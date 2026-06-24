@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aiwatcher-cli"
+version = "0.1.0"
+description = "Local-first AI coding cost visibility for AIWatcher"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+  { name = "AIWatcher" }
+]
+dependencies = []
+keywords = ["ai", "observability", "llm", "coding-agents", "cost"]
+
+[project.scripts]
+aiwatcher = "aiwatcher_cli.cli:main"
+
+[project.urls]
+Homepage = "https://www.getaiwatcher.com"
+Documentation = "https://github.com/ai-watcher/aiwatcher-local"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["aiwatcher_cli*"]
