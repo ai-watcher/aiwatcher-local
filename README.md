@@ -59,6 +59,8 @@ python -m aiwatcher_cli export --format json --level events # privacy-safe event
 python -m aiwatcher_cli ui                 # local-only browser dashboard
 ```
 
+![aiwatcher today terminal output: sessions, API-equivalent value, and a breakdown by tool and model.](docs/cli-today.svg)
+
 Cost is shown as **API-equivalent value**. Subscription plans may not bill this
 as incremental spend — AIWatcher Local separates API-priced tokens from
 plan/limited tokens so you can interpret the numbers honestly.

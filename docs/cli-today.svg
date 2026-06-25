@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 652" role="img" aria-labelledby="t d">
+  <title id="t">aiwatcher today — terminal output</title>
+  <desc id="d">Terminal output of the aiwatcher today command: sessions, API-equivalent value, projected month, breakdown by tool and model, and top project.</desc>
+  <rect x="20" y="20" width="820" height="612" rx="12" fill="#0b0f17" stroke="#263145"/>
+  <circle cx="46" cy="42" r="6" fill="#ff5f57"/>
+  <circle cx="68" cy="42" r="6" fill="#febc2e"/>
+  <circle cx="90" cy="42" r="6" fill="#28c840"/>
+  <text x="430" y="47" font-size="13" fill="#98a5b8" text-anchor="middle" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace">aiwatcher — today</text>
+  <line x1="20" y1="64" x2="840" y2="64" stroke="#1d2637"/>
+
+  <g xml:space="preserve" font-family="ui-monospace,'SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="14.5" fill="#e6edf6">
+    <text x="44" y="92"><tspan fill="#24d38b">$</tspan> aiwatcher today</text>
+    <text x="44" y="136">Today - Tuesday, June 23, 2026</text>
+    <text x="44" y="158">3 sessions · 551.9k API-priced tokens · $8.08 API-equivalent value</text>
+    <text x="44" y="180">Projected month: ~$71.09 API-equivalent at current pace</text>
+    <text x="44" y="202" fill="#8b97a8">Note: subscription plans may not bill this as incremental spend.</text>
+
+    <text x="44" y="246">By tool</text>
+    <text x="44" y="268" fill="#8b97a8">Tool              API value   Calls    Tokens Sessions</text>
+    <text x="44" y="290" fill="#3c4a5e">--------------------------------------------------------</text>
+    <text x="44" y="312">claude-code          $8.08     896    551.9k        1</text>
+    <text x="44" y="334">codex-cli            $0.00       2    239.0M        2</text>
+
+    <text x="44" y="378">By model</text>
+    <text x="44" y="400" fill="#8b97a8">Model                         API value    Tokens   Calls</text>
+    <text x="44" y="422" fill="#3c4a5e">----------------------------------------------------------</text>
+    <text x="44" y="444">claude-sonnet-4-6                $8.08    551.9k     896</text>
+    <text x="44" y="466">gpt-5.5                          $0.00    239.0M       2</text>
+
+    <text x="44" y="510">Top project: ~/code/payments-api (100% of today's API-equivalent value)</text>
+    <text x="44" y="532" fill="#8b97a8">Note: Codex cost is subscription/plan-based, not estimated as API spend</text>
+
+    <text x="44" y="576">This week: $15.72</text>
+    <text x="44" y="598">This month: $54.50</text>
+  </g>
+</svg>
