@@ -7,7 +7,7 @@ name = "aiwatcher-cli"
 version = "0.1.0"
 description = "Local-first AI coding cost visibility for AIWatcher"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 license = "MIT"
 authors = [
   { name = "AIWatcher" }

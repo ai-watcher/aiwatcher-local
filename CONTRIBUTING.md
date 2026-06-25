@@ -22,7 +22,7 @@ Pull requests that weaken these guarantees will not be merged.
 
 ## Development setup
 
-Requires Python 3.10+.
+Requires Python 3.9+.
 
 ```bash
 git clone https://github.com/ai-watcher/aiwatcher-local.git
@@ -44,7 +44,7 @@ python -m aiwatcher_cli status
 python -m aiwatcher_cli export --format json --since 2099-01-01
 ```
 
-CI runs these on Linux, macOS, and Windows across Python 3.10–3.12. Please make
+CI runs these on Linux, macOS, and Windows across Python 3.9–3.13. Please make
 sure they pass locally first.
 
 ## What makes a good contribution

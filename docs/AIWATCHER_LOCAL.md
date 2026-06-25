@@ -81,7 +81,7 @@ aiwatcher ui
 
 ## Run From This Repo
 
-Before a PyPI release you can run everything straight from a clone (Python 3.10+):
+Before a PyPI release you can run everything straight from a clone (Python 3.9+):
 
 ```bash
 python -m aiwatcher_cli start

@@ -23,18 +23,16 @@ reads and why, it should not read it.
 
 ## Quickstart
 
-Clone and run directly — no install required (Python 3.10+):
+Clone and run directly — no install required (Python 3.9+):
 
 ```bash
 git clone https://github.com/ai-watcher/aiwatcher-local.git
 cd aiwatcher-local
-python -m aiwatcher_cli today
-python -m aiwatcher_cli ui
 ```
 
-`ui` starts a local-only dashboard on `http://127.0.0.1:8765`. If that port is
-busy, AIWatcher Local automatically tries the next available port and prints the
-URL it picked.
+From there, run any of the [commands](#commands) below. The local dashboard
+(`ui`) serves on `http://127.0.0.1:8765`; if that port is busy, AIWatcher Local
+automatically tries the next available port and prints the URL it picked.
 
 ### After PyPI release
 
