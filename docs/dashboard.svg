@@ -1,0 +1,157 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 736" font-family="'Inter','Segoe UI',system-ui,-apple-system,sans-serif" role="img" aria-labelledby="t d">
+  <title id="t">AIWatcher Local dashboard</title>
+  <desc id="d">Local-only dashboard showing API-equivalent value, projected month, sessions, tokens, top projects, models, recent sessions, and privacy guarantees.</desc>
+  <defs>
+    <radialGradient id="bg" cx="0%" cy="0%" r="95%">
+      <stop offset="0" stop-color="#18243a"/>
+      <stop offset="0.55" stop-color="#0b1018"/>
+      <stop offset="1" stop-color="#090b10"/>
+    </radialGradient>
+    <linearGradient id="bar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#24d38b"/>
+      <stop offset="1" stop-color="#6ba6ff"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="736" fill="url(#bg)"/>
+
+  <text x="36" y="58" font-size="30" font-weight="700" fill="#eef3fb">AIWatcher Local</text>
+  <text x="36" y="88" font-size="14" fill="#98a5b8">Local mode for AIWatcher — private, read-only visibility into your AI coding tools.</text>
+
+  <rect x="920" y="44" width="152" height="36" rx="8" fill="#0d1320" stroke="#263145"/>
+  <text x="938" y="67" font-size="14" fill="#eef3fb">Last 7 days</text>
+  <text x="1050" y="67" font-size="14" fill="#98a5b8">▾</text>
+  <rect x="1088" y="44" width="76" height="36" rx="8" fill="#0d1320" stroke="#263145"/>
+  <text x="1126" y="67" font-size="14" fill="#eef3fb" text-anchor="middle">Refresh</text>
+  <rect x="964" y="88" width="200" height="36" rx="8" fill="#15233b" stroke="#33537f"/>
+  <text x="1064" y="111" font-size="14" fill="#dcebff" text-anchor="middle">Open AIWatcher Cloud</text>
+
+  <g font-size="13">
+    <rect x="36" y="124" width="120" height="30" rx="15" fill="#15233b" stroke="#33537f"/>
+    <text x="96" y="144" fill="#dcebff" text-anchor="middle">Local overview</text>
+    <rect x="166" y="124" width="78" height="30" rx="15" fill="#11151f" stroke="#263145"/>
+    <text x="205" y="144" fill="#cbd7e9" text-anchor="middle">Projects</text>
+    <rect x="254" y="124" width="82" height="30" rx="15" fill="#11151f" stroke="#263145"/>
+    <text x="295" y="144" fill="#cbd7e9" text-anchor="middle">Sessions</text>
+    <rect x="346" y="124" width="112" height="30" rx="15" fill="#11151f" stroke="#263145"/>
+    <text x="402" y="144" fill="#cbd7e9" text-anchor="middle">Weekly report</text>
+    <rect x="468" y="124" width="146" height="30" rx="15" fill="#11151f" stroke="#263145"/>
+    <text x="541" y="144" fill="#cbd7e9" text-anchor="middle">Privacy-safe export</text>
+  </g>
+
+  <g>
+    <rect x="36" y="172" width="270" height="120" rx="12" fill="#111722" stroke="#263145"/>
+    <text x="54" y="202" font-size="11" letter-spacing="0.6" fill="#98a5b8">API-EQUIVALENT VALUE</text>
+    <text x="54" y="240" font-size="30" font-weight="700" fill="#eef3fb">$13.91</text>
+    <text x="54" y="270" font-size="12" fill="#98a5b8">Last 7 days · not invoice spend</text>
+
+    <rect x="322" y="172" width="270" height="120" rx="12" fill="#111722" stroke="#263145"/>
+    <text x="340" y="202" font-size="11" letter-spacing="0.6" fill="#98a5b8">PROJECTED MONTH</text>
+    <text x="340" y="240" font-size="30" font-weight="700" fill="#eef3fb">$93.21</text>
+    <text x="340" y="270" font-size="12" fill="#98a5b8">At current pace</text>
+
+    <rect x="608" y="172" width="270" height="120" rx="12" fill="#111722" stroke="#263145"/>
+    <text x="626" y="202" font-size="11" letter-spacing="0.6" fill="#98a5b8">SESSIONS</text>
+    <text x="626" y="240" font-size="30" font-weight="700" fill="#eef3fb">4</text>
+    <text x="626" y="270" font-size="12" fill="#98a5b8">Local machine only</text>
+
+    <rect x="894" y="172" width="270" height="120" rx="12" fill="#111722" stroke="#263145"/>
+    <text x="912" y="202" font-size="11" letter-spacing="0.6" fill="#98a5b8">API-PRICED TOKENS</text>
+    <text x="912" y="240" font-size="30" font-weight="700" fill="#eef3fb">651.2k</text>
+    <text x="912" y="270" font-size="12" fill="#98a5b8">0 plan/limited observed</text>
+  </g>
+
+  <rect x="36" y="308" width="556" height="176" rx="12" fill="#111722" stroke="#263145"/>
+  <text x="54" y="340" font-size="16" font-weight="600" fill="#eef3fb">Projects driving AI usage</text>
+  <g font-size="13">
+    <text x="54" y="380" fill="#dce6f6">~/code/payments-api</text>
+    <rect x="250" y="372" width="210" height="10" rx="5" fill="#0b111b" stroke="#1d2637"/>
+    <rect x="250" y="372" width="210" height="10" rx="5" fill="url(#bar)"/>
+    <text x="574" y="380" fill="#dce6f6" text-anchor="end">$9.20</text>
+
+    <text x="54" y="414" fill="#dce6f6">~/code/web-dashboard</text>
+    <rect x="250" y="406" width="210" height="10" rx="5" fill="#0b111b" stroke="#1d2637"/>
+    <rect x="250" y="406" width="72" height="10" rx="5" fill="url(#bar)"/>
+    <text x="574" y="414" fill="#dce6f6" text-anchor="end">$3.10</text>
+
+    <text x="54" y="448" fill="#dce6f6">~/code/data-pipeline</text>
+    <rect x="250" y="440" width="210" height="10" rx="5" fill="#0b111b" stroke="#1d2637"/>
+    <rect x="250" y="440" width="37" height="10" rx="5" fill="url(#bar)"/>
+    <text x="574" y="448" fill="#dce6f6" text-anchor="end">$1.61</text>
+  </g>
+
+  <rect x="608" y="308" width="556" height="176" rx="12" fill="#111722" stroke="#263145"/>
+  <text x="626" y="340" font-size="16" font-weight="600" fill="#eef3fb">Models and tools</text>
+  <g font-size="13">
+    <text x="626" y="380" fill="#dce6f6">claude-opus-4-8</text>
+    <rect x="792" y="372" width="300" height="10" rx="5" fill="#0b111b" stroke="#1d2637"/>
+    <rect x="792" y="372" width="300" height="10" rx="5" fill="url(#bar)"/>
+    <text x="1146" y="380" fill="#dce6f6" text-anchor="end">$13.91</text>
+  </g>
+  <line x1="626" y1="400" x2="1146" y2="400" stroke="#263145"/>
+  <g font-size="12" fill="#98a5b8">
+    <text x="626" y="424">Tool</text>
+    <text x="760" y="424">Model</text>
+    <text x="1010" y="424" text-anchor="end">Tokens</text>
+    <text x="1146" y="424" text-anchor="end">API value</text>
+  </g>
+  <g font-size="13" fill="#dce6f6">
+    <text x="626" y="450">claude-code</text>
+    <text x="760" y="450">claude-opus-4-8</text>
+    <text x="1010" y="450" text-anchor="end">414.5k</text>
+    <text x="1146" y="450" text-anchor="end">$9.20</text>
+    <text x="626" y="472">claude-code</text>
+    <text x="760" y="472">claude-opus-4-8</text>
+    <text x="1010" y="472" text-anchor="end">236.7k</text>
+    <text x="1146" y="472" text-anchor="end">$4.71</text>
+  </g>
+
+  <rect x="36" y="500" width="556" height="200" rx="12" fill="#111722" stroke="#263145"/>
+  <text x="54" y="532" font-size="16" font-weight="600" fill="#eef3fb">Recent sessions</text>
+  <g font-size="12" fill="#98a5b8">
+    <text x="54" y="560">Tool</text>
+    <text x="150" y="560">Project</text>
+    <text x="462" y="560" text-anchor="end">Tokens</text>
+    <text x="574" y="560" text-anchor="end">API value</text>
+  </g>
+  <line x1="54" y1="572" x2="574" y2="572" stroke="#263145"/>
+  <g font-size="13" fill="#dce6f6">
+    <text x="54" y="596">claude-code</text>
+    <text x="150" y="596">~/code/payments-api</text>
+    <text x="462" y="596" text-anchor="end">318.4k</text>
+    <text x="574" y="596" text-anchor="end">$7.20</text>
+
+    <text x="54" y="624">claude-code</text>
+    <text x="150" y="624">~/code/payments-api</text>
+    <text x="462" y="624" text-anchor="end">96.1k</text>
+    <text x="574" y="624" text-anchor="end">$2.00</text>
+
+    <text x="54" y="652">claude-code</text>
+    <text x="150" y="652">~/code/web-dashboard</text>
+    <text x="462" y="652" text-anchor="end">142.7k</text>
+    <text x="574" y="652" text-anchor="end">$3.10</text>
+
+    <text x="54" y="680">claude-code</text>
+    <text x="150" y="680">~/code/data-pipeline</text>
+    <text x="462" y="680" text-anchor="end">94.0k</text>
+    <text x="574" y="680" text-anchor="end">$1.61</text>
+  </g>
+
+  <rect x="608" y="500" width="556" height="200" rx="12" fill="#111722" stroke="#263145"/>
+  <text x="626" y="532" font-size="16" font-weight="600" fill="#eef3fb">Private by design</text>
+  <g font-size="12">
+    <rect x="626" y="548" width="168" height="28" rx="8" fill="#0e2a22" stroke="#244134"/>
+    <text x="710" y="566" fill="#9fe1cb" text-anchor="middle">Read-only local scan</text>
+    <rect x="804" y="548" width="112" height="28" rx="8" fill="#0e2a22" stroke="#244134"/>
+    <text x="860" y="566" fill="#9fe1cb" text-anchor="middle">No LLM calls</text>
+    <rect x="626" y="584" width="226" height="28" rx="8" fill="#0e2a22" stroke="#244134"/>
+    <text x="739" y="602" fill="#9fe1cb" text-anchor="middle">No prompt or source content</text>
+    <rect x="862" y="584" width="140" height="28" rx="8" fill="#0e2a22" stroke="#244134"/>
+    <text x="932" y="602" fill="#9fe1cb" text-anchor="middle">No cloud upload</text>
+  </g>
+  <line x1="626" y1="636" x2="1146" y2="636" stroke="#263145"/>
+  <rect x="626" y="652" width="3" height="14" fill="#24d38b"/>
+  <text x="640" y="664" font-size="13" fill="#dce6f6">Top project: ~/code/payments-api ($9.20)</text>
+  <rect x="626" y="676" width="3" height="14" fill="#24d38b"/>
+  <text x="640" y="688" font-size="13" fill="#dce6f6">Top model: claude-opus-4-8 (651.2k tokens)</text>
+</svg>

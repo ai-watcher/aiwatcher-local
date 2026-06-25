@@ -9,6 +9,8 @@ history those tools already keep on your machine and turns it into an honest
 view of usage, tokens, and API-equivalent cost — with no account, no upload, and
 no changes to how you work.
 
+![The AIWatcher Local dashboard: API-equivalent value, projected month, sessions, and tokens up top; top projects, models, recent sessions, and privacy guarantees below.](docs/dashboard.svg)
+
 ## Privacy
 
 - Local-only by default
