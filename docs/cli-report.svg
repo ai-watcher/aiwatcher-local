@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 426 360" role="img" aria-label="aiwatcher — report terminal output">
+<rect x="14" y="14" width="398" height="332" rx="12" fill="#0b0f17" stroke="#263145"/>
+<circle cx="40" cy="36" r="6" fill="#ff5f57"/>
+<circle cx="62" cy="36" r="6" fill="#febc2e"/>
+<circle cx="84" cy="36" r="6" fill="#28c840"/>
+<text x="213" y="41" font-size="13" fill="#98a5b8" text-anchor="middle" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace">aiwatcher — report</text>
+<line x1="14" y1="58" x2="412" y2="58" stroke="#1d2637"/>
+<g xml:space="preserve" font-family="ui-monospace,'SF Mono',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="14">
+<text x="36" y="86"><tspan fill="#24d38b">$</tspan> <tspan fill="#e6edf6">aiwatcher report --days 7</tspan></text>
+<text x="36" y="108" fill="#e6edf6">AIWatcher Local report - last 7 days</text>
+<text x="36" y="152" fill="#e6edf6">Sessions: 4</text>
+<text x="36" y="174" fill="#e6edf6">API-equivalent value: $17.21</text>
+<text x="36" y="196" fill="#e6edf6">Tokens: 784.7k</text>
+<text x="36" y="218" fill="#8b97a8">Model calls: 381</text>
+<text x="36" y="240" fill="#8b97a8">Tool calls: 180</text>
+<text x="36" y="284" fill="#e6edf6">Top project: ~/code/payments-api ($17.21)</text>
+<text x="36" y="306" fill="#e6edf6">Top tool: claude-code (4 sessions)</text>
+<text x="36" y="328" fill="#e6edf6">Top model: claude-opus-4-8 (784.7k tokens)</text>
+</g></svg>

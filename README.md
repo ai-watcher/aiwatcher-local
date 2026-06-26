@@ -59,163 +59,41 @@ Subscription plans may not bill this as incremental spend.
 
 ### Detect your tools — `start`, `status`
 
-```text
-$ aiwatcher start
-AIWatcher v0.1.0 - local mode
-Read-only scan. No data leaves this machine.
+![aiwatcher start: read-only scan detecting installed AI coding tools.](docs/cli-start.svg)
 
-Watching:
-  ✓ Claude Code
-  ✓ Cursor
-  ✗ Codex CLI
-  ✗ Cline
-  ✗ Windsurf
-
-Collected 2 sessions from the last 24 hours.
-Run `aiwatcher today` to see your usage.
-```
-
-```text
-$ aiwatcher status
-AIWatcher Local status
-
-✓ claude-code      8 sessions
-✓ cursor           0 sessions
-✗ codex-cli        0 sessions
-✗ cline            0 sessions
-✗ windsurf         0 sessions
-
-Mode: local-only
-Network: disabled unless hosted sync is configured separately
-```
+![aiwatcher status: detected tools and local-only mode.](docs/cli-status.svg)
 
 ### Today's usage — `today`
 
-```text
-$ aiwatcher today
-Today - Wednesday, June 24, 2026
-2 sessions · 700.6k API-priced tokens · $16.01 API-equivalent value
-Projected month: ~$97.34 API-equivalent at current pace
-Note: subscription plans may not bill this as incremental spend.
-
-By tool
-Tool              API value   Calls    Tokens Sessions
---------------------------------------------------------
-claude-code          $16.01     340    700.6k        2
-
-By model
-Model                         API value    Tokens   Calls
-----------------------------------------------------------
-claude-opus-4-8                  $16.01    700.6k     340
-
-Top project: ~/code/payments-api (100% of today's API-equivalent value)
-
-This week: $17.21
-This month: $77.87
-```
+![aiwatcher today: sessions, API-equivalent value, and a breakdown by tool and model.](docs/cli-today.svg)
 
 ### Rank usage — `tools`, `projects`
 
-```text
-$ aiwatcher tools --days 7
-AI usage by tool - last 7 days
-Cost is shown as API-equivalent value; subscription plans may differ.
+![aiwatcher tools: usage ranked by tool over the last 7 days.](docs/cli-tools.svg)
 
-claude-code        4 sessions    120.4k in    664.2k out      $17.21
-```
-
-```text
-$ aiwatcher projects --days 7
-AI usage by project - last 7 days
-Cost is shown as API-equivalent value; subscription plans may differ.
-
-    $17.21     4 sessions    784.7k tokens  ~/code/payments-api
-```
+![aiwatcher projects: usage ranked by project over the last 7 days.](docs/cli-projects.svg)
 
 ### Weekly report — `report`
 
-```text
-$ aiwatcher report --days 7
-AIWatcher Local report - last 7 days
-
-Sessions: 4
-API-equivalent value: $17.21
-Tokens: 784.7k
-Model calls: 381
-Tool calls: 180
-
-Top project: ~/code/payments-api ($17.21)
-Top tool: claude-code (4 sessions)
-Top model: claude-opus-4-8 (784.7k tokens)
-```
+![aiwatcher report: weekly totals and top project, tool, and model.](docs/cli-report.svg)
 
 ### Recent sessions — `sessions`
 
-```text
-$ aiwatcher sessions --days 1
-Recent AI sessions - last 1 days
-
-Jun 24 22:14 claude-code      $15.80   674.5k tokens  ~/code/payments-api
-Jun 24 07:08 claude-code       $0.21    26.1k tokens  ~/code/payments-api
-```
+![aiwatcher sessions: recent local AI coding sessions.](docs/cli-sessions.svg)
 
 ### Export your data — `export`
 
 Session summaries as JSON:
 
-```text
-$ aiwatcher export --format json --days 30
-{
-  "schema": "aiwatcher.local_sessions.v0",
-  "sessions": [
-    {
-      "session_id": "9f2c7e1a-3b4d-4e6f-8a0b-1c2d3e4f5a6b",
-      "tool": "claude-code",
-      "project_path": "~/code/payments-api",
-      "started_at": "2026-06-24T14:15:48+00:00",
-      "updated_at": "2026-06-25T05:15:15+00:00",
-      "model": "claude-opus-4-8",
-      "tokens_in": 53317,
-      "tokens_out": 622187,
-      "cost_usd": 15.82126,
-      "agent_calls": 331,
-      "tool_calls": 159,
-      "notes": []
-    }
-  ]
-}
-```
+![aiwatcher export sessions: JSON session summaries.](docs/cli-export-sessions.svg)
 
 Privacy-safe event hashes — `content_hash` only, never prompt or source text:
 
-```text
-$ aiwatcher export --format json --level events --days 7
-{
-  "schema": "aiwatcher.local_events.v0",
-  "events": [
-    {
-      "event_id": "843b28a20f07ecf1279bf6a7",
-      "session_id": "9f2c7e1a-3b4d-4e6f-8a0b-1c2d3e4f5a6b",
-      "tool": "claude-code",
-      "event_type": "queue-operation",
-      "timestamp": "2026-06-24T14:15:48+00:00",
-      "project_path": "~/code/payments-api",
-      "model": null,
-      "tokens_in": 0,
-      "tokens_out": 0,
-      "cost_usd": 0.0,
-      "content_hash": null,
-      "notes": []
-    }
-  ]
-}
-```
+![aiwatcher export events: privacy-safe event hashes as JSON.](docs/cli-export-events.svg)
 
 ### Browser dashboard — `ui`
 
-```text
-$ aiwatcher ui
-```
+![aiwatcher ui: starts the local-only dashboard server.](docs/cli-ui.svg)
 
 Opens a local-only dashboard at `http://127.0.0.1:8765` (it auto-picks the next
 free port if that one is busy). It's the clickable version of everything above —
