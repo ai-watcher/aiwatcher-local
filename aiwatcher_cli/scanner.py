@@ -161,15 +161,21 @@ def _event_id(session_id: str, index: int, event_type: str, timestamp: datetime 
 
 
 def _decode_claude_project_path(encoded: str) -> str:
-    if not encoded.startswith("-"):
+    windows_match = re.match(r"^-?([A-Za-z])--(.*)$", encoded)
+    if windows_match:
+        current = Path(f"{windows_match.group(1)}:/")
+        raw_parts = windows_match.group(2)
+    elif encoded.startswith("-"):
+        current = Path("/")
+        raw_parts = encoded[1:]
+    else:
         return encoded
 
-    naive = "/" + encoded[1:].replace("-", "/")
-    if Path(naive).exists():
-        return naive
+    parts = [part for part in raw_parts.split("-") if part]
+    naive_path = current.joinpath(*parts)
+    if naive_path.exists():
+        return str(naive_path)
 
-    parts = [part for part in encoded[1:].split("-") if part]
-    current = Path("/")
     index = 0
     while index < len(parts):
         match: Path | None = None
@@ -180,7 +186,7 @@ def _decode_claude_project_path(encoded: str) -> str:
                 match = candidate
                 match_end = end
         if match is None:
-            return naive
+            return str(naive_path)
         current = match
         index = match_end
 

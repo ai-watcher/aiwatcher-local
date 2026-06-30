@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,7 +14,10 @@ class ProjectPathTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir) / "my-project"
             project.mkdir()
-            encoded = "-" + str(project).lstrip("/").replace("/", "-")
+            if os.name == "nt":
+                encoded = str(project).replace(":", "-").replace("\\", "-")
+            else:
+                encoded = "-" + str(project).lstrip("/").replace("/", "-")
             self.assertEqual(scanner._decode_claude_project_path(encoded), str(project))
 
     def test_choose_project_prefers_cost_then_event_count(self) -> None:
