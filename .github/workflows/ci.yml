@@ -26,6 +26,8 @@ jobs:
         run: pip install -e .
       - name: Compile
         run: python -m compileall aiwatcher_cli
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
       - name: CLI help
         run: aiwatcher --help
       - name: Status smoke test

@@ -13,9 +13,14 @@ is bigger than collection:
 
 ## What Developers Get
 
+- Prompt preflight with intent-preserving execution briefs.
+- Native Claude Code and Codex prompt hooks for automatic coverage.
+- Live local watch signals for cost, context growth, and loop-like behavior.
 - A local dashboard at `http://127.0.0.1:8765`.
-- A CLI for fast terminal checks.
+- A CLI for fast terminal checks and agent forwarding.
 - Click-through local project and session drill-down.
+- Useful, rework, and abandoned outcomes stored only on the laptop.
+- Privacy-safe intervention history using prompt hashes rather than prompt text.
 - A local weekly report.
 - Project, tool, model, session, token, and API-equivalent value breakdowns.
 - Separation between API-priced tokens and subscription/limited tokens.
@@ -86,6 +91,14 @@ Before a PyPI release you can run everything straight from a clone (Python 3.9+)
 ```bash
 python -m aiwatcher_cli start
 python -m aiwatcher_cli today
+python -m aiwatcher_cli last
+python -m aiwatcher_cli timeline
+python -m aiwatcher_cli journal
+python -m aiwatcher_cli watch --once
+python -m aiwatcher_cli preflight "Refactor auth and delete old credentials"
+python -m aiwatcher_cli codex --dry-run "Refactor the entire codebase"
+python -m aiwatcher_cli install-claude-hook
+python -m aiwatcher_cli install-codex-hook
 python -m aiwatcher_cli tools --days 7
 python -m aiwatcher_cli projects --days 7
 python -m aiwatcher_cli report --days 7
@@ -96,6 +109,86 @@ python -m aiwatcher_cli ui
 ```
 
 `start` is a one-time local scan, not a long-running daemon.
+
+## Lifecycle Model
+
+AIWatcher Local follows the same lifecycle as AIWatcher Enterprise, while
+keeping authority with the individual developer:
+
+1. **Plan** — preflight work and add only the scope, checkpoint, verification,
+   and safety controls relevant to the original request.
+2. **Watch** — detect large contexts, repeated calls, long sessions, and unusual
+   local usage while work is happening.
+3. **Control** — use the execution brief, edit it, run the original, cancel, or
+   stop work that is becoming wasteful.
+4. **Prove** — inspect the local timeline and record whether the result was
+   useful, needed rework, or was abandoned.
+5. **Improve** — compare interventions and outcomes, then recommend one better
+   behavior for the next run.
+
+The local state connects intervention hashes, predicted impact, session IDs,
+and outcomes. It does not store original or suggested prompt text.
+
+## Automatic Preflight
+
+Install the native prompt hooks once:
+
+```bash
+python -m aiwatcher_cli install-claude-hook --write --scope user
+python -m aiwatcher_cli install-codex-hook --write --scope user
+```
+
+Use `--gate` when you want the local decision screen before risky work starts:
+
+```bash
+python -m aiwatcher_cli install-claude-hook --write --scope user --gate
+python -m aiwatcher_cli install-codex-hook --write --scope user --gate
+```
+
+After installing the Codex hook, open Codex and run `/hooks` to inspect and
+trust the command. Low-risk prompts pass unchanged, medium-risk prompts receive
+an execution brief as additional context, and high-risk prompts pause before
+execution. With Prompt Gate enabled, medium and high-risk prompts open a
+one-shot localhost page with four choices:
+
+- **Use brief** — continue with AIWatcher's scoped execution brief as context.
+- **Use edited brief** — tune the brief locally before it reaches the agent.
+- **Run original** — proceed unchanged and record that decision locally.
+- **Cancel run** — stop the prompt before tools execute.
+
+The Prompt Gate page may display the prompt while you decide, but it does not
+persist prompt text. Local state stores hashes, decisions, risk findings, and
+predicted impact only.
+
+To verify whether a Codex/Claude hook actually ran, use:
+
+```bash
+python -m aiwatcher_cli hook-status
+```
+
+No recent event means the current AI surface did not invoke the hook. A recent
+event means AIWatcher ran; the event shows whether prompt text was found and
+which risk score was computed. This matters because not every Codex or Claude
+surface uses the same hook runtime.
+
+## Prompt Companion for Non-Hook Surfaces
+
+Some surfaces do not expose a prompt lifecycle hook. Claude Desktop chat,
+browser chat, editor sidebars, and vendor-specific desktop apps cannot be
+silently intercepted unless they provide an extension point.
+
+For those, `aiwatcher ui` includes a **Prompt** tab. It gives the same preflight
+logic in a local widget:
+
+1. Draft or paste the prompt.
+2. Review risk, reasons, and expected impact.
+3. Edit the execution brief.
+4. Copy either the brief or the original prompt into the AI tool.
+
+This is intentionally useful on its own, and it creates the local API contract
+for future extensions. Browser/editor integrations can call
+`POST /api/preflight` on the local AIWatcher server and show the same decision
+inside the user's current workflow.
 
 ## The Wow Moment
 
@@ -242,13 +335,21 @@ Enterprise should appear only when the user asks for something local OSS cannot
 honestly provide — shared team history, long retention, scheduled evidence
 packs, or policy enforcement. AIWatcher Local is never gated behind signup.
 
-## Next Product Step
+## Next Product Steps
 
-The next OSS step is not more raw collection. It is to make AIWatcher Local feel
-like the individual mode of the full AIWatcher product:
+The remaining OSS work completes the loop rather than adding more dashboards:
 
-1. Keep the local UI visually aligned with the hosted app.
-2. Improve the local project/session detail views with timeline charts.
-3. Add local loop/repetition detection from event hashes.
-4. Add local weekly report export to Markdown.
-5. Add Homebrew and `pipx` install paths.
+1. Polish Prompt Gate and Prompt Companion after beta feedback: tighter copy,
+   command-host quirks, timeout defaults, and copy/paste ergonomics.
+2. Link hook interventions to the resulting session automatically and calculate
+   measured impact only after comparable evidence exists.
+3. Move watch from periodic summaries to reliable active-session loop and
+   context-growth alerts, with developer-controlled pause or stop actions.
+4. Infer outcomes from tests, commits, and rework while keeping manual outcome
+   correction available.
+5. Turn Today into the daily control-loop home: active work, interventions,
+   useful outcomes, measured impact, and one recommendation.
+6. Package the Codex integration as a plugin and add browser/editor companion
+   extensions that call the local `/api/preflight` endpoint where true hooks are
+   unavailable.
+7. Add `pipx` and Homebrew installation only after the workflow is stable.
