@@ -163,7 +163,7 @@ python -m aiwatcher_cli mcp                # local stdio MCP server
 ```text
 $ aiwatcher today
 Today - Wednesday, June 24, 2026
-2 sessions · 700.6k API-priced tokens · $16.01 API-equivalent value
+2 sessions | 700.6k API-priced tokens | $16.01 API-equivalent value
 Projected month: ~$97.34 API-equivalent at current pace
 Note: subscription plans may not bill this as incremental spend.
 
