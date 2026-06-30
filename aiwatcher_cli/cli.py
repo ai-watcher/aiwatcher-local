@@ -128,7 +128,7 @@ def token_summary_label(sessions: Iterable[LocalSession]) -> str:
     total_tokens = sum(row.tokens_in + row.tokens_out for row in rows)
     unpriced_tokens = max(0, total_tokens - priced_tokens)
     if priced_tokens and unpriced_tokens:
-        return f"{compact_int(priced_tokens)} API-priced tokens · {compact_int(unpriced_tokens)} plan/limited tokens observed"
+        return f"{compact_int(priced_tokens)} API-priced tokens | {compact_int(unpriced_tokens)} plan/limited tokens observed"
     if priced_tokens:
         return f"{compact_int(priced_tokens)} API-priced tokens"
     return f"{compact_int(total_tokens)} tokens observed"
@@ -240,7 +240,7 @@ def print_session_detail(session: LocalSession, *, heading: str = "Latest local 
     print(f"Model: {session.model or 'unknown'}")
     print(f"API-equivalent value: {money(session.cost_usd)}")
     print(f"Tokens: {compact_int(session.tokens_in + session.tokens_out)} ({compact_int(session.tokens_in)} in / {compact_int(session.tokens_out)} out)")
-    print(f"Calls: {session.agent_calls} model · {session.tool_calls} tool")
+    print(f"Calls: {session.agent_calls} model | {session.tool_calls} tool")
     print(f"Measured duration: {compact_duration(reliable_seconds)}")
     outcome = get_outcome(session.session_id)
     print(f"Outcome: {outcome['outcome'] if outcome else 'not marked'}")
@@ -277,7 +277,7 @@ def render_session_detail(session: LocalSession, *, heading: str = "Latest local
         f"Model: {session.model or 'unknown'}",
         f"API-equivalent value: {money(session.cost_usd)}",
         f"Tokens: {compact_int(session.tokens_in + session.tokens_out)} ({compact_int(session.tokens_in)} in / {compact_int(session.tokens_out)} out)",
-        f"Calls: {session.agent_calls} model · {session.tool_calls} tool",
+        f"Calls: {session.agent_calls} model | {session.tool_calls} tool",
         f"Measured duration: {compact_duration(reliable_seconds)}",
         f"Outcome: {outcome['outcome'] if outcome else 'not marked'}",
     ]
@@ -675,9 +675,9 @@ def render_preflight(result: dict[str, object]) -> str:
         lines.extend([
             "",
             "Estimated impact",
-            f"Original prompt: {_number_range_label(*original['tokens'])} tokens · {_number_range_label(*original['model_calls'])} model calls · {_number_range_label(*original['tool_calls'])} tool calls · {_range_label(*original['api_value_usd'], money)} API-equivalent",
-            f"Safer prompt: {_number_range_label(*safer['tokens'])} tokens · {_number_range_label(*safer['model_calls'])} model calls · {_number_range_label(*safer['tool_calls'])} tool calls · {_range_label(*safer['api_value_usd'], money)} API-equivalent",
-            f"Estimated savings: {_number_range_label(*savings['tokens'])} tokens · {_number_range_label(*savings['model_calls'])} model calls · {_number_range_label(*savings['tool_calls'])} tool calls · {_range_label(*savings['api_value_usd'], money)} API-equivalent",
+            f"Original prompt: {_number_range_label(*original['tokens'])} tokens | {_number_range_label(*original['model_calls'])} model calls | {_number_range_label(*original['tool_calls'])} tool calls | {_range_label(*original['api_value_usd'], money)} API-equivalent",
+            f"Safer prompt: {_number_range_label(*safer['tokens'])} tokens | {_number_range_label(*safer['model_calls'])} model calls | {_number_range_label(*safer['tool_calls'])} tool calls | {_range_label(*safer['api_value_usd'], money)} API-equivalent",
+            f"Estimated savings: {_number_range_label(*savings['tokens'])} tokens | {_number_range_label(*savings['model_calls'])} model calls | {_number_range_label(*savings['tool_calls'])} tool calls | {_range_label(*savings['api_value_usd'], money)} API-equivalent",
             f"Planning confidence: {impact.get('confidence', 'low')} ({impact.get('basis', 'local history unavailable')})",
             "These are planning ranges, not guaranteed billing savings.",
         ])
@@ -779,7 +779,7 @@ button:hover {{ border-color: var(--blue); transform: translateY(-1px); }}
       <p>Review the work before {tool_label} starts. Use the brief to narrow scope, keep checkpoints, and reduce avoidable cost or safety risk.</p>
     </div>
     <div>
-      <span class="pill risk">Risk: {risk} · score {score}</span>
+      <span class="pill risk">Risk: {risk} | score {score}</span>
       <span class="pill">{tool_label}</span>
     </div>
   </div>
@@ -933,7 +933,7 @@ def render_session_timeline(session_id: str, *, days: int = 30, limit: int = 30)
     lines.extend([
         "",
         "Why this may have become expensive",
-        f"- Costliest event: {costliest.event_type} · {money(costliest.cost_usd)} · {compact_int(costliest.tokens_in + costliest.tokens_out)} tokens",
+        f"- Costliest event: {costliest.event_type} | {money(costliest.cost_usd)} | {compact_int(costliest.tokens_in + costliest.tokens_out)} tokens",
     ])
     if repeated:
         label, count = repeated[0]
@@ -948,9 +948,9 @@ def render_session_timeline(session_id: str, *, days: int = 30, limit: int = 30)
         stamp = format_short_datetime(event.timestamp.astimezone()) if event.timestamp else "unknown"
         token_label = compact_int(event.tokens_in + event.tokens_out)
         cost_label = money(event.cost_usd)
-        hash_label = f" · hash {event.content_hash[:10]}" if event.content_hash else ""
+        hash_label = f" | hash {event.content_hash[:10]}" if event.content_hash else ""
         lines.append(
-            f"{idx:>2}. {stamp} · {event.event_type} · {event.model or 'unknown'} · {token_label} tokens · {cost_label}{hash_label}"
+            f"{idx:>2}. {stamp} | {event.event_type} | {event.model or 'unknown'} | {token_label} tokens | {cost_label}{hash_label}"
         )
     if len(events) > limit:
         lines.append(f"... {len(events) - limit} more events omitted. Increase --limit to inspect more.")
@@ -981,11 +981,11 @@ def render_journal(days: int = 1) -> str:
 
     return "\n".join([
         f"AIWatcher daily journal - last {days} day{'s' if days != 1 else ''}",
-        f"Sessions: {stats['sessions']} · {money(float(stats['cost_usd']))} API-equivalent · {token_summary_label(rows)}",
+        f"Sessions: {stats['sessions']} | {money(float(stats['cost_usd']))} API-equivalent | {token_summary_label(rows)}",
         f"Top project: {short_path(top[0], 72)} ({money(float(top_project_stats['cost_usd']))})",
-        f"Most expensive session: {short_path(costliest.project_path)} · {costliest.tool} · {money(costliest.cost_usd)} · {compact_int(costliest.tokens_in + costliest.tokens_out)} tokens",
+        f"Most expensive session: {short_path(costliest.project_path)} | {costliest.tool} | {money(costliest.cost_usd)} | {compact_int(costliest.tokens_in + costliest.tokens_out)} tokens",
         (
-            f"Largest reliable context session: {short_path(largest_context.project_path)} · "
+            f"Largest reliable context session: {short_path(largest_context.project_path)} | "
             f"{compact_int(largest_context.tokens_in + largest_context.tokens_out)} tokens"
             if largest_context else "Largest reliable context session: unavailable from local logs"
         ),
@@ -1013,7 +1013,7 @@ def command_start(_args: argparse.Namespace) -> int:
         "windsurf": "Windsurf",
     }
     for key, label in labels.items():
-        print(f"  {'✓' if detected.get(key) else '✗'} {label}")
+        print(f"  {'[OK]' if detected.get(key) else '[--]'} {label}")
     print(f"\nCollected {len(sessions)} sessions from the last 24 hours.")
     print("Run `aiwatcher today` or `python -m aiwatcher_cli today` to see your usage.")
     print("Connect Cloud later for team spend, budget guardrails, and audit evidence.")
@@ -1026,7 +1026,7 @@ def command_status(_args: argparse.Namespace) -> int:
     print("AIWatcher Local status\n")
     for tool, installed in detected.items():
         tool_sessions = [row for row in sessions if row.tool == tool]
-        print(f"{'✓' if installed else '✗'} {tool:12} {len(tool_sessions):>5} sessions")
+        print(f"{'[OK]' if installed else '[--]'} {tool:12} {len(tool_sessions):>5} sessions")
     print("\nMode: local-only")
     print("Network: disabled unless hosted sync is configured separately")
     return 0
@@ -1064,7 +1064,7 @@ def command_today(_args: argparse.Namespace) -> int:
         print(f"{compact_duration(reliable_today_seconds)} of measured AI work")
     else:
         print("Active work time unavailable from local logs")
-    print(f"{int(today_stats['sessions'])} sessions · {token_summary_label(today)} · {money(float(today_stats['cost_usd']))} API-equivalent value")
+    print(f"{int(today_stats['sessions'])} sessions | {token_summary_label(today)} | {money(float(today_stats['cost_usd']))} API-equivalent value")
     print(f"Projected month: ~{money(projected_month)} API-equivalent at current pace")
     print("Note: subscription plans may not bill this as incremental spend.\n")
 
@@ -1287,7 +1287,7 @@ def command_watch(args: argparse.Namespace) -> int:
             for row in interesting[:5]:
                 stamp = session_sort_key(row)
                 when = format_short_datetime(stamp.astimezone()) if stamp != MIN_DT else "unknown"
-                print(f"[{when}] {row.tool} · {short_path(row.project_path)} · {money(row.cost_usd)} · {compact_int(row.tokens_in + row.tokens_out)} tokens")
+                print(f"[{when}] {row.tool} | {short_path(row.project_path)} | {money(row.cost_usd)} | {compact_int(row.tokens_in + row.tokens_out)} tokens")
                 for insight in session_insights(
                     row,
                     cost_threshold=args.cost_threshold,
@@ -2125,9 +2125,9 @@ def command_hook_status(_args: argparse.Namespace) -> int:
         prompt_label = "prompt found" if event.get("prompt_found") else "prompt missing"
         risk = event.get("risk") or "unknown"
         score = event.get("score")
-        line = f"- {stamp} · {tool} · {name} · {prompt_label} · risk {risk}"
+        line = f"- {stamp} | {tool} | {name} | {prompt_label} | risk {risk}"
         if score is not None:
-            line += f" · score {score}"
+            line += f" | score {score}"
         print(line)
         if event.get("error"):
             print(f"  error: {event['error']}")
