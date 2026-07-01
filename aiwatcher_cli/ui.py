@@ -7,12 +7,24 @@ import os
 import socket
 import subprocess
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from .cli import analyze_prompt
+from .correlate import link_recent_interventions_to_sessions
+from .local_state import (
+    VALID_OUTCOMES,
+    get_outcome,
+    outcome_counts,
+    outcomes_for_sessions,
+    recent_interventions,
+    record_outcome,
+)
 from .pricing import is_subscription_model
-from .scanner import LocalSession, discover_tools, scan_all
+from .scanner import LocalEvent, LocalSession, discover_tools, scan_all, scan_all_events
+
+MIN_DT = datetime.min.replace(tzinfo=timezone.utc)
 
 
 def money(value: float) -> str:
@@ -66,6 +78,10 @@ def token_split(rows: list[LocalSession]) -> dict[str, int]:
     return {"api_priced": api_priced, "plan_limited": max(0, total - api_priced)}
 
 
+def has_cumulative_totals(session: LocalSession) -> bool:
+    return any("cumulative" in note.lower() for note in session.notes)
+
+
 def group_rows(rows: list[LocalSession], key_fn) -> list[dict[str, object]]:
     grouped: dict[str, list[LocalSession]] = defaultdict(list)
     for row in rows:
@@ -98,6 +114,7 @@ def rows_for_window(days: int) -> list[LocalSession]:
 def session_json(row: LocalSession) -> dict[str, object]:
     started = row.started_at.isoformat() if row.started_at else None
     updated = row.updated_at.isoformat() if row.updated_at else None
+    outcome = get_outcome(row.session_id)
     return {
         "session_id": row.session_id,
         "tool": row.tool,
@@ -116,13 +133,29 @@ def session_json(row: LocalSession) -> dict[str, object]:
         "updated_at": updated,
         "source_path": row.source_path,
         "notes": row.notes,
+        "outcome": outcome["outcome"] if outcome else None,
+        "outcome_note": outcome.get("note") if outcome else None,
+    }
+
+
+def event_json(row: LocalEvent) -> dict[str, object]:
+    return {
+        "event_id": row.event_id,
+        "event_type": row.event_type,
+        "timestamp": row.timestamp.isoformat() if row.timestamp else None,
+        "model": row.model or "unknown",
+        "tokens": row.tokens_in + row.tokens_out,
+        "tokens_label": compact_int(row.tokens_in + row.tokens_out),
+        "api_value": money(row.cost_usd),
+        "api_value_usd": round(row.cost_usd, 6),
+        "content_hash": row.content_hash,
     }
 
 
 def build_project_detail(project: str, days: int = 7) -> dict[str, object]:
     rows = [row for row in rows_for_window(days) if (row.project_path or "unknown") == project]
     stats = summarize(rows)
-    sessions = sorted(rows, key=lambda row: row.updated_at or row.started_at or datetime.min.astimezone(), reverse=True)
+    sessions = sorted(rows, key=lambda row: row.updated_at or row.started_at or MIN_DT, reverse=True)
     return {
         "project": project,
         "project_short": short_path(project, 72),
@@ -144,9 +177,25 @@ def build_session_detail(session_id: str, days: int = 30) -> dict[str, object]:
     if not rows:
         return {"error": "session not found"}
     row = rows[0]
+    since = datetime.now().astimezone() - timedelta(days=days)
+    events = sorted(
+        [
+            event for event in scan_all_events()
+            if event.session_id == session_id and event.timestamp and event.timestamp.astimezone() >= since
+        ],
+        key=lambda event: event.timestamp or MIN_DT,
+    )
+    costliest = max(events, key=lambda event: (event.cost_usd, event.tokens_in + event.tokens_out), default=None)
     return {
         **session_json(row),
         "privacy": "Prompt/source content is not shown. Use event export for hashes.",
+        "timeline_summary": {
+            "events": len(events),
+            "tokens": compact_int(sum(event.tokens_in + event.tokens_out for event in events)),
+            "api_value": money(sum(event.cost_usd for event in events)),
+            "costliest": event_json(costliest) if costliest else None,
+        },
+        "events": [event_json(event) for event in events[:40]],
     }
 
 
@@ -177,11 +226,92 @@ def build_report(days: int = 7) -> dict[str, object]:
     }
 
 
+def build_journal(days: int = 1) -> dict[str, object]:
+    rows = rows_for_window(days)
+    if not rows:
+        return {
+            "title": f"Your last {days} day{'s' if days != 1 else ''}",
+            "summary": "No local AI work detected.",
+            "items": [],
+            "improvement": "Use AIWatcher after a few sessions to spot cost, scope, and loop patterns.",
+        }
+
+    stats = summarize(rows)
+    projects = group_rows(rows, lambda row: row.project_path or "unknown")
+    costliest = max(rows, key=lambda row: (row.cost_usd, row.tokens_in + row.tokens_out))
+    pressure_rows = [row for row in rows if not has_cumulative_totals(row)]
+    largest_context = max(pressure_rows, key=lambda row: row.tokens_in + row.tokens_out, default=None)
+    loop_candidate = max(pressure_rows, key=lambda row: row.agent_calls, default=None)
+    improvement = "Keep prompts scoped and ask for a short plan before large edits."
+    if loop_candidate and loop_candidate.agent_calls >= 250:
+        improvement = "Add explicit stop conditions to broad prompts to avoid repeated model/tool loops."
+    elif largest_context and largest_context.tokens_in + largest_context.tokens_out >= 500_000:
+        improvement = "Use smaller file scopes or checkpoints before asking for implementation."
+    elif costliest.cost_usd >= 1:
+        improvement = "Review the costliest session before repeating a similar prompt."
+
+    return {
+        "title": f"Your last {days} day{'s' if days != 1 else ''}",
+        "summary": f"{stats['sessions']} sessions · {money(float(stats['api_value_usd']))} API-equivalent · {compact_int(int(stats['tokens']))} tokens",
+        "items": [
+            f"Top project: {projects[0]['short_name']} ({projects[0]['api_value_label']})" if projects else "No project attribution yet.",
+            f"Most expensive session: {short_path(costliest.project_path)} · {costliest.tool} · {money(costliest.cost_usd)}",
+            (
+                f"Largest reliable context: {short_path(largest_context.project_path)} · "
+                f"{compact_int(largest_context.tokens_in + largest_context.tokens_out)} tokens"
+                if largest_context else "Largest reliable context: unavailable from local logs"
+            ),
+            (
+                f"Loop signal: {loop_candidate.agent_calls} model calls in {short_path(loop_candidate.project_path)}"
+                if loop_candidate else "Loop signal: unavailable from local logs"
+            ),
+        ],
+        "improvement": improvement,
+    }
+
+
+def build_prompt_preflight(prompt: str, *, tool: str = "agent", cwd: str | None = None) -> dict[str, object]:
+    text = prompt.strip()
+    if not text:
+        return {"error": "prompt is required"}
+    result = analyze_prompt(text, tool=tool or "agent", cwd=cwd)
+    impact = result.get("estimated_impact") if isinstance(result.get("estimated_impact"), dict) else {}
+    impact_label = "AIWatcher needs local history before it can estimate savings."
+    if impact:
+        if impact.get("available"):
+            savings = impact.get("savings", {}) if isinstance(impact.get("savings"), dict) else {}
+            api_value = savings.get("api_value_usd", []) if isinstance(savings, dict) else []
+            tokens = savings.get("tokens", []) if isinstance(savings, dict) else []
+            if len(api_value) == 2 and len(tokens) == 2:
+                impact_label = (
+                    f"Possible avoidable pressure: {compact_int(int(tokens[0]))}-{compact_int(int(tokens[1]))} tokens "
+                    f"and {money(float(api_value[0]))}-{money(float(api_value[1]))} API-equivalent."
+                )
+            else:
+                impact_label = "Comparable local sessions found, but savings could not be summarized."
+        else:
+            impact_label = str(impact.get("direction") or impact.get("basis") or impact_label)
+    return {
+        "risk": result["risk"],
+        "score": result["score"],
+        "tool": result["tool"],
+        "findings": result["findings"],
+        "suggestions": result["suggestions"],
+        "suggested_prompt": result["suggested_prompt"],
+        "impact_label": impact_label,
+        "privacy": "Prompt text is analyzed locally for this response and is not persisted by the Prompt Companion.",
+    }
+
+
 def build_summary(days: int = 7) -> dict[str, object]:
     now = datetime.now().astimezone()
     since = now - timedelta(days=days)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     all_rows = scan_all()
+    try:
+        link_recent_interventions_to_sessions(all_rows)
+    except OSError:
+        pass
     rows = [row for row in all_rows if in_window(row, since)]
     month_rows = [row for row in all_rows if in_window(row, month_start)]
 
@@ -195,7 +325,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
     tools = group_rows(rows, lambda row: row.tool)
     models = group_rows(rows, lambda row: row.model or "unknown")
 
-    recent = sorted(rows, key=lambda row: row.updated_at or row.started_at or datetime.min.astimezone(), reverse=True)[:12]
+    recent = sorted(rows, key=lambda row: row.updated_at or row.started_at or MIN_DT, reverse=True)[:12]
     detected = discover_tools()
     notes = sorted({note for row in rows for note in row.notes})
 
@@ -205,6 +335,30 @@ def build_summary(days: int = 7) -> dict[str, object]:
         insights.append({
             "title": "Top project",
             "body": f"{top['short_name']} accounts for {top['api_value_label']} API-equivalent value.",
+        })
+        if float(top["api_value_usd"]) > 0 and float(top["api_value_usd"]) >= float(stats["api_value_usd"]) * 0.6:
+            insights.append({
+                "title": "Usage is concentrated",
+                "body": f"Most API-equivalent value is coming from {top['short_name']}. Review recent sessions there before optimizing anything else.",
+            })
+    costliest = max(rows, key=lambda row: (row.cost_usd, row.tokens_in + row.tokens_out), default=None)
+    if costliest and costliest.cost_usd >= 1:
+        insights.append({
+            "title": "Session worth reviewing",
+            "body": f"{short_path(costliest.project_path)} used {money(costliest.cost_usd)} API-equivalent value on {costliest.model or costliest.tool}. Open the session before repeating similar work.",
+        })
+    pressure_rows = [row for row in rows if not has_cumulative_totals(row)]
+    highest_context = max(pressure_rows, key=lambda row: row.tokens_in + row.tokens_out, default=None)
+    if highest_context and highest_context.tokens_in + highest_context.tokens_out >= 500_000:
+        insights.append({
+            "title": "Large-context session",
+            "body": f"{compact_int(highest_context.tokens_in + highest_context.tokens_out)} tokens were observed in one session. Try smaller file scopes or checkpoints for similar tasks.",
+        })
+    loop_candidate = max(pressure_rows, key=lambda row: row.agent_calls, default=None)
+    if loop_candidate and loop_candidate.agent_calls >= 250:
+        insights.append({
+            "title": "Possible iterative loop",
+            "body": f"{loop_candidate.agent_calls} model calls were observed in one {loop_candidate.tool} session. Add explicit stop conditions or narrower acceptance criteria.",
         })
     if split["plan_limited"] > 0:
         insights.append({
@@ -217,6 +371,16 @@ def build_summary(days: int = 7) -> dict[str, object]:
             "body": "Cursor is installed, but local token/cost history is not reliably exposed yet.",
         })
 
+    window_session_ids = {row.session_id for row in rows}
+    window_outcomes = outcomes_for_sessions(window_session_ids)
+    outcomes = outcome_counts(window_session_ids)
+    interventions = recent_interventions(limit=200, days=days)
+    useful_rows = [
+        row for row in rows
+        if (window_outcomes.get(row.session_id) or {}).get("outcome") == "useful"
+    ]
+    useful_cost = sum(row.cost_usd for row in useful_rows)
+    cost_per_useful = useful_cost / len(useful_rows) if useful_rows else None
     return {
         "generated_at": now.isoformat(),
         "days": days,
@@ -237,6 +401,11 @@ def build_summary(days: int = 7) -> dict[str, object]:
             "plan_limited_tokens_label": compact_int(split["plan_limited"]),
             "calls": stats["calls"],
             "tool_calls": stats["tool_calls"],
+            "useful_outcomes": outcomes["useful"],
+            "rework_outcomes": outcomes["rework"],
+            "abandoned_outcomes": outcomes["abandoned"],
+            "preflight_decisions": len(interventions),
+            "cost_per_useful_change": money(cost_per_useful) if cost_per_useful is not None else "—",
         },
         "projects": projects[:10],
         "tools": tools,
@@ -252,6 +421,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
                 "model": row.model or "unknown",
                 "tokens": compact_int(row.tokens_in + row.tokens_out),
                 "api_value": money(row.cost_usd),
+                "outcome": (window_outcomes.get(row.session_id) or {}).get("outcome"),
                 "updated_at": (row.updated_at or row.started_at).isoformat() if (row.updated_at or row.started_at) else None,
             }
             for row in recent
@@ -268,98 +438,236 @@ HTML = r"""<!doctype html>
   <style>
     :root {
       color-scheme: dark;
-      --bg: #090b10;
-      --panel: #111722;
-      --panel-2: #151d2b;
-      --text: #eef3fb;
-      --muted: #98a5b8;
-      --line: #263145;
-      --green: #24d38b;
-      --blue: #6ba6ff;
-      --amber: #ffc857;
-      --red: #ff7a90;
+      --bg: #080b10;
+      --surface: #10151d;
+      --surface-raised: #161d27;
+      --surface-hover: #1b2430;
+      --text: #f5f7fa;
+      --muted: #9ba8b8;
+      --faint: #6f7d8f;
+      --line: #293443;
+      --line-strong: #3a485b;
+      --green: #35d399;
+      --green-soft: rgba(53, 211, 153, .12);
+      --blue: #70a7ff;
+      --blue-soft: rgba(112, 167, 255, .14);
+      --amber: #f6bd60;
+      --amber-soft: rgba(246, 189, 96, .13);
+      --red: #f27d8f;
+      --red-soft: rgba(242, 125, 143, .13);
     }
     * { box-sizing: border-box; }
+    html { min-width: 320px; }
     body {
       margin: 0;
-      background: radial-gradient(circle at top left, #18243a 0, #090b10 36rem);
+      background: var(--bg);
       color: var(--text);
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
     }
-    main { max-width: 1180px; margin: 0 auto; padding: 28px; }
-    header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 22px; }
-    h1 { font-size: 32px; margin: 0 0 8px; letter-spacing: 0; }
-    p { color: var(--muted); line-height: 1.55; margin: 0; }
+    body.drawer-open { overflow: hidden; }
+    main { max-width: 1360px; margin: 0 auto; padding: 24px 28px 48px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 20px; }
+    h1 { font-size: 22px; margin: 0; letter-spacing: 0; }
+    h2 { margin: 0; font-size: 16px; }
+    h3 { margin: 0; font-size: 14px; }
+    p { color: var(--muted); line-height: 1.5; margin: 0; }
+    .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+    .brand-mark {
+      display: grid; place-items: center; width: 36px; height: 36px;
+      border: 1px solid #4b86cf; border-radius: 8px; background: var(--blue-soft);
+      color: #dceaff; font-weight: 800;
+    }
+    .brand-copy { min-width: 0; }
+    .brand-copy p { margin-top: 2px; font-size: 12px; }
+    .status-badge {
+      display: inline-flex; align-items: center; gap: 7px; color: #c9f8e5;
+      border: 1px solid rgba(53,211,153,.32); background: var(--green-soft);
+      border-radius: 999px; padding: 5px 9px; font-size: 11px; font-weight: 700;
+    }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
     button, select {
-      border: 1px solid var(--line);
-      background: #0d1320;
+      border: 1px solid var(--line-strong);
+      background: var(--surface-raised);
       color: var(--text);
       border-radius: 8px;
-      padding: 9px 11px;
+      min-height: 38px;
+      padding: 8px 12px;
       font: inherit;
+      font-weight: 650;
     }
+    button { cursor: pointer; transition: background .15s ease, border-color .15s ease, color .15s ease; }
+    button:hover { background: var(--surface-hover); border-color: #53647a; }
+    button:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+    button:disabled { cursor: wait; opacity: .62; }
     .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .btn-primary { background: #2f6fbd; border-color: #5594df; color: white; }
+    .btn-primary:hover { background: #397dce; border-color: #76adf0; }
+    .btn-quiet { background: transparent; border-color: var(--line); color: #d5deea; }
     .link-button {
       text-decoration: none;
-      border: 1px solid #33537f;
-      background: rgba(107,166,255,.12);
+      border: 1px solid #4377b5;
+      background: var(--blue-soft);
       color: #dcebff;
       border-radius: 8px;
-      padding: 9px 11px;
+      min-height: 38px;
+      padding: 9px 12px;
       font-weight: 650;
     }
     .grid { display: grid; gap: 14px; }
-    .product-nav { display: flex; gap: 8px; flex-wrap: wrap; margin: -6px 0 18px; }
-    .nav-pill { border: 1px solid var(--line); background: rgba(255,255,255,.025); border-radius: 999px; padding: 7px 10px; color: #cbd7e9; font-size: 12px; }
-    .kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 14px; }
-    .two { grid-template-columns: minmax(0, 1.25fr) minmax(320px, .75fr); }
+    .product-nav {
+      display: flex; gap: 4px; width: fit-content; max-width: 100%; overflow-x: auto;
+      margin: 0 0 22px; padding: 4px; border: 1px solid var(--line);
+      border-radius: 8px; background: #0c1118;
+    }
+    .nav-tab {
+      min-height: 34px; border: 0; background: transparent; border-radius: 6px;
+      padding: 7px 14px; color: #aebaca; font-size: 13px;
+    }
+    .nav-tab:hover { background: #151d27; border-color: transparent; }
+    .nav-tab.active { background: #273449; color: white; }
+    .view[hidden] { display: none; }
+    .kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 14px 0; }
+    .two { grid-template-columns: minmax(0, 1.15fr) minmax(340px, .85fr); }
     .card {
-      background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.015)), var(--panel);
+      background: var(--surface);
       border: 1px solid var(--line);
       border-radius: 8px;
-      padding: 16px;
+      padding: 18px;
       min-width: 0;
     }
-    .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
-    .value { font-size: 28px; font-weight: 750; margin-top: 8px; }
+    .hero-card { border-color: #345b8b; background: #101925; }
+    .attention-card { border-color: #615233; background: #181710; }
+    .metric-card { min-height: 116px; position: relative; overflow: hidden; }
+    .metric-card::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--metric, var(--blue)); }
+    .metric-green { --metric: var(--green); }
+    .metric-blue { --metric: var(--blue); }
+    .metric-amber { --metric: var(--amber); }
+    .metric-red { --metric: var(--red); }
+    .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; font-weight: 700; }
+    .value { font-size: 30px; font-weight: 780; margin-top: 10px; font-variant-numeric: tabular-nums; }
     .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
-    h2 { margin: 0 0 14px; font-size: 16px; }
-    .bar-row { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(120px, 1.6fr) 92px; gap: 12px; align-items: center; margin: 12px 0; }
+    .session-summary { margin-top: 16px; }
+    .session-title { font-size: 18px; color: white; font-weight: 720; overflow-wrap: anywhere; }
+    .session-meta { margin-top: 5px; color: var(--muted); }
+    .session-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
+    .bar-row { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(120px, 1.5fr) 88px; gap: 12px; align-items: center; margin: 11px 0; padding: 5px 0; }
     .bar-row.clickable, tr.clickable { cursor: pointer; }
+    .bar-row.clickable { border-radius: 6px; }
+    .bar-row.clickable:hover { background: rgba(255,255,255,.03); }
     .bar-row.clickable:hover .bar-label, tr.clickable:hover td { color: white; }
     .bar-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dce6f6; }
-    .bar-shell { height: 10px; background: #0b111b; border-radius: 99px; overflow: hidden; border: 1px solid #1d2637; }
-    .bar { height: 100%; background: linear-gradient(90deg, var(--green), var(--blue)); border-radius: 99px; min-width: 2px; }
+    .bar-shell { height: 8px; background: #080d13; border-radius: 99px; overflow: hidden; border: 1px solid #222d3b; }
+    .bar { height: 100%; background: var(--blue); border-radius: 99px; min-width: 2px; }
     .amount { text-align: right; color: #dce6f6; font-variant-numeric: tabular-nums; }
-    .insight { border-left: 3px solid var(--green); padding: 10px 0 10px 12px; margin: 10px 0; }
+    .insight { border-left: 3px solid var(--amber); padding: 8px 0 8px 13px; margin: 12px 0; }
+    .insight strong { display: block; margin-bottom: 3px; color: white; }
     .pill-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
-    .pill { border: 1px solid var(--line); background: #0d1320; border-radius: 999px; padding: 6px 9px; color: #cdd8ea; font-size: 12px; }
+    .pill { border: 1px solid var(--line); background: #0b1118; border-radius: 999px; padding: 5px 9px; color: #bdc9d9; font-size: 11px; }
+    .outcome-pill.useful { color: #bff5df; border-color: rgba(53,211,153,.38); background: var(--green-soft); }
+    .outcome-pill.rework { color: #ffe2a4; border-color: rgba(246,189,96,.38); background: var(--amber-soft); }
+    .outcome-pill.abandoned { color: #ffc4ce; border-color: rgba(242,125,143,.38); background: var(--red-soft); }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { border-bottom: 1px solid var(--line); padding: 10px 8px; text-align: left; }
+    th, td { border-bottom: 1px solid var(--line); padding: 11px 8px; text-align: left; }
     th { color: var(--muted); font-weight: 600; }
     td:last-child, th:last-child { text-align: right; }
-    .trust { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
-    .trust div { border: 1px solid #244134; background: rgba(36,211,139,.08); border-radius: 8px; padding: 10px; color: #cdf7e5; font-size: 12px; }
+    tr.clickable:hover { background: rgba(112,167,255,.05); }
+    .row-action { min-height: 30px; padding: 5px 9px; color: #ddecff; background: var(--blue-soft); border-color: #3d6594; font-size: 12px; }
     .empty { color: var(--muted); padding: 16px; border: 1px dashed var(--line); border-radius: 8px; }
-    .detail { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 14px; }
+    .detail-section { padding: 20px 0; border-bottom: 1px solid var(--line); }
+    .detail-section:last-child { border-bottom: 0; }
     .mini-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 10px 0 12px; }
-    .mini { border: 1px solid var(--line); border-radius: 8px; padding: 9px; background: rgba(0,0,0,.12); }
-    .mini strong { display: block; font-size: 15px; }
+    .mini { border-left: 2px solid var(--line-strong); padding: 5px 10px; min-width: 0; }
+    .mini strong { display: block; font-size: 16px; margin-top: 4px; overflow-wrap: anywhere; }
+    .section-title { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; margin: 0 0 16px; }
+    .section-title h2 { margin: 0; }
+    .section-title p { font-size: 12px; }
+    .mono { font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .privacy-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .privacy-item { display: flex; align-items: center; gap: 9px; color: #c8d3e1; padding: 10px 0; }
+    .privacy-check { color: var(--green); font-weight: 900; }
+    .prompt-shell { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, .86fr); gap: 14px; align-items: start; }
+    .prompt-box, .brief-box {
+      width: 100%;
+      min-height: 260px;
+      resize: vertical;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: #090f16;
+      color: var(--text);
+      padding: 14px;
+      font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .prompt-box:focus, .brief-box:focus { outline: 2px solid var(--blue); outline-offset: 2px; }
+    .prompt-form-row { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 10px; margin: 12px 0; }
+    .prompt-result { margin-top: 14px; }
+    .risk-card { border-left: 3px solid var(--amber); padding: 14px; border-radius: 8px; background: #111923; }
+    .risk-card.high { border-left-color: var(--red); background: #191116; }
+    .risk-card.low { border-left-color: var(--green); background: #101b17; }
+    .risk-card h3 { font-size: 16px; margin-bottom: 8px; }
+    .prompt-list { margin: 10px 0 0; padding-left: 18px; color: #d9e4f2; line-height: 1.55; }
+    .copy-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    .drawer-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.62); opacity: 0; pointer-events: none; transition: opacity .18s ease; z-index: 20; }
+    .drawer-backdrop.open { opacity: 1; pointer-events: auto; }
+    .drawer {
+      position: fixed; z-index: 21; top: 0; right: 0; bottom: 0; width: min(620px, 94vw);
+      background: #0d1219; border-left: 1px solid var(--line-strong); box-shadow: -18px 0 46px rgba(0,0,0,.42);
+      transform: translateX(102%); visibility: hidden; transition: transform .2s ease, visibility .2s ease; display: flex; flex-direction: column;
+    }
+    .drawer.open { transform: translateX(0); visibility: visible; }
+    .drawer-header { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 18px 22px; border-bottom: 1px solid var(--line); }
+    .drawer-header p { font-size: 12px; margin-top: 2px; }
+    .drawer-content { padding: 0 22px 30px; overflow-y: auto; }
+    .outcome-control { margin-top: 16px; padding: 18px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface-raised); }
+    .outcome-control h3 { font-size: 16px; }
+    .outcome-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
+    .outcome-button { min-height: 44px; background: #0d131b; }
+    .outcome-button.useful { color: #bff5df; border-color: rgba(53,211,153,.45); }
+    .outcome-button.rework { color: #ffe2a4; border-color: rgba(246,189,96,.45); }
+    .outcome-button.abandoned { color: #ffc4ce; border-color: rgba(242,125,143,.45); }
+    .outcome-button.selected.useful { background: var(--green-soft); box-shadow: inset 0 0 0 1px var(--green); }
+    .outcome-button.selected.rework { background: var(--amber-soft); box-shadow: inset 0 0 0 1px var(--amber); }
+    .outcome-button.selected.abandoned { background: var(--red-soft); box-shadow: inset 0 0 0 1px var(--red); }
+    .toast { position: fixed; right: 20px; bottom: 20px; z-index: 30; max-width: 420px; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: 8px; background: #18212c; color: white; box-shadow: 0 12px 32px rgba(0,0,0,.35); opacity: 0; transform: translateY(12px); pointer-events: none; transition: opacity .18s ease, transform .18s ease; }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .toast.error { border-color: rgba(242,125,143,.55); background: #2a171d; }
+    .loading { color: var(--muted); padding: 18px 0; }
     @media (max-width: 860px) {
       main { padding: 18px; }
       header { flex-direction: column; }
-      .kpis, .two, .trust { grid-template-columns: 1fr; }
+      .actions { width: 100%; }
+      .actions select { flex: 1; }
+      .kpis { grid-template-columns: 1fr 1fr; }
+      .two { grid-template-columns: 1fr; }
+      .prompt-shell { grid-template-columns: 1fr; }
       .bar-row { grid-template-columns: 1fr; gap: 6px; }
       .amount { text-align: left; }
+    }
+    @media (max-width: 560px) {
+      main { padding: 14px 12px 36px; }
+      .brand-copy p, .link-button { display: none; }
+      .kpis { grid-template-columns: 1fr; }
+      .metric-card { min-height: 104px; }
+      .mini-grid, .outcome-options, .privacy-grid { grid-template-columns: 1fr; }
+      .drawer { width: 100vw; }
+      .drawer-header, .drawer-content { padding-left: 16px; padding-right: 16px; }
+      table { min-width: 620px; }
+      .table-wrap { overflow-x: auto; }
     }
   </style>
 </head>
 <body>
 <main>
   <header>
-    <div>
-      <h1>AIWatcher Local</h1>
-      <p>Local mode for AIWatcher. Start privately on one laptop, then connect Enterprise when you need team visibility, policy controls, and audit evidence.</p>
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">AW</div>
+      <div class="brand-copy">
+        <div class="actions">
+          <h1>AIWatcher Local</h1>
+          <span class="status-badge"><span class="status-dot"></span>Private and local</span>
+        </div>
+        <p>Your AI coding work, outcomes, and improvement signals.</p>
+      </div>
     </div>
     <div class="actions">
       <select id="days" onchange="load()">
@@ -367,72 +675,160 @@ HTML = r"""<!doctype html>
         <option value="7" selected>Last 7 days</option>
         <option value="30">Last 30 days</option>
       </select>
-      <button onclick="load()">Refresh</button>
-      <a class="link-button" href="https://www.getaiwatcher.com" target="_blank" rel="noreferrer">Open AIWatcher Cloud</a>
+      <button class="btn-quiet" onclick="load()">Refresh data</button>
+      <a class="link-button" href="https://www.getaiwatcher.com" target="_blank" rel="noreferrer">Enterprise</a>
     </div>
   </header>
 
   <nav class="product-nav" aria-label="AIWatcher Local sections">
-    <span class="nav-pill">Local overview</span>
-    <span class="nav-pill">Projects</span>
-    <span class="nav-pill">Sessions</span>
-    <span class="nav-pill">Weekly report</span>
-    <span class="nav-pill">Privacy-safe export</span>
+    <button class="nav-tab active" data-view="today" onclick="showView('today')">Today</button>
+    <button class="nav-tab" data-view="prompt" onclick="showView('prompt')">Prompt</button>
+    <button class="nav-tab" data-view="projects" onclick="showView('projects')">Projects</button>
+    <button class="nav-tab" data-view="sessions" onclick="showView('sessions')">Sessions</button>
+    <button class="nav-tab" data-view="insights" onclick="showView('insights')">Insights</button>
   </nav>
 
-  <section class="grid kpis">
-    <div class="card"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub"><span id="windowLabel">-</span> · not subscription invoice spend</div></div>
-    <div class="card"><div class="label">Projected month</div><div class="value" id="projected">-</div><div class="sub">At current pace</div></div>
-    <div class="card"><div class="label">Sessions</div><div class="value" id="sessions">-</div><div class="sub">Local machine only</div></div>
-    <div class="card"><div class="label">API-priced tokens</div><div class="value" id="apiTokens">-</div><div class="sub" id="limitedTokens">-</div></div>
+  <section id="view-today" class="view">
+    <section class="grid two" style="margin-bottom:14px">
+      <div class="card hero-card">
+        <div class="section-title"><div><h2>Latest AI work</h2><p>Your most recent local session and its outcome.</p></div></div>
+        <div id="latestSession"></div>
+      </div>
+      <div class="card attention-card">
+        <div class="section-title"><div><h2>One thing worth changing</h2><p>The highest-signal local recommendation for your next run.</p></div></div>
+        <div id="todayRecommendation"></div>
+      </div>
+    </section>
+    <section class="grid kpis">
+      <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub">Value per useful change: <span id="costPerUseful">-</span></div></div>
+      <div class="card metric-card metric-amber"><div class="label">Preflight decisions</div><div class="value" id="preflightDecisions">-</div><div class="sub"><span id="windowLabel">-</span></div></div>
+      <div class="card metric-card metric-blue"><div class="label">Sessions observed</div><div class="value" id="sessions">-</div><div class="sub">This machine only</div></div>
+      <div class="card metric-card metric-red"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div></div>
+    </section>
+
+    <section class="grid two">
+      <div class="card">
+        <div class="section-title"><div><h2>Projects Driving AI Usage</h2><p>Click a project to inspect local sessions, models, and tools.</p></div></div>
+        <div id="projects"></div>
+      </div>
+      <div class="card">
+        <div class="section-title"><div><h2>Recent sessions</h2><p>Review work and record whether it was useful.</p></div></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Tool</th><th>Project</th><th>Tokens</th><th></th></tr></thead>
+          <tbody id="recent"></tbody>
+        </table></div>
+      </div>
+    </section>
+
+    <section class="grid two" style="margin-top:14px">
+      <div class="card">
+        <h2>Models and Tools</h2>
+        <div id="models"></div>
+      </div>
+      <div class="card">
+        <div class="section-title"><div><h2>Privacy at a glance</h2><p>Your local trust boundary stays visible.</p></div></div>
+        <div class="privacy-grid" id="privacy"></div>
+        <div id="insights" hidden></div>
+      </div>
+    </section>
   </section>
 
-  <section class="grid two">
-    <div class="card">
-      <h2>Projects Driving AI Usage</h2>
-      <div id="projects"></div>
-    </div>
-    <div class="card">
-      <h2>What changed</h2>
-      <div id="insights"></div>
-      <div class="pill-row" id="privacy"></div>
-      <div class="detail" id="detail">
-        <p>Select a project or session to inspect local detail.</p>
+  <section id="view-prompt" class="view" hidden>
+    <div class="prompt-shell">
+      <div class="card">
+        <div class="section-title"><div><h2>Prompt Companion</h2><p>Preflight work before pasting it into Claude, Codex, Cursor, or any AI coding surface.</p></div></div>
+        <textarea id="promptInput" class="prompt-box" placeholder="Paste or draft a prompt here. Example: Refactor the entire codebase and delete old auth secrets"></textarea>
+        <div class="prompt-form-row">
+          <select id="promptTool">
+            <option value="codex">Codex</option>
+            <option value="claude">Claude</option>
+            <option value="cursor">Cursor</option>
+            <option value="agent">Generic agent</option>
+          </select>
+          <input id="promptCwd" class="prompt-box" style="min-height:38px;resize:none" placeholder="Working directory, optional">
+        </div>
+        <div class="actions">
+          <button class="btn-primary" onclick="preflightPrompt()">Preflight prompt</button>
+          <button class="btn-quiet" onclick="clearPromptCompanion()">Clear</button>
+        </div>
+        <p style="margin-top:12px">This is the fallback for surfaces where AIWatcher cannot install a native hook yet. Prompt text is analyzed locally and not persisted.</p>
+      </div>
+      <div class="card">
+        <div class="section-title"><div><h2>Decision</h2><p>Use the brief, edit it, or paste the original unchanged.</p></div></div>
+        <div id="promptResult" class="prompt-result"><div class="empty">Run a preflight to see risk, reasoning, and a safer execution brief.</div></div>
       </div>
     </div>
   </section>
 
-  <section class="grid two" style="margin-top:14px">
+  <section id="view-projects" class="view" hidden>
     <div class="card">
-      <h2>Models and Tools</h2>
-      <div id="models"></div>
-    </div>
-    <div class="card">
-      <h2>Recent Sessions</h2>
-      <table>
-        <thead><tr><th>Tool</th><th>Project</th><th>Tokens</th><th>API value</th></tr></thead>
-        <tbody id="recent"></tbody>
-      </table>
+      <div class="section-title">
+        <div><h2>Projects</h2><p>Local repos and folders absorbing AI coding work.</p></div>
+        <span class="pill" id="projectWindow">-</span>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Project</th><th>Sessions</th><th>Tokens</th><th>Model calls</th><th>API value</th></tr></thead>
+        <tbody id="projectRows"></tbody>
+      </table></div>
     </div>
   </section>
 
-  <section class="grid two" style="margin-top:14px">
+  <section id="view-sessions" class="view" hidden>
     <div class="card">
-      <h2>Local Weekly Report</h2>
-      <div id="report"></div>
-    </div>
-    <div class="card">
-      <h2>Enterprise handoff</h2>
-      <p>AIWatcher Local is for one developer. Enterprise adds team history, policy controls, HITL approvals, evidence packs, and integrations.</p>
-      <div class="pill-row">
-        <span class="pill">Team visibility</span>
-        <span class="pill">Budget guardrails</span>
-        <span class="pill">Audit evidence</span>
-        <span class="pill">SSO/RBAC</span>
+      <div class="section-title">
+        <div><h2>Sessions</h2><p>Recent local AI runs. Click any row for privacy-safe detail.</p></div>
+        <span class="pill">Local machine only</span>
       </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Tool</th><th>Project</th><th>Model</th><th>Tokens</th><th></th></tr></thead>
+        <tbody id="sessionRows"></tbody>
+      </table></div>
     </div>
+  </section>
+
+  <section id="view-insights" class="view" hidden>
+    <section class="grid two">
+      <div class="card">
+        <div class="section-title"><div><h2>Local Insights</h2><p>Suggestions to reduce waste without uploading prompts.</p></div></div>
+        <div id="insightRows"></div>
+      </div>
+      <div class="card">
+        <h2>Daily Journal</h2>
+        <div id="journal"></div>
+        <div class="detail-section">
+          <h2>Local Weekly Report</h2>
+          <div id="report"></div>
+        </div>
+      </div>
+    </section>
+    <section class="grid two" style="margin-top:14px">
+      <div class="card">
+        <h2>Privacy Contract</h2>
+        <p>AIWatcher Local is read-only and local-first. Summaries avoid source and prompt content by default.</p>
+        <div class="pill-row" id="privacyLarge"></div>
+      </div>
+      <div class="card">
+        <h2>Enterprise handoff</h2>
+        <p>Enterprise adds team history, policy controls, HITL approvals, evidence packs, and integrations.</p>
+        <div class="pill-row">
+          <span class="pill">Team visibility</span>
+          <span class="pill">Budget guardrails</span>
+          <span class="pill">Audit evidence</span>
+          <span class="pill">SSO/RBAC</span>
+        </div>
+      </div>
+    </section>
   </section>
 </main>
+<div class="drawer-backdrop" id="drawerBackdrop" onclick="closeDrawer()"></div>
+<aside class="drawer" id="detailDrawer" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="drawerTitle">
+  <div class="drawer-header">
+    <div><h2 id="drawerTitle">Work detail</h2><p>Local metadata only</p></div>
+    <button class="btn-quiet" onclick="closeDrawer()" aria-label="Close work detail">Close</button>
+  </div>
+  <div class="drawer-content" id="detailContent"><div class="loading">Select a project or session to inspect.</div></div>
+</aside>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script>
 function maxValue(rows) {
   return Math.max(0.000001, ...rows.map(r => Number(r.api_value_usd || 0)));
@@ -445,6 +841,92 @@ function esc(value) {
     '"': '&quot;',
     "'": '&#39;'
   }[ch]));
+}
+async function copyText(value, label = 'Copied') {
+  try {
+    await navigator.clipboard.writeText(value || '');
+    showToast(label);
+  } catch (error) {
+    showToast('Copy failed. Select the text manually.', 'error');
+  }
+}
+function clearPromptCompanion() {
+  document.getElementById('promptInput').value = '';
+  document.getElementById('promptResult').innerHTML = '<div class="empty">Run a preflight to see risk, reasoning, and a safer execution brief.</div>';
+}
+async function preflightPrompt() {
+  const prompt = document.getElementById('promptInput').value;
+  const tool = document.getElementById('promptTool').value;
+  const cwd = document.getElementById('promptCwd').value;
+  const resultNode = document.getElementById('promptResult');
+  if (!prompt.trim()) {
+    resultNode.innerHTML = '<div class="empty">Write or paste a prompt first.</div>';
+    return;
+  }
+  resultNode.innerHTML = '<div class="loading">Checking cost, scope, and safety pressure...</div>';
+  try {
+    const res = await fetch('/api/preflight', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, tool, cwd })
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      resultNode.innerHTML = `<div class="empty">${esc(data.error || 'Could not preflight prompt.')}</div>`;
+      return;
+    }
+    const riskTone = data.risk || 'low';
+    resultNode.innerHTML = `<div class="risk-card ${esc(riskTone)}">
+      <h3>Risk: ${esc(data.risk)} · score ${esc(data.score)}</h3>
+      <p>${esc(data.impact_label)}</p>
+      <h3 style="margin-top:14px">Findings</h3>
+      <ul class="prompt-list">${data.findings.map(item => `<li>${esc(item)}</li>`).join('')}</ul>
+      <h3 style="margin-top:14px">Suggestions</h3>
+      <ul class="prompt-list">${data.suggestions.map(item => `<li>${esc(item)}</li>`).join('')}</ul>
+    </div>
+    <div class="detail-section">
+      <h3>Execution brief</h3>
+      <textarea id="promptBrief" class="brief-box">${esc(data.suggested_prompt)}</textarea>
+      <div class="copy-row">
+        <button class="btn-primary" onclick="copyText(document.getElementById('promptBrief').value, 'Execution brief copied')">Copy brief</button>
+        <button class="btn-quiet" onclick="copyText(document.getElementById('promptInput').value, 'Original prompt copied')">Copy original</button>
+      </div>
+      <p style="margin-top:10px">${esc(data.privacy)}</p>
+    </div>`;
+  } catch (error) {
+    resultNode.innerHTML = '<div class="empty">Could not reach the local AIWatcher server.</div>';
+  }
+}
+let toastTimer;
+function showToast(message, kind = 'success') {
+  const toast = document.getElementById('toast');
+  toast.textContent = message;
+  toast.className = `toast ${kind === 'error' ? 'error' : ''} show`;
+  window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => { toast.className = 'toast'; }, 3200);
+}
+function openDrawer(title) {
+  document.getElementById('drawerTitle').textContent = title;
+  document.getElementById('drawerBackdrop').classList.add('open');
+  document.getElementById('detailDrawer').classList.add('open');
+  document.getElementById('detailDrawer').setAttribute('aria-hidden', 'false');
+  document.body.classList.add('drawer-open');
+}
+function closeDrawer() {
+  document.getElementById('drawerBackdrop').classList.remove('open');
+  document.getElementById('detailDrawer').classList.remove('open');
+  document.getElementById('detailDrawer').setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('drawer-open');
+}
+function outcomePill(outcome) {
+  const value = outcome || 'not marked';
+  const tone = outcome || '';
+  return `<span class="pill outcome-pill ${tone}">Outcome: ${esc(value)}</span>`;
+}
+function dateLabel(value) {
+  if (!value) return 'unknown';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 function bars(rows, valueKey = "api_value_label", kind = "project") {
   if (!rows.length) return '<div class="empty">No local usage found for this window.</div>';
@@ -469,30 +951,86 @@ function miniStats(totals) {
   </div>`;
 }
 async function selectProject(project) {
+  openDrawer('Project detail');
+  document.getElementById('detailContent').innerHTML = '<div class="loading">Loading project activity...</div>';
   const days = document.getElementById('days').value;
   const res = await fetch(`/api/project?days=${days}&project=${encodeURIComponent(project)}`);
   const data = await res.json();
-  document.getElementById('detail').innerHTML = `<h2>${esc(data.project_short)}</h2>
+  document.getElementById('drawerTitle').textContent = data.project_short || 'Project detail';
+  document.getElementById('detailContent').innerHTML = `<section class="detail-section"><h2>${esc(data.project_short)}</h2>
     ${miniStats(data.totals)}
-    <p>Top models in this project</p>
+    </section><section class="detail-section"><h3>Models used</h3>
     ${bars(data.models, "api_value_label", "model")}
-    <table><thead><tr><th>Tool</th><th>Model</th><th>Tokens</th><th>API value</th></tr></thead>
+    </section><section class="detail-section"><h3>Recent sessions</h3>
+    <div class="table-wrap"><table><thead><tr><th>Tool</th><th>Model</th><th>Tokens</th><th></th></tr></thead>
       <tbody>${data.sessions.map(s => `<tr class="clickable" onclick="selectSession('${s.session_id}')">
-        <td>${esc(s.tool)}</td><td>${esc(s.model)}</td><td>${esc(s.tokens_label)}</td><td>${esc(s.api_value)}</td>
-      </tr>`).join('')}</tbody></table>`;
+        <td>${esc(s.tool)}</td><td>${esc(s.model)}</td><td>${esc(s.tokens_label)}</td><td><button class="row-action">Review</button></td>
+      </tr>`).join('')}</tbody></table></div></section>`;
 }
 async function selectSession(sessionId) {
+  openDrawer('Session review');
+  document.getElementById('detailContent').innerHTML = '<div class="loading">Loading session details...</div>';
   const res = await fetch(`/api/session?id=${encodeURIComponent(sessionId)}`);
   const s = await res.json();
-  document.getElementById('detail').innerHTML = `<h2>Session detail</h2>
-    <p>${esc(s.project_short)} · ${esc(s.tool)} · ${esc(s.model)}</p>
+  if (s.error) {
+    document.getElementById('detailContent').innerHTML = `<div class="empty">${esc(s.error)}</div>`;
+    return;
+  }
+  document.getElementById('drawerTitle').textContent = 'Session review';
+  const timeline = s.events && s.events.length
+    ? `<section class="detail-section"><h3>Timeline</h3>
+        <p>${esc(s.timeline_summary.events)} events · ${esc(s.timeline_summary.tokens)} tokens · ${esc(s.timeline_summary.api_value)} API-equivalent value</p>
+        <div class="table-wrap"><table><thead><tr><th>Event</th><th>Model</th><th>Tokens</th><th>API value</th></tr></thead>
+          <tbody>${s.events.map(e => `<tr title="${esc(e.content_hash || '')}">
+            <td>${esc(e.event_type)}</td><td>${esc(e.model)}</td><td>${esc(e.tokens_label)}</td><td>${esc(e.api_value)}</td>
+          </tr>`).join('')}</tbody></table></div>
+      </section>`
+    : `<section class="detail-section"><h3>Timeline</h3><p>Event-level history is not available for this tool yet.</p></section>`;
+  const outcomeActions = `<div class="outcome-control"><h3>Was this work useful?</h3>
+    <p>Mark the result so AIWatcher can measure value instead of tokens alone.</p>
+    <div class="outcome-options">
+      <button data-testid="outcome-useful" class="outcome-button useful ${s.outcome === 'useful' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','useful')">Useful</button>
+      <button data-testid="outcome-rework" class="outcome-button rework ${s.outcome === 'rework' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','rework')">Needs rework</button>
+      <button data-testid="outcome-abandoned" class="outcome-button abandoned ${s.outcome === 'abandoned' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','abandoned')">Abandoned</button>
+    </div></div>`;
+  document.getElementById('detailContent').innerHTML = `<section class="detail-section">
+    <h2 class="session-title">${esc(s.project_short)}</h2>
+    <p class="session-meta">${esc(s.tool)} · ${esc(s.model)}</p>
     ${miniStats({ sessions: 1, api_value: s.api_value, tokens: s.tokens_label, tool_calls: s.tool_calls })}
+    ${outcomePill(s.outcome)}
+    ${outcomeActions}
+    </section><section class="detail-section"><h3>Session metadata</h3>
     <table><tbody>
-      <tr><th>Started</th><td>${esc(s.started_at || 'unknown')}</td></tr>
-      <tr><th>Updated</th><td>${esc(s.updated_at || 'unknown')}</td></tr>
+      <tr><th>Started</th><td>${esc(dateLabel(s.started_at))}</td></tr>
+      <tr><th>Updated</th><td>${esc(dateLabel(s.updated_at))}</td></tr>
       <tr><th>Source</th><td>${esc(s.source_path || 'unknown')}</td></tr>
       <tr><th>Privacy</th><td>${esc(s.privacy)}</td></tr>
-    </tbody></table>`;
+    </tbody></table>
+    </section>
+    ${timeline}`;
+}
+async function markOutcome(sessionId, outcome) {
+  const buttons = document.querySelectorAll('.outcome-button');
+  buttons.forEach(button => { button.disabled = true; });
+  try {
+    const res = await fetch('/api/outcome', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, outcome })
+    });
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({ error: 'Could not save outcome' }));
+      showToast(error.error || 'Could not save outcome', 'error');
+      return;
+    }
+    await Promise.all([selectSession(sessionId), load(false)]);
+    const labels = { useful: 'Useful', rework: 'Needs rework', abandoned: 'Abandoned' };
+    showToast(`Outcome saved: ${labels[outcome]}`);
+  } catch (error) {
+    showToast('Could not reach the local AIWatcher server.', 'error');
+  } finally {
+    buttons.forEach(button => { button.disabled = false; });
+  }
 }
 function renderReport(report) {
   return `<p>${esc(report.title)}</p>
@@ -500,33 +1038,85 @@ function renderReport(report) {
     ${report.highlights.map(item => `<div class="insight"><strong>${esc(item)}</strong></div>`).join('')}
     <p>${esc(report.next_checks.join(' '))}</p>`;
 }
-async function load() {
+function renderJournal(journal) {
+  return `<p>${esc(journal.title)}</p>
+    <div class="pill-row"><span class="pill">${esc(journal.summary)}</span></div>
+    ${journal.items.map(item => `<div class="insight"><strong>${esc(item)}</strong></div>`).join('')}
+    <p><strong>One thing to change next time:</strong> ${esc(journal.improvement)}</p>`;
+}
+function showView(view) {
+  document.querySelectorAll('.view').forEach(node => {
+    node.hidden = node.id !== `view-${view}`;
+  });
+  document.querySelectorAll('.nav-tab').forEach(node => {
+    node.classList.toggle('active', node.dataset.view === view);
+  });
+}
+async function load(resetDetail = true) {
   const days = document.getElementById('days').value;
-  const [summaryRes, reportRes] = await Promise.all([
+  const [summaryRes, reportRes, journalRes] = await Promise.all([
     fetch(`/api/summary?days=${days}`),
-    fetch(`/api/report?days=${days}`)
+    fetch(`/api/report?days=${days}`),
+    fetch(`/api/journal?days=${Math.min(Number(days), 30)}`)
   ]);
   const data = await summaryRes.json();
   const report = await reportRes.json();
+  const journal = await journalRes.json();
   const totals = data.totals;
   document.getElementById('apiValue').textContent = totals.api_value_label;
   document.getElementById('windowLabel').textContent = totals.window_label;
-  document.getElementById('projected').textContent = totals.projected_month_label;
   document.getElementById('sessions').textContent = totals.sessions;
-  document.getElementById('apiTokens').textContent = totals.api_priced_tokens_label;
-  document.getElementById('limitedTokens').textContent = `${totals.plan_limited_tokens_label} plan/limited tokens observed`;
+  document.getElementById('usefulOutcomes').textContent = totals.useful_outcomes;
+  document.getElementById('costPerUseful').textContent = totals.cost_per_useful_change;
+  document.getElementById('preflightDecisions').textContent = totals.preflight_decisions;
+  const latest = data.recent_sessions[0];
+  document.getElementById('latestSession').innerHTML = latest
+    ? `<div class="session-summary"><div class="session-title">${esc(latest.project)}</div>
+       <div class="session-meta">${esc(latest.tool)} · ${esc(latest.model)} · ${esc(latest.tokens)} tokens · ${esc(latest.api_value)}</div>
+       <div class="session-actions">${outcomePill(latest.outcome)}
+       <button data-testid="review-latest" class="btn-primary" onclick="selectSession('${esc(latest.session_id)}')">Review outcome</button></div></div>`
+    : '<div class="empty">No local AI session detected yet.</div>';
+  const recommendation = data.insights[0];
+  document.getElementById('todayRecommendation').innerHTML = recommendation
+    ? `<div class="insight"><strong>${esc(recommendation.title)}</strong><p>${esc(recommendation.body)}</p></div>`
+    : '<div class="empty">Nothing unusual yet. Keep the next task scoped and define a stop condition.</div>';
   document.getElementById('projects').innerHTML = bars(data.projects, "api_value_label", "project");
   document.getElementById('models').innerHTML = bars(data.models, "api_value_label", "model");
   document.getElementById('insights').innerHTML = data.insights.length
     ? data.insights.map(i => `<div class="insight"><strong>${esc(i.title)}</strong><p>${esc(i.body)}</p></div>`).join('')
     : '<div class="empty">No notable local signals yet.</div>';
-  document.getElementById('privacy').innerHTML = data.privacy.map(p => `<span class="pill">${esc(p)}</span>`).join('');
-  document.getElementById('recent').innerHTML = data.recent_sessions.map(s => `<tr class="clickable" onclick="selectSession('${s.session_id}')">
-    <td>${esc(s.tool)}</td><td>${esc(s.project)}</td><td>${esc(s.tokens)}</td><td>${esc(s.api_value)}</td>
+  document.getElementById('insightRows').innerHTML = data.insights.length
+    ? data.insights.map(i => `<div class="insight"><strong>${esc(i.title)}</strong><p>${esc(i.body)}</p></div>`).join('')
+    : '<div class="empty">No notable local signals yet. Keep using AI tools and check back after a few sessions.</div>';
+  document.getElementById('privacy').innerHTML = data.privacy.map(p => `<div class="privacy-item"><span class="privacy-check">&#10003;</span><span>${esc(p)}</span></div>`).join('');
+  document.getElementById('privacyLarge').innerHTML = data.privacy.map(p => `<span class="pill">${esc(p)}</span>`).join('');
+  document.getElementById('recent').innerHTML = data.recent_sessions.slice(0, 6).map(s => `<tr class="clickable" onclick="selectSession('${s.session_id}')">
+    <td>${esc(s.tool)}</td><td>${esc(s.project)}</td><td>${esc(s.tokens)}</td><td><button class="row-action">Review</button></td>
   </tr>`).join('');
+  document.getElementById('projectWindow').textContent = totals.window_label;
+  document.getElementById('projectRows').innerHTML = data.projects.length
+    ? data.projects.map(p => `<tr class="clickable" onclick="selectProject(decodeURIComponent(this.dataset.id))" data-id="${encodeURIComponent(p.id)}">
+        <td>${esc(p.short_name || p.name)}</td>
+        <td class="mono">${esc(p.sessions)}</td>
+        <td class="mono">${esc(p.tokens_label)}</td>
+        <td class="mono">${esc(p.calls)}</td>
+        <td class="mono">${esc(p.api_value_label)}</td>
+      </tr>`).join('')
+    : '<tr><td colspan="5"><div class="empty">No local project usage found for this window.</div></td></tr>';
+  document.getElementById('sessionRows').innerHTML = data.recent_sessions.length
+    ? data.recent_sessions.map(s => `<tr class="clickable" onclick="selectSession('${s.session_id}')">
+        <td>${esc(s.tool)}</td>
+        <td>${esc(s.project)}</td>
+        <td>${esc(s.model)}</td>
+        <td class="mono">${esc(s.tokens)}</td>
+        <td><button class="row-action">Review</button></td>
+      </tr>`).join('')
+    : '<tr><td colspan="5"><div class="empty">No local sessions found for this window.</div></td></tr>';
   document.getElementById('report').innerHTML = renderReport(report);
-  document.getElementById('detail').innerHTML = '<p>Select a project or session to inspect local detail.</p>';
+  document.getElementById('journal').innerHTML = renderJournal(journal);
+  if (resetDetail && document.getElementById('detailDrawer').classList.contains('open')) closeDrawer();
 }
+document.addEventListener('keydown', event => { if (event.key === 'Escape') closeDrawer(); });
 load();
 </script>
 </body>
@@ -582,7 +1172,57 @@ class UIHandler(BaseHTTPRequestHandler):
                 days = 7
             self._send(200, json.dumps(build_report(days)), "application/json; charset=utf-8")
             return
+        if parsed.path == "/api/journal":
+            params = parse_qs(parsed.query)
+            try:
+                days = max(1, min(30, int(params.get("days", ["1"])[0])))
+            except ValueError:
+                days = 1
+            self._send(200, json.dumps(build_journal(days)), "application/json; charset=utf-8")
+            return
         self._send(404, "Not found", "text/plain; charset=utf-8")
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path not in {"/api/outcome", "/api/preflight"}:
+            self._send(404, "Not found", "text/plain; charset=utf-8")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+        except (ValueError, json.JSONDecodeError):
+            self._send(400, json.dumps({"error": "Invalid JSON body"}), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/preflight":
+            prompt = str(payload.get("prompt", ""))
+            tool = str(payload.get("tool", "agent")).strip() or "agent"
+            cwd = str(payload.get("cwd", "")).strip() or None
+            response = build_prompt_preflight(prompt, tool=tool, cwd=cwd)
+            status = 400 if response.get("error") else 200
+            self._send(status, json.dumps(response), "application/json; charset=utf-8")
+            return
+        session_id = str(payload.get("session_id", "")).strip()
+        outcome = str(payload.get("outcome", "")).strip()
+        note = str(payload.get("note", "")).strip() or None
+        if not session_id:
+            self._send(400, json.dumps({"error": "session_id is required"}), "application/json; charset=utf-8")
+            return
+        if outcome not in VALID_OUTCOMES:
+            self._send(400, json.dumps({"error": "outcome must be useful, rework, or abandoned"}), "application/json; charset=utf-8")
+            return
+        if not any(row.session_id == session_id for row in scan_all()):
+            self._send(404, json.dumps({"error": "session not found"}), "application/json; charset=utf-8")
+            return
+        try:
+            record = record_outcome(session_id, outcome, note)
+        except OSError as exc:
+            self._send(
+                500,
+                json.dumps({"error": f"Could not save outcome: {exc}"}),
+                "application/json; charset=utf-8",
+            )
+            return
+        self._send(200, json.dumps(record), "application/json; charset=utf-8")
 
 
 def is_port_available(host: str, port: int) -> bool:
