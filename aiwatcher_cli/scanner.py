@@ -374,7 +374,7 @@ def scan_claude_code() -> list[LocalSession]:
                     tool="claude-code",
                     project_path=fallback_project_path,
                     started_at=started_at or _mtime(fpath),
-                    updated_at=updated_at or _mtime(fpath),
+                    updated_at=_max_dt(updated_at, _mtime(fpath)) or _mtime(fpath),
                     model=model or "claude-code",
                     tokens_in=tokens_in,
                     tokens_out=tokens_out,
