@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from . import __version__
 from .cli import analyze_prompt, session_insights
 from .correlate import link_recent_interventions_to_sessions
 from .local_state import (
@@ -31,6 +32,9 @@ from .scanner import (
     scan_all_events,
     segment_session_by_prompt,
 )
+
+
+MAX_REQUEST_BYTES = 64 * 1024
 
 MIN_DT = datetime.min.replace(tzinfo=timezone.utc)
 
@@ -1350,10 +1354,20 @@ class UIHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
+    def do_OPTIONS(self) -> None:
+        self._send(405, "Cross-origin requests are not allowed", "text/plain; charset=utf-8")
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/":
             self._send(200, HTML, "text/html; charset=utf-8")
+            return
+        if parsed.path == "/api/health":
+            self._send(200, json.dumps({
+                "service": "aiwatcher-local",
+                "version": __version__,
+                "capabilities": ["preflight"],
+            }), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/summary":
             params = parse_qs(parsed.query)
@@ -1400,8 +1414,15 @@ class UIHandler(BaseHTTPRequestHandler):
         if parsed.path not in {"/api/outcome", "/api/preflight"}:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if content_type != "application/json":
+            self._send(415, json.dumps({"error": "Content-Type must be application/json"}), "application/json; charset=utf-8")
+            return
         try:
             length = int(self.headers.get("Content-Length", "0"))
+            if length < 0 or length > MAX_REQUEST_BYTES:
+                self._send(413, json.dumps({"error": "Request body is too large"}), "application/json; charset=utf-8")
+                return
             payload = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
         except (ValueError, json.JSONDecodeError):
             self._send(400, json.dumps({"error": "Invalid JSON body"}), "application/json; charset=utf-8")

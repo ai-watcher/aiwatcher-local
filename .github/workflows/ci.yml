@@ -6,6 +6,22 @@ on:
     branches: [main]
 
 jobs:
+  adapters:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Validate browser adapter
+        run: |
+          node --check browser-extension/background.js
+          node --check browser-extension/content.js
+          node --check browser-extension/popup.js
+          node browser-extension/test-background.js
+      - name: Validate VS Code adapter
+        run: node --check vscode-extension/extension.js
+
   test:
     strategy:
       fail-fast: false

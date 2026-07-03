@@ -321,6 +321,58 @@ class IntegrationConfigTests(unittest.TestCase):
         merged = cli._merge_codex_hook({}, "python -m aiwatcher_cli", gate=True)
         self.assertIn("codex-hook --gate", json.dumps(merged))
 
+    def test_cursor_hook_merge_preserves_existing_hooks(self) -> None:
+        settings = {
+            "version": 1,
+            "hooks": {
+                "beforeSubmitPrompt": [{"command": "python existing.py"}],
+                "stop": [{"command": "python stop.py"}],
+            },
+        }
+        merged = cli._merge_cursor_hook(settings, "python -m aiwatcher_cli", gate=True)
+        self.assertEqual(len(merged["hooks"]["beforeSubmitPrompt"]), 2)
+        self.assertIn("cursor-hook --gate", json.dumps(merged))
+        self.assertIn("stop", merged["hooks"])
+
+        updated, removed = cli._remove_cursor_hook(merged)
+        self.assertTrue(removed)
+        self.assertEqual(len(updated["hooks"]["beforeSubmitPrompt"]), 1)
+
+    def test_cursor_hook_allows_low_risk_prompt(self) -> None:
+        payload = json.dumps({"prompt": "Explain this function", "workspace_roots": ["/repo"]})
+        args = SimpleNamespace(text=None, gate=False)
+        with (
+            patch.object(cli, "_read_stdin_text", return_value=payload),
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "record_hook_event"),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_cursor_hook(args)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(json.loads(stdout.getvalue()), {"continue": True})
+
+    def test_cursor_hook_pauses_risky_prompt_with_resubmittable_brief(self) -> None:
+        payload = json.dumps({
+            "prompt": "Refactor the entire codebase and delete old auth secrets",
+            "workspace_roots": ["/repo"],
+        })
+        args = SimpleNamespace(text=None, gate=False)
+        with (
+            patch.object(cli, "_read_stdin_text", return_value=payload),
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "record_hook_event"),
+            patch.object(cli, "record_intervention"),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_cursor_hook(args)
+
+        self.assertEqual(result, 0)
+        output = json.loads(stdout.getvalue())
+        self.assertFalse(output["continue"])
+        self.assertIn("scoped execution brief", output["user_message"].lower())
+        self.assertIn("Task\nRefactor the entire codebase", output["user_message"])
+
     def test_public_hook_command_uses_module_entrypoint(self) -> None:
         command = cli._cli_command_for_current_file()
         self.assertIn("-m aiwatcher_cli", command)
@@ -334,6 +386,7 @@ class IntegrationConfigTests(unittest.TestCase):
         )
         self.assertNotIn("codex-hook", subparsers.choices)
         self.assertNotIn("claude-hook", subparsers.choices)
+        self.assertNotIn("cursor-hook", subparsers.choices)
 
 
 if __name__ == "__main__":

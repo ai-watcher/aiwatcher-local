@@ -1,0 +1,63 @@
+{
+  "name": "aiwatcher-local",
+  "displayName": "AIWatcher Local",
+  "description": "Preflight AI prompts before they run. Flags risky scope, suggests safer briefs, keeps analysis local.",
+  "version": "0.1.0",
+  "publisher": "aiwatcher",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "keywords": ["ai", "claude", "cursor", "codex", "preflight", "cost", "safety"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "aiwatcher.preflightSelection",
+        "title": "AIWatcher: Preflight Selected Text",
+        "shortTitle": "Preflight Selection"
+      },
+      {
+        "command": "aiwatcher.preflightInput",
+        "title": "AIWatcher: Preflight a Prompt…",
+        "shortTitle": "Preflight Prompt"
+      },
+      {
+        "command": "aiwatcher.preflightClipboard",
+        "title": "AIWatcher: Preflight Clipboard",
+        "shortTitle": "Preflight Clipboard"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "aiwatcher.preflightSelection",
+        "key": "ctrl+shift+alt+p",
+        "mac": "cmd+shift+alt+p",
+        "when": "editorTextFocus && editorHasSelection"
+      },
+      {
+        "command": "aiwatcher.preflightInput",
+        "key": "ctrl+shift+alt+i",
+        "mac": "cmd+shift+alt+i"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "aiwatcher.preflightSelection",
+          "when": "editorHasSelection",
+          "group": "aiwatcher@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "AIWatcher Local",
+      "properties": {
+        "aiwatcher.serverUrl": {
+          "type": "string",
+          "default": "auto",
+          "description": "Use auto to discover AIWatcher Local, or provide an explicit local server URL."
+        }
+      }
+    }
+  }
+}

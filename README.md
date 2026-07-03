@@ -201,12 +201,14 @@ predicted impact, and outcomes, not the original or suggested prompt text.
 
 ### Automatic Prompt Preflight
 
-Claude Code and Codex CLI/TUI support prompt lifecycle hooks. Install AIWatcher
-once:
+Claude Code, Codex, and Cursor support prompt lifecycle hooks. Claude's user
+hook applies to both Claude Code CLI and the Code tab in Claude Desktop. Install
+AIWatcher once:
 
 ```sh
 python -m aiwatcher_cli install-claude-hook --write --scope user
 python -m aiwatcher_cli install-codex-hook --write --scope user
+python -m aiwatcher_cli install-cursor-hook --write --scope user
 ```
 
 For the richer beta workflow, add `--gate`. Risky prompts open a local decision
@@ -216,18 +218,23 @@ screen with **Use brief**, **Use edited brief**, **Run original**, and
 ```sh
 python -m aiwatcher_cli install-claude-hook --write --scope user --gate
 python -m aiwatcher_cli install-codex-hook --write --scope user --gate
+python -m aiwatcher_cli install-cursor-hook --write --scope user --gate
 ```
 
 Codex requires one additional trust review: open Codex and run `/hooks`.
+Reload Cursor after installing its hook and inspect **Output > Hooks** after a
+test prompt. Cursor can block a risky submission but cannot replace prompt text,
+so it returns a scoped brief for the developer to resubmit.
 Low-risk prompts pass unchanged. Medium-risk prompts receive a scoped execution
 brief before tools run. High-risk prompts pause before execution. The Prompt
 Gate keeps prompt text transient in the local browser page; AIWatcher persists
 hashes, decisions, and predicted impact only. MCP remains available for explicit
 local usage questions, but hooks provide automatic pre-send coverage.
 
-Current limitation: not every Codex or Claude surface invokes these hooks. Some
-desktop/chat/editor surfaces need the Prompt Companion or a future extension
-instead of automatic interception.
+Native hooks cover the corresponding coding-agent surfaces, not general vendor
+chat pages. Use `aiwatcher hook-status` after a test prompt to verify actual
+coverage instead of assuming that a similarly branded chat surface shares the
+same lifecycle.
 
 If a Codex prompt appears to bypass AIWatcher, run:
 
@@ -253,7 +260,9 @@ Open the **Prompt** tab. Draft or paste a prompt, preflight it locally, edit the
 execution brief, then copy either the brief or the original prompt into your AI
 tool. This is also the foundation for future browser and editor extensions:
 they can call the same local `/api/preflight` endpoint without uploading prompt
-text.
+text. The experimental `browser-extension/` adapter currently supports
+`claude.ai`; `vscode-extension/` provides manual editor, clipboard, and input
+commands. Neither is described as universal editor-chat interception.
 
 ## What It Reads
 
