@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import io
 import json
+import queue
+import socket
+import threading
 import unittest
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -358,6 +362,61 @@ class IntegrationConfigTests(unittest.TestCase):
     def test_install_codex_hook_can_generate_prompt_gate_command(self) -> None:
         merged = cli._merge_codex_hook({}, "python -m aiwatcher_cli", gate=True)
         self.assertIn("codex-hook --gate", json.dumps(merged))
+        hook = merged["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+        self.assertGreater(hook["timeout"], cli.PROMPT_GATE_TIMEOUT_SECONDS)
+
+    def test_claude_prompt_gate_host_timeout_exceeds_browser_gate(self) -> None:
+        merged = cli._merge_claude_hook({}, "python -m aiwatcher_cli", gate=True)
+        hook = merged["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+        self.assertGreater(hook["timeout"], cli.PROMPT_GATE_TIMEOUT_SECONDS)
+        self.assertIn("statusMessage", hook)
+
+    def test_prompt_gate_http_decision_completes_before_server_shutdown(self) -> None:
+        probe = socket.socket()
+        try:
+            probe.bind(("127.0.0.1", 0))
+        except PermissionError:
+            self.skipTest("loopback sockets are unavailable in this test sandbox")
+        finally:
+            probe.close()
+        urls: queue.Queue[str] = queue.Queue()
+        gate_result: list[dict[str, str] | None] = []
+        with patch.object(cli, "sessions_since", return_value=[]):
+            analysis = cli.analyze_prompt(
+                "Refactor the entire codebase and delete old auth secrets",
+                tool="claude",
+                cwd="/repo",
+            )
+
+        def run_gate() -> None:
+            with patch.object(cli.webbrowser, "open", side_effect=lambda url: urls.put(url)):
+                gate_result.append(cli.run_prompt_gate(
+                    tool="claude",
+                    cwd="/repo",
+                    prompt="Refactor the entire codebase and delete old auth secrets",
+                    result=analysis,
+                    timeout_seconds=5,
+                ))
+
+        worker = threading.Thread(target=run_gate)
+        worker.start()
+        url = urls.get(timeout=2)
+        request = urllib.request.Request(
+            url + "decision",
+            data=json.dumps({
+                "decision": "use_brief",
+                "prompt": analysis["suggested_prompt"],
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            saved = json.load(response)
+        worker.join(timeout=12)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(saved["decision_label"], "Add safer brief")
+        self.assertEqual(gate_result[0]["decision"], "use_brief")
 
     def test_cursor_hook_merge_preserves_existing_hooks(self) -> None:
         settings = {

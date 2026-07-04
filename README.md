@@ -214,7 +214,7 @@ python -m aiwatcher_cli install-cursor-hook --write --scope user
 ```
 
 For the richer beta workflow, add `--gate`. Risky prompts open a local decision
-screen with **Use brief**, **Use edited brief**, **Run original**, and
+screen with **Add safer brief**, **Add edited brief**, **Run original**, and
 **Cancel run**:
 
 ```sh
@@ -232,6 +232,13 @@ brief before tools run. High-risk prompts pause before execution. The Prompt
 Gate keeps prompt text transient in the local browser page; AIWatcher persists
 hashes, decisions, and predicted impact only. MCP remains available for explicit
 local usage questions, but hooks provide automatic pre-send coverage.
+
+Claude's `UserPromptSubmit` contract can add context beside the submitted
+prompt or block the prompt; it cannot silently replace the user's text. The two
+brief actions therefore add controlling execution guidance alongside the
+original request. **Cancel run** blocks the original request entirely. Gate
+installations set the host timeout above AIWatcher's three-minute decision
+window so the browser does not become detached while the user is reviewing it.
 
 Native hooks cover the corresponding coding-agent surfaces, not general vendor
 chat pages. Use `aiwatcher hook-status` after a test prompt to verify actual

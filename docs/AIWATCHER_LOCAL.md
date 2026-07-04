@@ -156,14 +156,21 @@ an execution brief as additional context, and high-risk prompts pause before
 execution. With Prompt Gate enabled, medium and high-risk prompts open a
 one-shot localhost page with four choices:
 
-- **Use brief** — continue with AIWatcher's scoped execution brief as context.
-- **Use edited brief** — tune the brief locally before it reaches the agent.
+- **Add safer brief** — add AIWatcher's scoped execution brief as controlling
+  context beside the original request.
+- **Add edited brief** — tune that brief locally before adding it.
 - **Run original** — proceed unchanged and record that decision locally.
 - **Cancel run** — stop the prompt before tools execute.
 
 The Prompt Gate page may display the prompt while you decide, but it does not
 persist prompt text. Local state stores hashes, decisions, risk findings, and
 predicted impact only.
+
+This wording is deliberate. Claude's `UserPromptSubmit` hook can add context
+alongside a submitted prompt or block it; it cannot replace the submitted text.
+Gate installations configure a 210-second host timeout around AIWatcher's
+180-second decision window. If the host terminates or disconnects anyway, the
+page shows an explicit failure instead of pretending the choice was applied.
 
 To verify whether a Codex/Claude hook actually ran, use:
 
@@ -364,8 +371,8 @@ packs, or policy enforcement. AIWatcher Local is never gated behind signup.
 
 The remaining OSS work completes the loop rather than adding more dashboards:
 
-1. Polish Prompt Gate and Prompt Companion after beta feedback: command-host
-   quirks, timeout defaults, and copy/paste ergonomics.
+1. Polish Prompt Gate and Prompt Companion after beta feedback: remaining
+   command-host quirks and copy/paste ergonomics.
 2. Improve intervention-to-session matching across concurrent sessions and
    collect more beta evidence for baseline quality.
 3. Move watch from periodic summaries to reliable active-session loop and

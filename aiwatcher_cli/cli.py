@@ -47,6 +47,7 @@ DEFAULT_MONTHLY_BUDGET_USD = 100.0
 MIN_SAVINGS_SESSIONS = 10
 MIN_SAVINGS_HISTORY_DAYS = 14
 PROMPT_GATE_TIMEOUT_SECONDS = 180
+PROMPT_GATE_HOST_TIMEOUT_SECONDS = PROMPT_GATE_TIMEOUT_SECONDS + 30
 CODEX_WRAPPER_MARKER_START = "# >>> aiwatcher codex wrapper >>>"
 CODEX_WRAPPER_MARKER_END = "# <<< aiwatcher codex wrapper <<<"
 
@@ -570,7 +571,13 @@ def build_execution_brief(
     return "\n".join(lines)
 
 
-def analyze_prompt(prompt: str, *, tool: str = "agent", cwd: str | None = None) -> dict[str, object]:
+def analyze_prompt(
+    prompt: str,
+    *,
+    tool: str = "agent",
+    cwd: str | None = None,
+    include_estimate: bool = True,
+) -> dict[str, object]:
     text = prompt.strip()
     lower = text.lower()
     findings: list[str] = []
@@ -663,7 +670,7 @@ def analyze_prompt(prompt: str, *, tool: str = "agent", cwd: str | None = None) 
         "suggested_prompt": safer_prompt,
         "estimated_impact": (
             estimate_prompt_savings(text, risk_score=score, tool=tool, cwd=cwd)
-            if score > 0
+            if score > 0 and include_estimate
             else {}
         ),
     }
@@ -744,7 +751,7 @@ def _selected_prompt_assessment(
         return None, None
     if selected_prompt == original_prompt:
         return str(original_result["risk"]), int(original_result["score"])
-    selected = analyze_prompt(selected_prompt, tool=tool, cwd=cwd)
+    selected = analyze_prompt(selected_prompt, tool=tool, cwd=cwd, include_estimate=False)
     return str(selected["risk"]), int(selected["score"])
 
 
@@ -802,6 +809,7 @@ textarea {{ resize: vertical; min-height: 260px; }}
 .actions {{ position: sticky; bottom: 0; margin-top: 20px; display: grid; grid-template-columns: 1.2fr 1fr 1fr 1fr; gap: 10px; padding: 16px; background: rgba(9,13,18,.94); border: 1px solid var(--line); border-radius: 8px; backdrop-filter: blur(10px); }}
 button {{ appearance: none; border: 1px solid var(--line); border-radius: 8px; min-height: 48px; padding: 0 16px; background: #0f1722; color: var(--text); font: inherit; font-weight: 700; cursor: pointer; }}
 button:hover {{ border-color: var(--blue); transform: translateY(-1px); }}
+button:disabled {{ cursor: wait; opacity: .62; transform: none; }}
 .primary {{ background: linear-gradient(135deg, #36d6a5, #6aa7ff); color: #061019; border: 0; }}
 .danger {{ color: #ffd4dc; border-color: rgba(255,127,147,.45); }}
 .privacy {{ margin-top: 16px; font-size: 13px; color: var(--muted); }}
@@ -843,30 +851,40 @@ button:hover {{ border-color: var(--blue); transform: translateY(-1px); }}
     </section>
   </div>
   <div class="actions">
-    <button class="primary" onclick="sendDecision('use_brief')">Use brief</button>
-    <button onclick="sendDecision('edit')">Use edited brief</button>
+    <button class="primary" onclick="sendDecision('use_brief')">Add safer brief</button>
+    <button onclick="sendDecision('edit')">Add edited brief</button>
     <button onclick="sendDecision('run_original')">Run original</button>
     <button class="danger" onclick="sendDecision('cancel')">Cancel run</button>
   </div>
+  <p id="decision-status" class="privacy" role="status"></p>
 </main>
 <script>
 async function sendDecision(decision) {{
-  const body = {{ decision, prompt: document.getElementById('brief').value }};
-  const response = await fetch('/decision', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify(body) }});
-  const saved = await response.json();
-  if (!response.ok) return;
-  const title = decision === 'cancel' ? 'Run cancelled' : decision === 'run_original' ? 'Original approved' : 'Scoped brief ready';
-  const riskChange = saved.selected_score === null
-    ? 'No prompt will run.'
-    : `Risk ${{saved.original_risk}} (${{saved.original_score}}) → ${{saved.selected_risk}} (${{saved.selected_score}})`;
-  document.body.innerHTML = `<main>
-    <div class="top"><div><h1>${{title}}</h1><p>Your choice has been returned to ${{saved.tool}}.</p></div><span class="pill">${{saved.decision_label}}</span></div>
-    <section class="card" style="max-width:760px">
-      <h2>${{riskChange}}</h2>
-      <div class="impact">${{saved.impact}}</div>
-      <p style="margin-top:16px">Return to your AI tool. The waiting session will continue automatically when this surface supports prompt hooks.</p>
-    </section>
-  </main>`;
+  const buttons = Array.from(document.querySelectorAll('button'));
+  const status = document.getElementById('decision-status');
+  buttons.forEach(button => button.disabled = true);
+  status.textContent = 'Applying your decision…';
+  try {{
+    const body = {{ decision, prompt: document.getElementById('brief').value }};
+    const response = await fetch('/decision', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify(body) }});
+    const saved = await response.json();
+    if (!response.ok) throw new Error(saved.error || `Request failed (${{response.status}})`);
+    const title = decision === 'cancel' ? 'Run cancelled' : decision === 'run_original' ? 'Original approved' : 'Execution brief added';
+    const riskChange = saved.selected_score === null
+      ? 'No prompt will run.'
+      : `Risk ${{saved.original_risk}} (${{saved.original_score}}) → ${{saved.selected_risk}} (${{saved.selected_score}})`;
+    document.body.innerHTML = `<main>
+      <div class="top"><div><h1>${{title}}</h1><p>Your choice has been returned to ${{saved.tool}}.</p></div><span class="pill">${{saved.decision_label}}</span></div>
+      <section class="card" style="max-width:760px">
+        <h2>${{riskChange}}</h2>
+        <div class="impact">${{saved.impact}}</div>
+        <p style="margin-top:16px">Return to your AI tool. On Claude hooks, an accepted brief is added beside the original request; cancelling blocks the original request entirely.</p>
+      </section>
+    </main>`;
+  }} catch (error) {{
+    buttons.forEach(button => button.disabled = false);
+    status.textContent = `AIWatcher could not apply this decision: ${{error.message}}. The host may have timed out; return to the AI tool and confirm before continuing.`;
+  }}
 }}
 </script>
 </body>
@@ -897,6 +915,7 @@ def run_prompt_gate(
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(encoded)
+            self.wfile.flush()
 
         def do_GET(self) -> None:
             if self.path != "/":
@@ -933,10 +952,9 @@ def run_prompt_gate(
             state["prompt"] = selected_prompt
             state["selected_risk"] = selected_risk or ""
             state["selected_score"] = str(selected_score) if selected_score is not None else ""
-            decision_event.set()
             labels = {
-                "use_brief": "Use brief",
-                "edit": "Use edited brief",
+                "use_brief": "Add safer brief",
+                "edit": "Add edited brief",
                 "run_original": "Run original",
                 "cancel": "Cancel run",
             }
@@ -950,6 +968,7 @@ def run_prompt_gate(
                 "selected_score": selected_score,
                 "impact": _impact_summary(result),
             }), "application/json; charset=utf-8")
+            decision_event.set()
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), GateHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -1695,12 +1714,13 @@ def _record_hook_event(
 
 def _hook_output_with_brief(tool: str, selected_prompt: str) -> dict[str, object]:
     return {
-        "systemMessage": "AIWatcher added a scoped execution brief before tools run.",
+        "systemMessage": "AIWatcher added a scoped execution brief alongside the submitted request.",
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "additionalContext": (
                 "AIWatcher identified avoidable cost or safety pressure. "
-                "Use the following execution brief while preserving the user's requested outcome:\n\n"
+                "Treat the following execution brief as controlling guidance for how to execute "
+                "the user's submitted request while preserving its intended outcome:\n\n"
                 + selected_prompt
             ),
         },
@@ -1942,14 +1962,14 @@ def _merge_claude_hook(settings: dict[str, object], command: str, *, gate: bool 
     event_hooks = hooks.get("UserPromptSubmit")
     if not isinstance(event_hooks, list):
         event_hooks = []
-    handler = {
-        "hooks": [
-            {
-                "type": "command",
-                "command": _hook_command(command, "claude-hook", gate=gate),
-            }
-        ]
+    command_hook: dict[str, object] = {
+        "type": "command",
+        "command": _hook_command(command, "claude-hook", gate=gate),
+        "statusMessage": "AIWatcher is checking execution pressure",
     }
+    if gate:
+        command_hook["timeout"] = PROMPT_GATE_HOST_TIMEOUT_SECONDS
+    handler = {"hooks": [command_hook]}
     event_hooks = [
         item for item in event_hooks
         if not (
@@ -2013,13 +2033,14 @@ def _merge_codex_hook(settings: dict[str, object], command: str, *, gate: bool =
             )
         )
     ]
-    event_hooks.append({
-        "hooks": [{
-            "type": "command",
-            "command": _hook_command(command, "codex-hook", gate=gate),
-            "statusMessage": "AIWatcher is checking execution pressure",
-        }]
-    })
+    codex_command_hook: dict[str, object] = {
+        "type": "command",
+        "command": _hook_command(command, "codex-hook", gate=gate),
+        "statusMessage": "AIWatcher is checking execution pressure",
+    }
+    if gate:
+        codex_command_hook["timeout"] = PROMPT_GATE_HOST_TIMEOUT_SECONDS
+    event_hooks.append({"hooks": [codex_command_hook]})
     hooks["UserPromptSubmit"] = event_hooks
     settings["hooks"] = hooks
     return settings
@@ -2117,16 +2138,18 @@ def _remove_cursor_hook(settings: dict[str, object]) -> tuple[dict[str, object],
 
 def command_install_claude_hook(args: argparse.Namespace) -> int:
     command = args.command or _cli_command_for_current_file()
+    command_hook: dict[str, object] = {
+        "type": "command",
+        "command": _hook_command(command, "claude-hook", gate=args.gate),
+        "statusMessage": "AIWatcher is checking execution pressure",
+    }
+    if args.gate:
+        command_hook["timeout"] = PROMPT_GATE_HOST_TIMEOUT_SECONDS
     snippet = {
         "hooks": {
             "UserPromptSubmit": [
                 {
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": _hook_command(command, "claude-hook", gate=args.gate),
-                        }
-                    ]
+                    "hooks": [command_hook]
                 }
             ]
         }
