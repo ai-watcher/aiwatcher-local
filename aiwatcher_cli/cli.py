@@ -22,7 +22,7 @@ import time as time_module
 import webbrowser
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Iterable
+from typing import Callable, Iterable
 
 from .correlate import link_recent_interventions_to_sessions
 from .local_state import (
@@ -899,6 +899,7 @@ def run_prompt_gate(
     result: dict[str, object],
     timeout_seconds: int = PROMPT_GATE_TIMEOUT_SECONDS,
     open_browser: bool = True,
+    ready_callback: Callable[[str], None] | None = None,
 ) -> dict[str, str] | None:
     decision_event = threading.Event()
     state: dict[str, str] = {}
@@ -975,6 +976,8 @@ def run_prompt_gate(
     thread.start()
     url = f"http://127.0.0.1:{server.server_port}/"
     try:
+        if ready_callback:
+            ready_callback(url)
         if open_browser:
             try:
                 webbrowser.open(url)

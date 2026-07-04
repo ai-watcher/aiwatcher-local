@@ -389,14 +389,15 @@ class IntegrationConfigTests(unittest.TestCase):
             )
 
         def run_gate() -> None:
-            with patch.object(cli.webbrowser, "open", side_effect=lambda url: urls.put(url)):
-                gate_result.append(cli.run_prompt_gate(
-                    tool="claude",
-                    cwd="/repo",
-                    prompt="Refactor the entire codebase and delete old auth secrets",
-                    result=analysis,
-                    timeout_seconds=5,
-                ))
+            gate_result.append(cli.run_prompt_gate(
+                tool="claude",
+                cwd="/repo",
+                prompt="Refactor the entire codebase and delete old auth secrets",
+                result=analysis,
+                timeout_seconds=5,
+                open_browser=False,
+                ready_callback=urls.put,
+            ))
 
         worker = threading.Thread(target=run_gate)
         worker.start()
