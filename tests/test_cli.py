@@ -17,6 +17,7 @@ def session(
     tool: str = "claude-code",
     age_days: int = 0,
     project: str = "/repo",
+    notes: list[str] | None = None,
 ) -> LocalSession:
     stamp = datetime.now(timezone.utc) - timedelta(days=age_days)
     return LocalSession(
@@ -31,6 +32,7 @@ def session(
         cost_usd=0.25,
         agent_calls=20,
         tool_calls=10,
+        notes=notes or [],
     )
 
 
@@ -65,7 +67,15 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertIn("planning ranges", cli.render_preflight(result).lower())
 
     def test_codex_cumulative_totals_are_not_used_for_savings(self) -> None:
-        rows = [session(index, tool="codex-cli", age_days=index * 2) for index in range(10)]
+        rows = [
+            session(
+                index,
+                tool="codex-cli",
+                age_days=index * 2,
+                notes=["tokens_used is Codex's cumulative thread total"],
+            )
+            for index in range(10)
+        ]
         with patch.object(cli, "sessions_since", return_value=rows):
             result = cli.analyze_prompt(
                 "Refactor the entire codebase",
@@ -76,6 +86,17 @@ class PromptPreflightTests(unittest.TestCase):
         impact = result["estimated_impact"]
         self.assertFalse(impact["available"])
         self.assertIn("cumulative", impact["basis"])
+
+    def test_codex_rollout_measurements_can_support_savings_ranges(self) -> None:
+        rows = [session(index, tool="codex-cli", age_days=index * 2) for index in range(10)]
+        with patch.object(cli, "sessions_since", return_value=rows):
+            result = cli.analyze_prompt(
+                "Refactor the entire codebase",
+                tool="codex",
+                cwd="/repo",
+            )
+
+        self.assertTrue(result["estimated_impact"]["available"])
 
     def test_low_risk_prompt_does_not_render_impact_section(self) -> None:
         with patch.object(
@@ -88,6 +109,23 @@ class PromptPreflightTests(unittest.TestCase):
         rendered = cli.render_preflight(result)
         self.assertEqual(result["risk"], "low")
         self.assertNotIn("Expected impact", rendered)
+
+    def test_scoped_execution_brief_reduces_risk_score(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            original = cli.analyze_prompt(
+                "Refactor the entire codebase and delete old auth secrets",
+                tool="claude",
+                cwd="/repo",
+            )
+            selected = cli.analyze_prompt(
+                str(original["suggested_prompt"]),
+                tool="claude",
+                cwd="/repo",
+            )
+
+        self.assertEqual(original["score"], 8)
+        self.assertLess(selected["score"], original["score"])
+        self.assertEqual(selected["risk"], "low")
 
     def test_interactive_preflight_can_forward_safer_prompt(self) -> None:
         result = {
@@ -387,6 +425,32 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertNotIn("codex-hook", subparsers.choices)
         self.assertNotIn("claude-hook", subparsers.choices)
         self.assertNotIn("cursor-hook", subparsers.choices)
+
+    def test_hook_status_connects_invocation_to_preflight_decision(self) -> None:
+        with (
+            patch.object(cli, "recent_hook_events", return_value=[{
+                "created_at": "2026-07-03T12:00:00+00:00",
+                "tool": "claude",
+                "event": "received",
+                "prompt_found": True,
+                "risk": "high",
+                "score": 8,
+            }]),
+            patch.object(cli, "recent_interventions", return_value=[{
+                "created_at": "2026-07-03T12:00:05+00:00",
+                "tool": "claude",
+                "decision": "brief_edited",
+                "score": 8,
+                "selected_score": 2,
+            }]),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_hook_status(SimpleNamespace())
+
+        self.assertEqual(result, 0)
+        output = stdout.getvalue()
+        self.assertIn("prompt found | risk high | score 8", output)
+        self.assertIn("brief_edited | risk score 8 -> 2", output)
 
 
 if __name__ == "__main__":

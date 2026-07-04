@@ -30,6 +30,7 @@ from .local_state import (
     get_outcome,
     link_intervention_session,
     recent_hook_events,
+    recent_interventions,
     record_intervention,
     record_hook_event,
     record_outcome,
@@ -414,6 +415,11 @@ def estimate_prompt_savings(prompt: str, *, risk_score: int, tool: str, cwd: str
         if project_rows:
             relevant = project_rows
 
+    excluded_cumulative = 0
+    if tool in {"codex", "codex-cli"}:
+        excluded_cumulative = sum(1 for row in relevant if has_cumulative_totals(row))
+        relevant = [row for row in relevant if not has_cumulative_totals(row)]
+
     dated_rows = [row for row in relevant if session_sort_key(row) != MIN_DT]
     history_span_days = 0
     if dated_rows:
@@ -424,7 +430,6 @@ def estimate_prompt_savings(prompt: str, *, risk_score: int, tool: str, cwd: str
     history_sufficient = (
         len(relevant) >= MIN_SAVINGS_SESSIONS
         and history_span_days >= MIN_SAVINGS_HISTORY_DAYS
-        and tool not in {"codex", "codex-cli"}
     )
     basis = (
         f"{len(relevant)} local {'AI' if tool == 'agent' else tool} session{'s' if len(relevant) != 1 else ''} "
@@ -432,8 +437,10 @@ def estimate_prompt_savings(prompt: str, *, risk_score: int, tool: str, cwd: str
         if relevant
         else "no comparable local history"
     )
-    if tool in {"codex", "codex-cli"}:
-        basis += "; Codex local token totals are cumulative, so they are not used for savings estimates"
+    if tool in {"codex", "codex-cli"} and excluded_cumulative:
+        basis += f"; excluded {excluded_cumulative} cumulative Codex thread total{'s' if excluded_cumulative != 1 else ''}"
+    if tool in {"codex", "codex-cli"} and not relevant:
+        basis += "; no per-session Codex rollout token events are available"
 
     if not history_sufficient:
         return {
@@ -575,10 +582,18 @@ def analyze_prompt(prompt: str, *, tool: str = "agent", cwd: str | None = None) 
         "rewrite the app", "refactor everything", "fix all", "scan all",
     ]
     broad_scope = any(term in lower for term in broad_terms)
+    scope_guardrails = any(term in lower for term in [
+        "smallest relevant subsystem", "one coherent phase", "phased plan",
+        "do not expand into unrelated", "smallest relevant files",
+    ])
     if broad_scope:
-        score += 3
-        findings.append("Scope looks broad and likely to create large context or many tool calls.")
-        suggestions.append("Start with a plan-only pass over the smallest relevant files before editing.")
+        if scope_guardrails:
+            score += 1
+            findings.append("Scope is broad, but explicit phasing and stop conditions reduce execution pressure.")
+        else:
+            score += 3
+            findings.append("Scope looks broad and likely to create large context or many tool calls.")
+            suggestions.append("Start with a plan-only pass over the smallest relevant files before editing.")
 
     edit_terms = ["change", "modify", "edit", "write", "implement", "refactor", "delete", "migrate", "rename"]
     plan_terms = ["plan first", "do not edit", "inspect first", "propose", "before editing", "ask before"]
@@ -593,10 +608,19 @@ def analyze_prompt(prompt: str, *, tool: str = "agent", cwd: str | None = None) 
         ".env", "credential", "delete", "drop table", "rm -rf", "payment", "stripe",
     ]
     sensitive_or_destructive = any(term in lower for term in risky_terms)
+    safety_guardrails = any(term in lower for term in [
+        "ask for confirmation before", "require confirmation before",
+        "do not reveal secret", "do not make destructive changes",
+        "avoid exposing secrets",
+    ])
     if sensitive_or_destructive:
-        score += 3
-        findings.append("Prompt mentions sensitive data, credentials, production systems, or destructive actions.")
-        suggestions.append("Require confirmation before destructive changes and avoid exposing secrets or customer data.")
+        if safety_guardrails:
+            score += 1
+            findings.append("Sensitive or destructive work is present with an explicit confirmation boundary.")
+        else:
+            score += 3
+            findings.append("Prompt mentions sensitive data, credentials, production systems, or destructive actions.")
+            suggestions.append("Require confirmation before destructive changes and avoid exposing secrets or customer data.")
 
     vague_terms = ["make it better", "improve everything", "clean this up", "fix it", "optimize it"]
     vague_scope = any(term in lower for term in vague_terms)
@@ -708,6 +732,22 @@ def _impact_summary(result: dict[str, object]) -> str:
     )
 
 
+def _selected_prompt_assessment(
+    selected_prompt: str | None,
+    *,
+    original_prompt: str,
+    original_result: dict[str, object],
+    tool: str,
+    cwd: str,
+) -> tuple[str | None, int | None]:
+    if not selected_prompt:
+        return None, None
+    if selected_prompt == original_prompt:
+        return str(original_result["risk"]), int(original_result["score"])
+    selected = analyze_prompt(selected_prompt, tool=tool, cwd=cwd)
+    return str(selected["risk"]), int(selected["score"])
+
+
 def _prompt_gate_html(*, tool: str, cwd: str, prompt: str, result: dict[str, object]) -> str:
     findings = "".join(f"<li>{html.escape(str(item))}</li>" for item in result["findings"])
     suggestions = "".join(f"<li>{html.escape(str(item))}</li>" for item in result["suggestions"])
@@ -812,8 +852,21 @@ button:hover {{ border-color: var(--blue); transform: translateY(-1px); }}
 <script>
 async function sendDecision(decision) {{
   const body = {{ decision, prompt: document.getElementById('brief').value }};
-  await fetch('/decision', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify(body) }});
-  document.body.innerHTML = '<main><h1>Decision saved</h1><p>You can close this tab and return to your AI tool.</p></main>';
+  const response = await fetch('/decision', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify(body) }});
+  const saved = await response.json();
+  if (!response.ok) return;
+  const title = decision === 'cancel' ? 'Run cancelled' : decision === 'run_original' ? 'Original approved' : 'Scoped brief ready';
+  const riskChange = saved.selected_score === null
+    ? 'No prompt will run.'
+    : `Risk ${{saved.original_risk}} (${{saved.original_score}}) → ${{saved.selected_risk}} (${{saved.selected_score}})`;
+  document.body.innerHTML = `<main>
+    <div class="top"><div><h1>${{title}}</h1><p>Your choice has been returned to ${{saved.tool}}.</p></div><span class="pill">${{saved.decision_label}}</span></div>
+    <section class="card" style="max-width:760px">
+      <h2>${{riskChange}}</h2>
+      <div class="impact">${{saved.impact}}</div>
+      <p style="margin-top:16px">Return to your AI tool. The waiting session will continue automatically when this surface supports prompt hooks.</p>
+    </section>
+  </main>`;
 }}
 </script>
 </body>
@@ -865,9 +918,38 @@ def run_prompt_gate(
                 self._send(400, json.dumps({"error": "unknown decision"}), "application/json; charset=utf-8")
                 return
             state["decision"] = decision
-            state["prompt"] = str(payload.get("prompt") or result.get("suggested_prompt") or "")
+            selected_prompt = str(payload.get("prompt") or result.get("suggested_prompt") or "")
+            if decision == "run_original":
+                selected_prompt = prompt
+            elif decision == "cancel":
+                selected_prompt = ""
+            selected_risk, selected_score = _selected_prompt_assessment(
+                selected_prompt or None,
+                original_prompt=prompt,
+                original_result=result,
+                tool=tool,
+                cwd=cwd,
+            )
+            state["prompt"] = selected_prompt
+            state["selected_risk"] = selected_risk or ""
+            state["selected_score"] = str(selected_score) if selected_score is not None else ""
             decision_event.set()
-            self._send(200, json.dumps({"ok": True}), "application/json; charset=utf-8")
+            labels = {
+                "use_brief": "Use brief",
+                "edit": "Use edited brief",
+                "run_original": "Run original",
+                "cancel": "Cancel run",
+            }
+            self._send(200, json.dumps({
+                "ok": True,
+                "tool": tool,
+                "decision_label": labels[decision],
+                "original_risk": result["risk"],
+                "original_score": result["score"],
+                "selected_risk": selected_risk,
+                "selected_score": selected_score,
+                "impact": _impact_summary(result),
+            }), "application/json; charset=utf-8")
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), GateHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -1442,6 +1524,13 @@ def command_agent_prompt(args: argparse.Namespace) -> int:
         return 0
     intervention_id = None
     try:
+        selected_risk, selected_score = _selected_prompt_assessment(
+            selected_prompt,
+            original_prompt=prompt,
+            original_result=result,
+            tool=args.agent,
+            cwd=cwd,
+        )
         intervention_id = record_intervention(
             tool=args.agent,
             cwd=cwd,
@@ -1457,6 +1546,8 @@ def command_agent_prompt(args: argparse.Namespace) -> int:
                 if isinstance(result.get("estimated_impact"), dict)
                 else None
             ),
+            selected_risk=selected_risk,
+            selected_score=selected_score,
         )
     except OSError as exc:
         print(f"Warning: could not record AIWatcher preflight decision: {exc}", file=sys.stderr)
@@ -1545,6 +1636,18 @@ def _record_hook_intervention(
     selected_prompt: str | None = None,
 ) -> None:
     try:
+        effective_prompt = (
+            selected_prompt or str(result["suggested_prompt"])
+            if decision in {"context_added", "brief_accepted", "brief_edited"}
+            else prompt if decision == "allowed_original" else None
+        )
+        selected_risk, selected_score = _selected_prompt_assessment(
+            effective_prompt,
+            original_prompt=prompt,
+            original_result=result,
+            tool=tool,
+            cwd=cwd,
+        )
         record_intervention(
             tool=tool,
             cwd=cwd,
@@ -1554,16 +1657,14 @@ def _record_hook_intervention(
             original_prompt=prompt,
             suggested_prompt=str(result["suggested_prompt"]),
             decision=decision,
-            selected_prompt=(
-                selected_prompt or str(result["suggested_prompt"])
-                if decision in {"context_added", "brief_accepted", "brief_edited"}
-                else None
-            ),
+            selected_prompt=effective_prompt,
             estimated_impact=(
                 result["estimated_impact"]
                 if isinstance(result.get("estimated_impact"), dict)
                 else None
             ),
+            selected_risk=selected_risk,
+            selected_score=selected_score,
         )
     except OSError:
         pass
@@ -2307,24 +2408,34 @@ def command_doctor(_args: argparse.Namespace) -> int:
 
 def command_hook_status(_args: argparse.Namespace) -> int:
     events = recent_hook_events(limit=8)
+    interventions = recent_interventions(limit=5, days=7)
     print("AIWatcher hook status\n")
     if not events:
         print("No recent hook events recorded.")
         print("Submit a test prompt after installing a Claude, Codex, or Cursor hook, then check again.")
-        return 0
-    for event in events:
-        stamp = str(event.get("created_at", "unknown"))
-        tool = str(event.get("tool", "unknown"))
-        name = str(event.get("event", "unknown"))
-        prompt_label = "prompt found" if event.get("prompt_found") else "prompt missing"
-        risk = event.get("risk") or "unknown"
-        score = event.get("score")
-        line = f"- {stamp} | {tool} | {name} | {prompt_label} | risk {risk}"
-        if score is not None:
-            line += f" | score {score}"
-        print(line)
-        if event.get("error"):
-            print(f"  error: {event['error']}")
+    else:
+        for event in events:
+            stamp = str(event.get("created_at", "unknown"))
+            tool = str(event.get("tool", "unknown"))
+            name = str(event.get("event", "unknown"))
+            prompt_label = "prompt found" if event.get("prompt_found") else "prompt missing"
+            risk = event.get("risk") or "unknown"
+            score = event.get("score")
+            line = f"- {stamp} | {tool} | {name} | {prompt_label} | risk {risk}"
+            if score is not None:
+                line += f" | score {score}"
+            print(line)
+            if event.get("error"):
+                print(f"  error: {event['error']}")
+    if interventions:
+        print("\nRecent preflight decisions")
+        for row in interventions:
+            selected_score = row.get("selected_score")
+            change = f"{row.get('score', 'unknown')} -> {selected_score}" if selected_score is not None else str(row.get("score", "unknown"))
+            print(
+                f"- {row.get('created_at', 'unknown')} | {row.get('tool', 'unknown')} | "
+                f"{row.get('decision', 'recorded')} | risk score {change}"
+            )
     print("\nIf an event appears but the tool did not pause, inspect its risk and decision. If no event appears, reload the tool and verify its hook configuration.")
     return 0
 

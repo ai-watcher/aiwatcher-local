@@ -8,13 +8,15 @@ from unittest.mock import patch
 
 from aiwatcher_cli import ui
 from aiwatcher_cli.local_state import record_intervention, record_outcome
-from aiwatcher_cli.scanner import LocalSession
+from aiwatcher_cli.scanner import LocalEvent, LocalSession
 
 
 class DashboardWindowTests(unittest.TestCase):
     def test_dashboard_uses_focused_drawer_and_inline_feedback(self) -> None:
         self.assertIn('id="detailDrawer"', ui.HTML)
         self.assertIn('data-view="prompt"', ui.HTML)
+        self.assertIn('data-view="receipts"', ui.HTML)
+        self.assertIn('id="latestIntervention"', ui.HTML)
         self.assertIn('id="promptInput"', ui.HTML)
         self.assertIn('class="outcome-button useful', ui.HTML)
         self.assertIn('class="outcome-button rework', ui.HTML)
@@ -100,6 +102,7 @@ class DashboardWindowTests(unittest.TestCase):
             with (
                 patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
                 patch.object(ui, "scan_all", return_value=rows),
+                patch.object(ui, "scan_all_events", return_value=[]),
                 patch.object(ui, "discover_tools", return_value={}),
             ):
                 record_outcome("recent", "useful")
@@ -120,6 +123,125 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(summary["totals"]["cost_per_useful_change"], "$0.40")
         self.assertEqual(summary["totals"]["preflight_decisions"], 1)
         self.assertEqual(summary["recent_sessions"][0]["outcome"], "useful")
+
+    def test_receipt_combines_prediction_observation_and_outcome(self) -> None:
+        now = datetime.now(timezone.utc)
+        session = LocalSession(
+            session_id="result-1",
+            tool="claude-code",
+            project_path="/repo",
+            started_at=now - timedelta(minutes=1),
+            updated_at=now,
+            tokens_in=1_000,
+            tokens_out=200,
+            cost_usd=0.03,
+            agent_calls=2,
+            tool_calls=1,
+        )
+        intervention = {
+            "id": "intervention-1",
+            "created_at": now.isoformat(),
+            "tool": "claude",
+            "cwd": "/repo",
+            "risk": "high",
+            "score": 8,
+            "selected_risk": "low",
+            "selected_score": 2,
+            "risk_points_reduced": 6,
+            "decision": "brief_accepted",
+            "session_id": "result-1",
+            "predicted_impact": {
+                "available": True,
+                "confidence": "medium",
+                "basis": "10 comparable sessions",
+                "original": {
+                    "tokens": [5_000, 7_000],
+                    "model_calls": [8, 12],
+                    "tool_calls": [5, 9],
+                    "api_value_usd": [0.1, 0.2],
+                },
+                "savings": {
+                    "tokens": [3_000, 5_000],
+                    "model_calls": [4, 8],
+                    "tool_calls": [2, 6],
+                    "api_value_usd": [0.05, 0.12],
+                },
+            },
+        }
+        receipts = ui._build_intervention_receipts(
+            [intervention], [session], {"result-1": {"outcome": "useful"}}
+        )
+
+        receipt = receipts[0]
+        self.assertEqual(receipt["risk_points_reduced"], 6)
+        self.assertEqual(receipt["actual"]["tokens"], 1_200)
+        self.assertEqual(receipt["outcome"], "useful")
+        self.assertIsNotNone(receipt["inferred"])
+
+    def test_receipt_uses_post_intervention_events_for_existing_thread(self) -> None:
+        now = datetime.now(timezone.utc)
+        session = LocalSession(
+            session_id="existing-thread",
+            tool="claude-code",
+            project_path="/repo",
+            started_at=now - timedelta(days=3),
+            updated_at=now + timedelta(seconds=10),
+            tokens_in=900_000,
+            tokens_out=20_000,
+            agent_calls=500,
+        )
+        intervention = {
+            "id": "intervention-existing",
+            "created_at": now.isoformat(),
+            "tool": "claude",
+            "cwd": "/repo",
+            "risk": "high",
+            "score": 8,
+            "decision": "brief_accepted",
+            "session_id": "existing-thread",
+        }
+        events = [
+            LocalEvent(
+                event_id="event-1",
+                session_id="existing-thread",
+                tool="claude-code",
+                event_type="assistant",
+                timestamp=now + timedelta(seconds=5),
+                tokens_in=1_200,
+                tokens_out=300,
+            )
+        ]
+
+        receipt = ui._build_intervention_receipts(
+            [intervention], [session], {}, events
+        )[0]
+
+        self.assertTrue(receipt["actual"]["reliable"])
+        self.assertEqual(receipt["actual"]["tokens"], 1_500)
+
+    def test_blocked_receipt_does_not_claim_a_resulting_session(self) -> None:
+        now = datetime.now(timezone.utc)
+        blocked_session = LocalSession(
+            session_id="session-after-block",
+            tool="claude-code",
+            project_path="/repo",
+            started_at=now,
+            updated_at=now,
+        )
+        receipts = ui._build_intervention_receipts([{
+            "id": "blocked-1",
+            "created_at": now.isoformat(),
+            "tool": "claude",
+            "cwd": "/repo",
+            "decision": "blocked",
+            "risk": "high",
+            "score": 8,
+            "session_id": blocked_session.session_id,
+        }], [blocked_session], {}, [])
+
+        self.assertEqual(receipts[0]["session_status"], "No session expected")
+        self.assertIsNone(receipts[0]["session_id"])
+        self.assertIsNone(receipts[0]["actual"])
 
     def test_cumulative_codex_totals_do_not_create_false_context_insight(self) -> None:
         now = datetime.now(timezone.utc)

@@ -101,6 +101,8 @@ Open the printed URL. The dashboard includes:
 - **Prompt**: local Prompt Companion for surfaces AIWatcher cannot hook yet.
 - **Projects**: local repos and folders driving usage.
 - **Sessions**: inspect recent work and mark outcomes.
+- **Receipts**: connect each preflight decision to its resulting session,
+  observed usage, risk change, and developer outcome.
 - **Insights**: privacy-safe journal and weekly report.
 
 ### 4. Mark whether work was useful
@@ -144,7 +146,7 @@ python -m aiwatcher_cli preflight "..."    # review work before execution
 python -m aiwatcher_cli codex "..."        # preflight, choose, and launch Codex
 python -m aiwatcher_cli claude "..."       # preflight, choose, and launch Claude
 python -m aiwatcher_cli outcome useful     # mark the latest result
-python -m aiwatcher_cli hook-status        # debug recent Claude/Codex hook invocations
+python -m aiwatcher_cli hook-status        # inspect hook invocations and recent decisions
 python -m aiwatcher_cli tools --days 7     # rank usage by tool
 python -m aiwatcher_cli projects --days 7  # rank usage by project
 python -m aiwatcher_cli report --days 7    # weekly local report
@@ -191,18 +193,18 @@ This month: $77.87
   subscription or API usage pressure.
 - **Control:** Let the developer use the brief, edit it, run the original, or
   cancel. High-risk automatic hooks pause before execution.
-- **Prove:** Inspect a privacy-safe session timeline and mark the result useful,
-  rework, or abandoned.
-- **Improve:** Use the Today view and journal to connect interventions with
-  outcomes and recommend one better behavior for the next run.
+- **Prove:** Inspect a privacy-safe intervention receipt and session timeline,
+  then mark the result useful, rework, or abandoned.
+- **Improve:** Compare predicted pressure with observed usage and outcomes,
+  then recommend one better behavior for the next run.
 
 Prompt content is processed locally. AIWatcher stores hashes, decisions,
 predicted impact, and outcomes, not the original or suggested prompt text.
 
 ### Automatic Prompt Preflight
 
-Claude Code, Codex, and Cursor support prompt lifecycle hooks. Claude's user
-hook applies to both Claude Code CLI and the Code tab in Claude Desktop. Install
+Claude Code CLI, the Code tab in Claude Desktop, Codex CLI/TUI builds that
+invoke `UserPromptSubmit`, and Cursor support prompt lifecycle hooks. Install
 AIWatcher once:
 
 ```sh
@@ -236,6 +238,13 @@ chat pages. Use `aiwatcher hook-status` after a test prompt to verify actual
 coverage instead of assuming that a similarly branded chat surface shares the
 same lifecycle.
 
+Current verified boundary: Claude Desktop's **Code** tab invokes the Claude
+hook. General Claude Desktop chat does not. The current Codex Desktop
+conversation surface tested by the project does not invoke the configured
+`UserPromptSubmit` hook; use the Prompt Companion, MCP, wrapper, or a Codex
+CLI/TUI surface that records a hook event. AIWatcher does not claim silent
+interception where a host application provides no lifecycle API.
+
 If a Codex prompt appears to bypass AIWatcher, run:
 
 ```sh
@@ -248,9 +257,9 @@ whether prompt text was found and what risk score was computed.
 
 ### Prompt Companion for Non-Hook Surfaces
 
-Not every AI surface exposes prompt lifecycle hooks. For Claude Desktop, web
-chat surfaces, editor chats, or any tool AIWatcher cannot hook yet, use the
-local companion:
+Not every AI surface exposes prompt lifecycle hooks. For general Claude
+Desktop chat, the current Codex Desktop conversation surface, web chat, editor
+chats, or any tool AIWatcher cannot hook yet, use the local companion:
 
 ```sh
 python -m aiwatcher_cli ui
@@ -268,7 +277,8 @@ commands. Neither is described as universal editor-chat interception.
 
 - **Claude Code:** `~/.claude/projects/**/*.jsonl`, normalized to the git
   project root when possible.
-- **Codex CLI:** local SQLite history in read-only mode when available.
+- **Codex:** local rollout JSONL with per-turn token events when available,
+  plus local SQLite history in read-only mode as a cumulative fallback.
 - **Cursor / Cline / Windsurf:** detected where local history is exposed; token
   and cost detail are intentionally marked limited when a vendor does not store
   it locally.
