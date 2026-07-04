@@ -14,6 +14,7 @@ import os
 import shlex
 import shutil
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 import subprocess
 import sys
 import tempfile
@@ -50,6 +51,15 @@ PROMPT_GATE_TIMEOUT_SECONDS = 180
 PROMPT_GATE_HOST_TIMEOUT_SECONDS = PROMPT_GATE_TIMEOUT_SECONDS + 30
 CODEX_WRAPPER_MARKER_START = "# >>> aiwatcher codex wrapper >>>"
 CODEX_WRAPPER_MARKER_END = "# <<< aiwatcher codex wrapper <<<"
+
+
+class LocalThreadingHTTPServer(ThreadingHTTPServer):
+    """Loopback server that avoids HTTPServer's unnecessary FQDN lookup."""
+
+    def server_bind(self) -> None:
+        TCPServer.server_bind(self)
+        self.server_name = str(self.server_address[0])
+        self.server_port = int(self.server_address[1])
 
 
 def money(value: float) -> str:
@@ -971,7 +981,7 @@ def run_prompt_gate(
             }), "application/json; charset=utf-8")
             decision_event.set()
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), GateHandler)
+    server = LocalThreadingHTTPServer(("127.0.0.1", 0), GateHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     url = f"http://127.0.0.1:{server.server_port}/"
