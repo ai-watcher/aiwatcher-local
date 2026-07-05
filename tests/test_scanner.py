@@ -63,6 +63,31 @@ class ScanDateTests(unittest.TestCase):
             self.assertIsNotNone(session.started_at)
             self.assertEqual(session.started_at.astimezone(timezone.utc).date(), date(2026, 6, 24))
 
+    def test_updated_at_ignores_mtime_when_fully_timestamped(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            projects = Path(temp_dir) / "projects"
+            project = projects / "-tmp-demo"
+            project.mkdir(parents=True)
+            session_file = project / "sess.jsonl"
+            lines = [
+                '{"type":"assistant","timestamp":"2026-06-24T10:00:00Z",'
+                '"message":{"model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":5}}}',
+                '{"type":"assistant","timestamp":"2026-06-24T10:05:00Z",'
+                '"message":{"model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":5}}}',
+            ]
+            session_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            # Simulate the file being copied/restored/synced well after the session ended.
+            later = datetime(2026, 6, 30, 20, 0, 0, tzinfo=timezone.utc).timestamp()
+            os.utime(session_file, (later, later))
+
+            with patch.object(scanner, "CLAUDE_PROJECTS_DIRS", [projects]):
+                sessions = scanner.scan_claude_code()
+
+            self.assertEqual(len(sessions), 1)
+            session = sessions[0]
+            self.assertIsNotNone(session.updated_at)
+            self.assertEqual(session.updated_at.astimezone(timezone.utc).date(), date(2026, 6, 24))
+
 
 if __name__ == "__main__":
     unittest.main()
