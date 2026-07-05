@@ -327,6 +327,7 @@ def scan_claude_code() -> list[LocalSession]:
                 model: str | None = None
                 started_at: datetime | None = None
                 updated_at: datetime | None = None
+                trailing_untimestamped = False
                 cwd_counts: dict[str, int] = defaultdict(int)
                 cwd_costs: dict[str, float] = defaultdict(float)
                 try:
@@ -340,7 +341,11 @@ def scan_claude_code() -> list[LocalSession]:
                                 continue
                             ts = _parse_ts(obj.get("timestamp") or obj.get("createdAt"))
                             started_at = _min_dt(started_at, ts)
-                            updated_at = _max_dt(updated_at, ts)
+                            if ts is not None:
+                                updated_at = _max_dt(updated_at, ts)
+                                trailing_untimestamped = False
+                            else:
+                                trailing_untimestamped = True
                             cwd = obj.get("cwd")
                             if isinstance(cwd, str) and cwd:
                                 cwd_counts[cwd] += 1
@@ -369,6 +374,8 @@ def scan_claude_code() -> list[LocalSession]:
 
                 if events_seen == 0:
                     continue
+                if trailing_untimestamped:
+                    updated_at = _max_dt(updated_at, _mtime(fpath))
                 sessions.append(LocalSession(
                     session_id=session_id,
                     tool="claude-code",
