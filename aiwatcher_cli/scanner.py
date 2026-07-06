@@ -124,6 +124,7 @@ class LocalEvent:
     content_hash: str | None = None
     source_path: str | None = None
     notes: list[str] = field(default_factory=list)
+    turn: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -140,6 +141,7 @@ class LocalEvent:
             "content_hash": self.content_hash,
             "source_path": self.source_path,
             "notes": self.notes,
+            "turn": self.turn,
         }
 
 
@@ -158,6 +160,112 @@ def _hash_text(value: Any) -> str | None:
 def _event_id(session_id: str, index: int, event_type: str, timestamp: datetime | None) -> str:
     raw = f"{session_id}|{index}|{event_type}|{timestamp.isoformat() if timestamp else ''}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def _user_prompt_text(content: Any) -> str | None:
+    """Pull natural-language text from a user message's content, or None if it is not a real prompt."""
+    if isinstance(content, str):
+        text = content.strip()
+    elif isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "tool_result":
+                return None  # user-role message that is actually a tool result, not a prompt
+            if item.get("type") == "text" and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+        text = "\n".join(parts).strip()
+    else:
+        return None
+    if not text:
+        return None
+    # Skip slash-command wrappers and injected reminders; they are not the user's real ask.
+    if text.startswith(("<command", "<local-command", "<system-reminder>", "Caveat:")):
+        return None
+    return text
+
+
+def segment_session_by_prompt(source_path: str | None, *, max_chars: int = 2000) -> list[dict[str, object]]:
+    """Split a Claude Code session into prompt-bounded turns.
+
+    Each real user prompt opens a turn; all following assistant/tool work (until the
+    next real prompt) is attributed to it. Returns one dict per turn with the prompt
+    text and the cost/tokens/tool-calls/events accumulated during that turn.
+    Reads prompt/text content on demand; the event scan itself stores only hashes.
+    """
+    if not source_path or not source_path.endswith(".jsonl"):
+        return []
+    segments: list[dict[str, object]] = []
+    current: dict[str, object] | None = None
+    try:
+        with Path(source_path).open(errors="replace") as handle:
+            for index, line in enumerate(handle):
+                if not line.strip():
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+                if obj.get("type") == "user" and not obj.get("isMeta"):
+                    text = _user_prompt_text(message.get("content"))
+                    if text:
+                        current = {
+                            "prompt": text[:max_chars],
+                            "turn": len(segments) + 1,
+                            "cost_usd": 0.0,
+                            "tokens": 0,
+                            "tool_calls": 0,
+                            "events": 0,
+                        }
+                        segments.append(current)
+                        continue
+                if current is None:
+                    continue
+                usage = message.get("usage") or obj.get("usage") or {}
+                input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+                output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+                model = message.get("model") or obj.get("model")
+                current["cost_usd"] = float(current["cost_usd"]) + estimate_cost(model, input_tokens, output_tokens)
+                current["tokens"] = int(current["tokens"]) + input_tokens + output_tokens
+                current["events"] = int(current["events"]) + 1
+                content = message.get("content")
+                if isinstance(content, list):
+                    current["tool_calls"] = int(current["tool_calls"]) + sum(
+                        1 for item in content if isinstance(item, dict) and item.get("type") == "tool_use"
+                    )
+    except OSError:
+        return []
+    return segments
+
+
+def extract_opening_prompt(source_path: str | None, *, max_chars: int = 4000) -> str | None:
+    """Return the first genuine user prompt from a Claude Code .jsonl session file.
+
+    Reads prompt content only on demand (the event scan itself stores hashes, not text).
+    Returns None when the source is unavailable or holds no readable user prompt.
+    """
+    if not source_path or not source_path.endswith(".jsonl"):
+        return None
+    try:
+        with Path(source_path).open(errors="replace") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("type") != "user" or obj.get("isMeta"):
+                    continue
+                message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+                text = _user_prompt_text(message.get("content"))
+                if text:
+                    return text[:max_chars]
+    except OSError:
+        return None
+    return None
 
 
 def _decode_claude_project_path(encoded: str) -> str:
@@ -411,6 +519,7 @@ def scan_claude_code_events() -> list[LocalEvent]:
             for fpath_raw in glob.glob(str(project_dir / "*.jsonl")):
                 fpath = Path(fpath_raw)
                 session_id = fpath.stem
+                turn = 0
                 try:
                     with fpath.open(errors="replace") as handle:
                         for index, line in enumerate(handle):
@@ -453,6 +562,11 @@ def scan_claude_code_events() -> list[LocalEvent]:
                             elif msg_type == "tool_result" or obj.get("toolUseResult") is not None:
                                 event_type = "tool_result"
 
+                            # A real user prompt opens a new turn; every following event belongs to it.
+                            # Same boundary test as segment_session_by_prompt() so turn numbers align.
+                            if msg_type == "user" and not obj.get("isMeta") and _user_prompt_text(content):
+                                turn += 1
+
                             events.append(LocalEvent(
                                 event_id=_event_id(session_id, index, event_type, ts),
                                 session_id=session_id,
@@ -466,6 +580,7 @@ def scan_claude_code_events() -> list[LocalEvent]:
                                 cost_usd=event_cost,
                                 content_hash=content_hash,
                                 source_path=str(fpath),
+                                turn=turn,
                             ))
                 except OSError:
                     continue

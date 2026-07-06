@@ -6,12 +6,12 @@ import json
 import os
 import socket
 import subprocess
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from .cli import analyze_prompt
+from .cli import analyze_prompt, session_insights
 from .correlate import link_recent_interventions_to_sessions
 from .local_state import (
     VALID_OUTCOMES,
@@ -22,7 +22,15 @@ from .local_state import (
     record_outcome,
 )
 from .pricing import is_subscription_model
-from .scanner import LocalEvent, LocalSession, discover_tools, scan_all, scan_all_events
+from .scanner import (
+    LocalEvent,
+    LocalSession,
+    discover_tools,
+    extract_opening_prompt,
+    scan_all,
+    scan_all_events,
+    segment_session_by_prompt,
+)
 
 MIN_DT = datetime.min.replace(tzinfo=timezone.utc)
 
@@ -149,6 +157,7 @@ def event_json(row: LocalEvent) -> dict[str, object]:
         "api_value": money(row.cost_usd),
         "api_value_usd": round(row.cost_usd, 6),
         "content_hash": row.content_hash,
+        "turn": row.turn,
     }
 
 
@@ -172,30 +181,135 @@ def build_project_detail(project: str, days: int = 7) -> dict[str, object]:
     }
 
 
+def timeline_analysis(events: list[LocalEvent]) -> dict[str, object]:
+    """Aggregate session events by type and detect duplicated content (loop/waste signal)."""
+    buckets: dict[str, dict[str, float]] = defaultdict(lambda: {"count": 0, "cost": 0.0, "tokens": 0})
+    total_cost = 0.0
+    hash_counts: Counter[str] = Counter()
+    for event in events:
+        bucket = buckets[event.event_type]
+        bucket["count"] += 1
+        bucket["cost"] += event.cost_usd
+        bucket["tokens"] += event.tokens_in + event.tokens_out
+        total_cost += event.cost_usd
+        if event.content_hash:
+            hash_counts[event.content_hash] += 1
+
+    cost_by_type = sorted(
+        (
+            {
+                "event_type": event_type,
+                "count": int(data["count"]),
+                "tokens_label": compact_int(int(data["tokens"])),
+                "api_value": money(data["cost"]),
+                "api_value_usd": round(data["cost"], 6),
+                "label": f"{money(data['cost'])} · {int(data['count'])}x",
+                "share_pct": round(data["cost"] / total_cost * 100) if total_cost else 0,
+            }
+            for event_type, data in buckets.items()
+        ),
+        key=lambda row: row["api_value_usd"],
+        reverse=True,
+    )
+
+    repeated = [count for count in hash_counts.values() if count > 1]
+    duplicate_events = sum(count - 1 for count in repeated)
+    return {
+        "cost_by_type": cost_by_type,
+        "repeats": {
+            "distinct_repeated": len(repeated),
+            "duplicate_events": duplicate_events,
+            "max_repeat": max(repeated, default=0),
+        },
+    }
+
+
+def build_prompt_analysis(
+    row: LocalSession, segments: list[dict[str, object]] | None = None
+) -> dict[str, object] | None:
+    """Attribute session cost to the prompts that drove it, and coach the costliest ask worth tightening.
+
+    Returns None for sessions with no readable prompts (e.g. non-Claude sources).
+    """
+    if segments is None:
+        segments = segment_session_by_prompt(row.source_path)
+    if not segments:
+        return None
+    total = sum(float(s["cost_usd"]) for s in segments)
+    by_cost = sorted(segments, key=lambda s: float(s["cost_usd"]), reverse=True)
+
+    expensive = [
+        {
+            "prompt": seg["prompt"],
+            "turn": seg["turn"],
+            "tool_calls": seg["tool_calls"],
+            "api_value": money(float(seg["cost_usd"])),
+            "api_value_usd": round(float(seg["cost_usd"]), 6),
+            "share_pct": round(float(seg["cost_usd"]) / total * 100) if total else 0,
+        }
+        for seg in by_cost[:5]
+        if float(seg["cost_usd"]) > 0
+    ]
+
+    # Coach the costliest prompt that actually has something to tighten (analyze_prompt score > 0).
+    # If none qualifies, cost accumulated across turns rather than from any single weak ask.
+    coaching = None
+    for seg in by_cost:
+        analysis = analyze_prompt(str(seg["prompt"]), tool=row.tool, cwd=row.project_path)
+        if int(analysis["score"]) > 0:
+            coaching = {
+                "prompt": seg["prompt"],
+                "turn": seg["turn"],
+                "api_value": money(float(seg["cost_usd"])),
+                "risk": analysis["risk"],
+                "findings": analysis["findings"],
+                "suggestions": analysis["suggestions"],
+                "suggested_prompt": analysis["suggested_prompt"],
+            }
+            break
+
+    return {
+        "opening_prompt": segments[0]["prompt"],
+        "turns": len(segments),
+        "expensive_asks": expensive,
+        "coaching": coaching,
+    }
+
+
+# High backstop so a full session (and thus every turn) renders; only pathological
+# sessions truncate, and the timeline note reports it when they do.
+EVENT_DISPLAY_LIMIT = 5000
+
+
 def build_session_detail(session_id: str, days: int = 30) -> dict[str, object]:
     rows = [row for row in rows_for_window(days) if row.session_id == session_id]
     if not rows:
         return {"error": "session not found"}
     row = rows[0]
-    since = datetime.now().astimezone() - timedelta(days=days)
+    # A single-session view shows the whole session, not just the last `days` — otherwise
+    # early turns of a long-running session are hidden. We only filter by session id here.
     events = sorted(
-        [
-            event for event in scan_all_events()
-            if event.session_id == session_id and event.timestamp and event.timestamp.astimezone() >= since
-        ],
+        [event for event in scan_all_events() if event.session_id == session_id],
         key=lambda event: event.timestamp or MIN_DT,
     )
     costliest = max(events, key=lambda event: (event.cost_usd, event.tokens_in + event.tokens_out), default=None)
+    segments = segment_session_by_prompt(row.source_path)
+    turn_prompts = {int(seg["turn"]): str(seg["prompt"])[:240] for seg in segments}
     return {
         **session_json(row),
         "privacy": "Prompt/source content is not shown. Use event export for hashes.",
+        "insights": session_insights(row),
+        "prompt_analysis": build_prompt_analysis(row, segments),
+        "turn_prompts": turn_prompts,
         "timeline_summary": {
             "events": len(events),
+            "shown": min(len(events), EVENT_DISPLAY_LIMIT),
             "tokens": compact_int(sum(event.tokens_in + event.tokens_out for event in events)),
             "api_value": money(sum(event.cost_usd for event in events)),
             "costliest": event_json(costliest) if costliest else None,
+            **timeline_analysis(events),
         },
-        "events": [event_json(event) for event in events[:40]],
+        "events": [event_json(event) for event in events[:EVENT_DISPLAY_LIMIT]],
     }
 
 
@@ -576,6 +690,29 @@ HTML = r"""<!doctype html>
     .empty { color: var(--muted); padding: 16px; border: 1px dashed var(--line); border-radius: 8px; }
     .detail-section { padding: 20px 0; border-bottom: 1px solid var(--line); }
     .detail-section:last-child { border-bottom: 0; }
+    .insight-list { margin: 8px 0 0; padding-left: 18px; }
+    .insight-list li { margin: 6px 0; line-height: 1.45; }
+    .costliest-step { margin: 12px 0; padding: 12px 14px; border: 1px solid var(--line-strong); border-left: 3px solid var(--metric-red, #d9534f); border-radius: 8px; background: var(--surface-raised); }
+    .costliest-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+    .costliest-share { text-transform: none; letter-spacing: 0; font-weight: 600; color: var(--text, inherit); }
+    .costliest-body { margin-top: 6px; font-size: 14px; overflow-wrap: anywhere; }
+    .waste-note { margin: 12px 0; padding: 10px 14px; border: 1px solid var(--line-strong); border-left: 3px solid #e0a800; border-radius: 8px; background: var(--surface-raised); font-size: 13px; line-height: 1.45; }
+    .prompt-text, .prompt-suggested { margin: 8px 0 4px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow-y: auto; }
+    .prompt-suggested { border-left: 3px solid var(--metric-green, #2e9e5b); }
+    .risk-tag { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; padding: 2px 8px; border-radius: 999px; vertical-align: middle; margin-left: 8px; border: 1px solid var(--line-strong); }
+    .risk-high { color: #d9534f; border-color: #d9534f; }
+    .risk-medium { color: #e0a800; border-color: #e0a800; }
+    .risk-low { color: var(--muted); }
+    .prompt-opener { margin: 6px 0 0; line-height: 1.5; }
+    .prompt-opener-label { display: inline-block; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-right: 6px; }
+    .asks-table td { vertical-align: top; }
+    .asks-table .ask-turn { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .asks-table .ask-prompt { overflow-wrap: anywhere; white-space: pre-wrap; }
+    .asks-table .ask-tools { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+    .asks-table .ask-cost { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .asks-table .ask-share { display: block; font-size: 11px; color: var(--muted); }
+    .evt-turn { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .timeline-note { margin: 4px 0 8px; font-size: 12px; color: var(--muted); }
     .mini-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 10px 0 12px; }
     .mini { border-left: 2px solid var(--line-strong); padding: 5px 10px; min-width: 0; }
     .mini strong { display: block; font-size: 16px; margin-top: 4px; overflow-wrap: anywhere; }
@@ -928,6 +1065,13 @@ function dateLabel(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
+function costliestShare(event, session) {
+  const total = Number(session.api_value_usd || 0);
+  const part = Number(event.api_value_usd || 0);
+  if (total <= 0 || part <= 0) return '';
+  const pct = Math.round(part / total * 100);
+  return pct >= 1 ? ` · ${pct}% of session cost` : '';
+}
 function bars(rows, valueKey = "api_value_label", kind = "project") {
   if (!rows.length) return '<div class="empty">No local usage found for this window.</div>';
   const max = maxValue(rows);
@@ -977,12 +1121,39 @@ async function selectSession(sessionId) {
     return;
   }
   document.getElementById('drawerTitle').textContent = 'Session review';
+  const summary = s.timeline_summary || {};
+  const costliest = summary.costliest;
+  const costliestCallout = costliest
+    ? `<div class="costliest-step">
+        <div class="costliest-head">Costliest step<span class="costliest-share">${costliestShare(costliest, s)}</span></div>
+        <div class="costliest-body">${esc(costliest.event_type)} · ${esc(costliest.model)} · ${esc(costliest.tokens_label)} tokens · ${esc(costliest.api_value)}</div>
+      </div>`
+    : '';
+  const costRows = (summary.cost_by_type || []).filter(r => r.api_value_usd > 0)
+    .map(r => ({ ...r, name: r.event_type, short_name: r.event_type }));
+  const costBreakdown = costRows.length
+    ? `<section class="detail-section"><h3>Cost by event type</h3>
+        <p>Where this session's API-equivalent value actually went.</p>
+        ${bars(costRows, "label", "type")}
+      </section>`
+    : '';
+  const repeats = summary.repeats || {};
+  const wasteNote = repeats.duplicate_events > 0
+    ? `<div class="waste-note">Possible rework: ${esc(repeats.duplicate_events)} event(s) repeated identical content${repeats.max_repeat > 2 ? ` (one appeared ${esc(repeats.max_repeat)}x)` : ''}. This often signals a retry loop or the agent re-doing work.</div>`
+    : '';
+  const turnPrompts = s.turn_prompts || {};
+  const truncated = summary.events > summary.shown
+    ? `<p class="timeline-note">Showing first ${esc(summary.shown)} of ${esc(summary.events)} events.</p>`
+    : '';
   const timeline = s.events && s.events.length
     ? `<section class="detail-section"><h3>Timeline</h3>
-        <p>${esc(s.timeline_summary.events)} events · ${esc(s.timeline_summary.tokens)} tokens · ${esc(s.timeline_summary.api_value)} API-equivalent value</p>
-        <div class="table-wrap"><table><thead><tr><th>Event</th><th>Model</th><th>Tokens</th><th>API value</th></tr></thead>
-          <tbody>${s.events.map(e => `<tr title="${esc(e.content_hash || '')}">
-            <td>${esc(e.event_type)}</td><td>${esc(e.model)}</td><td>${esc(e.tokens_label)}</td><td>${esc(e.api_value)}</td>
+        <p>${esc(summary.events)} events · ${esc(summary.tokens)} tokens · ${esc(summary.api_value)} API-equivalent value</p>
+        ${costliestCallout}
+        ${wasteNote}
+        ${truncated}
+        <div class="table-wrap"><table><thead><tr><th>Turn</th><th>Event</th><th>Model</th><th>Tokens</th><th>API value</th></tr></thead>
+          <tbody>${s.events.map(e => `<tr title="${esc(e.turn && turnPrompts[e.turn] ? 'Turn #' + e.turn + ': ' + turnPrompts[e.turn] : (e.content_hash || ''))}">
+            <td class="evt-turn">${e.turn ? '#' + esc(e.turn) : '—'}</td><td>${esc(e.event_type)}</td><td>${esc(e.model)}</td><td>${esc(e.tokens_label)}</td><td>${esc(e.api_value)}</td>
           </tr>`).join('')}</tbody></table></div>
       </section>`
     : `<section class="detail-section"><h3>Timeline</h3><p>Event-level history is not available for this tool yet.</p></section>`;
@@ -993,13 +1164,54 @@ async function selectSession(sessionId) {
       <button data-testid="outcome-rework" class="outcome-button rework ${s.outcome === 'rework' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','rework')">Needs rework</button>
       <button data-testid="outcome-abandoned" class="outcome-button abandoned ${s.outcome === 'abandoned' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','abandoned')">Abandoned</button>
     </div></div>`;
+  const insights = s.insights && s.insights.length
+    ? `<section class="detail-section"><h3>What to check next</h3>
+        <ul class="insight-list">${s.insights.map(i => `<li>${esc(i)}</li>`).join('')}</ul>
+      </section>`
+    : `<section class="detail-section"><h3>What to check next</h3>
+        <p>Nothing unusual in this session summary.</p></section>`;
+  const pa = s.prompt_analysis;
+  let promptReview = '';
+  if (pa) {
+    const opener = `<p class="prompt-opener"><span class="prompt-opener-label">Session opened with</span> ${esc(pa.opening_prompt)}</p>`;
+    const asksRows = (pa.expensive_asks || []).map(a => `<tr>
+        <td class="ask-turn">#${esc(a.turn)}</td>
+        <td class="ask-prompt" title="${esc(a.prompt)}">${esc(a.prompt.length > 110 ? a.prompt.slice(0, 110) + '…' : a.prompt)}</td>
+        <td class="ask-tools">${esc(a.tool_calls)}</td>
+        <td class="ask-cost">${esc(a.api_value)}<span class="ask-share">${esc(a.share_pct)}%</span></td>
+      </tr>`).join('');
+    const expensiveAsks = (pa.expensive_asks && pa.expensive_asks.length)
+      ? `<section class="detail-section"><h3>Expensive asks</h3>
+          <p>Which prompts drove the cost, by turn. Cost is cumulative — later turns re-send the whole conversation, so a short prompt late in a long session can still be expensive.</p>
+          <div class="table-wrap"><table class="asks-table"><thead><tr><th>Turn</th><th>Prompt</th><th>Tools</th><th>Cost</th></tr></thead>
+            <tbody>${asksRows}</tbody></table></div>
+        </section>`
+      : '';
+    const c = pa.coaching;
+    const coaching = c
+      ? `<section class="detail-section"><h3>Prompt worth tightening <span class="risk-tag risk-${esc(c.risk)}">${esc(c.risk)} risk</span></h3>
+          <p>Turn #${esc(c.turn)} (${esc(c.api_value)}) — the costliest ask with something to tighten.</p>
+          <div class="prompt-text">${esc(c.prompt)}</div>
+          ${c.findings && c.findings.length ? `<h4>Findings</h4><ul class="insight-list">${c.findings.map(f => `<li>${esc(f)}</li>`).join('')}</ul>` : ''}
+          ${c.suggestions && c.suggestions.length ? `<h4>Suggestions</h4><ul class="insight-list">${c.suggestions.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
+          <h4>Tighter prompt for next time</h4>
+          <div class="prompt-suggested">${esc(c.suggested_prompt)}</div>
+        </section>`
+      : `<section class="detail-section"><h3>Prompt worth tightening</h3>
+          <p>No single prompt stood out as under-specified — cost accumulated across ${esc(pa.turns)} turns. For work this long, checkpoint or start a fresh session between chunks to keep context (and cost) from compounding.</p>
+        </section>`;
+    promptReview = `<section class="detail-section"><h3>Prompt attribution</h3>${opener}</section>${expensiveAsks}${coaching}`;
+  }
   document.getElementById('detailContent').innerHTML = `<section class="detail-section">
     <h2 class="session-title">${esc(s.project_short)}</h2>
     <p class="session-meta">${esc(s.tool)} · ${esc(s.model)}</p>
     ${miniStats({ sessions: 1, api_value: s.api_value, tokens: s.tokens_label, tool_calls: s.tool_calls })}
     ${outcomePill(s.outcome)}
     ${outcomeActions}
-    </section><section class="detail-section"><h3>Session metadata</h3>
+    </section>
+    ${insights}
+    ${promptReview}
+    <section class="detail-section"><h3>Session metadata</h3>
     <table><tbody>
       <tr><th>Started</th><td>${esc(dateLabel(s.started_at))}</td></tr>
       <tr><th>Updated</th><td>${esc(dateLabel(s.updated_at))}</td></tr>
@@ -1007,6 +1219,7 @@ async function selectSession(sessionId) {
       <tr><th>Privacy</th><td>${esc(s.privacy)}</td></tr>
     </tbody></table>
     </section>
+    ${costBreakdown}
     ${timeline}`;
 }
 async function markOutcome(sessionId, outcome) {
