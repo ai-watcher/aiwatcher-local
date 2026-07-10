@@ -192,6 +192,48 @@ class PromptPreflightTests(unittest.TestCase):
         # redundant with the collapsed footer now.
         self.assertNotIn("<p class=\"privacy\">Working directory:", page)
 
+    def test_split_core_for_diff_separates_task_from_added_bullets(self) -> None:
+        full = cli.build_execution_brief(
+            "Refactor everything in the auth module",
+            cwd="/repo/auth",
+            broad_scope=True,
+            needs_checkpoint=True,
+            sensitive_or_destructive=True,
+            vague_scope=False,
+            multiple_tasks=False,
+        )
+        core, _ = cli._split_brief_for_display(full)
+        task, bullets = cli._split_core_for_diff(core)
+
+        self.assertEqual(task, "Refactor everything in the auth module")
+        self.assertNotIn("Task", task)
+        self.assertGreaterEqual(len(bullets), 3)
+        self.assertTrue(any("phased plan" in b for b in bullets))
+        self.assertTrue(any("Do not reveal secret values" in b for b in bullets))
+
+    def test_gate_html_renders_task_and_added_bullets_with_distinct_styling(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt(
+                "refactor everything and delete the production credential",
+                tool="claude",
+                cwd="/repo",
+            )
+        page = cli._prompt_gate_html(
+            tool="claude", cwd="/repo", prompt="refactor everything and delete the production credential", result=result
+        )
+
+        self.assertIn('class="brief-diff"', page)
+        self.assertIn('class="brief-task"', page)
+        self.assertIn('class="brief-added"', page)
+        self.assertIn('class="added-line"', page)
+        # The diff view renders before the raw editable textarea, so the
+        # scannable version is what's seen first, not the wall of text.
+        self.assertLess(page.index('class="brief-diff"'), page.index('id="brief"'))
+        # The raw textarea is still present and unchanged -- editing/sending
+        # must keep working exactly as before this purely visual change.
+        self.assertIn('<details class="brief-edit">', page)
+        self.assertIn('<textarea id="brief">', page)
+
     def test_interactive_preflight_can_forward_safer_prompt(self) -> None:
         result = {
             "risk": "high",

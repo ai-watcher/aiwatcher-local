@@ -750,6 +750,25 @@ def _split_brief_for_display(brief: str) -> tuple[str, str]:
     return brief[:cut], brief[cut:].lstrip("\n")
 
 
+def _split_core_for_diff(core: str) -> tuple[str, list[str]]:
+    """Split the brief core into the original task text and the added
+    execution-approach bullets, so the caller can render them with distinct
+    styling (unchanged vs. added) instead of undifferentiated prose --
+    scannable the way a code diff is, not something read line by line to
+    detect what changed.
+    """
+    marker = "\n\nExecution approach\n"
+    idx = core.find(marker)
+    if idx == -1:
+        return core, []
+    task_section = core[:idx]
+    if task_section.startswith("Task\n"):
+        task_section = task_section[len("Task\n"):]
+    bullets_block = core[idx + len(marker):]
+    bullets = [line[2:] for line in bullets_block.split("\n") if line.startswith("- ")]
+    return task_section, bullets
+
+
 def _prompt_gate_html(*, tool: str, cwd: str, prompt: str, result: dict[str, object]) -> str:
     findings = "".join(f"<li>{html.escape(str(item))}</li>" for item in result["findings"])
     suggestions = "".join(f"<li>{html.escape(str(item))}</li>" for item in result["suggestions"])
@@ -760,6 +779,20 @@ def _prompt_gate_html(*, tool: str, cwd: str, prompt: str, result: dict[str, obj
         f'(unchanged every time)</summary><pre id="brief-suffix">{html.escape(brief_suffix)}</pre></details>'
         if brief_suffix
         else ""
+    )
+    task_section, brief_bullets = _split_core_for_diff(brief_core)
+    added_lines = "".join(
+        f'<div class="added-line">{html.escape(bullet)}</div>' for bullet in brief_bullets
+    )
+    brief_editable = f'<textarea id="brief">{brief}</textarea>'
+    brief_body = (
+        f'<div class="brief-diff">'
+        f'<div class="brief-task">{html.escape(task_section)}</div>'
+        f'<div class="brief-added">{added_lines}</div>'
+        f'</div>'
+        f'<details class="brief-edit"><summary>Edit this brief before sending</summary>{brief_editable}</details>'
+        if brief_bullets
+        else brief_editable
     )
     original = html.escape(prompt)
     risk = html.escape(str(result["risk"]))
@@ -835,6 +868,15 @@ button:hover {{ border-color: var(--blue); transform: translateY(-1px); }}
 .brief-footer summary {{ cursor: pointer; font-size: 13px; color: var(--muted); user-select: none; }}
 .brief-footer summary:hover {{ color: var(--text); }}
 .brief-footer pre {{ min-height: 0; margin-top: 8px; font-size: 13px; color: var(--muted); background: #0c121a; }}
+.brief-diff {{ border: 1px solid var(--line); border-radius: 8px; background: #080d14; padding: 16px; }}
+.brief-task {{ white-space: pre-wrap; color: #dbe5f1; font: 14px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }}
+.brief-added {{ margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }}
+.added-line {{ border-left: 3px solid var(--accent); background: rgba(84,215,183,.08); padding: 6px 10px; color: #d9f8ee; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; }}
+.added-line::before {{ content: "+ "; color: var(--accent); font-weight: 700; }}
+.brief-edit {{ margin-top: 12px; }}
+.brief-edit summary {{ cursor: pointer; font-size: 13px; color: var(--muted); user-select: none; }}
+.brief-edit summary:hover {{ color: var(--text); }}
+.brief-edit textarea {{ margin-top: 8px; min-height: 220px; }}
 @media (max-width: 880px) {{
   main {{ width: min(100vw - 24px, 720px); margin: 18px auto; }}
   .top, .grid, .actions {{ grid-template-columns: 1fr; display: grid; }}
@@ -870,7 +912,7 @@ button:hover {{ border-color: var(--blue); transform: translateY(-1px); }}
     <section class="card">
       <h2>Execution brief</h2>
       <p>Keep the requested outcome, but add guardrails before tools run.</p>
-      <textarea id="brief">{brief}</textarea>
+      {brief_body}
       {brief_footer}
     </section>
   </div>
