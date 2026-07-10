@@ -2,20 +2,102 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import tempfile
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
 
 STATE_VERSION = 1
 VALID_OUTCOMES = {"useful", "rework", "abandoned"}
+
+# Guards this process's own threads. Every hook invocation is a separate OS
+# process though, so this alone does not prevent two concurrent processes
+# from racing a read-modify-write on local-state.json and silently dropping
+# one side's update. _cross_process_lock() below closes that gap with a real
+# OS-level file lock.
 STATE_LOCK = threading.RLock()
+LOCK_TIMEOUT_SECONDS = 10
+LOCK_POLL_SECONDS = 0.05
+
+
+class StateLockTimeout(RuntimeError):
+    """Another AIWatcher process held the local-state lock too long."""
+
+
+def _lock_path() -> Path:
+    return state_path().parent / ".local-state.lock"
+
+
+def _acquire_file_lock(handle) -> None:
+    if os.name == "nt":
+        deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                return
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise StateLockTimeout(
+                        "Timed out waiting for another AIWatcher process to release local-state.json."
+                    )
+                time.sleep(LOCK_POLL_SECONDS)
+    else:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def _release_file_lock(handle) -> None:
+    if os.name == "nt":
+        try:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+    else:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def _cross_process_lock():
+    lock_path = _lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+b") as handle:
+        if handle.seek(0, os.SEEK_END) == 0:
+            handle.write(b"\0")
+            handle.flush()
+        _acquire_file_lock(handle)
+        try:
+            yield
+        finally:
+            _release_file_lock(handle)
+
+
+@contextlib.contextmanager
+def _locked_state():
+    """Hold both the in-process thread lock and a cross-process file lock.
+
+    Every AIWatcher command (hook invocations especially) runs as its own
+    fresh OS process, so guarding local-state.json with only a
+    threading.Lock lets two concurrent processes interleave a
+    read-modify-write and silently clobber each other's append. This
+    combined lock makes read-modify-write of local-state.json atomic across
+    processes, not just threads.
+    """
+    with STATE_LOCK, _cross_process_lock():
+        yield
 
 
 def state_path() -> Path:
@@ -114,7 +196,7 @@ def record_intervention(
     selected_prompt: str | None,
     estimated_impact: dict[str, Any] | None = None,
 ) -> str:
-    with STATE_LOCK:
+    with _locked_state():
         data = _load()
         intervention_id = str(uuid.uuid4())
         data["interventions"].append({
@@ -148,7 +230,7 @@ def record_hook_event(
     score: int | None = None,
     error: str | None = None,
 ) -> None:
-    with STATE_LOCK:
+    with _locked_state():
         data = _load()
         data["hook_events"].append({
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -165,14 +247,14 @@ def record_hook_event(
 
 
 def recent_hook_events(limit: int = 10) -> list[dict[str, Any]]:
-    with STATE_LOCK:
+    with _locked_state():
         data = _load()
     rows = [row for row in data["hook_events"] if isinstance(row, dict)]
     return list(reversed(rows[-max(1, limit):]))
 
 
 def link_intervention_session(intervention_id: str, session_id: str) -> bool:
-    with STATE_LOCK:
+    with _locked_state():
         data = _load()
         for row in reversed(data["interventions"]):
             if row.get("id") == intervention_id:
@@ -185,7 +267,7 @@ def link_intervention_session(intervention_id: str, session_id: str) -> bool:
 def record_outcome(session_id: str, outcome: str, note: str | None = None) -> dict[str, Any]:
     if outcome not in VALID_OUTCOMES:
         raise ValueError(f"Outcome must be one of: {', '.join(sorted(VALID_OUTCOMES))}")
-    with STATE_LOCK:
+    with _locked_state():
         data = _load()
         record = {
             "session_id": session_id,
@@ -200,7 +282,7 @@ def record_outcome(session_id: str, outcome: str, note: str | None = None) -> di
 
 
 def get_outcome(session_id: str) -> dict[str, Any] | None:
-    with STATE_LOCK:
+    with _locked_state():
         data = _load()
     return next(
         (row for row in reversed(data["outcomes"]) if row.get("session_id") == session_id),
@@ -210,7 +292,7 @@ def get_outcome(session_id: str) -> dict[str, Any] | None:
 
 def outcomes_for_sessions(session_ids: set[str] | None = None) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
-    with STATE_LOCK:
+    with _locked_state():
         rows = list(_load()["outcomes"])
     for row in rows:
         session_id = row.get("session_id")
@@ -223,7 +305,7 @@ def outcomes_for_sessions(session_ids: set[str] | None = None) -> dict[str, dict
 
 
 def recent_interventions(limit: int = 20, days: int | None = None) -> list[dict[str, Any]]:
-    with STATE_LOCK:
+    with _locked_state():
         data = _load()
     rows = [row for row in data["interventions"] if isinstance(row, dict)]
     if days is not None:
