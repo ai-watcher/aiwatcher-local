@@ -1738,9 +1738,14 @@ def command_codex_hook(args: argparse.Namespace) -> int:
 
 
 def _cli_command_for_current_file() -> str:
-    parts = [sys.executable, "-m", "aiwatcher_cli"]
+    executable = sys.executable
     if os.name == "nt":
-        return subprocess.list2cmdline(parts)
+        # Claude/Codex/Cursor invoke hook commands through a POSIX shell (Git
+        # Bash) even on Windows, where backslash is an escape character. An
+        # unquoted Windows path like C:\Users\... gets mangled to C:Users...,
+        # so normalize to forward slashes, which Windows accepts too.
+        executable = executable.replace("\\", "/")
+    parts = [executable, "-m", "aiwatcher_cli"]
     return " ".join(shlex.quote(part) for part in parts)
 
 
