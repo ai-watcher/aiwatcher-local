@@ -232,6 +232,15 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertEqual(len(updated["hooks"]["UserPromptSubmit"]), 1)
         self.assertIn("Stop", updated["hooks"])
 
+    def test_read_stdin_text_decodes_utf8_regardless_of_platform_default(self) -> None:
+        payload = json.dumps({"prompt": "Scan macro signals — short–term and long–term effect"})
+        stdin = SimpleNamespace(buffer=io.BytesIO(payload.encode("utf-8")))
+        with patch.object(cli.sys, "stdin", stdin):
+            text = cli._read_stdin_text()
+        decoded_prompt = json.loads(text)["prompt"]
+        self.assertEqual(decoded_prompt, json.loads(payload)["prompt"])
+        self.assertIn("—", decoded_prompt)
+
     def test_codex_hook_adds_execution_brief_for_medium_risk(self) -> None:
         payload = json.dumps({"prompt": "Refactor the entire codebase", "cwd": "/repo"})
         args = SimpleNamespace(text=None, gate=False)

@@ -1515,8 +1515,12 @@ def command_outcome(args: argparse.Namespace) -> int:
 
 
 def _read_stdin_text() -> str:
+    # Hook payloads are always written as UTF-8. Text-mode sys.stdin decodes
+    # using the platform's default encoding (the Windows console codepage,
+    # e.g. cp1252), which mangles em dashes, smart quotes, and other
+    # multi-byte characters into mojibake. Decode the raw bytes explicitly.
     try:
-        return sys.stdin.read()
+        return sys.stdin.buffer.read().decode("utf-8", errors="replace")
     except OSError:
         return ""
 
