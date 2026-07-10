@@ -46,6 +46,13 @@ DEFAULT_MONTHLY_BUDGET_USD = 100.0
 MIN_SAVINGS_SESSIONS = 10
 MIN_SAVINGS_HISTORY_DAYS = 14
 PROMPT_GATE_TIMEOUT_SECONDS = 180
+# Claude/Codex kill a hook command after their own default timeout (30s),
+# independent of how long AIWatcher itself is willing to wait for a gate
+# decision. Without raising it, the host kills the hook process mid-wait,
+# discarding its output -- so a decision made on the gate page never reaches
+# the agent, even though the page looks alive. Installed hook entries set
+# their "timeout" field to this value when --gate is used.
+PROMPT_GATE_HOST_TIMEOUT_SECONDS = PROMPT_GATE_TIMEOUT_SECONDS + 30
 CODEX_WRAPPER_MARKER_START = "# >>> aiwatcher codex wrapper >>>"
 CODEX_WRAPPER_MARKER_END = "# <<< aiwatcher codex wrapper <<<"
 
@@ -1756,14 +1763,13 @@ def _merge_claude_hook(settings: dict[str, object], command: str, *, gate: bool 
     event_hooks = hooks.get("UserPromptSubmit")
     if not isinstance(event_hooks, list):
         event_hooks = []
-    handler = {
-        "hooks": [
-            {
-                "type": "command",
-                "command": _hook_command(command, "claude-hook", gate=gate),
-            }
-        ]
+    command_hook: dict[str, object] = {
+        "type": "command",
+        "command": _hook_command(command, "claude-hook", gate=gate),
     }
+    if gate:
+        command_hook["timeout"] = PROMPT_GATE_HOST_TIMEOUT_SECONDS
+    handler = {"hooks": [command_hook]}
     event_hooks = [
         item for item in event_hooks
         if not (
@@ -1827,13 +1833,14 @@ def _merge_codex_hook(settings: dict[str, object], command: str, *, gate: bool =
             )
         )
     ]
-    event_hooks.append({
-        "hooks": [{
-            "type": "command",
-            "command": _hook_command(command, "codex-hook", gate=gate),
-            "statusMessage": "AIWatcher is checking execution pressure",
-        }]
-    })
+    codex_command_hook: dict[str, object] = {
+        "type": "command",
+        "command": _hook_command(command, "codex-hook", gate=gate),
+        "statusMessage": "AIWatcher is checking execution pressure",
+    }
+    if gate:
+        codex_command_hook["timeout"] = PROMPT_GATE_HOST_TIMEOUT_SECONDS
+    event_hooks.append({"hooks": [codex_command_hook]})
     hooks["UserPromptSubmit"] = event_hooks
     settings["hooks"] = hooks
     return settings
@@ -1883,16 +1890,17 @@ def _codex_hooks_path(scope: str, project_dir: str | None = None) -> str:
 
 def command_install_claude_hook(args: argparse.Namespace) -> int:
     command = args.command or _cli_command_for_current_file()
+    preview_hook: dict[str, object] = {
+        "type": "command",
+        "command": _hook_command(command, "claude-hook", gate=args.gate),
+    }
+    if args.gate:
+        preview_hook["timeout"] = PROMPT_GATE_HOST_TIMEOUT_SECONDS
     snippet = {
         "hooks": {
             "UserPromptSubmit": [
                 {
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": _hook_command(command, "claude-hook", gate=args.gate),
-                        }
-                    ]
+                    "hooks": [preview_hook]
                 }
             ]
         }

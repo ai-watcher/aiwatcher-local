@@ -214,6 +214,26 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertIn("alias ll=", updated)
         self.assertNotIn("function codex", updated)
 
+    def test_gated_claude_hook_raises_host_timeout_past_decision_window(self) -> None:
+        # Claude kills a hook after its own default timeout (much shorter than
+        # AIWatcher's decision window), discarding the gate decision even
+        # though the page looked alive. --gate must raise the host's timeout
+        # past PROMPT_GATE_TIMEOUT_SECONDS or every gated decision is lost.
+        merged = cli._merge_claude_hook({}, "python -m aiwatcher_cli", gate=True)
+        hook = merged["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+        self.assertEqual(hook["timeout"], cli.PROMPT_GATE_HOST_TIMEOUT_SECONDS)
+        self.assertGreater(cli.PROMPT_GATE_HOST_TIMEOUT_SECONDS, cli.PROMPT_GATE_TIMEOUT_SECONDS)
+
+    def test_non_gated_claude_hook_does_not_set_a_timeout(self) -> None:
+        merged = cli._merge_claude_hook({}, "python -m aiwatcher_cli", gate=False)
+        hook = merged["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+        self.assertNotIn("timeout", hook)
+
+    def test_gated_codex_hook_raises_host_timeout_past_decision_window(self) -> None:
+        merged = cli._merge_codex_hook({}, "python -m aiwatcher_cli", gate=True)
+        hook = merged["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+        self.assertEqual(hook["timeout"], cli.PROMPT_GATE_HOST_TIMEOUT_SECONDS)
+
     def test_codex_hook_merge_and_remove_preserves_other_hooks(self) -> None:
         settings = {
             "hooks": {
