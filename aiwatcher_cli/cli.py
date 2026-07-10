@@ -568,6 +568,7 @@ def analyze_prompt(prompt: str, *, tool: str = "agent", cwd: str | None = None) 
     lower = text.lower()
     findings: list[str] = []
     suggestions: list[str] = []
+    guardrails: list[dict[str, str]] = []
     score = 0
 
     broad_terms = [
@@ -579,6 +580,7 @@ def analyze_prompt(prompt: str, *, tool: str = "agent", cwd: str | None = None) 
         score += 3
         findings.append("Scope looks broad and likely to create large context or many tool calls.")
         suggestions.append("Start with a plan-only pass over the smallest relevant files before editing.")
+        guardrails.append({"icon": "\U0001F50E", "label": "Scope narrowed"})
 
     edit_terms = ["change", "modify", "edit", "write", "implement", "refactor", "delete", "migrate", "rename"]
     plan_terms = ["plan first", "do not edit", "inspect first", "propose", "before editing", "ask before"]
@@ -587,6 +589,7 @@ def analyze_prompt(prompt: str, *, tool: str = "agent", cwd: str | None = None) 
         score += 2
         findings.append("Prompt asks for changes without an explicit plan/checkpoint.")
         suggestions.append("Ask the agent to inspect, summarize the intended change, then proceed after the plan is clear.")
+        guardrails.append({"icon": "\U0001F4CB", "label": "Plan-first checkpoint"})
 
     risky_terms = [
         "production", "prod database", "customer data", "pii", "secret", "api key", "token",
@@ -597,6 +600,7 @@ def analyze_prompt(prompt: str, *, tool: str = "agent", cwd: str | None = None) 
         score += 3
         findings.append("Prompt mentions sensitive data, credentials, production systems, or destructive actions.")
         suggestions.append("Require confirmation before destructive changes and avoid exposing secrets or customer data.")
+        guardrails.append({"icon": "\U0001F6D1", "label": "Confirm before destructive changes"})
 
     vague_terms = ["make it better", "improve everything", "clean this up", "fix it", "optimize it"]
     vague_scope = any(term in lower for term in vague_terms)
@@ -604,12 +608,14 @@ def analyze_prompt(prompt: str, *, tool: str = "agent", cwd: str | None = None) 
         score += 1
         findings.append("Prompt is vague, which can cause exploratory loops.")
         suggestions.append("Name the target files, acceptance criteria, and what should stay unchanged.")
+        guardrails.append({"icon": "\U0001F3AF", "label": "Vague ask clarified"})
 
     multiple_tasks = len(text) > 2500
     if multiple_tasks:
         score += 2
         findings.append("Prompt is long enough to hide multiple tasks in one request.")
         suggestions.append("Split this into one task per prompt and checkpoint between them.")
+        guardrails.append({"icon": "✂️", "label": "Split into smaller tasks"})
 
     if not findings:
         findings.append("No obvious cost or safety risk found from prompt text alone.")
@@ -636,6 +642,7 @@ def analyze_prompt(prompt: str, *, tool: str = "agent", cwd: str | None = None) 
         "tool": tool,
         "findings": findings,
         "suggestions": suggestions,
+        "guardrails": guardrails,
         "suggested_prompt": safer_prompt,
         "estimated_impact": (
             estimate_prompt_savings(text, risk_score=score, tool=tool, cwd=cwd)
@@ -708,6 +715,23 @@ def _impact_summary(result: dict[str, object]) -> str:
     )
 
 
+def _hero_savings_label(result: dict[str, object]) -> str | None:
+    """A short, glanceable savings figure for the gate header -- no reading required.
+
+    Returns None (rather than a placeholder string) when there isn't enough
+    local history for a real number, so the caller can omit the badge
+    entirely instead of showing a hedge like "no estimate yet".
+    """
+    impact = result.get("estimated_impact") if isinstance(result.get("estimated_impact"), dict) else {}
+    if not impact or not impact.get("available", False):
+        return None
+    savings = impact.get("savings", {}) if isinstance(impact.get("savings"), dict) else {}
+    api_value = savings.get("api_value_usd")
+    if not isinstance(api_value, list) or len(api_value) != 2:
+        return None
+    return f"~{_range_label(*api_value, money)} avoidable"
+
+
 def _prompt_gate_html(*, tool: str, cwd: str, prompt: str, result: dict[str, object]) -> str:
     findings = "".join(f"<li>{html.escape(str(item))}</li>" for item in result["findings"])
     suggestions = "".join(f"<li>{html.escape(str(item))}</li>" for item in result["suggestions"])
@@ -718,6 +742,19 @@ def _prompt_gate_html(*, tool: str, cwd: str, prompt: str, result: dict[str, obj
     impact = html.escape(_impact_summary(result))
     tool_label = html.escape(tool)
     cwd_label = html.escape(cwd)
+    savings_label = _hero_savings_label(result)
+    savings_pill = (
+        f'<span class="pill savings">{html.escape(savings_label)}</span>' if savings_label else ""
+    )
+    guardrail_chips = "".join(
+        f'<span class="chip"><span class="chip-icon">{html.escape(str(g["icon"]))}</span>{html.escape(str(g["label"]))}</span>'
+        for g in result.get("guardrails", [])
+    )
+    guardrail_row = (
+        f'<div class="guardrails">{guardrail_chips}</div>'
+        if guardrail_chips
+        else '<div class="guardrails"><span class="chip chip-clean">No guardrails needed — prompt looked scoped as written.</span></div>'
+    )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -751,6 +788,11 @@ h1 {{ margin: 0 0 8px; font-size: clamp(32px, 5vw, 58px); letter-spacing: 0; }}
 p {{ margin: 0; color: var(--muted); line-height: 1.5; }}
 .pill {{ display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 999px; padding: 8px 12px; color: var(--muted); background: #0c121a; }}
 .risk {{ color: {'var(--red)' if risk == 'high' else 'var(--amber)'}; border-color: {'rgba(255,127,147,.42)' if risk == 'high' else 'rgba(247,198,107,.42)'}; }}
+.savings {{ color: #061019; background: linear-gradient(135deg, #36d6a5, #6aa7ff); border: 0; font-weight: 800; }}
+.guardrails {{ display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 24px; }}
+.chip {{ display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 999px; padding: 10px 16px; background: var(--panel-2); color: var(--text); font-weight: 600; font-size: 15px; }}
+.chip-icon {{ font-size: 17px; line-height: 1; }}
+.chip-clean {{ color: var(--muted); font-weight: 400; }}
 .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }}
 .card {{ background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.01)), var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 22px; box-shadow: 0 16px 48px rgba(0,0,0,.28); }}
 h2 {{ margin: 0 0 14px; font-size: 21px; }}
@@ -781,8 +823,10 @@ button:hover {{ border-color: var(--blue); transform: translateY(-1px); }}
     <div>
       <span class="pill risk">Risk: {risk} | score {score}</span>
       <span class="pill">{tool_label}</span>
+      {savings_pill}
     </div>
   </div>
+  {guardrail_row}
   <div class="grid">
     <section class="card">
       <h2>What AIWatcher noticed</h2>

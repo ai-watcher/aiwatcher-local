@@ -89,6 +89,54 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertEqual(result["risk"], "low")
         self.assertNotIn("Expected impact", rendered)
 
+    def test_guardrail_chips_match_triggered_findings(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt(
+                "refactor everything and delete the production credential",
+                tool="claude",
+                cwd="/repo",
+            )
+
+        labels = [g["label"] for g in result["guardrails"]]
+        self.assertIn("Scope narrowed", labels)
+        self.assertIn("Plan-first checkpoint", labels)
+        self.assertIn("Confirm before destructive changes", labels)
+        # One chip per triggered finding, not a copy of the full prose findings list.
+        self.assertEqual(len(result["guardrails"]), len(result["findings"]))
+
+    def test_hero_savings_label_omitted_without_sufficient_history(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
+        self.assertIsNone(cli._hero_savings_label(result))
+
+    def test_hero_savings_label_shows_compact_dollar_range_when_available(self) -> None:
+        rows = [session(index, age_days=index * 2) for index in range(10)]
+        with patch.object(cli, "sessions_since", return_value=rows):
+            result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
+        label = cli._hero_savings_label(result)
+        self.assertIsNotNone(label)
+        self.assertIn("avoidable", label)
+        self.assertTrue(label.startswith("~$"))
+
+    def test_gate_html_shows_guardrail_chips_and_savings_badge_above_the_fold(self) -> None:
+        rows = [session(index, age_days=index * 2) for index in range(10)]
+        with patch.object(cli, "sessions_since", return_value=rows):
+            result = cli.analyze_prompt(
+                "refactor everything and delete the production credential",
+                tool="claude",
+                cwd="/repo",
+            )
+        page = cli._prompt_gate_html(tool="claude", cwd="/repo", prompt="original prompt text", result=result)
+
+        self.assertIn('class="pill savings"', page)
+        self.assertIn("avoidable", page)
+        self.assertIn('class="guardrails"', page)
+        self.assertIn("Scope narrowed", page)
+        self.assertIn("Confirm before destructive changes", page)
+        # The chip row must appear before the detailed findings/brief cards,
+        # so the glanceable summary renders above the fold, not after it.
+        self.assertLess(page.index('class="guardrails"'), page.index("What AIWatcher noticed"))
+
     def test_interactive_preflight_can_forward_safer_prompt(self) -> None:
         result = {
             "risk": "high",
