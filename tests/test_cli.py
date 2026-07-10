@@ -256,6 +256,26 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertIn("alias ll=", updated)
         self.assertNotIn("function codex", updated)
 
+    def test_gated_claude_hook_raises_host_timeout_past_decision_window(self) -> None:
+        # Claude kills a hook after its own default timeout (much shorter than
+        # AIWatcher's decision window), discarding the gate decision even
+        # though the page looked alive. --gate must raise the host's timeout
+        # past PROMPT_GATE_TIMEOUT_SECONDS or every gated decision is lost.
+        merged = cli._merge_claude_hook({}, "python -m aiwatcher_cli", gate=True)
+        hook = merged["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+        self.assertEqual(hook["timeout"], cli.PROMPT_GATE_HOST_TIMEOUT_SECONDS)
+        self.assertGreater(cli.PROMPT_GATE_HOST_TIMEOUT_SECONDS, cli.PROMPT_GATE_TIMEOUT_SECONDS)
+
+    def test_non_gated_claude_hook_does_not_set_a_timeout(self) -> None:
+        merged = cli._merge_claude_hook({}, "python -m aiwatcher_cli", gate=False)
+        hook = merged["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+        self.assertNotIn("timeout", hook)
+
+    def test_gated_codex_hook_raises_host_timeout_past_decision_window(self) -> None:
+        merged = cli._merge_codex_hook({}, "python -m aiwatcher_cli", gate=True)
+        hook = merged["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+        self.assertEqual(hook["timeout"], cli.PROMPT_GATE_HOST_TIMEOUT_SECONDS)
+
     def test_codex_hook_merge_and_remove_preserves_other_hooks(self) -> None:
         settings = {
             "hooks": {
@@ -273,6 +293,15 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertTrue(removed)
         self.assertEqual(len(updated["hooks"]["UserPromptSubmit"]), 1)
         self.assertIn("Stop", updated["hooks"])
+
+    def test_read_stdin_text_decodes_utf8_regardless_of_platform_default(self) -> None:
+        payload = json.dumps({"prompt": "Scan macro signals — short–term and long–term effect"})
+        stdin = SimpleNamespace(buffer=io.BytesIO(payload.encode("utf-8")))
+        with patch.object(cli.sys, "stdin", stdin):
+            text = cli._read_stdin_text()
+        decoded_prompt = json.loads(text)["prompt"]
+        self.assertEqual(decoded_prompt, json.loads(payload)["prompt"])
+        self.assertIn("—", decoded_prompt)
 
     def test_codex_hook_adds_execution_brief_for_medium_risk(self) -> None:
         payload = json.dumps({"prompt": "Refactor the entire codebase", "cwd": "/repo"})
@@ -475,6 +504,27 @@ class IntegrationConfigTests(unittest.TestCase):
         command = cli._cli_command_for_current_file()
         self.assertIn("-m aiwatcher_cli", command)
         self.assertNotIn("collector/cli.py", command)
+
+    def test_windows_hook_command_uses_forward_slashes_for_bash(self) -> None:
+        # Claude/Codex/Cursor run hook commands through Git Bash even on
+        # Windows. An unquoted backslash path like C:\Users\... gets mangled
+        # to C:Users... there, so the generated command must not contain any
+        # backslashes regardless of what sys.executable reports.
+        with (
+            patch.object(cli.sys, "executable", r"C:\Users\tadan\Python\python.exe"),
+            patch.object(cli.os, "name", "nt"),
+        ):
+            command = cli._cli_command_for_current_file()
+        self.assertNotIn("\\", command)
+        self.assertIn("C:/Users/tadan/Python/python.exe", command)
+
+    def test_windows_hook_command_quotes_paths_with_spaces(self) -> None:
+        with (
+            patch.object(cli.sys, "executable", r"C:\Program Files\Python\python.exe"),
+            patch.object(cli.os, "name", "nt"),
+        ):
+            command = cli._cli_command_for_current_file()
+        self.assertIn("'C:/Program Files/Python/python.exe'", command)
 
     def test_internal_hook_transport_is_not_in_public_parser(self) -> None:
         parser = cli.build_parser()

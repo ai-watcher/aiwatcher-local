@@ -48,6 +48,12 @@ DEFAULT_MONTHLY_BUDGET_USD = 100.0
 MIN_SAVINGS_SESSIONS = 10
 MIN_SAVINGS_HISTORY_DAYS = 14
 PROMPT_GATE_TIMEOUT_SECONDS = 180
+# Claude/Codex kill a hook command after their own default timeout (30s),
+# independent of how long AIWatcher itself is willing to wait for a gate
+# decision. Without raising it, the host kills the hook process mid-wait,
+# discarding its output -- so a decision made on the gate page never reaches
+# the agent, even though the page looks alive. Installed hook entries set
+# their "timeout" field to this value when --gate is used.
 PROMPT_GATE_HOST_TIMEOUT_SECONDS = PROMPT_GATE_TIMEOUT_SECONDS + 30
 CODEX_WRAPPER_MARKER_START = "# >>> aiwatcher codex wrapper >>>"
 CODEX_WRAPPER_MARKER_END = "# <<< aiwatcher codex wrapper <<<"
@@ -1638,8 +1644,12 @@ def command_outcome(args: argparse.Namespace) -> int:
 
 
 def _read_stdin_text() -> str:
+    # Hook payloads are always written as UTF-8. Text-mode sys.stdin decodes
+    # using the platform's default encoding (the Windows console codepage,
+    # e.g. cp1252), which mangles em dashes, smart quotes, and other
+    # multi-byte characters into mojibake. Decode the raw bytes explicitly.
     try:
-        return sys.stdin.read()
+        return sys.stdin.buffer.read().decode("utf-8", errors="replace")
     except OSError:
         return ""
 
@@ -1957,9 +1967,14 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
 
 
 def _cli_command_for_current_file() -> str:
-    parts = [sys.executable, "-m", "aiwatcher_cli"]
+    executable = sys.executable
     if os.name == "nt":
-        return subprocess.list2cmdline(parts)
+        # Claude/Codex/Cursor invoke hook commands through a POSIX shell (Git
+        # Bash) even on Windows, where backslash is an escape character. An
+        # unquoted Windows path like C:\Users\... gets mangled to C:Users...,
+        # so normalize to forward slashes, which Windows accepts too.
+        executable = executable.replace("\\", "/")
+    parts = [executable, "-m", "aiwatcher_cli"]
     return " ".join(shlex.quote(part) for part in parts)
 
 
