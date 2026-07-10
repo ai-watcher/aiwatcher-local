@@ -29,6 +29,8 @@ class LocalStateTests(unittest.TestCase):
                         "confidence": "medium",
                         "savings": {"tokens": [1000, 2000], "api_value_usd": [0.1, 0.2]},
                     },
+                    selected_risk="low",
+                    selected_score=1,
                 )
                 local_state.link_intervention_session(intervention_id, "session-1")
                 with open(state_file, encoding="utf-8") as handle:
@@ -42,6 +44,8 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(record["phase"], "plan")
         self.assertEqual(record["intervention_type"], "prompt_preflight")
         self.assertEqual(record["predicted_impact"]["savings"]["tokens"], [1000, 2000])
+        self.assertEqual(record["selected_risk"], "low")
+        self.assertEqual(record["risk_points_reduced"], 7)
 
     def test_outcome_replaces_previous_value_for_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

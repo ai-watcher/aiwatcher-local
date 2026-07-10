@@ -17,6 +17,7 @@ def session(
     tool: str = "codex-cli",
     project: str = "/repo/app",
     started_at: datetime | None = None,
+    updated_at: datetime | None = None,
 ) -> LocalSession:
     stamp = started_at or datetime.now(timezone.utc)
     return LocalSession(
@@ -24,7 +25,7 @@ def session(
         tool=tool,
         project_path=project,
         started_at=stamp,
-        updated_at=stamp + timedelta(minutes=5),
+        updated_at=updated_at or stamp + timedelta(minutes=5),
         model="gpt-5.5",
         tokens_in=1000,
         tokens_out=500,
@@ -75,6 +76,56 @@ class CorrelateTests(unittest.TestCase):
                 )
 
                 linked = link_recent_interventions_to_sessions([session(tool="codex-cli", project="/repo/app")])
+
+        self.assertEqual(linked, 0)
+
+    def test_links_existing_conversation_updated_after_intervention(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                intervention_id = local_state.record_intervention(
+                    tool="claude",
+                    cwd="/repo",
+                    risk="high",
+                    score=8,
+                    findings=["Broad scope"],
+                    original_prompt="Refactor everything",
+                    suggested_prompt="Inspect first",
+                    decision="brief_accepted",
+                    selected_prompt="Inspect first",
+                )
+                linked = link_recent_interventions_to_sessions([
+                    session(
+                        tool="claude-code",
+                        started_at=now - timedelta(days=3),
+                        updated_at=now + timedelta(seconds=5),
+                    )
+                ])
+                rows = local_state.recent_interventions()
+
+        self.assertEqual(linked, 1)
+        record = next(row for row in rows if row["id"] == intervention_id)
+        self.assertEqual(record["session_id"], "session-1")
+
+    def test_does_not_link_blocked_intervention(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_intervention(
+                    tool="claude",
+                    cwd="/repo",
+                    risk="high",
+                    score=8,
+                    findings=["Destructive action"],
+                    original_prompt="Delete everything",
+                    suggested_prompt="Inspect first",
+                    decision="blocked",
+                    selected_prompt=None,
+                )
+                linked = link_recent_interventions_to_sessions([
+                    session(tool="claude-code", project="/repo")
+                ])
 
         self.assertEqual(linked, 0)
 

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 
-STATE_VERSION = 1
+STATE_VERSION = 2
 VALID_OUTCOMES = {"useful", "rework", "abandoned"}
 STATE_LOCK = threading.RLock()
 
@@ -113,6 +113,8 @@ def record_intervention(
     decision: str,
     selected_prompt: str | None,
     estimated_impact: dict[str, Any] | None = None,
+    selected_risk: str | None = None,
+    selected_score: int | None = None,
 ) -> str:
     with STATE_LOCK:
         data = _load()
@@ -126,6 +128,9 @@ def record_intervention(
             "cwd": cwd,
             "risk": risk,
             "score": score,
+            "selected_risk": selected_risk,
+            "selected_score": selected_score,
+            "risk_points_reduced": max(0, score - selected_score) if selected_score is not None else None,
             "findings": list(findings),
             "original_prompt_hash": hash_prompt(original_prompt),
             "suggested_prompt_hash": hash_prompt(suggested_prompt),

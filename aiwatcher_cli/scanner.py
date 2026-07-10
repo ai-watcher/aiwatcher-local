@@ -51,6 +51,11 @@ CODEX_DIRS = _path_candidates(
     _env_path("APPDATA", "Codex"),
     _env_path("LOCALAPPDATA", "Codex"),
 )
+CODEX_SESSIONS_DIRS = _path_candidates(
+    HOME_DIR / ".codex" / "sessions",
+    _env_path("APPDATA", "Codex", "sessions"),
+    _env_path("LOCALAPPDATA", "Codex", "sessions"),
+)
 CLINE_DIRS = _path_candidates(
     HOME_DIR / ".cline",
     _env_path("APPDATA", "Cline"),
@@ -63,6 +68,11 @@ WINDSURF_DIRS = _path_candidates(
 AI_FILE_PATTERNS = re.compile(r"(copilot|chat|inline|ghost|predict)", re.IGNORECASE)
 GIT_ROOT_CACHE: dict[str, str | None] = {}
 PROJECT_PATH_CACHE: dict[str, str | None] = {}
+CODEX_ROLLOUT_CACHE: tuple[
+    tuple[tuple[str, int, int], ...],
+    list["LocalSession"],
+    list["LocalEvent"],
+] | None = None
 
 
 def _first_existing(paths: list[Path]) -> Path | None:
@@ -589,9 +599,10 @@ def scan_claude_code_events() -> list[LocalEvent]:
 
 
 def scan_codex_cli() -> list[LocalSession]:
+    rollout_sessions, _ = scan_codex_rollouts()
     codex_db = _first_existing(CODEX_DB_PATHS)
     if not codex_db:
-        return []
+        return rollout_sessions
 
     try:
         conn = sqlite3.connect(f"file:{codex_db}?mode=ro&immutable=1", uri=True)
@@ -603,7 +614,8 @@ def scan_codex_cli() -> list[LocalSession]:
                 tool="codex-cli",
                 source_path=str(codex_db),
                 notes=["Codex database detected but could not be opened read-only."],
-            )
+            ),
+            *rollout_sessions,
         ]
 
     sessions: list[LocalSession] = []
@@ -644,7 +656,123 @@ def scan_codex_cli() -> list[LocalSession]:
         )
     finally:
         conn.close()
-    return sessions
+    by_id = {row.session_id: row for row in sessions}
+    for rollout in rollout_sessions:
+        by_id[rollout.session_id] = rollout
+    return sorted(
+        by_id.values(),
+        key=lambda row: row.updated_at or row.started_at or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+
+
+def scan_codex_rollouts() -> tuple[list[LocalSession], list[LocalEvent]]:
+    global CODEX_ROLLOUT_CACHE
+    sessions: list[LocalSession] = []
+    events: list[LocalEvent] = []
+    paths: list[Path] = []
+    for root in CODEX_SESSIONS_DIRS:
+        if not root.exists():
+            continue
+        paths.extend(root.rglob("*.jsonl"))
+    signature_rows: list[tuple[str, int, int]] = []
+    for path in paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        signature_rows.append((str(path), stat.st_mtime_ns, stat.st_size))
+    signature = tuple(sorted(signature_rows))
+    if CODEX_ROLLOUT_CACHE and CODEX_ROLLOUT_CACHE[0] == signature:
+        return list(CODEX_ROLLOUT_CACHE[1]), list(CODEX_ROLLOUT_CACHE[2])
+
+    for path in paths:
+        session_id = path.stem
+        project_path: str | None = None
+        model: str | None = None
+        started_at: datetime | None = None
+        updated_at: datetime | None = None
+        final_input = 0
+        final_output = 0
+        agent_calls = 0
+        tool_calls = 0
+        previous_total = -1
+        try:
+            with path.open(errors="replace") as handle:
+                for index, line in enumerate(handle):
+                    if not line.strip():
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    timestamp = _parse_ts(row.get("timestamp"))
+                    started_at = _min_dt(started_at, timestamp)
+                    updated_at = _max_dt(updated_at, timestamp)
+                    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                    row_type = row.get("type")
+                    if row_type == "session_meta":
+                        session_id = str(payload.get("id") or payload.get("session_id") or session_id)
+                        project_path = _normalize_project_path(str(payload.get("cwd") or "")) or project_path
+                    elif row_type == "turn_context":
+                        project_path = _normalize_project_path(str(payload.get("cwd") or "")) or project_path
+                        model = str(payload.get("model") or model or "codex")
+                    elif row_type == "response_item" and payload.get("type") in {
+                        "function_call", "custom_tool_call", "local_shell_call"
+                    }:
+                        tool_calls += 1
+                    if row_type != "event_msg" or payload.get("type") != "token_count":
+                        continue
+                    info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+                    total = info.get("total_token_usage") if isinstance(info.get("total_token_usage"), dict) else {}
+                    last = info.get("last_token_usage") if isinstance(info.get("last_token_usage"), dict) else {}
+                    total_tokens = int(total.get("total_tokens") or 0)
+                    if not total_tokens or total_tokens == previous_total:
+                        continue
+                    previous_total = total_tokens
+                    final_input = int(total.get("input_tokens") or 0)
+                    final_output = int(total.get("output_tokens") or 0)
+                    agent_calls += 1
+                    event_input = int(last.get("input_tokens") or 0)
+                    event_output = int(last.get("output_tokens") or 0)
+                    events.append(LocalEvent(
+                        event_id=_event_id(session_id, index, "model_usage", timestamp),
+                        session_id=session_id,
+                        tool="codex-cli",
+                        event_type="model_usage",
+                        timestamp=timestamp,
+                        project_path=project_path,
+                        model=model or "codex",
+                        tokens_in=event_input,
+                        tokens_out=event_output,
+                        cost_usd=estimate_cost(model, event_input, event_output),
+                        source_path=str(path),
+                        notes=["Measured from Codex rollout token_count event"],
+                    ))
+        except OSError:
+            continue
+        if not final_input and not final_output:
+            continue
+        sessions.append(LocalSession(
+            session_id=session_id,
+            tool="codex-cli",
+            project_path=project_path,
+            started_at=started_at or _mtime(path),
+            updated_at=updated_at or _mtime(path),
+            model=model or "codex",
+            tokens_in=final_input,
+            tokens_out=final_output,
+            cost_usd=estimate_cost(model, final_input, final_output),
+            agent_calls=agent_calls,
+            tool_calls=tool_calls,
+            source_path=str(path),
+            notes=[
+                "Measured from Codex rollout token_count events",
+                "Codex cost is subscription/plan-based, not invoice spend",
+            ],
+        ))
+    CODEX_ROLLOUT_CACHE = (signature, list(sessions), list(events))
+    return sessions, events
 
 
 def scan_cursor_limited() -> list[LocalSession]:
@@ -689,4 +817,5 @@ def scan_all() -> list[LocalSession]:
 
 
 def scan_all_events() -> list[LocalEvent]:
-    return scan_claude_code_events()
+    _, codex_events = scan_codex_rollouts()
+    return [*scan_claude_code_events(), *codex_events]

@@ -14,13 +14,16 @@ is bigger than collection:
 ## What Developers Get
 
 - Prompt preflight with intent-preserving execution briefs.
-- Native Claude Code and Codex prompt hooks for automatic coverage.
+- Native prompt hooks on coding-agent surfaces that invoke the configured
+  lifecycle event, with explicit fallbacks where desktop chat does not.
 - Live local watch signals for cost, context growth, and loop-like behavior.
 - A local dashboard at `http://127.0.0.1:8765`.
 - A CLI for fast terminal checks and agent forwarding.
 - Click-through local project and session drill-down.
 - Useful, rework, and abandoned outcomes stored only on the laptop.
 - Privacy-safe intervention history using prompt hashes rather than prompt text.
+- Intervention receipts linking the decision to observed session usage, risk
+  reduction, and outcome.
 - A local weekly report.
 - Project, tool, model, session, token, and API-equivalent value breakdowns.
 - Separation between API-priced tokens and subscription/limited tokens.
@@ -127,7 +130,9 @@ keeping authority with the individual developer:
    behavior for the next run.
 
 The local state connects intervention hashes, predicted impact, session IDs,
-and outcomes. It does not store original or suggested prompt text.
+selected-prompt risk, observed usage, and outcomes. It does not store original
+or suggested prompt text. Comparisons to historical baselines are labeled as
+inferences, not guaranteed counterfactual savings.
 
 ## Automatic Preflight
 
@@ -151,14 +156,21 @@ an execution brief as additional context, and high-risk prompts pause before
 execution. With Prompt Gate enabled, medium and high-risk prompts open a
 one-shot localhost page with four choices:
 
-- **Use brief** — continue with AIWatcher's scoped execution brief as context.
-- **Use edited brief** — tune the brief locally before it reaches the agent.
+- **Add safer brief** — add AIWatcher's scoped execution brief as controlling
+  context beside the original request.
+- **Add edited brief** — tune that brief locally before adding it.
 - **Run original** — proceed unchanged and record that decision locally.
 - **Cancel run** — stop the prompt before tools execute.
 
 The Prompt Gate page may display the prompt while you decide, but it does not
 persist prompt text. Local state stores hashes, decisions, risk findings, and
 predicted impact only.
+
+This wording is deliberate. Claude's `UserPromptSubmit` hook can add context
+alongside a submitted prompt or block it; it cannot replace the submitted text.
+Gate installations configure a 210-second host timeout around AIWatcher's
+180-second decision window. If the host terminates or disconnects anyway, the
+page shows an explicit failure instead of pretending the choice was applied.
 
 To verify whether a Codex/Claude hook actually ran, use:
 
@@ -171,11 +183,27 @@ event means AIWatcher ran; the event shows whether prompt text was found and
 which risk score was computed. This matters because not every Codex or Claude
 surface uses the same hook runtime.
 
+Verified support boundary:
+
+- Claude Code CLI and Claude Desktop's **Code** tab invoke the Claude hook.
+- General Claude Desktop chat does not expose this hook.
+- Codex CLI/TUI support depends on the host build invoking
+  `UserPromptSubmit`.
+- The current Codex Desktop conversation surface tested by the project does
+  not invoke the configured hook.
+- Cursor can block a risky submission and return a scoped brief for resubmission,
+  but cannot replace the editor's prompt text in place.
+
+Use `hook-status` on each surface rather than inferring support from the vendor
+name. The Prompt Companion, MCP, and explicit wrappers remain available where
+the host does not provide a pre-submit lifecycle API.
+
 ## Prompt Companion for Non-Hook Surfaces
 
-Some surfaces do not expose a prompt lifecycle hook. Claude Desktop chat,
-browser chat, editor sidebars, and vendor-specific desktop apps cannot be
-silently intercepted unless they provide an extension point.
+Some surfaces do not expose a prompt lifecycle hook. General Claude Desktop
+chat, the current Codex Desktop conversation surface, browser chat, editor
+sidebars, and vendor-specific desktop apps cannot be silently intercepted
+unless they provide an extension point.
 
 For those, `aiwatcher ui` includes a **Prompt** tab. It gives the same preflight
 logic in a local widget:
@@ -300,7 +328,9 @@ What to check:
 
 - Claude Code: reads `~/.claude/projects/**/*.jsonl`, uses event-level `cwd`,
   and normalizes nested folders to the git project root when possible.
-- Codex CLI: reads `~/.codex/state_5.sqlite` in read-only mode when available.
+- Codex: reads `~/.codex/sessions/**/*.jsonl` for reliable per-turn token events
+  when present, and `~/.codex/state_5.sqlite` in read-only mode as a cumulative
+  fallback.
 - Cursor: detects local AI log activity where available, but cost/token detail is
   intentionally marked limited because Cursor does not reliably expose it locally.
 
@@ -308,7 +338,9 @@ What to check:
 
 - `start` is a one-time local scan, not a long-running daemon.
 - Claude Code has the richest support today.
-- Codex CLI support depends on local SQLite accessibility and schema shape.
+- Codex per-session estimates require rollout `token_count` events. Desktop or
+  older records that only expose cumulative totals remain visible but are not
+  used for savings estimates.
 - Cursor support is intentionally conservative until local token/cost data is reliable.
 - Event-level export currently has the richest support for Claude Code. Codex
   and Cursor remain session-summary first until their local event shapes are
@@ -339,10 +371,10 @@ packs, or policy enforcement. AIWatcher Local is never gated behind signup.
 
 The remaining OSS work completes the loop rather than adding more dashboards:
 
-1. Polish Prompt Gate and Prompt Companion after beta feedback: tighter copy,
-   command-host quirks, timeout defaults, and copy/paste ergonomics.
-2. Link hook interventions to the resulting session automatically and calculate
-   measured impact only after comparable evidence exists.
+1. Polish Prompt Gate and Prompt Companion after beta feedback: remaining
+   command-host quirks and copy/paste ergonomics.
+2. Improve intervention-to-session matching across concurrent sessions and
+   collect more beta evidence for baseline quality.
 3. Move watch from periodic summaries to reliable active-session loop and
    context-growth alerts, with developer-controlled pause or stop actions.
 4. Infer outcomes from tests, commits, and rework while keeping manual outcome

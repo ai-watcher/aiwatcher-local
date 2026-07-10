@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import io
 import json
+import queue
+import socket
+import threading
 import unittest
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -17,6 +21,7 @@ def session(
     tool: str = "claude-code",
     age_days: int = 0,
     project: str = "/repo",
+    notes: list[str] | None = None,
 ) -> LocalSession:
     stamp = datetime.now(timezone.utc) - timedelta(days=age_days)
     return LocalSession(
@@ -31,6 +36,7 @@ def session(
         cost_usd=0.25,
         agent_calls=20,
         tool_calls=10,
+        notes=notes or [],
     )
 
 
@@ -65,7 +71,15 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertIn("planning ranges", cli.render_preflight(result).lower())
 
     def test_codex_cumulative_totals_are_not_used_for_savings(self) -> None:
-        rows = [session(index, tool="codex-cli", age_days=index * 2) for index in range(10)]
+        rows = [
+            session(
+                index,
+                tool="codex-cli",
+                age_days=index * 2,
+                notes=["tokens_used is Codex's cumulative thread total"],
+            )
+            for index in range(10)
+        ]
         with patch.object(cli, "sessions_since", return_value=rows):
             result = cli.analyze_prompt(
                 "Refactor the entire codebase",
@@ -76,6 +90,17 @@ class PromptPreflightTests(unittest.TestCase):
         impact = result["estimated_impact"]
         self.assertFalse(impact["available"])
         self.assertIn("cumulative", impact["basis"])
+
+    def test_codex_rollout_measurements_can_support_savings_ranges(self) -> None:
+        rows = [session(index, tool="codex-cli", age_days=index * 2) for index in range(10)]
+        with patch.object(cli, "sessions_since", return_value=rows):
+            result = cli.analyze_prompt(
+                "Refactor the entire codebase",
+                tool="codex",
+                cwd="/repo",
+            )
+
+        self.assertTrue(result["estimated_impact"]["available"])
 
     def test_low_risk_prompt_does_not_render_impact_section(self) -> None:
         with patch.object(
@@ -88,6 +113,23 @@ class PromptPreflightTests(unittest.TestCase):
         rendered = cli.render_preflight(result)
         self.assertEqual(result["risk"], "low")
         self.assertNotIn("Expected impact", rendered)
+
+    def test_scoped_execution_brief_reduces_risk_score(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            original = cli.analyze_prompt(
+                "Refactor the entire codebase and delete old auth secrets",
+                tool="claude",
+                cwd="/repo",
+            )
+            selected = cli.analyze_prompt(
+                str(original["suggested_prompt"]),
+                tool="claude",
+                cwd="/repo",
+            )
+
+        self.assertEqual(original["score"], 8)
+        self.assertLess(selected["score"], original["score"])
+        self.assertEqual(selected["risk"], "low")
 
     def test_interactive_preflight_can_forward_safer_prompt(self) -> None:
         result = {
@@ -349,6 +391,114 @@ class IntegrationConfigTests(unittest.TestCase):
     def test_install_codex_hook_can_generate_prompt_gate_command(self) -> None:
         merged = cli._merge_codex_hook({}, "python -m aiwatcher_cli", gate=True)
         self.assertIn("codex-hook --gate", json.dumps(merged))
+        hook = merged["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+        self.assertGreater(hook["timeout"], cli.PROMPT_GATE_TIMEOUT_SECONDS)
+
+    def test_claude_prompt_gate_host_timeout_exceeds_browser_gate(self) -> None:
+        merged = cli._merge_claude_hook({}, "python -m aiwatcher_cli", gate=True)
+        hook = merged["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+        self.assertGreater(hook["timeout"], cli.PROMPT_GATE_TIMEOUT_SECONDS)
+        self.assertIn("statusMessage", hook)
+
+    def test_prompt_gate_http_decision_completes_before_server_shutdown(self) -> None:
+        probe = socket.socket()
+        try:
+            probe.bind(("127.0.0.1", 0))
+        except PermissionError:
+            self.skipTest("loopback sockets are unavailable in this test sandbox")
+        finally:
+            probe.close()
+        urls: queue.Queue[str] = queue.Queue()
+        gate_result: list[dict[str, str] | None] = []
+        with patch.object(cli, "sessions_since", return_value=[]):
+            analysis = cli.analyze_prompt(
+                "Refactor the entire codebase and delete old auth secrets",
+                tool="claude",
+                cwd="/repo",
+            )
+
+        def run_gate() -> None:
+            gate_result.append(cli.run_prompt_gate(
+                tool="claude",
+                cwd="/repo",
+                prompt="Refactor the entire codebase and delete old auth secrets",
+                result=analysis,
+                timeout_seconds=5,
+                open_browser=False,
+                ready_callback=urls.put,
+            ))
+
+        worker = threading.Thread(target=run_gate)
+        worker.start()
+        url = urls.get(timeout=2)
+        request = urllib.request.Request(
+            url + "decision",
+            data=json.dumps({
+                "decision": "use_brief",
+                "prompt": analysis["suggested_prompt"],
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            saved = json.load(response)
+        worker.join(timeout=12)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(saved["decision_label"], "Add safer brief")
+        self.assertEqual(gate_result[0]["decision"], "use_brief")
+
+    def test_cursor_hook_merge_preserves_existing_hooks(self) -> None:
+        settings = {
+            "version": 1,
+            "hooks": {
+                "beforeSubmitPrompt": [{"command": "python existing.py"}],
+                "stop": [{"command": "python stop.py"}],
+            },
+        }
+        merged = cli._merge_cursor_hook(settings, "python -m aiwatcher_cli", gate=True)
+        self.assertEqual(len(merged["hooks"]["beforeSubmitPrompt"]), 2)
+        self.assertIn("cursor-hook --gate", json.dumps(merged))
+        self.assertIn("stop", merged["hooks"])
+
+        updated, removed = cli._remove_cursor_hook(merged)
+        self.assertTrue(removed)
+        self.assertEqual(len(updated["hooks"]["beforeSubmitPrompt"]), 1)
+
+    def test_cursor_hook_allows_low_risk_prompt(self) -> None:
+        payload = json.dumps({"prompt": "Explain this function", "workspace_roots": ["/repo"]})
+        args = SimpleNamespace(text=None, gate=False)
+        with (
+            patch.object(cli, "_read_stdin_text", return_value=payload),
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "record_hook_event"),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_cursor_hook(args)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(json.loads(stdout.getvalue()), {"continue": True})
+
+    def test_cursor_hook_pauses_risky_prompt_with_resubmittable_brief(self) -> None:
+        payload = json.dumps({
+            "prompt": "Refactor the entire codebase and delete old auth secrets",
+            "workspace_roots": ["/repo"],
+        })
+        args = SimpleNamespace(text=None, gate=False)
+        with (
+            patch.object(cli, "_read_stdin_text", return_value=payload),
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "record_hook_event"),
+            patch.object(cli, "record_intervention"),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_cursor_hook(args)
+
+        self.assertEqual(result, 0)
+        output = json.loads(stdout.getvalue())
+        self.assertFalse(output["continue"])
+        self.assertIn("scoped execution brief", output["user_message"].lower())
+        self.assertIn("Task\nRefactor the entire codebase", output["user_message"])
 
     def test_public_hook_command_uses_module_entrypoint(self) -> None:
         command = cli._cli_command_for_current_file()
@@ -384,6 +534,33 @@ class IntegrationConfigTests(unittest.TestCase):
         )
         self.assertNotIn("codex-hook", subparsers.choices)
         self.assertNotIn("claude-hook", subparsers.choices)
+        self.assertNotIn("cursor-hook", subparsers.choices)
+
+    def test_hook_status_connects_invocation_to_preflight_decision(self) -> None:
+        with (
+            patch.object(cli, "recent_hook_events", return_value=[{
+                "created_at": "2026-07-03T12:00:00+00:00",
+                "tool": "claude",
+                "event": "received",
+                "prompt_found": True,
+                "risk": "high",
+                "score": 8,
+            }]),
+            patch.object(cli, "recent_interventions", return_value=[{
+                "created_at": "2026-07-03T12:00:05+00:00",
+                "tool": "claude",
+                "decision": "brief_edited",
+                "score": 8,
+                "selected_score": 2,
+            }]),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_hook_status(SimpleNamespace())
+
+        self.assertEqual(result, 0)
+        output = stdout.getvalue()
+        self.assertIn("prompt found | risk high | score 8", output)
+        self.assertIn("brief_edited | risk score 8 -> 2", output)
 
 
 if __name__ == "__main__":
