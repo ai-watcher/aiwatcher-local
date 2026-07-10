@@ -137,6 +137,61 @@ class PromptPreflightTests(unittest.TestCase):
         # so the glanceable summary renders above the fold, not after it.
         self.assertLess(page.index('class="guardrails"'), page.index("What AIWatcher noticed"))
 
+    def test_split_brief_for_display_is_lossless_on_reassembly(self) -> None:
+        full = cli.build_execution_brief(
+            "Refactor everything in the auth module",
+            cwd="/repo/auth",
+            broad_scope=True,
+            needs_checkpoint=True,
+            sensitive_or_destructive=True,
+            vague_scope=False,
+            multiple_tasks=False,
+        )
+        core, suffix = cli._split_brief_for_display(full)
+        self.assertNotIn("Working directory", core)
+        self.assertNotIn("Completion report", core)
+        self.assertIn("Working directory\n/repo/auth", suffix)
+        self.assertIn("Completion report", suffix)
+        # The split must be reversible -- nothing in the static suffix may be
+        # dropped from what actually gets sent when reassembled.
+        self.assertEqual(core + "\n\n" + suffix, full)
+
+    def test_split_brief_for_display_handles_missing_cwd(self) -> None:
+        full = cli.build_execution_brief(
+            "fix the bug",
+            cwd=None,
+            broad_scope=False,
+            needs_checkpoint=True,
+            sensitive_or_destructive=False,
+            vague_scope=False,
+            multiple_tasks=False,
+        )
+        core, suffix = cli._split_brief_for_display(full)
+        self.assertNotIn("Working directory", suffix)
+        self.assertIn("Completion report", suffix)
+        self.assertEqual(core + "\n\n" + suffix, full)
+
+    def test_gate_html_collapses_static_boilerplate_but_keeps_it_recoverable(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
+        page = cli._prompt_gate_html(tool="claude", cwd="/repo", prompt="original prompt text", result=result)
+
+        # The visible textarea must not contain the static suffix directly...
+        textarea_start = page.index('<textarea id="brief">') + len('<textarea id="brief">')
+        textarea_end = page.index("</textarea>")
+        textarea_content = page[textarea_start:textarea_end]
+        self.assertNotIn("Working directory", textarea_content)
+        self.assertNotIn("Completion report", textarea_content)
+        # ...but it must still be present somewhere on the page (collapsed),
+        # and the send handler must reattach it before submitting.
+        self.assertIn('id="brief-suffix"', page)
+        self.assertIn("Working directory", page)
+        self.assertIn("Completion report", page)
+        self.assertIn("suffixEl.textContent", page)
+        # The old standalone "Working directory: ..." line is gone -- it's
+        # redundant with the collapsed footer now.
+        self.assertNotIn("<p class=\"privacy\">Working directory:", page)
+
     def test_interactive_preflight_can_forward_safer_prompt(self) -> None:
         result = {
             "risk": "high",

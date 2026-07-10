@@ -732,16 +732,40 @@ def _hero_savings_label(result: dict[str, object]) -> str | None:
     return f"~{_range_label(*api_value, money)} avoidable"
 
 
+_BRIEF_STATIC_SUFFIX_MARKERS = ("\n\nWorking directory\n", "\n\nCompletion report\n")
+
+
+def _split_brief_for_display(brief: str) -> tuple[str, str]:
+    """Split a full execution brief into the decision-relevant core (Task +
+    execution-approach bullets) and the static suffix (working directory,
+    completion-report instructions) that reads identically on every gate
+    screen. The suffix still gets sent as part of the final prompt -- only
+    its on-screen presentation is collapsed, since it carries no
+    decision-relevant signal and was costing pure scroll distance.
+    """
+    indices = [i for i in (brief.find(marker) for marker in _BRIEF_STATIC_SUFFIX_MARKERS) if i != -1]
+    if not indices:
+        return brief, ""
+    cut = min(indices)
+    return brief[:cut], brief[cut:].lstrip("\n")
+
+
 def _prompt_gate_html(*, tool: str, cwd: str, prompt: str, result: dict[str, object]) -> str:
     findings = "".join(f"<li>{html.escape(str(item))}</li>" for item in result["findings"])
     suggestions = "".join(f"<li>{html.escape(str(item))}</li>" for item in result["suggestions"])
-    brief = html.escape(str(result["suggested_prompt"]))
+    brief_core, brief_suffix = _split_brief_for_display(str(result["suggested_prompt"]))
+    brief = html.escape(brief_core)
+    brief_footer = (
+        f'<details class="brief-footer"><summary>Working directory &amp; completion report '
+        f'(unchanged every time)</summary><pre id="brief-suffix">{html.escape(brief_suffix)}</pre></details>'
+        if brief_suffix
+        else ""
+    )
     original = html.escape(prompt)
     risk = html.escape(str(result["risk"]))
     score = html.escape(str(result["score"]))
     impact = html.escape(_impact_summary(result))
     tool_label = html.escape(tool)
-    cwd_label = html.escape(cwd)
     savings_label = _hero_savings_label(result)
     savings_pill = (
         f'<span class="pill savings">{html.escape(savings_label)}</span>' if savings_label else ""
@@ -807,6 +831,10 @@ button:hover {{ border-color: var(--blue); transform: translateY(-1px); }}
 .primary {{ background: linear-gradient(135deg, #36d6a5, #6aa7ff); color: #061019; border: 0; }}
 .danger {{ color: #ffd4dc; border-color: rgba(255,127,147,.45); }}
 .privacy {{ margin-top: 16px; font-size: 13px; color: var(--muted); }}
+.brief-footer {{ margin-top: 10px; }}
+.brief-footer summary {{ cursor: pointer; font-size: 13px; color: var(--muted); user-select: none; }}
+.brief-footer summary:hover {{ color: var(--text); }}
+.brief-footer pre {{ min-height: 0; margin-top: 8px; font-size: 13px; color: var(--muted); background: #0c121a; }}
 @media (max-width: 880px) {{
   main {{ width: min(100vw - 24px, 720px); margin: 18px auto; }}
   .top, .grid, .actions {{ grid-template-columns: 1fr; display: grid; }}
@@ -843,7 +871,7 @@ button:hover {{ border-color: var(--blue); transform: translateY(-1px); }}
       <h2>Execution brief</h2>
       <p>Keep the requested outcome, but add guardrails before tools run.</p>
       <textarea id="brief">{brief}</textarea>
-      <p class="privacy">Working directory: {cwd_label}</p>
+      {brief_footer}
     </section>
   </div>
   <div class="actions">
@@ -855,7 +883,13 @@ button:hover {{ border-color: var(--blue); transform: translateY(-1px); }}
 </main>
 <script>
 async function sendDecision(decision) {{
-  const body = {{ decision, prompt: document.getElementById('brief').value }};
+  const core = document.getElementById('brief').value;
+  const suffixEl = document.getElementById('brief-suffix');
+  // The static suffix (working directory, completion-report instructions) is
+  // collapsed out of view because it never changes, but it still has to be
+  // part of what's actually sent -- reattach it here rather than dropping it.
+  const prompt = suffixEl ? core + '\n\n' + suffixEl.textContent : core;
+  const body = {{ decision, prompt }};
   await fetch('/decision', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify(body) }});
   document.body.innerHTML = '<main><h1>Decision saved</h1><p>You can close this tab and return to your AI tool.</p></main>';
 }}
