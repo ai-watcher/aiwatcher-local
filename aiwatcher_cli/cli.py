@@ -14,6 +14,7 @@ import os
 import shlex
 import shutil
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 import subprocess
 import sys
 import tempfile
@@ -22,7 +23,7 @@ import time as time_module
 import webbrowser
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Iterable
+from typing import Callable, Iterable
 
 from .correlate import link_recent_interventions_to_sessions
 from .local_state import (
@@ -30,6 +31,7 @@ from .local_state import (
     get_outcome,
     link_intervention_session,
     recent_hook_events,
+    recent_interventions,
     record_intervention,
     record_hook_event,
     record_outcome,
@@ -46,8 +48,24 @@ DEFAULT_MONTHLY_BUDGET_USD = 100.0
 MIN_SAVINGS_SESSIONS = 10
 MIN_SAVINGS_HISTORY_DAYS = 14
 PROMPT_GATE_TIMEOUT_SECONDS = 180
+# Claude/Codex kill a hook command after their own default timeout (30s),
+# independent of how long AIWatcher itself is willing to wait for a gate
+# decision. Without raising it, the host kills the hook process mid-wait,
+# discarding its output -- so a decision made on the gate page never reaches
+# the agent, even though the page looks alive. Installed hook entries set
+# their "timeout" field to this value when --gate is used.
+PROMPT_GATE_HOST_TIMEOUT_SECONDS = PROMPT_GATE_TIMEOUT_SECONDS + 30
 CODEX_WRAPPER_MARKER_START = "# >>> aiwatcher codex wrapper >>>"
 CODEX_WRAPPER_MARKER_END = "# <<< aiwatcher codex wrapper <<<"
+
+
+class LocalThreadingHTTPServer(ThreadingHTTPServer):
+    """Loopback server that avoids HTTPServer's unnecessary FQDN lookup."""
+
+    def server_bind(self) -> None:
+        TCPServer.server_bind(self)
+        self.server_name = str(self.server_address[0])
+        self.server_port = int(self.server_address[1])
 
 
 def money(value: float) -> str:
@@ -414,6 +432,11 @@ def estimate_prompt_savings(prompt: str, *, risk_score: int, tool: str, cwd: str
         if project_rows:
             relevant = project_rows
 
+    excluded_cumulative = 0
+    if tool in {"codex", "codex-cli"}:
+        excluded_cumulative = sum(1 for row in relevant if has_cumulative_totals(row))
+        relevant = [row for row in relevant if not has_cumulative_totals(row)]
+
     dated_rows = [row for row in relevant if session_sort_key(row) != MIN_DT]
     history_span_days = 0
     if dated_rows:
@@ -424,7 +447,6 @@ def estimate_prompt_savings(prompt: str, *, risk_score: int, tool: str, cwd: str
     history_sufficient = (
         len(relevant) >= MIN_SAVINGS_SESSIONS
         and history_span_days >= MIN_SAVINGS_HISTORY_DAYS
-        and tool not in {"codex", "codex-cli"}
     )
     basis = (
         f"{len(relevant)} local {'AI' if tool == 'agent' else tool} session{'s' if len(relevant) != 1 else ''} "
@@ -432,8 +454,10 @@ def estimate_prompt_savings(prompt: str, *, risk_score: int, tool: str, cwd: str
         if relevant
         else "no comparable local history"
     )
-    if tool in {"codex", "codex-cli"}:
-        basis += "; Codex local token totals are cumulative, so they are not used for savings estimates"
+    if tool in {"codex", "codex-cli"} and excluded_cumulative:
+        basis += f"; excluded {excluded_cumulative} cumulative Codex thread total{'s' if excluded_cumulative != 1 else ''}"
+    if tool in {"codex", "codex-cli"} and not relevant:
+        basis += "; no per-session Codex rollout token events are available"
 
     if not history_sufficient:
         return {
@@ -563,7 +587,13 @@ def build_execution_brief(
     return "\n".join(lines)
 
 
-def analyze_prompt(prompt: str, *, tool: str = "agent", cwd: str | None = None) -> dict[str, object]:
+def analyze_prompt(
+    prompt: str,
+    *,
+    tool: str = "agent",
+    cwd: str | None = None,
+    include_estimate: bool = True,
+) -> dict[str, object]:
     text = prompt.strip()
     lower = text.lower()
     findings: list[str] = []
@@ -576,10 +606,21 @@ def analyze_prompt(prompt: str, *, tool: str = "agent", cwd: str | None = None) 
         "rewrite the app", "refactor everything", "fix all", "scan all",
     ]
     broad_scope = any(term in lower for term in broad_terms)
+    scope_guardrails = any(term in lower for term in [
+        "smallest relevant subsystem", "one coherent phase", "phased plan",
+        "do not expand into unrelated", "smallest relevant files",
+    ])
     if broad_scope:
-        score += 3
-        findings.append("Scope looks broad and likely to create large context or many tool calls.")
-        suggestions.append("Start with a plan-only pass over the smallest relevant files before editing.")
+        if scope_guardrails:
+            score += 1
+            findings.append("Scope is broad, but explicit phasing and stop conditions reduce execution pressure.")
+        else:
+            score += 3
+            findings.append("Scope looks broad and likely to create large context or many tool calls.")
+            suggestions.append("Start with a plan-only pass over the smallest relevant files before editing.")
+        # build_execution_brief() still adds the scope-narrowing bullet
+        # unconditionally on broad_scope (regardless of scope_guardrails), so
+        # the chip must match what's actually added to the brief.
         guardrails.append({"icon": "\U0001F50E", "label": "Scope narrowed"})
 
     edit_terms = ["change", "modify", "edit", "write", "implement", "refactor", "delete", "migrate", "rename"]
@@ -596,10 +637,22 @@ def analyze_prompt(prompt: str, *, tool: str = "agent", cwd: str | None = None) 
         ".env", "credential", "delete", "drop table", "rm -rf", "payment", "stripe",
     ]
     sensitive_or_destructive = any(term in lower for term in risky_terms)
+    safety_guardrails = any(term in lower for term in [
+        "ask for confirmation before", "require confirmation before",
+        "do not reveal secret", "do not make destructive changes",
+        "avoid exposing secrets",
+    ])
     if sensitive_or_destructive:
-        score += 3
-        findings.append("Prompt mentions sensitive data, credentials, production systems, or destructive actions.")
-        suggestions.append("Require confirmation before destructive changes and avoid exposing secrets or customer data.")
+        if safety_guardrails:
+            score += 1
+            findings.append("Sensitive or destructive work is present with an explicit confirmation boundary.")
+        else:
+            score += 3
+            findings.append("Prompt mentions sensitive data, credentials, production systems, or destructive actions.")
+            suggestions.append("Require confirmation before destructive changes and avoid exposing secrets or customer data.")
+        # build_execution_brief() still adds the confirm-before-destructive
+        # bullet unconditionally on sensitive_or_destructive (regardless of
+        # safety_guardrails), so the chip must match what's actually added.
         guardrails.append({"icon": "\U0001F6D1", "label": "Confirm before destructive changes"})
 
     vague_terms = ["make it better", "improve everything", "clean this up", "fix it", "optimize it"]
@@ -646,7 +699,7 @@ def analyze_prompt(prompt: str, *, tool: str = "agent", cwd: str | None = None) 
         "suggested_prompt": safer_prompt,
         "estimated_impact": (
             estimate_prompt_savings(text, risk_score=score, tool=tool, cwd=cwd)
-            if score > 0
+            if score > 0 and include_estimate
             else {}
         ),
     }
@@ -713,6 +766,22 @@ def _impact_summary(result: dict[str, object]) -> str:
         f"{_range_label(*savings['api_value_usd'], money)} API-equivalent. "
         f"Confidence: {impact.get('confidence', 'low')}."
     )
+
+
+def _selected_prompt_assessment(
+    selected_prompt: str | None,
+    *,
+    original_prompt: str,
+    original_result: dict[str, object],
+    tool: str,
+    cwd: str,
+) -> tuple[str | None, int | None]:
+    if not selected_prompt:
+        return None, None
+    if selected_prompt == original_prompt:
+        return str(original_result["risk"]), int(original_result["score"])
+    selected = analyze_prompt(selected_prompt, tool=tool, cwd=cwd, include_estimate=False)
+    return str(selected["risk"]), int(selected["score"])
 
 
 def _hero_savings_label(result: dict[str, object]) -> str | None:
@@ -861,6 +930,7 @@ textarea {{ resize: vertical; min-height: 260px; }}
 .actions {{ position: sticky; bottom: 0; margin-top: 20px; display: grid; grid-template-columns: 1.2fr 1fr 1fr 1fr; gap: 10px; padding: 16px; background: rgba(9,13,18,.94); border: 1px solid var(--line); border-radius: 8px; backdrop-filter: blur(10px); }}
 button {{ appearance: none; border: 1px solid var(--line); border-radius: 8px; min-height: 48px; padding: 0 16px; background: #0f1722; color: var(--text); font: inherit; font-weight: 700; cursor: pointer; }}
 button:hover {{ border-color: var(--blue); transform: translateY(-1px); }}
+button:disabled {{ cursor: wait; opacity: .62; transform: none; }}
 .primary {{ background: linear-gradient(135deg, #36d6a5, #6aa7ff); color: #061019; border: 0; }}
 .danger {{ color: #ffd4dc; border-color: rgba(255,127,147,.45); }}
 .privacy {{ margin-top: 16px; font-size: 13px; color: var(--muted); }}
@@ -917,23 +987,46 @@ button:hover {{ border-color: var(--blue); transform: translateY(-1px); }}
     </section>
   </div>
   <div class="actions">
-    <button class="primary" onclick="sendDecision('use_brief')">Use brief</button>
-    <button onclick="sendDecision('edit')">Use edited brief</button>
+    <button class="primary" onclick="sendDecision('use_brief')">Add safer brief</button>
+    <button onclick="sendDecision('edit')">Add edited brief</button>
     <button onclick="sendDecision('run_original')">Run original</button>
     <button class="danger" onclick="sendDecision('cancel')">Cancel run</button>
   </div>
+  <p id="decision-status" class="privacy" role="status"></p>
 </main>
 <script>
 async function sendDecision(decision) {{
-  const core = document.getElementById('brief').value;
-  const suffixEl = document.getElementById('brief-suffix');
-  // The static suffix (working directory, completion-report instructions) is
-  // collapsed out of view because it never changes, but it still has to be
-  // part of what's actually sent -- reattach it here rather than dropping it.
-  const prompt = suffixEl ? core + '\n\n' + suffixEl.textContent : core;
-  const body = {{ decision, prompt }};
-  await fetch('/decision', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify(body) }});
-  document.body.innerHTML = '<main><h1>Decision saved</h1><p>You can close this tab and return to your AI tool.</p></main>';
+  const buttons = Array.from(document.querySelectorAll('button'));
+  const status = document.getElementById('decision-status');
+  buttons.forEach(button => button.disabled = true);
+  status.textContent = 'Applying your decision…';
+  try {{
+    const core = document.getElementById('brief').value;
+    const suffixEl = document.getElementById('brief-suffix');
+    // The static suffix (working directory, completion-report instructions) is
+    // collapsed out of view because it never changes, but it still has to be
+    // part of what's actually sent -- reattach it here rather than dropping it.
+    const prompt = suffixEl ? core + '\n\n' + suffixEl.textContent : core;
+    const body = {{ decision, prompt }};
+    const response = await fetch('/decision', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify(body) }});
+    const saved = await response.json();
+    if (!response.ok) throw new Error(saved.error || `Request failed (${{response.status}})`);
+    const title = decision === 'cancel' ? 'Run cancelled' : decision === 'run_original' ? 'Original approved' : 'Execution brief added';
+    const riskChange = saved.selected_score === null
+      ? 'No prompt will run.'
+      : `Risk ${{saved.original_risk}} (${{saved.original_score}}) → ${{saved.selected_risk}} (${{saved.selected_score}})`;
+    document.body.innerHTML = `<main>
+      <div class="top"><div><h1>${{title}}</h1><p>Your choice has been returned to ${{saved.tool}}.</p></div><span class="pill">${{saved.decision_label}}</span></div>
+      <section class="card" style="max-width:760px">
+        <h2>${{riskChange}}</h2>
+        <div class="impact">${{saved.impact}}</div>
+        <p style="margin-top:16px">Return to your AI tool. On Claude hooks, an accepted brief is added beside the original request; cancelling blocks the original request entirely.</p>
+      </section>
+    </main>`;
+  }} catch (error) {{
+    buttons.forEach(button => button.disabled = false);
+    status.textContent = `AIWatcher could not apply this decision: ${{error.message}}. The host may have timed out; return to the AI tool and confirm before continuing.`;
+  }}
 }}
 </script>
 </body>
@@ -948,6 +1041,7 @@ def run_prompt_gate(
     result: dict[str, object],
     timeout_seconds: int = PROMPT_GATE_TIMEOUT_SECONDS,
     open_browser: bool = True,
+    ready_callback: Callable[[str], None] | None = None,
 ) -> dict[str, str] | None:
     decision_event = threading.Event()
     state: dict[str, str] = {}
@@ -964,6 +1058,7 @@ def run_prompt_gate(
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(encoded)
+            self.wfile.flush()
 
         def do_GET(self) -> None:
             if self.path != "/":
@@ -985,15 +1080,46 @@ def run_prompt_gate(
                 self._send(400, json.dumps({"error": "unknown decision"}), "application/json; charset=utf-8")
                 return
             state["decision"] = decision
-            state["prompt"] = str(payload.get("prompt") or result.get("suggested_prompt") or "")
+            selected_prompt = str(payload.get("prompt") or result.get("suggested_prompt") or "")
+            if decision == "run_original":
+                selected_prompt = prompt
+            elif decision == "cancel":
+                selected_prompt = ""
+            selected_risk, selected_score = _selected_prompt_assessment(
+                selected_prompt or None,
+                original_prompt=prompt,
+                original_result=result,
+                tool=tool,
+                cwd=cwd,
+            )
+            state["prompt"] = selected_prompt
+            state["selected_risk"] = selected_risk or ""
+            state["selected_score"] = str(selected_score) if selected_score is not None else ""
+            labels = {
+                "use_brief": "Add safer brief",
+                "edit": "Add edited brief",
+                "run_original": "Run original",
+                "cancel": "Cancel run",
+            }
+            self._send(200, json.dumps({
+                "ok": True,
+                "tool": tool,
+                "decision_label": labels[decision],
+                "original_risk": result["risk"],
+                "original_score": result["score"],
+                "selected_risk": selected_risk,
+                "selected_score": selected_score,
+                "impact": _impact_summary(result),
+            }), "application/json; charset=utf-8")
             decision_event.set()
-            self._send(200, json.dumps({"ok": True}), "application/json; charset=utf-8")
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), GateHandler)
+    server = LocalThreadingHTTPServer(("127.0.0.1", 0), GateHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     url = f"http://127.0.0.1:{server.server_port}/"
     try:
+        if ready_callback:
+            ready_callback(url)
         if open_browser:
             try:
                 webbrowser.open(url)
@@ -1562,6 +1688,13 @@ def command_agent_prompt(args: argparse.Namespace) -> int:
         return 0
     intervention_id = None
     try:
+        selected_risk, selected_score = _selected_prompt_assessment(
+            selected_prompt,
+            original_prompt=prompt,
+            original_result=result,
+            tool=args.agent,
+            cwd=cwd,
+        )
         intervention_id = record_intervention(
             tool=args.agent,
             cwd=cwd,
@@ -1577,6 +1710,8 @@ def command_agent_prompt(args: argparse.Namespace) -> int:
                 if isinstance(result.get("estimated_impact"), dict)
                 else None
             ),
+            selected_risk=selected_risk,
+            selected_score=selected_score,
         )
     except OSError as exc:
         print(f"Warning: could not record AIWatcher preflight decision: {exc}", file=sys.stderr)
@@ -1669,6 +1804,18 @@ def _record_hook_intervention(
     selected_prompt: str | None = None,
 ) -> None:
     try:
+        effective_prompt = (
+            selected_prompt or str(result["suggested_prompt"])
+            if decision in {"context_added", "brief_accepted", "brief_edited"}
+            else prompt if decision == "allowed_original" else None
+        )
+        selected_risk, selected_score = _selected_prompt_assessment(
+            effective_prompt,
+            original_prompt=prompt,
+            original_result=result,
+            tool=tool,
+            cwd=cwd,
+        )
         record_intervention(
             tool=tool,
             cwd=cwd,
@@ -1678,16 +1825,14 @@ def _record_hook_intervention(
             original_prompt=prompt,
             suggested_prompt=str(result["suggested_prompt"]),
             decision=decision,
-            selected_prompt=(
-                selected_prompt or str(result["suggested_prompt"])
-                if decision in {"context_added", "brief_accepted", "brief_edited"}
-                else None
-            ),
+            selected_prompt=effective_prompt,
             estimated_impact=(
                 result["estimated_impact"]
                 if isinstance(result.get("estimated_impact"), dict)
                 else None
             ),
+            selected_risk=selected_risk,
+            selected_score=selected_score,
         )
     except OSError:
         pass
@@ -1718,12 +1863,13 @@ def _record_hook_event(
 
 def _hook_output_with_brief(tool: str, selected_prompt: str) -> dict[str, object]:
     return {
-        "systemMessage": "AIWatcher added a scoped execution brief before tools run.",
+        "systemMessage": "AIWatcher added a scoped execution brief alongside the submitted request.",
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "additionalContext": (
                 "AIWatcher identified avoidable cost or safety pressure. "
-                "Use the following execution brief while preserving the user's requested outcome:\n\n"
+                "Treat the following execution brief as controlling guidance for how to execute "
+                "the user's submitted request while preserving its intended outcome:\n\n"
                 + selected_prompt
             ),
         },
@@ -1842,9 +1988,9 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
         tool=tool,
         cwd=cwd,
         prompt=prompt,
-            result=result,
-            decision="context_added",
-        )
+        result=result,
+        decision="context_added",
+    )
     print(json.dumps(_hook_output_with_brief(tool, str(result["suggested_prompt"]))))
     return 0
 
@@ -1857,10 +2003,104 @@ def command_codex_hook(args: argparse.Namespace) -> int:
     return _command_prompt_hook(args, tool="codex")
 
 
+def _cursor_hook_response(*, allow: bool, message: str | None = None) -> dict[str, object]:
+    response: dict[str, object] = {"continue": allow}
+    if message:
+        response["user_message"] = message
+        response["agent_message"] = message
+    return response
+
+
+def command_cursor_hook(args: argparse.Namespace) -> int:
+    """Handle Cursor's beforeSubmitPrompt event.
+
+    Cursor can allow or block a submitted prompt, but cannot replace its text
+    or inject additional context. Risky prompts are paused with a scoped brief
+    that the developer can review and resubmit.
+    """
+    raw = _read_stdin_text()
+    try:
+        payload = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError:
+        payload = {}
+    prompt = args.text or _extract_prompt_from_hook(payload)
+    workspace_roots = payload.get("workspace_roots")
+    workspace = workspace_roots[0] if isinstance(workspace_roots, list) and workspace_roots else None
+    cwd = str(payload.get("cwd") or payload.get("workspace") or workspace or os.getcwd())
+    result = analyze_prompt(prompt, tool="cursor", cwd=cwd) if prompt else {
+        "risk": "low",
+        "score": 0,
+        "tool": "cursor",
+        "findings": ["No prompt text found in hook payload."],
+        "suggestions": ["Allowing prompt because AIWatcher could not inspect it."],
+        "suggested_prompt": "",
+        "estimated_impact": {},
+    }
+    _record_hook_event(tool="cursor", cwd=cwd, event="received", prompt_found=bool(prompt), result=result)
+    if result["risk"] == "low":
+        print(json.dumps(_cursor_hook_response(allow=True)))
+        return 0
+
+    if _prompt_gate_requested(args):
+        try:
+            gate = run_prompt_gate(tool="cursor", cwd=cwd, prompt=prompt, result=result)
+        except OSError as exc:
+            gate = None
+            _record_hook_event(
+                tool="cursor", cwd=cwd, event="gate_failed", prompt_found=bool(prompt), result=result, error=str(exc)
+            )
+        if gate:
+            decision = gate.get("decision")
+            selected_prompt = str(gate.get("prompt") or result["suggested_prompt"])
+            if decision == "run_original":
+                _record_hook_intervention(
+                    tool="cursor", cwd=cwd, prompt=prompt, result=result, decision="allowed_original"
+                )
+                print(json.dumps(_cursor_hook_response(allow=True)))
+                return 0
+            if decision in {"use_brief", "edit"}:
+                _record_hook_intervention(
+                    tool="cursor",
+                    cwd=cwd,
+                    prompt=prompt,
+                    result=result,
+                    decision="brief_edited" if decision == "edit" else "brief_accepted",
+                    selected_prompt=selected_prompt,
+                )
+                message = (
+                    "AIWatcher paused the original prompt. Cursor hooks cannot replace prompt text. "
+                    "Resubmit this scoped execution brief:\n\n" + selected_prompt
+                )
+                print(json.dumps(_cursor_hook_response(allow=False, message=message)))
+                return 0
+            if decision == "cancel":
+                _record_hook_intervention(
+                    tool="cursor", cwd=cwd, prompt=prompt, result=result, decision="cancelled"
+                )
+                print(json.dumps(_cursor_hook_response(
+                    allow=False, message="AIWatcher cancelled this prompt before execution."
+                )))
+                return 0
+
+    _record_hook_intervention(tool="cursor", cwd=cwd, prompt=prompt, result=result, decision="blocked")
+    message = (
+        f"AIWatcher paused this {result['risk']}-risk prompt (score {result['score']}). "
+        "Cursor hooks cannot rewrite submitted text. Review and resubmit this scoped execution brief:\n\n"
+        + str(result["suggested_prompt"])
+    )
+    print(json.dumps(_cursor_hook_response(allow=False, message=message)))
+    return 0
+
+
 def _cli_command_for_current_file() -> str:
-    parts = [sys.executable, "-m", "aiwatcher_cli"]
+    executable = sys.executable
     if os.name == "nt":
-        return subprocess.list2cmdline(parts)
+        # Claude/Codex/Cursor invoke hook commands through a POSIX shell (Git
+        # Bash) even on Windows, where backslash is an escape character. An
+        # unquoted Windows path like C:\Users\... gets mangled to C:Users...,
+        # so normalize to forward slashes, which Windows accepts too.
+        executable = executable.replace("\\", "/")
+    parts = [executable, "-m", "aiwatcher_cli"]
     return " ".join(shlex.quote(part) for part in parts)
 
 
@@ -1876,14 +2116,14 @@ def _merge_claude_hook(settings: dict[str, object], command: str, *, gate: bool 
     event_hooks = hooks.get("UserPromptSubmit")
     if not isinstance(event_hooks, list):
         event_hooks = []
-    handler = {
-        "hooks": [
-            {
-                "type": "command",
-                "command": _hook_command(command, "claude-hook", gate=gate),
-            }
-        ]
+    command_hook: dict[str, object] = {
+        "type": "command",
+        "command": _hook_command(command, "claude-hook", gate=gate),
+        "statusMessage": "AIWatcher is checking execution pressure",
     }
+    if gate:
+        command_hook["timeout"] = PROMPT_GATE_HOST_TIMEOUT_SECONDS
+    handler = {"hooks": [command_hook]}
     event_hooks = [
         item for item in event_hooks
         if not (
@@ -1947,13 +2187,14 @@ def _merge_codex_hook(settings: dict[str, object], command: str, *, gate: bool =
             )
         )
     ]
-    event_hooks.append({
-        "hooks": [{
-            "type": "command",
-            "command": _hook_command(command, "codex-hook", gate=gate),
-            "statusMessage": "AIWatcher is checking execution pressure",
-        }]
-    })
+    codex_command_hook: dict[str, object] = {
+        "type": "command",
+        "command": _hook_command(command, "codex-hook", gate=gate),
+        "statusMessage": "AIWatcher is checking execution pressure",
+    }
+    if gate:
+        codex_command_hook["timeout"] = PROMPT_GATE_HOST_TIMEOUT_SECONDS
+    event_hooks.append({"hooks": [codex_command_hook]})
     hooks["UserPromptSubmit"] = event_hooks
     settings["hooks"] = hooks
     return settings
@@ -2001,18 +2242,68 @@ def _codex_hooks_path(scope: str, project_dir: str | None = None) -> str:
     return os.path.expanduser("~/.codex/hooks.json")
 
 
+def _cursor_hooks_path(scope: str, project_dir: str | None = None) -> str:
+    if scope == "project":
+        return os.path.abspath(os.path.join(project_dir or os.getcwd(), ".cursor", "hooks.json"))
+    return os.path.expanduser("~/.cursor/hooks.json")
+
+
+def _merge_cursor_hook(settings: dict[str, object], command: str, *, gate: bool = False) -> dict[str, object]:
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+    event_hooks = hooks.get("beforeSubmitPrompt")
+    if not isinstance(event_hooks, list):
+        event_hooks = []
+    event_hooks = [
+        item for item in event_hooks
+        if not (isinstance(item, dict) and "cursor-hook" in str(item.get("command", "")))
+    ]
+    event_hooks.append({
+        "command": _hook_command(command, "cursor-hook", gate=gate),
+        "failClosed": False,
+    })
+    hooks["beforeSubmitPrompt"] = event_hooks
+    settings["version"] = 1
+    settings["hooks"] = hooks
+    return settings
+
+
+def _remove_cursor_hook(settings: dict[str, object]) -> tuple[dict[str, object], bool]:
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return settings, False
+    event_hooks = hooks.get("beforeSubmitPrompt")
+    if not isinstance(event_hooks, list):
+        return settings, False
+    filtered = [
+        item for item in event_hooks
+        if not (isinstance(item, dict) and "cursor-hook" in str(item.get("command", "")))
+    ]
+    if len(filtered) == len(event_hooks):
+        return settings, False
+    if filtered:
+        hooks["beforeSubmitPrompt"] = filtered
+    else:
+        hooks.pop("beforeSubmitPrompt", None)
+    settings["hooks"] = hooks
+    return settings, True
+
+
 def command_install_claude_hook(args: argparse.Namespace) -> int:
     command = args.command or _cli_command_for_current_file()
+    command_hook: dict[str, object] = {
+        "type": "command",
+        "command": _hook_command(command, "claude-hook", gate=args.gate),
+        "statusMessage": "AIWatcher is checking execution pressure",
+    }
+    if args.gate:
+        command_hook["timeout"] = PROMPT_GATE_HOST_TIMEOUT_SECONDS
     snippet = {
         "hooks": {
             "UserPromptSubmit": [
                 {
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": _hook_command(command, "claude-hook", gate=args.gate),
-                        }
-                    ]
+                    "hooks": [command_hook]
                 }
             ]
         }
@@ -2118,6 +2409,59 @@ def command_uninstall_codex_hook(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_install_cursor_hook(args: argparse.Namespace) -> int:
+    command = args.command or _cli_command_for_current_file()
+    snippet = _merge_cursor_hook({}, command, gate=args.gate)
+    if not args.write:
+        print("Add this to your Cursor hooks JSON:")
+        print(json.dumps(snippet, indent=2))
+        print("\nUser-global path: ~/.cursor/hooks.json")
+        print("Project-local path: .cursor/hooks.json")
+        print("Reload the Cursor window, then inspect Output > Hooks after submitting a prompt.")
+        return 0
+
+    hooks_path = _cursor_hooks_path(args.scope, args.project_dir)
+    os.makedirs(os.path.dirname(hooks_path), exist_ok=True)
+    existing: dict[str, object] = {}
+    if os.path.exists(hooks_path):
+        try:
+            with open(hooks_path, "r", encoding="utf-8") as handle:
+                existing = json.load(handle)
+        except json.JSONDecodeError:
+            backup = hooks_path + ".aiwatcher.bak"
+            shutil.copyfile(hooks_path, backup)
+            print(f"Existing hooks were not valid JSON. Backed up to {backup}.")
+    merged = _merge_cursor_hook(existing, command, gate=args.gate)
+    with open(hooks_path, "w", encoding="utf-8") as handle:
+        json.dump(merged, handle, indent=2)
+        handle.write("\n")
+    print(f"Installed AIWatcher Cursor beforeSubmitPrompt hook at {hooks_path}")
+    print("Reload the Cursor window, submit a prompt, then run `aiwatcher hook-status`.")
+    return 0
+
+
+def command_uninstall_cursor_hook(args: argparse.Namespace) -> int:
+    hooks_path = _cursor_hooks_path(args.scope, args.project_dir)
+    if not os.path.exists(hooks_path):
+        print(f"No Cursor hooks file found at {hooks_path}.")
+        return 0
+    try:
+        with open(hooks_path, "r", encoding="utf-8") as handle:
+            settings = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Could not read Cursor hooks at {hooks_path}: {exc}", file=sys.stderr)
+        return 2
+    updated, removed = _remove_cursor_hook(settings)
+    if not removed:
+        print(f"No AIWatcher Cursor hook found in {hooks_path}.")
+        return 0
+    with open(hooks_path, "w", encoding="utf-8") as handle:
+        json.dump(updated, handle, indent=2)
+        handle.write("\n")
+    print(f"Removed AIWatcher Cursor hook from {hooks_path}")
+    return 0
+
+
 def _detect_binary(name: str, fallback: str | None = None) -> str:
     found = shutil.which(name)
     if found:
@@ -2207,6 +2551,8 @@ def command_doctor(_args: argparse.Namespace) -> int:
     claude_user = _claude_settings_path("user")
     codex_project = _codex_hooks_path("project")
     codex_user = _codex_hooks_path("user")
+    cursor_project = _cursor_hooks_path("project")
+    cursor_user = _cursor_hooks_path("user")
     shell_rc = os.path.expanduser("~/.zshrc")
     codex_config = os.path.expanduser("~/.codex/config.toml")
 
@@ -2226,6 +2572,8 @@ def command_doctor(_args: argparse.Namespace) -> int:
     print(f"Claude user hook: {'installed' if file_contains(claude_user, 'claude-hook') else 'not installed'}")
     print(f"Codex project hook: {'installed' if file_contains(codex_project, 'codex-hook') else 'not installed'}")
     print(f"Codex user hook: {'installed' if file_contains(codex_user, 'codex-hook') else 'not installed'}")
+    print(f"Cursor project hook: {'installed' if file_contains(cursor_project, 'cursor-hook') else 'not installed'}")
+    print(f"Cursor user hook: {'installed' if file_contains(cursor_user, 'cursor-hook') else 'not installed'}")
     print(f"Codex shell wrapper: {'installed' if file_contains(shell_rc, CODEX_WRAPPER_MARKER_START) else 'not installed'}")
     print(f"Codex MCP config: {'referenced' if file_contains(codex_config, 'aiwatcher') else 'not detected'}")
     print(f"Local state: {state_path()}")
@@ -2237,25 +2585,35 @@ def command_doctor(_args: argparse.Namespace) -> int:
 
 def command_hook_status(_args: argparse.Namespace) -> int:
     events = recent_hook_events(limit=8)
+    interventions = recent_interventions(limit=5, days=7)
     print("AIWatcher hook status\n")
     if not events:
         print("No recent hook events recorded.")
-        print("If you just submitted a Codex prompt, the current Codex surface may not be running UserPromptSubmit hooks.")
-        return 0
-    for event in events:
-        stamp = str(event.get("created_at", "unknown"))
-        tool = str(event.get("tool", "unknown"))
-        name = str(event.get("event", "unknown"))
-        prompt_label = "prompt found" if event.get("prompt_found") else "prompt missing"
-        risk = event.get("risk") or "unknown"
-        score = event.get("score")
-        line = f"- {stamp} | {tool} | {name} | {prompt_label} | risk {risk}"
-        if score is not None:
-            line += f" | score {score}"
-        print(line)
-        if event.get("error"):
-            print(f"  error: {event['error']}")
-    print("\nIf events appear here but Codex did not pause, inspect the risk/decision. If no events appear, that Codex surface is not invoking the hook.")
+        print("Submit a test prompt after installing a Claude, Codex, or Cursor hook, then check again.")
+    else:
+        for event in events:
+            stamp = str(event.get("created_at", "unknown"))
+            tool = str(event.get("tool", "unknown"))
+            name = str(event.get("event", "unknown"))
+            prompt_label = "prompt found" if event.get("prompt_found") else "prompt missing"
+            risk = event.get("risk") or "unknown"
+            score = event.get("score")
+            line = f"- {stamp} | {tool} | {name} | {prompt_label} | risk {risk}"
+            if score is not None:
+                line += f" | score {score}"
+            print(line)
+            if event.get("error"):
+                print(f"  error: {event['error']}")
+    if interventions:
+        print("\nRecent preflight decisions")
+        for row in interventions:
+            selected_score = row.get("selected_score")
+            change = f"{row.get('score', 'unknown')} -> {selected_score}" if selected_score is not None else str(row.get("score", "unknown"))
+            print(
+                f"- {row.get('created_at', 'unknown')} | {row.get('tool', 'unknown')} | "
+                f"{row.get('decision', 'recorded')} | risk score {change}"
+            )
+    print("\nIf an event appears but the tool did not pause, inspect its risk and decision. If no event appears, reload the tool and verify its hook configuration.")
     return 0
 
 
@@ -2592,6 +2950,19 @@ def build_parser() -> argparse.ArgumentParser:
     uninstall_codex_hook.add_argument("--project-dir")
     uninstall_codex_hook.set_defaults(func=command_uninstall_codex_hook)
 
+    install_cursor_hook = sub.add_parser("install-cursor-hook", help="Print or install a native Cursor prompt preflight hook")
+    install_cursor_hook.add_argument("--write", action="store_true", help="Write the hook into Cursor hooks.json")
+    install_cursor_hook.add_argument("--scope", choices=["project", "user"], default="user")
+    install_cursor_hook.add_argument("--project-dir")
+    install_cursor_hook.add_argument("--command", help="AIWatcher command to put in Cursor hooks")
+    install_cursor_hook.add_argument("--gate", action="store_true", help="Open the local Prompt Gate decision screen for risky prompts")
+    install_cursor_hook.set_defaults(func=command_install_cursor_hook)
+
+    uninstall_cursor_hook = sub.add_parser("uninstall-cursor-hook", help="Remove the native AIWatcher Cursor prompt hook")
+    uninstall_cursor_hook.add_argument("--scope", choices=["project", "user"], default="user")
+    uninstall_cursor_hook.add_argument("--project-dir")
+    uninstall_cursor_hook.set_defaults(func=command_uninstall_cursor_hook)
+
     install_codex_wrapper = sub.add_parser("install-codex-wrapper", help="Print or install a shell wrapper that preflights Codex prompts")
     install_codex_wrapper.add_argument("--write", action="store_true", help="Write the wrapper into your shell rc file")
     install_codex_wrapper.add_argument("--shell-rc", default="~/.zshrc")
@@ -2605,7 +2976,7 @@ def build_parser() -> argparse.ArgumentParser:
     uninstall_codex_wrapper.set_defaults(func=command_uninstall_codex_wrapper)
 
     sub.add_parser("doctor", help="Check local tool detection and AIWatcher integrations").set_defaults(func=command_doctor)
-    sub.add_parser("hook-status", help="Show recent local Codex/Claude hook invocations").set_defaults(func=command_hook_status)
+    sub.add_parser("hook-status", help="Show recent local Claude, Codex, and Cursor hook invocations").set_defaults(func=command_hook_status)
 
     sub.add_parser("mcp", help="Run AIWatcher Local as a stdio MCP server").set_defaults(func=command_mcp)
 
@@ -2629,12 +3000,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
-    if arguments and arguments[0] in {"claude-hook", "codex-hook"}:
+    if arguments and arguments[0] in {"claude-hook", "codex-hook", "cursor-hook"}:
         hook_parser = argparse.ArgumentParser(add_help=False)
         hook_parser.add_argument("--text")
         hook_parser.add_argument("--gate", action="store_true")
         hook_args = hook_parser.parse_args(arguments[1:])
-        handler = command_claude_hook if arguments[0] == "claude-hook" else command_codex_hook
+        handlers = {
+            "claude-hook": command_claude_hook,
+            "codex-hook": command_codex_hook,
+            "cursor-hook": command_cursor_hook,
+        }
+        handler = handlers[arguments[0]]
         return int(handler(hook_args))
     args = build_parser().parse_args(arguments)
     return int(args.func(args))

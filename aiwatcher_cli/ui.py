@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from . import __version__
 from .cli import analyze_prompt, session_insights
 from .correlate import link_recent_interventions_to_sessions
 from .local_state import (
@@ -22,6 +23,7 @@ from .local_state import (
     record_outcome,
 )
 from .pricing import is_subscription_model
+from .session_health import ContextHealth, analyze_all_sessions, gate_health_warning
 from .scanner import (
     LocalEvent,
     LocalSession,
@@ -31,6 +33,9 @@ from .scanner import (
     scan_all_events,
     segment_session_by_prompt,
 )
+
+
+MAX_REQUEST_BYTES = 64 * 1024
 
 MIN_DT = datetime.min.replace(tzinfo=timezone.utc)
 
@@ -417,6 +422,154 @@ def build_prompt_preflight(prompt: str, *, tool: str = "agent", cwd: str | None 
     }
 
 
+def _impact_range_label(values: object, *, currency: bool = False) -> str | None:
+    if not isinstance(values, list) or len(values) != 2:
+        return None
+    low, high = values
+    if not isinstance(low, (int, float)) or not isinstance(high, (int, float)):
+        return None
+    formatter = money if currency else lambda value: compact_int(int(value))
+    return formatter(float(low)) if low == high else f"{formatter(float(low))}-{formatter(float(high))}"
+
+
+def _build_intervention_receipts(
+    interventions: list[dict[str, object]],
+    sessions: list[LocalSession],
+    outcomes: dict[str, dict[str, object]],
+    events: list[LocalEvent] | None = None,
+) -> list[dict[str, object]]:
+    sessions_by_id = {row.session_id: row for row in sessions}
+    events = events or []
+    receipts: list[dict[str, object]] = []
+    decision_labels = {
+        "brief_accepted": "Used safer brief",
+        "brief_edited": "Used edited brief",
+        "context_added": "Added safer context",
+        "allowed_original": "Ran original",
+        "original": "Ran original",
+        "suggested": "Used safer prompt",
+        "edited": "Used edited prompt",
+        "blocked": "Blocked",
+        "cancelled": "Cancelled",
+    }
+    for intervention in interventions:
+        decision = str(intervention.get("decision") or "")
+        session_id = str(intervention.get("session_id") or "")
+        if decision in {"blocked", "cancelled"}:
+            session_id = ""
+        session = sessions_by_id.get(session_id)
+        prediction = intervention.get("predicted_impact")
+        prediction = prediction if isinstance(prediction, dict) else {}
+        savings = prediction.get("savings") if isinstance(prediction.get("savings"), dict) else {}
+        original = prediction.get("original") if isinstance(prediction.get("original"), dict) else {}
+        actual_reliable = bool(session and not has_cumulative_totals(session))
+        actual = None
+        inferred = None
+        created_at = None
+        try:
+            created_at = datetime.fromisoformat(str(intervention.get("created_at") or "").replace("Z", "+00:00"))
+        except ValueError:
+            pass
+        observed_events = [
+            event for event in events
+            if event.session_id == session_id
+            and event.timestamp
+            and created_at
+            and event.timestamp.astimezone(timezone.utc) >= created_at.astimezone(timezone.utc) - timedelta(seconds=5)
+        ]
+        if session and observed_events:
+            event_tokens_in = sum(event.tokens_in for event in observed_events)
+            event_tokens_out = sum(event.tokens_out for event in observed_events)
+            event_cost = sum(event.cost_usd for event in observed_events)
+            event_model_calls = sum(1 for event in observed_events if event.tokens_in or event.tokens_out)
+            event_tool_calls = sum(1 for event in observed_events if event.event_type == "tool_result")
+            actual_reliable = True
+            actual = {
+                "tokens": event_tokens_in + event_tokens_out,
+                "tokens_label": compact_int(event_tokens_in + event_tokens_out),
+                "model_calls": event_model_calls,
+                "tool_calls": event_tool_calls,
+                "api_value_usd": round(event_cost, 6),
+                "api_value_label": money(event_cost),
+                "reliable": True,
+                "reason": "Measured from local events recorded after this intervention.",
+            }
+        if session:
+            session_started = session.started_at.astimezone(timezone.utc) if session.started_at else None
+            intervention_time = created_at.astimezone(timezone.utc) if created_at else None
+            session_predates_intervention = bool(session_started and intervention_time and session_started < intervention_time - timedelta(minutes=2))
+            if actual is None:
+                actual_reliable = actual_reliable and not session_predates_intervention
+                reason = None
+                if has_cumulative_totals(session):
+                    reason = "This tool exposes cumulative thread totals, not one-prompt usage."
+                elif session_predates_intervention:
+                    reason = "The linked conversation predates this intervention and no post-intervention event delta is available."
+                actual = {
+                    "tokens": session.tokens_in + session.tokens_out,
+                    "tokens_label": compact_int(session.tokens_in + session.tokens_out),
+                    "model_calls": session.agent_calls,
+                    "tool_calls": session.tool_calls,
+                    "api_value_usd": round(session.cost_usd, 6),
+                    "api_value_label": money(session.cost_usd),
+                    "reliable": actual_reliable,
+                    "reason": reason,
+                }
+        if actual_reliable and original:
+            def avoided(metric: str, observed: float) -> float | None:
+                values = original.get(metric)
+                if not isinstance(values, list) or len(values) != 2:
+                    return None
+                midpoint = (float(values[0]) + float(values[1])) / 2
+                return max(0.0, midpoint - observed)
+
+            inferred_tokens = avoided("tokens", float(actual["tokens"]))
+            inferred_calls = avoided("model_calls", float(actual["model_calls"]))
+            inferred_tools = avoided("tool_calls", float(actual["tool_calls"]))
+            inferred_cost = avoided("api_value_usd", float(actual["api_value_usd"]))
+            inferred = {
+                "tokens_label": compact_int(int(inferred_tokens)) if inferred_tokens is not None else None,
+                "model_calls": int(inferred_calls) if inferred_calls is not None else None,
+                "tool_calls": int(inferred_tools) if inferred_tools is not None else None,
+                "api_value_label": money(inferred_cost) if inferred_cost is not None else None,
+                "label": "Observed below historical baseline",
+                "disclaimer": "An inferred comparison, not a guaranteed counterfactual saving.",
+            }
+        outcome = outcomes.get(session_id) if session_id else None
+        receipts.append({
+            "id": intervention.get("id"),
+            "created_at": intervention.get("created_at"),
+            "tool": intervention.get("tool") or "agent",
+            "project": short_path(str(intervention.get("cwd") or "unknown"), 72),
+            "decision": decision,
+            "decision_label": decision_labels.get(decision, decision or "Recorded"),
+            "original_risk": intervention.get("risk") or "unknown",
+            "original_score": intervention.get("score"),
+            "selected_risk": intervention.get("selected_risk"),
+            "selected_score": intervention.get("selected_score"),
+            "risk_points_reduced": intervention.get("risk_points_reduced"),
+            "predicted": {
+                "available": bool(prediction.get("available")),
+                "confidence": prediction.get("confidence"),
+                "basis": prediction.get("basis"),
+                "tokens_label": _impact_range_label(savings.get("tokens")),
+                "model_calls_label": _impact_range_label(savings.get("model_calls")),
+                "tool_calls_label": _impact_range_label(savings.get("tool_calls")),
+                "api_value_label": _impact_range_label(savings.get("api_value_usd"), currency=True),
+            },
+            "session_id": session_id or None,
+            "session_status": (
+                "No session expected"
+                if decision in {"blocked", "cancelled"}
+                else "Observed" if session else "Waiting for resulting session"
+            ),
+            "actual": actual,
+            "inferred": inferred,
+            "outcome": outcome.get("outcome") if outcome else None,
+        })
+    return receipts
+
+
 def build_summary(days: int = 7) -> dict[str, object]:
     now = datetime.now().astimezone()
     since = now - timedelta(days=days)
@@ -489,6 +642,8 @@ def build_summary(days: int = 7) -> dict[str, object]:
     window_outcomes = outcomes_for_sessions(window_session_ids)
     outcomes = outcome_counts(window_session_ids)
     interventions = recent_interventions(limit=200, days=days)
+    receipt_events = scan_all_events() if interventions else []
+    receipts = _build_intervention_receipts(interventions, all_rows, outcomes_for_sessions(), receipt_events)
     useful_rows = [
         row for row in rows
         if (window_outcomes.get(row.session_id) or {}).get("outcome") == "useful"
@@ -540,7 +695,31 @@ def build_summary(days: int = 7) -> dict[str, object]:
             }
             for row in recent
         ],
+        "intervention_receipts": receipts[:30],
     }
+
+
+def _build_compact_prompt(health: object) -> str:
+    """Generate a /compact-style smart compaction prompt for a session."""
+    if not isinstance(health, ContextHealth):
+        return "/compact"
+    eff = health.efficiency_pct
+    bloat = int(health.bloat_ratio * 100)
+    ctx_k = round(health.latest_turn_tokens / 1000)
+    lines = [
+        f"This session is at {ctx_k}K tokens/turn ({eff:.0f}% efficient — {bloat}% replayed history).",
+        "",
+        "Please compact this conversation by producing a structured summary that preserves:",
+        "1. Active task: what we are building right now and why",
+        "2. Key decisions already made (architecture, approach, rejected alternatives)",
+        "3. Files we have modified or created in this session",
+        "4. Hard constraints and invariants I must not violate",
+        "5. Open questions / next steps I still need to take",
+        "",
+        "Discard: full tool outputs, completed debug traces, superseded code snippets.",
+        "Format: concise bullet points per section. I will paste this into a fresh session.",
+    ]
+    return "\n".join(lines)
 
 
 HTML = r"""<!doctype html>
@@ -665,6 +844,14 @@ HTML = r"""<!doctype html>
     .session-title { font-size: 18px; color: white; font-weight: 720; overflow-wrap: anywhere; }
     .session-meta { margin-top: 5px; color: var(--muted); }
     .session-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
+    .receipt-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: center; }
+    .risk-flow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    .risk-chip { border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; font-size: 12px; font-weight: 750; text-transform: capitalize; }
+    .risk-chip.high { color: #ffc4ce; border-color: rgba(242,125,143,.45); background: var(--red-soft); }
+    .risk-chip.medium { color: #ffe2a4; border-color: rgba(246,189,96,.45); background: var(--amber-soft); }
+    .risk-chip.low { color: #bff5df; border-color: rgba(53,211,153,.45); background: var(--green-soft); }
+    .risk-arrow { color: var(--muted); font-weight: 800; }
+    .receipt-note { color: var(--muted); font-size: 12px; margin-top: 10px; }
     .bar-row { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(120px, 1.5fr) 88px; gap: 12px; align-items: center; margin: 11px 0; padding: 5px 0; }
     .bar-row.clickable, tr.clickable { cursor: pointer; }
     .bar-row.clickable { border-radius: 6px; }
@@ -777,6 +964,7 @@ HTML = r"""<!doctype html>
       .kpis { grid-template-columns: 1fr 1fr; }
       .two { grid-template-columns: 1fr; }
       .prompt-shell { grid-template-columns: 1fr; }
+      .receipt-summary { grid-template-columns: 1fr; }
       .bar-row { grid-template-columns: 1fr; gap: 6px; }
       .amount { text-align: left; }
     }
@@ -822,6 +1010,7 @@ HTML = r"""<!doctype html>
     <button class="nav-tab" data-view="prompt" onclick="showView('prompt')">Prompt</button>
     <button class="nav-tab" data-view="projects" onclick="showView('projects')">Projects</button>
     <button class="nav-tab" data-view="sessions" onclick="showView('sessions')">Sessions</button>
+    <button class="nav-tab" data-view="receipts" onclick="showView('receipts')">Receipts</button>
     <button class="nav-tab" data-view="insights" onclick="showView('insights')">Insights</button>
   </nav>
 
@@ -841,6 +1030,11 @@ HTML = r"""<!doctype html>
       <div class="card metric-card metric-amber"><div class="label">Preflight decisions</div><div class="value" id="preflightDecisions">-</div><div class="sub"><span id="windowLabel">-</span></div></div>
       <div class="card metric-card metric-blue"><div class="label">Sessions observed</div><div class="value" id="sessions">-</div><div class="sub">This machine only</div></div>
       <div class="card metric-card metric-red"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div></div>
+    </section>
+
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title"><div><h2>Latest intervention</h2><p>What AIWatcher changed before execution and what happened afterward.</p></div></div>
+      <div id="latestIntervention"></div>
     </section>
 
     <section class="grid two">
@@ -923,6 +1117,19 @@ HTML = r"""<!doctype html>
     </div>
   </section>
 
+  <section id="view-receipts" class="view" hidden>
+    <div class="card">
+      <div class="section-title">
+        <div><h2>Intervention receipts</h2><p>Risk decisions, predicted impact, resulting usage, and developer outcomes.</p></div>
+        <span class="pill">Prompt text stays private</span>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Time</th><th>Tool / project</th><th>Decision</th><th>Risk change</th><th>Result</th><th></th></tr></thead>
+        <tbody id="receiptRows"></tbody>
+      </table></div>
+    </div>
+  </section>
+
   <section id="view-insights" class="view" hidden>
     <section class="grid two">
       <div class="card">
@@ -978,6 +1185,75 @@ function esc(value) {
     '"': '&quot;',
     "'": '&#39;'
   }[ch]));
+}
+let receiptCache = [];
+function riskFlow(receipt) {
+  const original = `<span class="risk-chip ${esc(receipt.original_risk)}">${esc(receipt.original_risk)} · ${esc(receipt.original_score ?? '—')}</span>`;
+  if (receipt.selected_score === null || receipt.selected_score === undefined) return `<div class="risk-flow">${original}</div>`;
+  return `<div class="risk-flow">${original}<span class="risk-arrow">→</span><span class="risk-chip ${esc(receipt.selected_risk || 'low')}">${esc(receipt.selected_risk || 'unknown')} · ${esc(receipt.selected_score)}</span><span class="pill">${esc(receipt.risk_points_reduced || 0)} points reduced</span></div>`;
+}
+function predictedStats(receipt) {
+  const p = receipt.predicted || {};
+  if (!p.available) return `<div class="empty">Savings estimate unavailable. ${esc(p.basis || 'More comparable local history is required.')}</div>`;
+  return `<div class="mini-grid">
+    <div class="mini"><span class="label">Predicted token savings</span><strong>${esc(p.tokens_label || '—')}</strong></div>
+    <div class="mini"><span class="label">Model calls avoided</span><strong>${esc(p.model_calls_label || '—')}</strong></div>
+    <div class="mini"><span class="label">Tool calls avoided</span><strong>${esc(p.tool_calls_label || '—')}</strong></div>
+    <div class="mini"><span class="label">API-equivalent savings</span><strong>${esc(p.api_value_label || '—')}</strong></div>
+  </div><p class="receipt-note">${esc(p.confidence || 'unknown')} confidence · ${esc(p.basis || '')}</p>`;
+}
+function renderLatestReceipt(receipt) {
+  if (!receipt) return '<div class="empty">No prompt intervention recorded in this window.</div>';
+  return `<div class="receipt-summary"><div>
+    <div class="session-title">${esc(receipt.decision_label)}</div>
+    <div class="session-meta">${esc(receipt.tool)} · ${esc(receipt.project)} · ${esc(dateLabel(receipt.created_at))}</div>
+    ${riskFlow(receipt)}
+    ${predictedStats(receipt)}
+    <div class="pill-row"><span class="pill">${esc(receipt.session_status)}</span>${outcomePill(receipt.outcome)}</div>
+  </div><button class="btn-primary" onclick="openReceipt('${esc(receipt.id)}')">Review receipt</button></div>`;
+}
+function renderReceiptRows(receipts) {
+  if (!receipts.length) return '<tr><td colspan="6"><div class="empty">No interventions recorded in this window.</div></td></tr>';
+  return receipts.map(receipt => `<tr class="clickable" onclick="openReceipt('${esc(receipt.id)}')">
+    <td>${esc(dateLabel(receipt.created_at))}</td>
+    <td><strong>${esc(receipt.tool)}</strong><br><span class="sub">${esc(receipt.project)}</span></td>
+    <td>${esc(receipt.decision_label)}</td>
+    <td>${esc(receipt.original_score ?? '—')} → ${esc(receipt.selected_score ?? '—')}</td>
+    <td>${esc(receipt.outcome || receipt.session_status)}</td>
+    <td><button class="row-action">Review</button></td>
+  </tr>`).join('');
+}
+function openReceipt(receiptId) {
+  const receipt = receiptCache.find(item => item.id === receiptId);
+  if (!receipt) return;
+  openDrawer('Intervention receipt');
+  const actual = receipt.actual
+    ? `<section class="detail-section"><h3>Observed session</h3>
+       <div class="mini-grid">
+         <div class="mini"><span class="label">Tokens</span><strong>${esc(receipt.actual.tokens_label)}</strong></div>
+         <div class="mini"><span class="label">Model calls</span><strong>${esc(receipt.actual.model_calls)}</strong></div>
+         <div class="mini"><span class="label">Tool calls</span><strong>${esc(receipt.actual.tool_calls)}</strong></div>
+         <div class="mini"><span class="label">API value</span><strong>${esc(receipt.actual.api_value_label)}</strong></div>
+       </div>${receipt.actual.reliable ? '' : `<p>${esc(receipt.actual.reason)}</p>`}
+       ${receipt.session_id ? `<button class="btn-quiet" onclick="selectSession('${esc(receipt.session_id)}')">Open resulting session</button>` : ''}
+      </section>`
+    : `<section class="detail-section"><h3>Observed session</h3><div class="empty">Waiting for a matching local session. Refresh after the agent finishes.</div></section>`;
+  const inferred = receipt.inferred
+    ? `<section class="detail-section"><h3>${esc(receipt.inferred.label)}</h3>
+       <div class="mini-grid">
+         <div class="mini"><span class="label">Tokens below baseline</span><strong>${esc(receipt.inferred.tokens_label || '—')}</strong></div>
+         <div class="mini"><span class="label">Model calls</span><strong>${esc(receipt.inferred.model_calls ?? '—')}</strong></div>
+         <div class="mini"><span class="label">Tool calls</span><strong>${esc(receipt.inferred.tool_calls ?? '—')}</strong></div>
+         <div class="mini"><span class="label">API-equivalent</span><strong>${esc(receipt.inferred.api_value_label || '—')}</strong></div>
+       </div><p>${esc(receipt.inferred.disclaimer)}</p></section>`
+    : '';
+  document.getElementById('detailContent').innerHTML = `<section class="detail-section">
+    <h2>${esc(receipt.decision_label)}</h2>
+    <p>${esc(receipt.tool)} · ${esc(receipt.project)} · ${esc(dateLabel(receipt.created_at))}</p>
+    ${riskFlow(receipt)}
+    <div class="pill-row"><span class="pill">${esc(receipt.session_status)}</span>${outcomePill(receipt.outcome)}</div>
+  </section><section class="detail-section"><h3>Predicted before execution</h3>${predictedStats(receipt)}</section>${actual}${inferred}
+  <section class="detail-section"><h3>Privacy evidence</h3><p>Prompt text is not stored. This receipt contains hashes, policy findings, aggregate usage, and your outcome only.</p></section>`;
 }
 async function copyText(value, label = 'Copied') {
   try {
@@ -1282,6 +1558,9 @@ async function load(resetDetail = true) {
   document.getElementById('usefulOutcomes').textContent = totals.useful_outcomes;
   document.getElementById('costPerUseful').textContent = totals.cost_per_useful_change;
   document.getElementById('preflightDecisions').textContent = totals.preflight_decisions;
+  receiptCache = data.intervention_receipts || [];
+  document.getElementById('latestIntervention').innerHTML = renderLatestReceipt(receiptCache[0]);
+  document.getElementById('receiptRows').innerHTML = renderReceiptRows(receiptCache);
   const latest = data.recent_sessions[0];
   document.getElementById('latestSession').innerHTML = latest
     ? `<div class="session-summary"><div class="session-title">${esc(latest.project)}</div>
@@ -1341,19 +1620,63 @@ class UIHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         return
 
+    def _trusted_origin(self) -> str | None:
+        """Echo back Origin only for the AIWatcher extension or local dev pages.
+
+        Never returns "*" — a wildcard would let any open tab in the browser
+        read this loopback server's responses (prompt risk, cost, session
+        metadata), not just the AIWatcher extension.
+
+        Compares the parsed hostname exactly rather than using str.startswith()
+        prefix matching — a prefix check would also match attacker-registerable
+        domains like http://127.0.0.1.evil.com or http://localhost.evil.com,
+        which reintroduces the same cross-origin exposure a wildcard would have.
+        """
+        origin = self.headers.get("Origin", "")
+        if origin.startswith("chrome-extension://"):
+            return origin
+        parsed = urlparse(origin)
+        if parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost"}:
+            return origin
+        return None
+
     def _send(self, status: int, body: str, content_type: str) -> None:
         encoded = body.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(encoded)))
         self.send_header("Cache-Control", "no-store")
+        trusted = self._trusted_origin()
+        if trusted:
+            self.send_header("Access-Control-Allow-Origin", trusted)
+            self.send_header("Vary", "Origin")
         self.end_headers()
         self.wfile.write(encoded)
+
+    def do_OPTIONS(self) -> None:
+        trusted = self._trusted_origin()
+        if not trusted:
+            self._send(405, "Cross-origin requests are not allowed", "text/plain; charset=utf-8")
+            return
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", trusted)
+        self.send_header("Vary", "Origin")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/":
             self._send(200, HTML, "text/html; charset=utf-8")
+            return
+        if parsed.path == "/api/health":
+            self._send(200, json.dumps({
+                "service": "aiwatcher-local",
+                "version": __version__,
+                "capabilities": ["preflight"],
+            }), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/summary":
             params = parse_qs(parsed.query)
@@ -1393,6 +1716,47 @@ class UIHandler(BaseHTTPRequestHandler):
                 days = 1
             self._send(200, json.dumps(build_journal(days)), "application/json; charset=utf-8")
             return
+        if parsed.path == "/api/context-health":
+            params = parse_qs(parsed.query)
+            tool = params.get("tool", ["claude"])[0].strip() or "claude"
+            cwd = params.get("cwd", [""])[0].strip() or None
+            try:
+                all_sessions = scan_all()
+                all_events = scan_all_events()
+                healths = analyze_all_sessions(all_sessions, all_events)
+                warn = gate_health_warning(all_sessions, all_events, tool=tool, cwd=cwd)
+                tool_lower = tool.lower()
+                tool_aliases = {"claude": {"claude", "claude-code"}, "codex": {"codex", "codex-cli"}}
+                allowed = tool_aliases.get(tool_lower, {tool_lower})
+                match = next((h for h in healths if h.tool.lower() in allowed), None)
+                if match:
+                    payload = {
+                        "session_id": match.session_id,
+                        "tool": match.tool,
+                        "severity": match.severity,
+                        "age_hours": match.age_hours,
+                        "age_days": match.age_days,
+                        "latest_turn_tokens": match.latest_turn_tokens,
+                        "peak_turn_tokens": match.peak_turn_tokens,
+                        "efficiency_pct": match.efficiency_pct,
+                        "bloat_ratio": match.bloat_ratio,
+                        "growth_rate": match.growth_rate,
+                        "is_context_critical": match.is_context_critical,
+                        "is_context_pressure": match.is_context_pressure,
+                        "is_extreme_bloat": match.is_extreme_bloat,
+                        "is_high_bloat": match.is_high_bloat,
+                        "is_stale": match.is_stale,
+                        "is_critical_stale": match.is_critical_stale,
+                        "recommendations": match.recommendations,
+                        "warning_text": warn,
+                        "compact_prompt": _build_compact_prompt(match),
+                    }
+                else:
+                    payload = {"severity": "healthy", "warning_text": None, "compact_prompt": None}
+            except OSError:
+                payload = {"severity": "healthy", "warning_text": None, "compact_prompt": None}
+            self._send(200, json.dumps(payload), "application/json; charset=utf-8")
+            return
         self._send(404, "Not found", "text/plain; charset=utf-8")
 
     def do_POST(self) -> None:
@@ -1400,8 +1764,15 @@ class UIHandler(BaseHTTPRequestHandler):
         if parsed.path not in {"/api/outcome", "/api/preflight"}:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if content_type != "application/json":
+            self._send(415, json.dumps({"error": "Content-Type must be application/json"}), "application/json; charset=utf-8")
+            return
         try:
             length = int(self.headers.get("Content-Length", "0"))
+            if length < 0 or length > MAX_REQUEST_BYTES:
+                self._send(413, json.dumps({"error": "Request body is too large"}), "application/json; charset=utf-8")
+                return
             payload = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
         except (ValueError, json.JSONDecodeError):
             self._send(400, json.dumps({"error": "Invalid JSON body"}), "application/json; charset=utf-8")

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AIWatcher Local</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="header">
+    <div class="logo">A</div>
+    <div>
+      <div class="title">AIWatcher Local</div>
+      <div class="sub">Prompt preflight</div>
+    </div>
+  </div>
+
+  <div class="status-row">
+    <div class="status-dot" id="statusDot"></div>
+    <span class="status-label" id="statusLabel">Checking…</span>
+  </div>
+
+  <div class="toggle-row">
+    <span class="toggle-label">Intercept prompts</span>
+    <label class="toggle">
+      <input type="checkbox" id="enabledToggle">
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="info">
+    <div class="info-line">Intercepts prompts on <strong>claude.ai</strong></div>
+    <div class="info-line">Finds the active AIWatcher Local port automatically</div>
+    <div class="info-line">All analysis runs locally — nothing uploaded</div>
+  </div>
+
+  <div class="footer">
+    <a href="https://www.getaiwatcher.com" target="_blank" rel="noopener">getaiwatcher.com</a>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

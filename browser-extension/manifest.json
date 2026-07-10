@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "AIWatcher Local",
+  "version": "0.1.0",
+  "description": "Preflight AI prompts locally before they run. Flags high-risk prompts, suggests safer briefs, and keeps all analysis on your machine.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://claude.ai/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://claude.ai/*"],
+      "js": ["content.js"],
+      "css": ["modal.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "AIWatcher Local"
+  },
+  "icons": {
+    "16":  "icons/icon16.png",
+    "48":  "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

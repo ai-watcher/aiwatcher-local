@@ -1,0 +1,2 @@
+/* Content-script stylesheet — the host is a plain div; all modal styles live
+   inside its shadow DOM. No page-level styles are needed here. */

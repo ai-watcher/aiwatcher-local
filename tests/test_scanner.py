@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+import json
 from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -34,6 +35,34 @@ class ProjectPathTests(unittest.TestCase):
                 {"/repo/a": 1.0, "/repo/b": 5.0},
             )
         self.assertEqual(selected, "/repo/b")
+
+    def test_codex_rollout_uses_measured_token_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "sessions"
+            root.mkdir()
+            rollout = root / "rollout-session-1.jsonl"
+            rows = [
+                {"timestamp": "2026-07-01T10:00:00Z", "type": "session_meta", "payload": {"id": "session-1", "cwd": temp_dir}},
+                {"timestamp": "2026-07-01T10:00:01Z", "type": "turn_context", "payload": {"model": "gpt-5.2-codex", "cwd": temp_dir}},
+                {"timestamp": "2026-07-01T10:00:02Z", "type": "event_msg", "payload": {"type": "token_count", "info": {
+                    "total_token_usage": {"input_tokens": 1000, "output_tokens": 100, "total_tokens": 1100},
+                    "last_token_usage": {"input_tokens": 1000, "output_tokens": 100, "total_tokens": 1100},
+                }}},
+                {"timestamp": "2026-07-01T10:00:03Z", "type": "event_msg", "payload": {"type": "token_count", "info": {
+                    "total_token_usage": {"input_tokens": 1800, "output_tokens": 200, "total_tokens": 2000},
+                    "last_token_usage": {"input_tokens": 800, "output_tokens": 100, "total_tokens": 900},
+                }}},
+            ]
+            rollout.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+            with patch.object(scanner, "CODEX_SESSIONS_DIRS", [root]):
+                sessions, events = scanner.scan_codex_rollouts()
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].tokens_in, 1800)
+        self.assertEqual(sessions[0].tokens_out, 200)
+        self.assertEqual(sessions[0].agent_calls, 2)
+        self.assertEqual(len(events), 2)
+        self.assertNotIn("cumulative", " ".join(sessions[0].notes).lower())
 
 
 class ScanDateTests(unittest.TestCase):

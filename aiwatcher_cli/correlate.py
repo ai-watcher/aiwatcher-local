@@ -29,7 +29,7 @@ def _parse_datetime(value: object) -> datetime | None:
 
 
 def _session_stamp(session: LocalSession) -> datetime | None:
-    stamp = session.started_at or session.updated_at
+    stamp = session.updated_at or session.started_at
     if not stamp:
         return None
     if stamp.tzinfo is None:
@@ -69,6 +69,8 @@ def link_recent_interventions_to_sessions(
     used_sessions: set[str] = set()
     for intervention in sorted(interventions, key=lambda row: str(row.get("created_at") or "")):
         if intervention.get("session_id"):
+            continue
+        if intervention.get("decision") in {"blocked", "cancelled"}:
             continue
         created_at = _parse_datetime(intervention.get("created_at"))
         if not created_at:
