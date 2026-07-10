@@ -52,12 +52,25 @@ class AdapterContractTests(unittest.TestCase):
                 with urllib.request.urlopen(request, timeout=5) as response:
                     self.assertEqual(response.headers.get("Access-Control-Allow-Origin"), origin)
 
-            untrusted = urllib.request.Request(
-                f"http://127.0.0.1:{port}/api/context-health?tool=claude",
-                headers={"Origin": "https://evil.example.com"},
-            )
-            with urllib.request.urlopen(untrusted, timeout=5) as response:
-                self.assertIsNone(response.headers.get("Access-Control-Allow-Origin"))
+            # Attacker-registerable domains that a naive str.startswith("http://127.0.0.1")
+            # or str.startswith("http://localhost") prefix check would incorrectly trust —
+            # both are real, ownable DNS names, not spoofed headers.
+            untrusted_cases = [
+                "https://evil.example.com",
+                "http://127.0.0.1.evil.com",
+                "http://localhost.evil.com",
+                "https://127.0.0.1",  # right host, wrong scheme
+            ]
+            for origin in untrusted_cases:
+                untrusted = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/api/context-health?tool=claude",
+                    headers={"Origin": origin},
+                )
+                with urllib.request.urlopen(untrusted, timeout=5) as response:
+                    self.assertIsNone(
+                        response.headers.get("Access-Control-Allow-Origin"),
+                        f"Origin {origin!r} must not be trusted",
+                    )
 
             no_origin = urllib.request.Request(f"http://127.0.0.1:{port}/api/context-health?tool=claude")
             with urllib.request.urlopen(no_origin, timeout=5) as response:

@@ -1626,13 +1626,17 @@ class UIHandler(BaseHTTPRequestHandler):
         Never returns "*" — a wildcard would let any open tab in the browser
         read this loopback server's responses (prompt risk, cost, session
         metadata), not just the AIWatcher extension.
+
+        Compares the parsed hostname exactly rather than using str.startswith()
+        prefix matching — a prefix check would also match attacker-registerable
+        domains like http://127.0.0.1.evil.com or http://localhost.evil.com,
+        which reintroduces the same cross-origin exposure a wildcard would have.
         """
         origin = self.headers.get("Origin", "")
-        if (
-            origin.startswith("chrome-extension://")
-            or origin.startswith("http://127.0.0.1")
-            or origin.startswith("http://localhost")
-        ):
+        if origin.startswith("chrome-extension://"):
+            return origin
+        parsed = urlparse(origin)
+        if parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost"}:
             return origin
         return None
 
