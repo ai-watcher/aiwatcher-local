@@ -598,6 +598,7 @@ def analyze_prompt(
     lower = text.lower()
     findings: list[str] = []
     suggestions: list[str] = []
+    guardrails: list[dict[str, str]] = []
     score = 0
 
     broad_terms = [
@@ -617,6 +618,10 @@ def analyze_prompt(
             score += 3
             findings.append("Scope looks broad and likely to create large context or many tool calls.")
             suggestions.append("Start with a plan-only pass over the smallest relevant files before editing.")
+        # build_execution_brief() still adds the scope-narrowing bullet
+        # unconditionally on broad_scope (regardless of scope_guardrails), so
+        # the chip must match what's actually added to the brief.
+        guardrails.append({"icon": "\U0001F50E", "label": "Scope narrowed"})
 
     edit_terms = ["change", "modify", "edit", "write", "implement", "refactor", "delete", "migrate", "rename"]
     plan_terms = ["plan first", "do not edit", "inspect first", "propose", "before editing", "ask before"]
@@ -625,6 +630,7 @@ def analyze_prompt(
         score += 2
         findings.append("Prompt asks for changes without an explicit plan/checkpoint.")
         suggestions.append("Ask the agent to inspect, summarize the intended change, then proceed after the plan is clear.")
+        guardrails.append({"icon": "\U0001F4CB", "label": "Plan-first checkpoint"})
 
     risky_terms = [
         "production", "prod database", "customer data", "pii", "secret", "api key", "token",
@@ -644,6 +650,10 @@ def analyze_prompt(
             score += 3
             findings.append("Prompt mentions sensitive data, credentials, production systems, or destructive actions.")
             suggestions.append("Require confirmation before destructive changes and avoid exposing secrets or customer data.")
+        # build_execution_brief() still adds the confirm-before-destructive
+        # bullet unconditionally on sensitive_or_destructive (regardless of
+        # safety_guardrails), so the chip must match what's actually added.
+        guardrails.append({"icon": "\U0001F6D1", "label": "Confirm before destructive changes"})
 
     vague_terms = ["make it better", "improve everything", "clean this up", "fix it", "optimize it"]
     vague_scope = any(term in lower for term in vague_terms)
@@ -651,12 +661,14 @@ def analyze_prompt(
         score += 1
         findings.append("Prompt is vague, which can cause exploratory loops.")
         suggestions.append("Name the target files, acceptance criteria, and what should stay unchanged.")
+        guardrails.append({"icon": "\U0001F3AF", "label": "Vague ask clarified"})
 
     multiple_tasks = len(text) > 2500
     if multiple_tasks:
         score += 2
         findings.append("Prompt is long enough to hide multiple tasks in one request.")
         suggestions.append("Split this into one task per prompt and checkpoint between them.")
+        guardrails.append({"icon": "✂️", "label": "Split into smaller tasks"})
 
     if not findings:
         findings.append("No obvious cost or safety risk found from prompt text alone.")
@@ -683,6 +695,7 @@ def analyze_prompt(
         "tool": tool,
         "findings": findings,
         "suggestions": suggestions,
+        "guardrails": guardrails,
         "suggested_prompt": safer_prompt,
         "estimated_impact": (
             estimate_prompt_savings(text, risk_score=score, tool=tool, cwd=cwd)
@@ -771,16 +784,103 @@ def _selected_prompt_assessment(
     return str(selected["risk"]), int(selected["score"])
 
 
+def _hero_savings_label(result: dict[str, object]) -> str | None:
+    """A short, glanceable savings figure for the gate header -- no reading required.
+
+    Returns None (rather than a placeholder string) when there isn't enough
+    local history for a real number, so the caller can omit the badge
+    entirely instead of showing a hedge like "no estimate yet".
+    """
+    impact = result.get("estimated_impact") if isinstance(result.get("estimated_impact"), dict) else {}
+    if not impact or not impact.get("available", False):
+        return None
+    savings = impact.get("savings", {}) if isinstance(impact.get("savings"), dict) else {}
+    api_value = savings.get("api_value_usd")
+    if not isinstance(api_value, list) or len(api_value) != 2:
+        return None
+    return f"~{_range_label(*api_value, money)} avoidable"
+
+
+_BRIEF_STATIC_SUFFIX_MARKERS = ("\n\nWorking directory\n", "\n\nCompletion report\n")
+
+
+def _split_brief_for_display(brief: str) -> tuple[str, str]:
+    """Split a full execution brief into the decision-relevant core (Task +
+    execution-approach bullets) and the static suffix (working directory,
+    completion-report instructions) that reads identically on every gate
+    screen. The suffix still gets sent as part of the final prompt -- only
+    its on-screen presentation is collapsed, since it carries no
+    decision-relevant signal and was costing pure scroll distance.
+    """
+    indices = [i for i in (brief.find(marker) for marker in _BRIEF_STATIC_SUFFIX_MARKERS) if i != -1]
+    if not indices:
+        return brief, ""
+    cut = min(indices)
+    return brief[:cut], brief[cut:].lstrip("\n")
+
+
+def _split_core_for_diff(core: str) -> tuple[str, list[str]]:
+    """Split the brief core into the original task text and the added
+    execution-approach bullets, so the caller can render them with distinct
+    styling (unchanged vs. added) instead of undifferentiated prose --
+    scannable the way a code diff is, not something read line by line to
+    detect what changed.
+    """
+    marker = "\n\nExecution approach\n"
+    idx = core.find(marker)
+    if idx == -1:
+        return core, []
+    task_section = core[:idx]
+    if task_section.startswith("Task\n"):
+        task_section = task_section[len("Task\n"):]
+    bullets_block = core[idx + len(marker):]
+    bullets = [line[2:] for line in bullets_block.split("\n") if line.startswith("- ")]
+    return task_section, bullets
+
+
 def _prompt_gate_html(*, tool: str, cwd: str, prompt: str, result: dict[str, object]) -> str:
     findings = "".join(f"<li>{html.escape(str(item))}</li>" for item in result["findings"])
     suggestions = "".join(f"<li>{html.escape(str(item))}</li>" for item in result["suggestions"])
-    brief = html.escape(str(result["suggested_prompt"]))
+    brief_core, brief_suffix = _split_brief_for_display(str(result["suggested_prompt"]))
+    brief = html.escape(brief_core)
+    brief_footer = (
+        f'<details class="brief-footer"><summary>Working directory &amp; completion report '
+        f'(unchanged every time)</summary><pre id="brief-suffix">{html.escape(brief_suffix)}</pre></details>'
+        if brief_suffix
+        else ""
+    )
+    task_section, brief_bullets = _split_core_for_diff(brief_core)
+    added_lines = "".join(
+        f'<div class="added-line">{html.escape(bullet)}</div>' for bullet in brief_bullets
+    )
+    brief_editable = f'<textarea id="brief">{brief}</textarea>'
+    brief_body = (
+        f'<div class="brief-diff">'
+        f'<div class="brief-task">{html.escape(task_section)}</div>'
+        f'<div class="brief-added">{added_lines}</div>'
+        f'</div>'
+        f'<details class="brief-edit"><summary>Edit this brief before sending</summary>{brief_editable}</details>'
+        if brief_bullets
+        else brief_editable
+    )
     original = html.escape(prompt)
     risk = html.escape(str(result["risk"]))
     score = html.escape(str(result["score"]))
     impact = html.escape(_impact_summary(result))
     tool_label = html.escape(tool)
-    cwd_label = html.escape(cwd)
+    savings_label = _hero_savings_label(result)
+    savings_pill = (
+        f'<span class="pill savings">{html.escape(savings_label)}</span>' if savings_label else ""
+    )
+    guardrail_chips = "".join(
+        f'<span class="chip"><span class="chip-icon">{html.escape(str(g["icon"]))}</span>{html.escape(str(g["label"]))}</span>'
+        for g in result.get("guardrails", [])
+    )
+    guardrail_row = (
+        f'<div class="guardrails">{guardrail_chips}</div>'
+        if guardrail_chips
+        else '<div class="guardrails"><span class="chip chip-clean">No guardrails needed — prompt looked scoped as written.</span></div>'
+    )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -814,6 +914,11 @@ h1 {{ margin: 0 0 8px; font-size: clamp(32px, 5vw, 58px); letter-spacing: 0; }}
 p {{ margin: 0; color: var(--muted); line-height: 1.5; }}
 .pill {{ display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 999px; padding: 8px 12px; color: var(--muted); background: #0c121a; }}
 .risk {{ color: {'var(--red)' if risk == 'high' else 'var(--amber)'}; border-color: {'rgba(255,127,147,.42)' if risk == 'high' else 'rgba(247,198,107,.42)'}; }}
+.savings {{ color: #061019; background: linear-gradient(135deg, #36d6a5, #6aa7ff); border: 0; font-weight: 800; }}
+.guardrails {{ display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 24px; }}
+.chip {{ display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 999px; padding: 10px 16px; background: var(--panel-2); color: var(--text); font-weight: 600; font-size: 15px; }}
+.chip-icon {{ font-size: 17px; line-height: 1; }}
+.chip-clean {{ color: var(--muted); font-weight: 400; }}
 .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }}
 .card {{ background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.01)), var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 22px; box-shadow: 0 16px 48px rgba(0,0,0,.28); }}
 h2 {{ margin: 0 0 14px; font-size: 21px; }}
@@ -829,6 +934,19 @@ button:disabled {{ cursor: wait; opacity: .62; transform: none; }}
 .primary {{ background: linear-gradient(135deg, #36d6a5, #6aa7ff); color: #061019; border: 0; }}
 .danger {{ color: #ffd4dc; border-color: rgba(255,127,147,.45); }}
 .privacy {{ margin-top: 16px; font-size: 13px; color: var(--muted); }}
+.brief-footer {{ margin-top: 10px; }}
+.brief-footer summary {{ cursor: pointer; font-size: 13px; color: var(--muted); user-select: none; }}
+.brief-footer summary:hover {{ color: var(--text); }}
+.brief-footer pre {{ min-height: 0; margin-top: 8px; font-size: 13px; color: var(--muted); background: #0c121a; }}
+.brief-diff {{ border: 1px solid var(--line); border-radius: 8px; background: #080d14; padding: 16px; }}
+.brief-task {{ white-space: pre-wrap; color: #dbe5f1; font: 14px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }}
+.brief-added {{ margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }}
+.added-line {{ border-left: 3px solid var(--accent); background: rgba(84,215,183,.08); padding: 6px 10px; color: #d9f8ee; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; }}
+.added-line::before {{ content: "+ "; color: var(--accent); font-weight: 700; }}
+.brief-edit {{ margin-top: 12px; }}
+.brief-edit summary {{ cursor: pointer; font-size: 13px; color: var(--muted); user-select: none; }}
+.brief-edit summary:hover {{ color: var(--text); }}
+.brief-edit textarea {{ margin-top: 8px; min-height: 220px; }}
 @media (max-width: 880px) {{
   main {{ width: min(100vw - 24px, 720px); margin: 18px auto; }}
   .top, .grid, .actions {{ grid-template-columns: 1fr; display: grid; }}
@@ -845,8 +963,10 @@ button:disabled {{ cursor: wait; opacity: .62; transform: none; }}
     <div>
       <span class="pill risk">Risk: {risk} | score {score}</span>
       <span class="pill">{tool_label}</span>
+      {savings_pill}
     </div>
   </div>
+  {guardrail_row}
   <div class="grid">
     <section class="card">
       <h2>What AIWatcher noticed</h2>
@@ -862,8 +982,8 @@ button:disabled {{ cursor: wait; opacity: .62; transform: none; }}
     <section class="card">
       <h2>Execution brief</h2>
       <p>Keep the requested outcome, but add guardrails before tools run.</p>
-      <textarea id="brief">{brief}</textarea>
-      <p class="privacy">Working directory: {cwd_label}</p>
+      {brief_body}
+      {brief_footer}
     </section>
   </div>
   <div class="actions">
@@ -881,7 +1001,13 @@ async function sendDecision(decision) {{
   buttons.forEach(button => button.disabled = true);
   status.textContent = 'Applying your decision…';
   try {{
-    const body = {{ decision, prompt: document.getElementById('brief').value }};
+    const core = document.getElementById('brief').value;
+    const suffixEl = document.getElementById('brief-suffix');
+    // The static suffix (working directory, completion-report instructions) is
+    // collapsed out of view because it never changes, but it still has to be
+    // part of what's actually sent -- reattach it here rather than dropping it.
+    const prompt = suffixEl ? core + '\n\n' + suffixEl.textContent : core;
+    const body = {{ decision, prompt }};
     const response = await fetch('/decision', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify(body) }});
     const saved = await response.json();
     if (!response.ok) throw new Error(saved.error || `Request failed (${{response.status}})`);

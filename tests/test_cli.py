@@ -131,6 +131,151 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertLess(selected["score"], original["score"])
         self.assertEqual(selected["risk"], "low")
 
+    def test_guardrail_chips_match_triggered_findings(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt(
+                "refactor everything and delete the production credential",
+                tool="claude",
+                cwd="/repo",
+            )
+
+        labels = [g["label"] for g in result["guardrails"]]
+        self.assertIn("Scope narrowed", labels)
+        self.assertIn("Plan-first checkpoint", labels)
+        self.assertIn("Confirm before destructive changes", labels)
+        # One chip per triggered finding, not a copy of the full prose findings list.
+        self.assertEqual(len(result["guardrails"]), len(result["findings"]))
+
+    def test_hero_savings_label_omitted_without_sufficient_history(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
+        self.assertIsNone(cli._hero_savings_label(result))
+
+    def test_hero_savings_label_shows_compact_dollar_range_when_available(self) -> None:
+        rows = [session(index, age_days=index * 2) for index in range(10)]
+        with patch.object(cli, "sessions_since", return_value=rows):
+            result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
+        label = cli._hero_savings_label(result)
+        self.assertIsNotNone(label)
+        self.assertIn("avoidable", label)
+        self.assertTrue(label.startswith("~$"))
+
+    def test_gate_html_shows_guardrail_chips_and_savings_badge_above_the_fold(self) -> None:
+        rows = [session(index, age_days=index * 2) for index in range(10)]
+        with patch.object(cli, "sessions_since", return_value=rows):
+            result = cli.analyze_prompt(
+                "refactor everything and delete the production credential",
+                tool="claude",
+                cwd="/repo",
+            )
+        page = cli._prompt_gate_html(tool="claude", cwd="/repo", prompt="original prompt text", result=result)
+
+        self.assertIn('class="pill savings"', page)
+        self.assertIn("avoidable", page)
+        self.assertIn('class="guardrails"', page)
+        self.assertIn("Scope narrowed", page)
+        self.assertIn("Confirm before destructive changes", page)
+        # The chip row must appear before the detailed findings/brief cards,
+        # so the glanceable summary renders above the fold, not after it.
+        self.assertLess(page.index('class="guardrails"'), page.index("What AIWatcher noticed"))
+
+    def test_split_brief_for_display_is_lossless_on_reassembly(self) -> None:
+        full = cli.build_execution_brief(
+            "Refactor everything in the auth module",
+            cwd="/repo/auth",
+            broad_scope=True,
+            needs_checkpoint=True,
+            sensitive_or_destructive=True,
+            vague_scope=False,
+            multiple_tasks=False,
+        )
+        core, suffix = cli._split_brief_for_display(full)
+        self.assertNotIn("Working directory", core)
+        self.assertNotIn("Completion report", core)
+        self.assertIn("Working directory\n/repo/auth", suffix)
+        self.assertIn("Completion report", suffix)
+        # The split must be reversible -- nothing in the static suffix may be
+        # dropped from what actually gets sent when reassembled.
+        self.assertEqual(core + "\n\n" + suffix, full)
+
+    def test_split_brief_for_display_handles_missing_cwd(self) -> None:
+        full = cli.build_execution_brief(
+            "fix the bug",
+            cwd=None,
+            broad_scope=False,
+            needs_checkpoint=True,
+            sensitive_or_destructive=False,
+            vague_scope=False,
+            multiple_tasks=False,
+        )
+        core, suffix = cli._split_brief_for_display(full)
+        self.assertNotIn("Working directory", suffix)
+        self.assertIn("Completion report", suffix)
+        self.assertEqual(core + "\n\n" + suffix, full)
+
+    def test_gate_html_collapses_static_boilerplate_but_keeps_it_recoverable(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
+        page = cli._prompt_gate_html(tool="claude", cwd="/repo", prompt="original prompt text", result=result)
+
+        # The visible textarea must not contain the static suffix directly...
+        textarea_start = page.index('<textarea id="brief">') + len('<textarea id="brief">')
+        textarea_end = page.index("</textarea>")
+        textarea_content = page[textarea_start:textarea_end]
+        self.assertNotIn("Working directory", textarea_content)
+        self.assertNotIn("Completion report", textarea_content)
+        # ...but it must still be present somewhere on the page (collapsed),
+        # and the send handler must reattach it before submitting.
+        self.assertIn('id="brief-suffix"', page)
+        self.assertIn("Working directory", page)
+        self.assertIn("Completion report", page)
+        self.assertIn("suffixEl.textContent", page)
+        # The old standalone "Working directory: ..." line is gone -- it's
+        # redundant with the collapsed footer now.
+        self.assertNotIn("<p class=\"privacy\">Working directory:", page)
+
+    def test_split_core_for_diff_separates_task_from_added_bullets(self) -> None:
+        full = cli.build_execution_brief(
+            "Refactor everything in the auth module",
+            cwd="/repo/auth",
+            broad_scope=True,
+            needs_checkpoint=True,
+            sensitive_or_destructive=True,
+            vague_scope=False,
+            multiple_tasks=False,
+        )
+        core, _ = cli._split_brief_for_display(full)
+        task, bullets = cli._split_core_for_diff(core)
+
+        self.assertEqual(task, "Refactor everything in the auth module")
+        self.assertNotIn("Task", task)
+        self.assertGreaterEqual(len(bullets), 3)
+        self.assertTrue(any("phased plan" in b for b in bullets))
+        self.assertTrue(any("Do not reveal secret values" in b for b in bullets))
+
+    def test_gate_html_renders_task_and_added_bullets_with_distinct_styling(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt(
+                "refactor everything and delete the production credential",
+                tool="claude",
+                cwd="/repo",
+            )
+        page = cli._prompt_gate_html(
+            tool="claude", cwd="/repo", prompt="refactor everything and delete the production credential", result=result
+        )
+
+        self.assertIn('class="brief-diff"', page)
+        self.assertIn('class="brief-task"', page)
+        self.assertIn('class="brief-added"', page)
+        self.assertIn('class="added-line"', page)
+        # The diff view renders before the raw editable textarea, so the
+        # scannable version is what's seen first, not the wall of text.
+        self.assertLess(page.index('class="brief-diff"'), page.index('id="brief"'))
+        # The raw textarea is still present and unchanged -- editing/sending
+        # must keep working exactly as before this purely visual change.
+        self.assertIn('<details class="brief-edit">', page)
+        self.assertIn('<textarea id="brief">', page)
+
     def test_interactive_preflight_can_forward_safer_prompt(self) -> None:
         result = {
             "risk": "high",
