@@ -335,6 +335,27 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertIn("-m aiwatcher_cli", command)
         self.assertNotIn("collector/cli.py", command)
 
+    def test_windows_hook_command_uses_forward_slashes_for_bash(self) -> None:
+        # Claude/Codex/Cursor run hook commands through Git Bash even on
+        # Windows. An unquoted backslash path like C:\Users\... gets mangled
+        # to C:Users... there, so the generated command must not contain any
+        # backslashes regardless of what sys.executable reports.
+        with (
+            patch.object(cli.sys, "executable", r"C:\Users\tadan\Python\python.exe"),
+            patch.object(cli.os, "name", "nt"),
+        ):
+            command = cli._cli_command_for_current_file()
+        self.assertNotIn("\\", command)
+        self.assertIn("C:/Users/tadan/Python/python.exe", command)
+
+    def test_windows_hook_command_quotes_paths_with_spaces(self) -> None:
+        with (
+            patch.object(cli.sys, "executable", r"C:\Program Files\Python\python.exe"),
+            patch.object(cli.os, "name", "nt"),
+        ):
+            command = cli._cli_command_for_current_file()
+        self.assertIn("'C:/Program Files/Python/python.exe'", command)
+
     def test_internal_hook_transport_is_not_in_public_parser(self) -> None:
         parser = cli.build_parser()
         subparsers = next(
