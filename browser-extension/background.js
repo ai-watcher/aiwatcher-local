@@ -48,12 +48,24 @@ async function discoverServer() {
 
 if (typeof chrome !== "undefined") {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    if (!message || !["health", "preflight"].includes(message.type)) return false;
+    if (!message || !["health", "preflight", "context-health"].includes(message.type)) return false;
     (async () => {
       try {
         const server = await discoverServer();
         if (message.type === "health") {
           sendResponse({ ok: true, baseUrl: server.baseUrl, health: server.health });
+          return;
+        }
+        if (message.type === "context-health") {
+          const tool = String(message.tool ?? "claude");
+          const params = new URLSearchParams({ tool });
+          let result = null;
+          try {
+            result = await fetchJson(`${server.baseUrl}/api/context-health?${params}`, {}, 2000);
+          } catch {
+            // Health data is best-effort; leave result null on failure.
+          }
+          sendResponse({ ok: true, result });
           return;
         }
         const result = await fetchJson(`${server.baseUrl}/api/preflight`, {

@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import json
+import socket
+import threading
 import unittest
+import urllib.request
+from http.server import ThreadingHTTPServer
 from pathlib import Path
+
+from aiwatcher_cli.ui import UIHandler
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,7 +21,51 @@ class AdapterContractTests(unittest.TestCase):
         self.assertIn("MAX_REQUEST_BYTES = 64 * 1024", source)
         self.assertIn("length > MAX_REQUEST_BYTES", source)
         self.assertIn('content_type != "application/json"', source)
-        self.assertNotIn("Access-Control-Allow-Origin", source)
+        # A bare wildcard would let any open tab read this loopback server's
+        # responses (prompt risk, cost, session metadata) cross-origin, not
+        # just the AIWatcher extension. Origin-scoped CORS is fine; "*" is not.
+        self.assertNotIn('Access-Control-Allow-Origin", "*"', source)
+
+    def test_local_broker_scopes_cors_to_trusted_origins_only(self) -> None:
+        try:
+            probe = socket.socket()
+            probe.bind(("127.0.0.1", 0))
+            probe.close()
+        except PermissionError:
+            self.skipTest("loopback sockets are unavailable in this test sandbox")
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), UIHandler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            trusted_cases = [
+                "chrome-extension://abcdefghijklmnopabcdefghijklmnop",
+                "http://127.0.0.1:5173",
+                "http://localhost:5173",
+            ]
+            for origin in trusted_cases:
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/api/context-health?tool=claude",
+                    headers={"Origin": origin},
+                )
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    self.assertEqual(response.headers.get("Access-Control-Allow-Origin"), origin)
+
+            untrusted = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/context-health?tool=claude",
+                headers={"Origin": "https://evil.example.com"},
+            )
+            with urllib.request.urlopen(untrusted, timeout=5) as response:
+                self.assertIsNone(response.headers.get("Access-Control-Allow-Origin"))
+
+            no_origin = urllib.request.Request(f"http://127.0.0.1:{port}/api/context-health?tool=claude")
+            with urllib.request.urlopen(no_origin, timeout=5) as response:
+                self.assertIsNone(response.headers.get("Access-Control-Allow-Origin"))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
     def test_browser_adapter_uses_background_transport_and_dynamic_ports(self) -> None:
         manifest = json.loads((ROOT / "browser-extension" / "manifest.json").read_text(encoding="utf-8"))

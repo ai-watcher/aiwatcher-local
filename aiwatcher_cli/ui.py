@@ -23,6 +23,7 @@ from .local_state import (
     record_outcome,
 )
 from .pricing import is_subscription_model
+from .session_health import ContextHealth, analyze_all_sessions, gate_health_warning
 from .scanner import (
     LocalEvent,
     LocalSession,
@@ -696,6 +697,29 @@ def build_summary(days: int = 7) -> dict[str, object]:
         ],
         "intervention_receipts": receipts[:30],
     }
+
+
+def _build_compact_prompt(health: object) -> str:
+    """Generate a /compact-style smart compaction prompt for a session."""
+    if not isinstance(health, ContextHealth):
+        return "/compact"
+    eff = health.efficiency_pct
+    bloat = int(health.bloat_ratio * 100)
+    ctx_k = round(health.latest_turn_tokens / 1000)
+    lines = [
+        f"This session is at {ctx_k}K tokens/turn ({eff:.0f}% efficient — {bloat}% replayed history).",
+        "",
+        "Please compact this conversation by producing a structured summary that preserves:",
+        "1. Active task: what we are building right now and why",
+        "2. Key decisions already made (architecture, approach, rejected alternatives)",
+        "3. Files we have modified or created in this session",
+        "4. Hard constraints and invariants I must not violate",
+        "5. Open questions / next steps I still need to take",
+        "",
+        "Discard: full tool outputs, completed debug traces, superseded code snippets.",
+        "Format: concise bullet points per section. I will paste this into a fresh session.",
+    ]
+    return "\n".join(lines)
 
 
 HTML = r"""<!doctype html>
@@ -1596,17 +1620,47 @@ class UIHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         return
 
+    def _trusted_origin(self) -> str | None:
+        """Echo back Origin only for the AIWatcher extension or local dev pages.
+
+        Never returns "*" — a wildcard would let any open tab in the browser
+        read this loopback server's responses (prompt risk, cost, session
+        metadata), not just the AIWatcher extension.
+        """
+        origin = self.headers.get("Origin", "")
+        if (
+            origin.startswith("chrome-extension://")
+            or origin.startswith("http://127.0.0.1")
+            or origin.startswith("http://localhost")
+        ):
+            return origin
+        return None
+
     def _send(self, status: int, body: str, content_type: str) -> None:
         encoded = body.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(encoded)))
         self.send_header("Cache-Control", "no-store")
+        trusted = self._trusted_origin()
+        if trusted:
+            self.send_header("Access-Control-Allow-Origin", trusted)
+            self.send_header("Vary", "Origin")
         self.end_headers()
         self.wfile.write(encoded)
 
     def do_OPTIONS(self) -> None:
-        self._send(405, "Cross-origin requests are not allowed", "text/plain; charset=utf-8")
+        trusted = self._trusted_origin()
+        if not trusted:
+            self._send(405, "Cross-origin requests are not allowed", "text/plain; charset=utf-8")
+            return
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", trusted)
+        self.send_header("Vary", "Origin")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -1657,6 +1711,47 @@ class UIHandler(BaseHTTPRequestHandler):
             except ValueError:
                 days = 1
             self._send(200, json.dumps(build_journal(days)), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/context-health":
+            params = parse_qs(parsed.query)
+            tool = params.get("tool", ["claude"])[0].strip() or "claude"
+            cwd = params.get("cwd", [""])[0].strip() or None
+            try:
+                all_sessions = scan_all()
+                all_events = scan_all_events()
+                healths = analyze_all_sessions(all_sessions, all_events)
+                warn = gate_health_warning(all_sessions, all_events, tool=tool, cwd=cwd)
+                tool_lower = tool.lower()
+                tool_aliases = {"claude": {"claude", "claude-code"}, "codex": {"codex", "codex-cli"}}
+                allowed = tool_aliases.get(tool_lower, {tool_lower})
+                match = next((h for h in healths if h.tool.lower() in allowed), None)
+                if match:
+                    payload = {
+                        "session_id": match.session_id,
+                        "tool": match.tool,
+                        "severity": match.severity,
+                        "age_hours": match.age_hours,
+                        "age_days": match.age_days,
+                        "latest_turn_tokens": match.latest_turn_tokens,
+                        "peak_turn_tokens": match.peak_turn_tokens,
+                        "efficiency_pct": match.efficiency_pct,
+                        "bloat_ratio": match.bloat_ratio,
+                        "growth_rate": match.growth_rate,
+                        "is_context_critical": match.is_context_critical,
+                        "is_context_pressure": match.is_context_pressure,
+                        "is_extreme_bloat": match.is_extreme_bloat,
+                        "is_high_bloat": match.is_high_bloat,
+                        "is_stale": match.is_stale,
+                        "is_critical_stale": match.is_critical_stale,
+                        "recommendations": match.recommendations,
+                        "warning_text": warn,
+                        "compact_prompt": _build_compact_prompt(match),
+                    }
+                else:
+                    payload = {"severity": "healthy", "warning_text": None, "compact_prompt": None}
+            except OSError:
+                payload = {"severity": "healthy", "warning_text": None, "compact_prompt": None}
+            self._send(200, json.dumps(payload), "application/json; charset=utf-8")
             return
         self._send(404, "Not found", "text/plain; charset=utf-8")
 
