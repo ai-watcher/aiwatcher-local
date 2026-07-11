@@ -302,7 +302,7 @@ def build_session_detail(session_id: str, days: int = 30) -> dict[str, object]:
     turn_prompts = {int(seg["turn"]): str(seg["prompt"])[:240] for seg in segments}
     return {
         **session_json(row),
-        "privacy": "Prompt/source content is not shown. Use event export for hashes.",
+        "privacy": "Prompt text is shown only when you inspect this local session; it is not uploaded or persisted in summaries.",
         "insights": session_insights(row),
         "prompt_analysis": build_prompt_analysis(row, segments),
         "turn_prompts": turn_prompts,
@@ -1107,7 +1107,7 @@ HTML = r"""<!doctype html>
   <section id="view-sessions" class="view" hidden>
     <div class="card">
       <div class="section-title">
-        <div><h2>Sessions</h2><p>Recent local AI runs. Click any row for privacy-safe detail.</p></div>
+        <div><h2>Sessions</h2><p>Recent local AI runs. Click any row to inspect locally — prompt text is shown for your own review only, never uploaded.</p></div>
         <span class="pill">Local machine only</span>
       </div>
       <div class="table-wrap"><table>

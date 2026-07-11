@@ -276,6 +276,20 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertIn('<details class="brief-edit">', page)
         self.assertIn('<textarea id="brief">', page)
 
+    def test_pasting_a_generated_brief_back_in_does_not_double_wrap(self) -> None:
+        """A brief AIWatcher already generated must not get a second Task/Execution
+        approach/Completion report shell wrapped around it when resubmitted."""
+        with patch.object(cli, "sessions_since", return_value=[]):
+            first = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
+            brief = str(first["suggested_prompt"])
+            self.assertTrue(brief.startswith("Task\n"))
+
+            second = cli.analyze_prompt(brief, tool="claude", cwd="/repo")
+
+        self.assertEqual(second["risk"], "low")
+        self.assertEqual(second["suggested_prompt"], "")
+        self.assertEqual(brief.count("Execution approach"), 1)
+
     def test_interactive_preflight_can_forward_safer_prompt(self) -> None:
         result = {
             "risk": "high",
@@ -465,8 +479,27 @@ class IntegrationConfigTests(unittest.TestCase):
         context = output["hookSpecificOutput"]["additionalContext"]
         self.assertIn("Task\nRefactor the entire codebase", context)
 
-    def test_codex_prompt_gate_can_allow_original_prompt(self) -> None:
+    def test_codex_hook_medium_risk_skips_gate_even_when_requested(self) -> None:
+        """Medium risk must never open the browser gate, even with gate=True —
+        only high risk warrants the round-trip. Silent context injection instead."""
         payload = json.dumps({"prompt": "Refactor the entire codebase", "cwd": "/repo"})
+        args = SimpleNamespace(text=None, gate=True)
+        with (
+            patch.object(cli, "_read_stdin_text", return_value=payload),
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "run_prompt_gate") as gate_mock,
+            patch.object(cli, "record_intervention"),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_codex_hook(args)
+
+        self.assertEqual(result, 0)
+        gate_mock.assert_not_called()
+        output = json.loads(stdout.getvalue())
+        self.assertIn("execution brief", output["systemMessage"].lower())
+
+    def test_codex_prompt_gate_can_allow_original_prompt(self) -> None:
+        payload = json.dumps({"prompt": "Refactor the entire codebase and delete old auth secrets", "cwd": "/repo"})
         args = SimpleNamespace(text=None, gate=True)
         with (
             patch.object(cli, "_read_stdin_text", return_value=payload),
@@ -499,7 +532,7 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertEqual(record.call_args.kwargs["decision"], "brief_edited")
 
     def test_codex_prompt_gate_cancel_blocks_run(self) -> None:
-        payload = json.dumps({"prompt": "Refactor the entire codebase", "cwd": "/repo"})
+        payload = json.dumps({"prompt": "Refactor the entire codebase and delete old auth secrets", "cwd": "/repo"})
         args = SimpleNamespace(text=None, gate=True)
         with (
             patch.object(cli, "_read_stdin_text", return_value=payload),

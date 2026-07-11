@@ -587,6 +587,20 @@ def build_execution_brief(
     return "\n".join(lines)
 
 
+def _is_generated_brief(text: str) -> bool:
+    """Detect text that is already an AIWatcher execution brief.
+
+    Prevents re-scoring and re-wrapping a brief the user pasted back in — without
+    this, `build_execution_brief` nests a second Task/Execution approach/Completion
+    report shell around the first one every time a brief is resubmitted.
+    """
+    return (
+        text.startswith("Task\n")
+        and "\nExecution approach\n" in text
+        and "\nCompletion report\n" in text
+    )
+
+
 def analyze_prompt(
     prompt: str,
     *,
@@ -595,6 +609,16 @@ def analyze_prompt(
     include_estimate: bool = True,
 ) -> dict[str, object]:
     text = prompt.strip()
+    if _is_generated_brief(text):
+        return {
+            "risk": "low",
+            "score": 0,
+            "tool": tool,
+            "findings": ["This is already a scoped AIWatcher execution brief — not re-analyzing."],
+            "suggestions": [],
+            "suggested_prompt": "",
+            "estimated_impact": {},
+        }
     lower = text.lower()
     findings: list[str] = []
     suggestions: list[str] = []
@@ -1923,7 +1947,10 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
         return 0
 
     rendered = render_preflight(result)
-    if _prompt_gate_requested(args):
+    # Only high risk warrants the browser round-trip. Medium risk falls through to
+    # the silent additionalContext injection below — no gate, no copy/paste, and
+    # therefore no chance of a brief being resubmitted and double-wrapped.
+    if _prompt_gate_requested(args) and result["risk"] == "high":
         gate = None
         try:
             gate = run_prompt_gate(tool=tool, cwd=cwd, prompt=prompt, result=result)
@@ -2041,7 +2068,10 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
         print(json.dumps(_cursor_hook_response(allow=True)))
         return 0
 
-    if _prompt_gate_requested(args):
+    # Only high risk warrants the interactive browser gate. Cursor's hook contract
+    # can't silently inject context (it can only block-and-ask-to-resubmit), so
+    # medium risk skips straight to the block message below instead of the round-trip.
+    if _prompt_gate_requested(args) and result["risk"] == "high":
         try:
             gate = run_prompt_gate(tool="cursor", cwd=cwd, prompt=prompt, result=result)
         except OSError as exc:
