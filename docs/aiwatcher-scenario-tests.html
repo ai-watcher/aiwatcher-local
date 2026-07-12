@@ -158,7 +158,7 @@
       <div class="life"><div class="name">Plan</div><div class="purpose">Identify risky, broad, or expensive work before it starts.</div><div class="ids">S-01, S-02, S-03, S-04, S-16</div></div>
       <div class="life"><div class="name">Watch</div><div class="purpose">Detect context bloat, loop pressure, quota risk, and session fatigue while work is happening.</div><div class="ids">S-11, S-20, S-21</div></div>
       <div class="life"><div class="name">Control</div><div class="purpose">Warn, gate, block, rescope, or stop risky execution paths.</div><div class="ids">S-05-S-10, S-15, S-17-S-19</div></div>
-      <div class="life"><div class="name">Prove</div><div class="purpose">Record decisions, resulting sessions, local evidence, and measured impact.</div><div class="ids">S-12, S-13, S-22, S-23, S-26</div></div>
+      <div class="life"><div class="name">Prove</div><div class="purpose">Record decisions, resulting sessions, local evidence, and measured impact.</div><div class="ids">S-12, S-13, S-22, S-23, S-26, S-28</div></div>
       <div class="life"><div class="name">Improve</div><div class="purpose">Learn what worked and help the next run become smaller, safer, or more successful.</div><div class="ids">S-24, S-25, S-27</div></div>
     </div>
 
@@ -270,7 +270,7 @@
   <section class="section" id="gaps">
     <h2>What Is Missing</h2>
     <div class="grid two">
-      <div class="card partial"><div class="kicker">P1 · moat first</div><h3>Turn evidence into durable linkage</h3><p>Outcome evidence exists, but the moat needs durable session-to-commit records, branch context, test transitions, revert/churn detection, and same-file re-prompt signals. Finish this first because every linked session strengthens the intervention graph.</p></div>
+      <div class="card partial"><div class="kicker">P1 · moat first</div><h3>Turn evidence into durable linkage</h3><p>Outcome evidence exists, but the moat needs passive snapshot capture from daily scans, durable session-to-commit records, branch context, test transitions, revert/churn detection, and same-file re-prompt signals. Finish this first because every linked session strengthens the intervention graph.</p></div>
       <div class="card gap"><div class="kicker">P1 · control loop</div><h3>Build live control</h3><p>Loop detection, runaway token velocity, and dangerous command gates are still not built. This is the biggest gap against the control-loop thesis after durable linkage.</p></div>
       <div class="card test"><div class="kicker">Launch gate</div><h3>Verify cross-platform claims</h3><p>Run S-03, S-08, S-09, S-10, S-11, and S-15 on real devices. If a surface does not invoke hooks, document the fallback path. Treat this as a continuous release bar, not a separate product pillar.</p></div>
       <div class="card partial"><div class="kicker">P2 · habit</div><h3>Polish weekly digest</h3><p>Report and journal exist. Package them into a weekly ritual that shows spend by tool, gates fired, commands blocked, outcomes confirmed, and open follow-ups.</p></div>
@@ -283,7 +283,7 @@
     <h2>Build Priorities</h2>
     <table>
       <tr><th>Priority</th><th>Work</th><th>Scenarios</th><th>Reason</th></tr>
-      <tr><td class="mono">P1</td><td>Durable outcome linkage</td><td class="mono">S-22, S-24</td><td>Highest moat: starts the intervention graph and measured impact dataset. Finish partial-to-done before spreading effort.</td></tr>
+      <tr><td class="mono">P1</td><td>Durable outcome linkage</td><td class="mono">S-22, S-24, S-28</td><td>Highest moat: passively starts the intervention graph and measured impact dataset. Finish partial-to-done before spreading effort.</td></tr>
       <tr><td class="mono">P1</td><td>Live control engine</td><td class="mono">S-17, S-18, S-19</td><td>Moves AIWatcher from preflight helper to real control loop.</td></tr>
       <tr><td class="mono">Launch gate</td><td>Device/browser verification pass</td><td class="mono">S-03, S-08-S-11, S-15</td><td>Protects credibility of cross-tool claims. Verify continuously, but do not let it displace the outcome flywheel.</td></tr>
       <tr><td class="mono">P2</td><td>Weekly digest packaging</td><td class="mono">S-26</td><td>Cheap habit-former using existing report/journal/ledger data; does not need weeks of outcome history to be useful.</td></tr>
@@ -307,7 +307,8 @@ const requirements = [
   ["Mid-session loop/runaway/command control", "Control", "Stops waste and risky tool actions after the run starts.", "gap", "S-17, S-18, S-19"],
   ["Decision ledger and receipts", "Prove", "Shows what AIWatcher changed, observed usage, risk reduced, and outcome.", "done", "S-12"],
   ["Manual outcome review", "Prove", "Lets the developer confirm useful, rework, or abandoned.", "done", "S-13"],
-  ["Durable session to commit linkage", "Prove", "Connects AI sessions to real code artifacts.", "partial", "S-22"],
+  ["Durable session to commit linkage", "Prove", "Connects AI sessions to real code artifacts.", "partial", "S-22, S-28"],
+  ["Passive evidence snapshot capture", "Prove", "Accumulates the intervention graph during normal daily use, without requiring a drawer click.", "gap", "S-28"],
   ["Cost per surviving change", "Prove", "Measures value, not just tokens.", "gap", "S-23"],
   ["Weekly digest", "Prove", "Turns the loop into a weekly habit.", "partial", "S-26"],
   ["Automatic outcome inference", "Improve", "Reduces manual labeling and powers measured savings.", "partial", "S-24"],
@@ -360,7 +361,8 @@ const scenarios = [
   {id:"S-19", status:"gap", phase:"Control", platform:"Claude Code CLI", title:"Dangerous command gate", go:"Enable command blocklist.", do:"Agent attempts rm -rf, git reset --hard, force push, or credential access.", expected:"Command is intercepted before execution with allow, block, and Always allow this pattern decisions so safe repeated commands do not become nagware.", value:"Protects when the agent decides to do something the prompt did not reveal.", why:"Tool-call-time control is different from prompt-time scoring."},
   {id:"S-12", status:"done", phase:"Prove", platform:"Dashboard", title:"Gate decision appears in receipts", go:"Run aiwatcher ui after a gate decision.", do:"Open Receipts/Today.", expected:"Decision, risk, predicted impact, resulting session usage, risk change, and outcome appear when linkable.", value:"Evidence of AIWatcher impact.", why:"Prove phase needs local ledger, not memory."},
   {id:"S-13", status:"done", phase:"Prove", platform:"CLI + Dashboard", title:"User marks outcome", go:"Complete or inspect a session.", do:"Run aiwatcher outcome useful, or click Review outcome in UI.", expected:"Outcome is recorded as useful/rework/abandoned and reflected in Today/session views.", value:"Manual fallback for quality signal.", why:"Outcome closes the loop."},
-  {id:"S-22", status:"partial", phase:"Prove", platform:"Git repo + Dashboard", title:"Session evidence links to code artifacts", go:"Run AI session in git repo, change or commit files.", do:"Open session review or mark an outcome.", expected:"Nearby commit/change/test evidence appears and a privacy-safe local evidence snapshot is recorded. Missing durable commit survival timestamps and churn/revert analysis.", value:"Starts value measurement from local ground truth.", why:"Foundation for measured outcomes."},
+  {id:"S-22", status:"partial", phase:"Prove", platform:"Git repo + Dashboard", title:"Session evidence links to code artifacts", go:"Run AI session in git repo, change or commit files.", do:"Open session review or mark an outcome.", expected:"Nearby commit/change/test evidence appears and a privacy-safe local evidence snapshot is recorded. Missing passive capture from today/ui/watch, durable commit survival timestamps, and churn/revert analysis.", value:"Starts value measurement from local ground truth.", why:"Foundation for measured outcomes."},
+  {id:"S-28", status:"gap", phase:"Prove", platform:"CLI + Dashboard", title:"Passive evidence snapshots from daily scans", go:"Have recent sessions older than two hours in git-backed projects.", do:"Run aiwatcher today, aiwatcher watch --once, or open the dashboard without manually inspecting a session.", expected:"AIWatcher captures a capped batch of missing evidence snapshots, skips already-captured and too-recent sessions, and stores only hashes/metadata.", value:"Builds the intervention graph passively during normal daily use.", why:"The moat should not depend on users clicking every session drawer."},
   {id:"S-23", status:"gap", phase:"Prove", platform:"Dashboard", title:"Cost per surviving change", go:"Collect two or more weeks of durable linkage.", do:"Open Impact view.", expected:"Show cost per surviving code change by task/model/tool. Not built.", value:"Measures business-like value, not token volume.", why:"Differentiates from ordinary observability dashboards."},
   {id:"S-26", status:"partial", phase:"Prove", platform:"CLI + Dashboard", title:"Weekly digest", go:"Run aiwatcher report --days 7 or open Insights.", do:"Review top projects, sessions, risks, outcomes.", expected:"Current report/journal exists. Missing polished weekly digest with control effectiveness and measured savings.", value:"Makes AIWatcher a weekly habit.", why:"Evidence must be easy to consume."},
   {id:"S-24", status:"partial", phase:"Improve", platform:"Git repo + Dashboard", title:"Automatic outcome inference", go:"Complete session with local evidence.", do:"Open Today/session review.", expected:"Likely useful or needs review appears from commits/tests/changes, with one-click confirm/correct. Missing churn/revert/re-prompt inference and platform-specific evidence weighting.", value:"Reduces manual labeling and makes useful work measurable without nagging.", why:"Improvement loop depends on outcome quality and low-friction confirmation."},
@@ -377,7 +379,7 @@ const statusLabel = {
 };
 
 const priorityById = {
-  'S-22':'P1', 'S-24':'P1', 'S-17':'P1', 'S-18':'P1', 'S-19':'P1',
+  'S-22':'P1', 'S-24':'P1', 'S-28':'P1', 'S-17':'P1', 'S-18':'P1', 'S-19':'P1',
   'S-26':'P2', 'S-20':'P2', 'S-21':'P2', 'S-27':'P2', 'S-04':'P2',
   'S-03':'Launch gate', 'S-08':'Launch gate', 'S-09':'Launch gate', 'S-10':'Launch gate', 'S-11':'Launch gate', 'S-15':'Launch gate',
   'S-23':'P3', 'S-25':'P3'
