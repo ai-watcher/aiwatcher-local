@@ -59,6 +59,9 @@ aiwatcher today
 The examples below use `python -m aiwatcher_cli`; Windows users can replace
 `python` with `py` when needed.
 
+For implementation and release verification, use the canonical lifecycle suite at
+[`docs/aiwatcher-scenario-tests.html`](docs/aiwatcher-scenario-tests.html).
+
 ## Try the Core Workflows
 
 ### 1. See today's AI work
@@ -114,7 +117,28 @@ python -m aiwatcher_cli outcome useful
 Or use the **Review outcome** button in the UI. This is how AIWatcher moves from
 token counting toward cost per useful change.
 
-### 5. Export local evidence
+AIWatcher also shows local outcome evidence before you mark a result: nearby
+commits, uncommitted files, and recent test artifacts. These signals stay on
+your laptop and are labeled as evidence to review, not automatic truth.
+When you inspect or confirm a session, AIWatcher also stores a local
+privacy-safe evidence snapshot: commit SHAs, hashes of file paths/test
+artifacts, confidence, and inferred outcome. It does not store source diffs,
+prompt text, commit subjects, or file contents.
+
+### 5. Resume work without rebuilding context
+
+When a session gets stale, expensive, or you want to move from Claude to Codex,
+generate a target-ready continuation brief:
+
+```sh
+python -m aiwatcher_cli resume --search orcha --target codex --copy
+python -m aiwatcher_cli handoff --session-id <session-id> --target cursor
+```
+
+Targets: `generic`, `claude`, `codex`, `cursor`, and `vscode`. The brief is
+formatted for the next tool and keeps the next run focused on one checkpoint.
+
+### 6. Export local evidence
 
 ```sh
 python -m aiwatcher_cli export --format json --days 30
@@ -140,6 +164,8 @@ python -m aiwatcher_cli status             # show detected tools and local statu
 python -m aiwatcher_cli today              # today's local AI usage
 python -m aiwatcher_cli last               # inspect the latest local AI session
 python -m aiwatcher_cli timeline           # privacy-safe event timeline
+python -m aiwatcher_cli handoff            # create a fresh-session handoff capsule
+python -m aiwatcher_cli resume --target codex --copy
 python -m aiwatcher_cli journal            # one daily improvement recommendation
 python -m aiwatcher_cli watch --once       # detect expensive or loop-like work
 python -m aiwatcher_cli preflight "..."    # review work before execution
@@ -151,6 +177,7 @@ python -m aiwatcher_cli tools --days 7     # rank usage by tool
 python -m aiwatcher_cli projects --days 7  # rank usage by project
 python -m aiwatcher_cli report --days 7    # weekly local report
 python -m aiwatcher_cli sessions --days 1  # recent local sessions
+python -m aiwatcher_cli sessions --search orcha --days 30
 python -m aiwatcher_cli export --format json --days 30      # export session summaries
 python -m aiwatcher_cli export --format json --level events # privacy-safe event hashes
 python -m aiwatcher_cli ui                 # local-only browser dashboard
@@ -194,9 +221,11 @@ This month: $77.87
 - **Control:** Let the developer use the brief, edit it, run the original, or
   cancel. High-risk automatic hooks pause before execution.
 - **Prove:** Inspect a privacy-safe intervention receipt and session timeline,
-  then mark the result useful, rework, or abandoned.
+  review local git/test evidence, then mark the result useful, rework, or
+  abandoned.
 - **Improve:** Compare predicted pressure with observed usage and outcomes,
-  then recommend one better behavior for the next run.
+  then recommend one better behavior or create a handoff capsule for the next
+  fresh session.
 
 Prompt content is processed locally. AIWatcher stores hashes, decisions,
 predicted impact, and outcomes, not the original or suggested prompt text.

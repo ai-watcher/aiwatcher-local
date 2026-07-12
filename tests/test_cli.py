@@ -102,6 +102,62 @@ class PromptPreflightTests(unittest.TestCase):
 
         self.assertTrue(result["estimated_impact"]["available"])
 
+    def test_sessions_search_filters_project_tool_model_or_id(self) -> None:
+        rows = [
+            session(1, project="/repo/orcha"),
+            session(2, tool="codex-cli", project="/repo/agentwatch"),
+        ]
+        args = SimpleNamespace(days=7, limit=20, team=False, search="orcha")
+        output = io.StringIO()
+
+        with patch.object(cli, "sessions_since", return_value=rows), patch("sys.stdout", output):
+            result = cli.command_sessions(args)
+
+        self.assertEqual(result, 0)
+        self.assertIn("/repo/orcha", output.getvalue())
+        self.assertNotIn("/repo/agentwatch", output.getvalue())
+
+    def test_resume_uses_most_recent_matching_session(self) -> None:
+        rows = [
+            session(1, project="/repo/agentwatch"),
+            session(2, project="/repo/orcha"),
+        ]
+        args = SimpleNamespace(
+            session_id=None,
+            search="orcha",
+            days=7,
+            target="codex",
+            copy=False,
+            format="text",
+            include_prompt_excerpt=False,
+        )
+
+        with patch.object(cli, "sessions_since", return_value=rows), patch.object(cli, "command_handoff", return_value=0) as handoff:
+            result = cli.command_resume(args)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(args.session_id, "session-2")
+        handoff.assert_called_once_with(args)
+
+    def test_watch_points_high_pressure_session_to_resume(self) -> None:
+        row = session(1, project="/repo/orcha")
+        row.agent_calls = 300
+        args = SimpleNamespace(
+            days=1,
+            interval=15,
+            once=True,
+            cost_threshold=5.0,
+            calls_threshold=250,
+            tokens_threshold=500_000,
+        )
+        output = io.StringIO()
+
+        with patch.object(cli, "sessions_since", return_value=[row]), patch("sys.stdout", output):
+            result = cli.command_watch(args)
+
+        self.assertEqual(result, 0)
+        self.assertIn("aiwatcher resume --session-id session-1 --target codex --copy", output.getvalue())
+
     def test_low_risk_prompt_does_not_render_impact_section(self) -> None:
         with patch.object(
             cli,

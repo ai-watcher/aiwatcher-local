@@ -104,6 +104,29 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(events[0]["error"], "bind failed")
         self.assertNotIn("Refactor the entire codebase", json.dumps(stored))
 
+    def test_evidence_snapshot_stores_hashes_not_paths_or_subjects(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                record = local_state.record_evidence_snapshot("session-1", {
+                    "repo_root": "/Users/dev/secret-project",
+                    "commits": [{"sha": "abcdef1234567890", "subject_hash": "already-safe"}],
+                    "changed_files": ["src/auth/secrets.py"],
+                    "tests": [{"artifact": "test-results/auth.xml"}],
+                    "inferred_outcome": "useful",
+                    "confidence": "low",
+                })
+                snapshots = local_state.evidence_snapshots_for_sessions({"session-1"})
+                with open(state_file, encoding="utf-8") as handle:
+                    stored = json.load(handle)
+
+        serialized = json.dumps(stored)
+        self.assertEqual(record["commit_shas"], ["abcdef123456"])
+        self.assertEqual(snapshots["session-1"]["inferred_outcome"], "useful")
+        self.assertNotIn("/Users/dev/secret-project", serialized)
+        self.assertNotIn("src/auth/secrets.py", serialized)
+        self.assertNotIn("test-results/auth.xml", serialized)
+
 
 if __name__ == "__main__":
     unittest.main()

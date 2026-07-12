@@ -27,7 +27,7 @@ def state_path() -> Path:
 
 
 def _empty_state() -> dict[str, Any]:
-    return {"version": STATE_VERSION, "interventions": [], "outcomes": [], "hook_events": []}
+    return {"version": STATE_VERSION, "interventions": [], "outcomes": [], "hook_events": [], "evidence_snapshots": []}
 
 
 def _load() -> dict[str, Any]:
@@ -43,6 +43,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("interventions", [])
     data.setdefault("outcomes", [])
     data.setdefault("hook_events", [])
+    data.setdefault("evidence_snapshots", [])
     return data
 
 
@@ -202,6 +203,64 @@ def record_outcome(session_id: str, outcome: str, note: str | None = None) -> di
         data["outcomes"].append(record)
         _save(data)
     return record
+
+
+def record_evidence_snapshot(session_id: str, evidence: dict[str, Any]) -> dict[str, Any]:
+    """Store a privacy-safe evidence snapshot for a session.
+
+    This keeps enough local history to support later survival/outcome analysis
+    without storing prompt text, source diffs, commit subjects, or file content.
+    """
+    commits = evidence.get("commits") if isinstance(evidence.get("commits"), list) else []
+    changed_files = evidence.get("changed_files") if isinstance(evidence.get("changed_files"), list) else []
+    tests = evidence.get("tests") if isinstance(evidence.get("tests"), list) else []
+    repo_root = evidence.get("repo_root") if isinstance(evidence.get("repo_root"), str) else None
+    record = {
+        "session_id": session_id,
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "repo_root_hash": hash_prompt(repo_root)[:16] if repo_root else None,
+        "commit_shas": [
+            str(item.get("sha"))[:12]
+            for item in commits
+            if isinstance(item, dict) and item.get("sha")
+        ][:20],
+        "changed_file_hashes": [
+            hash_prompt(str(path))[:16]
+            for path in changed_files
+            if isinstance(path, str)
+        ][:100],
+        "test_artifact_hashes": [
+            hash_prompt(str(item.get("artifact")))[:16]
+            for item in tests
+            if isinstance(item, dict) and item.get("artifact")
+        ][:30],
+        "inferred_outcome": evidence.get("inferred_outcome") if isinstance(evidence.get("inferred_outcome"), str) else None,
+        "confidence": evidence.get("confidence") if isinstance(evidence.get("confidence"), str) else None,
+    }
+    with STATE_LOCK:
+        data = _load()
+        data["evidence_snapshots"] = [
+            row for row in data["evidence_snapshots"]
+            if row.get("session_id") != session_id
+        ]
+        data["evidence_snapshots"].append(record)
+        data["evidence_snapshots"] = data["evidence_snapshots"][-500:]
+        _save(data)
+    return record
+
+
+def evidence_snapshots_for_sessions(session_ids: set[str] | None = None) -> dict[str, dict[str, Any]]:
+    with STATE_LOCK:
+        rows = list(_load()["evidence_snapshots"])
+    result: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        session_id = row.get("session_id")
+        if not isinstance(session_id, str):
+            continue
+        if session_ids is not None and session_id not in session_ids:
+            continue
+        result[session_id] = row
+    return result
 
 
 def get_outcome(session_id: str) -> dict[str, Any] | None:

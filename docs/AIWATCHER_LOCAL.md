@@ -96,6 +96,7 @@ python -m aiwatcher_cli start
 python -m aiwatcher_cli today
 python -m aiwatcher_cli last
 python -m aiwatcher_cli timeline
+python -m aiwatcher_cli resume --target codex --copy
 python -m aiwatcher_cli journal
 python -m aiwatcher_cli watch --once
 python -m aiwatcher_cli preflight "Refactor auth and delete old credentials"
@@ -106,6 +107,7 @@ python -m aiwatcher_cli tools --days 7
 python -m aiwatcher_cli projects --days 7
 python -m aiwatcher_cli report --days 7
 python -m aiwatcher_cli sessions --days 1
+python -m aiwatcher_cli sessions --search orcha --days 30
 python -m aiwatcher_cli export --format json --days 30
 python -m aiwatcher_cli export --format json --level events --days 7
 python -m aiwatcher_cli ui
@@ -124,15 +126,24 @@ keeping authority with the individual developer:
    local usage while work is happening.
 3. **Control** — use the execution brief, edit it, run the original, cancel, or
    stop work that is becoming wasteful.
-4. **Prove** — inspect the local timeline and record whether the result was
-   useful, needed rework, or was abandoned.
-5. **Improve** — compare interventions and outcomes, then recommend one better
-   behavior for the next run.
+4. **Prove** — inspect the local timeline, review inferred evidence, and record
+   whether the result was useful, needed rework, or was abandoned.
+5. **Improve** — compare interventions and outcomes, then resume or hand off
+   the next run with a target-ready brief.
 
 The local state connects intervention hashes, predicted impact, session IDs,
 selected-prompt risk, observed usage, and outcomes. It does not store original
 or suggested prompt text. Comparisons to historical baselines are labeled as
 inferences, not guaranteed counterfactual savings.
+
+The canonical lifecycle requirements and scenario suite lives at
+[`docs/aiwatcher-scenario-tests.html`](aiwatcher-scenario-tests.html). Use it as
+the release checklist for Plan, Watch, Control, Prove, and Improve coverage.
+
+When a session is inspected or confirmed, AIWatcher also stores a local
+privacy-safe evidence snapshot: commit SHAs, hashes of file paths/test
+artifacts, confidence, and inferred outcome. It does not store source diffs,
+prompt text, commit subjects, or file contents.
 
 ## Automatic Preflight
 
@@ -306,6 +317,8 @@ python -m aiwatcher_cli tools --days 7
 python -m aiwatcher_cli projects --days 7 --limit 5
 python -m aiwatcher_cli report --days 7
 python -m aiwatcher_cli sessions --days 1 --limit 5
+python -m aiwatcher_cli sessions --search orcha --days 30
+python -m aiwatcher_cli resume --target codex --copy
 python -m aiwatcher_cli export --format json --days 7 > aiwatcher-local-export.json
 python -m aiwatcher_cli export --format json --level events --days 7 > aiwatcher-local-events.json
 python -m aiwatcher_cli ui

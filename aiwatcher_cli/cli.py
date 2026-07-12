@@ -32,11 +32,14 @@ from .local_state import (
     link_intervention_session,
     recent_hook_events,
     recent_interventions,
+    record_evidence_snapshot,
     record_intervention,
     record_hook_event,
     record_outcome,
     state_path,
 )
+from .handoff import TARGET_LABELS, build_handoff_capsule, render_handoff_capsule
+from .outcome_evidence import build_outcome_evidence
 from .pricing import is_subscription_model
 from .scanner import LocalEvent, LocalSession, discover_tools, scan_all, scan_all_events
 
@@ -262,6 +265,19 @@ def print_session_detail(session: LocalSession, *, heading: str = "Latest local 
     print(f"Measured duration: {compact_duration(reliable_seconds)}")
     outcome = get_outcome(session.session_id)
     print(f"Outcome: {outcome['outcome'] if outcome else 'not marked'}")
+    evidence = build_outcome_evidence(session)
+    try:
+        record_evidence_snapshot(session.session_id, evidence.to_json())
+    except OSError:
+        pass
+    if evidence.inferred_outcome:
+        print(f"Inferred outcome: {evidence.inferred_outcome} ({evidence.confidence})")
+    if evidence.commits:
+        print(f"Nearby commits: {len(evidence.commits)}")
+    if evidence.changed_files:
+        print(f"Uncommitted files: {len(evidence.changed_files)}")
+    if evidence.tests:
+        print(f"Recent test artifacts: {len(evidence.tests)}")
     if session.source_path:
         print(f"Source: {short_path(session.source_path, 80)}")
     if session.notes:
@@ -269,6 +285,8 @@ def print_session_detail(session: LocalSession, *, heading: str = "Latest local 
         for note in session.notes[:4]:
             print(f"- {note}")
     insights = session_insights(session)
+    if evidence.reasons:
+        insights = [*evidence.reasons[:2], *insights]
     if insights:
         print("\nWhat to check next")
         for insight in insights[:5]:
@@ -285,6 +303,11 @@ def render_session_detail(session: LocalSession, *, heading: str = "Latest local
     when = format_short_datetime(stamp.astimezone()) if stamp != MIN_DT else "unknown"
     reliable_seconds = reliable_session_seconds(session)
     outcome = get_outcome(session.session_id)
+    evidence = build_outcome_evidence(session)
+    try:
+        record_evidence_snapshot(session.session_id, evidence.to_json())
+    except OSError:
+        pass
     lines = [
         heading,
         "",
@@ -299,12 +322,20 @@ def render_session_detail(session: LocalSession, *, heading: str = "Latest local
         f"Measured duration: {compact_duration(reliable_seconds)}",
         f"Outcome: {outcome['outcome'] if outcome else 'not marked'}",
     ]
+    if evidence.inferred_outcome:
+        lines.append(f"Inferred outcome: {evidence.inferred_outcome} ({evidence.confidence})")
+    if evidence.commits:
+        lines.append(f"Nearby commits: {len(evidence.commits)}")
+    if evidence.changed_files:
+        lines.append(f"Uncommitted files: {len(evidence.changed_files)}")
+    if evidence.tests:
+        lines.append(f"Recent test artifacts: {len(evidence.tests)}")
     if session.source_path:
         lines.append(f"Source: {short_path(session.source_path, 80)}")
     if session.notes:
         lines.extend(["", "Notes"])
         lines.extend(f"- {note}" for note in session.notes[:4])
-    insights = session_insights(session)
+    insights = [*evidence.reasons[:2], *session_insights(session)]
     lines.extend(["", "What to check next"])
     if insights:
         lines.extend(f"- {insight}" for insight in insights[:5])
@@ -1478,6 +1509,17 @@ def command_sessions(args: argparse.Namespace) -> int:
         return 0
 
     sessions = sorted(sessions_since(args.days), key=session_sort_key, reverse=True)
+    if args.search:
+        needle = args.search.strip().lower()
+        sessions = [
+            row for row in sessions
+            if needle in " ".join([
+                row.session_id,
+                row.tool,
+                row.model or "",
+                row.project_path or "",
+            ]).lower()
+        ]
     print(f"Recent AI sessions - last {args.days} days\n")
     for row in sessions[: args.limit]:
         stamp = row.updated_at or row.started_at
@@ -1486,6 +1528,24 @@ def command_sessions(args: argparse.Namespace) -> int:
     if args.days > 30:
         print_cloud_hint("Cloud adds retention, team filters, and scheduled exports for session history.")
     return 0
+
+
+def _copy_to_clipboard(text: str) -> tuple[bool, str]:
+    if sys.platform == "darwin":
+        commands = [["pbcopy"]]
+    elif os.name == "nt":
+        commands = [["clip"]]
+    else:
+        commands = [["wl-copy"], ["xclip", "-selection", "clipboard"]]
+    for command in commands:
+        if not shutil.which(command[0]):
+            continue
+        try:
+            subprocess.run(command, input=text, text=True, check=True, timeout=3)
+            return True, command[0]
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            continue
+    return False, "no clipboard command found"
 
 
 def command_last(args: argparse.Namespace) -> int:
@@ -1516,6 +1576,61 @@ def command_timeline(args: argparse.Namespace) -> int:
         session_id = session.session_id
     print(render_session_timeline(session_id, days=args.days, limit=args.limit))
     return 0
+
+
+def command_handoff(args: argparse.Namespace) -> int:
+    rows = sessions_since(args.days)
+    if args.session_id:
+        session = next((row for row in rows if row.session_id == args.session_id), None)
+        if not session:
+            print(f"No local session found for {args.session_id!r} in the last {args.days} days.", file=sys.stderr)
+            return 2
+    else:
+        session = latest_session(rows)
+        if not session:
+            print(f"No local AI sessions detected in the last {args.days} days.")
+            return 0
+
+    outcome = get_outcome(session.session_id)
+    capsule = build_handoff_capsule(
+        session,
+        events_for_session(session.session_id, days=args.days),
+        outcome=outcome.get("outcome") if outcome else None,
+        include_prompt_excerpt=args.include_prompt_excerpt,
+        target=args.target,
+    )
+    if args.format == "json":
+        rendered = json.dumps(capsule, indent=2)
+    else:
+        rendered = render_handoff_capsule(capsule)
+    if args.copy:
+        ok, detail = _copy_to_clipboard(str(capsule.get("next_brief") or rendered))
+        if ok:
+            print(f"Copied {capsule.get('target_label') or 'handoff'} brief to clipboard.\n")
+        else:
+            print(f"Could not copy to clipboard ({detail}); printing instead.\n", file=sys.stderr)
+    print(rendered)
+    return 0
+
+
+def command_resume(args: argparse.Namespace) -> int:
+    if not args.session_id and args.search:
+        rows = sorted(sessions_since(args.days), key=session_sort_key, reverse=True)
+        needle = args.search.strip().lower()
+        matches = [
+            row for row in rows
+            if needle in " ".join([
+                row.session_id,
+                row.tool,
+                row.model or "",
+                row.project_path or "",
+            ]).lower()
+        ]
+        if not matches:
+            print(f"No local session matched {args.search!r} in the last {args.days} days.", file=sys.stderr)
+            return 2
+        args.session_id = matches[0].session_id
+    return command_handoff(args)
 
 
 def command_journal(args: argparse.Namespace) -> int:
@@ -1565,6 +1680,7 @@ def command_watch(args: argparse.Namespace) -> int:
                     tokens_threshold=args.tokens_threshold,
                 )[:3]:
                     print(f"  - {insight}")
+                print(f"  Next: aiwatcher resume --session-id {row.session_id} --target codex --copy")
 
             if args.once:
                 return 0
@@ -1777,14 +1893,19 @@ def command_agent_prompt(args: argparse.Namespace) -> int:
 
 def command_outcome(args: argparse.Namespace) -> int:
     session_id = args.session_id
+    session = None
     if not session_id:
         session = latest_session(sessions_since(args.days))
         if not session:
             print(f"No local AI sessions detected in the last {args.days} days.", file=sys.stderr)
             return 2
         session_id = session.session_id
+    else:
+        session = next((row for row in sessions_since(args.days) if row.session_id == session_id), None)
     try:
         record = record_outcome(session_id, args.outcome, args.note)
+        if session:
+            record_evidence_snapshot(session_id, build_outcome_evidence(session).to_json())
     except (ValueError, OSError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -2897,6 +3018,7 @@ def build_parser() -> argparse.ArgumentParser:
     sessions = sub.add_parser("sessions", help="Show recent local AI sessions")
     sessions.add_argument("--days", type=int, default=1)
     sessions.add_argument("--limit", type=int, default=20)
+    sessions.add_argument("--search", help="Filter by project path, tool, model, or session id")
     sessions.add_argument("--team", action="store_true", help="Explain team session visibility in AIWatcher Cloud")
     sessions.set_defaults(func=command_sessions)
 
@@ -2910,6 +3032,25 @@ def build_parser() -> argparse.ArgumentParser:
     timeline.add_argument("--days", type=int, default=30)
     timeline.add_argument("--limit", type=int, default=30)
     timeline.set_defaults(func=command_timeline)
+
+    handoff = sub.add_parser("handoff", help="Create a local handoff capsule for continuing work in a fresh AI session")
+    handoff.add_argument("--session-id")
+    handoff.add_argument("--days", type=int, default=30)
+    handoff.add_argument("--target", choices=sorted(TARGET_LABELS), default="generic", help="Format the brief for a target AI tool")
+    handoff.add_argument("--copy", action="store_true", help="Copy the next-session brief to the clipboard when supported")
+    handoff.add_argument("--format", choices=["text", "json"], default="text")
+    handoff.add_argument("--include-prompt-excerpt", action="store_true", help="Include a local prompt excerpt in the capsule output")
+    handoff.set_defaults(func=command_handoff)
+
+    resume = sub.add_parser("resume", help="Find a local session and create a target-ready continuation brief")
+    resume.add_argument("--session-id")
+    resume.add_argument("--search", help="Find the most recent matching project, tool, model, or session id")
+    resume.add_argument("--days", type=int, default=30)
+    resume.add_argument("--target", choices=sorted(TARGET_LABELS), default="generic")
+    resume.add_argument("--copy", action="store_true")
+    resume.add_argument("--format", choices=["text", "json"], default="text")
+    resume.add_argument("--include-prompt-excerpt", action="store_true")
+    resume.set_defaults(func=command_resume)
 
     journal = sub.add_parser("journal", help="Show a personal local AI work journal")
     journal.add_argument("--days", type=int, default=1)
