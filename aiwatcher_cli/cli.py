@@ -938,7 +938,8 @@ p {{ margin: 0; color: var(--muted); line-height: 1.5; }}
 .pill {{ display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 999px; padding: 8px 12px; color: var(--muted); background: #0c121a; }}
 .risk {{ color: {'var(--red)' if risk == 'high' else 'var(--amber)'}; border-color: {'rgba(255,127,147,.42)' if risk == 'high' else 'rgba(247,198,107,.42)'}; }}
 .savings {{ color: #061019; background: linear-gradient(135deg, #36d6a5, #6aa7ff); border: 0; font-weight: 800; }}
-.pressure-caption {{ margin-top: 6px; font-size: 12px; color: var(--muted); text-align: right; }}
+.savings-block {{ display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }}
+.pressure-caption {{ font-size: 15px; color: var(--muted); text-align: left; }}
 .guardrails {{ display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 24px; }}
 .chip {{ display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 999px; padding: 10px 16px; background: var(--panel-2); color: var(--text); font-weight: 600; font-size: 15px; }}
 .chip-icon {{ font-size: 17px; line-height: 1; }}
@@ -987,8 +988,10 @@ button:disabled {{ cursor: wait; opacity: .62; transform: none; }}
     <div>
       <span class="pill risk">Risk: {risk} | score {score}</span>
       <span class="pill">{tool_label}</span>
-      {savings_pill}
-      {pressure_caption}
+      <div class="savings-block">
+        {savings_pill}
+        {pressure_caption}
+      </div>
     </div>
   </div>
   {guardrail_row}
