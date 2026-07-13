@@ -1431,7 +1431,7 @@ function eventTypeLabel(type) {
     assistant_tool_use: 'Tool-driven work',
     tool_result: 'Tool results',
     user: 'User turns',
-    last-prompt: 'Prompt metadata',
+    'last-prompt': 'Prompt metadata',
     mode: 'Mode metadata'
   };
   return labels[type] || type;
