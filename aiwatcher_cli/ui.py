@@ -329,7 +329,12 @@ def build_session_detail(session_id: str, days: int = 30) -> dict[str, object]:
     }
 
 
-def build_handoff_detail(session_id: str, days: int = 30, target: str = "generic") -> dict[str, object]:
+def build_handoff_detail(
+    session_id: str,
+    days: int = 30,
+    target: str = "generic",
+    include_prompt_excerpt: bool = False,
+) -> dict[str, object]:
     rows = [row for row in rows_for_window(days) if row.session_id == session_id]
     if not rows:
         return {"error": "session not found"}
@@ -343,7 +348,7 @@ def build_handoff_detail(session_id: str, days: int = 30, target: str = "generic
         row,
         events,
         outcome=outcome.get("outcome") if outcome else None,
-        include_prompt_excerpt=False,
+        include_prompt_excerpt=include_prompt_excerpt,
         target=target if target in {"generic", "claude", "codex", "cursor", "vscode"} else "generic",
     )
 
@@ -994,6 +999,9 @@ HTML = r"""<!doctype html>
     .risk-card h3 { font-size: 16px; margin-bottom: 8px; }
     .prompt-list { margin: 10px 0 0; padding-left: 18px; color: #d9e4f2; line-height: 1.55; }
     .copy-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    .prompt-opt-in { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); font-size: 13px; color: #d5deea; cursor: pointer; }
+    .prompt-opt-in input { width: 15px; height: 15px; accent-color: var(--blue, #4f8cff); }
+    .prompt-opt-in .hint { flex-basis: 100%; color: #93a2b8; font-size: 12px; }
     .drawer-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.62); opacity: 0; pointer-events: none; transition: opacity .18s ease; z-index: 20; }
     .drawer-backdrop.open { opacity: 1; pointer-events: auto; }
     .drawer {
@@ -1472,6 +1480,7 @@ function renderHandoff(capsule) {
   const evidence = capsule.evidence || {};
   const changedFiles = evidence.changed_files || [];
   const target = capsule.target || 'generic';
+  const includePrompt = !!capsule.include_prompt_excerpt;
   return `<section class="detail-section">
     <h2>Fresh-session handoff</h2>
     <p>Use this when a session gets expensive, stale, or hard to continue. It keeps the next ${esc(capsule.target_label || 'AI tool')} focused without carrying the whole chat history.</p>
@@ -1482,8 +1491,13 @@ function renderHandoff(capsule) {
       <div class="mini"><span class="label">Evidence</span><strong>${esc((evidence.commits || []).length)} commits</strong></div>
     </div>
     <div class="copy-row">
-      ${['generic','claude','codex','cursor','vscode'].map(item => `<button class="${item === target ? 'btn-primary' : 'btn-quiet'}" onclick="openHandoff('${esc(capsule.session_id)}','${item}')">${esc(item === 'generic' ? 'Generic' : item)}</button>`).join('')}
+      ${['generic','claude','codex','cursor','vscode'].map(item => `<button class="${item === target ? 'btn-primary' : 'btn-quiet'}" onclick="openHandoff('${esc(capsule.session_id)}','${item}', ${includePrompt})">${esc(item === 'generic' ? 'Generic' : item)}</button>`).join('')}
     </div>
+    <label class="prompt-opt-in">
+      <input type="checkbox" ${includePrompt ? 'checked' : ''} onchange="openHandoff('${esc(capsule.session_id)}','${target}', this.checked)">
+      Include prompt excerpt
+      <span class="hint">Adds your own highest-cost prompt from this session to the brief. Local only, but review before pasting elsewhere.</span>
+    </label>
   </section>
   <section class="detail-section"><h3>Why hand off now</h3>
     <ul class="insight-list">${(capsule.warnings || []).map(item => `<li>${esc(item)}</li>`).join('')}</ul>
@@ -1494,10 +1508,10 @@ function renderHandoff(capsule) {
     ${changedFiles.length ? `<details class="aiw-details"><summary>${esc(changedFiles.length)} changed file${changedFiles.length === 1 ? '' : 's'} to inspect</summary><div class="details-body"><div class="pill-row">${changedFiles.slice(0, 12).map(file => `<span class="pill">${esc(file)}</span>`).join('')}</div></div></details>` : ''}
   </section>`;
 }
-async function openHandoff(sessionId, target = 'generic') {
+async function openHandoff(sessionId, target = 'generic', includePrompt = false) {
   openDrawer('Handoff capsule');
   document.getElementById('detailContent').innerHTML = '<div class="loading">Building local handoff capsule...</div>';
-  const res = await fetch(`/api/handoff?id=${encodeURIComponent(sessionId)}&target=${encodeURIComponent(target)}`);
+  const res = await fetch(`/api/handoff?id=${encodeURIComponent(sessionId)}&target=${encodeURIComponent(target)}&prompt=${includePrompt ? '1' : '0'}`);
   const capsule = await res.json();
   if (capsule.error) {
     document.getElementById('detailContent').innerHTML = `<div class="empty">${esc(capsule.error)}</div>`;
@@ -1884,11 +1898,16 @@ class UIHandler(BaseHTTPRequestHandler):
             params = parse_qs(parsed.query)
             session_id = params.get("id", [""])[0]
             target = params.get("target", ["generic"])[0]
+            include_prompt_excerpt = params.get("prompt", ["0"])[0] == "1"
             try:
                 days = max(1, min(90, int(params.get("days", ["30"])[0])))
             except ValueError:
                 days = 30
-            self._send(200, json.dumps(build_handoff_detail(session_id, days, target)), "application/json; charset=utf-8")
+            self._send(
+                200,
+                json.dumps(build_handoff_detail(session_id, days, target, include_prompt_excerpt)),
+                "application/json; charset=utf-8",
+            )
             return
         if parsed.path == "/api/report":
             params = parse_qs(parsed.query)

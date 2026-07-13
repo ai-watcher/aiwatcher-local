@@ -25,6 +25,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Outcome evidence", ui.HTML)
         self.assertIn("Create handoff capsule", ui.HTML)
         self.assertIn("/api/handoff", ui.HTML)
+        self.assertIn("Include prompt excerpt", ui.HTML)
         self.assertNotIn("window.alert", ui.HTML)
 
     def test_prompt_preflight_response_is_privacy_scoped(self) -> None:
@@ -190,6 +191,28 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("next_brief", capsule)
         self.assertIn("Project", capsule["next_brief"])
         self.assertIn("Cursor", capsule["next_brief"])
+
+    def test_handoff_detail_defaults_prompt_excerpt_off_and_respects_opt_in(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="recent",
+            tool="claude-code",
+            project_path="/repo",
+            started_at=now - timedelta(hours=2),
+            updated_at=now - timedelta(hours=1),
+            tokens_in=100,
+            tokens_out=50,
+            cost_usd=0.4,
+        )
+        with (
+            patch.object(ui, "scan_all", return_value=[row]),
+            patch.object(ui, "scan_all_events", return_value=[]),
+        ):
+            default_capsule = ui.build_handoff_detail("recent", days=7, target="generic")
+            opted_in_capsule = ui.build_handoff_detail("recent", days=7, target="generic", include_prompt_excerpt=True)
+
+        self.assertFalse(default_capsule["include_prompt_excerpt"])
+        self.assertTrue(opted_in_capsule["include_prompt_excerpt"])
 
     def test_receipt_combines_prediction_observation_and_outcome(self) -> None:
         now = datetime.now(timezone.utc)
