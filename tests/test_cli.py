@@ -179,6 +179,39 @@ class PromptPreflightTests(unittest.TestCase):
         # so the glanceable summary renders above the fold, not after it.
         self.assertLess(page.index('class="guardrails"'), page.index("What AIWatcher noticed"))
 
+    def test_hero_pressure_label_omitted_without_sufficient_history(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
+        self.assertIsNone(cli._hero_pressure_label(result))
+
+    def test_hero_pressure_label_shows_tokens_and_tool_calls_when_available(self) -> None:
+        rows = [session(index, age_days=index * 2) for index in range(10)]
+        with patch.object(cli, "sessions_since", return_value=rows):
+            result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
+        label = cli._hero_pressure_label(result)
+        self.assertIsNotNone(label)
+        self.assertIn("tokens", label)
+        self.assertIn("tool calls avoided", label)
+
+    def test_gate_html_shows_pressure_caption_next_to_savings_badge(self) -> None:
+        rows = [session(index, age_days=index * 2) for index in range(10)]
+        with patch.object(cli, "sessions_since", return_value=rows):
+            result = cli.analyze_prompt(
+                "refactor everything and delete the production credential",
+                tool="claude",
+                cwd="/repo",
+            )
+        page = cli._prompt_gate_html(tool="claude", cwd="/repo", prompt="original prompt text", result=result)
+
+        self.assertIn('class="pressure-caption"', page)
+        self.assertIn("tool calls avoided", page)
+        # The compact caption must sit right after the savings badge (both in
+        # the header), not down in the "What AIWatcher noticed" detail card --
+        # that's still where the full sentence (_impact_summary) lives.
+        self.assertLess(page.index('class="pressure-caption"'), page.index("What AIWatcher noticed"))
+        self.assertGreater(page.index('class="pressure-caption"'), page.index('class="pill savings"'))
+        self.assertIn("Estimated avoidable pressure:", page)
+
     def test_split_brief_for_display_is_lossless_on_reassembly(self) -> None:
         full = cli.build_execution_brief(
             "Refactor everything in the auth module",

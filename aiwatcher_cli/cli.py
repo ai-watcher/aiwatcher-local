@@ -801,6 +801,25 @@ def _hero_savings_label(result: dict[str, object]) -> str | None:
     return f"~{_range_label(*api_value, money)} avoidable"
 
 
+def _hero_pressure_label(result: dict[str, object]) -> str | None:
+    """A compact tokens/tool-calls figure to sit right next to the dollar
+    savings badge -- the full sentence (with confidence wording and basis)
+    still lives in the "What AIWatcher noticed" card via _impact_summary()
+    for anyone who wants the detail behind the headline number.
+    """
+    impact = result.get("estimated_impact") if isinstance(result.get("estimated_impact"), dict) else {}
+    if not impact or not impact.get("available", False):
+        return None
+    savings = impact.get("savings", {}) if isinstance(impact.get("savings"), dict) else {}
+    tokens = savings.get("tokens")
+    tool_calls = savings.get("tool_calls")
+    if not isinstance(tokens, list) or len(tokens) != 2:
+        return None
+    if not isinstance(tool_calls, list) or len(tool_calls) != 2:
+        return None
+    return f"{_number_range_label(*tokens)} tokens · {_number_range_label(*tool_calls)} tool calls avoided"
+
+
 _BRIEF_STATIC_SUFFIX_MARKERS = ("\n\nWorking directory\n", "\n\nCompletion report\n")
 
 
@@ -872,6 +891,10 @@ def _prompt_gate_html(*, tool: str, cwd: str, prompt: str, result: dict[str, obj
     savings_pill = (
         f'<span class="pill savings">{html.escape(savings_label)}</span>' if savings_label else ""
     )
+    pressure_label = _hero_pressure_label(result)
+    pressure_caption = (
+        f'<div class="pressure-caption">{html.escape(pressure_label)}</div>' if pressure_label else ""
+    )
     guardrail_chips = "".join(
         f'<span class="chip"><span class="chip-icon">{html.escape(str(g["icon"]))}</span>{html.escape(str(g["label"]))}</span>'
         for g in result.get("guardrails", [])
@@ -915,6 +938,8 @@ p {{ margin: 0; color: var(--muted); line-height: 1.5; }}
 .pill {{ display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 999px; padding: 8px 12px; color: var(--muted); background: #0c121a; }}
 .risk {{ color: {'var(--red)' if risk == 'high' else 'var(--amber)'}; border-color: {'rgba(255,127,147,.42)' if risk == 'high' else 'rgba(247,198,107,.42)'}; }}
 .savings {{ color: #061019; background: linear-gradient(135deg, #36d6a5, #6aa7ff); border: 0; font-weight: 800; }}
+.savings-block {{ display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }}
+.pressure-caption {{ font-size: 15px; color: var(--muted); text-align: left; }}
 .guardrails {{ display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 24px; }}
 .chip {{ display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 999px; padding: 10px 16px; background: var(--panel-2); color: var(--text); font-weight: 600; font-size: 15px; }}
 .chip-icon {{ font-size: 17px; line-height: 1; }}
@@ -963,7 +988,10 @@ button:disabled {{ cursor: wait; opacity: .62; transform: none; }}
     <div>
       <span class="pill risk">Risk: {risk} | score {score}</span>
       <span class="pill">{tool_label}</span>
-      {savings_pill}
+      <div class="savings-block">
+        {savings_pill}
+        {pressure_caption}
+      </div>
     </div>
   </div>
   {guardrail_row}
