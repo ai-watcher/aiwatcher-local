@@ -139,11 +139,24 @@ def build_handoff_capsule(
         f"{len(evidence.changed_files)} changed file(s), {len(evidence.tests)} test artifact(s)",
     ]
     for commit in evidence.commits[:3]:
-        evidence_lines.append(f"  - Commit {commit.get('sha')} at {commit.get('committed_at')}")
+        subject = str(commit.get("subject") or "").strip()
+        label = f"{commit.get('sha')}: {subject}" if subject else str(commit.get("sha"))
+        evidence_lines.append(f"  - Commit {label}")
     for changed_file in evidence.changed_files[:5]:
         evidence_lines.append(f"  - Changed file: {changed_file}")
     if evidence.commits:
         evidence_lines.append(f"- Suggested check: git show {evidence.commits[0].get('sha')} --stat")
+
+    commit_message_lines: list[str] = []
+    if evidence.commits:
+        latest_commit = evidence.commits[0]
+        body = _short(str(latest_commit.get("body") or ""), 600)
+        if body:
+            commit_message_lines = [
+                "",
+                f"Most recent commit message ({latest_commit.get('sha')})",
+                body,
+            ]
 
     task_context_lines: list[str] = []
     if include_prompt_excerpt and costliest_prompt and costliest_prompt.get("prompt_excerpt"):
@@ -168,6 +181,7 @@ def build_handoff_capsule(
         f"{_money(session.cost_usd)} API-equivalent value",
         f"- Outcome status: {outcome or evidence.inferred_outcome or 'not confirmed'}",
         *evidence_lines,
+        *commit_message_lines,
         *task_context_lines,
         "",
         "Before editing",

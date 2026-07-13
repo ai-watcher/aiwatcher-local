@@ -70,7 +70,11 @@ class HandoffTests(unittest.TestCase):
             stamp = (now + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S%z")
             env = {**os.environ, "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp}
             run(["git", "add", "app.py"], temp_dir, env=env)
-            run(["git", "commit", "-m", "secret customer fix"], temp_dir, env=env)
+            run(
+                ["git", "commit", "-m", "fix login bug", "-m", "Session tokens were not being refreshed."],
+                temp_dir,
+                env=env,
+            )
             (repo / "app.py").write_text("print('still editing')\n", encoding="utf-8")
 
             session = LocalSession(
@@ -83,10 +87,37 @@ class HandoffTests(unittest.TestCase):
             capsule = build_handoff_capsule(session, [], outcome="useful")
 
         commit_sha = capsule["evidence"]["commits"][0]["sha"]
-        self.assertIn(f"Commit {commit_sha}", capsule["next_brief"])
+        self.assertIn(f"Commit {commit_sha}: fix login bug", capsule["next_brief"])
         self.assertIn(f"git show {commit_sha} --stat", capsule["next_brief"])
         self.assertIn("Changed file: app.py", capsule["next_brief"])
-        self.assertNotIn("secret customer fix", capsule["next_brief"])
+        self.assertIn(f"Most recent commit message ({commit_sha})", capsule["next_brief"])
+        self.assertIn("Session tokens were not being refreshed.", capsule["next_brief"])
+
+    def test_body_less_commit_omits_commit_message_section(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            run(["git", "init"], temp_dir)
+            run(["git", "config", "user.email", "test@example.com"], temp_dir)
+            run(["git", "config", "user.name", "AIWatcher Test"], temp_dir)
+            (repo / "app.py").write_text("print('hello')\n", encoding="utf-8")
+            stamp = (now + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S%z")
+            env = {**os.environ, "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp}
+            run(["git", "add", "app.py"], temp_dir, env=env)
+            run(["git", "commit", "-m", "wip"], temp_dir, env=env)
+
+            session = LocalSession(
+                session_id="session-5",
+                tool="claude-code",
+                project_path=temp_dir,
+                started_at=now,
+                updated_at=now + timedelta(minutes=1),
+            )
+            capsule = build_handoff_capsule(session, [], outcome="useful")
+
+        commit_sha = capsule["evidence"]["commits"][0]["sha"]
+        self.assertIn(f"Commit {commit_sha}: wip", capsule["next_brief"])
+        self.assertNotIn("Most recent commit message", capsule["next_brief"])
 
     def test_prompt_excerpt_is_embedded_only_when_opted_in(self) -> None:
         now = datetime.now(timezone.utc)

@@ -7,7 +7,6 @@ upload source, prompt text, diffs, or team data.
 
 from __future__ import annotations
 
-import hashlib
 import os
 import subprocess
 from dataclasses import dataclass, field
@@ -86,11 +85,16 @@ def _session_window(session: LocalSession) -> tuple[datetime | None, datetime | 
     return start, end
 
 
-def _safe_hash(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
-
-
 def _recent_commits(repo: str, session: LocalSession) -> list[dict[str, Any]]:
+    """Commit subject/body are captured as real text, not hashed.
+
+    Unlike prompts, a commit message is written by whoever made the change
+    specifically to explain it to a future reader -- it is not private the
+    way prompt text is, and it is the strongest local signal for "why" a
+    change happened. The record separator (%x1e) is required because %b
+    can itself contain newlines, which would otherwise break line-based
+    parsing of `git log` output.
+    """
     start, end = _session_window(session)
     if not start:
         return []
@@ -100,7 +104,7 @@ def _recent_commits(repo: str, session: LocalSession) -> list[dict[str, Any]]:
         [
             "log",
             "--date=iso-strict",
-            "--pretty=format:%H%x1f%ad%x1f%s",
+            "--pretty=format:%H%x1f%ad%x1f%s%x1f%b%x1e",
             f"--since={start.isoformat()}",
             f"--until={until.isoformat()}",
             "--",
@@ -109,14 +113,18 @@ def _recent_commits(repo: str, session: LocalSession) -> list[dict[str, Any]]:
     if not result or result.returncode != 0:
         return []
     commits: list[dict[str, Any]] = []
-    for line in result.stdout.splitlines():
-        parts = line.split("\x1f", 2)
-        if len(parts) != 3:
+    for record in result.stdout.split("\x1e"):
+        record = record.strip("\n")
+        if not record:
             continue
-        sha, stamp, subject = parts
+        parts = record.split("\x1f", 3)
+        if len(parts) != 4:
+            continue
+        sha, stamp, subject, body = parts
         commits.append({
             "sha": sha[:12],
-            "subject_hash": _safe_hash(subject),
+            "subject": subject.strip(),
+            "body": body.strip(),
             "committed_at": stamp,
         })
     return commits[:10]

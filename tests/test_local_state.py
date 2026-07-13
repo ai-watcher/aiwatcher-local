@@ -104,13 +104,24 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(events[0]["error"], "bind failed")
         self.assertNotIn("Refactor the entire codebase", json.dumps(stored))
 
-    def test_evidence_snapshot_stores_hashes_not_paths_or_subjects(self) -> None:
+    def test_evidence_snapshot_never_persists_commit_text(self) -> None:
+        # build_outcome_evidence() now captures real commit subject/body text
+        # (see outcome_evidence.py) for use in ephemeral, copy-once handoff
+        # briefs. That text must never reach the persistent evidence_snapshot
+        # store on disk -- this test simulates the real evidence.to_json()
+        # shape and asserts the subject/body text is filtered out before
+        # anything is written.
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")
             with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
                 record = local_state.record_evidence_snapshot("session-1", {
                     "repo_root": "/Users/dev/secret-project",
-                    "commits": [{"sha": "abcdef1234567890", "subject_hash": "already-safe"}],
+                    "commits": [{
+                        "sha": "abcdef1234567890",
+                        "subject": "fix login bug for acme corp",
+                        "body": "Session tokens were not being refreshed for the acme account.",
+                        "committed_at": "2026-07-13T10:00:00Z",
+                    }],
                     "changed_files": ["src/auth/secrets.py"],
                     "tests": [{"artifact": "test-results/auth.xml"}],
                     "inferred_outcome": "useful",
@@ -126,6 +137,8 @@ class LocalStateTests(unittest.TestCase):
         self.assertNotIn("/Users/dev/secret-project", serialized)
         self.assertNotIn("src/auth/secrets.py", serialized)
         self.assertNotIn("test-results/auth.xml", serialized)
+        self.assertNotIn("fix login bug", serialized)
+        self.assertNotIn("acme", serialized)
 
 
 if __name__ == "__main__":
