@@ -1495,8 +1495,8 @@ function renderHandoff(capsule) {
     </div>
     <label class="prompt-opt-in">
       <input type="checkbox" ${includePrompt ? 'checked' : ''} onchange="openHandoff('${esc(capsule.session_id)}','${target}', this.checked)">
-      Include prompt excerpt
-      <span class="hint">Adds your own highest-cost prompt from this session to the brief. Local only, but review before pasting elsewhere.</span>
+      <span class="prompt-opt-in-label">Include prompt excerpt <span class="pill">Privacy opt-in</span></span>
+      <span class="hint">Off by default: everything else in this brief is metadata (counts, hashes, file paths). This adds your actual prompt text from the costliest turn, so review it before pasting into another tool.</span>
     </label>
   </section>
   <section class="detail-section"><h3>Why hand off now</h3>
