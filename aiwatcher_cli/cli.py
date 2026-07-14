@@ -1034,7 +1034,7 @@ async function sendDecision(decision) {{
     // The static suffix (working directory, completion-report instructions) is
     // collapsed out of view because it never changes, but it still has to be
     // part of what's actually sent -- reattach it here rather than dropping it.
-    const prompt = suffixEl ? core + '\n\n' + suffixEl.textContent : core;
+    const prompt = suffixEl ? core + '\\n\\n' + suffixEl.textContent : core;
     const body = {{ decision, prompt }};
     const response = await fetch('/decision', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify(body) }});
     const saved = await response.json();
