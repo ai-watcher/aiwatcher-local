@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import tempfile
@@ -10,6 +11,43 @@ from aiwatcher_cli import local_state
 
 
 class LocalStateTests(unittest.TestCase):
+    def test_state_lock_is_only_ever_used_inside_locked_state(self) -> None:
+        # _STATE_LOCK guards only in-process threads; a bare `with _STATE_LOCK:`
+        # in a new record_*/recent_*/get_* function would compile and pass
+        # every other test while silently reintroducing the cross-process
+        # race _locked_state() exists to close. This asserts the only
+        # reference to the raw lock left after removing _locked_state()'s own
+        # body is its single definition line -- i.e. nothing else touches it
+        # directly. If this fails, whatever new function added a second
+        # reference should be using `with _locked_state():` instead.
+        source = inspect.getsource(local_state)
+        locked_state_source = inspect.getsource(local_state._locked_state)
+        remainder = source.replace(locked_state_source, "", 1)
+        self.assertEqual(
+            remainder.count("_STATE_LOCK"), 1,
+            "_STATE_LOCK must only be referenced in its own definition and inside "
+            "_locked_state(); use `with _locked_state():` in any new function instead.",
+        )
+
+    def test_concurrent_decisions_do_not_clobber_each_other(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                import threading as threading_module
+
+                def record(index: int) -> None:
+                    local_state.record_decision("session-1", f"decision {index}")
+
+                threads = [threading_module.Thread(target=record, args=(i,)) for i in range(20)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+
+                stored = local_state.recent_decisions("session-1", limit=20)
+
+        self.assertEqual(len(stored), 20)
+
     def test_intervention_stores_hashes_not_prompt_text(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")
