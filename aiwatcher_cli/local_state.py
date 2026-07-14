@@ -27,7 +27,14 @@ def state_path() -> Path:
 
 
 def _empty_state() -> dict[str, Any]:
-    return {"version": STATE_VERSION, "interventions": [], "outcomes": [], "hook_events": [], "evidence_snapshots": []}
+    return {
+        "version": STATE_VERSION,
+        "interventions": [],
+        "outcomes": [],
+        "hook_events": [],
+        "evidence_snapshots": [],
+        "decisions": [],
+    }
 
 
 def _load() -> dict[str, Any]:
@@ -44,6 +51,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("outcomes", [])
     data.setdefault("hook_events", [])
     data.setdefault("evidence_snapshots", [])
+    data.setdefault("decisions", [])
     return data
 
 
@@ -261,6 +269,55 @@ def evidence_snapshots_for_sessions(session_ids: set[str] | None = None) -> dict
             continue
         result[session_id] = row
     return result
+
+
+MAX_DECISION_SUMMARY_LENGTH = 200
+MAX_DECISION_REASONING_LENGTH = 500
+MAX_DECISIONS_STORED = 500
+
+
+def record_decision(
+    session_id: str,
+    summary: str,
+    reasoning: str | None = None,
+    alternatives_rejected: list[str] | None = None,
+) -> dict[str, Any]:
+    """Store a self-reported decision entry for a session.
+
+    Unlike evidence_snapshots, this intentionally stores real text -- the
+    point is to capture "why" for decisions that never produce a commit
+    (e.g. an approach that was seriously considered and rejected without
+    ever being implemented). It is convention-based and self-reported by
+    whoever/whatever calls it, not verified against anything that actually
+    happened, so callers surfacing this should label it as such rather
+    than presenting it as fact.
+    """
+    if not summary or not summary.strip():
+        raise ValueError("summary is required")
+    with STATE_LOCK:
+        data = _load()
+        record = {
+            "session_id": session_id,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+            "summary": summary.strip()[:MAX_DECISION_SUMMARY_LENGTH],
+            "reasoning": reasoning.strip()[:MAX_DECISION_REASONING_LENGTH] if reasoning and reasoning.strip() else None,
+            "alternatives_rejected": [
+                str(item).strip()[:MAX_DECISION_SUMMARY_LENGTH]
+                for item in (alternatives_rejected or [])
+                if str(item).strip()
+            ][:5],
+        }
+        data["decisions"].append(record)
+        data["decisions"] = data["decisions"][-MAX_DECISIONS_STORED:]
+        _save(data)
+    return record
+
+
+def recent_decisions(session_id: str, limit: int = 5) -> list[dict[str, Any]]:
+    with STATE_LOCK:
+        rows = list(_load()["decisions"])
+    matching = [row for row in rows if row.get("session_id") == session_id]
+    return list(reversed(matching))[:limit]
 
 
 def get_outcome(session_id: str) -> dict[str, Any] | None:

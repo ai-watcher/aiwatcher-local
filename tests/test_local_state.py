@@ -140,6 +140,48 @@ class LocalStateTests(unittest.TestCase):
         self.assertNotIn("fix login bug", serialized)
         self.assertNotIn("acme", serialized)
 
+    def test_record_decision_round_trips_and_orders_most_recent_first(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_decision(
+                    "session-1",
+                    "Chose real commit subject/body over hashing",
+                    reasoning="A commit message explains itself to a future reader.",
+                    alternatives_rejected=["hashing the subject"],
+                )
+                local_state.record_decision(
+                    "session-1",
+                    "Considered a token-based tiebreaker",
+                    reasoning="Still picks turn #1 for unrelated reasons.",
+                    alternatives_rejected=["token-based tiebreaker", "git diff --stat only"],
+                )
+                local_state.record_decision("session-2", "Unrelated decision for a different session")
+                decisions = local_state.recent_decisions("session-1")
+
+        self.assertEqual(len(decisions), 2)
+        self.assertEqual(decisions[0]["summary"], "Considered a token-based tiebreaker")
+        self.assertEqual(decisions[0]["alternatives_rejected"], ["token-based tiebreaker", "git diff --stat only"])
+        self.assertEqual(decisions[1]["summary"], "Chose real commit subject/body over hashing")
+
+    def test_record_decision_requires_a_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                with self.assertRaises(ValueError):
+                    local_state.record_decision("session-1", "   ")
+
+    def test_recent_decisions_respects_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                for i in range(8):
+                    local_state.record_decision("session-1", f"decision {i}")
+                decisions = local_state.recent_decisions("session-1", limit=5)
+
+        self.assertEqual(len(decisions), 5)
+        self.assertEqual(decisions[0]["summary"], "decision 7")
+
 
 if __name__ == "__main__":
     unittest.main()

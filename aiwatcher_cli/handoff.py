@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Literal, Sequence
 
+from .local_state import recent_decisions
 from .outcome_evidence import build_outcome_evidence
 from .pricing import is_subscription_model
 from .scanner import LocalEvent, LocalSession, segment_session_by_prompt
@@ -178,6 +179,25 @@ def build_handoff_capsule(
                 body,
             ]
 
+    decisions = recent_decisions(session.session_id, limit=5)
+    decision_lines: list[str] = []
+    if decisions:
+        decision_lines = [
+            "",
+            "Decisions logged this session (self-reported, not verified against what actually happened)",
+        ]
+        for decision in decisions:
+            summary = str(decision.get("summary") or "").strip()
+            if not summary:
+                continue
+            decision_lines.append(f"- {summary}")
+            reasoning = str(decision.get("reasoning") or "").strip()
+            if reasoning:
+                decision_lines.append(f"  Why: {reasoning}")
+            rejected = decision.get("alternatives_rejected") or []
+            if rejected:
+                decision_lines.append(f"  Rejected: {', '.join(str(item) for item in rejected)}")
+
     task_context_lines: list[str] = []
     if include_prompt_excerpt and costliest_prompt and costliest_prompt.get("prompt_excerpt"):
         task_context_lines = [
@@ -202,6 +222,7 @@ def build_handoff_capsule(
         f"- Outcome status: {outcome or evidence.inferred_outcome or 'not confirmed'}",
         *evidence_lines,
         *commit_message_lines,
+        *decision_lines,
         *task_context_lines,
         "",
         "Before editing",
@@ -238,6 +259,7 @@ def build_handoff_capsule(
         "warnings": warnings,
         "include_prompt_excerpt": include_prompt_excerpt,
         "costliest_prompt": costliest_prompt,
+        "decisions": decisions,
         "next_brief": next_brief,
     }
 

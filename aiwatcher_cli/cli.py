@@ -32,6 +32,7 @@ from .local_state import (
     link_intervention_session,
     recent_hook_events,
     recent_interventions,
+    record_decision,
     record_evidence_snapshot,
     record_intervention,
     record_hook_event,
@@ -1914,6 +1915,29 @@ def command_outcome(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_log_decision(args: argparse.Namespace) -> int:
+    session_id = args.session_id
+    if not session_id:
+        session = latest_session(sessions_since(args.days))
+        if not session:
+            print(f"No local AI sessions detected in the last {args.days} days.", file=sys.stderr)
+            return 2
+        session_id = session.session_id
+    try:
+        record = record_decision(
+            session_id,
+            args.summary,
+            reasoning=args.reasoning,
+            alternatives_rejected=args.alternatives_rejected,
+        )
+    except (ValueError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"Logged decision for session {session_id}: {record['summary']}")
+    print("Stored locally; self-reported, not verified against what actually happened.")
+    return 0
+
+
 def _read_stdin_text() -> str:
     # Hook payloads are always written as UTF-8. Text-mode sys.stdin decodes
     # using the platform's default encoding (the Windows console codepage,
@@ -3062,6 +3086,23 @@ def build_parser() -> argparse.ArgumentParser:
     outcome.add_argument("--note")
     outcome.add_argument("--days", type=int, default=30)
     outcome.set_defaults(func=command_outcome)
+
+    log_decision = sub.add_parser(
+        "log-decision",
+        help="Record a local note for a design decision made or rejected this session",
+    )
+    log_decision.add_argument("summary", help="One-line summary of the decision")
+    log_decision.add_argument("--reasoning", help="Why this decision was made")
+    log_decision.add_argument(
+        "--rejected",
+        action="append",
+        default=[],
+        dest="alternatives_rejected",
+        help="An alternative that was considered and rejected; repeat for multiple",
+    )
+    log_decision.add_argument("--session-id")
+    log_decision.add_argument("--days", type=int, default=30)
+    log_decision.set_defaults(func=command_log_decision)
 
     watch = sub.add_parser("watch", help="Watch local AI sessions for high-cost or looping behavior")
     watch.add_argument("--days", type=int, default=1)

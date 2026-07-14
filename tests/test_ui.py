@@ -180,11 +180,14 @@ class DashboardWindowTests(unittest.TestCase):
             tokens_out=50,
             cost_usd=0.4,
         )
-        with (
-            patch.object(ui, "scan_all", return_value=[row]),
-            patch.object(ui, "scan_all_events", return_value=[]),
-        ):
-            capsule = ui.build_handoff_detail("recent", days=7, target="cursor")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all", return_value=[row]),
+                patch.object(ui, "scan_all_events", return_value=[]),
+            ):
+                capsule = ui.build_handoff_detail("recent", days=7, target="cursor")
 
         self.assertEqual(capsule["session_id"], "recent")
         self.assertEqual(capsule["target"], "cursor")
@@ -204,12 +207,15 @@ class DashboardWindowTests(unittest.TestCase):
             tokens_out=50,
             cost_usd=0.4,
         )
-        with (
-            patch.object(ui, "scan_all", return_value=[row]),
-            patch.object(ui, "scan_all_events", return_value=[]),
-        ):
-            default_capsule = ui.build_handoff_detail("recent", days=7, target="generic")
-            opted_in_capsule = ui.build_handoff_detail("recent", days=7, target="generic", include_prompt_excerpt=True)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all", return_value=[row]),
+                patch.object(ui, "scan_all_events", return_value=[]),
+            ):
+                default_capsule = ui.build_handoff_detail("recent", days=7, target="generic")
+                opted_in_capsule = ui.build_handoff_detail("recent", days=7, target="generic", include_prompt_excerpt=True)
 
         self.assertFalse(default_capsule["include_prompt_excerpt"])
         self.assertTrue(opted_in_capsule["include_prompt_excerpt"])

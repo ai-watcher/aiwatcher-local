@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import queue
 import socket
+import tempfile
 import threading
 import unittest
 import urllib.request
@@ -12,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiwatcher_cli import cli
+from aiwatcher_cli.local_state import recent_decisions
 from aiwatcher_cli.scanner import LocalSession
 
 
@@ -138,6 +141,72 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(args.session_id, "session-2")
         handoff.assert_called_once_with(args)
+
+    def test_log_decision_defaults_to_latest_session(self) -> None:
+        rows = [session(1, project="/repo/older", age_days=1), session(2, project="/repo/newest", age_days=0)]
+        args = SimpleNamespace(
+            session_id=None,
+            days=7,
+            summary="Considered a token-based tiebreaker",
+            reasoning="Still picks turn #1 for unrelated reasons.",
+            alternatives_rejected=["token-based tiebreaker", "git diff --stat only"],
+        )
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(cli, "sessions_since", return_value=rows),
+                patch("sys.stdout", output),
+            ):
+                result = cli.command_log_decision(args)
+                stored = recent_decisions("session-2")
+
+        self.assertEqual(result, 0)
+        self.assertIn("session-2", output.getvalue())
+        self.assertIn("not verified against what actually happened", output.getvalue())
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(stored[0]["summary"], "Considered a token-based tiebreaker")
+        self.assertEqual(stored[0]["alternatives_rejected"], ["token-based tiebreaker", "git diff --stat only"])
+
+    def test_log_decision_respects_explicit_session_id(self) -> None:
+        args = SimpleNamespace(
+            session_id="explicit-session",
+            days=7,
+            summary="Chose real commit subject/body over hashing",
+            reasoning=None,
+            alternatives_rejected=[],
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                result = cli.command_log_decision(args)
+                stored = recent_decisions("explicit-session")
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(stored[0]["session_id"], "explicit-session")
+
+    def test_log_decision_rejects_empty_summary(self) -> None:
+        args = SimpleNamespace(
+            session_id="explicit-session",
+            days=7,
+            summary="   ",
+            reasoning=None,
+            alternatives_rejected=[],
+        )
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}), patch("sys.stderr", output):
+                result = cli.command_log_decision(args)
+                stored = recent_decisions("explicit-session")
+
+        self.assertEqual(result, 2)
+        self.assertEqual(stored, [])
 
     def test_watch_points_high_pressure_session_to_resume(self) -> None:
         row = session(1, project="/repo/orcha")

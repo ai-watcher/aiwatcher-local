@@ -7,8 +7,10 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from aiwatcher_cli.handoff import build_handoff_capsule, render_handoff_capsule
+from aiwatcher_cli.local_state import record_decision
 from aiwatcher_cli.scanner import LocalSession
 
 
@@ -20,21 +22,24 @@ def run(command: list[str], cwd: str, env: dict[str, str] | None = None) -> None
 
 class HandoffTests(unittest.TestCase):
     def test_handoff_capsule_prioritizes_fresh_session_guidance(self) -> None:
-        session = LocalSession(
-            session_id="session-1",
-            tool="claude-code",
-            project_path="/repo/app",
-            updated_at=datetime.now(timezone.utc),
-            model="claude-sonnet",
-            tokens_in=700_000,
-            tokens_out=20_000,
-            cost_usd=9.03,
-            agent_calls=984,
-            tool_calls=547,
-        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                session = LocalSession(
+                    session_id="session-1",
+                    tool="claude-code",
+                    project_path="/repo/app",
+                    updated_at=datetime.now(timezone.utc),
+                    model="claude-sonnet",
+                    tokens_in=700_000,
+                    tokens_out=20_000,
+                    cost_usd=9.03,
+                    agent_calls=984,
+                    tool_calls=547,
+                )
 
-        capsule = build_handoff_capsule(session, [], outcome="useful")
-        rendered = render_handoff_capsule(capsule)
+                capsule = build_handoff_capsule(session, [], outcome="useful")
+                rendered = render_handoff_capsule(capsule)
 
         self.assertEqual(capsule["usage"]["tokens_label"], "720.0k")
         self.assertIn("continue with a smaller checkpoint", "\n".join(capsule["warnings"]))
@@ -43,16 +48,19 @@ class HandoffTests(unittest.TestCase):
         self.assertNotIn("source diff", rendered.lower())
 
     def test_handoff_capsule_formats_for_target_tool(self) -> None:
-        session = LocalSession(
-            session_id="session-2",
-            tool="claude-code",
-            project_path="/repo/app",
-            updated_at=datetime.now(timezone.utc),
-            model="claude-sonnet",
-        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                session = LocalSession(
+                    session_id="session-2",
+                    tool="claude-code",
+                    project_path="/repo/app",
+                    updated_at=datetime.now(timezone.utc),
+                    model="claude-sonnet",
+                )
 
-        capsule = build_handoff_capsule(session, [], target="codex")
-        rendered = render_handoff_capsule(capsule)
+                capsule = build_handoff_capsule(session, [], target="codex")
+                rendered = render_handoff_capsule(capsule)
 
         self.assertEqual(capsule["target"], "codex")
         self.assertEqual(capsule["target_label"], "Codex")
@@ -84,7 +92,8 @@ class HandoffTests(unittest.TestCase):
                 started_at=now,
                 updated_at=now + timedelta(minutes=1),
             )
-            capsule = build_handoff_capsule(session, [], outcome="useful")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(temp_dir, "state.json")}):
+                capsule = build_handoff_capsule(session, [], outcome="useful")
 
         commit_sha = capsule["evidence"]["commits"][0]["sha"]
         self.assertIn(f"Commit {commit_sha}: fix login bug", capsule["next_brief"])
@@ -113,7 +122,8 @@ class HandoffTests(unittest.TestCase):
                 started_at=now,
                 updated_at=now + timedelta(minutes=1),
             )
-            capsule = build_handoff_capsule(session, [], outcome="useful")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(temp_dir, "state.json")}):
+                capsule = build_handoff_capsule(session, [], outcome="useful")
 
         commit_sha = capsule["evidence"]["commits"][0]["sha"]
         self.assertIn(f"Commit {commit_sha}: wip", capsule["next_brief"])
@@ -141,7 +151,8 @@ class HandoffTests(unittest.TestCase):
                 started_at=now,
                 updated_at=now + timedelta(minutes=1),
             )
-            capsule = build_handoff_capsule(session, [], outcome="useful")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(temp_dir, "state.json")}):
+                capsule = build_handoff_capsule(session, [], outcome="useful")
 
         brief = capsule["next_brief"]
         self.assertNotIn(long_body, brief)
@@ -186,7 +197,8 @@ class HandoffTests(unittest.TestCase):
                 started_at=now,
                 updated_at=now + timedelta(minutes=3),
             )
-            capsule = build_handoff_capsule(session, [], outcome="useful")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(temp_dir, "state.json")}):
+                capsule = build_handoff_capsule(session, [], outcome="useful")
 
         brief = capsule["next_brief"]
         self.assertEqual(len(capsule["evidence"]["commits"]), 5)
@@ -213,14 +225,60 @@ class HandoffTests(unittest.TestCase):
                 updated_at=now,
             )
 
-            capsule_off = build_handoff_capsule(session, [], include_prompt_excerpt=False)
-            self.assertNotIn("billing module", capsule_off["next_brief"])
-            self.assertIsNone(capsule_off["costliest_prompt"])
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(temp_dir, "state.json")}):
+                capsule_off = build_handoff_capsule(session, [], include_prompt_excerpt=False)
+                capsule_on = build_handoff_capsule(session, [], include_prompt_excerpt=True)
 
-            capsule_on = build_handoff_capsule(session, [], include_prompt_excerpt=True)
-            self.assertIn("billing module", capsule_on["next_brief"])
-            self.assertIn("Task context", capsule_on["next_brief"])
-            self.assertTrue(capsule_on["include_prompt_excerpt"])
+        self.assertNotIn("billing module", capsule_off["next_brief"])
+        self.assertIsNone(capsule_off["costliest_prompt"])
+        self.assertIn("billing module", capsule_on["next_brief"])
+        self.assertIn("Task context", capsule_on["next_brief"])
+        self.assertTrue(capsule_on["include_prompt_excerpt"])
+
+    def test_logged_decisions_are_surfaced_and_hedged(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                record_decision(
+                    "session-8",
+                    "Considered a token-based tiebreaker",
+                    reasoning="Still picks turn #1 for unrelated reasons.",
+                    alternatives_rejected=["token-based tiebreaker", "git diff --stat only"],
+                )
+
+                session = LocalSession(
+                    session_id="session-8",
+                    tool="claude-code",
+                    project_path=temp_dir,
+                    started_at=now,
+                    updated_at=now,
+                )
+                capsule = build_handoff_capsule(session, [], outcome="useful")
+
+        brief = capsule["next_brief"]
+        self.assertIn("Decisions logged this session (self-reported, not verified against what actually happened)", brief)
+        self.assertIn("- Considered a token-based tiebreaker", brief)
+        self.assertIn("Why: Still picks turn #1 for unrelated reasons.", brief)
+        self.assertIn("Rejected: token-based tiebreaker, git diff --stat only", brief)
+        self.assertEqual(len(capsule["decisions"]), 1)
+
+    def test_no_decisions_omits_the_section(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                session = LocalSession(
+                    session_id="session-9",
+                    tool="claude-code",
+                    project_path=temp_dir,
+                    started_at=now,
+                    updated_at=now,
+                )
+                capsule = build_handoff_capsule(session, [], outcome="useful")
+
+        self.assertNotIn("Decisions logged this session", capsule["next_brief"])
+        self.assertEqual(capsule["decisions"], [])
 
 
 if __name__ == "__main__":
