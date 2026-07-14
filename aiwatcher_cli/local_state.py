@@ -31,11 +31,6 @@ VALID_OUTCOMES = {"useful", "rework", "abandoned"}
 # is the only supported way to guard a read-modify-write of local state.
 # Leading underscore is load-bearing: nothing outside this module (and
 # nothing else in this module) should reach for this lock on its own.
-#
-# NOTE: this locking mechanism is duplicated from PR #7
-# (fix/local-state-cross-process-lock), which had not merged yet when this
-# was written. Whoever merges both PRs should de-duplicate this block --
-# it's the same tested implementation in two places, not a competing one.
 _STATE_LOCK = threading.RLock()
 LOCK_TIMEOUT_SECONDS = 10
 LOCK_POLL_SECONDS = 0.05

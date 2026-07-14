@@ -120,6 +120,63 @@ class LocalStateTests(unittest.TestCase):
         else:
             chmod.assert_called_once_with(local_state.Path(state_file), 0o600)
 
+    def test_cross_process_lock_blocks_a_second_holder_until_released(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                lock_path = local_state._lock_path()
+                lock_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(lock_path, "a+b") as first:
+                    if first.seek(0, os.SEEK_END) == 0:
+                        first.write(b"\0")
+                        first.flush()
+                    local_state._acquire_file_lock(first)
+                    try:
+                        with open(lock_path, "a+b") as second:
+                            with (
+                                patch.object(local_state, "LOCK_TIMEOUT_SECONDS", 0.2),
+                                patch.object(local_state, "LOCK_POLL_SECONDS", 0.02),
+                            ):
+                                with self.assertRaises(local_state.StateLockTimeout):
+                                    local_state._acquire_file_lock(second)
+                    finally:
+                        local_state._release_file_lock(first)
+
+                # Once released, a fresh acquire succeeds immediately.
+                with open(lock_path, "a+b") as third:
+                    local_state._acquire_file_lock(third)
+                    local_state._release_file_lock(third)
+
+    def test_concurrent_interventions_do_not_clobber_each_other(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                import threading as threading_module
+
+                def record(index: int) -> None:
+                    local_state.record_intervention(
+                        tool="claude",
+                        cwd="/repo",
+                        risk="low",
+                        score=0,
+                        findings=[],
+                        original_prompt=f"prompt {index}",
+                        suggested_prompt=f"prompt {index}",
+                        decision="allowed_original",
+                        selected_prompt=None,
+                    )
+
+                threads = [threading_module.Thread(target=record, args=(i,)) for i in range(20)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+
+                with open(state_file, encoding="utf-8") as handle:
+                    stored = json.load(handle)
+
+        self.assertEqual(len(stored["interventions"]), 20)
+
     def test_hook_events_are_privacy_safe_and_bounded(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")
