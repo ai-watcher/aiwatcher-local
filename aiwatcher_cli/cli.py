@@ -2531,6 +2531,109 @@ def command_uninstall_claude_hook(args: argparse.Namespace) -> int:
     return 0
 
 
+DECISION_LOG_MARKER_START = "<!-- aiwatcher:decision-log:start -->"
+DECISION_LOG_MARKER_END = "<!-- aiwatcher:decision-log:end -->"
+
+
+def _claude_user_memory_path() -> str:
+    # Deliberately global/personal only (~/.claude/CLAUDE.md), never a
+    # project-local CLAUDE.md -- that file is typically committed and shared
+    # with every collaborator on the repo, so writing to it would change how
+    # the whole team's AI behaves, not just the person running this command.
+    return os.path.expanduser("~/.claude/CLAUDE.md")
+
+
+def _decision_log_convention_block() -> str:
+    return "\n".join([
+        DECISION_LOG_MARKER_START,
+        "## AIWatcher decision log",
+        "",
+        "When you seriously consider and reject a real alternative during a coding",
+        "session -- an approach, a library, a design -- and that rejection doesn't",
+        "end up reflected in a commit message, log it:",
+        "",
+        "```",
+        'aiwatcher log-decision "<one-line summary>" --reasoning "<why>" --rejected "<alternative>"',
+        "```",
+        "",
+        "Use `--rejected` more than once if there were multiple alternatives. Only",
+        "log real decision points, not routine implementation choices -- if it",
+        "wouldn't be worth explaining to a teammate picking up the work fresh, skip",
+        "it.",
+        DECISION_LOG_MARKER_END,
+    ])
+
+
+def _merge_decision_log_convention(existing: str) -> tuple[str, bool]:
+    if DECISION_LOG_MARKER_START in existing:
+        return existing, False
+    block = _decision_log_convention_block()
+    if not existing.strip():
+        return block + "\n", True
+    return existing.rstrip("\n") + "\n\n" + block + "\n", True
+
+
+def _remove_decision_log_convention(existing: str) -> tuple[str, bool]:
+    start = existing.find(DECISION_LOG_MARKER_START)
+    if start == -1:
+        return existing, False
+    end = existing.find(DECISION_LOG_MARKER_END)
+    if end == -1:
+        return existing, False
+    end += len(DECISION_LOG_MARKER_END)
+    before = existing[:start].rstrip("\n")
+    after = existing[end:].lstrip("\n")
+    if before and after:
+        updated = before + "\n\n" + after
+    else:
+        updated = (before + after).strip("\n")
+    if updated:
+        updated += "\n"
+    return updated, True
+
+
+def command_install_claude_decision_log(args: argparse.Namespace) -> int:
+    path = _claude_user_memory_path()
+    if not args.write:
+        print("Add this to your personal Claude Code memory (never a project-shared file):")
+        print(_decision_log_convention_block())
+        print(f"\nUser-global path: {path}")
+        print("Re-run with --write to install it there directly.")
+        return 0
+
+    existing = ""
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as handle:
+            existing = handle.read()
+    updated, changed = _merge_decision_log_convention(existing)
+    if not changed:
+        print(f"AIWatcher decision-log convention is already installed at {path}.")
+        return 0
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(updated)
+    print(f"Installed AIWatcher decision-log convention at {path}")
+    print("This is personal to this machine -- it is not committed, and does not affect other collaborators.")
+    return 0
+
+
+def command_uninstall_claude_decision_log(args: argparse.Namespace) -> int:
+    path = _claude_user_memory_path()
+    if not os.path.exists(path):
+        print(f"No personal Claude memory file found at {path}.")
+        return 0
+    with open(path, "r", encoding="utf-8") as handle:
+        existing = handle.read()
+    updated, removed = _remove_decision_log_convention(existing)
+    if not removed:
+        print(f"No AIWatcher decision-log convention found in {path}.")
+        return 0
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(updated)
+    print(f"Removed AIWatcher decision-log convention from {path}")
+    return 0
+
+
 def command_install_codex_hook(args: argparse.Namespace) -> int:
     command = args.command or _cli_command_for_current_file()
     snippet = _merge_codex_hook({}, command, gate=args.gate)
@@ -3148,6 +3251,19 @@ def build_parser() -> argparse.ArgumentParser:
     uninstall_claude_hook.add_argument("--scope", choices=["project", "user"], default="project")
     uninstall_claude_hook.add_argument("--project-dir")
     uninstall_claude_hook.set_defaults(func=command_uninstall_claude_hook)
+
+    install_decision_log = sub.add_parser(
+        "install-claude-decision-log",
+        help="Print or install a personal Claude Code convention for logging rejected decisions",
+    )
+    install_decision_log.add_argument("--write", action="store_true", help="Write the convention into your personal CLAUDE.md")
+    install_decision_log.set_defaults(func=command_install_claude_decision_log)
+
+    uninstall_decision_log = sub.add_parser(
+        "uninstall-claude-decision-log",
+        help="Remove the AIWatcher decision-log convention from your personal CLAUDE.md",
+    )
+    uninstall_decision_log.set_defaults(func=command_uninstall_claude_decision_log)
 
     install_codex_hook = sub.add_parser("install-codex-hook", help="Print or install a native Codex prompt preflight hook")
     install_codex_hook.add_argument("--write", action="store_true", help="Write the hook into Codex hooks.json")

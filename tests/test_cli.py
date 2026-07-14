@@ -208,6 +208,96 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertEqual(result, 2)
         self.assertEqual(stored, [])
 
+    def test_install_decision_log_dry_run_writes_nothing(self) -> None:
+        args = SimpleNamespace(write=False)
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            claude_md = os.path.join(temp_dir, ".claude", "CLAUDE.md")
+            with (
+                patch.dict(os.environ, {"HOME": temp_dir, "USERPROFILE": temp_dir}),
+                patch("sys.stdout", output),
+            ):
+                result = cli.command_install_claude_decision_log(args)
+
+        self.assertEqual(result, 0)
+        self.assertFalse(os.path.exists(claude_md))
+        self.assertIn("aiwatcher log-decision", output.getvalue())
+        self.assertIn(claude_md.replace("\\", "/"), output.getvalue().replace("\\", "/"))
+
+    def test_install_decision_log_writes_and_is_idempotent(self) -> None:
+        args = SimpleNamespace(write=True)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            claude_md = os.path.join(temp_dir, ".claude", "CLAUDE.md")
+            with patch.dict(os.environ, {"HOME": temp_dir, "USERPROFILE": temp_dir}):
+                first = cli.command_install_claude_decision_log(args)
+                with open(claude_md, encoding="utf-8") as handle:
+                    first_content = handle.read()
+                second = cli.command_install_claude_decision_log(args)
+                with open(claude_md, encoding="utf-8") as handle:
+                    second_content = handle.read()
+
+        self.assertEqual(first, 0)
+        self.assertEqual(second, 0)
+        self.assertIn("aiwatcher log-decision", first_content)
+        self.assertEqual(first_content, second_content)
+        self.assertEqual(first_content.count(cli.DECISION_LOG_MARKER_START), 1)
+
+    def test_install_decision_log_preserves_existing_content(self) -> None:
+        args = SimpleNamespace(write=True)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            claude_dir = os.path.join(temp_dir, ".claude")
+            os.makedirs(claude_dir)
+            claude_md = os.path.join(claude_dir, "CLAUDE.md")
+            with open(claude_md, "w", encoding="utf-8") as handle:
+                handle.write("# My personal preferences\n\nAlways use tabs.\n")
+
+            with patch.dict(os.environ, {"HOME": temp_dir, "USERPROFILE": temp_dir}):
+                cli.command_install_claude_decision_log(args)
+                with open(claude_md, encoding="utf-8") as handle:
+                    content = handle.read()
+
+        self.assertIn("Always use tabs.", content)
+        self.assertIn("aiwatcher log-decision", content)
+
+    def test_uninstall_decision_log_removes_block_and_preserves_rest(self) -> None:
+        install_args = SimpleNamespace(write=True)
+        uninstall_args = SimpleNamespace()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            claude_dir = os.path.join(temp_dir, ".claude")
+            os.makedirs(claude_dir)
+            claude_md = os.path.join(claude_dir, "CLAUDE.md")
+            with open(claude_md, "w", encoding="utf-8") as handle:
+                handle.write("# My personal preferences\n\nAlways use tabs.\n")
+
+            with patch.dict(os.environ, {"HOME": temp_dir, "USERPROFILE": temp_dir}):
+                cli.command_install_claude_decision_log(install_args)
+                result = cli.command_uninstall_claude_decision_log(uninstall_args)
+                with open(claude_md, encoding="utf-8") as handle:
+                    content = handle.read()
+
+        self.assertEqual(result, 0)
+        self.assertIn("Always use tabs.", content)
+        self.assertNotIn("aiwatcher log-decision", content)
+        self.assertNotIn(cli.DECISION_LOG_MARKER_START, content)
+
+    def test_uninstall_decision_log_when_nothing_installed(self) -> None:
+        args = SimpleNamespace()
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.dict(os.environ, {"HOME": temp_dir, "USERPROFILE": temp_dir}),
+                patch("sys.stdout", output),
+            ):
+                result = cli.command_uninstall_claude_decision_log(args)
+
+        self.assertEqual(result, 0)
+        self.assertIn("No personal Claude memory file found", output.getvalue())
+
     def test_watch_points_high_pressure_session_to_resume(self) -> None:
         row = session(1, project="/repo/orcha")
         row.agent_calls = 300
