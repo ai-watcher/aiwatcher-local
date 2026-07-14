@@ -23,12 +23,15 @@ else:
 STATE_VERSION = 1
 VALID_OUTCOMES = {"useful", "rework", "abandoned"}
 
-# Guards this process's own threads. Every hook invocation is a separate OS
-# process though, so this alone does not prevent two concurrent processes
-# from racing a read-modify-write on local-state.json and silently dropping
-# one side's update. _cross_process_lock() below closes that gap with a real
-# OS-level file lock.
-STATE_LOCK = threading.RLock()
+# Private: guards this process's own threads only. Every hook invocation is
+# a separate OS process though, so this alone does not prevent two
+# concurrent processes from racing a read-modify-write on local-state.json
+# and silently dropping one side's update. Deliberately not exported/reused
+# directly by any record_*/recent_*/get_* function -- _locked_state() below
+# is the only supported way to guard a read-modify-write of local state.
+# Leading underscore is load-bearing: nothing outside this module (and
+# nothing else in this module) should reach for this lock on its own.
+_STATE_LOCK = threading.RLock()
 LOCK_TIMEOUT_SECONDS = 10
 LOCK_POLL_SECONDS = 0.05
 
@@ -96,7 +99,7 @@ def _locked_state():
     combined lock makes read-modify-write of local-state.json atomic across
     processes, not just threads.
     """
-    with STATE_LOCK, _cross_process_lock():
+    with _STATE_LOCK, _cross_process_lock():
         yield
 
 
