@@ -39,7 +39,19 @@ def _short(value: str | None, limit: int = 900) -> str | None:
     text = value.strip()
     if len(text) <= limit:
         return text
-    return text[:limit].rstrip() + "..."
+    truncated = text[:limit]
+    # Prefer dropping the last, possibly-partial line entirely (so a bullet
+    # list doesn't end on a fragment) rather than just avoiding a mid-word
+    # cut. Only fall back to a word boundary when there's no newline close
+    # enough to be worth it (e.g. a single long paragraph with no lines).
+    newline_break = truncated.rfind("\n")
+    if newline_break > limit * 0.5:
+        truncated = truncated[:newline_break]
+    else:
+        space_break = truncated.rfind(" ")
+        if space_break > limit * 0.6:
+            truncated = truncated[:space_break]
+    return truncated.rstrip() + "..."
 
 
 def _stamp(session: LocalSession) -> str:
@@ -138,12 +150,20 @@ def build_handoff_capsule(
         f"- Local evidence: {len(evidence.commits)} nearby commit(s), "
         f"{len(evidence.changed_files)} changed file(s), {len(evidence.tests)} test artifact(s)",
     ]
-    for commit in evidence.commits[:3]:
+    shown_commits = evidence.commits[:3]
+    for commit in shown_commits:
         subject = str(commit.get("subject") or "").strip()
         label = f"{commit.get('sha')}: {subject}" if subject else str(commit.get("sha"))
         evidence_lines.append(f"  - Commit {label}")
-    for changed_file in evidence.changed_files[:5]:
+    if len(evidence.commits) > len(shown_commits):
+        evidence_lines.append(f"  - ...and {len(evidence.commits) - len(shown_commits)} more commit(s) (see git log)")
+    shown_files = evidence.changed_files[:5]
+    for changed_file in shown_files:
         evidence_lines.append(f"  - Changed file: {changed_file}")
+    if len(evidence.changed_files) > len(shown_files):
+        evidence_lines.append(
+            f"  - ...and {len(evidence.changed_files) - len(shown_files)} more changed file(s) (see git status)"
+        )
     if evidence.commits:
         evidence_lines.append(f"- Suggested check: git show {evidence.commits[0].get('sha')} --stat")
 

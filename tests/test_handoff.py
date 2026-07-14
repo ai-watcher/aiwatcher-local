@@ -119,6 +119,81 @@ class HandoffTests(unittest.TestCase):
         self.assertIn(f"Commit {commit_sha}: wip", capsule["next_brief"])
         self.assertNotIn("Most recent commit message", capsule["next_brief"])
 
+    def test_commit_message_body_truncates_at_line_boundary_not_mid_word(self) -> None:
+        now = datetime.now(timezone.utc)
+        bullets = [f"- bullet point number {i} with some descriptive words attached" for i in range(30)]
+        long_body = "\n".join(bullets)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            run(["git", "init"], temp_dir)
+            run(["git", "config", "user.email", "test@example.com"], temp_dir)
+            run(["git", "config", "user.name", "AIWatcher Test"], temp_dir)
+            (repo / "app.py").write_text("print('hello')\n", encoding="utf-8")
+            stamp = (now + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S%z")
+            env = {**os.environ, "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp}
+            run(["git", "add", "app.py"], temp_dir, env=env)
+            run(["git", "commit", "-m", "big change", "-m", long_body], temp_dir, env=env)
+
+            session = LocalSession(
+                session_id="session-6",
+                tool="claude-code",
+                project_path=temp_dir,
+                started_at=now,
+                updated_at=now + timedelta(minutes=1),
+            )
+            capsule = build_handoff_capsule(session, [], outcome="useful")
+
+        brief = capsule["next_brief"]
+        self.assertNotIn(long_body, brief)
+        section = brief.split("Most recent commit message")[1].split("\n\nBefore editing")[0]
+        header_line, _, body_text = section.partition("\n")
+        self.assertTrue(body_text.rstrip().endswith("..."))
+        kept_text = body_text.rstrip()[:-3].rstrip()
+        for line in kept_text.splitlines():
+            if not line.strip():
+                continue
+            self.assertIn(line, bullets)
+
+    def test_evidence_flags_when_more_commits_or_files_exist_than_shown(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            run(["git", "init"], temp_dir)
+            run(["git", "config", "user.email", "test@example.com"], temp_dir)
+            run(["git", "config", "user.name", "AIWatcher Test"], temp_dir)
+
+            seed_stamp = (now + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%S%z")
+            seed_env = {**os.environ, "GIT_AUTHOR_DATE": seed_stamp, "GIT_COMMITTER_DATE": seed_stamp}
+            for i in range(6):
+                (repo / f"changed{i}.py").write_text(f"print({i})\n", encoding="utf-8")
+            run(["git", "add"] + [f"changed{i}.py" for i in range(6)], temp_dir, env=seed_env)
+            run(["git", "commit", "-m", "seed files"], temp_dir, env=seed_env)
+
+            for i in range(4):
+                stamp = (now + timedelta(minutes=2, seconds=i)).strftime("%Y-%m-%dT%H:%M:%S%z")
+                env = {**os.environ, "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp}
+                (repo / f"extra{i}.py").write_text(f"print('extra {i}')\n", encoding="utf-8")
+                run(["git", "add", f"extra{i}.py"], temp_dir, env=env)
+                run(["git", "commit", "-m", f"commit number {i}"], temp_dir, env=env)
+
+            for i in range(6):
+                (repo / f"changed{i}.py").write_text(f"print('modified {i}')\n", encoding="utf-8")
+
+            session = LocalSession(
+                session_id="session-7",
+                tool="claude-code",
+                project_path=temp_dir,
+                started_at=now,
+                updated_at=now + timedelta(minutes=3),
+            )
+            capsule = build_handoff_capsule(session, [], outcome="useful")
+
+        brief = capsule["next_brief"]
+        self.assertEqual(len(capsule["evidence"]["commits"]), 5)
+        self.assertEqual(len(capsule["evidence"]["changed_files"]), 6)
+        self.assertIn("...and 2 more commit(s) (see git log)", brief)
+        self.assertIn("...and 1 more changed file(s) (see git status)", brief)
+
     def test_prompt_excerpt_is_embedded_only_when_opted_in(self) -> None:
         now = datetime.now(timezone.utc)
         with tempfile.TemporaryDirectory() as temp_dir:
