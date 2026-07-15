@@ -112,7 +112,14 @@ def state_path() -> Path:
 
 
 def _empty_state() -> dict[str, Any]:
-    return {"version": STATE_VERSION, "interventions": [], "outcomes": [], "hook_events": []}
+    return {
+        "version": STATE_VERSION,
+        "interventions": [],
+        "outcomes": [],
+        "hook_events": [],
+        "evidence_snapshots": [],
+        "decisions": [],
+    }
 
 
 def _load() -> dict[str, Any]:
@@ -128,6 +135,8 @@ def _load() -> dict[str, Any]:
     data.setdefault("interventions", [])
     data.setdefault("outcomes", [])
     data.setdefault("hook_events", [])
+    data.setdefault("evidence_snapshots", [])
+    data.setdefault("decisions", [])
     return data
 
 
@@ -287,6 +296,113 @@ def record_outcome(session_id: str, outcome: str, note: str | None = None) -> di
         data["outcomes"].append(record)
         _save(data)
     return record
+
+
+def record_evidence_snapshot(session_id: str, evidence: dict[str, Any]) -> dict[str, Any]:
+    """Store a privacy-safe evidence snapshot for a session.
+
+    This keeps enough local history to support later survival/outcome analysis
+    without storing prompt text, source diffs, commit subjects, or file content.
+    """
+    commits = evidence.get("commits") if isinstance(evidence.get("commits"), list) else []
+    changed_files = evidence.get("changed_files") if isinstance(evidence.get("changed_files"), list) else []
+    tests = evidence.get("tests") if isinstance(evidence.get("tests"), list) else []
+    repo_root = evidence.get("repo_root") if isinstance(evidence.get("repo_root"), str) else None
+    record = {
+        "session_id": session_id,
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "repo_root_hash": hash_prompt(repo_root)[:16] if repo_root else None,
+        "commit_shas": [
+            str(item.get("sha"))[:12]
+            for item in commits
+            if isinstance(item, dict) and item.get("sha")
+        ][:20],
+        "changed_file_hashes": [
+            hash_prompt(str(path))[:16]
+            for path in changed_files
+            if isinstance(path, str)
+        ][:100],
+        "test_artifact_hashes": [
+            hash_prompt(str(item.get("artifact")))[:16]
+            for item in tests
+            if isinstance(item, dict) and item.get("artifact")
+        ][:30],
+        "inferred_outcome": evidence.get("inferred_outcome") if isinstance(evidence.get("inferred_outcome"), str) else None,
+        "confidence": evidence.get("confidence") if isinstance(evidence.get("confidence"), str) else None,
+    }
+    with _locked_state():
+        data = _load()
+        data["evidence_snapshots"] = [
+            row for row in data["evidence_snapshots"]
+            if row.get("session_id") != session_id
+        ]
+        data["evidence_snapshots"].append(record)
+        data["evidence_snapshots"] = data["evidence_snapshots"][-500:]
+        _save(data)
+    return record
+
+
+def evidence_snapshots_for_sessions(session_ids: set[str] | None = None) -> dict[str, dict[str, Any]]:
+    with _locked_state():
+        rows = list(_load()["evidence_snapshots"])
+    result: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        session_id = row.get("session_id")
+        if not isinstance(session_id, str):
+            continue
+        if session_ids is not None and session_id not in session_ids:
+            continue
+        result[session_id] = row
+    return result
+
+
+MAX_DECISION_SUMMARY_LENGTH = 200
+MAX_DECISION_REASONING_LENGTH = 500
+MAX_DECISIONS_STORED = 500
+
+
+def record_decision(
+    session_id: str,
+    summary: str,
+    reasoning: str | None = None,
+    alternatives_rejected: list[str] | None = None,
+) -> dict[str, Any]:
+    """Store a self-reported decision entry for a session.
+
+    Unlike evidence_snapshots, this intentionally stores real text -- the
+    point is to capture "why" for decisions that never produce a commit
+    (e.g. an approach that was seriously considered and rejected without
+    ever being implemented). It is convention-based and self-reported by
+    whoever/whatever calls it, not verified against anything that actually
+    happened, so callers surfacing this should label it as such rather
+    than presenting it as fact.
+    """
+    if not summary or not summary.strip():
+        raise ValueError("summary is required")
+    with _locked_state():
+        data = _load()
+        record = {
+            "session_id": session_id,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+            "summary": summary.strip()[:MAX_DECISION_SUMMARY_LENGTH],
+            "reasoning": reasoning.strip()[:MAX_DECISION_REASONING_LENGTH] if reasoning and reasoning.strip() else None,
+            "alternatives_rejected": [
+                str(item).strip()[:MAX_DECISION_SUMMARY_LENGTH]
+                for item in (alternatives_rejected or [])
+                if str(item).strip()
+            ][:5],
+        }
+        data["decisions"].append(record)
+        data["decisions"] = data["decisions"][-MAX_DECISIONS_STORED:]
+        _save(data)
+    return record
+
+
+def recent_decisions(session_id: str, limit: int = 5) -> list[dict[str, Any]]:
+    with _locked_state():
+        rows = list(_load()["decisions"])
+    matching = [row for row in rows if row.get("session_id") == session_id]
+    return list(reversed(matching))[:limit]
 
 
 def get_outcome(session_id: str) -> dict[str, Any] | None:

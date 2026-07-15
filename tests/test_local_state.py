@@ -28,6 +28,26 @@ class LocalStateTests(unittest.TestCase):
             "_STATE_LOCK must only be referenced in its own definition and inside "
             "_locked_state(); use `with _locked_state():` in any new function instead.",
         )
+
+    def test_concurrent_decisions_do_not_clobber_each_other(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                import threading as threading_module
+
+                def record(index: int) -> None:
+                    local_state.record_decision("session-1", f"decision {index}")
+
+                threads = [threading_module.Thread(target=record, args=(i,)) for i in range(20)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+
+                stored = local_state.recent_decisions("session-1", limit=20)
+
+        self.assertEqual(len(stored), 20)
+
     def test_intervention_stores_hashes_not_prompt_text(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")
@@ -178,6 +198,84 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(len(events), 50)
         self.assertEqual(events[0]["error"], "bind failed")
         self.assertNotIn("Refactor the entire codebase", json.dumps(stored))
+
+    def test_evidence_snapshot_never_persists_commit_text(self) -> None:
+        # build_outcome_evidence() now captures real commit subject/body text
+        # (see outcome_evidence.py) for use in ephemeral, copy-once handoff
+        # briefs. That text must never reach the persistent evidence_snapshot
+        # store on disk -- this test simulates the real evidence.to_json()
+        # shape and asserts the subject/body text is filtered out before
+        # anything is written.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                record = local_state.record_evidence_snapshot("session-1", {
+                    "repo_root": "/Users/dev/secret-project",
+                    "commits": [{
+                        "sha": "abcdef1234567890",
+                        "subject": "fix login bug for acme corp",
+                        "body": "Session tokens were not being refreshed for the acme account.",
+                        "committed_at": "2026-07-13T10:00:00Z",
+                    }],
+                    "changed_files": ["src/auth/secrets.py"],
+                    "tests": [{"artifact": "test-results/auth.xml"}],
+                    "inferred_outcome": "useful",
+                    "confidence": "low",
+                })
+                snapshots = local_state.evidence_snapshots_for_sessions({"session-1"})
+                with open(state_file, encoding="utf-8") as handle:
+                    stored = json.load(handle)
+
+        serialized = json.dumps(stored)
+        self.assertEqual(record["commit_shas"], ["abcdef123456"])
+        self.assertEqual(snapshots["session-1"]["inferred_outcome"], "useful")
+        self.assertNotIn("/Users/dev/secret-project", serialized)
+        self.assertNotIn("src/auth/secrets.py", serialized)
+        self.assertNotIn("test-results/auth.xml", serialized)
+        self.assertNotIn("fix login bug", serialized)
+        self.assertNotIn("acme", serialized)
+
+    def test_record_decision_round_trips_and_orders_most_recent_first(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_decision(
+                    "session-1",
+                    "Chose real commit subject/body over hashing",
+                    reasoning="A commit message explains itself to a future reader.",
+                    alternatives_rejected=["hashing the subject"],
+                )
+                local_state.record_decision(
+                    "session-1",
+                    "Considered a token-based tiebreaker",
+                    reasoning="Still picks turn #1 for unrelated reasons.",
+                    alternatives_rejected=["token-based tiebreaker", "git diff --stat only"],
+                )
+                local_state.record_decision("session-2", "Unrelated decision for a different session")
+                decisions = local_state.recent_decisions("session-1")
+
+        self.assertEqual(len(decisions), 2)
+        self.assertEqual(decisions[0]["summary"], "Considered a token-based tiebreaker")
+        self.assertEqual(decisions[0]["alternatives_rejected"], ["token-based tiebreaker", "git diff --stat only"])
+        self.assertEqual(decisions[1]["summary"], "Chose real commit subject/body over hashing")
+
+    def test_record_decision_requires_a_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                with self.assertRaises(ValueError):
+                    local_state.record_decision("session-1", "   ")
+
+    def test_recent_decisions_respects_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                for i in range(8):
+                    local_state.record_decision("session-1", f"decision {i}")
+                decisions = local_state.recent_decisions("session-1", limit=5)
+
+        self.assertEqual(len(decisions), 5)
+        self.assertEqual(decisions[0]["summary"], "decision 7")
 
 
 if __name__ == "__main__":
