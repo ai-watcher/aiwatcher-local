@@ -219,6 +219,8 @@ python -m aiwatcher_cli log-decision "..." --reasoning "..." --rejected "..."  #
 python -m aiwatcher_cli install-claude-decision-log --write  # personal convention to log decisions automatically
 python -m aiwatcher_cli journal            # one daily improvement recommendation
 python -m aiwatcher_cli watch --once       # detect expensive or loop-like work
+python -m aiwatcher_cli run -- npm test    # run any command, then summarize the AI session alongside it
+python -m aiwatcher_cli doctor             # check tool detection and hook/wrapper install status
 python -m aiwatcher_cli preflight "..."    # review work before execution
 python -m aiwatcher_cli codex "..."        # preflight, choose, and launch Codex
 python -m aiwatcher_cli claude "..."       # preflight, choose, and launch Claude
@@ -331,6 +333,15 @@ conversation surface tested by the project does not invoke the configured
 `UserPromptSubmit` hook; use the Prompt Companion, MCP, wrapper, or a Codex
 CLI/TUI surface that records a hook event. AIWatcher does not claim silent
 interception where a host application provides no lifecycle API.
+
+For that gap, the wrapper is a shell-level fallback rather than a native hook:
+it installs a shell function (in your shell rc file) that intercepts `codex`
+invocations at the command line and preflights them through AIWatcher before
+the real binary runs:
+
+```sh
+python -m aiwatcher_cli install-codex-wrapper --write
+```
 
 If a Codex prompt appears to bypass AIWatcher, run:
 
