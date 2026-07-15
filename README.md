@@ -116,6 +116,16 @@ Open the printed URL. The dashboard includes:
   usage, and unmarked outcome evidence — plus a privacy-safe daily journal
   and weekly report.
 
+The mockups below use synthetic data — like the PR that introduced them, this
+README does not embed real dashboard screenshots, since those can expose
+private local paths, project names, and AI usage history.
+
+![Sessions tab: a session list next to a review drawer showing Expensive asks with the costliest step highlighted, outcome buttons, outcome evidence, and Create handoff capsule.](docs/dashboard-sessions.svg)
+
+![Receipts tab: a table of intervention receipts with time, tool/project, decision, risk change, result, and a review action per row.](docs/dashboard-receipts.svg)
+
+![Insights tab: a stacked list of flagged suggestions — concentrated spend, a large-context session, a possible iterative loop, subscription/limited usage, and unmarked outcome evidence — next to a daily journal and weekly report, with privacy contract and enterprise handoff panels below.](docs/dashboard-insights.svg)
+
 ### 4. Mark whether work was useful
 
 ```sh

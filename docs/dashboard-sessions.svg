@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 736" font-family="'Inter','Segoe UI',system-ui,-apple-system,sans-serif" role="img" aria-labelledby="t-sessions d-sessions">
+  <title id="t-sessions">AIWatcher Local — Sessions review</title>
+  <desc id="d-sessions">Sessions tab showing a session list, an Expensive asks cost breakdown with the costliest step highlighted, outcome buttons, outcome evidence, and a Create handoff capsule action.</desc>
+  <defs>
+    <radialGradient id="bg-sessions" cx="0%" cy="0%" r="95%">
+      <stop offset="0" stop-color="#18243a"/>
+      <stop offset="0.55" stop-color="#0b1018"/>
+      <stop offset="1" stop-color="#090b10"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1200" height="736" fill="url(#bg-sessions)"/>
+
+  <rect x="36" y="22" width="40" height="40" rx="10" fill="#141924" stroke="#2a3140"/>
+  <text x="56" y="48" font-size="14" font-weight="700" fill="#eef3fb" text-anchor="middle">AW</text>
+  <text x="88" y="40" font-size="22" font-weight="700" fill="#eef3fb">AIWatcher Local</text>
+  <rect x="234" y="24" width="150" height="24" rx="12" fill="#0f2a1f" stroke="#1f4a34"/>
+  <circle cx="248" cy="36" r="4" fill="#3ddc84"/>
+  <text x="260" y="40" font-size="11" fill="#8fe9b8">Private and local</text>
+  <text x="88" y="62" font-size="13" fill="#8b96a8">Your AI coding work, outcomes, and improvement signals.</text>
+
+  <rect x="808" y="22" width="132" height="34" rx="8" fill="#12151c" stroke="#262b38"/>
+  <text x="824" y="44" font-size="13" fill="#dbe2ee">Last 7 days</text>
+  <text x="926" y="44" font-size="12" fill="#8b96a8" text-anchor="end">▾</text>
+  <rect x="952" y="22" width="104" height="34" rx="8" fill="#12151c" stroke="#262b38"/>
+  <text x="1004" y="44" font-size="13" fill="#dbe2ee" text-anchor="middle">Refresh data</text>
+  <rect x="1068" y="22" width="96" height="34" rx="8" fill="#12151c" stroke="#3a6fd8"/>
+  <text x="1116" y="44" font-size="13" font-weight="600" fill="#8fb4f7" text-anchor="middle">Enterprise</text>
+
+  <g font-size="13">
+    <text x="63" y="104" fill="#8b96a8" text-anchor="middle">Today</text>
+    <text x="130" y="104" fill="#8b96a8" text-anchor="middle">Prompt</text>
+    <text x="208" y="104" fill="#8b96a8" text-anchor="middle">Projects</text>
+    <rect x="254" y="86" width="80" height="28" rx="14" fill="#eef1f6"/>
+    <text x="294" y="105" fill="#141a26" font-weight="700" text-anchor="middle">Sessions</text>
+    <text x="380" y="104" fill="#8b96a8" text-anchor="middle">Receipts</text>
+    <text x="462" y="104" fill="#8b96a8" text-anchor="middle">Insights</text>
+  </g>
+
+  <rect x="36" y="172" width="350" height="528" rx="12" fill="#111722" stroke="#263145"/>
+  <text x="54" y="204" font-size="16" font-weight="600" fill="#eef3fb">Recent sessions</text>
+  <text x="54" y="224" font-size="12" fill="#98a5b8">Click a row to review and record an outcome.</text>
+
+  <rect x="54" y="248" width="314" height="56" rx="10" fill="#15233b" stroke="#33537f"/>
+  <text x="70" y="270" font-size="13" fill="#dcebff">claude-code · payments-api</text>
+  <text x="70" y="290" font-size="12" fill="#9db4d9">318.4k tokens · $7.20 · not marked</text>
+
+  <rect x="54" y="312" width="314" height="56" rx="10" fill="#0d1320" stroke="#263145"/>
+  <text x="70" y="334" font-size="13" fill="#dce6f6">claude-code · web-dashboard</text>
+  <text x="70" y="354" font-size="12" fill="#98a5b8">142.7k tokens · $3.10 · useful</text>
+
+  <rect x="54" y="376" width="314" height="56" rx="10" fill="#0d1320" stroke="#263145"/>
+  <text x="70" y="398" font-size="13" fill="#dce6f6">codex · data-pipeline</text>
+  <text x="70" y="418" font-size="12" fill="#98a5b8">94.0k tokens · $1.61 · needs rework</text>
+
+  <rect x="54" y="440" width="314" height="56" rx="10" fill="#0d1320" stroke="#263145"/>
+  <text x="70" y="462" font-size="13" fill="#dce6f6">claude-code · payments-api</text>
+  <text x="70" y="482" font-size="12" fill="#98a5b8">26.9k tokens · $0.82 · not marked</text>
+
+  <text x="54" y="680" font-size="12" fill="#98a5b8">Prompt text is shown for your own review only, never uploaded.</text>
+
+  <rect x="410" y="172" width="754" height="528" rx="12" fill="#111722" stroke="#263145"/>
+  <text x="430" y="204" font-size="18" font-weight="700" fill="#eef3fb">~/code/payments-api</text>
+  <text x="430" y="224" font-size="13" fill="#98a5b8">claude-code · claude-opus-4-8 · 318.4k tokens · $7.20</text>
+  <rect x="1010" y="188" width="130" height="28" rx="14" fill="#0d1320" stroke="#263145"/>
+  <text x="1075" y="207" font-size="12" fill="#98a5b8" text-anchor="middle">Not marked yet</text>
+  <line x1="430" y1="240" x2="1140" y2="240" stroke="#263145"/>
+
+  <text x="430" y="270" font-size="16" font-weight="600" fill="#eef3fb">Expensive asks</text>
+
+  <rect x="430" y="282" width="710" height="54" rx="8" fill="#171014" stroke="#3a2430"/>
+  <rect x="430" y="282" width="3" height="54" fill="#d9534f"/>
+  <text x="446" y="300" font-size="12" font-weight="600" fill="#f3d8d4">Costliest step</text>
+  <text x="1128" y="300" font-size="12" fill="#e3b3ac" text-anchor="end">41% of session cost</text>
+  <text x="446" y="320" font-size="13" fill="#dce6f6">Turn #6 · Model turn · claude-opus-4-8 · 82.1k tokens · $3.10</text>
+
+  <rect x="430" y="344" width="710" height="40" rx="8" fill="#0d1320" stroke="#263145"/>
+  <text x="446" y="368" font-size="13" fill="#dce6f6">Turn #3 · Tool call · 24.5k tokens · $1.10</text>
+
+  <rect x="430" y="392" width="710" height="40" rx="8" fill="#0d1320" stroke="#263145"/>
+  <text x="446" y="416" font-size="13" fill="#dce6f6">Turn #1 · Model turn · 12.0k tokens · $0.62</text>
+
+  <text x="430" y="462" font-size="16" font-weight="600" fill="#eef3fb">Was this work useful?</text>
+  <rect x="430" y="474" width="112" height="34" rx="8" fill="#0e2a22" stroke="#244134"/>
+  <text x="486" y="496" font-size="13" fill="#9fe1cb" text-anchor="middle">Useful</text>
+  <rect x="554" y="474" width="150" height="34" rx="8" fill="#11151f" stroke="#263145"/>
+  <text x="629" y="496" font-size="13" fill="#cbd7e9" text-anchor="middle">Needs rework</text>
+  <rect x="716" y="474" width="130" height="34" rx="8" fill="#11151f" stroke="#263145"/>
+  <text x="781" y="496" font-size="13" fill="#cbd7e9" text-anchor="middle">Abandoned</text>
+
+  <text x="430" y="542" font-size="16" font-weight="600" fill="#eef3fb">Outcome evidence</text>
+  <circle cx="434" cy="560" r="2" fill="#6ba6ff"/>
+  <text x="446" y="565" font-size="13" fill="#dce6f6">Nearby commits: 3 within 15 minutes</text>
+  <circle cx="434" cy="582" r="2" fill="#6ba6ff"/>
+  <text x="446" y="587" font-size="13" fill="#dce6f6">Uncommitted files: 2 changed, not committed</text>
+  <circle cx="434" cy="604" r="2" fill="#6ba6ff"/>
+  <text x="446" y="609" font-size="13" fill="#dce6f6">Test artifacts: 1 suite passed (pytest)</text>
+  <text x="446" y="630" font-size="12" fill="#98a5b8" font-style="italic">Evidence to review, not automatic truth.</text>
+
+  <rect x="850" y="656" width="290" height="40" rx="10" fill="#15233b" stroke="#33537f"/>
+  <text x="995" y="681" font-size="14" fill="#dcebff" text-anchor="middle">Create handoff capsule</text>
+</svg>

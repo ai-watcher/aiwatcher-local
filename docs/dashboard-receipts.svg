@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 736" font-family="'Inter','Segoe UI',system-ui,-apple-system,sans-serif" role="img" aria-labelledby="t-receipts d-receipts">
+  <title id="t-receipts">AIWatcher Local — Intervention receipts</title>
+  <desc id="d-receipts">Receipts tab: a table of risk decisions with time, tool/project, decision, risk change, result, and a review action per row.</desc>
+  <defs>
+    <radialGradient id="bg-receipts" cx="0%" cy="0%" r="95%">
+      <stop offset="0" stop-color="#18243a"/>
+      <stop offset="0.55" stop-color="#0b1018"/>
+      <stop offset="1" stop-color="#090b10"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1200" height="736" fill="url(#bg-receipts)"/>
+
+  <rect x="36" y="22" width="40" height="40" rx="10" fill="#141924" stroke="#2a3140"/>
+  <text x="56" y="48" font-size="14" font-weight="700" fill="#eef3fb" text-anchor="middle">AW</text>
+  <text x="88" y="40" font-size="22" font-weight="700" fill="#eef3fb">AIWatcher Local</text>
+  <rect x="234" y="24" width="150" height="24" rx="12" fill="#0f2a1f" stroke="#1f4a34"/>
+  <circle cx="248" cy="36" r="4" fill="#3ddc84"/>
+  <text x="260" y="40" font-size="11" fill="#8fe9b8">Private and local</text>
+  <text x="88" y="62" font-size="13" fill="#8b96a8">Your AI coding work, outcomes, and improvement signals.</text>
+
+  <rect x="808" y="22" width="132" height="34" rx="8" fill="#12151c" stroke="#262b38"/>
+  <text x="824" y="44" font-size="13" fill="#dbe2ee">Last 7 days</text>
+  <text x="926" y="44" font-size="12" fill="#8b96a8" text-anchor="end">▾</text>
+  <rect x="952" y="22" width="104" height="34" rx="8" fill="#12151c" stroke="#262b38"/>
+  <text x="1004" y="44" font-size="13" fill="#dbe2ee" text-anchor="middle">Refresh data</text>
+  <rect x="1068" y="22" width="96" height="34" rx="8" fill="#12151c" stroke="#3a6fd8"/>
+  <text x="1116" y="44" font-size="13" font-weight="600" fill="#8fb4f7" text-anchor="middle">Enterprise</text>
+
+  <g font-size="13">
+    <text x="63" y="104" fill="#8b96a8" text-anchor="middle">Today</text>
+    <text x="130" y="104" fill="#8b96a8" text-anchor="middle">Prompt</text>
+    <text x="208" y="104" fill="#8b96a8" text-anchor="middle">Projects</text>
+    <text x="294" y="104" fill="#8b96a8" text-anchor="middle">Sessions</text>
+    <rect x="342" y="86" width="76" height="28" rx="14" fill="#eef1f6"/>
+    <text x="380" y="105" fill="#141a26" font-weight="700" text-anchor="middle">Receipts</text>
+    <text x="462" y="104" fill="#8b96a8" text-anchor="middle">Insights</text>
+  </g>
+
+  <rect x="36" y="172" width="1128" height="528" rx="12" fill="#111722" stroke="#263145"/>
+  <text x="54" y="204" font-size="18" font-weight="700" fill="#eef3fb">Intervention receipts</text>
+  <text x="54" y="224" font-size="13" fill="#98a5b8">Risk decisions, predicted impact, resulting usage, and developer outcomes.</text>
+  <rect x="978" y="192" width="186" height="26" rx="13" fill="#0d1320" stroke="#263145"/>
+  <text x="1071" y="209" font-size="11" fill="#98a5b8" text-anchor="middle">Prompt text stays private</text>
+
+  <g font-size="12" fill="#8b96a8">
+    <text x="54" y="252">Time</text>
+    <text x="220" y="252">Tool / project</text>
+    <text x="620" y="252">Decision</text>
+    <text x="812" y="252">Risk change</text>
+    <text x="932" y="252">Result</text>
+  </g>
+  <line x1="54" y1="264" x2="1140" y2="264" stroke="#263145"/>
+
+  <g font-size="13">
+    <text x="54" y="292" fill="#dce6f6">Jul 15, 6:47 AM</text>
+    <text x="220" y="288" fill="#eef3fb" font-weight="600">claude-code</text>
+    <text x="220" y="304" fill="#8b96a8" font-size="11.5">~/code/payments-api</text>
+    <text x="620" y="292" fill="#dce6f6">Used safer brief</text>
+    <text x="812" y="292" fill="#dce6f6">6 → 2</text>
+    <text x="932" y="292" fill="#dce6f6">Observed</text>
+    <rect x="1058" y="278" width="82" height="28" rx="8" fill="#12151c" stroke="#33537f"/>
+    <text x="1099" y="297" fill="#8fb4f7" text-anchor="middle">Review</text>
+  </g>
+
+  <line x1="54" y1="320" x2="1140" y2="320" stroke="#1c2130"/>
+  <g font-size="13">
+    <text x="54" y="348" fill="#dce6f6">Jul 14, 7:32 AM</text>
+    <text x="220" y="344" fill="#eef3fb" font-weight="600">claude-code</text>
+    <text x="220" y="360" fill="#8b96a8" font-size="11.5">~/code/web-dashboard</text>
+    <text x="620" y="348" fill="#dce6f6">Added safer context</text>
+    <text x="812" y="348" fill="#dce6f6">3 → 0</text>
+    <text x="932" y="348" fill="#dce6f6">Observed</text>
+    <rect x="1058" y="334" width="82" height="28" rx="8" fill="#12151c" stroke="#33537f"/>
+    <text x="1099" y="353" fill="#8fb4f7" text-anchor="middle">Review</text>
+  </g>
+
+  <line x1="54" y1="376" x2="1140" y2="376" stroke="#1c2130"/>
+  <g font-size="13">
+    <text x="54" y="404" fill="#dce6f6">Jul 14, 7:28 AM</text>
+    <text x="220" y="400" fill="#eef3fb" font-weight="600">codex</text>
+    <text x="220" y="416" fill="#8b96a8" font-size="11.5">~/code/data-pipeline</text>
+    <text x="620" y="404" fill="#dce6f6">Added safer context</text>
+    <text x="812" y="404" fill="#dce6f6">5 → 0</text>
+    <text x="932" y="404" fill="#dce6f6">Observed</text>
+    <rect x="1058" y="390" width="82" height="28" rx="8" fill="#12151c" stroke="#33537f"/>
+    <text x="1099" y="409" fill="#8fb4f7" text-anchor="middle">Review</text>
+  </g>
+
+  <line x1="54" y1="432" x2="1140" y2="432" stroke="#1c2130"/>
+  <g font-size="13">
+    <text x="54" y="460" fill="#dce6f6">Jul 13, 7:44 PM</text>
+    <text x="220" y="456" fill="#eef3fb" font-weight="600">claude-code</text>
+    <text x="220" y="472" fill="#8b96a8" font-size="11.5">~/code/payments-api</text>
+    <text x="620" y="460" fill="#dce6f6">Added safer context</text>
+    <text x="812" y="460" fill="#dce6f6">3 → 0</text>
+    <text x="932" y="460" fill="#9fe1cb">useful</text>
+    <rect x="1058" y="446" width="82" height="28" rx="8" fill="#12151c" stroke="#33537f"/>
+    <text x="1099" y="465" fill="#8fb4f7" text-anchor="middle">Review</text>
+  </g>
+
+  <line x1="54" y1="488" x2="1140" y2="488" stroke="#1c2130"/>
+  <g font-size="13">
+    <text x="54" y="516" fill="#dce6f6">Jul 13, 4:13 PM</text>
+    <text x="220" y="512" fill="#eef3fb" font-weight="600">claude-code</text>
+    <text x="220" y="528" fill="#8b96a8" font-size="11.5">~/code/payments-api</text>
+    <text x="620" y="516" fill="#dce6f6">Added safer context</text>
+    <text x="812" y="516" fill="#dce6f6">3 → 0</text>
+    <text x="932" y="516" fill="#dce6f6">Observed</text>
+    <rect x="1058" y="502" width="82" height="28" rx="8" fill="#12151c" stroke="#33537f"/>
+    <text x="1099" y="521" fill="#8fb4f7" text-anchor="middle">Review</text>
+  </g>
+
+  <line x1="54" y1="544" x2="1140" y2="544" stroke="#1c2130"/>
+  <g font-size="13">
+    <text x="54" y="572" fill="#dce6f6">Jul 13, 3:12 PM</text>
+    <text x="220" y="568" fill="#eef3fb" font-weight="600">claude-code</text>
+    <text x="220" y="584" fill="#8b96a8" font-size="11.5">~/code/web-dashboard</text>
+    <text x="620" y="572" fill="#dce6f6">Added safer context</text>
+    <text x="812" y="572" fill="#dce6f6">3 → 0</text>
+    <text x="932" y="572" fill="#9fe1cb">useful</text>
+    <rect x="1058" y="558" width="82" height="28" rx="8" fill="#12151c" stroke="#33537f"/>
+    <text x="1099" y="577" fill="#8fb4f7" text-anchor="middle">Review</text>
+  </g>
+
+  <text x="54" y="672" font-size="12" fill="#98a5b8" font-style="italic">Prompt text is not stored. Rows show hashes, decisions, aggregate usage, and outcomes only.</text>
+</svg>
