@@ -107,8 +107,10 @@ Open the printed URL. The dashboard includes:
   under **Expensive asks** (cost is cumulative — a short prompt late in a long
   session can still be expensive, since it re-sends the whole conversation),
   mark outcomes, and create a handoff capsule to continue in a fresh session.
-- **Receipts**: connect each preflight decision to its resulting session,
-  observed usage, risk change, and developer outcome.
+- **Receipts**: connect each preflight decision to its resulting session —
+  predicted savings before execution, observed usage after, an inferred
+  estimate of what was actually avoided (labeled as inferred, not a
+  guaranteed counterfactual), risk change, and developer outcome.
 - **Insights**: local suggestions for waste and risk — concentrated spend,
   large-context sessions, possible iterative loops, subscription/limited
   usage, and unmarked outcome evidence — plus a privacy-safe daily journal
