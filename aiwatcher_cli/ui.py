@@ -14,14 +14,17 @@ from urllib.parse import parse_qs, urlparse
 from . import __version__
 from .cli import analyze_prompt, session_insights
 from .correlate import link_recent_interventions_to_sessions
+from .handoff import build_handoff_capsule
 from .local_state import (
     VALID_OUTCOMES,
     get_outcome,
     outcome_counts,
     outcomes_for_sessions,
     recent_interventions,
+    record_evidence_snapshot,
     record_outcome,
 )
+from .outcome_evidence import build_outcome_evidence, evidence_for_sessions
 from .pricing import is_subscription_model
 from .session_health import ContextHealth, analyze_all_sessions, gate_health_warning
 from .scanner import (
@@ -128,6 +131,7 @@ def session_json(row: LocalSession) -> dict[str, object]:
     started = row.started_at.isoformat() if row.started_at else None
     updated = row.updated_at.isoformat() if row.updated_at else None
     outcome = get_outcome(row.session_id)
+    evidence = build_outcome_evidence(row)
     return {
         "session_id": row.session_id,
         "tool": row.tool,
@@ -148,6 +152,7 @@ def session_json(row: LocalSession) -> dict[str, object]:
         "notes": row.notes,
         "outcome": outcome["outcome"] if outcome else None,
         "outcome_note": outcome.get("note") if outcome else None,
+        "evidence": evidence.to_json(),
     }
 
 
@@ -300,11 +305,17 @@ def build_session_detail(session_id: str, days: int = 30) -> dict[str, object]:
     costliest = max(events, key=lambda event: (event.cost_usd, event.tokens_in + event.tokens_out), default=None)
     segments = segment_session_by_prompt(row.source_path)
     turn_prompts = {int(seg["turn"]): str(seg["prompt"])[:240] for seg in segments}
+    evidence = build_outcome_evidence(row)
+    try:
+        record_evidence_snapshot(session_id, evidence.to_json())
+    except OSError:
+        pass
     return {
         **session_json(row),
-        "privacy": "Prompt/source content is not shown. Use event export for hashes.",
+        "privacy": "Prompt text is shown only when you inspect this local session; it is not uploaded or persisted in summaries.",
         "insights": session_insights(row),
         "prompt_analysis": build_prompt_analysis(row, segments),
+        "outcome_evidence": evidence.to_json(),
         "turn_prompts": turn_prompts,
         "timeline_summary": {
             "events": len(events),
@@ -316,6 +327,30 @@ def build_session_detail(session_id: str, days: int = 30) -> dict[str, object]:
         },
         "events": [event_json(event) for event in events[:EVENT_DISPLAY_LIMIT]],
     }
+
+
+def build_handoff_detail(
+    session_id: str,
+    days: int = 30,
+    target: str = "generic",
+    include_prompt_excerpt: bool = False,
+) -> dict[str, object]:
+    rows = [row for row in rows_for_window(days) if row.session_id == session_id]
+    if not rows:
+        return {"error": "session not found"}
+    row = rows[0]
+    events = sorted(
+        [event for event in scan_all_events() if event.session_id == session_id],
+        key=lambda event: event.timestamp or MIN_DT,
+    )
+    outcome = get_outcome(session_id)
+    return build_handoff_capsule(
+        row,
+        events,
+        outcome=outcome.get("outcome") if outcome else None,
+        include_prompt_excerpt=include_prompt_excerpt,
+        target=target if target in {"generic", "claude", "codex", "cursor", "vscode"} else "generic",
+    )
 
 
 def build_report(days: int = 7) -> dict[str, object]:
@@ -641,6 +676,27 @@ def build_summary(days: int = 7) -> dict[str, object]:
     window_session_ids = {row.session_id for row in rows}
     window_outcomes = outcomes_for_sessions(window_session_ids)
     outcomes = outcome_counts(window_session_ids)
+    evidence_by_session = evidence_for_sessions(rows[:30])
+    inferred_useful = sum(
+        1
+        for session_id, evidence in evidence_by_session.items()
+        if session_id not in window_outcomes and evidence.inferred_outcome == "useful"
+    )
+    needs_review = sum(
+        1
+        for session_id, evidence in evidence_by_session.items()
+        if session_id not in window_outcomes and evidence.inferred_outcome == "needs_review"
+    )
+    if inferred_useful:
+        insights.append({
+            "title": "Outcome evidence found",
+            "body": f"{inferred_useful} unmarked session{'s' if inferred_useful != 1 else ''} have nearby commit or test evidence. Review and confirm the outcome.",
+        })
+    if needs_review:
+        insights.append({
+            "title": "Work needs outcome review",
+            "body": f"{needs_review} unmarked session{'s' if needs_review != 1 else ''} changed files without a confirmed useful outcome.",
+        })
     interventions = recent_interventions(limit=200, days=days)
     receipt_events = scan_all_events() if interventions else []
     receipts = _build_intervention_receipts(interventions, all_rows, outcomes_for_sessions(), receipt_events)
@@ -671,6 +727,8 @@ def build_summary(days: int = 7) -> dict[str, object]:
             "calls": stats["calls"],
             "tool_calls": stats["tool_calls"],
             "useful_outcomes": outcomes["useful"],
+            "inferred_useful_outcomes": inferred_useful,
+            "needs_review_outcomes": needs_review,
             "rework_outcomes": outcomes["rework"],
             "abandoned_outcomes": outcomes["abandoned"],
             "preflight_decisions": len(interventions),
@@ -691,6 +749,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
                 "tokens": compact_int(row.tokens_in + row.tokens_out),
                 "api_value": money(row.cost_usd),
                 "outcome": (window_outcomes.get(row.session_id) or {}).get("outcome"),
+                "inferred_outcome": evidence_by_session.get(row.session_id).inferred_outcome if evidence_by_session.get(row.session_id) else None,
                 "updated_at": (row.updated_at or row.started_at).isoformat() if (row.updated_at or row.started_at) else None,
             }
             for row in recent
@@ -877,6 +936,15 @@ HTML = r"""<!doctype html>
     .empty { color: var(--muted); padding: 16px; border: 1px dashed var(--line); border-radius: 8px; }
     .detail-section { padding: 20px 0; border-bottom: 1px solid var(--line); }
     .detail-section:last-child { border-bottom: 0; }
+    .verdict-card { border: 1px solid var(--line-strong); border-left: 4px solid var(--blue); border-radius: 8px; padding: 16px; background: #101925; margin-top: 14px; }
+    .verdict-card.high { border-left-color: var(--amber); background: #181710; }
+    .verdict-card.useful { border-left-color: var(--green); background: #101b17; }
+    .verdict-card h3 { font-size: 17px; margin: 0 0 8px; }
+    .verdict-card ul { margin: 10px 0 0; padding-left: 18px; color: #d9e4f2; line-height: 1.45; }
+    details.aiw-details { border: 1px solid var(--line); border-radius: 8px; background: #0b1118; margin-top: 12px; }
+    details.aiw-details summary { cursor: pointer; padding: 12px 14px; color: #dce6f6; font-weight: 750; }
+    details.aiw-details[open] summary { border-bottom: 1px solid var(--line); }
+    .details-body { padding: 14px; }
     .insight-list { margin: 8px 0 0; padding-left: 18px; }
     .insight-list li { margin: 6px 0; line-height: 1.45; }
     .costliest-step { margin: 12px 0; padding: 12px 14px; border: 1px solid var(--line-strong); border-left: 3px solid var(--metric-red, #d9534f); border-radius: 8px; background: var(--surface-raised); }
@@ -931,6 +999,9 @@ HTML = r"""<!doctype html>
     .risk-card h3 { font-size: 16px; margin-bottom: 8px; }
     .prompt-list { margin: 10px 0 0; padding-left: 18px; color: #d9e4f2; line-height: 1.55; }
     .copy-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    .prompt-opt-in { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); font-size: 13px; color: #d5deea; cursor: pointer; }
+    .prompt-opt-in input { width: 15px; height: 15px; accent-color: var(--blue, #4f8cff); }
+    .prompt-opt-in .hint { flex-basis: 100%; color: #93a2b8; font-size: 12px; }
     .drawer-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.62); opacity: 0; pointer-events: none; transition: opacity .18s ease; z-index: 20; }
     .drawer-backdrop.open { opacity: 1; pointer-events: auto; }
     .drawer {
@@ -1107,7 +1178,7 @@ HTML = r"""<!doctype html>
   <section id="view-sessions" class="view" hidden>
     <div class="card">
       <div class="section-title">
-        <div><h2>Sessions</h2><p>Recent local AI runs. Click any row for privacy-safe detail.</p></div>
+        <div><h2>Sessions</h2><p>Recent local AI runs. Click any row to inspect locally — prompt text is shown for your own review only, never uploaded.</p></div>
         <span class="pill">Local machine only</span>
       </div>
       <div class="table-wrap"><table>
@@ -1336,6 +1407,118 @@ function outcomePill(outcome) {
   const tone = outcome || '';
   return `<span class="pill outcome-pill ${tone}">Outcome: ${esc(value)}</span>`;
 }
+function outcomeEvidencePill(session) {
+  if (!session || session.outcome) return '';
+  if (session.inferred_outcome === 'useful') return '<span class="pill outcome-pill useful">Evidence: likely useful</span>';
+  if (session.inferred_outcome === 'needs_review') return '<span class="pill outcome-pill rework">Evidence: review changes</span>';
+  return '';
+}
+function renderEvidence(evidence) {
+  if (!evidence) return '';
+  const commits = evidence.commits || [];
+  const files = evidence.changed_files || [];
+  const tests = evidence.tests || [];
+  const reasons = evidence.reasons || [];
+  return `<section class="detail-section"><h3>Outcome evidence</h3>
+    <p>Local git/test signals. AIWatcher stores metadata, not source diffs.</p>
+    <div class="mini-grid">
+      <div class="mini"><span class="label">Inferred outcome</span><strong>${esc(evidence.inferred_outcome || 'not enough evidence')}</strong></div>
+      <div class="mini"><span class="label">Confidence</span><strong>${esc(evidence.confidence || 'low')}</strong></div>
+      <div class="mini"><span class="label">Nearby commits</span><strong>${esc(commits.length)}</strong></div>
+      <div class="mini"><span class="label">Changed files</span><strong>${esc(files.length)}</strong></div>
+    </div>
+    ${tests.length ? `<div class="pill-row"><span class="pill">${esc(tests.length)} recent test artifact${tests.length === 1 ? '' : 's'}</span></div>` : ''}
+    ${reasons.length ? `<ul class="insight-list">${reasons.map(reason => `<li>${esc(reason)}</li>`).join('')}</ul>` : ''}
+    ${commits.length ? `<div class="pill-row">${commits.slice(0, 4).map(commit => `<span class="pill">commit ${esc(commit.sha)}</span>`).join('')}</div>` : ''}
+    ${files.length ? `<details class="aiw-details"><summary>${esc(files.length)} changed file${files.length === 1 ? '' : 's'}</summary><div class="details-body"><div class="pill-row">${files.slice(0, 12).map(file => `<span class="pill">${esc(file)}</span>`).join('')}</div></div></details>` : ''}
+  </section>`;
+}
+function eventTypeLabel(type) {
+  const labels = {
+    assistant: 'Model reasoning',
+    assistant_tool_use: 'Tool-driven work',
+    tool_result: 'Tool results',
+    user: 'User turns',
+    'last-prompt': 'Prompt metadata',
+    mode: 'Mode metadata'
+  };
+  return labels[type] || type;
+}
+function compactText(value, limit = 420) {
+  const text = String(value || '');
+  return text.length > limit ? `${text.slice(0, limit)}...` : text;
+}
+function sessionVerdict(s) {
+  const evidence = s.outcome_evidence || s.evidence || {};
+  const tokens = Number(s.tokens || 0);
+  const cost = Number(s.api_value_usd || 0);
+  const toolCalls = Number(s.tool_calls || 0);
+  const likelyUseful = !s.outcome && evidence.inferred_outcome === 'useful';
+  const highCost = cost >= 5 || tokens >= 500000 || toolCalls >= 250;
+  let title = 'Review this AI work';
+  if (s.outcome) title = `Marked ${s.outcome}`;
+  else if (likelyUseful && highCost) title = 'Likely useful, but expensive';
+  else if (likelyUseful) title = 'Likely useful, needs confirmation';
+  else if (highCost) title = 'High-cost session, needs review';
+  const bullets = [];
+  if (likelyUseful) bullets.push('A nearby commit or test signal suggests this produced useful work.');
+  if (cost >= 5) bullets.push(`${s.api_value} API-equivalent value is high for one local session.`);
+  if (tokens >= 500000) bullets.push(`${s.tokens_label} tokens indicates heavy context pressure.`);
+  if (toolCalls >= 250) bullets.push(`${s.tool_calls} tool calls suggests broad search, retries, or loop-like work.`);
+  if (!bullets.length) bullets.push('No urgent cost or outcome signal was detected.');
+  return { title, tone: likelyUseful ? 'useful' : highCost ? 'high' : '', bullets };
+}
+function renderVerdict(s) {
+  const verdict = sessionVerdict(s);
+  return `<div class="verdict-card ${esc(verdict.tone)}"><h3>${esc(verdict.title)}</h3>
+    <p>Confirm the outcome, then use the expensive asks below to improve the next run.</p>
+    <ul>${verdict.bullets.map(item => `<li>${esc(item)}</li>`).join('')}</ul>
+  </div>`;
+}
+function renderHandoff(capsule) {
+  const usage = capsule.usage || {};
+  const evidence = capsule.evidence || {};
+  const changedFiles = evidence.changed_files || [];
+  const target = capsule.target || 'generic';
+  const includePrompt = !!capsule.include_prompt_excerpt;
+  return `<section class="detail-section">
+    <h2>Fresh-session handoff</h2>
+    <p>Use this when a session gets expensive, stale, or hard to continue. It keeps the next ${esc(capsule.target_label || 'AI tool')} focused without carrying the whole chat history.</p>
+    <div class="mini-grid">
+      <div class="mini"><span class="label">Previous usage</span><strong>${esc(usage.tokens_label || '—')}</strong></div>
+      <div class="mini"><span class="label">API value</span><strong>${esc(usage.api_value_label || '—')}</strong></div>
+      <div class="mini"><span class="label">Model calls</span><strong>${esc(usage.model_calls ?? '—')}</strong></div>
+      <div class="mini"><span class="label">Evidence</span><strong>${esc((evidence.commits || []).length)} commits</strong></div>
+    </div>
+    <div class="copy-row">
+      ${['generic','claude','codex','cursor','vscode'].map(item => `<button class="${item === target ? 'btn-primary' : 'btn-quiet'}" onclick="openHandoff('${esc(capsule.session_id)}','${item}', ${includePrompt})">${esc(item === 'generic' ? 'Generic' : item)}</button>`).join('')}
+    </div>
+    <label class="prompt-opt-in">
+      <input type="checkbox" ${includePrompt ? 'checked' : ''} onchange="openHandoff('${esc(capsule.session_id)}','${target}', this.checked)">
+      <span class="prompt-opt-in-label">Include prompt excerpt <span class="pill">Privacy opt-in</span></span>
+      <span class="hint">Off by default: everything else in this brief is metadata (counts, hashes, file paths). This adds your actual prompt text from the costliest turn, so review it before pasting into another tool.</span>
+    </label>
+  </section>
+  <section class="detail-section"><h3>Why hand off now</h3>
+    <ul class="insight-list">${(capsule.warnings || []).map(item => `<li>${esc(item)}</li>`).join('')}</ul>
+  </section>
+  <section class="detail-section"><h3>Paste into the next AI tool</h3>
+    <textarea id="handoffBrief" class="brief-box">${esc(capsule.next_brief || '')}</textarea>
+    <div class="copy-row"><button class="btn-primary" onclick="copyText(document.getElementById('handoffBrief').value, 'Handoff brief copied')">Copy handoff brief</button></div>
+    ${changedFiles.length ? `<details class="aiw-details"><summary>${esc(changedFiles.length)} changed file${changedFiles.length === 1 ? '' : 's'} to inspect</summary><div class="details-body"><div class="pill-row">${changedFiles.slice(0, 12).map(file => `<span class="pill">${esc(file)}</span>`).join('')}</div></div></details>` : ''}
+  </section>`;
+}
+async function openHandoff(sessionId, target = 'generic', includePrompt = false) {
+  openDrawer('Handoff capsule');
+  document.getElementById('detailContent').innerHTML = '<div class="loading">Building local handoff capsule...</div>';
+  const res = await fetch(`/api/handoff?id=${encodeURIComponent(sessionId)}&target=${encodeURIComponent(target)}&prompt=${includePrompt ? '1' : '0'}`);
+  const capsule = await res.json();
+  if (capsule.error) {
+    document.getElementById('detailContent').innerHTML = `<div class="empty">${esc(capsule.error)}</div>`;
+    return;
+  }
+  document.getElementById('detailContent').innerHTML = renderHandoff(capsule);
+}
 function dateLabel(value) {
   if (!value) return 'unknown';
   const date = new Date(value);
@@ -1402,11 +1585,11 @@ async function selectSession(sessionId) {
   const costliestCallout = costliest
     ? `<div class="costliest-step">
         <div class="costliest-head">Costliest step<span class="costliest-share">${costliestShare(costliest, s)}</span></div>
-        <div class="costliest-body">${esc(costliest.event_type)} · ${esc(costliest.model)} · ${esc(costliest.tokens_label)} tokens · ${esc(costliest.api_value)}</div>
+        <div class="costliest-body">${esc(eventTypeLabel(costliest.event_type))} · ${esc(costliest.model)} · ${esc(costliest.tokens_label)} tokens · ${esc(costliest.api_value)}</div>
       </div>`
     : '';
   const costRows = (summary.cost_by_type || []).filter(r => r.api_value_usd > 0)
-    .map(r => ({ ...r, name: r.event_type, short_name: r.event_type }));
+    .map(r => ({ ...r, name: eventTypeLabel(r.event_type), short_name: eventTypeLabel(r.event_type) }));
   const costBreakdown = costRows.length
     ? `<section class="detail-section"><h3>Cost by event type</h3>
         <p>Where this session's API-equivalent value actually went.</p>
@@ -1418,28 +1601,35 @@ async function selectSession(sessionId) {
     ? `<div class="waste-note">Possible rework: ${esc(repeats.duplicate_events)} event(s) repeated identical content${repeats.max_repeat > 2 ? ` (one appeared ${esc(repeats.max_repeat)}x)` : ''}. This often signals a retry loop or the agent re-doing work.</div>`
     : '';
   const turnPrompts = s.turn_prompts || {};
-  const truncated = summary.events > summary.shown
-    ? `<p class="timeline-note">Showing first ${esc(summary.shown)} of ${esc(summary.events)} events.</p>`
-    : '';
-  const timeline = s.events && s.events.length
-    ? `<section class="detail-section"><h3>Timeline</h3>
-        <p>${esc(summary.events)} events · ${esc(summary.tokens)} tokens · ${esc(summary.api_value)} API-equivalent value</p>
+  const meaningfulEvents = (s.events || []).filter(e => Number(e.tokens || 0) > 0 || Number(e.api_value_usd || 0) > 0);
+  const hiddenMetadata = Math.max(0, (s.events || []).length - meaningfulEvents.length);
+  const shownEvents = meaningfulEvents.slice(0, 80);
+  const truncated = meaningfulEvents.length > shownEvents.length
+    ? `<p class="timeline-note">Showing first ${esc(shownEvents.length)} meaningful events of ${esc(meaningfulEvents.length)}. ${esc(hiddenMetadata)} zero-value metadata events hidden.</p>`
+    : hiddenMetadata
+      ? `<p class="timeline-note">${esc(hiddenMetadata)} zero-value metadata events hidden.</p>`
+      : '';
+  const timeline = meaningfulEvents.length
+    ? `<section class="detail-section"><details class="aiw-details"><summary>Advanced timeline (${esc(meaningfulEvents.length)} meaningful events)</summary><div class="details-body">
+        <p>${esc(summary.events)} total events · ${esc(summary.tokens)} tokens · ${esc(summary.api_value)} API-equivalent value</p>
         ${costliestCallout}
         ${wasteNote}
         ${truncated}
         <div class="table-wrap"><table><thead><tr><th>Turn</th><th>Event</th><th>Model</th><th>Tokens</th><th>API value</th></tr></thead>
-          <tbody>${s.events.map(e => `<tr title="${esc(e.turn && turnPrompts[e.turn] ? 'Turn #' + e.turn + ': ' + turnPrompts[e.turn] : (e.content_hash || ''))}">
-            <td class="evt-turn">${e.turn ? '#' + esc(e.turn) : '—'}</td><td>${esc(e.event_type)}</td><td>${esc(e.model)}</td><td>${esc(e.tokens_label)}</td><td>${esc(e.api_value)}</td>
+          <tbody>${shownEvents.map(e => `<tr title="${esc(e.turn && turnPrompts[e.turn] ? 'Turn #' + e.turn + ': ' + compactText(turnPrompts[e.turn], 220) : (e.content_hash || ''))}">
+            <td class="evt-turn">${e.turn ? '#' + esc(e.turn) : '—'}</td><td>${esc(eventTypeLabel(e.event_type))}</td><td>${esc(e.model)}</td><td>${esc(e.tokens_label)}</td><td>${esc(e.api_value)}</td>
           </tr>`).join('')}</tbody></table></div>
-      </section>`
-    : `<section class="detail-section"><h3>Timeline</h3><p>Event-level history is not available for this tool yet.</p></section>`;
+      </div></details></section>`
+    : `<section class="detail-section"><details class="aiw-details"><summary>Advanced timeline</summary><div class="details-body"><p>No meaningful token/cost events are available for this tool yet.</p>${hiddenMetadata ? `<p>${esc(hiddenMetadata)} zero-value metadata events hidden.</p>` : ''}</div></details></section>`;
   const outcomeActions = `<div class="outcome-control"><h3>Was this work useful?</h3>
     <p>Mark the result so AIWatcher can measure value instead of tokens alone.</p>
     <div class="outcome-options">
       <button data-testid="outcome-useful" class="outcome-button useful ${s.outcome === 'useful' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','useful')">Useful</button>
       <button data-testid="outcome-rework" class="outcome-button rework ${s.outcome === 'rework' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','rework')">Needs rework</button>
       <button data-testid="outcome-abandoned" class="outcome-button abandoned ${s.outcome === 'abandoned' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','abandoned')">Abandoned</button>
-    </div></div>`;
+    </div>
+    <div class="copy-row"><button class="btn-quiet" onclick="openHandoff('${esc(s.session_id)}')">Create handoff capsule</button></div>
+    </div>`;
   const insights = s.insights && s.insights.length
     ? `<section class="detail-section"><h3>What to check next</h3>
         <ul class="insight-list">${s.insights.map(i => `<li>${esc(i)}</li>`).join('')}</ul>
@@ -1449,7 +1639,7 @@ async function selectSession(sessionId) {
   const pa = s.prompt_analysis;
   let promptReview = '';
   if (pa) {
-    const opener = `<p class="prompt-opener"><span class="prompt-opener-label">Session opened with</span> ${esc(pa.opening_prompt)}</p>`;
+    const opener = `<details class="aiw-details"><summary>Session opening prompt</summary><div class="details-body"><p class="prompt-opener">${esc(pa.opening_prompt)}</p></div></details>`;
     const asksRows = (pa.expensive_asks || []).map(a => `<tr>
         <td class="ask-turn">#${esc(a.turn)}</td>
         <td class="ask-prompt" title="${esc(a.prompt)}">${esc(a.prompt.length > 110 ? a.prompt.slice(0, 110) + '…' : a.prompt)}</td>
@@ -1467,35 +1657,39 @@ async function selectSession(sessionId) {
     const coaching = c
       ? `<section class="detail-section"><h3>Prompt worth tightening <span class="risk-tag risk-${esc(c.risk)}">${esc(c.risk)} risk</span></h3>
           <p>Turn #${esc(c.turn)} (${esc(c.api_value)}) — the costliest ask with something to tighten.</p>
-          <div class="prompt-text">${esc(c.prompt)}</div>
+          <div class="prompt-text">${esc(compactText(c.prompt, 700))}</div>
+          ${String(c.prompt || '').length > 700 ? `<details class="aiw-details"><summary>Show full prompt</summary><div class="details-body"><div class="prompt-text">${esc(c.prompt)}</div></div></details>` : ''}
           ${c.findings && c.findings.length ? `<h4>Findings</h4><ul class="insight-list">${c.findings.map(f => `<li>${esc(f)}</li>`).join('')}</ul>` : ''}
           ${c.suggestions && c.suggestions.length ? `<h4>Suggestions</h4><ul class="insight-list">${c.suggestions.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
           <h4>Tighter prompt for next time</h4>
-          <div class="prompt-suggested">${esc(c.suggested_prompt)}</div>
+          <div class="prompt-suggested">${esc(compactText(c.suggested_prompt, 900))}</div>
+          ${String(c.suggested_prompt || '').length > 900 ? `<details class="aiw-details"><summary>Show full tighter prompt</summary><div class="details-body"><div class="prompt-suggested">${esc(c.suggested_prompt)}</div></div></details>` : ''}
         </section>`
       : `<section class="detail-section"><h3>Prompt worth tightening</h3>
           <p>No single prompt stood out as under-specified — cost accumulated across ${esc(pa.turns)} turns. For work this long, checkpoint or start a fresh session between chunks to keep context (and cost) from compounding.</p>
         </section>`;
-    promptReview = `<section class="detail-section"><h3>Prompt attribution</h3>${opener}</section>${expensiveAsks}${coaching}`;
+    promptReview = `${expensiveAsks}${coaching}<section class="detail-section"><h3>Prompt context</h3>${opener}</section>`;
   }
   document.getElementById('detailContent').innerHTML = `<section class="detail-section">
     <h2 class="session-title">${esc(s.project_short)}</h2>
     <p class="session-meta">${esc(s.tool)} · ${esc(s.model)}</p>
     ${miniStats({ sessions: 1, api_value: s.api_value, tokens: s.tokens_label, tool_calls: s.tool_calls })}
     ${outcomePill(s.outcome)}
+    ${renderVerdict(s)}
     ${outcomeActions}
     </section>
-    ${insights}
     ${promptReview}
-    <section class="detail-section"><h3>Session metadata</h3>
-    <table><tbody>
-      <tr><th>Started</th><td>${esc(dateLabel(s.started_at))}</td></tr>
-      <tr><th>Updated</th><td>${esc(dateLabel(s.updated_at))}</td></tr>
-      <tr><th>Source</th><td>${esc(s.source_path || 'unknown')}</td></tr>
-      <tr><th>Privacy</th><td>${esc(s.privacy)}</td></tr>
-    </tbody></table>
-    </section>
+    ${renderEvidence(s.outcome_evidence)}
+    ${insights}
     ${costBreakdown}
+    <section class="detail-section"><details class="aiw-details"><summary>Session metadata</summary><div class="details-body">
+      <table><tbody>
+        <tr><th>Started</th><td>${esc(dateLabel(s.started_at))}</td></tr>
+        <tr><th>Updated</th><td>${esc(dateLabel(s.updated_at))}</td></tr>
+        <tr><th>Source</th><td>${esc(s.source_path || 'unknown')}</td></tr>
+        <tr><th>Privacy</th><td>${esc(s.privacy)}</td></tr>
+      </tbody></table>
+    </div></details></section>
     ${timeline}`;
 }
 async function markOutcome(sessionId, outcome) {
@@ -1556,7 +1750,7 @@ async function load(resetDetail = true) {
   document.getElementById('windowLabel').textContent = totals.window_label;
   document.getElementById('sessions').textContent = totals.sessions;
   document.getElementById('usefulOutcomes').textContent = totals.useful_outcomes;
-  document.getElementById('costPerUseful').textContent = totals.cost_per_useful_change;
+  document.getElementById('costPerUseful').textContent = `${totals.cost_per_useful_change}${totals.inferred_useful_outcomes ? ` · ${totals.inferred_useful_outcomes} to confirm` : ''}`;
   document.getElementById('preflightDecisions').textContent = totals.preflight_decisions;
   receiptCache = data.intervention_receipts || [];
   document.getElementById('latestIntervention').innerHTML = renderLatestReceipt(receiptCache[0]);
@@ -1565,7 +1759,7 @@ async function load(resetDetail = true) {
   document.getElementById('latestSession').innerHTML = latest
     ? `<div class="session-summary"><div class="session-title">${esc(latest.project)}</div>
        <div class="session-meta">${esc(latest.tool)} · ${esc(latest.model)} · ${esc(latest.tokens)} tokens · ${esc(latest.api_value)}</div>
-       <div class="session-actions">${outcomePill(latest.outcome)}
+       <div class="session-actions">${outcomePill(latest.outcome)}${outcomeEvidencePill(latest)}
        <button data-testid="review-latest" class="btn-primary" onclick="selectSession('${esc(latest.session_id)}')">Review outcome</button></div></div>`
     : '<div class="empty">No local AI session detected yet.</div>';
   const recommendation = data.insights[0];
@@ -1583,7 +1777,7 @@ async function load(resetDetail = true) {
   document.getElementById('privacy').innerHTML = data.privacy.map(p => `<div class="privacy-item"><span class="privacy-check">&#10003;</span><span>${esc(p)}</span></div>`).join('');
   document.getElementById('privacyLarge').innerHTML = data.privacy.map(p => `<span class="pill">${esc(p)}</span>`).join('');
   document.getElementById('recent').innerHTML = data.recent_sessions.slice(0, 6).map(s => `<tr class="clickable" onclick="selectSession('${s.session_id}')">
-    <td>${esc(s.tool)}</td><td>${esc(s.project)}</td><td>${esc(s.tokens)}</td><td><button class="row-action">Review</button></td>
+    <td>${esc(s.tool)}</td><td>${esc(s.project)}<br>${outcomeEvidencePill(s)}</td><td>${esc(s.tokens)}</td><td><button class="row-action">Review</button></td>
   </tr>`).join('');
   document.getElementById('projectWindow').textContent = totals.window_label;
   document.getElementById('projectRows').innerHTML = data.projects.length
@@ -1699,6 +1893,21 @@ class UIHandler(BaseHTTPRequestHandler):
             params = parse_qs(parsed.query)
             session_id = params.get("id", [""])[0]
             self._send(200, json.dumps(build_session_detail(session_id)), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/handoff":
+            params = parse_qs(parsed.query)
+            session_id = params.get("id", [""])[0]
+            target = params.get("target", ["generic"])[0]
+            include_prompt_excerpt = params.get("prompt", ["0"])[0] == "1"
+            try:
+                days = max(1, min(90, int(params.get("days", ["30"])[0])))
+            except ValueError:
+                days = 30
+            self._send(
+                200,
+                json.dumps(build_handoff_detail(session_id, days, target, include_prompt_excerpt)),
+                "application/json; charset=utf-8",
+            )
             return
         if parsed.path == "/api/report":
             params = parse_qs(parsed.query)

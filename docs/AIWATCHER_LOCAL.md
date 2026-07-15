@@ -36,11 +36,19 @@ is bigger than collection:
 - Read-only.
 - No LLM API calls.
 - No phone-home telemetry.
-- No source-code or prompt-content storage in summaries.
+- No source-code or prompt-content storage in persisted summaries.
 - No cloud upload unless the user explicitly connects AIWatcher Enterprise.
 
 This trust boundary is the product. If AIWatcher Local cannot explain what it
 reads and why, it should not read it.
+
+One explicit exception to the prompt-content rule, stated precisely rather than
+implied away: `resume`/`handoff --include-prompt-excerpt` (off by default, a
+labeled opt-in in both the CLI and the dashboard) embeds your own highest-cost
+prompt from the session into the one-time brief you copy elsewhere. It is never
+written to the persisted local-state file — only into that ephemeral output —
+but it is real prompt text, and the docs should say so rather than let the
+blanket claim above cover it by omission.
 
 ## Platform Support
 
@@ -96,6 +104,7 @@ python -m aiwatcher_cli start
 python -m aiwatcher_cli today
 python -m aiwatcher_cli last
 python -m aiwatcher_cli timeline
+python -m aiwatcher_cli resume --target codex --copy
 python -m aiwatcher_cli journal
 python -m aiwatcher_cli watch --once
 python -m aiwatcher_cli preflight "Refactor auth and delete old credentials"
@@ -106,6 +115,7 @@ python -m aiwatcher_cli tools --days 7
 python -m aiwatcher_cli projects --days 7
 python -m aiwatcher_cli report --days 7
 python -m aiwatcher_cli sessions --days 1
+python -m aiwatcher_cli sessions --search orcha --days 30
 python -m aiwatcher_cli export --format json --days 30
 python -m aiwatcher_cli export --format json --level events --days 7
 python -m aiwatcher_cli ui
@@ -124,15 +134,25 @@ keeping authority with the individual developer:
    local usage while work is happening.
 3. **Control** — use the execution brief, edit it, run the original, cancel, or
    stop work that is becoming wasteful.
-4. **Prove** — inspect the local timeline and record whether the result was
-   useful, needed rework, or was abandoned.
-5. **Improve** — compare interventions and outcomes, then recommend one better
-   behavior for the next run.
+4. **Prove** — inspect the local timeline, review inferred evidence, and record
+   whether the result was useful, needed rework, or was abandoned.
+5. **Improve** — compare interventions and outcomes, log a decision that never
+   became a commit, then resume or hand off the next run with a target-ready
+   brief.
 
 The local state connects intervention hashes, predicted impact, session IDs,
 selected-prompt risk, observed usage, and outcomes. It does not store original
 or suggested prompt text. Comparisons to historical baselines are labeled as
 inferences, not guaranteed counterfactual savings.
+
+The canonical lifecycle requirements and scenario suite lives at
+[`docs/aiwatcher-scenario-tests.html`](aiwatcher-scenario-tests.html). Use it as
+the release checklist for Plan, Watch, Control, Prove, and Improve coverage.
+
+When a session is inspected or confirmed, AIWatcher also stores a local
+privacy-safe evidence snapshot: commit SHAs, hashes of file paths/test
+artifacts, confidence, and inferred outcome. It does not store source diffs,
+prompt text, commit subjects, or file contents.
 
 ## Automatic Preflight
 
@@ -306,6 +326,10 @@ python -m aiwatcher_cli tools --days 7
 python -m aiwatcher_cli projects --days 7 --limit 5
 python -m aiwatcher_cli report --days 7
 python -m aiwatcher_cli sessions --days 1 --limit 5
+python -m aiwatcher_cli sessions --search orcha --days 30
+python -m aiwatcher_cli resume --target codex --copy
+python -m aiwatcher_cli log-decision "test decision" --reasoning "why" --rejected "alternative"
+python -m aiwatcher_cli install-claude-decision-log
 python -m aiwatcher_cli export --format json --days 7 > aiwatcher-local-export.json
 python -m aiwatcher_cli export --format json --level events --days 7 > aiwatcher-local-events.json
 python -m aiwatcher_cli ui
@@ -323,6 +347,13 @@ What to check:
 - The event export should contain hashes, not prompt text or code.
 - The dashboard time-window selector should visibly update the values.
 - Project rows and recent sessions should open useful detail.
+- `resume`/`handoff` without `--include-prompt-excerpt` should not contain
+  prompt text; with it, the brief should contain a labeled excerpt and nothing
+  else in the surrounding output should change.
+- `log-decision` without `--write` on `install-claude-decision-log` should
+  print the convention and touch no files; `--write` should be idempotent on a
+  second run and only ever touch the user-global `~/.claude/CLAUDE.md`, never a
+  project-local file.
 
 ## Current Local Sources
 

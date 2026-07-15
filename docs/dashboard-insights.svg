@@ -1,0 +1,166 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1080" font-family="'Inter','Segoe UI',system-ui,-apple-system,sans-serif" role="img" aria-labelledby="t-insights d-insights">
+  <title id="t-insights">AIWatcher Local — Local Insights</title>
+  <desc id="d-insights">Insights tab: a stacked list of amber-flagged suggestions (top project, concentrated usage, sessions worth reviewing, large context, iterative loops, subscription usage, unmarked outcomes), next to a Daily Journal and Local Weekly Report, with Privacy Contract and Enterprise handoff panels below.</desc>
+  <defs>
+    <radialGradient id="bg-insights" cx="0%" cy="0%" r="95%">
+      <stop offset="0" stop-color="#18243a"/>
+      <stop offset="0.55" stop-color="#0b1018"/>
+      <stop offset="1" stop-color="#090b10"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1200" height="1080" fill="url(#bg-insights)"/>
+
+  <rect x="36" y="22" width="40" height="40" rx="10" fill="#141924" stroke="#2a3140"/>
+  <text x="56" y="48" font-size="14" font-weight="700" fill="#eef3fb" text-anchor="middle">AW</text>
+  <text x="88" y="40" font-size="22" font-weight="700" fill="#eef3fb">AIWatcher Local</text>
+  <rect x="234" y="24" width="150" height="24" rx="12" fill="#0f2a1f" stroke="#1f4a34"/>
+  <circle cx="248" cy="36" r="4" fill="#3ddc84"/>
+  <text x="260" y="40" font-size="11" fill="#8fe9b8">Private and local</text>
+  <text x="88" y="62" font-size="13" fill="#8b96a8">Your AI coding work, outcomes, and improvement signals.</text>
+
+  <rect x="808" y="22" width="132" height="34" rx="8" fill="#12151c" stroke="#262b38"/>
+  <text x="824" y="44" font-size="13" fill="#dbe2ee">Last 7 days</text>
+  <text x="926" y="44" font-size="12" fill="#8b96a8" text-anchor="end">▾</text>
+  <rect x="952" y="22" width="104" height="34" rx="8" fill="#12151c" stroke="#262b38"/>
+  <text x="1004" y="44" font-size="13" fill="#dbe2ee" text-anchor="middle">Refresh data</text>
+  <rect x="1068" y="22" width="96" height="34" rx="8" fill="#12151c" stroke="#3a6fd8"/>
+  <text x="1116" y="44" font-size="13" font-weight="600" fill="#8fb4f7" text-anchor="middle">Enterprise</text>
+
+  <g font-size="13">
+    <text x="63" y="104" fill="#8b96a8" text-anchor="middle">Today</text>
+    <text x="130" y="104" fill="#8b96a8" text-anchor="middle">Prompt</text>
+    <text x="208" y="104" fill="#8b96a8" text-anchor="middle">Projects</text>
+    <text x="294" y="104" fill="#8b96a8" text-anchor="middle">Sessions</text>
+    <text x="380" y="104" fill="#8b96a8" text-anchor="middle">Receipts</text>
+    <rect x="426" y="86" width="72" height="28" rx="14" fill="#eef1f6"/>
+    <text x="462" y="105" fill="#141a26" font-weight="700" text-anchor="middle">Insights</text>
+  </g>
+
+  <!-- Row 1: Local Insights (left) / Daily Journal + Weekly Report (right) -->
+  <rect x="36" y="172" width="700" height="618" rx="12" fill="#111722" stroke="#263145"/>
+  <text x="54" y="204" font-size="16" font-weight="700" fill="#eef3fb">Local Insights</text>
+  <text x="54" y="224" font-size="12" fill="#98a5b8">Suggestions to reduce waste without uploading prompts.</text>
+
+  <g font-size="12">
+    <rect x="54" y="242" width="3" height="46" fill="#e0a83c"/>
+    <text x="68" y="256" font-size="13" font-weight="600" fill="#eef3fb">Top project</text>
+    <text x="68" y="274" fill="#a7b1c0">~/code/payments-api accounts for $21.30 API-equivalent value.</text>
+
+    <rect x="54" y="296" width="3" height="60" fill="#e0a83c"/>
+    <text x="68" y="310" font-size="13" font-weight="600" fill="#eef3fb">Usage is concentrated</text>
+    <text x="68" y="328" fill="#a7b1c0">Most API-equivalent value comes from ~/code/payments-api.</text>
+    <text x="68" y="344" fill="#a7b1c0">Review recent sessions there before optimizing elsewhere.</text>
+
+    <rect x="54" y="364" width="3" height="60" fill="#e0a83c"/>
+    <text x="68" y="378" font-size="13" font-weight="600" fill="#eef3fb">Session worth reviewing</text>
+    <text x="68" y="396" fill="#a7b1c0">~/code/payments-api used $20.69 on claude-opus-4-8. Open</text>
+    <text x="68" y="412" fill="#a7b1c0">the session before repeating similar work.</text>
+
+    <rect x="54" y="432" width="3" height="60" fill="#e0a83c"/>
+    <text x="68" y="446" font-size="13" font-weight="600" fill="#eef3fb">Large-context session</text>
+    <text x="68" y="464" fill="#a7b1c0">917.3k tokens were observed in one session. Try smaller</text>
+    <text x="68" y="480" fill="#a7b1c0">file scopes or checkpoints for similar tasks.</text>
+
+    <rect x="54" y="500" width="3" height="60" fill="#e0a83c"/>
+    <text x="68" y="514" font-size="13" font-weight="600" fill="#eef3fb">Possible iterative loop</text>
+    <text x="68" y="532" fill="#a7b1c0">1,273 model calls were observed in one claude-code session.</text>
+    <text x="68" y="548" fill="#a7b1c0">Add explicit stop conditions or narrower acceptance criteria.</text>
+
+    <rect x="54" y="568" width="3" height="60" fill="#e0a83c"/>
+    <text x="68" y="582" font-size="13" font-weight="600" fill="#eef3fb">Subscription/limited usage detected</text>
+    <text x="68" y="600" fill="#a7b1c0">2.7M tokens came from plan-based or limited-cost sources.</text>
+    <text x="68" y="616" fill="#a7b1c0">Treat them as observed usage, not invoice spend.</text>
+
+    <rect x="54" y="636" width="3" height="46" fill="#e0a83c"/>
+    <text x="68" y="650" font-size="13" font-weight="600" fill="#eef3fb">Cursor detected, but usage is limited</text>
+    <text x="68" y="668" fill="#a7b1c0">Cursor is installed, but local token/cost history is not reliably exposed yet.</text>
+
+    <rect x="54" y="690" width="3" height="60" fill="#e0a83c"/>
+    <text x="68" y="704" font-size="13" font-weight="600" fill="#eef3fb">Outcome evidence found</text>
+    <text x="68" y="722" fill="#a7b1c0">10 unmarked sessions have nearby commit or test evidence.</text>
+    <text x="68" y="738" fill="#a7b1c0">Review and confirm the outcome.</text>
+
+    <rect x="54" y="758" width="3" height="46" fill="#e0a83c"/>
+    <text x="68" y="772" font-size="13" font-weight="600" fill="#eef3fb">Work needs outcome review</text>
+    <text x="68" y="790" fill="#a7b1c0">1 unmarked session changed files without a confirmed useful outcome.</text>
+  </g>
+
+  <rect x="752" y="172" width="412" height="618" rx="12" fill="#111722" stroke="#263145"/>
+  <text x="770" y="204" font-size="16" font-weight="700" fill="#eef3fb">Daily Journal</text>
+  <text x="770" y="222" font-size="12" fill="#98a5b8">Your last 7 days</text>
+
+  <rect x="770" y="234" width="112" height="24" rx="12" fill="#0d1320" stroke="#263145"/>
+  <text x="826" y="250" font-size="11" fill="#a7b1c0" text-anchor="middle">14 sessions</text>
+  <rect x="888" y="234" width="150" height="24" rx="12" fill="#0d1320" stroke="#263145"/>
+  <text x="963" y="250" font-size="11" fill="#a7b1c0" text-anchor="middle">$31.81 API-equivalent</text>
+
+  <g font-size="12">
+    <rect x="770" y="274" width="3" height="34" fill="#e0a83c"/>
+    <text x="782" y="288" font-size="12" font-weight="600" fill="#eef3fb">Top project</text>
+    <text x="782" y="303" fill="#a7b1c0" font-size="11">~/code/payments-api ($21.30)</text>
+
+    <rect x="770" y="316" width="3" height="34" fill="#e0a83c"/>
+    <text x="782" y="330" font-size="12" font-weight="600" fill="#eef3fb">Most expensive session</text>
+    <text x="782" y="345" fill="#a7b1c0" font-size="11">~/code/payments-api · claude-code · $20.69</text>
+
+    <rect x="770" y="358" width="3" height="34" fill="#e0a83c"/>
+    <text x="782" y="372" font-size="12" font-weight="600" fill="#eef3fb">Largest reliable context</text>
+    <text x="782" y="387" fill="#a7b1c0" font-size="11">~/code/payments-api · 917.3k tokens</text>
+  </g>
+
+  <rect x="770" y="404" width="376" height="52" rx="8" fill="#0d1320" stroke="#263145"/>
+  <text x="782" y="422" font-size="11" font-weight="600" fill="#98a5b8">ONE THING TO CHANGE NEXT TIME</text>
+  <text x="782" y="440" font-size="12" fill="#dce6f6">Add explicit stop conditions to broad prompts.</text>
+
+  <line x1="770" y1="476" x2="1146" y2="476" stroke="#263145"/>
+  <text x="770" y="502" font-size="16" font-weight="700" fill="#eef3fb">Local Weekly Report</text>
+  <text x="770" y="520" font-size="12" fill="#98a5b8">Your AI coding week</text>
+
+  <rect x="770" y="532" width="132" height="24" rx="12" fill="#0d1320" stroke="#263145"/>
+  <text x="836" y="548" font-size="11" fill="#a7b1c0" text-anchor="middle">14 local sessions</text>
+  <rect x="910" y="532" width="150" height="24" rx="12" fill="#0d1320" stroke="#263145"/>
+  <text x="985" y="548" font-size="11" fill="#a7b1c0" text-anchor="middle">4.1M tokens observed</text>
+
+  <g font-size="12">
+    <rect x="770" y="572" width="3" height="30" fill="#e0a83c"/>
+    <text x="782" y="586" font-size="12" font-weight="600" fill="#eef3fb">Top project</text>
+    <text x="782" y="600" fill="#a7b1c0" font-size="11">~/code/payments-api ($21.30)</text>
+
+    <rect x="770" y="610" width="3" height="30" fill="#e0a83c"/>
+    <text x="782" y="624" font-size="12" font-weight="600" fill="#eef3fb">Top model</text>
+    <text x="782" y="638" fill="#a7b1c0" font-size="11">claude-opus-4-8 (1.4M tokens)</text>
+  </g>
+
+  <text x="770" y="668" font-size="11" fill="#8b96a8">Treat API-equivalent value as usage pressure,</text>
+  <text x="770" y="684" font-size="11" fill="#8b96a8">not subscription invoice spend.</text>
+
+  <!-- Row 2: Privacy Contract (left) / Enterprise handoff (right) -->
+  <rect x="36" y="808" width="700" height="196" rx="12" fill="#111722" stroke="#263145"/>
+  <text x="54" y="840" font-size="16" font-weight="700" fill="#eef3fb">Privacy Contract</text>
+  <text x="54" y="860" font-size="12" fill="#98a5b8">AIWatcher Local is read-only and local-first. Summaries avoid</text>
+  <text x="54" y="876" font-size="12" fill="#98a5b8">source and prompt content by default.</text>
+
+  <rect x="54" y="896" width="146" height="26" rx="13" fill="#0e2a22" stroke="#244134"/>
+  <text x="127" y="914" font-size="11" fill="#9fe1cb" text-anchor="middle">Read-only local scan</text>
+  <rect x="208" y="896" width="98" height="26" rx="13" fill="#0e2a22" stroke="#244134"/>
+  <text x="257" y="914" font-size="11" fill="#9fe1cb" text-anchor="middle">No LLM calls</text>
+  <rect x="54" y="930" width="256" height="26" rx="13" fill="#0e2a22" stroke="#244134"/>
+  <text x="182" y="948" font-size="11" fill="#9fe1cb" text-anchor="middle">No source/prompt content in summaries</text>
+  <rect x="318" y="930" width="222" height="26" rx="13" fill="#0e2a22" stroke="#244134"/>
+  <text x="429" y="948" font-size="11" fill="#9fe1cb" text-anchor="middle">No cloud upload unless connected</text>
+
+  <rect x="752" y="808" width="412" height="196" rx="12" fill="#111722" stroke="#263145"/>
+  <text x="770" y="840" font-size="16" font-weight="700" fill="#eef3fb">Enterprise handoff</text>
+  <text x="770" y="860" font-size="12" fill="#98a5b8">Adds team history, policy controls, HITL approvals,</text>
+  <text x="770" y="876" font-size="12" fill="#98a5b8">evidence packs, and integrations.</text>
+
+  <rect x="770" y="896" width="120" height="26" rx="13" fill="#0d1320" stroke="#263145"/>
+  <text x="830" y="914" font-size="11" fill="#a7b1c0" text-anchor="middle">Team visibility</text>
+  <rect x="898" y="896" width="140" height="26" rx="13" fill="#0d1320" stroke="#263145"/>
+  <text x="968" y="914" font-size="11" fill="#a7b1c0" text-anchor="middle">Budget guardrails</text>
+  <rect x="770" y="930" width="120" height="26" rx="13" fill="#0d1320" stroke="#263145"/>
+  <text x="830" y="948" font-size="11" fill="#a7b1c0" text-anchor="middle">Audit evidence</text>
+  <rect x="898" y="930" width="100" height="26" rx="13" fill="#0d1320" stroke="#263145"/>
+  <text x="948" y="948" font-size="11" fill="#a7b1c0" text-anchor="middle">SSO/RBAC</text>
+</svg>

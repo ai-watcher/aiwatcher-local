@@ -7,7 +7,7 @@ other local AI coding tools. It preflights risky work, watches local sessions,
 records outcomes, and turns the history those tools already keep into useful
 cost and security guidance with no account or cloud upload.
 
-![The AIWatcher Local dashboard: API-equivalent value, projected month, sessions, and tokens up top; top projects, models, recent sessions, and privacy guarantees below.](docs/dashboard.svg)
+![The AIWatcher Local dashboard's Today tab: latest AI work and one thing worth changing up top; useful outcomes, preflight decisions, sessions observed, and API-equivalent value tiles; the latest intervention receipt with predicted savings; projects driving usage and recent sessions below.](docs/dashboard.svg)
 
 ## Privacy
 
@@ -59,6 +59,9 @@ aiwatcher today
 The examples below use `python -m aiwatcher_cli`; Windows users can replace
 `python` with `py` when needed.
 
+For implementation and release verification, use the canonical lifecycle suite at
+[`docs/aiwatcher-scenario-tests.html`](docs/aiwatcher-scenario-tests.html).
+
 ## Try the Core Workflows
 
 ### 1. See today's AI work
@@ -96,14 +99,32 @@ python -m aiwatcher_cli ui
 
 Open the printed URL. The dashboard includes:
 
+The mockups below use synthetic data — like the PR that introduced them, this
+README does not embed real dashboard screenshots, since those can expose
+private local paths, project names, and AI usage history.
+
 - **Today**: latest work, useful outcomes, preflight decisions, and one next
   recommendation.
 - **Prompt**: local Prompt Companion for surfaces AIWatcher cannot hook yet.
 - **Projects**: local repos and folders driving usage.
-- **Sessions**: inspect recent work and mark outcomes.
-- **Receipts**: connect each preflight decision to its resulting session,
-  observed usage, risk change, and developer outcome.
-- **Insights**: privacy-safe journal and weekly report.
+- **Sessions**: inspect recent work, rank every prompt in a session by cost
+  under **Expensive asks** (cost is cumulative — a short prompt late in a long
+  session can still be expensive, since it re-sends the whole conversation),
+  mark outcomes, and create a handoff capsule to continue in a fresh session.
+
+  ![Sessions tab: a session list next to a review drawer showing Expensive asks with the costliest step highlighted, outcome buttons, outcome evidence, and Create handoff capsule.](docs/dashboard-sessions.svg)
+- **Receipts**: connect each preflight decision to its resulting session —
+  predicted savings before execution, observed usage after, an inferred
+  estimate of what was actually avoided (labeled as inferred, not a
+  guaranteed counterfactual), risk change, and developer outcome.
+
+  ![Receipts tab: a table of intervention receipts with time, tool/project, decision, risk change, result, and a review action per row.](docs/dashboard-receipts.svg)
+- **Insights**: local suggestions for waste and risk — concentrated spend,
+  large-context sessions, possible iterative loops, subscription/limited
+  usage, and unmarked outcome evidence — plus a privacy-safe daily journal
+  and weekly report.
+
+  ![Insights tab: a stacked list of flagged suggestions — concentrated spend, a large-context session, a possible iterative loop, subscription/limited usage, and unmarked outcome evidence — next to a daily journal and weekly report, with privacy contract and enterprise handoff panels below.](docs/dashboard-insights.svg)
 
 ### 4. Mark whether work was useful
 
@@ -114,7 +135,69 @@ python -m aiwatcher_cli outcome useful
 Or use the **Review outcome** button in the UI. This is how AIWatcher moves from
 token counting toward cost per useful change.
 
-### 5. Export local evidence
+For sessions with a clear costliest turn, the review drawer also retroactively
+coaches that prompt under **Prompt worth tightening** — the same findings,
+suggestions, and risk analysis preflight runs before execution, applied after
+the fact, plus a rewritten tighter version of the prompt for next time.
+
+AIWatcher also shows local outcome evidence before you mark a result: nearby
+commits, uncommitted files, and recent test artifacts. These signals stay on
+your laptop and are labeled as evidence to review, not automatic truth.
+When you inspect or confirm a session, AIWatcher also stores a local
+privacy-safe evidence snapshot: commit SHAs, hashes of file paths/test
+artifacts, confidence, and inferred outcome. It does not store source diffs,
+prompt text, commit subjects, or file contents.
+
+This persisted snapshot is separate from the one-time handoff brief you copy
+elsewhere (below), which does include the real commit subject and body. A
+commit message is written by whoever made the change specifically to explain
+it to a future reader, so unlike prompt text it is not treated as private —
+just not persisted to disk beyond the hash above.
+
+### 5. Resume work without rebuilding context
+
+When a session gets stale, expensive, or you want to move from Claude to Codex,
+generate a target-ready continuation brief:
+
+```sh
+python -m aiwatcher_cli resume --search orcha --target codex --copy
+python -m aiwatcher_cli handoff --session-id <session-id> --target cursor
+```
+
+The brief opens with why AIWatcher is suggesting a handoff now: degraded
+context health or a stale session, 250+ model calls, 80+ tool calls, or
+$5+ in API-equivalent value — so you know whether it's worth acting on
+before reading further.
+
+Targets: `generic`, `claude`, `codex`, `cursor`, and `vscode`. The brief lists
+recent commit subjects/bodies and changed files for context, any decisions
+logged for the session (see below), and keeps the next run focused on one
+checkpoint. Add `--include-prompt-excerpt` to also include your own
+highest-cost prompt from the session — off by default, and labeled as a
+privacy opt-in in both the CLI and the dashboard.
+
+### 6. Log a decision that never became a commit
+
+A commit message explains changes that shipped. It cannot explain an approach
+you seriously considered and rejected without ever writing code for it — a
+fresh session has no way to know that ground was already covered:
+
+```sh
+python -m aiwatcher_cli log-decision "Chose X over Y" --reasoning "..." --rejected "Y"
+```
+
+Logged decisions for a session are surfaced in its handoff brief, explicitly
+labeled self-reported and not verified against what actually happened.
+Nothing is logged automatically. To have an AI session call this itself at
+real decision points, install a personal convention — this only ever touches
+your own machine's `~/.claude/CLAUDE.md`, never a project file shared with
+collaborators:
+
+```sh
+python -m aiwatcher_cli install-claude-decision-log --write
+```
+
+### 7. Export local evidence
 
 ```sh
 python -m aiwatcher_cli export --format json --days 30
@@ -140,8 +223,14 @@ python -m aiwatcher_cli status             # show detected tools and local statu
 python -m aiwatcher_cli today              # today's local AI usage
 python -m aiwatcher_cli last               # inspect the latest local AI session
 python -m aiwatcher_cli timeline           # privacy-safe event timeline
-python -m aiwatcher_cli journal            # one daily improvement recommendation
+python -m aiwatcher_cli handoff            # create a fresh-session handoff capsule
+python -m aiwatcher_cli resume --target codex --copy  # find a session and continue it elsewhere
+python -m aiwatcher_cli log-decision "..." --reasoning "..." --rejected "..."  # note a rejected approach
+python -m aiwatcher_cli install-claude-decision-log --write  # personal convention to log decisions automatically
+python -m aiwatcher_cli journal            # daily usage summary plus one thing to change next time
 python -m aiwatcher_cli watch --once       # detect expensive or loop-like work
+python -m aiwatcher_cli run -- npm test    # run any command, then summarize the AI session alongside it
+python -m aiwatcher_cli doctor             # check tool detection and hook/wrapper install status
 python -m aiwatcher_cli preflight "..."    # review work before execution
 python -m aiwatcher_cli codex "..."        # preflight, choose, and launch Codex
 python -m aiwatcher_cli claude "..."       # preflight, choose, and launch Claude
@@ -151,6 +240,7 @@ python -m aiwatcher_cli tools --days 7     # rank usage by tool
 python -m aiwatcher_cli projects --days 7  # rank usage by project
 python -m aiwatcher_cli report --days 7    # weekly local report
 python -m aiwatcher_cli sessions --days 1  # recent local sessions
+python -m aiwatcher_cli sessions --search orcha --days 30
 python -m aiwatcher_cli export --format json --days 30      # export session summaries
 python -m aiwatcher_cli export --format json --level events # privacy-safe event hashes
 python -m aiwatcher_cli ui                 # local-only browser dashboard
@@ -194,9 +284,21 @@ This month: $77.87
 - **Control:** Let the developer use the brief, edit it, run the original, or
   cancel. High-risk automatic hooks pause before execution.
 - **Prove:** Inspect a privacy-safe intervention receipt and session timeline,
-  then mark the result useful, rework, or abandoned.
+  review local git/test evidence, then mark the result useful, rework, or
+  abandoned.
 - **Improve:** Compare predicted pressure with observed usage and outcomes,
-  then recommend one better behavior for the next run.
+  log a decision that never became a commit, then recommend one better
+  behavior or create a handoff capsule for the next fresh session.
+
+**Prompt Gate** is what makes **Control** interactive instead of just a log:
+install a native hook with `--gate` and a risky prompt opens a local decision
+screen with **Add safer brief**, **Add edited brief**, **Run original**, and
+**Cancel run** before anything executes. Prompt text stays transient in that
+local browser page — AIWatcher persists hashes, decisions, and predicted
+impact only. See [Automatic Prompt Preflight](#automatic-prompt-preflight)
+below for install commands and per-tool setup notes.
+
+![AIWatcher Prompt Gate: a local decision screen showing risk score, guardrail chips, findings and suggestions, the original prompt, a proposed execution brief, and the Add safer brief / Add edited brief / Run original / Cancel run actions.](docs/dashboard-prompt-gate.svg)
 
 Prompt content is processed locally. AIWatcher stores hashes, decisions,
 predicted impact, and outcomes, not the original or suggested prompt text.
@@ -251,6 +353,15 @@ conversation surface tested by the project does not invoke the configured
 `UserPromptSubmit` hook; use the Prompt Companion, MCP, wrapper, or a Codex
 CLI/TUI surface that records a hook event. AIWatcher does not claim silent
 interception where a host application provides no lifecycle API.
+
+For that gap, the wrapper is a shell-level fallback rather than a native hook:
+it installs a shell function (in your shell rc file) that intercepts `codex`
+invocations at the command line and preflights them through AIWatcher before
+the real binary runs:
+
+```sh
+python -m aiwatcher_cli install-codex-wrapper --write
+```
 
 If a Codex prompt appears to bypass AIWatcher, run:
 
