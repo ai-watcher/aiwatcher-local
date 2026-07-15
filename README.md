@@ -7,7 +7,7 @@ other local AI coding tools. It preflights risky work, watches local sessions,
 records outcomes, and turns the history those tools already keep into useful
 cost and security guidance with no account or cloud upload.
 
-![The AIWatcher Local dashboard: API-equivalent value, projected month, sessions, and tokens up top; top projects, models, recent sessions, and privacy guarantees below.](docs/dashboard.svg)
+![The AIWatcher Local dashboard's Today tab: latest AI work and one thing worth changing up top; useful outcomes, preflight decisions, sessions observed, and API-equivalent value tiles; the latest intervention receipt with predicted savings; projects driving usage and recent sessions below.](docs/dashboard.svg)
 
 ## Privacy
 
@@ -99,6 +99,10 @@ python -m aiwatcher_cli ui
 
 Open the printed URL. The dashboard includes:
 
+The mockups below use synthetic data — like the PR that introduced them, this
+README does not embed real dashboard screenshots, since those can expose
+private local paths, project names, and AI usage history.
+
 - **Today**: latest work, useful outcomes, preflight decisions, and one next
   recommendation.
 - **Prompt**: local Prompt Companion for surfaces AIWatcher cannot hook yet.
@@ -107,24 +111,20 @@ Open the printed URL. The dashboard includes:
   under **Expensive asks** (cost is cumulative — a short prompt late in a long
   session can still be expensive, since it re-sends the whole conversation),
   mark outcomes, and create a handoff capsule to continue in a fresh session.
+
+  ![Sessions tab: a session list next to a review drawer showing Expensive asks with the costliest step highlighted, outcome buttons, outcome evidence, and Create handoff capsule.](docs/dashboard-sessions.svg)
 - **Receipts**: connect each preflight decision to its resulting session —
   predicted savings before execution, observed usage after, an inferred
   estimate of what was actually avoided (labeled as inferred, not a
   guaranteed counterfactual), risk change, and developer outcome.
+
+  ![Receipts tab: a table of intervention receipts with time, tool/project, decision, risk change, result, and a review action per row.](docs/dashboard-receipts.svg)
 - **Insights**: local suggestions for waste and risk — concentrated spend,
   large-context sessions, possible iterative loops, subscription/limited
   usage, and unmarked outcome evidence — plus a privacy-safe daily journal
   and weekly report.
 
-The mockups below use synthetic data — like the PR that introduced them, this
-README does not embed real dashboard screenshots, since those can expose
-private local paths, project names, and AI usage history.
-
-![Sessions tab: a session list next to a review drawer showing Expensive asks with the costliest step highlighted, outcome buttons, outcome evidence, and Create handoff capsule.](docs/dashboard-sessions.svg)
-
-![Receipts tab: a table of intervention receipts with time, tool/project, decision, risk change, result, and a review action per row.](docs/dashboard-receipts.svg)
-
-![Insights tab: a stacked list of flagged suggestions — concentrated spend, a large-context session, a possible iterative loop, subscription/limited usage, and unmarked outcome evidence — next to a daily journal and weekly report, with privacy contract and enterprise handoff panels below.](docs/dashboard-insights.svg)
+  ![Insights tab: a stacked list of flagged suggestions — concentrated spend, a large-context session, a possible iterative loop, subscription/limited usage, and unmarked outcome evidence — next to a daily journal and weekly report, with privacy contract and enterprise handoff panels below.](docs/dashboard-insights.svg)
 
 ### 4. Mark whether work was useful
 
@@ -289,6 +289,16 @@ This month: $77.87
 - **Improve:** Compare predicted pressure with observed usage and outcomes,
   log a decision that never became a commit, then recommend one better
   behavior or create a handoff capsule for the next fresh session.
+
+**Prompt Gate** is what makes **Control** interactive instead of just a log:
+install a native hook with `--gate` and a risky prompt opens a local decision
+screen with **Add safer brief**, **Add edited brief**, **Run original**, and
+**Cancel run** before anything executes. Prompt text stays transient in that
+local browser page — AIWatcher persists hashes, decisions, and predicted
+impact only. See [Automatic Prompt Preflight](#automatic-prompt-preflight)
+below for install commands and per-tool setup notes.
+
+![AIWatcher Prompt Gate: a local decision screen showing risk score, guardrail chips, findings and suggestions, the original prompt, a proposed execution brief, and the Add safer brief / Add edited brief / Run original / Cancel run actions.](docs/dashboard-prompt-gate.svg)
 
 Prompt content is processed locally. AIWatcher stores hashes, decisions,
 predicted impact, and outcomes, not the original or suggested prompt text.

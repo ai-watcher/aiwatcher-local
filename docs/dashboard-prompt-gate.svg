@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" font-family="'Inter','Segoe UI',system-ui,-apple-system,sans-serif" role="img" aria-labelledby="t-gate d-gate">
+  <title id="t-gate">AIWatcher Prompt Gate</title>
+  <desc id="d-gate">The local decision screen a native hook opens for a risky prompt: risk score, guardrail chips, findings and suggestions, the original prompt, a proposed execution brief, and four actions — Add safer brief, Add edited brief, Run original, Cancel run.</desc>
+  <defs>
+    <radialGradient id="bg-gate" cx="15%" cy="0%" r="60%">
+      <stop offset="0" stop-color="#163027"/>
+      <stop offset="0.45" stop-color="#090d12"/>
+      <stop offset="1" stop-color="#07090d"/>
+    </radialGradient>
+    <linearGradient id="accent-gate" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#36d6a5"/>
+      <stop offset="1" stop-color="#6aa7ff"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="760" fill="url(#bg-gate)"/>
+
+  <text x="40" y="70" font-size="38" font-weight="800" fill="#eef4fb">AIWatcher Prompt Gate</text>
+  <text x="40" y="98" font-size="13" fill="#9ba9bb">Review the work before codex starts. Use the brief to narrow scope, keep</text>
+  <text x="40" y="116" font-size="13" fill="#9ba9bb">checkpoints, and reduce avoidable cost or safety risk.</text>
+
+  <rect x="820" y="34" width="176" height="32" rx="16" fill="#0c121a" stroke="#5a2a34"/>
+  <text x="908" y="55" font-size="12" font-weight="600" fill="#ff7f93" text-anchor="middle">Risk: high · score 8</text>
+  <rect x="1006" y="34" width="76" height="32" rx="16" fill="#0c121a" stroke="#28364a"/>
+  <text x="1044" y="55" font-size="12" fill="#9ba9bb" text-anchor="middle">codex</text>
+
+  <rect x="820" y="76" width="238" height="32" rx="16" fill="url(#accent-gate)"/>
+  <text x="939" y="97" font-size="12" font-weight="800" fill="#061019" text-anchor="middle">Predicted: ~35% tokens avoided</text>
+  <text x="820" y="126" font-size="11" fill="#9ba9bb">23 comparable local sessions, last 21 days</text>
+
+  <rect x="40" y="146" width="196" height="34" rx="17" fill="#172131" stroke="#28364a"/>
+  <text x="58" y="168" font-size="14">🔎</text>
+  <text x="82" y="168" font-size="13" font-weight="600" fill="#eef4fb">Scope narrowed</text>
+  <rect x="246" y="146" width="330" height="34" rx="17" fill="#172131" stroke="#28364a"/>
+  <text x="264" y="168" font-size="14">🛑</text>
+  <text x="288" y="168" font-size="13" font-weight="600" fill="#eef4fb">Confirm before destructive changes</text>
+  <rect x="586" y="146" width="234" height="34" rx="17" fill="#172131" stroke="#28364a"/>
+  <text x="604" y="168" font-size="14">🎯</text>
+  <text x="628" y="168" font-size="13" font-weight="600" fill="#eef4fb">Vague ask clarified</text>
+
+  <!-- Left card -->
+  <rect x="40" y="200" width="560" height="436" rx="8" fill="#111821" stroke="#28364a"/>
+  <text x="58" y="234" font-size="19" font-weight="700" fill="#eef4fb">What AIWatcher noticed</text>
+
+  <text x="58" y="260" font-size="12" font-weight="600" letter-spacing="1" fill="#c8d4e4">FINDINGS</text>
+  <circle cx="62" cy="278" r="2" fill="#75a7ff"/>
+  <text x="72" y="282" font-size="13" fill="#dbe5f1">Scope looks broad and likely to create large context or</text>
+  <text x="72" y="298" font-size="13" fill="#dbe5f1">many tool calls.</text>
+  <circle cx="62" cy="316" r="2" fill="#75a7ff"/>
+  <text x="72" y="320" font-size="13" fill="#dbe5f1">Prompt requests deleting credentials without an explicit</text>
+  <text x="72" y="336" font-size="13" fill="#dbe5f1">backup step.</text>
+
+  <text x="58" y="366" font-size="12" font-weight="600" letter-spacing="1" fill="#c8d4e4">SUGGESTIONS</text>
+  <circle cx="62" cy="384" r="2" fill="#75a7ff"/>
+  <text x="72" y="388" font-size="13" fill="#dbe5f1">Start with a plan-only pass over the smallest relevant</text>
+  <text x="72" y="404" font-size="13" fill="#dbe5f1">files before editing.</text>
+  <circle cx="62" cy="422" r="2" fill="#75a7ff"/>
+  <text x="72" y="426" font-size="13" fill="#dbe5f1">Confirm before deleting or rotating credentials; keep a</text>
+  <text x="72" y="442" font-size="13" fill="#dbe5f1">backup path.</text>
+
+  <rect x="58" y="458" width="524" height="56" rx="8" fill="#123d33" stroke="#1d5b4c"/>
+  <rect x="58" y="458" width="4" height="56" fill="#54d7b7"/>
+  <text x="72" y="478" font-size="12" font-weight="700" fill="#d9f8ee">Predicted impact</text>
+  <text x="72" y="496" font-size="12" fill="#bdeee0">A narrower prompt with checkpoints should reduce context</text>
+  <text x="72" y="510" font-size="12" fill="#bdeee0">and tool-call pressure by roughly 30-40%.</text>
+
+  <text x="58" y="536" font-size="11" fill="#9ba9bb" font-style="italic">Prompt content is only held in this local browser page while you decide.</text>
+  <text x="58" y="550" font-size="11" fill="#9ba9bb" font-style="italic">AIWatcher stores hashes and decisions, not prompt text.</text>
+
+  <text x="58" y="576" font-size="12" font-weight="600" letter-spacing="1" fill="#c8d4e4">ORIGINAL PROMPT</text>
+  <rect x="58" y="586" width="524" height="42" rx="8" fill="#080d14" stroke="#28364a"/>
+  <text x="70" y="604" font-size="12" fill="#e8f0fa" font-family="ui-monospace,Consolas,monospace">Refactor the auth module, delete old credentials, and</text>
+  <text x="70" y="620" font-size="12" fill="#e8f0fa" font-family="ui-monospace,Consolas,monospace">rotate keys across the repo.</text>
+
+  <!-- Right card -->
+  <rect x="620" y="200" width="540" height="436" rx="8" fill="#111821" stroke="#28364a"/>
+  <text x="638" y="234" font-size="19" font-weight="700" fill="#eef4fb">Execution brief</text>
+  <text x="638" y="256" font-size="13" fill="#9ba9bb">Keep the requested outcome, but add guardrails before</text>
+  <text x="638" y="272" font-size="13" fill="#9ba9bb">tools run.</text>
+
+  <rect x="638" y="292" width="504" height="44" rx="8" fill="#080d14" stroke="#28364a"/>
+  <text x="650" y="310" font-size="12" fill="#dbe5f1" font-family="ui-monospace,Consolas,monospace">Task</text>
+  <text x="650" y="326" font-size="12" fill="#dbe5f1" font-family="ui-monospace,Consolas,monospace">Refactor the auth module's credential rotation path.</text>
+
+  <rect x="638" y="348" width="4" height="30" fill="#54d7b7"/>
+  <text x="650" y="360" font-size="12" fill="#d9f8ee" font-family="ui-monospace,Consolas,monospace">+ Plan-only pass over auth/credentials.py first; list</text>
+  <text x="650" y="374" font-size="12" fill="#d9f8ee" font-family="ui-monospace,Consolas,monospace">  files touched before editing.</text>
+
+  <rect x="638" y="390" width="4" height="30" fill="#54d7b7"/>
+  <text x="650" y="402" font-size="12" fill="#d9f8ee" font-family="ui-monospace,Consolas,monospace">+ Confirm before deleting or rotating any credential;</text>
+  <text x="650" y="416" font-size="12" fill="#d9f8ee" font-family="ui-monospace,Consolas,monospace">  keep a backup path.</text>
+
+  <rect x="638" y="432" width="4" height="30" fill="#54d7b7"/>
+  <text x="650" y="444" font-size="12" fill="#d9f8ee" font-family="ui-monospace,Consolas,monospace">+ Stop and report once the plan is clear, before running</text>
+  <text x="650" y="458" font-size="12" fill="#d9f8ee" font-family="ui-monospace,Consolas,monospace">  destructive commands.</text>
+
+  <text x="638" y="494" font-size="12" fill="#9ba9bb">▸ View full diff</text>
+
+  <!-- Sticky action bar -->
+  <rect x="40" y="660" width="1120" height="64" rx="8" fill="#0d1219" stroke="#28364a"/>
+  <rect x="52" y="672" width="330" height="40" rx="8" fill="url(#accent-gate)"/>
+  <text x="217" y="697" font-size="14" font-weight="700" fill="#061019" text-anchor="middle">Add safer brief</text>
+  <rect x="394" y="672" width="230" height="40" rx="8" fill="#0f1722" stroke="#28364a"/>
+  <text x="509" y="697" font-size="14" font-weight="700" fill="#eef4fb" text-anchor="middle">Add edited brief</text>
+  <rect x="636" y="672" width="200" height="40" rx="8" fill="#0f1722" stroke="#28364a"/>
+  <text x="736" y="697" font-size="14" font-weight="700" fill="#eef4fb" text-anchor="middle">Run original</text>
+  <rect x="848" y="672" width="180" height="40" rx="8" fill="#0f1722" stroke="#ff7f93"/>
+  <text x="938" y="697" font-size="14" font-weight="700" fill="#ffd4dc" text-anchor="middle">Cancel run</text>
+</svg>
