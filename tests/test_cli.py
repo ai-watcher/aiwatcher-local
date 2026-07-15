@@ -4,7 +4,10 @@ import io
 import json
 import os
 import queue
+import re
+import shutil
 import socket
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -426,6 +429,29 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertLess(page.index('class="pressure-caption"'), page.index("What AIWatcher noticed"))
         self.assertGreater(page.index('class="pressure-caption"'), page.index('class="pill savings"'))
         self.assertIn("Estimated avoidable pressure:", page)
+
+    def test_prompt_gate_html_script_is_valid_javascript(self) -> None:
+        # A raw newline character accidentally embedded inside a JS single-quoted
+        # string (from writing '\n\n' instead of '\\n\\n' in the Python f-string)
+        # silently breaks the *entire* inline <script> block -- sendDecision()
+        # never gets defined, so every gate button does nothing when clicked,
+        # with no visible error anywhere. This actually happened (417f070).
+        # Content-only assertions (assertIn on HTML fragments) can't catch this
+        # class of bug; only actually parsing the script can.
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not available to check JS syntax")
+        result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
+        page = cli._prompt_gate_html(tool="claude", cwd="/repo", prompt="original prompt text", result=result)
+        script = re.search(r"<script>(.*?)</script>", page, re.S).group(1)
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as handle:
+            handle.write(script)
+            script_path = handle.name
+        try:
+            completed = subprocess.run([node, "-c", script_path], capture_output=True, text=True)
+        finally:
+            os.unlink(script_path)
+        self.assertEqual(completed.returncode, 0, f"Prompt Gate's inline JS has a syntax error:\n{completed.stderr}")
 
     def test_split_brief_for_display_is_lossless_on_reassembly(self) -> None:
         full = cli.build_execution_brief(

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import re
+import shutil
+import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -12,6 +15,26 @@ from aiwatcher_cli.scanner import LocalEvent, LocalSession
 
 
 class DashboardWindowTests(unittest.TestCase):
+    def test_dashboard_script_is_valid_javascript(self) -> None:
+        # A single unquoted/malformed token anywhere in this one large inline
+        # <script> block breaks the entire dashboard silently -- every tab
+        # shows blank stats, no console error is obvious, and nothing in a
+        # content-only assertIn() check would catch it (this exact class of
+        # bug shipped once already: the unquoted `last-prompt` object key).
+        # Only actually parsing the script catches this.
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not available to check JS syntax")
+        script = re.search(r"<script>(.*?)</script>", ui.HTML, re.S).group(1)
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as handle:
+            handle.write(script)
+            script_path = handle.name
+        try:
+            completed = subprocess.run([node, "-c", script_path], capture_output=True, text=True)
+        finally:
+            os.unlink(script_path)
+        self.assertEqual(completed.returncode, 0, f"Dashboard's inline JS has a syntax error:\n{completed.stderr}")
+
     def test_dashboard_uses_focused_drawer_and_inline_feedback(self) -> None:
         self.assertIn('id="detailDrawer"', ui.HTML)
         self.assertIn('data-view="prompt"', ui.HTML)

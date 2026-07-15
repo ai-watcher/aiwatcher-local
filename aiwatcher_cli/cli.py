@@ -1090,7 +1090,7 @@ async function sendDecision(decision) {{
     // The static suffix (working directory, completion-report instructions) is
     // collapsed out of view because it never changes, but it still has to be
     // part of what's actually sent -- reattach it here rather than dropping it.
-    const prompt = suffixEl ? core + '\n\n' + suffixEl.textContent : core;
+    const prompt = suffixEl ? core + '\\n\\n' + suffixEl.textContent : core;
     const body = {{ decision, prompt }};
     const response = await fetch('/decision', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify(body) }});
     const saved = await response.json();
@@ -3041,26 +3041,46 @@ def _mcp_tool_call(name: str, arguments: dict[str, object] | None) -> str:
     return f"Unknown AIWatcher tool: {name}"
 
 
+# The MCP stdio transport delimits JSON-RPC messages by newline. Some clients
+# (and older AIWatcher builds) instead use LSP-style Content-Length framing.
+# Track whichever framing the connected client uses so responses match it.
+_MCP_FRAMING = "line"
+
+
 def _read_mcp_message() -> dict[str, object] | None:
-    headers: dict[str, str] = {}
-    while True:
+    global _MCP_FRAMING
+    line = sys.stdin.buffer.readline()
+    while line in (b"\r\n", b"\n"):  # skip blank separators between messages
         line = sys.stdin.buffer.readline()
-        if line == b"":
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, _, value = line.decode("utf-8").partition(":")
-        headers[key.lower()] = value.strip()
-    length = int(headers.get("content-length", "0"))
-    if length <= 0:
+    if line == b"":
         return None
-    return json.loads(sys.stdin.buffer.read(length).decode("utf-8"))
+    if line.strip().lower().startswith(b"content-length:"):
+        _MCP_FRAMING = "lsp"
+        headers: dict[str, str] = {}
+        while line not in (b"\r\n", b"\n"):
+            if line == b"":
+                return None
+            key, _, value = line.decode("utf-8").partition(":")
+            headers[key.strip().lower()] = value.strip()
+            line = sys.stdin.buffer.readline()
+        length = int(headers.get("content-length", "0"))
+        if length <= 0:
+            return None
+        return json.loads(sys.stdin.buffer.read(length).decode("utf-8"))
+    _MCP_FRAMING = "line"
+    try:
+        return json.loads(line.decode("utf-8"))
+    except json.JSONDecodeError:
+        return None
 
 
 def _write_mcp_message(payload: dict[str, object]) -> None:
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
-    sys.stdout.buffer.write(body)
+    if _MCP_FRAMING == "lsp":
+        sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
+        sys.stdout.buffer.write(body)
+    else:
+        sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 
