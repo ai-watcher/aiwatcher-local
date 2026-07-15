@@ -32,15 +32,11 @@ from .local_state import (
     link_intervention_session,
     recent_hook_events,
     recent_interventions,
-    record_decision,
-    record_evidence_snapshot,
     record_intervention,
     record_hook_event,
     record_outcome,
     state_path,
 )
-from .handoff import TARGET_LABELS, build_handoff_capsule, render_handoff_capsule
-from .outcome_evidence import build_outcome_evidence
 from .pricing import is_subscription_model
 from .scanner import LocalEvent, LocalSession, discover_tools, scan_all, scan_all_events
 
@@ -266,19 +262,6 @@ def print_session_detail(session: LocalSession, *, heading: str = "Latest local 
     print(f"Measured duration: {compact_duration(reliable_seconds)}")
     outcome = get_outcome(session.session_id)
     print(f"Outcome: {outcome['outcome'] if outcome else 'not marked'}")
-    evidence = build_outcome_evidence(session)
-    try:
-        record_evidence_snapshot(session.session_id, evidence.to_json())
-    except OSError:
-        pass
-    if evidence.inferred_outcome:
-        print(f"Inferred outcome: {evidence.inferred_outcome} ({evidence.confidence})")
-    if evidence.commits:
-        print(f"Nearby commits: {len(evidence.commits)}")
-    if evidence.changed_files:
-        print(f"Uncommitted files: {len(evidence.changed_files)}")
-    if evidence.tests:
-        print(f"Recent test artifacts: {len(evidence.tests)}")
     if session.source_path:
         print(f"Source: {short_path(session.source_path, 80)}")
     if session.notes:
@@ -286,8 +269,6 @@ def print_session_detail(session: LocalSession, *, heading: str = "Latest local 
         for note in session.notes[:4]:
             print(f"- {note}")
     insights = session_insights(session)
-    if evidence.reasons:
-        insights = [*evidence.reasons[:2], *insights]
     if insights:
         print("\nWhat to check next")
         for insight in insights[:5]:
@@ -304,11 +285,6 @@ def render_session_detail(session: LocalSession, *, heading: str = "Latest local
     when = format_short_datetime(stamp.astimezone()) if stamp != MIN_DT else "unknown"
     reliable_seconds = reliable_session_seconds(session)
     outcome = get_outcome(session.session_id)
-    evidence = build_outcome_evidence(session)
-    try:
-        record_evidence_snapshot(session.session_id, evidence.to_json())
-    except OSError:
-        pass
     lines = [
         heading,
         "",
@@ -323,20 +299,12 @@ def render_session_detail(session: LocalSession, *, heading: str = "Latest local
         f"Measured duration: {compact_duration(reliable_seconds)}",
         f"Outcome: {outcome['outcome'] if outcome else 'not marked'}",
     ]
-    if evidence.inferred_outcome:
-        lines.append(f"Inferred outcome: {evidence.inferred_outcome} ({evidence.confidence})")
-    if evidence.commits:
-        lines.append(f"Nearby commits: {len(evidence.commits)}")
-    if evidence.changed_files:
-        lines.append(f"Uncommitted files: {len(evidence.changed_files)}")
-    if evidence.tests:
-        lines.append(f"Recent test artifacts: {len(evidence.tests)}")
     if session.source_path:
         lines.append(f"Source: {short_path(session.source_path, 80)}")
     if session.notes:
         lines.extend(["", "Notes"])
         lines.extend(f"- {note}" for note in session.notes[:4])
-    insights = [*evidence.reasons[:2], *session_insights(session)]
+    insights = session_insights(session)
     lines.extend(["", "What to check next"])
     if insights:
         lines.extend(f"- {insight}" for insight in insights[:5])
@@ -619,20 +587,6 @@ def build_execution_brief(
     return "\n".join(lines)
 
 
-def _is_generated_brief(text: str) -> bool:
-    """Detect text that is already an AIWatcher execution brief.
-
-    Prevents re-scoring and re-wrapping a brief the user pasted back in — without
-    this, `build_execution_brief` nests a second Task/Execution approach/Completion
-    report shell around the first one every time a brief is resubmitted.
-    """
-    return (
-        text.startswith("Task\n")
-        and "\nExecution approach\n" in text
-        and "\nCompletion report\n" in text
-    )
-
-
 def analyze_prompt(
     prompt: str,
     *,
@@ -641,16 +595,6 @@ def analyze_prompt(
     include_estimate: bool = True,
 ) -> dict[str, object]:
     text = prompt.strip()
-    if _is_generated_brief(text):
-        return {
-            "risk": "low",
-            "score": 0,
-            "tool": tool,
-            "findings": ["This is already a scoped AIWatcher execution brief — not re-analyzing."],
-            "suggestions": [],
-            "suggested_prompt": "",
-            "estimated_impact": {},
-        }
     lower = text.lower()
     findings: list[str] = []
     suggestions: list[str] = []
@@ -1538,17 +1482,6 @@ def command_sessions(args: argparse.Namespace) -> int:
         return 0
 
     sessions = sorted(sessions_since(args.days), key=session_sort_key, reverse=True)
-    if args.search:
-        needle = args.search.strip().lower()
-        sessions = [
-            row for row in sessions
-            if needle in " ".join([
-                row.session_id,
-                row.tool,
-                row.model or "",
-                row.project_path or "",
-            ]).lower()
-        ]
     print(f"Recent AI sessions - last {args.days} days\n")
     for row in sessions[: args.limit]:
         stamp = row.updated_at or row.started_at
@@ -1557,24 +1490,6 @@ def command_sessions(args: argparse.Namespace) -> int:
     if args.days > 30:
         print_cloud_hint("Cloud adds retention, team filters, and scheduled exports for session history.")
     return 0
-
-
-def _copy_to_clipboard(text: str) -> tuple[bool, str]:
-    if sys.platform == "darwin":
-        commands = [["pbcopy"]]
-    elif os.name == "nt":
-        commands = [["clip"]]
-    else:
-        commands = [["wl-copy"], ["xclip", "-selection", "clipboard"]]
-    for command in commands:
-        if not shutil.which(command[0]):
-            continue
-        try:
-            subprocess.run(command, input=text, text=True, check=True, timeout=3)
-            return True, command[0]
-        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            continue
-    return False, "no clipboard command found"
 
 
 def command_last(args: argparse.Namespace) -> int:
@@ -1605,61 +1520,6 @@ def command_timeline(args: argparse.Namespace) -> int:
         session_id = session.session_id
     print(render_session_timeline(session_id, days=args.days, limit=args.limit))
     return 0
-
-
-def command_handoff(args: argparse.Namespace) -> int:
-    rows = sessions_since(args.days)
-    if args.session_id:
-        session = next((row for row in rows if row.session_id == args.session_id), None)
-        if not session:
-            print(f"No local session found for {args.session_id!r} in the last {args.days} days.", file=sys.stderr)
-            return 2
-    else:
-        session = latest_session(rows)
-        if not session:
-            print(f"No local AI sessions detected in the last {args.days} days.")
-            return 0
-
-    outcome = get_outcome(session.session_id)
-    capsule = build_handoff_capsule(
-        session,
-        events_for_session(session.session_id, days=args.days),
-        outcome=outcome.get("outcome") if outcome else None,
-        include_prompt_excerpt=args.include_prompt_excerpt,
-        target=args.target,
-    )
-    if args.format == "json":
-        rendered = json.dumps(capsule, indent=2)
-    else:
-        rendered = render_handoff_capsule(capsule)
-    if args.copy:
-        ok, detail = _copy_to_clipboard(str(capsule.get("next_brief") or rendered))
-        if ok:
-            print(f"Copied {capsule.get('target_label') or 'handoff'} brief to clipboard.\n")
-        else:
-            print(f"Could not copy to clipboard ({detail}); printing instead.\n", file=sys.stderr)
-    print(rendered)
-    return 0
-
-
-def command_resume(args: argparse.Namespace) -> int:
-    if not args.session_id and args.search:
-        rows = sorted(sessions_since(args.days), key=session_sort_key, reverse=True)
-        needle = args.search.strip().lower()
-        matches = [
-            row for row in rows
-            if needle in " ".join([
-                row.session_id,
-                row.tool,
-                row.model or "",
-                row.project_path or "",
-            ]).lower()
-        ]
-        if not matches:
-            print(f"No local session matched {args.search!r} in the last {args.days} days.", file=sys.stderr)
-            return 2
-        args.session_id = matches[0].session_id
-    return command_handoff(args)
 
 
 def command_journal(args: argparse.Namespace) -> int:
@@ -1709,7 +1569,6 @@ def command_watch(args: argparse.Namespace) -> int:
                     tokens_threshold=args.tokens_threshold,
                 )[:3]:
                     print(f"  - {insight}")
-                print(f"  Next: aiwatcher resume --session-id {row.session_id} --target codex --copy")
 
             if args.once:
                 return 0
@@ -1922,47 +1781,19 @@ def command_agent_prompt(args: argparse.Namespace) -> int:
 
 def command_outcome(args: argparse.Namespace) -> int:
     session_id = args.session_id
-    session = None
     if not session_id:
         session = latest_session(sessions_since(args.days))
         if not session:
             print(f"No local AI sessions detected in the last {args.days} days.", file=sys.stderr)
             return 2
         session_id = session.session_id
-    else:
-        session = next((row for row in sessions_since(args.days) if row.session_id == session_id), None)
     try:
         record = record_outcome(session_id, args.outcome, args.note)
-        if session:
-            record_evidence_snapshot(session_id, build_outcome_evidence(session).to_json())
     except (ValueError, OSError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
     print(f"Marked session {session_id} as {record['outcome']}.")
     print("Stored locally; no prompt or source content was recorded.")
-    return 0
-
-
-def command_log_decision(args: argparse.Namespace) -> int:
-    session_id = args.session_id
-    if not session_id:
-        session = latest_session(sessions_since(args.days))
-        if not session:
-            print(f"No local AI sessions detected in the last {args.days} days.", file=sys.stderr)
-            return 2
-        session_id = session.session_id
-    try:
-        record = record_decision(
-            session_id,
-            args.summary,
-            reasoning=args.reasoning,
-            alternatives_rejected=args.alternatives_rejected,
-        )
-    except (ValueError, OSError) as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
-    print(f"Logged decision for session {session_id}: {record['summary']}")
-    print("Stored locally; self-reported, not verified against what actually happened.")
     return 0
 
 
@@ -2120,10 +1951,7 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
         return 0
 
     rendered = render_preflight(result)
-    # Only high risk warrants the browser round-trip. Medium risk falls through to
-    # the silent additionalContext injection below — no gate, no copy/paste, and
-    # therefore no chance of a brief being resubmitted and double-wrapped.
-    if _prompt_gate_requested(args) and result["risk"] == "high":
+    if _prompt_gate_requested(args):
         gate = None
         try:
             gate = run_prompt_gate(tool=tool, cwd=cwd, prompt=prompt, result=result)
@@ -2241,10 +2069,7 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
         print(json.dumps(_cursor_hook_response(allow=True)))
         return 0
 
-    # Only high risk warrants the interactive browser gate. Cursor's hook contract
-    # can't silently inject context (it can only block-and-ask-to-resubmit), so
-    # medium risk skips straight to the block message below instead of the round-trip.
-    if _prompt_gate_requested(args) and result["risk"] == "high":
+    if _prompt_gate_requested(args):
         try:
             gate = run_prompt_gate(tool="cursor", cwd=cwd, prompt=prompt, result=result)
         except OSError as exc:
@@ -2556,109 +2381,6 @@ def command_uninstall_claude_hook(args: argparse.Namespace) -> int:
         json.dump(updated, handle, indent=2)
         handle.write("\n")
     print(f"Removed AIWatcher Claude hook from {settings_path}")
-    return 0
-
-
-DECISION_LOG_MARKER_START = "<!-- aiwatcher:decision-log:start -->"
-DECISION_LOG_MARKER_END = "<!-- aiwatcher:decision-log:end -->"
-
-
-def _claude_user_memory_path() -> str:
-    # Deliberately global/personal only (~/.claude/CLAUDE.md), never a
-    # project-local CLAUDE.md -- that file is typically committed and shared
-    # with every collaborator on the repo, so writing to it would change how
-    # the whole team's AI behaves, not just the person running this command.
-    return os.path.expanduser("~/.claude/CLAUDE.md")
-
-
-def _decision_log_convention_block() -> str:
-    return "\n".join([
-        DECISION_LOG_MARKER_START,
-        "## AIWatcher decision log",
-        "",
-        "When you seriously consider and reject a real alternative during a coding",
-        "session -- an approach, a library, a design -- and that rejection doesn't",
-        "end up reflected in a commit message, log it:",
-        "",
-        "```",
-        'aiwatcher log-decision "<one-line summary>" --reasoning "<why>" --rejected "<alternative>"',
-        "```",
-        "",
-        "Use `--rejected` more than once if there were multiple alternatives. Only",
-        "log real decision points, not routine implementation choices -- if it",
-        "wouldn't be worth explaining to a teammate picking up the work fresh, skip",
-        "it.",
-        DECISION_LOG_MARKER_END,
-    ])
-
-
-def _merge_decision_log_convention(existing: str) -> tuple[str, bool]:
-    if DECISION_LOG_MARKER_START in existing:
-        return existing, False
-    block = _decision_log_convention_block()
-    if not existing.strip():
-        return block + "\n", True
-    return existing.rstrip("\n") + "\n\n" + block + "\n", True
-
-
-def _remove_decision_log_convention(existing: str) -> tuple[str, bool]:
-    start = existing.find(DECISION_LOG_MARKER_START)
-    if start == -1:
-        return existing, False
-    end = existing.find(DECISION_LOG_MARKER_END)
-    if end == -1:
-        return existing, False
-    end += len(DECISION_LOG_MARKER_END)
-    before = existing[:start].rstrip("\n")
-    after = existing[end:].lstrip("\n")
-    if before and after:
-        updated = before + "\n\n" + after
-    else:
-        updated = (before + after).strip("\n")
-    if updated:
-        updated += "\n"
-    return updated, True
-
-
-def command_install_claude_decision_log(args: argparse.Namespace) -> int:
-    path = _claude_user_memory_path()
-    if not args.write:
-        print("Add this to your personal Claude Code memory (never a project-shared file):")
-        print(_decision_log_convention_block())
-        print(f"\nUser-global path: {path}")
-        print("Re-run with --write to install it there directly.")
-        return 0
-
-    existing = ""
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as handle:
-            existing = handle.read()
-    updated, changed = _merge_decision_log_convention(existing)
-    if not changed:
-        print(f"AIWatcher decision-log convention is already installed at {path}.")
-        return 0
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(updated)
-    print(f"Installed AIWatcher decision-log convention at {path}")
-    print("This is personal to this machine -- it is not committed, and does not affect other collaborators.")
-    return 0
-
-
-def command_uninstall_claude_decision_log(args: argparse.Namespace) -> int:
-    path = _claude_user_memory_path()
-    if not os.path.exists(path):
-        print(f"No personal Claude memory file found at {path}.")
-        return 0
-    with open(path, "r", encoding="utf-8") as handle:
-        existing = handle.read()
-    updated, removed = _remove_decision_log_convention(existing)
-    if not removed:
-        print(f"No AIWatcher decision-log convention found in {path}.")
-        return 0
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(updated)
-    print(f"Removed AIWatcher decision-log convention from {path}")
     return 0
 
 
@@ -3193,7 +2915,6 @@ def build_parser() -> argparse.ArgumentParser:
     sessions = sub.add_parser("sessions", help="Show recent local AI sessions")
     sessions.add_argument("--days", type=int, default=1)
     sessions.add_argument("--limit", type=int, default=20)
-    sessions.add_argument("--search", help="Filter by project path, tool, model, or session id")
     sessions.add_argument("--team", action="store_true", help="Explain team session visibility in AIWatcher Cloud")
     sessions.set_defaults(func=command_sessions)
 
@@ -3208,25 +2929,6 @@ def build_parser() -> argparse.ArgumentParser:
     timeline.add_argument("--limit", type=int, default=30)
     timeline.set_defaults(func=command_timeline)
 
-    handoff = sub.add_parser("handoff", help="Create a local handoff capsule for continuing work in a fresh AI session")
-    handoff.add_argument("--session-id")
-    handoff.add_argument("--days", type=int, default=30)
-    handoff.add_argument("--target", choices=sorted(TARGET_LABELS), default="generic", help="Format the brief for a target AI tool")
-    handoff.add_argument("--copy", action="store_true", help="Copy the next-session brief to the clipboard when supported")
-    handoff.add_argument("--format", choices=["text", "json"], default="text")
-    handoff.add_argument("--include-prompt-excerpt", action="store_true", help="Include a local prompt excerpt in the capsule output")
-    handoff.set_defaults(func=command_handoff)
-
-    resume = sub.add_parser("resume", help="Find a local session and create a target-ready continuation brief")
-    resume.add_argument("--session-id")
-    resume.add_argument("--search", help="Find the most recent matching project, tool, model, or session id")
-    resume.add_argument("--days", type=int, default=30)
-    resume.add_argument("--target", choices=sorted(TARGET_LABELS), default="generic")
-    resume.add_argument("--copy", action="store_true")
-    resume.add_argument("--format", choices=["text", "json"], default="text")
-    resume.add_argument("--include-prompt-excerpt", action="store_true")
-    resume.set_defaults(func=command_resume)
-
     journal = sub.add_parser("journal", help="Show a personal local AI work journal")
     journal.add_argument("--days", type=int, default=1)
     journal.set_defaults(func=command_journal)
@@ -3237,23 +2939,6 @@ def build_parser() -> argparse.ArgumentParser:
     outcome.add_argument("--note")
     outcome.add_argument("--days", type=int, default=30)
     outcome.set_defaults(func=command_outcome)
-
-    log_decision = sub.add_parser(
-        "log-decision",
-        help="Record a local note for a design decision made or rejected this session",
-    )
-    log_decision.add_argument("summary", help="One-line summary of the decision")
-    log_decision.add_argument("--reasoning", help="Why this decision was made")
-    log_decision.add_argument(
-        "--rejected",
-        action="append",
-        default=[],
-        dest="alternatives_rejected",
-        help="An alternative that was considered and rejected; repeat for multiple",
-    )
-    log_decision.add_argument("--session-id")
-    log_decision.add_argument("--days", type=int, default=30)
-    log_decision.set_defaults(func=command_log_decision)
 
     watch = sub.add_parser("watch", help="Watch local AI sessions for high-cost or looping behavior")
     watch.add_argument("--days", type=int, default=1)
@@ -3299,19 +2984,6 @@ def build_parser() -> argparse.ArgumentParser:
     uninstall_claude_hook.add_argument("--scope", choices=["project", "user"], default="project")
     uninstall_claude_hook.add_argument("--project-dir")
     uninstall_claude_hook.set_defaults(func=command_uninstall_claude_hook)
-
-    install_decision_log = sub.add_parser(
-        "install-claude-decision-log",
-        help="Print or install a personal Claude Code convention for logging rejected decisions",
-    )
-    install_decision_log.add_argument("--write", action="store_true", help="Write the convention into your personal CLAUDE.md")
-    install_decision_log.set_defaults(func=command_install_claude_decision_log)
-
-    uninstall_decision_log = sub.add_parser(
-        "uninstall-claude-decision-log",
-        help="Remove the AIWatcher decision-log convention from your personal CLAUDE.md",
-    )
-    uninstall_decision_log.set_defaults(func=command_uninstall_claude_decision_log)
 
     install_codex_hook = sub.add_parser("install-codex-hook", help="Print or install a native Codex prompt preflight hook")
     install_codex_hook.add_argument("--write", action="store_true", help="Write the hook into Codex hooks.json")
