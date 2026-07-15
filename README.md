@@ -103,7 +103,9 @@ Open the printed URL. The dashboard includes:
   recommendation.
 - **Prompt**: local Prompt Companion for surfaces AIWatcher cannot hook yet.
 - **Projects**: local repos and folders driving usage.
-- **Sessions**: inspect recent work and mark outcomes.
+- **Sessions**: inspect recent work, see which prompt in the session cost the
+  most and why, mark outcomes, and create a handoff capsule to continue in a
+  fresh session.
 - **Receipts**: connect each preflight decision to its resulting session,
   observed usage, risk change, and developer outcome.
 - **Insights**: privacy-safe journal and weekly report.
@@ -125,6 +127,12 @@ privacy-safe evidence snapshot: commit SHAs, hashes of file paths/test
 artifacts, confidence, and inferred outcome. It does not store source diffs,
 prompt text, commit subjects, or file contents.
 
+This persisted snapshot is separate from the one-time handoff brief you copy
+elsewhere (below), which does include the real commit subject and body. A
+commit message is written by whoever made the change specifically to explain
+it to a future reader, so unlike prompt text it is not treated as private —
+just not persisted to disk beyond the hash above.
+
 ### 5. Resume work without rebuilding context
 
 When a session gets stale, expensive, or you want to move from Claude to Codex,
@@ -135,10 +143,35 @@ python -m aiwatcher_cli resume --search orcha --target codex --copy
 python -m aiwatcher_cli handoff --session-id <session-id> --target cursor
 ```
 
-Targets: `generic`, `claude`, `codex`, `cursor`, and `vscode`. The brief is
-formatted for the next tool and keeps the next run focused on one checkpoint.
+Targets: `generic`, `claude`, `codex`, `cursor`, and `vscode`. The brief lists
+recent commit subjects/bodies and changed files for context, any decisions
+logged for the session (see below), and keeps the next run focused on one
+checkpoint. Add `--include-prompt-excerpt` to also include your own
+highest-cost prompt from the session — off by default, and labeled as a
+privacy opt-in in both the CLI and the dashboard.
 
-### 6. Export local evidence
+### 6. Log a decision that never became a commit
+
+A commit message explains changes that shipped. It cannot explain an approach
+you seriously considered and rejected without ever writing code for it — a
+fresh session has no way to know that ground was already covered:
+
+```sh
+python -m aiwatcher_cli log-decision "Chose X over Y" --reasoning "..." --rejected "Y"
+```
+
+Logged decisions for a session are surfaced in its handoff brief, explicitly
+labeled self-reported and not verified against what actually happened.
+Nothing is logged automatically. To have an AI session call this itself at
+real decision points, install a personal convention — this only ever touches
+your own machine's `~/.claude/CLAUDE.md`, never a project file shared with
+collaborators:
+
+```sh
+python -m aiwatcher_cli install-claude-decision-log --write
+```
+
+### 7. Export local evidence
 
 ```sh
 python -m aiwatcher_cli export --format json --days 30
@@ -166,6 +199,8 @@ python -m aiwatcher_cli last               # inspect the latest local AI session
 python -m aiwatcher_cli timeline           # privacy-safe event timeline
 python -m aiwatcher_cli handoff            # create a fresh-session handoff capsule
 python -m aiwatcher_cli resume --target codex --copy
+python -m aiwatcher_cli log-decision "..." --reasoning "..." --rejected "..."  # note a rejected approach
+python -m aiwatcher_cli install-claude-decision-log --write  # personal convention to log decisions automatically
 python -m aiwatcher_cli journal            # one daily improvement recommendation
 python -m aiwatcher_cli watch --once       # detect expensive or loop-like work
 python -m aiwatcher_cli preflight "..."    # review work before execution
@@ -224,8 +259,8 @@ This month: $77.87
   review local git/test evidence, then mark the result useful, rework, or
   abandoned.
 - **Improve:** Compare predicted pressure with observed usage and outcomes,
-  then recommend one better behavior or create a handoff capsule for the next
-  fresh session.
+  log a decision that never became a commit, then recommend one better
+  behavior or create a handoff capsule for the next fresh session.
 
 Prompt content is processed locally. AIWatcher stores hashes, decisions,
 predicted impact, and outcomes, not the original or suggested prompt text.
