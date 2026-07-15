@@ -103,9 +103,10 @@ Open the printed URL. The dashboard includes:
   recommendation.
 - **Prompt**: local Prompt Companion for surfaces AIWatcher cannot hook yet.
 - **Projects**: local repos and folders driving usage.
-- **Sessions**: inspect recent work, see which prompt in the session cost the
-  most and why, mark outcomes, and create a handoff capsule to continue in a
-  fresh session.
+- **Sessions**: inspect recent work, rank every prompt in a session by cost
+  under **Expensive asks** (cost is cumulative — a short prompt late in a long
+  session can still be expensive, since it re-sends the whole conversation),
+  mark outcomes, and create a handoff capsule to continue in a fresh session.
 - **Receipts**: connect each preflight decision to its resulting session,
   observed usage, risk change, and developer outcome.
 - **Insights**: privacy-safe journal and weekly report.
@@ -142,6 +143,11 @@ generate a target-ready continuation brief:
 python -m aiwatcher_cli resume --search orcha --target codex --copy
 python -m aiwatcher_cli handoff --session-id <session-id> --target cursor
 ```
+
+The brief opens with why AIWatcher is suggesting a handoff now: degraded
+context health or a stale session, 250+ model calls, 80+ tool calls, or
+$5+ in API-equivalent value — so you know whether it's worth acting on
+before reading further.
 
 Targets: `generic`, `claude`, `codex`, `cursor`, and `vscode`. The brief lists
 recent commit subjects/bodies and changed files for context, any decisions
