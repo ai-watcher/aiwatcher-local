@@ -123,6 +123,11 @@ python -m aiwatcher_cli outcome useful
 Or use the **Review outcome** button in the UI. This is how AIWatcher moves from
 token counting toward cost per useful change.
 
+For sessions with a clear costliest turn, the review drawer also retroactively
+coaches that prompt under **Prompt worth tightening** — the same findings,
+suggestions, and risk analysis preflight runs before execution, applied after
+the fact, plus a rewritten tighter version of the prompt for next time.
+
 AIWatcher also shows local outcome evidence before you mark a result: nearby
 commits, uncommitted files, and recent test artifacts. These signals stay on
 your laptop and are labeled as evidence to review, not automatic truth.
