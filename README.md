@@ -109,7 +109,10 @@ Open the printed URL. The dashboard includes:
   mark outcomes, and create a handoff capsule to continue in a fresh session.
 - **Receipts**: connect each preflight decision to its resulting session,
   observed usage, risk change, and developer outcome.
-- **Insights**: privacy-safe journal and weekly report.
+- **Insights**: local suggestions for waste and risk — concentrated spend,
+  large-context sessions, possible iterative loops, subscription/limited
+  usage, and unmarked outcome evidence — plus a privacy-safe daily journal
+  and weekly report.
 
 ### 4. Mark whether work was useful
 
