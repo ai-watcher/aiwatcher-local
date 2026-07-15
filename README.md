@@ -214,10 +214,10 @@ python -m aiwatcher_cli today              # today's local AI usage
 python -m aiwatcher_cli last               # inspect the latest local AI session
 python -m aiwatcher_cli timeline           # privacy-safe event timeline
 python -m aiwatcher_cli handoff            # create a fresh-session handoff capsule
-python -m aiwatcher_cli resume --target codex --copy
+python -m aiwatcher_cli resume --target codex --copy  # find a session and continue it elsewhere
 python -m aiwatcher_cli log-decision "..." --reasoning "..." --rejected "..."  # note a rejected approach
 python -m aiwatcher_cli install-claude-decision-log --write  # personal convention to log decisions automatically
-python -m aiwatcher_cli journal            # one daily improvement recommendation
+python -m aiwatcher_cli journal            # daily usage summary plus one thing to change next time
 python -m aiwatcher_cli watch --once       # detect expensive or loop-like work
 python -m aiwatcher_cli run -- npm test    # run any command, then summarize the AI session alongside it
 python -m aiwatcher_cli doctor             # check tool detection and hook/wrapper install status
