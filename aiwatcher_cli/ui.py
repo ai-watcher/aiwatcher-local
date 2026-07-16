@@ -999,6 +999,18 @@ HTML = r"""<!doctype html>
     .risk-card h3 { font-size: 16px; margin-bottom: 8px; }
     .prompt-list { margin: 10px 0 0; padding-left: 18px; color: #d9e4f2; line-height: 1.55; }
     .copy-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    .handoff-cta {
+      margin-top: 16px;
+      padding: 14px;
+      border: 1px solid rgba(86,157,231,.36);
+      border-radius: 8px;
+      background: linear-gradient(135deg, rgba(47,111,189,.18), rgba(53,211,153,.1));
+      display: grid;
+      gap: 10px;
+    }
+    .handoff-cta h4 { margin: 0; font-size: 13px; }
+    .handoff-cta p { font-size: 12px; }
+    .handoff-cta .btn-primary { width: fit-content; }
     .prompt-opt-in { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); font-size: 13px; color: #d5deea; cursor: pointer; }
     .prompt-opt-in input { width: 15px; height: 15px; accent-color: var(--blue, #4f8cff); }
     .prompt-opt-in .hint { flex-basis: 100%; color: #93a2b8; font-size: 12px; }
@@ -1628,7 +1640,13 @@ async function selectSession(sessionId) {
       <button data-testid="outcome-rework" class="outcome-button rework ${s.outcome === 'rework' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','rework')">Needs rework</button>
       <button data-testid="outcome-abandoned" class="outcome-button abandoned ${s.outcome === 'abandoned' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','abandoned')">Abandoned</button>
     </div>
-    <div class="copy-row"><button class="btn-quiet" onclick="openHandoff('${esc(s.session_id)}')">Create handoff capsule</button></div>
+    <div class="handoff-cta">
+      <div>
+        <h4>Continue in a fresh session</h4>
+        <p>Create a paste-ready brief with local evidence, recent commits, and guardrails for Claude, Codex, Cursor, or VS Code.</p>
+      </div>
+      <button class="btn-primary" onclick="openHandoff('${esc(s.session_id)}')">Create handoff capsule</button>
+    </div>
     </div>`;
   const insights = s.insights && s.insights.length
     ? `<section class="detail-section"><h3>What to check next</h3>

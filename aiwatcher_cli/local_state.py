@@ -59,7 +59,17 @@ def _acquire_file_lock(handle) -> None:
                     )
                 time.sleep(LOCK_POLL_SECONDS)
     else:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise StateLockTimeout(
+                        "Timed out waiting for another AIWatcher process to release local-state.json."
+                    )
+                time.sleep(LOCK_POLL_SECONDS)
 
 
 def _release_file_lock(handle) -> None:
