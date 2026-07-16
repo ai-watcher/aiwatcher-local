@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiwatcher_cli import cli
+from aiwatcher_cli.local_state import recent_decisions
 from aiwatcher_cli.scanner import LocalSession
 
 
@@ -106,6 +107,218 @@ class PromptPreflightTests(unittest.TestCase):
             )
 
         self.assertTrue(result["estimated_impact"]["available"])
+
+    def test_sessions_search_filters_project_tool_model_or_id(self) -> None:
+        rows = [
+            session(1, project="/repo/orcha"),
+            session(2, tool="codex-cli", project="/repo/agentwatch"),
+        ]
+        args = SimpleNamespace(days=7, limit=20, team=False, search="orcha")
+        output = io.StringIO()
+
+        with patch.object(cli, "sessions_since", return_value=rows), patch("sys.stdout", output):
+            result = cli.command_sessions(args)
+
+        self.assertEqual(result, 0)
+        self.assertIn("/repo/orcha", output.getvalue())
+        self.assertNotIn("/repo/agentwatch", output.getvalue())
+
+    def test_resume_uses_most_recent_matching_session(self) -> None:
+        rows = [
+            session(1, project="/repo/agentwatch"),
+            session(2, project="/repo/orcha"),
+        ]
+        args = SimpleNamespace(
+            session_id=None,
+            search="orcha",
+            days=7,
+            target="codex",
+            copy=False,
+            format="text",
+            include_prompt_excerpt=False,
+        )
+
+        with patch.object(cli, "sessions_since", return_value=rows), patch.object(cli, "command_handoff", return_value=0) as handoff:
+            result = cli.command_resume(args)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(args.session_id, "session-2")
+        handoff.assert_called_once_with(args)
+
+    def test_log_decision_defaults_to_latest_session(self) -> None:
+        rows = [session(1, project="/repo/older", age_days=1), session(2, project="/repo/newest", age_days=0)]
+        args = SimpleNamespace(
+            session_id=None,
+            days=7,
+            summary="Considered a token-based tiebreaker",
+            reasoning="Still picks turn #1 for unrelated reasons.",
+            alternatives_rejected=["token-based tiebreaker", "git diff --stat only"],
+        )
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(cli, "sessions_since", return_value=rows),
+                patch("sys.stdout", output),
+            ):
+                result = cli.command_log_decision(args)
+                stored = recent_decisions("session-2")
+
+        self.assertEqual(result, 0)
+        self.assertIn("session-2", output.getvalue())
+        self.assertIn("not verified against what actually happened", output.getvalue())
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(stored[0]["summary"], "Considered a token-based tiebreaker")
+        self.assertEqual(stored[0]["alternatives_rejected"], ["token-based tiebreaker", "git diff --stat only"])
+
+    def test_log_decision_respects_explicit_session_id(self) -> None:
+        args = SimpleNamespace(
+            session_id="explicit-session",
+            days=7,
+            summary="Chose real commit subject/body over hashing",
+            reasoning=None,
+            alternatives_rejected=[],
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                result = cli.command_log_decision(args)
+                stored = recent_decisions("explicit-session")
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(stored[0]["session_id"], "explicit-session")
+
+    def test_log_decision_rejects_empty_summary(self) -> None:
+        args = SimpleNamespace(
+            session_id="explicit-session",
+            days=7,
+            summary="   ",
+            reasoning=None,
+            alternatives_rejected=[],
+        )
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}), patch("sys.stderr", output):
+                result = cli.command_log_decision(args)
+                stored = recent_decisions("explicit-session")
+
+        self.assertEqual(result, 2)
+        self.assertEqual(stored, [])
+
+    def test_install_decision_log_dry_run_writes_nothing(self) -> None:
+        args = SimpleNamespace(write=False)
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            claude_md = os.path.join(temp_dir, ".claude", "CLAUDE.md")
+            with (
+                patch.dict(os.environ, {"HOME": temp_dir, "USERPROFILE": temp_dir}),
+                patch("sys.stdout", output),
+            ):
+                result = cli.command_install_claude_decision_log(args)
+
+        self.assertEqual(result, 0)
+        self.assertFalse(os.path.exists(claude_md))
+        self.assertIn("aiwatcher log-decision", output.getvalue())
+        self.assertIn(claude_md.replace("\\", "/"), output.getvalue().replace("\\", "/"))
+
+    def test_install_decision_log_writes_and_is_idempotent(self) -> None:
+        args = SimpleNamespace(write=True)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            claude_md = os.path.join(temp_dir, ".claude", "CLAUDE.md")
+            with patch.dict(os.environ, {"HOME": temp_dir, "USERPROFILE": temp_dir}):
+                first = cli.command_install_claude_decision_log(args)
+                with open(claude_md, encoding="utf-8") as handle:
+                    first_content = handle.read()
+                second = cli.command_install_claude_decision_log(args)
+                with open(claude_md, encoding="utf-8") as handle:
+                    second_content = handle.read()
+
+        self.assertEqual(first, 0)
+        self.assertEqual(second, 0)
+        self.assertIn("aiwatcher log-decision", first_content)
+        self.assertEqual(first_content, second_content)
+        self.assertEqual(first_content.count(cli.DECISION_LOG_MARKER_START), 1)
+
+    def test_install_decision_log_preserves_existing_content(self) -> None:
+        args = SimpleNamespace(write=True)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            claude_dir = os.path.join(temp_dir, ".claude")
+            os.makedirs(claude_dir)
+            claude_md = os.path.join(claude_dir, "CLAUDE.md")
+            with open(claude_md, "w", encoding="utf-8") as handle:
+                handle.write("# My personal preferences\n\nAlways use tabs.\n")
+
+            with patch.dict(os.environ, {"HOME": temp_dir, "USERPROFILE": temp_dir}):
+                cli.command_install_claude_decision_log(args)
+                with open(claude_md, encoding="utf-8") as handle:
+                    content = handle.read()
+
+        self.assertIn("Always use tabs.", content)
+        self.assertIn("aiwatcher log-decision", content)
+
+    def test_uninstall_decision_log_removes_block_and_preserves_rest(self) -> None:
+        install_args = SimpleNamespace(write=True)
+        uninstall_args = SimpleNamespace()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            claude_dir = os.path.join(temp_dir, ".claude")
+            os.makedirs(claude_dir)
+            claude_md = os.path.join(claude_dir, "CLAUDE.md")
+            with open(claude_md, "w", encoding="utf-8") as handle:
+                handle.write("# My personal preferences\n\nAlways use tabs.\n")
+
+            with patch.dict(os.environ, {"HOME": temp_dir, "USERPROFILE": temp_dir}):
+                cli.command_install_claude_decision_log(install_args)
+                result = cli.command_uninstall_claude_decision_log(uninstall_args)
+                with open(claude_md, encoding="utf-8") as handle:
+                    content = handle.read()
+
+        self.assertEqual(result, 0)
+        self.assertIn("Always use tabs.", content)
+        self.assertNotIn("aiwatcher log-decision", content)
+        self.assertNotIn(cli.DECISION_LOG_MARKER_START, content)
+
+    def test_uninstall_decision_log_when_nothing_installed(self) -> None:
+        args = SimpleNamespace()
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.dict(os.environ, {"HOME": temp_dir, "USERPROFILE": temp_dir}),
+                patch("sys.stdout", output),
+            ):
+                result = cli.command_uninstall_claude_decision_log(args)
+
+        self.assertEqual(result, 0)
+        self.assertIn("No personal Claude memory file found", output.getvalue())
+
+    def test_watch_points_high_pressure_session_to_resume(self) -> None:
+        row = session(1, project="/repo/orcha")
+        row.agent_calls = 300
+        args = SimpleNamespace(
+            days=1,
+            interval=15,
+            once=True,
+            cost_threshold=5.0,
+            calls_threshold=250,
+            tokens_threshold=500_000,
+        )
+        output = io.StringIO()
+
+        with patch.object(cli, "sessions_since", return_value=[row]), patch("sys.stdout", output):
+            result = cli.command_watch(args)
+
+        self.assertEqual(result, 0)
+        self.assertIn("aiwatcher resume --session-id session-1 --target codex --copy", output.getvalue())
 
     def test_low_risk_prompt_does_not_render_impact_section(self) -> None:
         with patch.object(
@@ -337,6 +550,20 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertIn('<details class="brief-edit">', page)
         self.assertIn('<textarea id="brief">', page)
 
+    def test_pasting_a_generated_brief_back_in_does_not_double_wrap(self) -> None:
+        """A brief AIWatcher already generated must not get a second Task/Execution
+        approach/Completion report shell wrapped around it when resubmitted."""
+        with patch.object(cli, "sessions_since", return_value=[]):
+            first = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
+            brief = str(first["suggested_prompt"])
+            self.assertTrue(brief.startswith("Task\n"))
+
+            second = cli.analyze_prompt(brief, tool="claude", cwd="/repo")
+
+        self.assertEqual(second["risk"], "low")
+        self.assertEqual(second["suggested_prompt"], "")
+        self.assertEqual(brief.count("Execution approach"), 1)
+
     def test_interactive_preflight_can_forward_safer_prompt(self) -> None:
         result = {
             "risk": "high",
@@ -526,8 +753,27 @@ class IntegrationConfigTests(unittest.TestCase):
         context = output["hookSpecificOutput"]["additionalContext"]
         self.assertIn("Task\nRefactor the entire codebase", context)
 
-    def test_codex_prompt_gate_can_allow_original_prompt(self) -> None:
+    def test_codex_hook_medium_risk_skips_gate_even_when_requested(self) -> None:
+        """Medium risk must never open the browser gate, even with gate=True —
+        only high risk warrants the round-trip. Silent context injection instead."""
         payload = json.dumps({"prompt": "Refactor the entire codebase", "cwd": "/repo"})
+        args = SimpleNamespace(text=None, gate=True)
+        with (
+            patch.object(cli, "_read_stdin_text", return_value=payload),
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "run_prompt_gate") as gate_mock,
+            patch.object(cli, "record_intervention"),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_codex_hook(args)
+
+        self.assertEqual(result, 0)
+        gate_mock.assert_not_called()
+        output = json.loads(stdout.getvalue())
+        self.assertIn("execution brief", output["systemMessage"].lower())
+
+    def test_codex_prompt_gate_can_allow_original_prompt(self) -> None:
+        payload = json.dumps({"prompt": "Refactor the entire codebase and delete old auth secrets", "cwd": "/repo"})
         args = SimpleNamespace(text=None, gate=True)
         with (
             patch.object(cli, "_read_stdin_text", return_value=payload),
@@ -560,7 +806,7 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertEqual(record.call_args.kwargs["decision"], "brief_edited")
 
     def test_codex_prompt_gate_cancel_blocks_run(self) -> None:
-        payload = json.dumps({"prompt": "Refactor the entire codebase", "cwd": "/repo"})
+        payload = json.dumps({"prompt": "Refactor the entire codebase and delete old auth secrets", "cwd": "/repo"})
         args = SimpleNamespace(text=None, gate=True)
         with (
             patch.object(cli, "_read_stdin_text", return_value=payload),
