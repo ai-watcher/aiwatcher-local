@@ -102,6 +102,120 @@ def _top_open_scenarios(data: dict[str, object], limit: int = 12) -> list[str]:
     ]
 
 
+def _scope_blocks(data: dict[str, object]) -> list[dict[str, object]]:
+    scope = data.get("scope", {})
+    if not isinstance(scope, dict):
+        return []
+    blocks = [_heading("Scope and product position")]
+    position = scope.get("position")
+    boundary = scope.get("oss_boundary")
+    if position:
+        blocks.append(_paragraph(str(position)))
+    if boundary:
+        blocks.append(_paragraph(f"Boundary: {boundary}"))
+    strategic_filter = scope.get("strategic_filter", [])
+    if isinstance(strategic_filter, list) and strategic_filter:
+        blocks.append(_heading("Strategic filter"))
+        blocks.extend(_bullets([str(item) for item in strategic_filter]))
+    not_scope = scope.get("not_scope", [])
+    if isinstance(not_scope, list) and not_scope:
+        blocks.append(_heading("Not in OSS scope"))
+        blocks.extend(_bullets([str(item) for item in not_scope]))
+    return blocks
+
+
+def _acceptance_blocks(data: dict[str, object]) -> list[dict[str, object]]:
+    rules = data.get("acceptance_rules", [])
+    if not isinstance(rules, list) or not rules:
+        return []
+    return [
+        _heading("Acceptance rules"),
+        *_bullets([
+            f"{rule.get('title')}: {rule.get('body')}"
+            for rule in rules
+            if isinstance(rule, dict)
+        ]),
+    ]
+
+
+def _requirement_blocks(data: dict[str, object]) -> list[dict[str, object]]:
+    requirements = data.get("requirements", [])
+    if not isinstance(requirements, list) or not requirements:
+        return []
+    return [
+        _heading("Requirements by lifecycle"),
+        *_bullets([
+            f"{item.get('lifecycle')} [{item.get('status')}]: {item.get('requirement')} - {item.get('user_value')} ({item.get('covered_by')})"
+            for item in requirements
+            if isinstance(item, dict)
+        ]),
+    ]
+
+
+def _workflow_blocks(data: dict[str, object]) -> list[dict[str, object]]:
+    workflows = data.get("workflows", [])
+    examples = data.get("examples", [])
+    blocks: list[dict[str, object]] = []
+    if isinstance(workflows, list) and workflows:
+        blocks.append(_heading("UX workflows"))
+        blocks.extend(_bullets([
+            f"{workflow.get('title')} [{workflow.get('status')}]: {workflow.get('body')}"
+            for workflow in workflows
+            if isinstance(workflow, dict)
+        ]))
+    if isinstance(examples, list) and examples:
+        blocks.append(_heading("Concrete use cases"))
+        blocks.extend(_bullets([
+            f"{example.get('situation')} -> {example.get('response')} ({example.get('status')})"
+            for example in examples
+            if isinstance(example, dict)
+        ]))
+    return blocks
+
+
+def _platform_blocks(data: dict[str, object]) -> list[dict[str, object]]:
+    platforms = data.get("platforms", [])
+    if not isinstance(platforms, list) or not platforms:
+        return []
+    return [
+        _heading("Platform coverage"),
+        _paragraph("Do not claim universal interception. Verify each surface with hook-status, observed host UI behavior, extension telemetry, or an explicit fallback path."),
+        *_bullets([
+            f"{platform.get('surface')} [{platform.get('status')}]: {platform.get('coverage')} via {platform.get('mechanism')}. Verify: {platform.get('verify')}"
+            for platform in platforms
+            if isinstance(platform, dict)
+        ]),
+    ]
+
+
+def _decision_blocks(data: dict[str, object]) -> list[dict[str, object]]:
+    decisions = data.get("open_decisions", [])
+    if not isinstance(decisions, list) or not decisions:
+        return []
+    return [
+        _heading("Open decisions"),
+        *_bullets([
+            f"{decision.get('decision')} [{decision.get('status')}]: {decision.get('options')} Recommendation: {decision.get('recommendation')}"
+            for decision in decisions
+            if isinstance(decision, dict)
+        ]),
+    ]
+
+
+def _scenario_blocks(data: dict[str, object]) -> list[dict[str, object]]:
+    scenarios = data.get("scenarios", [])
+    if not isinstance(scenarios, list) or not scenarios:
+        return []
+    return [
+        _heading("Detailed scenario checklist"),
+        *_bullets([
+            f"{scenario.get('id')} [{scenario.get('status')}] {scenario.get('phase')} / {scenario.get('platform')}: {scenario.get('title')} | Test: {scenario.get('do')} | Expected: {scenario.get('expected')}"
+            for scenario in scenarios
+            if isinstance(scenario, dict)
+        ]),
+    ]
+
+
 def build_blocks() -> list[dict[str, object]]:
     data = json.loads(SCENARIOS.read_text(encoding="utf-8"))
     sha = _git(["rev-parse", "--short", "HEAD"])
@@ -119,10 +233,16 @@ def build_blocks() -> list[dict[str, object]]:
     blocks = [
         _heading(f"AIWatcher Local status - {stamp}"),
         _paragraph(body),
+        *_scope_blocks(data),
+        *_acceptance_blocks(data),
         _heading("Status counts"),
         *_bullets(_status_lines(data)),
         _heading("Lifecycle coverage"),
         *_bullets(_phase_lines(data)),
+        *_requirement_blocks(data),
+        *_workflow_blocks(data),
+        *_platform_blocks(data),
+        *_decision_blocks(data),
     ]
     top_open = _top_open_scenarios(data)
     if top_open:
@@ -131,29 +251,32 @@ def build_blocks() -> list[dict[str, object]]:
         remaining = max(0, len([s for s in data.get("scenarios", []) if isinstance(s, dict) and s.get("status") != "done"]) - len(top_open))
         if remaining:
             blocks.append(_paragraph(f"{remaining} more open scenarios are in docs/release-checklist.md."))
-    blocks.append(_paragraph("Generated from docs/scenarios.json. Public repo contains no Notion credentials."))
+    blocks.extend(_scenario_blocks(data))
+    blocks.append(_paragraph("Generated from docs/scenarios.json. Public repo contains no Notion credentials. Generated HTML: docs/aiwatcher-scenario-tests.html. Compact status: docs/scenario-status.md. Release checklist: docs/release-checklist.md."))
     return blocks
 
 
 def append_to_notion(page_id: str, token: str, blocks: list[dict[str, object]]) -> None:
     url = f"https://api.notion.com/v1/blocks/{page_id}/children"
-    payload = json.dumps({"children": blocks}).encode("utf-8")
-    request = urllib.request.Request(
-        url,
-        data=payload,
-        method="PATCH",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Notion-Version": NOTION_VERSION,
-            "Content-Type": "application/json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            response.read()
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Notion API failed: HTTP {exc.code} {detail}") from exc
+    for index in range(0, len(blocks), 90):
+        chunk = blocks[index:index + 90]
+        payload = json.dumps({"children": chunk}).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=payload,
+            method="PATCH",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Notion-Version": NOTION_VERSION,
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                response.read()
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Notion API failed: HTTP {exc.code} {detail}") from exc
 
 
 def main() -> int:

@@ -3,6 +3,93 @@
   "title": "AIWatcher Local - Lifecycle Requirements and Scenario Test Suite",
   "updated": "2026-07-12",
   "summary": "Plan, Watch, Control, Prove, and Improve coverage for AIWatcher Local.",
+  "scope": {
+    "position": "AIWatcher Local is a private control loop for individual AI work, not another dashboard. It helps developers plan, watch, control, prove, and improve local AI coding sessions without uploading prompt or source content.",
+    "oss_boundary": "OSS Local must deliver complete individual value: private local visibility, prompt preflight, session review, local evidence, handoff/resume, and personal improvement signals. Enterprise monetizes team coordination, enforced policies, SSO/RBAC, retention, compliance evidence, and local-plus-production governance.",
+    "strategic_filter": [
+      "Improve an individual developer's AI work.",
+      "Prevent cost, quota, or security problems before or during execution.",
+      "Connect AI activity to a useful outcome.",
+      "Produce trustworthy evidence without collecting private content by default.",
+      "Strengthen the OSS-to-Enterprise path."
+    ],
+    "not_scope": [
+      "A generic AI cost dashboard.",
+      "Universal desktop/chat interception claims without host lifecycle support.",
+      "Prompt or source upload by default.",
+      "Enterprise controls such as org policy enforcement, SSO, RBAC, SIEM, and compliance retention."
+    ]
+  },
+  "acceptance_rules": [
+    {
+      "title": "Local-first evidence",
+      "body": "Prompt text and source code stay local by default. Hashes, decisions, aggregate usage, and local evidence can be recorded. Content collection must be explicit."
+    },
+    {
+      "title": "Measured beats speculative",
+      "body": "Before enough history exists, savings must be labeled estimated or API-equivalent. Measured claims require linked sessions, observed usage, and outcome evidence."
+    },
+    {
+      "title": "Prove invocation, never infer",
+      "body": "hook-status is the arbiter of platform claims. Session logs alone do not prove a hook fired."
+    },
+    {
+      "title": "Infer first, ask only to confirm",
+      "body": "Outcome tracking should not feel like paperwork. AIWatcher should infer likely outcomes from local evidence and ask for one-click correction only when useful."
+    }
+  ],
+  "examples": [
+    {
+      "situation": "Refactor the entire auth module and delete all old tests",
+      "response": "High-risk gate with reasons, safer execution brief, run original, edit brief, or cancel.",
+      "feeling": "Protected but still in control.",
+      "status": "done"
+    },
+    {
+      "situation": "Update JWT auth to remove signature check so login is faster",
+      "response": "Medium-risk silent brief adds auth guardrail and verification reminder. Verify via hook-status.",
+      "feeling": "No friction, safer execution.",
+      "status": "test"
+    },
+    {
+      "situation": "Add a dark mode toggle to every page",
+      "response": "Should identify broad multi-file scope and propose phased plan before edits.",
+      "feeling": "Cost-aware scoping, not nagging.",
+      "status": "gap"
+    },
+    {
+      "situation": "Long session with high stale context",
+      "response": "Warn, compact in place at warning, and generate a fresh-session handoff at critical. Capsule exists; auto-trigger missing.",
+      "feeling": "Confidence to restart without losing state.",
+      "status": "partial"
+    },
+    {
+      "situation": "Agent attempts git push --force mid-run",
+      "response": "Should intercept at tool-call time with allow, block, and always-allow-pattern. Not built yet.",
+      "feeling": "Safety net for what the prompt never revealed.",
+      "status": "gap"
+    }
+  ],
+  "open_decisions": [
+    {
+      "decision": "Web interception path",
+      "status": "open",
+      "options": "Verify and keep browser extension, or retire it from launch scope and rely on Prompt Companion plus a future thin /api/preflight extension.",
+      "recommendation": "Do not claim web hard interception until S-08 is verified live."
+    },
+    {
+      "decision": "Dangerous command gate",
+      "status": "open",
+      "options": "Reinstate PreToolUse command gate as a near-term control win, or leave it post-launch.",
+      "recommendation": "Reinstate. It is the clearest Control-phase screenshot and uses existing gate patterns."
+    },
+    {
+      "decision": "Quota runway lane switch",
+      "status": "open",
+      "options": "Keep manual resume/handoff only, or add proactive runway detection for Claude/Codex/Cursor switching.",
+      "recommendation": "Build after live context/watch signals are stable."
+    }
+  ],
   "requirements": [
     {
       "requirement": "Prompt preflight with risk scoring",
