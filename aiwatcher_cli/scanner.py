@@ -13,7 +13,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .pricing import estimate_cost
 
@@ -94,6 +94,13 @@ class LocalSession:
     tool_calls: int = 0
     source_path: str | None = None
     notes: list[str] = field(default_factory=list)
+    # "cli" | "desktop" | None (host did not report which surface was used).
+    surface: str | None = None
+    # Per-model usage within this session: {model_name: {tokens_in, tokens_out,
+    # cost_usd, agent_calls, tool_calls}}. `model` above is only the highest-usage
+    # model for backward compatibility — a session that used more than one model
+    # (e.g. Fable then Sonnet) is fully represented here, not just by its last model.
+    model_breakdown: dict[str, dict[str, float]] = field(default_factory=dict)
 
     @property
     def duration_seconds(self) -> int:
@@ -116,6 +123,8 @@ class LocalSession:
             "tool_calls": self.tool_calls,
             "source_path": self.source_path,
             "notes": self.notes,
+            "surface": self.surface,
+            "model_breakdown": self.model_breakdown,
         }
 
 
@@ -443,6 +452,10 @@ def scan_claude_code() -> list[LocalSession]:
                 tokens_out = 0
                 cost = 0.0
                 model: str | None = None
+                surface: str | None = None
+                model_totals: dict[str, dict[str, float]] = defaultdict(
+                    lambda: {"tokens_in": 0.0, "tokens_out": 0.0, "cost_usd": 0.0, "agent_calls": 0.0, "tool_calls": 0.0}
+                )
                 started_at: datetime | None = None
                 updated_at: datetime | None = None
                 trailing_untimestamped = False
@@ -467,6 +480,12 @@ def scan_claude_code() -> list[LocalSession]:
                             cwd = obj.get("cwd")
                             if isinstance(cwd, str) and cwd:
                                 cwd_counts[cwd] += 1
+                            if surface is None:
+                                entrypoint = obj.get("entrypoint")
+                                if entrypoint == "cli":
+                                    surface = "cli"
+                                elif entrypoint == "claude-desktop":
+                                    surface = "desktop"
 
                             message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
                             msg_type = obj.get("type") or message.get("role")
@@ -482,10 +501,28 @@ def scan_claude_code() -> list[LocalSession]:
                             cost += event_cost
                             if event_model:
                                 model = event_model
-                            if msg_type == "assistant" or event_model:
+                            is_agent_call = bool(msg_type == "assistant" or event_model)
+                            is_tool_call = bool(
+                                obj.get("toolUseResult") is not None or obj.get("toolUseID") or msg_type == "tool_result"
+                            )
+                            if is_agent_call:
                                 agent_calls += 1
-                            if obj.get("toolUseResult") is not None or obj.get("toolUseID") or msg_type == "tool_result":
+                            if is_tool_call:
                                 tool_calls += 1
+                            # Attribute this event to whichever model is active (its own
+                            # model if reported, else the last model seen) so a session
+                            # that used more than one model keeps every model's usage
+                            # visible instead of only the last model overwriting the rest.
+                            model_key = event_model or model
+                            if model_key:
+                                bucket = model_totals[model_key]
+                                bucket["tokens_in"] += input_tokens
+                                bucket["tokens_out"] += output_tokens
+                                bucket["cost_usd"] += event_cost
+                                if is_agent_call:
+                                    bucket["agent_calls"] += 1
+                                if is_tool_call:
+                                    bucket["tool_calls"] += 1
                             events_seen += 1
                 except OSError:
                     continue
@@ -494,18 +531,26 @@ def scan_claude_code() -> list[LocalSession]:
                     continue
                 if trailing_untimestamped:
                     updated_at = _max_dt(updated_at, _mtime(fpath))
+                primary_model = model or "claude-code"
+                if model_totals:
+                    primary_model = max(
+                        model_totals.items(),
+                        key=lambda item: item[1]["tokens_in"] + item[1]["tokens_out"],
+                    )[0]
                 sessions.append(LocalSession(
                     session_id=session_id,
                     tool="claude-code",
                     project_path=fallback_project_path,
                     started_at=started_at or _mtime(fpath),
                     updated_at=updated_at or _mtime(fpath),
-                    model=model or "claude-code",
+                    model=primary_model,
                     tokens_in=tokens_in,
                     tokens_out=tokens_out,
                     cost_usd=cost,
                     agent_calls=agent_calls,
                     tool_calls=tool_calls,
+                    surface=surface,
+                    model_breakdown={key: dict(value) for key, value in model_totals.items()},
                     source_path=str(fpath),
                 ))
 
@@ -690,6 +735,7 @@ def scan_codex_rollouts() -> tuple[list[LocalSession], list[LocalEvent]]:
         session_id = path.stem
         project_path: str | None = None
         model: str | None = None
+        surface: str | None = None
         started_at: datetime | None = None
         updated_at: datetime | None = None
         final_input = 0
@@ -697,6 +743,9 @@ def scan_codex_rollouts() -> tuple[list[LocalSession], list[LocalEvent]]:
         agent_calls = 0
         tool_calls = 0
         previous_total = -1
+        model_totals: dict[str, dict[str, float]] = defaultdict(
+            lambda: {"tokens_in": 0.0, "tokens_out": 0.0, "cost_usd": 0.0, "agent_calls": 0.0, "tool_calls": 0.0}
+        )
         try:
             with path.open(errors="replace") as handle:
                 for index, line in enumerate(handle):
@@ -714,6 +763,12 @@ def scan_codex_rollouts() -> tuple[list[LocalSession], list[LocalEvent]]:
                     if row_type == "session_meta":
                         session_id = str(payload.get("id") or payload.get("session_id") or session_id)
                         project_path = _normalize_project_path(str(payload.get("cwd") or "")) or project_path
+                        if surface is None:
+                            originator = str(payload.get("originator") or "").lower()
+                            if "desktop" in originator:
+                                surface = "desktop"
+                            elif "cli" in originator or "tui" in originator:
+                                surface = "cli"
                     elif row_type == "turn_context":
                         project_path = _normalize_project_path(str(payload.get("cwd") or "")) or project_path
                         model = str(payload.get("model") or model or "codex")
@@ -721,6 +776,8 @@ def scan_codex_rollouts() -> tuple[list[LocalSession], list[LocalEvent]]:
                         "function_call", "custom_tool_call", "local_shell_call"
                     }:
                         tool_calls += 1
+                        if model:
+                            model_totals[model]["tool_calls"] += 1
                     if row_type != "event_msg" or payload.get("type") != "token_count":
                         continue
                     info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
@@ -735,6 +792,17 @@ def scan_codex_rollouts() -> tuple[list[LocalSession], list[LocalEvent]]:
                     agent_calls += 1
                     event_input = int(last.get("input_tokens") or 0)
                     event_output = int(last.get("output_tokens") or 0)
+                    event_cost = estimate_cost(model, event_input, event_output)
+                    # Attribute each incremental turn's tokens/cost to whichever model
+                    # was active for that turn — total_token_usage is cumulative and
+                    # priced with only the final model, but these per-turn deltas let
+                    # a session that switched models keep every model's share visible.
+                    model_key = model or "codex"
+                    bucket = model_totals[model_key]
+                    bucket["tokens_in"] += event_input
+                    bucket["tokens_out"] += event_output
+                    bucket["cost_usd"] += event_cost
+                    bucket["agent_calls"] += 1
                     events.append(LocalEvent(
                         event_id=_event_id(session_id, index, "model_usage", timestamp),
                         session_id=session_id,
@@ -745,7 +813,7 @@ def scan_codex_rollouts() -> tuple[list[LocalSession], list[LocalEvent]]:
                         model=model or "codex",
                         tokens_in=event_input,
                         tokens_out=event_output,
-                        cost_usd=estimate_cost(model, event_input, event_output),
+                        cost_usd=event_cost,
                         source_path=str(path),
                         notes=["Measured from Codex rollout token_count event"],
                     ))
@@ -766,6 +834,8 @@ def scan_codex_rollouts() -> tuple[list[LocalSession], list[LocalEvent]]:
             agent_calls=agent_calls,
             tool_calls=tool_calls,
             source_path=str(path),
+            surface=surface,
+            model_breakdown={key: dict(value) for key, value in model_totals.items()},
             notes=[
                 "Measured from Codex rollout token_count events",
                 "Codex cost is subscription/plan-based, not invoice spend",
@@ -810,6 +880,41 @@ def scan_cursor_limited() -> list[LocalSession]:
             notes=["Cursor local logs are detected, but token and cost details are limited."],
         ))
     return sessions
+
+
+def model_usage_totals(sessions: Iterable[LocalSession]) -> dict[str, dict[str, float]]:
+    """Flatten each session's model_breakdown into a global per-model total.
+
+    A session that used more than one model contributes to every model's bucket
+    here, instead of collapsing to whichever single model the session's `model`
+    field happened to record last.
+    """
+    totals: dict[str, dict[str, float]] = defaultdict(
+        lambda: {"tokens_in": 0.0, "tokens_out": 0.0, "cost_usd": 0.0, "agent_calls": 0.0, "tool_calls": 0.0, "sessions": 0.0}
+    )
+    session_counts: dict[str, set[str]] = defaultdict(set)
+    for row in sessions:
+        breakdown = row.model_breakdown or {
+            (row.model or "unknown"): {
+                "tokens_in": row.tokens_in,
+                "tokens_out": row.tokens_out,
+                "cost_usd": row.cost_usd,
+                "agent_calls": row.agent_calls,
+                "tool_calls": row.tool_calls,
+            }
+        }
+        for model_name, stats in breakdown.items():
+            key = model_name or "unknown"
+            bucket = totals[key]
+            bucket["tokens_in"] += float(stats.get("tokens_in", 0))
+            bucket["tokens_out"] += float(stats.get("tokens_out", 0))
+            bucket["cost_usd"] += float(stats.get("cost_usd", 0))
+            bucket["agent_calls"] += float(stats.get("agent_calls", 0))
+            bucket["tool_calls"] += float(stats.get("tool_calls", 0))
+            session_counts[key].add(row.session_id)
+    for key, ids in session_counts.items():
+        totals[key]["sessions"] = float(len(ids))
+    return dict(totals)
 
 
 def scan_all() -> list[LocalSession]:
