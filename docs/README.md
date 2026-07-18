@@ -38,11 +38,23 @@ practice, this means every commit pushed to GitHub gets a fresh generated-docs
 check and, when secrets are configured, appends a private status update to the
 team Notion page. Local-only commits do not sync until they are pushed.
 
-The Notion update is intentionally a compact review surface: current status,
-lifecycle progress, top open work, and collapsed sections for scope,
-requirements, workflows, platform coverage, open decisions, and detailed test
-cases. The richer interactive artifact remains
-`docs/aiwatcher-scenario-tests.html`.
+The Notion update is intentionally a navigable team workspace, not a historical
+append-only log. On each sync it cleans the configured parent page's generated
+top-level content, keeps managed child pages/databases, and updates:
+
+- `AIWatcher Review Home` — current status, lifecycle progress, top open work,
+  and links to the rest of the workspace.
+- `Scenario Tracker` — a Notion database that can be filtered by `Status`
+  (`Done`, `In progress`, `To verify`, `Blocker`), `Phase`, `Priority`, and
+  platform.
+- `Scope` — product position, OSS boundary, strategic filter, and non-scope.
+- `Requirements` — lifecycle requirements mapped to user value and scenario
+  coverage.
+- `UX Workflows` — daily developer workflows and concrete examples.
+- `Gaps` — blockers, in-progress work, to-verify items, and open decisions.
+- `Test Cases` — full scenario checklist for manual verification.
+
+The richer interactive artifact remains `docs/aiwatcher-scenario-tests.html`.
 
 Required GitHub Actions secrets:
 
@@ -50,6 +62,15 @@ Required GitHub Actions secrets:
 | --- | --- |
 | `NOTION_TOKEN` | Internal Notion integration token. |
 | `NOTION_PAGE_ID` | Destination Notion page or block id where status updates are appended. |
+
+The Notion integration should have read, insert, and update content access for
+the destination page if you want the sync to clean old generated content and
+refresh child pages in place. If update/delete access is missing, the workflow
+will warn and continue. It will still update what the token is allowed to
+update, but it intentionally skips appending duplicate generated content to an
+existing child page that could not be cleaned first. Old generated blocks may
+remain visible until the page is cleaned manually or the integration permissions
+are expanded.
 
 Recommended flow:
 
@@ -63,6 +84,10 @@ Recommended flow:
 5. The workflow at `.github/workflows/scenario-docs.yml` runs on every push and
    by manual `workflow_dispatch`. If the Notion secrets are missing, it skips
    Notion sync successfully so public contributors are not blocked.
+
+The sync intentionally rewrites generated content in the configured Notion
+parent page. Keep manual notes in a separate child page if they should not be
+managed by automation.
 
 Manual dry run without secrets:
 

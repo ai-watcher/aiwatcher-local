@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Append AIWatcher Local scenario status to a private Notion page.
+"""Sync AIWatcher Local scenario status to a private Notion workspace.
 
 This script is intentionally optional. It reads public repo status files but
 requires private environment variables for Notion access:
 
   NOTION_TOKEN      Internal integration token
-  NOTION_PAGE_ID    Private Notion page id where updates should be appended
+  NOTION_PAGE_ID    Private Notion page id that owns the team status workspace
 
 No Notion credentials or page ids should be committed to this public repo.
-The action is intentionally safe for public contributors: if secrets are not
-configured, it exits successfully without attempting a network call.
+The action is safe for public contributors: if secrets are not configured, it
+exits successfully without attempting a network call.
 """
 
 from __future__ import annotations
@@ -23,12 +23,22 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SCENARIOS = ROOT / "docs" / "scenarios.json"
-STATUS = ROOT / "docs" / "scenario-status.md"
-CHECKLIST = ROOT / "docs" / "release-checklist.md"
 NOTION_VERSION = "2022-06-28"
+API = "https://api.notion.com/v1"
+
+SECTION_PAGES = [
+    "AIWatcher Review Home",
+    "Scope",
+    "Requirements",
+    "UX Workflows",
+    "Gaps",
+    "Test Cases",
+]
+TRACKER_TITLE = "Scenario Tracker"
 
 
 def _git(args: list[str]) -> str:
@@ -38,49 +48,105 @@ def _git(args: list[str]) -> str:
         return "unknown"
 
 
-def _rich_text(text: str) -> list[dict[str, object]]:
-    # Notion text objects have a practical size limit. Keep each paragraph short.
-    return [{"type": "text", "text": {"content": text[:1800]}}]
+def _request(method: str, path: str, token: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request(
+        f"{API}{path}",
+        data=data,
+        method=method,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Notion-Version": NOTION_VERSION,
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Notion API failed: {method} {path} HTTP {exc.code} {detail}") from exc
+    return json.loads(raw) if raw else {}
 
 
-def _paragraph(text: str) -> dict[str, object]:
+def _children(block_id: str, token: str) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    cursor = None
+    while True:
+        suffix = f"&start_cursor={cursor}" if cursor else ""
+        page = _request("GET", f"/blocks/{block_id}/children?page_size=100{suffix}", token)
+        results.extend(page.get("results", []))
+        if not page.get("has_more"):
+            return results
+        cursor = page.get("next_cursor")
+
+
+def _archive_block(block_id: str, token: str) -> bool:
+    try:
+        _request("DELETE", f"/blocks/{block_id}", token)
+        return True
+    except RuntimeError as exc:
+        print(f"Warning: could not archive Notion block {block_id}: {exc}", file=sys.stderr)
+        return False
+
+
+def _clean_page_content(page_id: str, token: str, *, keep_children: bool = True) -> bool:
+    cleaned = True
+    for block in _children(page_id, token):
+        block_type = block.get("type")
+        if keep_children and block_type in {"child_page", "child_database"}:
+            continue
+        cleaned = _archive_block(str(block["id"]), token) and cleaned
+    return cleaned
+
+
+def _append_blocks(block_id: str, token: str, blocks: list[dict[str, Any]]) -> None:
+    for index in range(0, len(blocks), 90):
+        _request("PATCH", f"/blocks/{block_id}/children", token, {"children": blocks[index:index + 90]})
+
+
+def _rich_text(text: str) -> list[dict[str, Any]]:
+    return [{"type": "text", "text": {"content": str(text)[:1900]}}]
+
+
+def _paragraph(text: str) -> dict[str, Any]:
     return {"object": "block", "type": "paragraph", "paragraph": {"rich_text": _rich_text(text)}}
 
 
-def _heading(text: str) -> dict[str, object]:
+def _heading(text: str) -> dict[str, Any]:
     return {"object": "block", "type": "heading_2", "heading_2": {"rich_text": _rich_text(text)}}
 
 
-def _heading3(text: str) -> dict[str, object]:
+def _heading3(text: str) -> dict[str, Any]:
     return {"object": "block", "type": "heading_3", "heading_3": {"rich_text": _rich_text(text)}}
 
 
-def _divider() -> dict[str, object]:
+def _divider() -> dict[str, Any]:
     return {"object": "block", "type": "divider", "divider": {}}
 
 
-def _bullets(lines: list[str]) -> list[dict[str, object]]:
+def _bullets(lines: list[str]) -> list[dict[str, Any]]:
     return [
         {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": _rich_text(line)}}
         for line in lines
     ]
 
 
-def _toggle(title: str, children: list[dict[str, object]]) -> dict[str, object]:
+def _code(text: str) -> dict[str, Any]:
     return {
         "object": "block",
-        "type": "toggle",
-        "toggle": {
-            "rich_text": _rich_text(title),
-            "children": children[:100],
-        },
+        "type": "code",
+        "code": {"rich_text": _rich_text(text), "language": "plain text"},
     }
 
 
-def _status_counts(data: dict[str, object]) -> dict[str, int]:
-    scenarios = data.get("scenarios", [])
-    counts: dict[str, int] = {"done": 0, "test": 0, "partial": 0, "gap": 0}
-    for scenario in scenarios if isinstance(scenarios, list) else []:
+def _page_id_to_url(page_id: str) -> str:
+    return f"https://www.notion.so/{page_id.replace('-', '')}"
+
+
+def _status_counts(data: dict[str, Any]) -> dict[str, int]:
+    counts = {"done": 0, "test": 0, "partial": 0, "gap": 0}
+    for scenario in data.get("scenarios", []):
         if isinstance(scenario, dict):
             status = str(scenario.get("status", ""))
             if status in counts:
@@ -88,233 +154,341 @@ def _status_counts(data: dict[str, object]) -> dict[str, int]:
     return counts
 
 
-def _status_lines(data: dict[str, object]) -> list[str]:
-    counts = _status_counts(data)
-    labels = {"done": "Done", "test": "To test", "partial": "Partial", "gap": "Not built"}
-    return [f"{labels[key]}: {counts[key]}" for key in ["done", "test", "partial", "gap"]]
+def _team_status(status: str) -> str:
+    return {
+        "done": "Done",
+        "partial": "In progress",
+        "test": "To verify",
+        "gap": "Blocker",
+    }.get(status, "In progress")
 
 
-def _phase_lines(data: dict[str, object]) -> list[str]:
+def _priority(status: str) -> str:
+    return {
+        "gap": "P1",
+        "partial": "P2",
+        "test": "P2",
+        "done": "Done",
+    }.get(status, "P2")
+
+
+def _phase_lines(data: dict[str, Any]) -> list[str]:
     scenarios = data.get("scenarios", [])
     phases = ["Plan", "Watch", "Control", "Prove", "Improve", "Failsafe"]
     lines: list[str] = []
     for phase in phases:
-        phase_items = [
-            scenario
-            for scenario in scenarios
-            if isinstance(scenario, dict) and str(scenario.get("phase", "")) == phase
-        ]
+        phase_items = [item for item in scenarios if isinstance(item, dict) and item.get("phase") == phase]
         if not phase_items:
             continue
-        done = sum(1 for scenario in phase_items if scenario.get("status") == "done")
-        lines.append(f"{phase}: {done}/{len(phase_items)} scenarios done")
+        done = sum(1 for item in phase_items if item.get("status") == "done")
+        blockers = sum(1 for item in phase_items if item.get("status") == "gap")
+        lines.append(f"{phase}: {done}/{len(phase_items)} done, {blockers} blocker(s)")
     return lines
 
 
-def _top_open_scenarios(data: dict[str, object], limit: int = 12) -> list[str]:
-    priority = {"gap": 0, "partial": 1, "test": 2, "done": 3}
-    scenarios = data.get("scenarios", [])
-    open_items = [
-        scenario
-        for scenario in scenarios
-        if isinstance(scenario, dict) and scenario.get("status") != "done"
+def _top_open_scenarios(data: dict[str, Any], limit: int = 10) -> list[dict[str, Any]]:
+    order = {"gap": 0, "partial": 1, "test": 2, "done": 3}
+    items = [item for item in data.get("scenarios", []) if isinstance(item, dict) and item.get("status") != "done"]
+    return sorted(items, key=lambda item: (order.get(str(item.get("status")), 9), str(item.get("id"))))[:limit]
+
+
+def _find_existing_children(parent_id: str, token: str) -> tuple[dict[str, str], dict[str, str]]:
+    pages: dict[str, str] = {}
+    databases: dict[str, str] = {}
+    for block in _children(parent_id, token):
+        if block.get("type") == "child_page":
+            pages[str(block["child_page"]["title"])] = str(block["id"])
+        if block.get("type") == "child_database":
+            databases[str(block["child_database"]["title"])] = str(block["id"])
+    return pages, databases
+
+
+def _ensure_page(parent_id: str, token: str, title: str, existing_pages: dict[str, str]) -> str:
+    if title in existing_pages:
+        return existing_pages[title]
+    response = _request(
+        "POST",
+        "/pages",
+        token,
+        {
+            "parent": {"type": "page_id", "page_id": parent_id},
+            "properties": {"title": {"title": [{"type": "text", "text": {"content": title}}]}},
+        },
+    )
+    return str(response["id"])
+
+
+def _ensure_tracker(parent_id: str, token: str, existing_databases: dict[str, str]) -> str:
+    if TRACKER_TITLE in existing_databases:
+        return existing_databases[TRACKER_TITLE]
+    response = _request(
+        "POST",
+        "/databases",
+        token,
+        {
+            "parent": {"type": "page_id", "page_id": parent_id},
+            "title": [{"type": "text", "text": {"content": TRACKER_TITLE}}],
+            "properties": {
+                "Name": {"title": {}},
+                "ID": {"rich_text": {}},
+                "Status": {
+                    "select": {
+                        "options": [
+                            {"name": "Done", "color": "green"},
+                            {"name": "In progress", "color": "purple"},
+                            {"name": "To verify", "color": "blue"},
+                            {"name": "Blocker", "color": "red"},
+                        ]
+                    }
+                },
+                "Phase": {
+                    "select": {
+                        "options": [
+                            {"name": "Plan", "color": "blue"},
+                            {"name": "Watch", "color": "yellow"},
+                            {"name": "Control", "color": "red"},
+                            {"name": "Prove", "color": "green"},
+                            {"name": "Improve", "color": "purple"},
+                            {"name": "Failsafe", "color": "gray"},
+                        ]
+                    }
+                },
+                "Priority": {
+                    "select": {
+                        "options": [
+                            {"name": "P1", "color": "red"},
+                            {"name": "P2", "color": "yellow"},
+                            {"name": "Done", "color": "green"},
+                        ]
+                    }
+                },
+                "Platform": {"rich_text": {}},
+                "Verify": {"rich_text": {}},
+                "Expected": {"rich_text": {}},
+                "Value": {"rich_text": {}},
+            },
+        },
+    )
+    return str(response["id"])
+
+
+def _query_tracker(database_id: str, token: str) -> dict[str, str]:
+    rows: dict[str, str] = {}
+    cursor = None
+    while True:
+        payload: dict[str, Any] = {"page_size": 100}
+        if cursor:
+            payload["start_cursor"] = cursor
+        response = _request("POST", f"/databases/{database_id}/query", token, payload)
+        for page in response.get("results", []):
+            props = page.get("properties", {})
+            rich_id = props.get("ID", {}).get("rich_text", [])
+            if rich_id:
+                rows[str(rich_id[0].get("plain_text", ""))] = str(page["id"])
+        if not response.get("has_more"):
+            return rows
+        cursor = response.get("next_cursor")
+
+
+def _scenario_properties(scenario: dict[str, Any]) -> dict[str, Any]:
+    scenario_id = str(scenario.get("id", ""))
+    return {
+        "Name": {"title": [{"type": "text", "text": {"content": f"{scenario_id} {scenario.get('title', '')}"[:1900]}}]},
+        "ID": {"rich_text": [{"type": "text", "text": {"content": scenario_id}}]},
+        "Status": {"select": {"name": _team_status(str(scenario.get("status", "")))}},
+        "Phase": {"select": {"name": str(scenario.get("phase", "Plan"))}},
+        "Priority": {"select": {"name": _priority(str(scenario.get("status", "")))}},
+        "Platform": {"rich_text": [{"type": "text", "text": {"content": str(scenario.get("platform", ""))[:1900]}}]},
+        "Verify": {"rich_text": [{"type": "text", "text": {"content": str(scenario.get("do", ""))[:1900]}}]},
+        "Expected": {"rich_text": [{"type": "text", "text": {"content": str(scenario.get("expected", ""))[:1900]}}]},
+        "Value": {"rich_text": [{"type": "text", "text": {"content": str(scenario.get("value", ""))[:1900]}}]},
+    }
+
+
+def _sync_tracker(database_id: str, token: str, data: dict[str, Any]) -> None:
+    existing = _query_tracker(database_id, token)
+    for scenario in data.get("scenarios", []):
+        if not isinstance(scenario, dict):
+            continue
+        scenario_id = str(scenario.get("id", ""))
+        properties = _scenario_properties(scenario)
+        if scenario_id in existing:
+            _request("PATCH", f"/pages/{existing[scenario_id]}", token, {"properties": properties})
+        else:
+            _request(
+                "POST",
+                "/pages",
+                token,
+                {"parent": {"type": "database_id", "database_id": database_id}, "properties": properties},
+            )
+
+
+def _home_blocks(data: dict[str, Any], pages: dict[str, str], database_id: str) -> list[dict[str, Any]]:
+    sha = _git(["rev-parse", "--short", "HEAD"])
+    branch = _git(["rev-parse", "--abbrev-ref", "HEAD"])
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    run_url = os.environ.get("GITHUB_RUN_URL", "local/manual")
+    counts = _status_counts(data)
+    total = len([item for item in data.get("scenarios", []) if isinstance(item, dict)])
+    lines = [
+        f"{total} scenarios: {counts['done']} done, {counts['partial']} in progress, {counts['test']} to verify, {counts['gap']} blockers.",
+        f"Branch: {branch} · Commit: {sha} · Generated: {stamp}",
+        f"Run: {run_url}",
     ]
-    open_items.sort(key=lambda scenario: (priority.get(str(scenario.get("status")), 9), str(scenario.get("id"))))
+    links = [f"{title}: {_page_id_to_url(page_id)}" for title, page_id in pages.items() if title in SECTION_PAGES]
+    links.append(f"{TRACKER_TITLE}: {_page_id_to_url(database_id)}")
+    open_work = [
+        f"{item.get('id')} [{_team_status(str(item.get('status')))}] {item.get('phase')}: {item.get('title')}"
+        for item in _top_open_scenarios(data)
+    ]
     return [
-        f"{scenario.get('id')} [{scenario.get('status')}] {scenario.get('phase')}: {scenario.get('title')}"
-        for scenario in open_items[:limit]
+        _heading("AIWatcher Local review"),
+        _paragraph("Team-facing status for the OSS control-loop roadmap. Use Scenario Tracker to filter by Done, In progress, To verify, or Blocker."),
+        *_bullets(lines),
+        _heading("Navigation"),
+        *_bullets(links),
+        _heading("Lifecycle progress"),
+        *_bullets(_phase_lines(data)),
+        _heading("Highest-priority open work"),
+        *_bullets(open_work),
+        _divider(),
+        _paragraph("Generated from docs/scenarios.json. Public repo contains no Notion credentials."),
     ]
 
 
-def _scope_children(data: dict[str, object]) -> list[dict[str, object]]:
+def _scope_blocks(data: dict[str, Any]) -> list[dict[str, Any]]:
     scope = data.get("scope", {})
     if not isinstance(scope, dict):
-        return []
-    blocks: list[dict[str, object]] = []
-    position = scope.get("position")
-    boundary = scope.get("oss_boundary")
-    if position:
-        blocks.append(_paragraph(str(position)))
-    if boundary:
-        blocks.append(_paragraph(f"Boundary: {boundary}"))
-    strategic_filter = scope.get("strategic_filter", [])
-    if isinstance(strategic_filter, list) and strategic_filter:
-        blocks.append(_heading3("Strategic filter"))
-        blocks.extend(_bullets([str(item) for item in strategic_filter]))
-    not_scope = scope.get("not_scope", [])
-    if isinstance(not_scope, list) and not_scope:
-        blocks.append(_heading3("Not in OSS scope"))
-        blocks.extend(_bullets([str(item) for item in not_scope]))
+        return [_paragraph("No scope data found.")]
+    blocks = [
+        _heading("Scope and product position"),
+        _paragraph(str(scope.get("position", ""))),
+        _heading3("OSS boundary"),
+        _paragraph(str(scope.get("oss_boundary", ""))),
+        _heading3("Strategic filter"),
+        *_bullets([str(item) for item in scope.get("strategic_filter", []) if item]),
+        _heading3("Not in OSS scope"),
+        *_bullets([str(item) for item in scope.get("not_scope", []) if item]),
+    ]
     return blocks
 
 
-def _acceptance_children(data: dict[str, object]) -> list[dict[str, object]]:
-    rules = data.get("acceptance_rules", [])
-    if not isinstance(rules, list) or not rules:
-        return []
-    return [
-        *_bullets([
-            f"{rule.get('title')}: {rule.get('body')}"
-            for rule in rules
-            if isinstance(rule, dict)
-        ]),
-    ]
-
-
-def _requirement_children(data: dict[str, object]) -> list[dict[str, object]]:
-    requirements = data.get("requirements", [])
-    if not isinstance(requirements, list) or not requirements:
-        return []
-    children: list[dict[str, object]] = []
+def _requirements_blocks(data: dict[str, Any]) -> list[dict[str, Any]]:
+    blocks = [_heading("Requirements by lifecycle")]
     for lifecycle in ["Plan", "Watch", "Control", "Prove", "Improve", "Failsafe"]:
         items = [
-            item for item in requirements
+            item for item in data.get("requirements", [])
             if isinstance(item, dict) and item.get("lifecycle") == lifecycle
         ]
         if not items:
             continue
-        children.append(_heading3(lifecycle))
-        children.extend(_bullets([
-            f"[{item.get('status')}] {item.get('requirement')} - {item.get('user_value')} ({item.get('covered_by')})"
+        blocks.append(_heading3(lifecycle))
+        blocks.extend(_bullets([
+            f"{item.get('requirement')} [{_team_status(str(item.get('status')))}] - {item.get('user_value')} Covered by: {item.get('covered_by')}"
             for item in items
         ]))
-    return children
+    return blocks
 
 
-def _workflow_children(data: dict[str, object]) -> list[dict[str, object]]:
-    workflows = data.get("workflows", [])
-    examples = data.get("examples", [])
-    blocks: list[dict[str, object]] = []
-    if isinstance(workflows, list) and workflows:
-        blocks.append(_heading3("UX workflows"))
+def _workflow_blocks(data: dict[str, Any]) -> list[dict[str, Any]]:
+    blocks = [_heading("UX workflows and concrete use cases")]
+    blocks.append(_heading3("Workflows"))
+    blocks.extend(_bullets([
+        f"{item.get('title')} [{_team_status(str(item.get('status')))}]: {item.get('body')}"
+        for item in data.get("workflows", [])
+        if isinstance(item, dict)
+    ]))
+    blocks.append(_heading3("Examples"))
+    blocks.extend(_bullets([
+        f"{item.get('situation')} -> {item.get('response')} Expected feeling: {item.get('feeling')} [{_team_status(str(item.get('status')))}]"
+        for item in data.get("examples", [])
+        if isinstance(item, dict)
+    ]))
+    return blocks
+
+
+def _gaps_blocks(data: dict[str, Any]) -> list[dict[str, Any]]:
+    blocks = [_heading("Gaps and open decisions")]
+    for status, title in [("gap", "Blockers"), ("partial", "In progress"), ("test", "To verify")]:
+        items = [item for item in data.get("scenarios", []) if isinstance(item, dict) and item.get("status") == status]
+        if not items:
+            continue
+        blocks.append(_heading3(title))
         blocks.extend(_bullets([
-            f"{workflow.get('title')} [{workflow.get('status')}]: {workflow.get('body')}"
-            for workflow in workflows
-            if isinstance(workflow, dict)
+            f"{item.get('id')} {item.get('phase')}: {item.get('title')} - {item.get('expected')}"
+            for item in items
         ]))
-    if isinstance(examples, list) and examples:
-        blocks.append(_heading3("Concrete use cases"))
+    decisions = data.get("open_decisions", [])
+    if isinstance(decisions, list) and decisions:
+        blocks.append(_heading3("Open decisions"))
         blocks.extend(_bullets([
-            f"{example.get('situation')} -> {example.get('response')} ({example.get('status')})"
-            for example in examples
-            if isinstance(example, dict)
+            f"{item.get('decision')} [{item.get('status')}]: {item.get('options')} Recommendation: {item.get('recommendation')}"
+            for item in decisions
+            if isinstance(item, dict)
         ]))
     return blocks
 
 
-def _platform_children(data: dict[str, object]) -> list[dict[str, object]]:
-    platforms = data.get("platforms", [])
-    if not isinstance(platforms, list) or not platforms:
-        return []
+def _test_case_blocks(data: dict[str, Any]) -> list[dict[str, Any]]:
+    blocks = [
+        _heading("Test cases"),
+        _paragraph("Use Scenario Tracker for filtering and search. This page keeps the full checklist readable in one place."),
+    ]
+    for phase in ["Plan", "Watch", "Control", "Prove", "Improve", "Failsafe"]:
+        items = [item for item in data.get("scenarios", []) if isinstance(item, dict) and item.get("phase") == phase]
+        if not items:
+            continue
+        blocks.append(_heading3(phase))
+        for item in items:
+            blocks.append(_code(textwrap.dedent(f"""
+            {item.get('id')} [{_team_status(str(item.get('status')))}] {item.get('title')}
+            Platform: {item.get('platform')}
+            Go to: {item.get('go')}
+            Do: {item.get('do')}
+            Expected: {item.get('expected')}
+            Value: {item.get('value')}
+            Why: {item.get('why')}
+            """).strip()))
+    return blocks
+
+
+def _platform_blocks(data: dict[str, Any]) -> list[dict[str, Any]]:
     return [
+        _heading("Platform coverage"),
         _paragraph("Do not claim universal interception. Verify each surface with hook-status, observed host UI behavior, extension telemetry, or an explicit fallback path."),
         *_bullets([
-            f"{platform.get('surface')} [{platform.get('status')}]: {platform.get('coverage')} via {platform.get('mechanism')}. Verify: {platform.get('verify')}"
-            for platform in platforms
-            if isinstance(platform, dict)
+            f"{item.get('surface')} [{_team_status(str(item.get('status')))}]: {item.get('coverage')} via {item.get('mechanism')}. Verify: {item.get('verify')}"
+            for item in data.get("platforms", [])
+            if isinstance(item, dict)
         ]),
     ]
 
 
-def _decision_children(data: dict[str, object]) -> list[dict[str, object]]:
-    decisions = data.get("open_decisions", [])
-    if not isinstance(decisions, list) or not decisions:
-        return []
-    return [
-        *_bullets([
-            f"{decision.get('decision')} [{decision.get('status')}]: {decision.get('options')} Recommendation: {decision.get('recommendation')}"
-            for decision in decisions
-            if isinstance(decision, dict)
-        ]),
-    ]
-
-
-def _scenario_children(data: dict[str, object]) -> list[dict[str, object]]:
-    scenarios = data.get("scenarios", [])
-    if not isinstance(scenarios, list) or not scenarios:
-        return []
-    return [
-        *_bullets([
-            f"{scenario.get('id')} [{scenario.get('status')}] {scenario.get('phase')} / {scenario.get('platform')}: {scenario.get('title')} | Test: {scenario.get('do')} | Expected: {scenario.get('expected')}"
-            for scenario in scenarios
-            if isinstance(scenario, dict)
-        ]),
-    ]
-
-
-def build_blocks() -> list[dict[str, object]]:
-    data = json.loads(SCENARIOS.read_text(encoding="utf-8"))
-    sha = _git(["rev-parse", "--short", "HEAD"])
-    branch = _git(["rev-parse", "--abbrev-ref", "HEAD"])
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    run_url = os.environ.get("GITHUB_RUN_URL", "")
-    counts = _status_counts(data)
-    scenarios = data.get("scenarios", [])
-    scenario_count = len(scenarios) if isinstance(scenarios, list) else 0
-    body = textwrap.dedent(f"""
-    Source: ai-watcher/aiwatcher-local
-    Branch: {branch}
-    Commit: {sha}
-    Generated: {stamp}
-    Scenario source: docs/scenarios.json
-    Run: {run_url or 'local/manual'}
-    """).strip()
-    blocks = [
-        _heading(f"AIWatcher Local review - {stamp}"),
-        _paragraph("A compact team review generated from docs/scenarios.json. Open the toggles for detail; use the committed HTML suite for interactive filtering."),
-        _paragraph(body),
-        _heading("At a glance"),
-        *_bullets([
-            f"{scenario_count} total scenarios: {counts['done']} done, {counts['test']} to test, {counts['partial']} partial, {counts['gap']} not built.",
-            "Interactive suite: docs/aiwatcher-scenario-tests.html",
-            "Compact status: docs/scenario-status.md",
-            "Release checklist: docs/release-checklist.md",
-        ]),
-        _heading("Lifecycle progress"),
-        *_bullets(_phase_lines(data)),
-    ]
-    top_open = _top_open_scenarios(data)
-    if top_open:
-        blocks.append(_heading("Highest-priority open work"))
-        blocks.extend(_bullets(top_open))
-        remaining = max(0, len([s for s in data.get("scenarios", []) if isinstance(s, dict) and s.get("status") != "done"]) - len(top_open))
-        if remaining:
-            blocks.append(_paragraph(f"{remaining} more open scenarios are in docs/release-checklist.md."))
-    blocks.extend([
-        _divider(),
-        _toggle("Scope and product position", _scope_children(data)),
-        _toggle("Acceptance rules", _acceptance_children(data)),
-        _toggle("Requirements by lifecycle", _requirement_children(data)),
-        _toggle("UX workflows and concrete use cases", _workflow_children(data)),
-        _toggle("Platform coverage", _platform_children(data)),
-        _toggle("Open decisions", _decision_children(data)),
-        _toggle("Detailed scenario checklist", _scenario_children(data)),
-        _paragraph("Generated from docs/scenarios.json. Public repo contains no Notion credentials."),
-    ])
-    return blocks
-
-
-def append_to_notion(page_id: str, token: str, blocks: list[dict[str, object]]) -> None:
-    url = f"https://api.notion.com/v1/blocks/{page_id}/children"
-    for index in range(0, len(blocks), 90):
-        chunk = blocks[index:index + 90]
-        payload = json.dumps({"children": chunk}).encode("utf-8")
-        request = urllib.request.Request(
-            url,
-            data=payload,
-            method="PATCH",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Notion-Version": NOTION_VERSION,
-                "Content-Type": "application/json",
-            },
+def _sync_page(page_id: str, token: str, blocks: list[dict[str, Any]]) -> None:
+    existing = _children(page_id, token)
+    cleaned = _clean_page_content(page_id, token, keep_children=False)
+    if existing and not cleaned:
+        print(
+            f"Warning: skipped refreshing page {page_id} because old blocks could not be archived.",
+            file=sys.stderr,
         )
-        try:
-            with urllib.request.urlopen(request, timeout=20) as response:
-                response.read()
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Notion API failed: HTTP {exc.code} {detail}") from exc
+        return
+    _append_blocks(page_id, token, blocks)
+
+
+def sync_workspace(parent_id: str, token: str) -> None:
+    data = json.loads(SCENARIOS.read_text(encoding="utf-8"))
+    _clean_page_content(parent_id, token, keep_children=True)
+    pages, databases = _find_existing_children(parent_id, token)
+    page_ids = {title: _ensure_page(parent_id, token, title, pages) for title in SECTION_PAGES}
+    database_id = _ensure_tracker(parent_id, token, databases)
+    _sync_tracker(database_id, token, data)
+    _sync_page(page_ids["AIWatcher Review Home"], token, _home_blocks(data, page_ids, database_id))
+    _sync_page(page_ids["Scope"], token, _scope_blocks(data))
+    _sync_page(page_ids["Requirements"], token, _requirements_blocks(data))
+    _sync_page(page_ids["UX Workflows"], token, _workflow_blocks(data))
+    _sync_page(page_ids["Gaps"], token, _gaps_blocks(data))
+    _sync_page(page_ids["Test Cases"], token, _test_case_blocks(data))
 
 
 def main() -> int:
@@ -323,8 +497,8 @@ def main() -> int:
     if not token or not page_id:
         print("Skipping Notion sync: NOTION_TOKEN and NOTION_PAGE_ID are required.")
         return 0
-    append_to_notion(page_id, token, build_blocks())
-    print("Synced AIWatcher scenario status to Notion.")
+    sync_workspace(page_id, token)
+    print("Synced AIWatcher scenario workspace to Notion.")
     return 0
 
 
