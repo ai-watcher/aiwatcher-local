@@ -51,6 +51,14 @@ def _heading(text: str) -> dict[str, object]:
     return {"object": "block", "type": "heading_2", "heading_2": {"rich_text": _rich_text(text)}}
 
 
+def _heading3(text: str) -> dict[str, object]:
+    return {"object": "block", "type": "heading_3", "heading_3": {"rich_text": _rich_text(text)}}
+
+
+def _divider() -> dict[str, object]:
+    return {"object": "block", "type": "divider", "divider": {}}
+
+
 def _bullets(lines: list[str]) -> list[dict[str, object]]:
     return [
         {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": _rich_text(line)}}
@@ -58,7 +66,18 @@ def _bullets(lines: list[str]) -> list[dict[str, object]]:
     ]
 
 
-def _status_lines(data: dict[str, object]) -> list[str]:
+def _toggle(title: str, children: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "object": "block",
+        "type": "toggle",
+        "toggle": {
+            "rich_text": _rich_text(title),
+            "children": children[:100],
+        },
+    }
+
+
+def _status_counts(data: dict[str, object]) -> dict[str, int]:
     scenarios = data.get("scenarios", [])
     counts: dict[str, int] = {"done": 0, "test": 0, "partial": 0, "gap": 0}
     for scenario in scenarios if isinstance(scenarios, list) else []:
@@ -66,6 +85,11 @@ def _status_lines(data: dict[str, object]) -> list[str]:
             status = str(scenario.get("status", ""))
             if status in counts:
                 counts[status] += 1
+    return counts
+
+
+def _status_lines(data: dict[str, object]) -> list[str]:
+    counts = _status_counts(data)
     labels = {"done": "Done", "test": "To test", "partial": "Partial", "gap": "Not built"}
     return [f"{labels[key]}: {counts[key]}" for key in ["done", "test", "partial", "gap"]]
 
@@ -102,11 +126,11 @@ def _top_open_scenarios(data: dict[str, object], limit: int = 12) -> list[str]:
     ]
 
 
-def _scope_blocks(data: dict[str, object]) -> list[dict[str, object]]:
+def _scope_children(data: dict[str, object]) -> list[dict[str, object]]:
     scope = data.get("scope", {})
     if not isinstance(scope, dict):
         return []
-    blocks = [_heading("Scope and product position")]
+    blocks: list[dict[str, object]] = []
     position = scope.get("position")
     boundary = scope.get("oss_boundary")
     if position:
@@ -115,21 +139,20 @@ def _scope_blocks(data: dict[str, object]) -> list[dict[str, object]]:
         blocks.append(_paragraph(f"Boundary: {boundary}"))
     strategic_filter = scope.get("strategic_filter", [])
     if isinstance(strategic_filter, list) and strategic_filter:
-        blocks.append(_heading("Strategic filter"))
+        blocks.append(_heading3("Strategic filter"))
         blocks.extend(_bullets([str(item) for item in strategic_filter]))
     not_scope = scope.get("not_scope", [])
     if isinstance(not_scope, list) and not_scope:
-        blocks.append(_heading("Not in OSS scope"))
+        blocks.append(_heading3("Not in OSS scope"))
         blocks.extend(_bullets([str(item) for item in not_scope]))
     return blocks
 
 
-def _acceptance_blocks(data: dict[str, object]) -> list[dict[str, object]]:
+def _acceptance_children(data: dict[str, object]) -> list[dict[str, object]]:
     rules = data.get("acceptance_rules", [])
     if not isinstance(rules, list) or not rules:
         return []
     return [
-        _heading("Acceptance rules"),
         *_bullets([
             f"{rule.get('title')}: {rule.get('body')}"
             for rule in rules
@@ -138,33 +161,39 @@ def _acceptance_blocks(data: dict[str, object]) -> list[dict[str, object]]:
     ]
 
 
-def _requirement_blocks(data: dict[str, object]) -> list[dict[str, object]]:
+def _requirement_children(data: dict[str, object]) -> list[dict[str, object]]:
     requirements = data.get("requirements", [])
     if not isinstance(requirements, list) or not requirements:
         return []
-    return [
-        _heading("Requirements by lifecycle"),
-        *_bullets([
-            f"{item.get('lifecycle')} [{item.get('status')}]: {item.get('requirement')} - {item.get('user_value')} ({item.get('covered_by')})"
-            for item in requirements
-            if isinstance(item, dict)
-        ]),
-    ]
+    children: list[dict[str, object]] = []
+    for lifecycle in ["Plan", "Watch", "Control", "Prove", "Improve", "Failsafe"]:
+        items = [
+            item for item in requirements
+            if isinstance(item, dict) and item.get("lifecycle") == lifecycle
+        ]
+        if not items:
+            continue
+        children.append(_heading3(lifecycle))
+        children.extend(_bullets([
+            f"[{item.get('status')}] {item.get('requirement')} - {item.get('user_value')} ({item.get('covered_by')})"
+            for item in items
+        ]))
+    return children
 
 
-def _workflow_blocks(data: dict[str, object]) -> list[dict[str, object]]:
+def _workflow_children(data: dict[str, object]) -> list[dict[str, object]]:
     workflows = data.get("workflows", [])
     examples = data.get("examples", [])
     blocks: list[dict[str, object]] = []
     if isinstance(workflows, list) and workflows:
-        blocks.append(_heading("UX workflows"))
+        blocks.append(_heading3("UX workflows"))
         blocks.extend(_bullets([
             f"{workflow.get('title')} [{workflow.get('status')}]: {workflow.get('body')}"
             for workflow in workflows
             if isinstance(workflow, dict)
         ]))
     if isinstance(examples, list) and examples:
-        blocks.append(_heading("Concrete use cases"))
+        blocks.append(_heading3("Concrete use cases"))
         blocks.extend(_bullets([
             f"{example.get('situation')} -> {example.get('response')} ({example.get('status')})"
             for example in examples
@@ -173,12 +202,11 @@ def _workflow_blocks(data: dict[str, object]) -> list[dict[str, object]]:
     return blocks
 
 
-def _platform_blocks(data: dict[str, object]) -> list[dict[str, object]]:
+def _platform_children(data: dict[str, object]) -> list[dict[str, object]]:
     platforms = data.get("platforms", [])
     if not isinstance(platforms, list) or not platforms:
         return []
     return [
-        _heading("Platform coverage"),
         _paragraph("Do not claim universal interception. Verify each surface with hook-status, observed host UI behavior, extension telemetry, or an explicit fallback path."),
         *_bullets([
             f"{platform.get('surface')} [{platform.get('status')}]: {platform.get('coverage')} via {platform.get('mechanism')}. Verify: {platform.get('verify')}"
@@ -188,12 +216,11 @@ def _platform_blocks(data: dict[str, object]) -> list[dict[str, object]]:
     ]
 
 
-def _decision_blocks(data: dict[str, object]) -> list[dict[str, object]]:
+def _decision_children(data: dict[str, object]) -> list[dict[str, object]]:
     decisions = data.get("open_decisions", [])
     if not isinstance(decisions, list) or not decisions:
         return []
     return [
-        _heading("Open decisions"),
         *_bullets([
             f"{decision.get('decision')} [{decision.get('status')}]: {decision.get('options')} Recommendation: {decision.get('recommendation')}"
             for decision in decisions
@@ -202,12 +229,11 @@ def _decision_blocks(data: dict[str, object]) -> list[dict[str, object]]:
     ]
 
 
-def _scenario_blocks(data: dict[str, object]) -> list[dict[str, object]]:
+def _scenario_children(data: dict[str, object]) -> list[dict[str, object]]:
     scenarios = data.get("scenarios", [])
     if not isinstance(scenarios, list) or not scenarios:
         return []
     return [
-        _heading("Detailed scenario checklist"),
         *_bullets([
             f"{scenario.get('id')} [{scenario.get('status')}] {scenario.get('phase')} / {scenario.get('platform')}: {scenario.get('title')} | Test: {scenario.get('do')} | Expected: {scenario.get('expected')}"
             for scenario in scenarios
@@ -222,6 +248,9 @@ def build_blocks() -> list[dict[str, object]]:
     branch = _git(["rev-parse", "--abbrev-ref", "HEAD"])
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     run_url = os.environ.get("GITHUB_RUN_URL", "")
+    counts = _status_counts(data)
+    scenarios = data.get("scenarios", [])
+    scenario_count = len(scenarios) if isinstance(scenarios, list) else 0
     body = textwrap.dedent(f"""
     Source: ai-watcher/aiwatcher-local
     Branch: {branch}
@@ -231,28 +260,37 @@ def build_blocks() -> list[dict[str, object]]:
     Run: {run_url or 'local/manual'}
     """).strip()
     blocks = [
-        _heading(f"AIWatcher Local status - {stamp}"),
+        _heading(f"AIWatcher Local review - {stamp}"),
+        _paragraph("A compact team review generated from docs/scenarios.json. Open the toggles for detail; use the committed HTML suite for interactive filtering."),
         _paragraph(body),
-        *_scope_blocks(data),
-        *_acceptance_blocks(data),
-        _heading("Status counts"),
-        *_bullets(_status_lines(data)),
-        _heading("Lifecycle coverage"),
+        _heading("At a glance"),
+        *_bullets([
+            f"{scenario_count} total scenarios: {counts['done']} done, {counts['test']} to test, {counts['partial']} partial, {counts['gap']} not built.",
+            "Interactive suite: docs/aiwatcher-scenario-tests.html",
+            "Compact status: docs/scenario-status.md",
+            "Release checklist: docs/release-checklist.md",
+        ]),
+        _heading("Lifecycle progress"),
         *_bullets(_phase_lines(data)),
-        *_requirement_blocks(data),
-        *_workflow_blocks(data),
-        *_platform_blocks(data),
-        *_decision_blocks(data),
     ]
     top_open = _top_open_scenarios(data)
     if top_open:
-        blocks.append(_heading("Top open scenarios"))
+        blocks.append(_heading("Highest-priority open work"))
         blocks.extend(_bullets(top_open))
         remaining = max(0, len([s for s in data.get("scenarios", []) if isinstance(s, dict) and s.get("status") != "done"]) - len(top_open))
         if remaining:
             blocks.append(_paragraph(f"{remaining} more open scenarios are in docs/release-checklist.md."))
-    blocks.extend(_scenario_blocks(data))
-    blocks.append(_paragraph("Generated from docs/scenarios.json. Public repo contains no Notion credentials. Generated HTML: docs/aiwatcher-scenario-tests.html. Compact status: docs/scenario-status.md. Release checklist: docs/release-checklist.md."))
+    blocks.extend([
+        _divider(),
+        _toggle("Scope and product position", _scope_children(data)),
+        _toggle("Acceptance rules", _acceptance_children(data)),
+        _toggle("Requirements by lifecycle", _requirement_children(data)),
+        _toggle("UX workflows and concrete use cases", _workflow_children(data)),
+        _toggle("Platform coverage", _platform_children(data)),
+        _toggle("Open decisions", _decision_children(data)),
+        _toggle("Detailed scenario checklist", _scenario_children(data)),
+        _paragraph("Generated from docs/scenarios.json. Public repo contains no Notion credentials."),
+    ])
     return blocks
 
 

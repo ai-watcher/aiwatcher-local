@@ -38,6 +38,12 @@ practice, this means every commit pushed to GitHub gets a fresh generated-docs
 check and, when secrets are configured, appends a private status update to the
 team Notion page. Local-only commits do not sync until they are pushed.
 
+The Notion update is intentionally a compact review surface: current status,
+lifecycle progress, top open work, and collapsed sections for scope,
+requirements, workflows, platform coverage, open decisions, and detailed test
+cases. The richer interactive artifact remains
+`docs/aiwatcher-scenario-tests.html`.
+
 Required GitHub Actions secrets:
 
 | Secret | Purpose |
