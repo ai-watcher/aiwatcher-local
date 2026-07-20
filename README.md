@@ -82,9 +82,6 @@ aiwatcher today
 The examples below use `python -m aiwatcher_cli`; Windows users can replace
 `python` with `py` when needed.
 
-For implementation and release verification, use the canonical lifecycle suite at
-[`docs/aiwatcher-scenario-tests.html`](docs/aiwatcher-scenario-tests.html).
-
 ## Try the Core Workflows
 
 ### 1. See today's AI work

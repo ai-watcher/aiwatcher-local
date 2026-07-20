@@ -1,0 +1,142 @@
+# AIWatcher Local Docs
+
+This folder keeps deeper product, release, and lifecycle material out of the
+root README. The root README should stay focused on the developer's first run.
+
+## Repository Docs
+
+| File | Purpose | Source |
+| --- | --- | --- |
+| `AIWATCHER_LOCAL.md` | Product boundary, privacy contract, platform support, OSS vs Enterprise split, and validation checklist. | Edited by hand |
+| `dashboard.svg` | Public README dashboard preview. | Edited by hand or replaced as needed |
+| `dashboard-*.svg` | Public README workflow previews. | Edited by hand or replaced as needed |
+
+## Owner-Only Scenario Suite
+
+The scenario suite is owner-only project status. Keep its source data outside
+this public repo.
+
+Expected private repo layout:
+
+```text
+aiwatcher-local/
+  scenarios.json
+  index.html
+  scenario-status.md
+  release-checklist.md
+```
+
+`scenarios.json` is the private source of truth. The other files are generated.
+
+To regenerate locally from a private source file:
+
+```sh
+AIWATCHER_SCENARIOS_PATH=/path/to/private/aiwatcher-local/scenarios.json \
+AIWATCHER_SCENARIO_OUT_DIR=/path/to/private/aiwatcher-local \
+python3 scripts/generate_scenario_docs.py
+mv /path/to/private/aiwatcher-local/aiwatcher-scenario-tests.html \
+  /path/to/private/aiwatcher-local/index.html
+```
+
+## Owner-Only Team Status / Notion
+
+Do not put customer notes, sensitive roadmap commitments, project status, or
+competitive planning into this public repository. The public repo contains the
+generator and optional workflow only; the scenario source and generated HTML
+belong in a private owner repo or private docs workspace.
+
+The workflow at `.github/workflows/scenario-docs.yml` runs on every push. In
+practice, this means every commit pushed to GitHub validates the scenario
+generator and, when secrets are configured, syncs owner-only status surfaces.
+Local-only commits do not sync until they are pushed.
+
+### Owner-only HTML suite
+
+The best review experience is still the generated HTML suite because it has
+tabs, lifecycle coverage, filters, search, and expandable test cases. Because
+this repository is public, the workflow does not publish the HTML through
+GitHub Pages or public workflow artifacts.
+
+To make the HTML suite owner-only, create a private docs repo such as
+`ai-watcher/aiwatcher-internal-docs` and configure these Actions secrets on
+this public repo:
+
+| Secret | Purpose |
+| --- | --- |
+| `AIWATCHER_PRIVATE_DOCS_REPO` | Private destination repo, for example `ai-watcher/aiwatcher-internal-docs`. |
+| `AIWATCHER_PRIVATE_DOCS_TOKEN` | Fine-grained token with read/write contents access to that private repo. |
+
+When configured, every pushed commit reads
+`aiwatcher-local/scenarios.json` from the private repo and refreshes:
+
+- `index.html` — the interactive scenario suite
+- `scenario-status.md` — compact status
+- `release-checklist.md` — open release checklist
+
+Owners can open the private repo file directly or publish it from that private
+repo using whichever private docs host the team prefers.
+
+### Notion mirror
+
+The Notion update is intentionally a lightweight navigable team workspace, not
+a replacement for the HTML suite and not a historical append-only log. On each
+sync it cleans the configured parent page's generated top-level content, keeps
+managed child pages/databases, and updates:
+
+- `AIWatcher Review Home` — current status, lifecycle progress, top open work,
+  and links to the rest of the workspace.
+- `Scenario Tracker` — a Notion database that can be filtered by `Status`
+  (`Done`, `In progress`, `To verify`, `Blocker`), `Phase`, `Priority`, and
+  platform.
+- `Scope` — product position, OSS boundary, strategic filter, and non-scope.
+- `Requirements` — lifecycle requirements mapped to user value and scenario
+  coverage.
+- `UX Workflows` — daily developer workflows and concrete examples.
+- `Gaps` — blockers, in-progress work, to-verify items, and open decisions.
+- `Test Cases` — full scenario checklist for manual verification.
+
+Required GitHub Actions secrets:
+
+| Secret | Purpose |
+| --- | --- |
+| `NOTION_TOKEN` | Internal Notion integration token. |
+| `NOTION_PAGE_ID` | Destination Notion page or block id where status updates are appended. |
+
+The Notion integration should have read, insert, and update content access for
+the destination page if you want the sync to clean old generated content and
+refresh child pages in place. If update/delete access is missing, the workflow
+will warn and continue. It will still update what the token is allowed to
+update, but it intentionally skips appending duplicate generated content to an
+existing child page that could not be cleaned first. Old generated blocks may
+remain visible until the page is cleaned manually or the integration permissions
+are expanded.
+
+Recommended flow:
+
+1. Keep this OSS repo public and free of Notion tokens.
+2. Configure `NOTION_TOKEN` and `NOTION_PAGE_ID` as GitHub Actions secrets in
+   this repo if you want the Notion mirror.
+3. Configure `AIWATCHER_PRIVATE_DOCS_REPO` and
+   `AIWATCHER_PRIVATE_DOCS_TOKEN` if you want owner-only HTML.
+4. The workflow at `.github/workflows/scenario-docs.yml` runs on every push and
+   by manual `workflow_dispatch`. If private sync secrets are missing, those
+   steps skip successfully so public contributors are not blocked.
+
+The sync intentionally rewrites generated content in the configured Notion
+parent page. Keep manual notes in a separate child page if they should not be
+managed by automation.
+
+Manual dry run without private source or secrets:
+
+```sh
+python3 -m py_compile scripts/generate_scenario_docs.py scripts/sync_notion_status.py
+python3 scripts/sync_notion_status.py
+```
+
+The second command should print that Notion sync was skipped. To test generation
+against a real private source, set `AIWATCHER_SCENARIOS_PATH` and
+`AIWATCHER_SCENARIO_OUT_DIR`. To test against a real private Notion page, also
+export the Notion secrets in your shell. Do not commit those values.
+
+This keeps the public OSS docs honest while giving the team a current private
+status page.

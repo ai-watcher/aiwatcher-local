@@ -1,0 +1,90 @@
+name: Scenario docs and private status sync
+
+on:
+  push:
+    branches:
+      - "**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-scenario-tooling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate scenario doc tooling
+        run: python3 -m py_compile scripts/generate_scenario_docs.py scripts/sync_notion_status.py
+
+  sync-notion:
+    runs-on: ubuntu-latest
+    needs: verify-scenario-tooling
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+    env:
+      PRIVATE_DOCS_REPO: ${{ secrets.AIWATCHER_PRIVATE_DOCS_REPO }}
+      PRIVATE_DOCS_TOKEN: ${{ secrets.AIWATCHER_PRIVATE_DOCS_TOKEN }}
+      NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+      NOTION_PAGE_ID: ${{ secrets.NOTION_PAGE_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Sync private Notion status page
+        env:
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$PRIVATE_DOCS_REPO" ] || [ -z "$PRIVATE_DOCS_TOKEN" ] || [ -z "$NOTION_TOKEN" ] || [ -z "$NOTION_PAGE_ID" ]; then
+            echo "Skipping Notion sync: private docs repo/token and Notion token/page id are required."
+            exit 0
+          fi
+          git clone "https://x-access-token:${PRIVATE_DOCS_TOKEN}@github.com/${PRIVATE_DOCS_REPO}.git" private-docs
+          AIWATCHER_SCENARIOS_PATH="$PWD/private-docs/aiwatcher-local/scenarios.json" \
+            python3 scripts/sync_notion_status.py
+
+  sync-private-html-suite:
+    runs-on: ubuntu-latest
+    needs: verify-scenario-tooling
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+    env:
+      PRIVATE_DOCS_REPO: ${{ secrets.AIWATCHER_PRIVATE_DOCS_REPO }}
+      PRIVATE_DOCS_TOKEN: ${{ secrets.AIWATCHER_PRIVATE_DOCS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate and copy scenario suite to private docs repo
+        run: |
+          if [ -z "$PRIVATE_DOCS_REPO" ] || [ -z "$PRIVATE_DOCS_TOKEN" ]; then
+            echo "Skipping private HTML suite sync: AIWATCHER_PRIVATE_DOCS_REPO and AIWATCHER_PRIVATE_DOCS_TOKEN are required."
+            exit 0
+          fi
+          git clone "https://x-access-token:${PRIVATE_DOCS_TOKEN}@github.com/${PRIVATE_DOCS_REPO}.git" private-docs
+          test -f private-docs/aiwatcher-local/scenarios.json
+          AIWATCHER_SCENARIOS_PATH="$PWD/private-docs/aiwatcher-local/scenarios.json" \
+            AIWATCHER_SCENARIO_OUT_DIR="$PWD/private-docs/aiwatcher-local" \
+            python3 scripts/generate_scenario_docs.py
+          mv private-docs/aiwatcher-local/aiwatcher-scenario-tests.html private-docs/aiwatcher-local/index.html
+          {
+            echo "# AIWatcher Local Scenario Suite"
+            echo
+            echo "Generated from ai-watcher/aiwatcher-local."
+            echo
+            echo "- Source branch: ${GITHUB_REF_NAME}"
+            echo "- Source commit: ${GITHUB_SHA}"
+            echo "- Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo
+            echo "Open \`aiwatcher-local/index.html\` for the interactive suite."
+          } > private-docs/aiwatcher-local/README.md
+          cd private-docs
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add aiwatcher-local
+          if git diff --cached --quiet; then
+            echo "Private scenario suite already up to date."
+          else
+            git commit -m "Update AIWatcher Local scenario suite"
+            git push
+          fi
