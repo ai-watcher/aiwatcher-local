@@ -10,7 +10,7 @@ from __future__ import annotations
 import html
 import json
 import os
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -18,8 +18,11 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = Path(os.environ.get("AIWATCHER_SCENARIOS_PATH", ROOT / "docs" / "scenarios.json"))
 OUT_DIR = Path(os.environ.get("AIWATCHER_SCENARIO_OUT_DIR", ROOT / "docs"))
 HTML_OUT = OUT_DIR / "aiwatcher-scenario-tests.html"
-STATUS_OUT = OUT_DIR / "scenario-status.md"
-CHECKLIST_OUT = OUT_DIR / "release-checklist.md"
+README_OUT = OUT_DIR / "README.md"
+SCOPE_OUT = OUT_DIR / "scope.md"
+REQUIREMENTS_OUT = OUT_DIR / "requirements.md"
+PLATFORMS_OUT = OUT_DIR / "platforms.md"
+TEST_CASES_OUT = OUT_DIR / "test-cases.md"
 
 STATUS_LABELS = {
     "done": "Done",
@@ -29,6 +32,21 @@ STATUS_LABELS = {
 }
 
 STATUS_ORDER = {"gap": 0, "partial": 1, "test": 2, "done": 3}
+STATUS_ICONS = {
+    "done": "Done",
+    "test": "To verify",
+    "partial": "In progress",
+    "gap": "Gap",
+}
+
+PHASE_PURPOSES = {
+    "Plan": "Identify risky, broad, or expensive work before it starts.",
+    "Watch": "Detect context bloat, loop pressure, quota risk, and session fatigue while work is happening.",
+    "Control": "Warn, gate, block, rescope, route, or stop risky execution paths.",
+    "Prove": "Record decisions, resulting sessions, local evidence, and measured impact.",
+    "Improve": "Learn what worked and make the next run smaller, safer, or more successful.",
+    "Failsafe": "Prove platform claims and keep install/uninstall behavior trustworthy.",
+}
 
 
 def load_data() -> dict[str, Any]:
@@ -43,6 +61,269 @@ def load_data() -> dict[str, Any]:
 def status_pill(status: str) -> str:
     label = STATUS_LABELS.get(status, status)
     return f'<span class="pill p-{html.escape(status)}">{html.escape(label)}</span>'
+
+
+def md_cell(value: Any) -> str:
+    text = str(value or "")
+    return text.replace("|", "\\|").replace("\n", "<br>")
+
+
+def status_text(status: str) -> str:
+    return STATUS_ICONS.get(status, STATUS_LABELS.get(status, status))
+
+
+def section_nav() -> str:
+    return (
+        "[Review Home](README.md) · "
+        "[Scope](scope.md) · "
+        "[Requirements](requirements.md) · "
+        "[Platforms](platforms.md) · "
+        "[Test Cases](test-cases.md)"
+    )
+
+
+def render_counts(data: dict[str, Any]) -> list[str]:
+    counts = Counter(s.get("status", "unknown") for s in data["scenarios"])
+    return [
+        "| Status | Count |",
+        "| --- | ---: |",
+        f"| Done | {counts['done']} |",
+        f"| To verify | {counts['test']} |",
+        f"| In progress | {counts['partial']} |",
+        f"| Gap | {counts['gap']} |",
+    ]
+
+
+def render_lifecycle_counts(data: dict[str, Any]) -> list[str]:
+    rows = [
+        "| Lifecycle | Done | Total | Coverage |",
+        "| --- | ---: | ---: | ---: |",
+    ]
+    for phase in ["Plan", "Watch", "Control", "Prove", "Improve", "Failsafe"]:
+        scenarios = [s for s in data["scenarios"] if s.get("phase") == phase]
+        done = len([s for s in scenarios if s.get("status") == "done"])
+        total = len(scenarios)
+        coverage = f"{round((done / total) * 100)}%" if total else "-"
+        rows.append(f"| {phase} | {done} | {total} | {coverage} |")
+    return rows
+
+
+def render_review_home(data: dict[str, Any]) -> str:
+    open_items = [s for s in data["scenarios"] if s.get("status") != "done"]
+    priority = sorted(open_items, key=lambda s: (STATUS_ORDER.get(s.get("status", ""), 9), s.get("id", "")))[:10]
+    lines = [
+        "# AIWatcher Local Review Home",
+        "",
+        section_nav(),
+        "",
+        f"Updated: `{data.get('updated', 'unknown')}`",
+        "",
+        data.get("scope", {}).get("position", data.get("summary", "")),
+        "",
+        "## Status",
+        "",
+        *render_counts(data),
+        "",
+        "## Lifecycle Coverage",
+        "",
+        *render_lifecycle_counts(data),
+        "",
+        "## What To Review First",
+        "",
+    ]
+    if priority:
+        for scenario in priority:
+            lines.append(
+                f"- `{scenario['id']}` {scenario['phase']} - {status_text(scenario['status'])}: "
+                f"[{scenario['title']}](test-cases.md#{scenario['id'].lower()})"
+            )
+    else:
+        lines.append("- No open scenarios.")
+    lines.extend([
+        "",
+        "## Review Sections",
+        "",
+        "| Section | Use it for |",
+        "| --- | --- |",
+        "| [Scope](scope.md) | Product boundary, strategic filter, and acceptance rules. |",
+        "| [Requirements](requirements.md) | Lifecycle requirement matrix and coverage. |",
+        "| [Platforms](platforms.md) | Coverage by Claude, Codex, Cursor, browser, VS Code, and terminal surfaces. |",
+        "| [Test Cases](test-cases.md) | Full scenario checklist, status summary, open gaps, UX workflows, examples, and decisions. |",
+        "",
+        "## Interactive HTML",
+        "",
+        "`index.html` is still generated for the tabbed local browser experience. "
+        "GitHub displays HTML files as source, so use these Markdown pages for normal GitHub review.",
+        "",
+        "Generated from `aiwatcher-local/scenarios.json`. The JSON is the private source of truth; "
+        "the Markdown and HTML files are generated.",
+        "",
+    ])
+    return "\n".join(lines)
+
+
+def render_scope_markdown(data: dict[str, Any]) -> str:
+    scope = data.get("scope", {})
+    lines = [
+        "# Scope",
+        "",
+        section_nav(),
+        "",
+        "## Position",
+        "",
+        scope.get("position", ""),
+        "",
+        "## OSS Boundary",
+        "",
+        scope.get("oss_boundary", ""),
+        "",
+        "## Strategic Filter",
+        "",
+    ]
+    for item in scope.get("strategic_filter", []):
+        lines.append(f"- {item}")
+    lines.extend(["", "## Not In OSS Scope", ""])
+    for item in scope.get("not_scope", []):
+        lines.append(f"- {item}")
+    lines.extend(["", "## Acceptance Rules", ""])
+    for rule in data.get("acceptance_rules", []):
+        lines.extend([f"### {rule.get('title', '')}", "", rule.get("body", ""), ""])
+    return "\n".join(lines)
+
+
+def render_requirements_markdown(data: dict[str, Any]) -> str:
+    lines = [
+        "# Requirements",
+        "",
+        section_nav(),
+        "",
+        "## Lifecycle",
+        "",
+    ]
+    for phase in ["Plan", "Watch", "Control", "Prove", "Improve", "Failsafe"]:
+        scenarios = [s["id"] for s in data["scenarios"] if s.get("phase") == phase]
+        lines.append(f"- **{phase}:** {PHASE_PURPOSES[phase]} Covered by {', '.join(scenarios) or 'none'}.")
+    lines.extend([
+        "",
+        "## Requirement Matrix",
+        "",
+        "| Requirement | Lifecycle | User value | Status | Covered by |",
+        "| --- | --- | --- | --- | --- |",
+    ])
+    for req in data.get("requirements", []):
+        lines.append(
+            f"| {md_cell(req.get('requirement'))} | {md_cell(req.get('lifecycle'))} | "
+            f"{md_cell(req.get('user_value'))} | {status_text(req.get('status', ''))} | "
+            f"{md_cell(req.get('covered_by'))} |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_platforms_markdown(data: dict[str, Any]) -> str:
+    lines = [
+        "# Platform Coverage",
+        "",
+        section_nav(),
+        "",
+        "> Do not claim universal interception. Verify each platform with hook-status or live behavior. "
+        "Where hooks do not exist, use Prompt Companion, MCP, wrappers, or thin extensions through the local preflight API.",
+        "",
+        "| Surface | Current mechanism | Coverage | Status | What to verify |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for platform in data.get("platforms", []):
+        lines.append(
+            f"| {md_cell(platform.get('surface'))} | {md_cell(platform.get('mechanism'))} | "
+            f"{md_cell(platform.get('coverage'))} | {status_text(platform.get('status', ''))} | "
+            f"{md_cell(platform.get('verify'))} |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_test_cases_markdown(data: dict[str, Any]) -> str:
+    open_scenarios = [s for s in data["scenarios"] if s.get("status") != "done"]
+    lines = [
+        "# Test Cases",
+        "",
+        section_nav(),
+        "",
+        "## Status Summary",
+        "",
+        *render_counts(data),
+        "",
+        "## Lifecycle Coverage",
+        "",
+        *render_lifecycle_counts(data),
+        "",
+        "## UX Workflows",
+        "",
+    ]
+    for workflow in data.get("workflows", []):
+        lines.extend([
+            f"### {workflow.get('title', '')}",
+            "",
+            f"- Phase: `{workflow.get('phase', '')}`",
+            f"- Status: {status_text(workflow.get('status', ''))}",
+            f"- Experience: {workflow.get('body', '')}",
+            "",
+        ])
+    lines.extend([
+        "## Concrete Examples",
+        "",
+        "| Situation | AIWatcher response | Expected feeling | Status |",
+        "| --- | --- | --- | --- |",
+    ])
+    for example in data.get("examples", []):
+        lines.append(
+            f"| {md_cell(example.get('situation'))} | {md_cell(example.get('response'))} | "
+            f"{md_cell(example.get('feeling'))} | {status_text(example.get('status', ''))} |"
+        )
+    lines.extend(["", "## Open Gaps and To-Verify Work", ""])
+    for status in ["gap", "partial", "test"]:
+        items = [s for s in open_scenarios if s.get("status") == status]
+        if not items:
+            continue
+        lines.extend([f"### {STATUS_LABELS[status]}", ""])
+        for scenario in items:
+            lines.append(
+                f"- `{scenario['id']}` {scenario['phase']} - [{scenario['title']}](#{scenario['id'].lower()}): "
+                f"{scenario.get('expected', '')}"
+            )
+        lines.append("")
+    lines.extend(["## Open Decisions", ""])
+    for decision in data.get("open_decisions", []):
+        lines.extend([
+            f"### {decision.get('decision', '')}",
+            "",
+            f"- Status: {decision.get('status', 'open')}",
+            f"- Options: {decision.get('options', '')}",
+            f"- Recommendation: {decision.get('recommendation', '')}",
+            "",
+        ])
+    lines.extend(["## All Scenario Tests", ""])
+    for phase in ["Plan", "Watch", "Control", "Prove", "Improve", "Failsafe"]:
+        scenarios = [s for s in data["scenarios"] if s.get("phase") == phase]
+        if not scenarios:
+            continue
+        lines.extend([f"## {phase}", ""])
+        for scenario in scenarios:
+            lines.extend([
+                f'<a id="{scenario["id"].lower()}"></a>',
+                "",
+                f"### {scenario['id']} - {scenario['title']}",
+                "",
+                f"- Status: {status_text(scenario.get('status', ''))}",
+                f"- Platform: {scenario.get('platform', '')}",
+                f"- Go to: {scenario.get('go', '')}",
+                f"- Do: {scenario.get('do', '')}",
+                f"- Expected: {scenario.get('expected', '')}",
+                f"- User value: {scenario.get('value', '')}",
+                f"- Why it matters: {scenario.get('why', '')}",
+                "",
+            ])
+    return "\n".join(lines)
 
 
 def render_html(data: dict[str, Any]) -> str:
@@ -121,66 +402,21 @@ render();
 """
 
 
-def render_status_markdown(data: dict[str, Any]) -> str:
-    counts = Counter(s["status"] for s in data["scenarios"])
-    lines = [
-        "# AIWatcher Local Scenario Status",
-        "",
-        "Generated from `docs/scenarios.json`. Do not edit by hand.",
-        "",
-        f"Updated: {data.get('updated', 'unknown')}",
-        "",
-        "| Status | Count |",
-        "| --- | ---: |",
-    ]
-    for status in ["done", "test", "partial", "gap"]:
-        lines.append(f"| {STATUS_LABELS[status]} | {counts[status]} |")
-    lines.extend(["", "| ID | Phase | Status | Scenario |", "| --- | --- | --- | --- |"])
-    for scenario in data["scenarios"]:
-        lines.append(
-            f"| {scenario['id']} | {scenario['phase']} | {STATUS_LABELS.get(scenario['status'], scenario['status'])} | {scenario['title']} |"
-        )
-    return "\n".join(lines) + "\n"
-
-
-def render_release_checklist(data: dict[str, Any]) -> str:
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for scenario in sorted(data["scenarios"], key=lambda s: (STATUS_ORDER.get(s["status"], 9), s["id"])):
-        if scenario["status"] != "done":
-            grouped[scenario["status"]].append(scenario)
-    lines = [
-        "# AIWatcher Local Release Checklist",
-        "",
-        "Generated from `docs/scenarios.json`. Do not edit by hand.",
-        "",
-        "Use this before public OSS releases and before syncing status to a private team workspace.",
-        "",
-    ]
-    for status in ["gap", "partial", "test"]:
-        items = grouped.get(status, [])
-        if not items:
-            continue
-        lines.extend([f"## {STATUS_LABELS[status]}", ""])
-        for scenario in items:
-            lines.extend([
-                f"- [ ] `{scenario['id']}` {scenario['title']}",
-                f"  - Phase: {scenario['phase']}",
-                f"  - Verify: {scenario['do']}",
-                f"  - Expected: {scenario['expected']}",
-            ])
-        lines.append("")
-    return "\n".join(lines)
-
-
 def main() -> int:
     data = load_data()
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     HTML_OUT.write_text(render_html(data), encoding="utf-8")
-    STATUS_OUT.write_text(render_status_markdown(data), encoding="utf-8")
-    CHECKLIST_OUT.write_text(render_release_checklist(data), encoding="utf-8")
+    README_OUT.write_text(render_review_home(data), encoding="utf-8")
+    SCOPE_OUT.write_text(render_scope_markdown(data), encoding="utf-8")
+    REQUIREMENTS_OUT.write_text(render_requirements_markdown(data), encoding="utf-8")
+    PLATFORMS_OUT.write_text(render_platforms_markdown(data), encoding="utf-8")
+    TEST_CASES_OUT.write_text(render_test_cases_markdown(data), encoding="utf-8")
     print(f"Generated {HTML_OUT}")
-    print(f"Generated {STATUS_OUT}")
-    print(f"Generated {CHECKLIST_OUT}")
+    print(f"Generated {README_OUT}")
+    print(f"Generated {SCOPE_OUT}")
+    print(f"Generated {REQUIREMENTS_OUT}")
+    print(f"Generated {PLATFORMS_OUT}")
+    print(f"Generated {TEST_CASES_OUT}")
     return 0
 
 
