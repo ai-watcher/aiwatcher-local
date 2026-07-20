@@ -35,6 +35,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Sync private Notion status page
+        continue-on-error: true
         env:
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -63,21 +64,16 @@ jobs:
           fi
           git clone "https://x-access-token:${PRIVATE_DOCS_TOKEN}@github.com/${PRIVATE_DOCS_REPO}.git" private-docs
           test -f private-docs/aiwatcher-local/scenarios.json
+          rm -f \
+            private-docs/aiwatcher-local/gaps.md \
+            private-docs/aiwatcher-local/workflows.md \
+            private-docs/aiwatcher-local/release-checklist.md \
+            private-docs/aiwatcher-local/scenario-status.md \
+            private-docs/aiwatcher-local/sync-metadata.md
           AIWATCHER_SCENARIOS_PATH="$PWD/private-docs/aiwatcher-local/scenarios.json" \
             AIWATCHER_SCENARIO_OUT_DIR="$PWD/private-docs/aiwatcher-local" \
             python3 scripts/generate_scenario_docs.py
           mv private-docs/aiwatcher-local/aiwatcher-scenario-tests.html private-docs/aiwatcher-local/index.html
-          {
-            echo "# AIWatcher Local Scenario Suite"
-            echo
-            echo "Generated from ai-watcher/aiwatcher-local."
-            echo
-            echo "- Source branch: ${GITHUB_REF_NAME}"
-            echo "- Source commit: ${GITHUB_SHA}"
-            echo "- Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-            echo
-            echo "Open \`aiwatcher-local/index.html\` for the interactive suite."
-          } > private-docs/aiwatcher-local/README.md
           cd private-docs
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

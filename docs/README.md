@@ -21,12 +21,17 @@ Expected private repo layout:
 ```text
 aiwatcher-local/
   scenarios.json
+  README.md
+  scope.md
+  requirements.md
+  platforms.md
+  test-cases.md
   index.html
-  scenario-status.md
-  release-checklist.md
 ```
 
 `scenarios.json` is the private source of truth. The other files are generated.
+Use `README.md` for GitHub-native review. Use `index.html` when you want the
+interactive local browser suite; GitHub shows committed HTML as source.
 
 To regenerate locally from a private source file:
 
@@ -69,12 +74,17 @@ this public repo:
 When configured, every pushed commit reads
 `aiwatcher-local/scenarios.json` from the private repo and refreshes:
 
-- `index.html` — the interactive scenario suite
-- `scenario-status.md` — compact status
-- `release-checklist.md` — open release checklist
+- `README.md` — GitHub-native review home
+- `scope.md` — product boundary, strategic filter, and acceptance rules
+- `requirements.md` — lifecycle requirements and coverage
+- `platforms.md` — platform coverage and verification posture
+- `test-cases.md` — all scenarios, status summary, UX workflows, examples,
+  open gaps, and decisions
+- `index.html` — the interactive scenario suite for local browser/private host
 
-Owners can open the private repo file directly or publish it from that private
-repo using whichever private docs host the team prefers.
+Owners can review the Markdown pages directly in GitHub. The HTML file is still
+generated for the richer tabbed experience, but it should be downloaded/opened
+locally or published from the private repo using a private docs host.
 
 ### Notion mirror
 
