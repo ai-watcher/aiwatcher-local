@@ -9,15 +9,17 @@ from __future__ import annotations
 
 import html
 import json
+import os
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "docs" / "scenarios.json"
-HTML_OUT = ROOT / "docs" / "aiwatcher-scenario-tests.html"
-STATUS_OUT = ROOT / "docs" / "scenario-status.md"
-CHECKLIST_OUT = ROOT / "docs" / "release-checklist.md"
+SOURCE = Path(os.environ.get("AIWATCHER_SCENARIOS_PATH", ROOT / "docs" / "scenarios.json"))
+OUT_DIR = Path(os.environ.get("AIWATCHER_SCENARIO_OUT_DIR", ROOT / "docs"))
+HTML_OUT = OUT_DIR / "aiwatcher-scenario-tests.html"
+STATUS_OUT = OUT_DIR / "scenario-status.md"
+CHECKLIST_OUT = OUT_DIR / "release-checklist.md"
 
 STATUS_LABELS = {
     "done": "Done",
@@ -30,6 +32,11 @@ STATUS_ORDER = {"gap": 0, "partial": 1, "test": 2, "done": 3}
 
 
 def load_data() -> dict[str, Any]:
+    if not SOURCE.exists():
+        raise FileNotFoundError(
+            f"Scenario source not found at {SOURCE}. Set AIWATCHER_SCENARIOS_PATH "
+            "to a private scenarios.json file when generating owner-only docs."
+        )
     return json.loads(SOURCE.read_text(encoding="utf-8"))
 
 
@@ -167,12 +174,13 @@ def render_release_checklist(data: dict[str, Any]) -> str:
 
 def main() -> int:
     data = load_data()
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
     HTML_OUT.write_text(render_html(data), encoding="utf-8")
     STATUS_OUT.write_text(render_status_markdown(data), encoding="utf-8")
     CHECKLIST_OUT.write_text(render_release_checklist(data), encoding="utf-8")
-    print(f"Generated {HTML_OUT.relative_to(ROOT)}")
-    print(f"Generated {STATUS_OUT.relative_to(ROOT)}")
-    print(f"Generated {CHECKLIST_OUT.relative_to(ROOT)}")
+    print(f"Generated {HTML_OUT}")
+    print(f"Generated {STATUS_OUT}")
+    print(f"Generated {CHECKLIST_OUT}")
     return 0
 
 

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-SCENARIOS = ROOT / "docs" / "scenarios.json"
+SCENARIOS = Path(os.environ.get("AIWATCHER_SCENARIOS_PATH", ROOT / "docs" / "scenarios.json"))
 NOTION_VERSION = "2022-06-28"
 API = "https://api.notion.com/v1"
 
@@ -477,6 +477,13 @@ def _sync_page(page_id: str, token: str, blocks: list[dict[str, Any]]) -> None:
 
 
 def sync_workspace(parent_id: str, token: str) -> None:
+    if not SCENARIOS.exists():
+        print(
+            f"Skipping Notion sync: scenario source not found at {SCENARIOS}. "
+            "Set AIWATCHER_SCENARIOS_PATH to a private scenarios.json file.",
+            file=sys.stderr,
+        )
+        return
     data = json.loads(SCENARIOS.read_text(encoding="utf-8"))
     _clean_page_content(parent_id, token, keep_children=True)
     pages, databases = _find_existing_children(parent_id, token)
