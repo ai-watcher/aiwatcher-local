@@ -1129,21 +1129,6 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         first_bullet = rendered.index("- ", why_hand_off)
         self.assertEqual(loop_in_capsule, first_bullet + 2)
 
-    def test_today_passively_captures_evidence_snapshots(self) -> None:
-        rows = [session(1, project="/repo/orcha")]
-        output = io.StringIO()
-
-        with (
-            patch.object(cli, "scan_all", return_value=rows),
-            patch.object(cli, "link_recent_interventions_to_sessions", return_value=None),
-            patch.object(cli, "record_missing_evidence_snapshots", return_value=0) as capture,
-            patch("sys.stdout", output),
-        ):
-            result = cli.command_today(SimpleNamespace())
-
-        self.assertEqual(result, 0)
-        capture.assert_called_once_with(rows)
-
     def test_today_shows_every_model_used_and_tool_surface(self) -> None:
         """Regression for the bug where a session that used more than one model
         (e.g. Fable via Claude Desktop, then Sonnet) only showed its last model
@@ -1160,7 +1145,6 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         with (
             patch.object(cli, "scan_all", return_value=[row]),
             patch.object(cli, "link_recent_interventions_to_sessions", return_value=None),
-            patch.object(cli, "record_missing_evidence_snapshots", return_value=0),
             patch("sys.stdout", output),
         ):
             result = cli.command_today(SimpleNamespace())
