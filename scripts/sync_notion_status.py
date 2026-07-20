@@ -337,14 +337,13 @@ def _home_blocks(data: dict[str, Any], pages: dict[str, str], database_id: str) 
     ]
     links = [f"{title}: {_page_id_to_url(page_id)}" for title, page_id in pages.items() if title in SECTION_PAGES]
     links.append(f"{TRACKER_TITLE}: {_page_id_to_url(database_id)}")
-    links.insert(0, "Interactive HTML suite: https://ai-watcher.github.io/aiwatcher-local/")
     open_work = [
         f"{item.get('id')} [{_team_status(str(item.get('status')))}] {item.get('phase')}: {item.get('title')}"
         for item in _top_open_scenarios(data)
     ]
     return [
         _heading("AIWatcher Local review"),
-        _paragraph("Team-facing status for the OSS control-loop roadmap. Use the interactive HTML suite for the best review experience; use Scenario Tracker for Notion-native filters."),
+        _paragraph("Team-facing status for the OSS control-loop roadmap. Use Scenario Tracker for Notion-native filters; keep any richer HTML review surface in a private owner-only location."),
         *_bullets(lines),
         _heading("Navigation"),
         *_bullets(links),
