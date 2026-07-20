@@ -31,27 +31,20 @@ jobs:
       NOTION_PAGE_ID: ${{ secrets.NOTION_PAGE_ID }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: public-source
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Skip when private sync secrets are missing
-        if: ${{ env.PRIVATE_DOCS_REPO == '' || env.PRIVATE_DOCS_TOKEN == '' || env.NOTION_TOKEN == '' || env.NOTION_PAGE_ID == '' }}
-        run: echo "Skipping Notion sync: private docs repo/token and Notion token/page id are required."
-      - name: Checkout private docs repo
-        if: ${{ env.PRIVATE_DOCS_REPO != '' && env.PRIVATE_DOCS_TOKEN != '' && env.NOTION_TOKEN != '' && env.NOTION_PAGE_ID != '' }}
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.PRIVATE_DOCS_REPO }}
-          token: ${{ env.PRIVATE_DOCS_TOKEN }}
-          path: private-docs
       - name: Sync private Notion status page
-        if: ${{ env.PRIVATE_DOCS_REPO != '' && env.PRIVATE_DOCS_TOKEN != '' && env.NOTION_TOKEN != '' && env.NOTION_PAGE_ID != '' }}
         env:
-          AIWATCHER_SCENARIOS_PATH: private-docs/aiwatcher-local/scenarios.json
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: python3 public-source/scripts/sync_notion_status.py
+        run: |
+          if [ -z "$PRIVATE_DOCS_REPO" ] || [ -z "$PRIVATE_DOCS_TOKEN" ] || [ -z "$NOTION_TOKEN" ] || [ -z "$NOTION_PAGE_ID" ]; then
+            echo "Skipping Notion sync: private docs repo/token and Notion token/page id are required."
+            exit 0
+          fi
+          git clone "https://x-access-token:${PRIVATE_DOCS_TOKEN}@github.com/${PRIVATE_DOCS_REPO}.git" private-docs
+          AIWATCHER_SCENARIOS_PATH="$PWD/private-docs/aiwatcher-local/scenarios.json" \
+            python3 scripts/sync_notion_status.py
 
   sync-private-html-suite:
     runs-on: ubuntu-latest
@@ -62,25 +55,17 @@ jobs:
       PRIVATE_DOCS_TOKEN: ${{ secrets.AIWATCHER_PRIVATE_DOCS_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: public-source
-      - name: Skip when private docs secrets are missing
-        if: ${{ env.PRIVATE_DOCS_REPO == '' || env.PRIVATE_DOCS_TOKEN == '' }}
-        run: echo "Skipping private HTML suite sync: AIWATCHER_PRIVATE_DOCS_REPO and AIWATCHER_PRIVATE_DOCS_TOKEN are required."
-      - name: Checkout private docs repo
-        if: ${{ env.PRIVATE_DOCS_REPO != '' && env.PRIVATE_DOCS_TOKEN != '' }}
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.PRIVATE_DOCS_REPO }}
-          token: ${{ env.PRIVATE_DOCS_TOKEN }}
-          path: private-docs
-      - name: Copy scenario suite to private docs repo
-        if: ${{ env.PRIVATE_DOCS_REPO != '' && env.PRIVATE_DOCS_TOKEN != '' }}
+      - name: Generate and copy scenario suite to private docs repo
         run: |
+          if [ -z "$PRIVATE_DOCS_REPO" ] || [ -z "$PRIVATE_DOCS_TOKEN" ]; then
+            echo "Skipping private HTML suite sync: AIWATCHER_PRIVATE_DOCS_REPO and AIWATCHER_PRIVATE_DOCS_TOKEN are required."
+            exit 0
+          fi
+          git clone "https://x-access-token:${PRIVATE_DOCS_TOKEN}@github.com/${PRIVATE_DOCS_REPO}.git" private-docs
           test -f private-docs/aiwatcher-local/scenarios.json
           AIWATCHER_SCENARIOS_PATH="$PWD/private-docs/aiwatcher-local/scenarios.json" \
             AIWATCHER_SCENARIO_OUT_DIR="$PWD/private-docs/aiwatcher-local" \
-            python3 public-source/scripts/generate_scenario_docs.py
+            python3 scripts/generate_scenario_docs.py
           mv private-docs/aiwatcher-local/aiwatcher-scenario-tests.html private-docs/aiwatcher-local/index.html
           {
             echo "# AIWatcher Local Scenario Suite"
@@ -93,10 +78,7 @@ jobs:
             echo
             echo "Open \`aiwatcher-local/index.html\` for the interactive suite."
           } > private-docs/aiwatcher-local/README.md
-      - name: Commit private docs update
-        if: ${{ env.PRIVATE_DOCS_REPO != '' && env.PRIVATE_DOCS_TOKEN != '' }}
-        working-directory: private-docs
-        run: |
+          cd private-docs
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add aiwatcher-local
