@@ -8,6 +8,8 @@ on:
 
 permissions:
   contents: read
+  pages: write
+  id-token: write
 
 jobs:
   verify-generated-docs:
@@ -21,6 +23,45 @@ jobs:
         run: python3 scripts/generate_scenario_docs.py
       - name: Verify generated files are committed
         run: git diff --exit-code -- docs/aiwatcher-scenario-tests.html docs/scenario-status.md docs/release-checklist.md
+
+  upload-html-suite:
+    runs-on: ubuntu-latest
+    needs: verify-generated-docs
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upload interactive scenario suite
+        uses: actions/upload-artifact@v4
+        with:
+          name: aiwatcher-scenario-suite
+          path: |
+            docs/aiwatcher-scenario-tests.html
+            docs/scenarios.json
+            docs/scenario-status.md
+            docs/release-checklist.md
+          if-no-files-found: error
+
+  publish-html-suite:
+    runs-on: ubuntu-latest
+    needs: verify-generated-docs
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - name: Prepare Pages artifact
+        run: |
+          mkdir -p .scenario-site
+          cp docs/aiwatcher-scenario-tests.html .scenario-site/index.html
+          cp docs/scenarios.json .scenario-site/scenarios.json
+          cp docs/scenario-status.md .scenario-site/scenario-status.md
+          cp docs/release-checklist.md .scenario-site/release-checklist.md
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: .scenario-site
+      - id: deployment
+        uses: actions/deploy-pages@v4
 
   sync-notion:
     runs-on: ubuntu-latest

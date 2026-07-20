@@ -27,6 +27,26 @@ automatically:
 python3 scripts/install_git_hooks.py
 ```
 
+## Live Scenario Suite
+
+The interactive HTML suite is the canonical team review surface because it has
+tabs, lifecycle coverage, filters, search, and expandable test cases. Notion is
+only a private index/status mirror.
+
+Every pushed commit uploads an `aiwatcher-scenario-suite` artifact from the
+`Scenario docs and private status sync` workflow. Download that artifact from
+the workflow run when reviewing a branch or PR.
+
+After this workflow is merged to `main`, GitHub Pages publishes the latest
+`main` version of the suite at:
+
+```text
+https://ai-watcher.github.io/aiwatcher-local/
+```
+
+Repository setup required once: Settings -> Pages -> Build and deployment ->
+Source -> GitHub Actions.
+
 ## Private Team Status / Notion
 
 Do not put private team execution status, customer notes, or internal roadmap
@@ -38,9 +58,10 @@ practice, this means every commit pushed to GitHub gets a fresh generated-docs
 check and, when secrets are configured, appends a private status update to the
 team Notion page. Local-only commits do not sync until they are pushed.
 
-The Notion update is intentionally a navigable team workspace, not a historical
-append-only log. On each sync it cleans the configured parent page's generated
-top-level content, keeps managed child pages/databases, and updates:
+The Notion update is intentionally a lightweight navigable team workspace, not
+the canonical scenario UX and not a historical append-only log. On each sync it
+cleans the configured parent page's generated top-level content, keeps managed
+child pages/databases, and updates:
 
 - `AIWatcher Review Home` — current status, lifecycle progress, top open work,
   and links to the rest of the workspace.
@@ -54,7 +75,8 @@ top-level content, keeps managed child pages/databases, and updates:
 - `Gaps` — blockers, in-progress work, to-verify items, and open decisions.
 - `Test Cases` — full scenario checklist for manual verification.
 
-The richer interactive artifact remains `docs/aiwatcher-scenario-tests.html`.
+The richer interactive artifact remains `docs/aiwatcher-scenario-tests.html`
+locally, the workflow artifact on branch pushes, and GitHub Pages on `main`.
 
 Required GitHub Actions secrets:
 
