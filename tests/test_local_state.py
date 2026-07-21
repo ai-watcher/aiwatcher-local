@@ -157,6 +157,77 @@ class LocalStateTests(unittest.TestCase):
 
         self.assertEqual(len(stored["interventions"]), 20)
 
+    def test_truncated_json_quarantines_file_and_starts_fresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "local-state.json")
+            with open(state_file, "w", encoding="utf-8") as handle:
+                handle.write('{"version": 2, "interventions": [{"id": "x"')
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                data = local_state._load()
+
+            self.assertEqual(data, local_state._empty_state())
+            self.assertFalse(os.path.exists(state_file))
+            backups = [
+                name for name in os.listdir(temp_dir)
+                if name.startswith("local-state.corrupt-") and name.endswith(".json")
+            ]
+            self.assertEqual(len(backups), 1)
+            with open(os.path.join(temp_dir, backups[0]), encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), '{"version": 2, "interventions": [{"id": "x"')
+
+    def test_non_dict_json_quarantines_file_and_starts_fresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "local-state.json")
+            with open(state_file, "w", encoding="utf-8") as handle:
+                handle.write("[1, 2, 3]")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                data = local_state._load()
+
+            self.assertEqual(data, local_state._empty_state())
+            backups = [
+                name for name in os.listdir(temp_dir)
+                if name.startswith("local-state.corrupt-")
+            ]
+            self.assertEqual(len(backups), 1)
+
+    def test_valid_json_creates_no_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "local-state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_outcome("session-1", "useful")
+                data = local_state._load()
+
+            self.assertEqual(data["outcomes"][0]["session_id"], "session-1")
+            backups = [
+                name for name in os.listdir(temp_dir)
+                if name.startswith("local-state.corrupt-")
+            ]
+            self.assertEqual(backups, [])
+
+    def test_read_os_error_raises_and_leaves_file_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "local-state.json")
+            original_bytes = b'{"version": 2, "interventions": [], "outcomes": [], "hook_events": []}'
+            with open(state_file, "wb") as handle:
+                handle.write(original_bytes)
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(local_state.Path, "open", side_effect=PermissionError("denied")),
+            ):
+                with self.assertRaises(local_state.StateReadError):
+                    local_state._load()
+
+            with open(state_file, "rb") as handle:
+                self.assertEqual(handle.read(), original_bytes)
+
+    def test_state_read_error_from_hook_write_path_does_not_raise(self) -> None:
+        # Hook write paths (cli.py's _record_hook_intervention /
+        # _record_hook_event) already wrap record_intervention() in a bare
+        # `except OSError: pass` so a bad state file never blocks the user's
+        # AI flow. StateReadError must subclass OSError so that existing
+        # handling covers it without each call site needing a new except clause.
+        self.assertTrue(issubclass(local_state.StateReadError, OSError))
+
     def test_hook_events_are_privacy_safe_and_bounded(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")

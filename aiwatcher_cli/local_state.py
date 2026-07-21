@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -38,6 +39,21 @@ LOCK_POLL_SECONDS = 0.05
 
 class StateLockTimeout(RuntimeError):
     """Another AIWatcher process held the local-state lock too long."""
+
+
+class StateReadError(OSError):
+    """local-state.json exists but could not be read (not a corrupt-JSON case).
+
+    Deliberately a subclass of OSError: callers up the stack (especially
+    hook write paths in cli.py) already catch OSError around record_*()
+    calls to avoid blocking the user's AI flow, so this propagates through
+    those existing handlers without each one needing a new except clause.
+    Distinct from corrupt/malformed JSON, which _load() recovers from by
+    quarantining the bad file and starting fresh -- a real read failure
+    (permissions, I/O error) must NOT be treated the same way, since doing
+    so would let a subsequent _save() silently overwrite a ledger that was
+    never actually read.
+    """
 
 
 def _lock_path() -> Path:
@@ -115,15 +131,52 @@ def _empty_state() -> dict[str, Any]:
     return {"version": STATE_VERSION, "interventions": [], "outcomes": [], "hook_events": []}
 
 
+def _quarantine_corrupt_state(path: Path) -> None:
+    """Move an unparseable state file aside instead of discarding it.
+
+    Called only for malformed JSON / wrong top-level type, never for a
+    real read failure -- see StateReadError.
+    """
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    backup_path = path.with_name(f"local-state.corrupt-{timestamp}.json")
+    try:
+        path.replace(backup_path)
+    except OSError as exc:
+        print(
+            f"Warning: AIWatcher could not back up corrupt state file {path}: {exc}",
+            file=sys.stderr,
+        )
+        return
+    print(
+        f"Warning: AIWatcher local state at {path} was unreadable and has been "
+        f"backed up to {backup_path}. Starting from a fresh, empty state.",
+        file=sys.stderr,
+    )
+
+
 def _load() -> dict[str, Any]:
     path = state_path()
     try:
         with path.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (OSError, json.JSONDecodeError):
+            text = handle.read()
+    except FileNotFoundError:
         return _empty_state()
+    except OSError as exc:
+        # A real read failure (permissions, I/O error, etc). Never silently
+        # return empty state here: doing so would let a later _save() call
+        # overwrite a ledger this process never actually managed to read.
+        raise StateReadError(f"Could not read AIWatcher state at {path}: {exc}") from exc
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        _quarantine_corrupt_state(path)
+        return _empty_state()
+
     if not isinstance(data, dict):
+        _quarantine_corrupt_state(path)
         return _empty_state()
+
     data.setdefault("version", STATE_VERSION)
     data.setdefault("interventions", [])
     data.setdefault("outcomes", [])
