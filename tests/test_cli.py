@@ -46,9 +46,136 @@ def session(
     )
 
 
+def _baselines_from_sessions(rows: list[LocalSession]) -> dict[str, object]:
+    # estimate_prompt_savings() now reads cached baselines (get_baselines())
+    # instead of scanning history live -- see P0-3. Route the test's synthetic
+    # session rows through the real _compute_baselines() aggregation so these
+    # tests still exercise the actual p75/honesty-gate math, not a hand-rolled
+    # stand-in for it.
+    with patch.object(cli, "sessions_since", return_value=rows):
+        return cli._compute_baselines()
+
+
+class PromptSavingsBaselineTests(unittest.TestCase):
+    """P0-3: prompt gate must read cached baselines, never rescan history live."""
+
+    def test_warm_cache_does_not_call_scanner(self) -> None:
+        fresh = {
+            "computed_at": datetime.now(timezone.utc).isoformat(),
+            "history_days": 30,
+            "per_tool": {"claude-code": {
+                "p75_tokens": 100_000, "p75_calls": 50, "p75_tool_calls": 20,
+                "p75_api_value": 1.0, "session_count": 12, "history_span_days": 20,
+                "excluded_cumulative": 0,
+            }},
+        }
+        with (
+            patch.object(cli, "get_baselines", return_value=fresh),
+            patch.object(cli, "sessions_since") as sessions_since,
+            patch.object(cli, "save_baselines") as save,
+        ):
+            result = cli.get_or_refresh_baselines()
+
+        sessions_since.assert_not_called()
+        save.assert_not_called()
+        self.assertEqual(result, fresh)
+
+    def test_stale_cache_is_recomputed_and_saved(self) -> None:
+        stale = {
+            "computed_at": (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat(),
+            "history_days": 30,
+            "per_tool": {},
+        }
+        with (
+            patch.object(cli, "get_baselines", return_value=stale),
+            patch.object(cli, "sessions_since", return_value=[]) as sessions_since,
+            patch.object(cli, "save_baselines") as save,
+        ):
+            result = cli.get_or_refresh_baselines(max_age_hours=24)
+
+        sessions_since.assert_called()
+        save.assert_called_once()
+        self.assertNotEqual(result["computed_at"], stale["computed_at"])
+
+    def test_cold_hook_path_never_scans_history(self) -> None:
+        # No cache at all (e.g. a brand new install) must still return
+        # quickly with an insufficient-confidence result -- never fall back
+        # to scanning, which is exactly the hot-path cost this fix removes.
+        with (
+            patch.object(cli, "get_baselines", return_value={}),
+            patch.object(cli, "sessions_since") as sessions_since,
+        ):
+            result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
+
+        sessions_since.assert_not_called()
+        self.assertFalse(result["estimated_impact"]["available"])
+
+    def test_today_refreshes_a_missing_cache(self) -> None:
+        rows = [session(index, age_days=index * 2) for index in range(10)]
+        with (
+            patch.object(cli, "scan_all", return_value=[]),
+            patch.object(cli, "link_recent_interventions_to_sessions"),
+            patch.object(cli, "get_baselines", return_value={}),
+            patch.object(cli, "sessions_since", return_value=rows),
+            patch.object(cli, "save_baselines") as save,
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            cli.command_today(SimpleNamespace())
+
+        save.assert_called_once()
+        saved = save.call_args.args[0]
+        self.assertEqual(saved["per_tool"]["claude-code"]["session_count"], 10)
+
+    def test_fixed_fixture_matches_locked_estimate(self) -> None:
+        # Regression lock: a known, fixed set of sessions must always produce
+        # this exact estimate. Guards against the cache-based rewrite quietly
+        # drifting from the pre-P0-3 live-scan math.
+        rows = [session(index, age_days=index * 2) for index in range(10)]
+        baselines = _baselines_from_sessions(rows)
+        self.assertEqual(baselines["per_tool"]["claude-code"], {
+            "p75_tokens": 15014.0,
+            "p75_calls": 20.0,
+            "p75_tool_calls": 10.0,
+            "p75_api_value": 0.25,
+            "session_count": 10,
+            "history_span_days": 19,
+            "excluded_cumulative": 0,
+        })
+        with patch.object(cli, "get_baselines", return_value=baselines):
+            impact = cli.estimate_prompt_savings(
+                "Refactor the entire codebase", risk_score=3, tool="claude", cwd="/repo"
+            )
+        self.assertEqual(impact, {
+            "available": True,
+            "confidence": "medium",
+            "basis": "10 local claude sessions spanning 19 days",
+            "sample_count": 10,
+            "history_span_days": 19,
+            "original": {
+                "tokens": [25139, 52212],
+                "model_calls": [33, 69],
+                "tool_calls": [16, 34],
+                "api_value_usd": [0.4186, 0.8694],
+            },
+            "safer": {
+                "tokens": [11312, 32893],
+                "model_calls": [14, 43],
+                "tool_calls": [7, 21],
+                "api_value_usd": [0.1884, 0.5477],
+            },
+            "savings": {
+                "tokens": [13827, 19319],
+                "model_calls": [19, 26],
+                "tool_calls": [9, 13],
+                "api_value_usd": [0.2302, 0.3217],
+            },
+        })
+
+
 class PromptPreflightTests(unittest.TestCase):
     def test_sparse_history_does_not_show_quantified_savings(self) -> None:
-        with patch.object(cli, "sessions_since", return_value=[session(1), session(2, age_days=2)]):
+        baselines = _baselines_from_sessions([session(1), session(2, age_days=2)])
+        with patch.object(cli, "get_baselines", return_value=baselines):
             result = cli.analyze_prompt(
                 "Refactor the entire codebase and delete old auth secrets",
                 tool="claude",
@@ -63,7 +190,8 @@ class PromptPreflightTests(unittest.TestCase):
 
     def test_quantified_ranges_require_enough_history_over_time(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]
-        with patch.object(cli, "sessions_since", return_value=rows):
+        baselines = _baselines_from_sessions(rows)
+        with patch.object(cli, "get_baselines", return_value=baselines):
             result = cli.analyze_prompt(
                 "Refactor the entire codebase, but inspect first",
                 tool="claude",
@@ -86,7 +214,8 @@ class PromptPreflightTests(unittest.TestCase):
             )
             for index in range(10)
         ]
-        with patch.object(cli, "sessions_since", return_value=rows):
+        baselines = _baselines_from_sessions(rows)
+        with patch.object(cli, "get_baselines", return_value=baselines):
             result = cli.analyze_prompt(
                 "Refactor the entire codebase",
                 tool="codex",
@@ -99,7 +228,8 @@ class PromptPreflightTests(unittest.TestCase):
 
     def test_codex_rollout_measurements_can_support_savings_ranges(self) -> None:
         rows = [session(index, tool="codex-cli", age_days=index * 2) for index in range(10)]
-        with patch.object(cli, "sessions_since", return_value=rows):
+        baselines = _baselines_from_sessions(rows)
+        with patch.object(cli, "get_baselines", return_value=baselines):
             result = cli.analyze_prompt(
                 "Refactor the entire codebase",
                 tool="codex",
@@ -371,7 +501,8 @@ class PromptPreflightTests(unittest.TestCase):
 
     def test_hero_savings_label_shows_compact_dollar_range_when_available(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]
-        with patch.object(cli, "sessions_since", return_value=rows):
+        baselines = _baselines_from_sessions(rows)
+        with patch.object(cli, "get_baselines", return_value=baselines):
             result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
         label = cli._hero_savings_label(result)
         self.assertIsNotNone(label)
@@ -380,7 +511,8 @@ class PromptPreflightTests(unittest.TestCase):
 
     def test_gate_html_shows_guardrail_chips_and_savings_badge_above_the_fold(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]
-        with patch.object(cli, "sessions_since", return_value=rows):
+        baselines = _baselines_from_sessions(rows)
+        with patch.object(cli, "get_baselines", return_value=baselines):
             result = cli.analyze_prompt(
                 "refactor everything and delete the production credential",
                 tool="claude",
@@ -404,7 +536,8 @@ class PromptPreflightTests(unittest.TestCase):
 
     def test_hero_pressure_label_shows_tokens_and_tool_calls_when_available(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]
-        with patch.object(cli, "sessions_since", return_value=rows):
+        baselines = _baselines_from_sessions(rows)
+        with patch.object(cli, "get_baselines", return_value=baselines):
             result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
         label = cli._hero_pressure_label(result)
         self.assertIsNotNone(label)
@@ -413,7 +546,8 @@ class PromptPreflightTests(unittest.TestCase):
 
     def test_gate_html_shows_pressure_caption_next_to_savings_badge(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]
-        with patch.object(cli, "sessions_since", return_value=rows):
+        baselines = _baselines_from_sessions(rows)
+        with patch.object(cli, "get_baselines", return_value=baselines):
             result = cli.analyze_prompt(
                 "refactor everything and delete the production credential",
                 tool="claude",

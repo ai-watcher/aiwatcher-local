@@ -155,6 +155,7 @@ def _empty_state() -> dict[str, Any]:
         "hook_events": [],
         "evidence_snapshots": [],
         "decisions": [],
+        "baselines": {},
     }
 
 
@@ -210,6 +211,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("hook_events", [])
     data.setdefault("evidence_snapshots", [])
     data.setdefault("decisions", [])
+    data.setdefault("baselines", {})
     return data
 
 
@@ -535,3 +537,24 @@ def outcome_counts(session_ids: set[str] | None = None) -> dict[str, int]:
         if outcome in counts:
             counts[outcome] += 1
     return counts
+
+
+def get_baselines() -> dict[str, Any]:
+    """Read-only cache lookup -- never scans local session history.
+
+    Safe to call from a hook's hot path: this only reads whatever is
+    already stored, it never computes anything. Computing fresh baselines
+    (scanning session history) belongs in cli.py, off the hot path -- see
+    get_or_refresh_baselines() there.
+    """
+    with _locked_state():
+        data = _load()
+    baselines = data.get("baselines")
+    return baselines if isinstance(baselines, dict) else {}
+
+
+def save_baselines(baselines: dict[str, Any]) -> None:
+    with _locked_state():
+        data = _load()
+        data["baselines"] = baselines
+        _save(data)

@@ -28,6 +28,7 @@ from typing import Callable, Iterable
 from .correlate import link_recent_interventions_to_sessions
 from .local_state import (
     VALID_OUTCOMES,
+    get_baselines,
     get_outcome,
     link_intervention_session,
     recent_hook_events,
@@ -37,6 +38,7 @@ from .local_state import (
     record_intervention,
     record_hook_event,
     record_outcome,
+    save_baselines,
     state_path,
 )
 from .handoff import TARGET_LABELS, build_handoff_capsule, render_handoff_capsule
@@ -450,45 +452,119 @@ def _quantile(values: list[float], q: float) -> float:
     return ordered[index]
 
 
-def estimate_prompt_savings(prompt: str, *, risk_score: int, tool: str, cwd: str | None = None) -> dict[str, object]:
-    sessions = sessions_since(30)
+BASELINE_HISTORY_DAYS = 30
+BASELINE_TOOLS = ("claude-code", "codex-cli")
+
+
+def _normalize_tool_for_baseline(tool: str) -> str | None:
     if tool in {"claude", "claude-code"}:
-        relevant = [row for row in sessions if row.tool == "claude-code"]
-    elif tool in {"codex", "codex-cli"}:
-        relevant = [row for row in sessions if row.tool == "codex-cli"]
-    else:
-        relevant = sessions
-
-    if cwd:
-        project_rows = [row for row in relevant if row.project_path and cwd.startswith(row.project_path)]
-        if project_rows:
-            relevant = project_rows
-
-    excluded_cumulative = 0
+        return "claude-code"
     if tool in {"codex", "codex-cli"}:
-        excluded_cumulative = sum(1 for row in relevant if has_cumulative_totals(row))
-        relevant = [row for row in relevant if not has_cumulative_totals(row)]
+        return "codex-cli"
+    return None
 
-    dated_rows = [row for row in relevant if session_sort_key(row) != MIN_DT]
-    history_span_days = 0
-    if dated_rows:
-        oldest = min(session_sort_key(row) for row in dated_rows)
-        newest = max(session_sort_key(row) for row in dated_rows)
-        history_span_days = max(1, (newest - oldest).days + 1)
+
+def _compute_baselines() -> dict[str, object]:
+    """Scan local session history and aggregate per-tool p75 stats.
+
+    This is the expensive full-history scan estimate_prompt_savings() used
+    to run on every hook invocation. It must only ever be called off the
+    hot path (see get_or_refresh_baselines()) -- never from a hook.
+    """
+    sessions = sessions_since(BASELINE_HISTORY_DAYS)
+    per_tool: dict[str, object] = {}
+    for tool_name in BASELINE_TOOLS:
+        relevant = [row for row in sessions if row.tool == tool_name]
+        excluded_cumulative = 0
+        if tool_name == "codex-cli":
+            excluded_cumulative = sum(1 for row in relevant if has_cumulative_totals(row))
+            relevant = [row for row in relevant if not has_cumulative_totals(row)]
+
+        dated_rows = [row for row in relevant if session_sort_key(row) != MIN_DT]
+        history_span_days = 0
+        if dated_rows:
+            oldest = min(session_sort_key(row) for row in dated_rows)
+            newest = max(session_sort_key(row) for row in dated_rows)
+            history_span_days = max(1, (newest - oldest).days + 1)
+
+        token_values = [float(row.tokens_in + row.tokens_out) for row in relevant if row.tokens_in + row.tokens_out > 0]
+        call_values = [float(row.agent_calls) for row in relevant if row.agent_calls > 0]
+        tool_values = [float(row.tool_calls) for row in relevant if row.tool_calls > 0]
+        cost_values = [float(row.cost_usd) for row in relevant if row.cost_usd > 0]
+        per_tool[tool_name] = {
+            "p75_tokens": _quantile(token_values, 0.75),
+            "p75_calls": _quantile(call_values, 0.75),
+            "p75_tool_calls": _quantile(tool_values, 0.75),
+            "p75_api_value": _quantile(cost_values, 0.75),
+            "session_count": len(relevant),
+            "history_span_days": history_span_days,
+            "excluded_cumulative": excluded_cumulative,
+        }
+    return {
+        "computed_at": datetime.now(timezone.utc).isoformat(),
+        "history_days": BASELINE_HISTORY_DAYS,
+        "per_tool": per_tool,
+    }
+
+
+def get_or_refresh_baselines(max_age_hours: int = 24) -> dict[str, object]:
+    """Return cached prompt-savings baselines, recomputing if missing/stale.
+
+    Callers on the hook hot path must use local_state.get_baselines()
+    directly instead -- that never scans, it only reads whatever is
+    already cached. This refreshing version belongs only in places that
+    aren't latency-sensitive: `today`, `report`, and `ui` startup.
+    """
+    cached = get_baselines()
+    computed_at = cached.get("computed_at") if isinstance(cached, dict) else None
+    stale = True
+    if computed_at:
+        try:
+            age = datetime.now(timezone.utc) - datetime.fromisoformat(str(computed_at))
+            stale = age > timedelta(hours=max_age_hours)
+        except ValueError:
+            stale = True
+    if cached and not stale:
+        return cached
+    fresh = _compute_baselines()
+    try:
+        save_baselines(fresh)
+    except OSError:
+        pass
+    return fresh
+
+
+def estimate_prompt_savings(prompt: str, *, risk_score: int, tool: str, cwd: str | None = None) -> dict[str, object]:
+    # cwd is accepted for call-site compatibility but intentionally unused:
+    # baselines are cached per-tool only (see get_or_refresh_baselines), not
+    # per-project, so a hook invocation can read the cache without ever
+    # touching disk. A project-scoped estimate would need a per-project
+    # cache dimension, which is more staleness/complexity than this
+    # hot-path fix is worth -- see the P0-3 tradeoff discussion.
+    del cwd
+    tool_key = _normalize_tool_for_baseline(tool)
+    baselines = get_baselines()
+    per_tool = baselines.get("per_tool") if isinstance(baselines, dict) else None
+    stats = per_tool.get(tool_key) if isinstance(per_tool, dict) and tool_key else None
+
+    sample_count = int(stats["session_count"]) if stats else 0
+    history_span_days = int(stats["history_span_days"]) if stats else 0
+    excluded_cumulative = int(stats.get("excluded_cumulative", 0)) if stats else 0
 
     history_sufficient = (
-        len(relevant) >= MIN_SAVINGS_SESSIONS
+        stats is not None
+        and sample_count >= MIN_SAVINGS_SESSIONS
         and history_span_days >= MIN_SAVINGS_HISTORY_DAYS
     )
     basis = (
-        f"{len(relevant)} local {'AI' if tool == 'agent' else tool} session{'s' if len(relevant) != 1 else ''} "
+        f"{sample_count} local {'AI' if tool == 'agent' else tool} session{'s' if sample_count != 1 else ''} "
         f"spanning {history_span_days} day{'s' if history_span_days != 1 else ''}"
-        if relevant
+        if sample_count
         else "no comparable local history"
     )
-    if tool in {"codex", "codex-cli"} and excluded_cumulative:
+    if tool_key == "codex-cli" and excluded_cumulative:
         basis += f"; excluded {excluded_cumulative} cumulative Codex thread total{'s' if excluded_cumulative != 1 else ''}"
-    if tool in {"codex", "codex-cli"} and not relevant:
+    if tool_key == "codex-cli" and not sample_count:
         basis += "; no per-session Codex rollout token events are available"
 
     if not history_sufficient:
@@ -496,29 +572,18 @@ def estimate_prompt_savings(prompt: str, *, risk_score: int, tool: str, cwd: str
             "available": False,
             "confidence": "insufficient",
             "basis": basis,
-            "sample_count": len(relevant),
+            "sample_count": sample_count,
             "history_span_days": history_span_days,
             "required_sessions": MIN_SAVINGS_SESSIONS,
             "required_history_days": MIN_SAVINGS_HISTORY_DAYS,
             "direction": "A narrower prompt with checkpoints should reduce context and tool-call pressure, but AIWatcher cannot quantify savings yet.",
         }
 
-    if relevant:
-        token_values = [float(row.tokens_in + row.tokens_out) for row in relevant if row.tokens_in + row.tokens_out > 0]
-        call_values = [float(row.agent_calls) for row in relevant if row.agent_calls > 0]
-        tool_values = [float(row.tool_calls) for row in relevant if row.tool_calls > 0]
-        cost_values = [float(row.cost_usd) for row in relevant if row.cost_usd > 0]
-        base_tokens = _quantile(token_values, 0.75) or 120_000
-        base_calls = _quantile(call_values, 0.75) or 80
-        base_tool_calls = _quantile(tool_values, 0.75) or 40
-        base_cost = _quantile(cost_values, 0.75) or 1.5
-        confidence = "medium"
-    else:
-        base_tokens = 180_000
-        base_calls = 120
-        base_tool_calls = 60
-        base_cost = 2.5
-        confidence = "low"
+    base_tokens = stats["p75_tokens"] or 120_000
+    base_calls = stats["p75_calls"] or 80
+    base_tool_calls = stats["p75_tool_calls"] or 40
+    base_cost = stats["p75_api_value"] or 1.5
+    confidence = "medium"
 
     risk_multiplier = 1.0 + min(8, max(0, risk_score)) * 0.28
     broad_bonus = 1.4 if any(term in prompt.lower() for term in ["entire codebase", "whole codebase", "all files", "everything"]) else 1.0
@@ -545,7 +610,7 @@ def estimate_prompt_savings(prompt: str, *, risk_score: int, tool: str, cwd: str
         "available": True,
         "confidence": confidence,
         "basis": basis,
-        "sample_count": len(relevant),
+        "sample_count": sample_count,
         "history_span_days": history_span_days,
         "original": {
             "tokens": [original_low_tokens, original_high_tokens],
@@ -1372,6 +1437,10 @@ def command_today(_args: argparse.Namespace) -> int:
         link_recent_interventions_to_sessions(all_sessions)
     except OSError:
         pass
+    try:
+        get_or_refresh_baselines()
+    except OSError:
+        pass
     today = [row for row in all_sessions if in_window(row, today_start)]
     week = [row for row in all_sessions if in_window(row, week_start)]
     month = [row for row in all_sessions if in_window(row, month_start)]
@@ -1490,6 +1559,10 @@ def command_projects(args: argparse.Namespace) -> int:
 def command_report(args: argparse.Namespace) -> int:
     days = args.days
     rows = sessions_since(days)
+    try:
+        get_or_refresh_baselines()
+    except OSError:
+        pass
     stats = summarize(rows)
     projects: dict[str, list[LocalSession]] = defaultdict(list)
     tools: dict[str, list[LocalSession]] = defaultdict(list)
@@ -3208,6 +3281,11 @@ def command_export(args: argparse.Namespace) -> int:
 
 def command_ui(args: argparse.Namespace) -> int:
     from .ui import serve
+
+    try:
+        get_or_refresh_baselines()
+    except OSError:
+        pass
 
     try:
         serve(
