@@ -9,6 +9,29 @@ cost and security guidance with no account or cloud upload.
 
 ![The AIWatcher Local dashboard's Today tab: latest AI work and one thing worth changing up top; useful outcomes, preflight decisions, sessions observed, and API-equivalent value tiles; the latest intervention receipt with predicted savings; projects driving usage and recent sessions below.](docs/dashboard.svg)
 
+## Contents
+
+- [Privacy](#privacy)
+- [Quickstart](#quickstart)
+- [Try the Core Workflows](#try-the-core-workflows)
+  - [1. See today's AI work](#1-see-todays-ai-work)
+  - [2. Preflight a risky prompt](#2-preflight-a-risky-prompt)
+  - [3. Use the local dashboard](#3-use-the-local-dashboard)
+  - [4. Mark whether work was useful](#4-mark-whether-work-was-useful)
+  - [5. Resume work without rebuilding context](#5-resume-work-without-rebuilding-context)
+  - [6. Log a decision that never became a commit](#6-log-a-decision-that-never-became-a-commit)
+  - [7. Export local evidence](#7-export-local-evidence)
+- [Commands](#commands)
+- [Example Output](#example-output)
+- [The Local Control Loop](#the-local-control-loop)
+  - [Automatic Prompt Preflight](#automatic-prompt-preflight)
+  - [Prompt Companion for Non-Hook Surfaces](#prompt-companion-for-non-hook-surfaces)
+- [What It Reads](#what-it-reads)
+- [AIWatcher Local vs AIWatcher Enterprise](#aiwatcher-local-vs-aiwatcher-enterprise)
+- [After PyPI Release](#after-pypi-release)
+- [Contributing](#contributing)
+- [License](#license)
+
 ## Privacy
 
 - Local-only by default
@@ -58,9 +81,6 @@ aiwatcher today
 
 The examples below use `python -m aiwatcher_cli`; Windows users can replace
 `python` with `py` when needed.
-
-For implementation and release verification, use the canonical lifecycle suite at
-[`docs/aiwatcher-scenario-tests.html`](docs/aiwatcher-scenario-tests.html).
 
 ## Try the Core Workflows
 
