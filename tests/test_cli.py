@@ -28,8 +28,15 @@ def session(
     age_days: int = 0,
     project: str = "/repo",
     notes: list[str] | None = None,
+    now: datetime | None = None,
 ) -> LocalSession:
-    stamp = datetime.now(timezone.utc) - timedelta(days=age_days)
+    # `now` lets callers pin every session in a batch to one shared instant.
+    # Without it, back-to-back session(...) calls each take their own
+    # datetime.now(), and the microsecond drift between the first and last
+    # call can push a span like "exactly 18 days" to "17 days, 23:59:59.998"
+    # -- a flaky day-boundary flip in any test asserting an exact
+    # history_span_days from timedelta.days truncation.
+    stamp = (now or datetime.now(timezone.utc)) - timedelta(days=age_days)
     return LocalSession(
         session_id=f"session-{index}",
         tool=tool,
@@ -129,8 +136,11 @@ class PromptSavingsBaselineTests(unittest.TestCase):
     def test_fixed_fixture_matches_locked_estimate(self) -> None:
         # Regression lock: a known, fixed set of sessions must always produce
         # this exact estimate. Guards against the cache-based rewrite quietly
-        # drifting from the pre-P0-3 live-scan math.
-        rows = [session(index, age_days=index * 2) for index in range(10)]
+        # drifting from the pre-P0-3 live-scan math. All rows share one `now`
+        # so history_span_days is an exact 18-day span, not sensitive to
+        # inter-call timing drift (see session()'s `now` param docstring).
+        now = datetime.now(timezone.utc)
+        rows = [session(index, age_days=index * 2, now=now) for index in range(10)]
         baselines = _baselines_from_sessions(rows)
         self.assertEqual(baselines["per_tool"]["claude-code"], {
             "p75_tokens": 15014.0,
