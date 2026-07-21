@@ -2,12 +2,31 @@ from __future__ import annotations
 
 import inspect
 import json
+import multiprocessing
 import os
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
 from aiwatcher_cli import local_state
+
+
+def _mp_record_intervention_worker(state_file: str, index: int) -> None:
+    # Runs in a freshly spawned child process (not a thread), so it exercises
+    # the cross-process file lock, not just _STATE_LOCK's in-process guard.
+    os.environ["AIWATCHER_STATE_FILE"] = state_file
+    local_state.record_intervention(
+        tool="claude",
+        cwd="/repo",
+        risk="low",
+        score=0,
+        findings=[],
+        original_prompt=f"prompt {index}",
+        suggested_prompt=f"prompt {index}",
+        decision="allowed_original",
+        selected_prompt=None,
+    )
 
 
 class LocalStateTests(unittest.TestCase):
@@ -156,6 +175,61 @@ class LocalStateTests(unittest.TestCase):
                     stored = json.load(handle)
 
         self.assertEqual(len(stored["interventions"]), 20)
+
+    def test_multiprocess_record_intervention_does_not_drop_entries(self) -> None:
+        # test_concurrent_interventions_do_not_clobber_each_other above only
+        # covers threads within one process, which never exercises
+        # _cross_process_lock -- every real AIWatcher invocation (hooks
+        # especially) is a separate OS process. This spawns 8 real processes
+        # to prove the file lock, not just _STATE_LOCK, prevents a dropped
+        # write.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "local-state.json")
+            processes = [
+                multiprocessing.Process(target=_mp_record_intervention_worker, args=(state_file, i))
+                for i in range(8)
+            ]
+            for process in processes:
+                process.start()
+            for process in processes:
+                process.join(timeout=30)
+                self.assertEqual(process.exitcode, 0)
+
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                data = local_state._load()
+
+        self.assertEqual(len(data["interventions"]), 8)
+
+    def test_stale_lockfile_left_behind_does_not_deadlock_future_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "local-state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                lock_path = local_state._lock_path()
+                lock_path.parent.mkdir(parents=True, exist_ok=True)
+                # Simulate a lock file left behind by a process that
+                # exited without an active hold on it. The OS releases the
+                # advisory lock itself when the holding process's file
+                # descriptor closes, so the lock *file's* mere existence on
+                # disk must never be mistaken for an active hold.
+                lock_path.write_bytes(b"\0")
+
+                with patch.object(local_state, "LOCK_TIMEOUT_SECONDS", 0.5):
+                    started = time.monotonic()
+                    local_state.record_outcome("session-1", "useful")
+                    elapsed = time.monotonic() - started
+
+                outcome = local_state.get_outcome("session-1")
+
+        self.assertLess(elapsed, 0.5)
+        self.assertEqual(outcome["outcome"], "useful")
+
+    def test_lock_timeout_is_an_os_error(self) -> None:
+        # StateLockTimeout must subclass OSError so the existing
+        # `except OSError: pass` in cli.py's hook write paths
+        # (_record_hook_intervention / _record_hook_event) already skips
+        # recording on a stuck lock instead of crashing or blocking the
+        # user's prompt, with no cli.py changes needed.
+        self.assertTrue(issubclass(local_state.StateLockTimeout, OSError))
 
     def test_truncated_json_quarantines_file_and_starts_fresh(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

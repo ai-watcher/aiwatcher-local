@@ -37,8 +37,14 @@ LOCK_TIMEOUT_SECONDS = 10
 LOCK_POLL_SECONDS = 0.05
 
 
-class StateLockTimeout(RuntimeError):
-    """Another AIWatcher process held the local-state lock too long."""
+class StateLockTimeout(OSError):
+    """Another AIWatcher process held the local-state lock too long.
+
+    Deliberately a subclass of OSError, for the same reason as
+    StateReadError above: hook write paths in cli.py already catch OSError
+    around record_*() calls so a slow/stuck lock skips recording instead of
+    blocking or crashing the user's prompt, with no cli.py changes needed.
+    """
 
 
 class StateReadError(OSError):
@@ -61,21 +67,27 @@ def _lock_path() -> Path:
 
 
 def _acquire_file_lock(handle) -> None:
-    if os.name == "nt":
-        deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
-        while True:
-            try:
+    # Both branches poll a non-blocking lock attempt against the same
+    # deadline. fcntl.flock's blocking mode (LOCK_EX with no LOCK_NB) has no
+    # timeout at all, so a stuck holder would wedge every other AIWatcher
+    # process -- including a prompt-gate hook -- forever instead of failing
+    # safe. Polling keeps POSIX and Windows on identical, testable timeout
+    # semantics.
+    deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+    while True:
+        try:
+            if os.name == "nt":
                 handle.seek(0)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                return
-            except OSError:
-                if time.monotonic() >= deadline:
-                    raise StateLockTimeout(
-                        "Timed out waiting for another AIWatcher process to release local-state.json."
-                    )
-                time.sleep(LOCK_POLL_SECONDS)
-    else:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise StateLockTimeout(
+                    "Timed out waiting for another AIWatcher process to release local-state.json."
+                )
+            time.sleep(LOCK_POLL_SECONDS)
 
 
 def _release_file_lock(handle) -> None:
