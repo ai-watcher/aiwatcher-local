@@ -10,11 +10,12 @@ import socket
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from aiwatcher_cli import cli
 from aiwatcher_cli.local_state import recent_decisions
@@ -798,6 +799,212 @@ class PromptPreflightTests(unittest.TestCase):
             result = cli.command_agent_prompt(args)
         self.assertEqual(result, 0)
         run.assert_called_once()
+
+
+class HeadlessPromptGateTests(unittest.TestCase):
+    """P0-5: the prompt gate must not hang waiting for a display that isn't there."""
+
+    GATE_RESULT = {
+        "risk": "high",
+        "score": 8,
+        "tool": "claude",
+        "findings": [],
+        "suggestions": [],
+        "suggested_prompt": "safer scoped brief",
+        "estimated_impact": {},
+    }
+
+    def test_display_available_true_on_windows_regardless_of_env(self) -> None:
+        with (
+            patch.object(cli.os, "name", "nt"),
+            patch.dict(os.environ, {"SSH_TTY": "/dev/ttys001", "DISPLAY": ""}, clear=True),
+        ):
+            self.assertTrue(cli._display_available())
+
+    def test_display_available_false_for_ssh_session_without_display(self) -> None:
+        with (
+            patch.object(cli.os, "name", "posix"),
+            patch.object(cli.sys, "platform", "darwin"),
+            patch.dict(os.environ, {"SSH_TTY": "/dev/ttys001", "DISPLAY": ""}, clear=True),
+        ):
+            self.assertFalse(cli._display_available())
+
+    def test_display_available_false_for_linux_without_display_even_without_ssh(self) -> None:
+        with (
+            patch.object(cli.os, "name", "posix"),
+            patch.object(cli.sys, "platform", "linux"),
+            patch.dict(os.environ, {"DISPLAY": ""}, clear=True),
+        ):
+            self.assertFalse(cli._display_available())
+
+    def test_display_available_true_on_macos_desktop_without_display_var(self) -> None:
+        # macOS's native GUI doesn't use $DISPLAY at all -- only Linux and an
+        # active SSH session should treat a missing DISPLAY as "no display".
+        with (
+            patch.object(cli.os, "name", "posix"),
+            patch.object(cli.sys, "platform", "darwin"),
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            self.assertTrue(cli._display_available())
+
+    def test_run_prompt_gate_still_uses_browser_when_display_available(self) -> None:
+        with (
+            patch.object(cli, "_display_available", return_value=True),
+            patch.object(cli, "webbrowser") as webbrowser_mock,
+        ):
+            webbrowser_mock.open.return_value = True
+            gate = cli.run_prompt_gate(
+                tool="claude", cwd="/repo", prompt="original prompt",
+                result=self.GATE_RESULT, timeout_seconds=1,
+            )
+        webbrowser_mock.open.assert_called_once()
+        self.assertIsNone(gate)  # nobody answered within the short timeout
+
+    def test_run_prompt_gate_shows_terminal_gate_when_no_display_and_tty(self) -> None:
+        fake_stdin = Mock()
+        fake_stdin.isatty.return_value = True
+        with (
+            patch.object(cli, "_display_available", return_value=False),
+            patch.object(cli.sys, "stdin", fake_stdin),
+            patch("builtins.input", return_value="b"),
+            patch("sys.stderr", new_callable=io.StringIO),
+        ):
+            gate = cli.run_prompt_gate(
+                tool="claude", cwd="/repo", prompt="original prompt", result=self.GATE_RESULT,
+            )
+        self.assertEqual(gate, {"decision": "use_brief", "prompt": "safer scoped brief"})
+
+    def test_terminal_gate_all_four_options_map_to_browser_decision_names(self) -> None:
+        fake_stdin = Mock()
+        fake_stdin.isatty.return_value = True
+        cases = [
+            ("o", {"decision": "run_original", "prompt": "original prompt"}),
+            ("c", {"decision": "cancel", "prompt": ""}),
+        ]
+        for choice, expected in cases:
+            with (
+                patch.object(cli, "_display_available", return_value=False),
+                patch.object(cli.sys, "stdin", fake_stdin),
+                patch("builtins.input", return_value=choice),
+                patch("sys.stderr", new_callable=io.StringIO),
+            ):
+                gate = cli.run_prompt_gate(
+                    tool="claude", cwd="/repo", prompt="original prompt", result=self.GATE_RESULT,
+                )
+            self.assertEqual(gate, expected)
+
+    def test_run_prompt_gate_auto_blocks_instantly_when_headless_without_tty(self) -> None:
+        fake_stdin = Mock()
+        fake_stdin.isatty.return_value = False
+        with (
+            patch.object(cli, "_display_available", return_value=False),
+            patch.object(cli.sys, "stdin", fake_stdin),
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            started = time.monotonic()
+            gate = cli.run_prompt_gate(
+                tool="claude", cwd="/repo", prompt="original prompt", result=self.GATE_RESULT,
+                timeout_seconds=180,
+            )
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 1.0)
+        self.assertEqual(gate, {"decision": "auto_block_headless", "prompt": ""})
+
+    def test_run_prompt_gate_auto_briefs_instantly_when_configured(self) -> None:
+        fake_stdin = Mock()
+        fake_stdin.isatty.return_value = False
+        with (
+            patch.object(cli, "_display_available", return_value=False),
+            patch.object(cli.sys, "stdin", fake_stdin),
+            patch.dict(os.environ, {"AIWATCHER_GATE_DEFAULT": "brief"}, clear=True),
+        ):
+            started = time.monotonic()
+            gate = cli.run_prompt_gate(
+                tool="claude", cwd="/repo", prompt="original prompt", result=self.GATE_RESULT,
+                timeout_seconds=180,
+            )
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 1.0)
+        self.assertEqual(gate, {"decision": "auto_brief_headless", "prompt": "safer scoped brief"})
+
+    def test_run_prompt_gate_falls_back_when_webbrowser_open_returns_false(self) -> None:
+        # A display can look available yet webbrowser.open() still can't
+        # launch anything (no known browser controller) -- must not wait out
+        # the full timeout for a decision that will never come.
+        fake_stdin = Mock()
+        fake_stdin.isatty.return_value = False
+        with (
+            patch.object(cli, "_display_available", return_value=True),
+            patch.object(cli, "webbrowser") as webbrowser_mock,
+            patch.object(cli.sys, "stdin", fake_stdin),
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            webbrowser_mock.open.return_value = False
+            started = time.monotonic()
+            gate = cli.run_prompt_gate(
+                tool="claude", cwd="/repo", prompt="original prompt", result=self.GATE_RESULT,
+                timeout_seconds=180,
+            )
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 1.0)
+        self.assertEqual(gate, {"decision": "auto_block_headless", "prompt": ""})
+
+    def test_claude_hook_records_auto_block_headless_decision(self) -> None:
+        payload = json.dumps({"prompt": "Refactor the entire codebase and delete old auth secrets", "cwd": "/repo"})
+        args = SimpleNamespace(text=None, gate=True)
+        with (
+            patch.object(cli, "_read_stdin_text", return_value=payload),
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "run_prompt_gate", return_value={"decision": "auto_block_headless", "prompt": ""}),
+            patch.object(cli, "record_intervention") as record,
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_claude_hook(args)
+
+        self.assertEqual(result, 0)
+        output = json.loads(stdout.getvalue())
+        self.assertEqual(output["decision"], "block")
+        self.assertEqual(record.call_args.kwargs["decision"], "auto_block_headless")
+
+    def test_claude_hook_records_auto_brief_headless_decision(self) -> None:
+        payload = json.dumps({"prompt": "Refactor the entire codebase and delete old auth secrets", "cwd": "/repo"})
+        args = SimpleNamespace(text=None, gate=True)
+        with (
+            patch.object(cli, "_read_stdin_text", return_value=payload),
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(
+                cli, "run_prompt_gate",
+                return_value={"decision": "auto_brief_headless", "prompt": "Edited safe brief"},
+            ),
+            patch.object(cli, "record_intervention") as record,
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_claude_hook(args)
+
+        self.assertEqual(result, 0)
+        output = json.loads(stdout.getvalue())
+        self.assertIn("Edited safe brief", output["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(record.call_args.kwargs["decision"], "auto_brief_headless")
+
+    def test_cursor_hook_records_auto_block_headless_decision(self) -> None:
+        payload = json.dumps({"prompt": "Refactor the entire codebase and delete old auth secrets", "cwd": "/repo"})
+        args = SimpleNamespace(text=None, gate=True)
+        with (
+            patch.object(cli, "_read_stdin_text", return_value=payload),
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "run_prompt_gate", return_value={"decision": "auto_block_headless", "prompt": ""}),
+            patch.object(cli, "record_intervention") as record,
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_cursor_hook(args)
+
+        self.assertEqual(result, 0)
+        output = json.loads(stdout.getvalue())
+        self.assertFalse(output["continue"])
+        self.assertEqual(record.call_args.kwargs["decision"], "auto_block_headless")
 
 
 class IntegrationConfigTests(unittest.TestCase):

@@ -1182,6 +1182,79 @@ async function sendDecision(decision) {{
 </html>"""
 
 
+def _display_available() -> bool:
+    """Best-effort check for whether a GUI display exists to open a browser.
+
+    Deliberately conservative (only returns False when we're fairly sure
+    there's no display) -- a false positive here just means we still try
+    webbrowser.open(), whose own failure is caught separately in
+    run_prompt_gate(). A false negative would wrongly deny a working
+    display, so this never denies Windows or a non-SSH, non-Linux POSIX
+    session (e.g. a normal macOS desktop, which doesn't use DISPLAY at all).
+    """
+    if os.name == "nt":
+        return True
+    is_ssh = bool(
+        os.environ.get("SSH_TTY") or os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_CLIENT")
+    )
+    display = os.environ.get("DISPLAY", "").strip()
+    if is_ssh and not display:
+        return False
+    if sys.platform.startswith("linux") and not display:
+        return False
+    return True
+
+
+def _terminal_prompt_gate(*, tool: str, prompt: str, result: dict[str, object]) -> dict[str, str]:
+    """Render the gate as plain text and prompt for a decision at the TTY.
+
+    Returns the same {"decision", "prompt"} shape as the browser gate, using
+    the same decision vocabulary (use_brief/edit/run_original/cancel), so
+    callers need no special-casing for this path.
+    """
+    print(f"\nNo display available for the {tool} prompt gate -- using the terminal instead.", file=sys.stderr)
+    print(render_preflight(result), file=sys.stderr)
+    print(file=sys.stderr)
+    while True:
+        sys.stderr.write("[b]rief / [e]dit / [o]riginal / [c]ancel: ")
+        sys.stderr.flush()
+        try:
+            choice = input().strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return {"decision": "cancel", "prompt": ""}
+        if choice in {"b", "brief"}:
+            return {"decision": "use_brief", "prompt": str(result["suggested_prompt"])}
+        if choice in {"e", "edit"}:
+            print("Enter the edited prompt, then press Enter:", file=sys.stderr)
+            edited = input()
+            return {"decision": "edit", "prompt": edited.strip() or str(result["suggested_prompt"])}
+        if choice in {"o", "original"}:
+            return {"decision": "run_original", "prompt": prompt}
+        if choice in {"c", "cancel"}:
+            return {"decision": "cancel", "prompt": ""}
+        print("Please enter b, e, o, or c.", file=sys.stderr)
+
+
+def _auto_decide_headless_gate(*, result: dict[str, object]) -> dict[str, str]:
+    """No display and no TTY: decide instantly instead of waiting to time out.
+
+    Returns a distinct auto_brief_headless/auto_block_headless decision
+    (rather than reusing use_brief/cancel) so a fully unattended default is
+    never confused with a real human's use_brief/cancel choice -- callers
+    must record these as their own decision, not translate them.
+    """
+    default = os.environ.get("AIWATCHER_GATE_DEFAULT", "block").strip().lower()
+    if default == "brief":
+        return {"decision": "auto_brief_headless", "prompt": str(result["suggested_prompt"])}
+    return {"decision": "auto_block_headless", "prompt": ""}
+
+
+def _fallback_prompt_gate(*, tool: str, prompt: str, result: dict[str, object]) -> dict[str, str]:
+    if sys.stdin.isatty():
+        return _terminal_prompt_gate(tool=tool, prompt=prompt, result=result)
+    return _auto_decide_headless_gate(result=result)
+
+
 def run_prompt_gate(
     *,
     tool: str,
@@ -1192,6 +1265,9 @@ def run_prompt_gate(
     open_browser: bool = True,
     ready_callback: Callable[[str], None] | None = None,
 ) -> dict[str, str] | None:
+    if open_browser and not _display_available():
+        return _fallback_prompt_gate(tool=tool, prompt=prompt, result=result)
+
     decision_event = threading.Event()
     state: dict[str, str] = {}
 
@@ -1271,9 +1347,15 @@ def run_prompt_gate(
             ready_callback(url)
         if open_browser:
             try:
-                webbrowser.open(url)
+                opened = webbrowser.open(url)
             except Exception:
-                pass
+                opened = False
+            if not opened:
+                # A display looked available, but webbrowser.open() itself
+                # couldn't launch anything (no known browser controller) --
+                # equivalent to no display: fall back rather than wait out
+                # the full timeout for a decision that will never come.
+                return _fallback_prompt_gate(tool=tool, prompt=prompt, result=result)
         if not decision_event.wait(max(1, timeout_seconds)):
             return None
         return dict(state)
@@ -2104,7 +2186,7 @@ def _record_hook_intervention(
     try:
         effective_prompt = (
             selected_prompt or str(result["suggested_prompt"])
-            if decision in {"context_added", "brief_accepted", "brief_edited"}
+            if decision in {"context_added", "brief_accepted", "brief_edited", "auto_brief_headless"}
             else prompt if decision == "allowed_original" else None
         )
         selected_risk, selected_score = _selected_prompt_assessment(
@@ -2281,6 +2363,34 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
                 )
                 print(json.dumps(_hook_block_output("AIWatcher Prompt Gate cancelled this run.", tool=tool)))
                 return 0
+            if decision == "auto_brief_headless":
+                _record_hook_intervention(
+                    tool=tool,
+                    cwd=cwd,
+                    prompt=prompt,
+                    result=result,
+                    decision="auto_brief_headless",
+                    selected_prompt=selected_prompt,
+                    session_id=session_id,
+                )
+                print(json.dumps(_hook_output_with_brief(tool, selected_prompt)))
+                return 0
+            if decision == "auto_block_headless":
+                _record_hook_intervention(
+                    tool=tool,
+                    cwd=cwd,
+                    prompt=prompt,
+                    result=result,
+                    decision="auto_block_headless",
+                    session_id=session_id,
+                )
+                print(json.dumps(_hook_block_output(
+                    "AIWatcher blocked this high-risk prompt automatically: no interactive display or "
+                    "terminal was available to review it. Set AIWATCHER_GATE_DEFAULT=brief to add a safer "
+                    "brief automatically instead of blocking.",
+                    tool=tool,
+                )))
+                return 0
         # If the browser gate times out, fall back to the deterministic hook policy below.
 
     if result["risk"] == "high":
@@ -2403,6 +2513,30 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
                 )
                 print(json.dumps(_cursor_hook_response(
                     allow=False, message="AIWatcher cancelled this prompt before execution."
+                )))
+                return 0
+            if decision == "auto_brief_headless":
+                _record_hook_intervention(
+                    tool="cursor", cwd=cwd, prompt=prompt, result=result, decision="auto_brief_headless",
+                    selected_prompt=selected_prompt, session_id=session_id,
+                )
+                message = (
+                    "AIWatcher paused the original prompt automatically (no interactive display or terminal "
+                    "was available to review it). Resubmit this scoped execution brief:\n\n" + selected_prompt
+                )
+                print(json.dumps(_cursor_hook_response(allow=False, message=message)))
+                return 0
+            if decision == "auto_block_headless":
+                _record_hook_intervention(
+                    tool="cursor", cwd=cwd, prompt=prompt, result=result, decision="auto_block_headless",
+                    session_id=session_id,
+                )
+                print(json.dumps(_cursor_hook_response(
+                    allow=False,
+                    message=(
+                        "AIWatcher blocked this high-risk prompt automatically: no interactive display or "
+                        "terminal was available to review it."
+                    ),
                 )))
                 return 0
 
