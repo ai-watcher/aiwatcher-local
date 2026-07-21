@@ -104,6 +104,41 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(record["selected_risk"], "low")
         self.assertEqual(record["risk_points_reduced"], 7)
 
+    def test_record_intervention_accepts_session_id_at_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_intervention(
+                    tool="claude",
+                    cwd="/repo",
+                    risk="low",
+                    score=0,
+                    findings=[],
+                    original_prompt="prompt",
+                    suggested_prompt="prompt",
+                    decision="allowed_original",
+                    selected_prompt=None,
+                    session_id="sess-real-id",
+                )
+                stored = local_state.recent_interventions(limit=1)
+
+        self.assertEqual(stored[0]["session_id"], "sess-real-id")
+
+    def test_record_hook_event_stores_session_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_hook_event(
+                    tool="claude",
+                    cwd="/repo",
+                    event="received",
+                    prompt_found=True,
+                    session_id="sess-real-id",
+                )
+                events = local_state.recent_hook_events(limit=1)
+
+        self.assertEqual(events[0]["session_id"], "sess-real-id")
+
     def test_outcome_replaces_previous_value_for_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")

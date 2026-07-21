@@ -753,6 +753,79 @@ class IntegrationConfigTests(unittest.TestCase):
         context = output["hookSpecificOutput"]["additionalContext"]
         self.assertIn("Task\nRefactor the entire codebase", context)
 
+    def test_extract_session_meta_reads_top_level_keys(self) -> None:
+        meta = cli._extract_session_meta({
+            "session_id": "sess-abc123",
+            "transcript_path": "/home/dev/.claude/projects/x/sess-abc123.jsonl",
+        })
+        self.assertEqual(meta["session_id"], "sess-abc123")
+        self.assertEqual(meta["transcript_path"], "/home/dev/.claude/projects/x/sess-abc123.jsonl")
+
+    def test_extract_session_meta_falls_back_to_nested_hook_event(self) -> None:
+        meta = cli._extract_session_meta({"hook_event": {"session_id": "sess-nested"}})
+        self.assertEqual(meta["session_id"], "sess-nested")
+        self.assertIsNone(meta["transcript_path"])
+
+    def test_extract_session_meta_ignores_non_string_and_missing_values(self) -> None:
+        meta = cli._extract_session_meta({"session_id": 12345, "cwd": "/repo"})
+        self.assertIsNone(meta["session_id"])
+        self.assertIsNone(meta["transcript_path"])
+
+    def test_claude_hook_stores_session_id_on_intervention(self) -> None:
+        payload = json.dumps({
+            "prompt": "Refactor the entire codebase",
+            "cwd": "/repo",
+            "session_id": "sess-real-id",
+        })
+        args = SimpleNamespace(text=None, gate=False)
+        with (
+            patch.object(cli, "_read_stdin_text", return_value=payload),
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "record_intervention") as record,
+            patch.object(cli, "record_hook_event"),
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            result = cli.command_claude_hook(args)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(record.call_args.kwargs["session_id"], "sess-real-id")
+
+    def test_claude_hook_without_session_id_still_records(self) -> None:
+        payload = json.dumps({"prompt": "Refactor the entire codebase", "cwd": "/repo"})
+        args = SimpleNamespace(text=None, gate=False)
+        with (
+            patch.object(cli, "_read_stdin_text", return_value=payload),
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "record_intervention") as record,
+            patch.object(cli, "record_hook_event") as hook_event,
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            result = cli.command_claude_hook(args)
+
+        self.assertEqual(result, 0)
+        self.assertIsNone(record.call_args.kwargs["session_id"])
+        self.assertIsNone(hook_event.call_args.kwargs["session_id"])
+
+    def test_debug_hook_keys_env_var_logs_keys_not_values(self) -> None:
+        payload = json.dumps({"prompt": "delete the secret file", "session_id": "sess-secret"})
+        args = SimpleNamespace(text=None, gate=False)
+        with (
+            patch.object(cli, "_read_stdin_text", return_value=payload),
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "record_intervention"),
+            patch.object(cli, "record_hook_event"),
+            patch.dict(os.environ, {"AIWATCHER_DEBUG_HOOK_KEYS": "1"}),
+            patch("sys.stdout", new_callable=io.StringIO),
+            patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            cli.command_claude_hook(args)
+
+        logged = stderr.getvalue()
+        self.assertIn("prompt", logged)
+        self.assertIn("session_id", logged)
+        self.assertNotIn("delete the secret file", logged)
+        self.assertNotIn("sess-secret", logged)
+
     def test_codex_hook_medium_risk_skips_gate_even_when_requested(self) -> None:
         """Medium risk must never open the browser gate, even with gate=True —
         only high risk warrants the round-trip. Silent context injection instead."""
@@ -1013,6 +1086,34 @@ class IntegrationConfigTests(unittest.TestCase):
         output = stdout.getvalue()
         self.assertIn("prompt found | risk high | score 8", output)
         self.assertIn("brief_edited | risk score 8 -> 2", output)
+
+    def test_hook_status_shows_session_id_when_present(self) -> None:
+        with (
+            patch.object(cli, "recent_hook_events", return_value=[{
+                "created_at": "2026-07-03T12:00:00+00:00",
+                "tool": "claude",
+                "event": "received",
+                "prompt_found": True,
+                "risk": "high",
+                "score": 8,
+                "session_id": "sess-real-id",
+            }]),
+            patch.object(cli, "recent_interventions", return_value=[{
+                "created_at": "2026-07-03T12:00:05+00:00",
+                "tool": "claude",
+                "decision": "brief_edited",
+                "score": 8,
+                "selected_score": 2,
+                "session_id": "sess-real-id",
+            }]),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_hook_status(SimpleNamespace())
+
+        self.assertEqual(result, 0)
+        output = stdout.getvalue()
+        self.assertIn("| session sess-real-id", output)
+        self.assertEqual(output.count("sess-real-id"), 2)
 
 
 if __name__ == "__main__":

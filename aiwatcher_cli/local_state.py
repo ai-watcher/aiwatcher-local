@@ -282,6 +282,7 @@ def record_intervention(
     estimated_impact: dict[str, Any] | None = None,
     selected_risk: str | None = None,
     selected_score: int | None = None,
+    session_id: str | None = None,
 ) -> str:
     with _locked_state():
         data = _load()
@@ -304,7 +305,13 @@ def record_intervention(
             "selected_prompt_hash": hash_prompt(selected_prompt) if selected_prompt else None,
             "decision": decision,
             "predicted_impact": _safe_impact(estimated_impact),
-            "session_id": None,
+            # A hook-provided session_id (see _extract_session_meta in cli.py) is
+            # ground truth from the tool itself. Anything left None here still
+            # gets a best-effort retroactive match from
+            # correlate.link_recent_interventions_to_sessions() -- see its
+            # `if intervention.get("session_id"): continue` guard, which skips
+            # interventions that already have a real id instead of overwriting them.
+            "session_id": session_id,
         })
         _save(data)
     return intervention_id
@@ -319,6 +326,7 @@ def record_hook_event(
     risk: str | None = None,
     score: int | None = None,
     error: str | None = None,
+    session_id: str | None = None,
 ) -> None:
     with _locked_state():
         data = _load()
@@ -331,6 +339,7 @@ def record_hook_event(
             "risk": risk,
             "score": score,
             "error": error,
+            "session_id": session_id,
         })
         data["hook_events"] = data["hook_events"][-50:]
         _save(data)

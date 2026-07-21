@@ -1991,6 +1991,33 @@ def _extract_prompt_from_hook(payload: dict[str, object]) -> str:
     return ""
 
 
+def _extract_session_meta(payload: dict[str, object]) -> dict[str, str | None]:
+    """Pull only session_id/transcript_path from a hook payload.
+
+    Deliberately narrow: reads exactly two keys, only accepts them as plain
+    strings, and returns nothing else from the payload. This is the one
+    place allowed to look at hook payload shape beyond the prompt text
+    itself -- it must never grow into a general payload passthrough.
+    """
+    def _string(source: dict[str, object], key: str) -> str | None:
+        value = source.get(key)
+        return value if isinstance(value, str) and value else None
+
+    session_id = _string(payload, "session_id")
+    transcript_path = _string(payload, "transcript_path")
+    nested = payload.get("hook_event")
+    if isinstance(nested, dict):
+        session_id = session_id or _string(nested, "session_id")
+        transcript_path = transcript_path or _string(nested, "transcript_path")
+    return {"session_id": session_id, "transcript_path": transcript_path}
+
+
+def _log_hook_payload_keys(payload: dict[str, object]) -> None:
+    # Keys only, never values -- values may contain prompt/session content.
+    if os.environ.get("AIWATCHER_DEBUG_HOOK_KEYS", "").strip().lower() in {"1", "true", "yes", "on"}:
+        print(f"AIWatcher debug: hook payload keys = {sorted(payload.keys())}", file=sys.stderr)
+
+
 def _record_hook_intervention(
     *,
     tool: str,
@@ -1999,6 +2026,7 @@ def _record_hook_intervention(
     result: dict[str, object],
     decision: str,
     selected_prompt: str | None = None,
+    session_id: str | None = None,
 ) -> None:
     try:
         effective_prompt = (
@@ -2030,6 +2058,7 @@ def _record_hook_intervention(
             ),
             selected_risk=selected_risk,
             selected_score=selected_score,
+            session_id=session_id,
         )
     except OSError:
         pass
@@ -2043,6 +2072,7 @@ def _record_hook_event(
     prompt_found: bool,
     result: dict[str, object] | None = None,
     error: str | None = None,
+    session_id: str | None = None,
 ) -> None:
     try:
         record_hook_event(
@@ -2053,6 +2083,7 @@ def _record_hook_event(
             risk=str(result.get("risk")) if result else None,
             score=int(result.get("score", 0)) if result else None,
             error=error,
+            session_id=session_id,
         )
     except OSError:
         pass
@@ -2097,8 +2128,10 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
         payload = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError:
         payload = {}
+    _log_hook_payload_keys(payload)
     prompt = args.text or _extract_prompt_from_hook(payload)
     cwd = str(payload.get("cwd") or payload.get("workspace") or os.getcwd())
+    session_id = _extract_session_meta(payload)["session_id"]
     result = analyze_prompt(prompt, tool=tool, cwd=cwd) if prompt else {
         "risk": "low",
         "score": 0,
@@ -2114,6 +2147,7 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
         event="received",
         prompt_found=bool(prompt),
         result=result,
+        session_id=session_id,
     )
     if result["risk"] == "low":
         print("{}")
@@ -2135,6 +2169,7 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
                 prompt_found=bool(prompt),
                 result=result,
                 error=str(exc),
+                session_id=session_id,
             )
         if gate:
             decision = gate.get("decision")
@@ -2147,6 +2182,7 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
                     result=result,
                     decision="brief_edited" if decision == "edit" else "brief_accepted",
                     selected_prompt=selected_prompt,
+                    session_id=session_id,
                 )
                 print(json.dumps(_hook_output_with_brief(tool, selected_prompt)))
                 return 0
@@ -2157,6 +2193,7 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
                     prompt=prompt,
                     result=result,
                     decision="allowed_original",
+                    session_id=session_id,
                 )
                 print("{}")
                 return 0
@@ -2167,6 +2204,7 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
                     prompt=prompt,
                     result=result,
                     decision="cancelled",
+                    session_id=session_id,
                 )
                 print(json.dumps(_hook_block_output("AIWatcher Prompt Gate cancelled this run.", tool=tool)))
                 return 0
@@ -2179,6 +2217,7 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
             prompt=prompt,
             result=result,
             decision="blocked",
+            session_id=session_id,
         )
         print(json.dumps(_hook_block_output(rendered, tool=tool)))
         return 0
@@ -2190,6 +2229,7 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
         prompt=prompt,
         result=result,
         decision="context_added",
+        session_id=session_id,
     )
     print(json.dumps(_hook_output_with_brief(tool, str(result["suggested_prompt"]))))
     return 0
@@ -2223,10 +2263,12 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
         payload = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError:
         payload = {}
+    _log_hook_payload_keys(payload)
     prompt = args.text or _extract_prompt_from_hook(payload)
     workspace_roots = payload.get("workspace_roots")
     workspace = workspace_roots[0] if isinstance(workspace_roots, list) and workspace_roots else None
     cwd = str(payload.get("cwd") or payload.get("workspace") or workspace or os.getcwd())
+    session_id = _extract_session_meta(payload)["session_id"]
     result = analyze_prompt(prompt, tool="cursor", cwd=cwd) if prompt else {
         "risk": "low",
         "score": 0,
@@ -2236,7 +2278,9 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
         "suggested_prompt": "",
         "estimated_impact": {},
     }
-    _record_hook_event(tool="cursor", cwd=cwd, event="received", prompt_found=bool(prompt), result=result)
+    _record_hook_event(
+        tool="cursor", cwd=cwd, event="received", prompt_found=bool(prompt), result=result, session_id=session_id
+    )
     if result["risk"] == "low":
         print(json.dumps(_cursor_hook_response(allow=True)))
         return 0
@@ -2250,14 +2294,16 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
         except OSError as exc:
             gate = None
             _record_hook_event(
-                tool="cursor", cwd=cwd, event="gate_failed", prompt_found=bool(prompt), result=result, error=str(exc)
+                tool="cursor", cwd=cwd, event="gate_failed", prompt_found=bool(prompt), result=result,
+                error=str(exc), session_id=session_id,
             )
         if gate:
             decision = gate.get("decision")
             selected_prompt = str(gate.get("prompt") or result["suggested_prompt"])
             if decision == "run_original":
                 _record_hook_intervention(
-                    tool="cursor", cwd=cwd, prompt=prompt, result=result, decision="allowed_original"
+                    tool="cursor", cwd=cwd, prompt=prompt, result=result, decision="allowed_original",
+                    session_id=session_id,
                 )
                 print(json.dumps(_cursor_hook_response(allow=True)))
                 return 0
@@ -2269,6 +2315,7 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
                     result=result,
                     decision="brief_edited" if decision == "edit" else "brief_accepted",
                     selected_prompt=selected_prompt,
+                    session_id=session_id,
                 )
                 message = (
                     "AIWatcher paused the original prompt. Cursor hooks cannot replace prompt text. "
@@ -2278,14 +2325,17 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
                 return 0
             if decision == "cancel":
                 _record_hook_intervention(
-                    tool="cursor", cwd=cwd, prompt=prompt, result=result, decision="cancelled"
+                    tool="cursor", cwd=cwd, prompt=prompt, result=result, decision="cancelled",
+                    session_id=session_id,
                 )
                 print(json.dumps(_cursor_hook_response(
                     allow=False, message="AIWatcher cancelled this prompt before execution."
                 )))
                 return 0
 
-    _record_hook_intervention(tool="cursor", cwd=cwd, prompt=prompt, result=result, decision="blocked")
+    _record_hook_intervention(
+        tool="cursor", cwd=cwd, prompt=prompt, result=result, decision="blocked", session_id=session_id
+    )
     message = (
         f"AIWatcher paused this {result['risk']}-risk prompt (score {result['score']}). "
         "Cursor hooks cannot rewrite submitted text. Review and resubmit this scoped execution brief:\n\n"
@@ -2907,6 +2957,8 @@ def command_hook_status(_args: argparse.Namespace) -> int:
             line = f"- {stamp} | {tool} | {name} | {prompt_label} | risk {risk}"
             if score is not None:
                 line += f" | score {score}"
+            if event.get("session_id"):
+                line += f" | session {event['session_id']}"
             print(line)
             if event.get("error"):
                 print(f"  error: {event['error']}")
@@ -2915,10 +2967,13 @@ def command_hook_status(_args: argparse.Namespace) -> int:
         for row in interventions:
             selected_score = row.get("selected_score")
             change = f"{row.get('score', 'unknown')} -> {selected_score}" if selected_score is not None else str(row.get("score", "unknown"))
-            print(
+            line = (
                 f"- {row.get('created_at', 'unknown')} | {row.get('tool', 'unknown')} | "
                 f"{row.get('decision', 'recorded')} | risk score {change}"
             )
+            if row.get("session_id"):
+                line += f" | session {row['session_id']}"
+            print(line)
     print("\nIf an event appears but the tool did not pause, inspect its risk and decision. If no event appears, reload the tool and verify its hook configuration.")
     return 0
 
