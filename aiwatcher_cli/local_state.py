@@ -609,6 +609,7 @@ def save_baselines(baselines: dict[str, Any]) -> None:
 
 
 MAX_COMMAND_DECISIONS_STORED = 500
+COMMAND_GATE_BLOCKED_DECISIONS = frozenset({"block", "auto_block_headless", "gate_timeout_blocked"})
 
 
 def record_command_decision(
@@ -649,12 +650,23 @@ def record_command_decision(
     return record
 
 
-def recent_command_decisions(limit: int = 20) -> list[dict[str, Any]]:
+def recent_command_decisions(limit: int = 20, days: int | None = None) -> list[dict[str, Any]]:
     try:
         with _locked_state():
             rows = list(_load()["command_decisions"])
     except OSError:
         return []
+    if days is not None:
+        cutoff = datetime.now(timezone.utc).timestamp() - max(1, days) * 86400
+        filtered = []
+        for row in rows:
+            try:
+                created_at = datetime.fromisoformat(str(row.get("created_at", ""))).timestamp()
+            except ValueError:
+                continue
+            if created_at >= cutoff:
+                filtered.append(row)
+        rows = filtered
     return list(reversed(rows[-max(1, limit):]))
 
 

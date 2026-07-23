@@ -12,15 +12,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
-from .cli import analyze_prompt, session_insights, timeline_analysis
+from .cli import _loop_signal, _velocity_signal, analyze_prompt, session_insights, timeline_analysis
 from .correlate import link_recent_interventions_to_sessions
 from .handoff import build_handoff_capsule
 from .local_state import (
+    COMMAND_GATE_BLOCKED_DECISIONS,
+    MAX_COMMAND_DECISIONS_STORED,
     VALID_OUTCOMES,
     evidence_snapshots_for_sessions,
     get_outcome,
     outcome_counts,
     outcomes_for_sessions,
+    recent_command_decisions,
     recent_interventions,
     record_evidence_snapshot,
     record_outcome,
@@ -366,6 +369,141 @@ def build_report(days: int = 7) -> dict[str, object]:
             "Treat API-equivalent value as usage pressure, not subscription invoice spend.",
             "Export event hashes if you want privacy-safe local evidence.",
         ],
+        "digest": build_weekly_digest(days),
+    }
+
+
+DIGEST_EVIDENCE_SAMPLE_SIZE = 30
+DIGEST_CANDIDATE_LIMIT = 5
+
+
+def _events_by_session(rows: list[LocalSession]) -> dict[str, list[LocalEvent]]:
+    session_ids = {row.session_id for row in rows}
+    grouped: dict[str, list[LocalEvent]] = defaultdict(list)
+    for event in scan_all_events():
+        if event.session_id in session_ids:
+            grouped[event.session_id].append(event)
+    return grouped
+
+
+def _recommend_weekly_improvement(
+    *,
+    commands_blocked: int,
+    loop_candidates: list[dict[str, object]],
+    velocity_candidates: list[dict[str, object]],
+    inferred_churned: int,
+    outcomes: dict[str, int],
+    survival: dict[str, object],
+) -> str:
+    if commands_blocked > 0:
+        plural = "s were" if commands_blocked != 1 else " was"
+        return (
+            f"{commands_blocked} dangerous command{plural} blocked this window -- "
+            "run `aiwatcher hook-status` to review what was caught."
+        )
+    if loop_candidates:
+        return (
+            f"{len(loop_candidates)} session(s) show repeated identical content -- "
+            "narrow scope before re-running the same step."
+        )
+    if velocity_candidates:
+        return (
+            f"{len(velocity_candidates)} session(s) ran well above their tool's typical pace -- "
+            "check for a runaway loop before it burns more budget."
+        )
+    if survival.get("available") and int(survival.get("churned_count") or 0) > int(survival.get("surviving_count") or 0):
+        return "More sessions churned than survived recently -- review the highest-cost churned sessions before repeating that approach."
+    if inferred_churned > 0:
+        plural = "s" if inferred_churned != 1 else ""
+        return f"{inferred_churned} session{plural} looked useful but the commit didn't survive -- review before trusting similar work."
+    if outcomes["abandoned"] > outcomes["useful"]:
+        return "More sessions were marked abandoned than useful this window -- review scoping before the next batch."
+    return "No urgent signal this window -- local usage looks healthy."
+
+
+def build_weekly_digest(days: int = 7) -> dict[str, object]:
+    """P1-5 (S-26): richer weekly signals layered onto build_report's plain totals --
+    outcome breakdown, highest-cost useful session, loop/runaway candidates (P1-3),
+    command-gate activity (P1-3), survival economics (P1-4), and one recommendation.
+    """
+    all_rows = scan_all()
+    rows = rows_for_window(days)
+    window_session_ids = {row.session_id for row in rows}
+    window_outcomes = outcomes_for_sessions(window_session_ids)
+    outcomes = outcome_counts(window_session_ids)
+
+    sample_rows = rows[:DIGEST_EVIDENCE_SAMPLE_SIZE]
+    evidence_by_session = evidence_for_sessions(sample_rows, survival_by_session=survival_by_session(sample_rows))
+    inferred_useful = sum(
+        1
+        for session_id, evidence in evidence_by_session.items()
+        if session_id not in window_outcomes and evidence.inferred_outcome == "useful"
+    )
+    inferred_churned = sum(1 for evidence in evidence_by_session.values() if evidence.inferred_outcome == "churned")
+
+    useful_rows = [row for row in rows if (window_outcomes.get(row.session_id) or {}).get("outcome") == "useful"]
+    highest_cost_useful = max(useful_rows, key=lambda row: row.cost_usd, default=None)
+
+    events_by_session = _events_by_session(rows)
+    loop_candidates: list[dict[str, object]] = []
+    velocity_candidates: list[dict[str, object]] = []
+    for row in rows:
+        events = events_by_session.get(row.session_id, [])
+        loop = _loop_signal(events)
+        if loop is not None:
+            loop_candidates.append({
+                "project": short_path(row.project_path),
+                "tool": row.tool,
+                "diagnosis": loop["diagnosis"],
+            })
+        velocity = _velocity_signal(row.tool, events)
+        if velocity is not None:
+            velocity_candidates.append({
+                "project": short_path(row.project_path),
+                "tool": row.tool,
+                "ratio_label": f"{float(velocity['ratio']):.1f}x baseline pace",
+            })
+
+    gate_decisions = recent_command_decisions(limit=MAX_COMMAND_DECISIONS_STORED, days=days)
+    blocked = [row for row in gate_decisions if row.get("decision") in COMMAND_GATE_BLOCKED_DECISIONS]
+
+    survival = _cost_per_surviving_change(all_rows)
+
+    recommendation = _recommend_weekly_improvement(
+        commands_blocked=len(blocked),
+        loop_candidates=loop_candidates,
+        velocity_candidates=velocity_candidates,
+        inferred_churned=inferred_churned,
+        outcomes=outcomes,
+        survival=survival,
+    )
+
+    return {
+        "outcomes": {
+            "useful": outcomes["useful"],
+            "rework": outcomes["rework"],
+            "abandoned": outcomes["abandoned"],
+            "inferred_useful": inferred_useful,
+            "inferred_churned": inferred_churned,
+        },
+        "highest_cost_useful_session": (
+            {
+                "project": short_path(highest_cost_useful.project_path),
+                "tool": highest_cost_useful.tool,
+                "model": highest_cost_useful.model or "unknown",
+                "api_value_label": money(highest_cost_useful.cost_usd),
+            }
+            if highest_cost_useful is not None
+            else None
+        ),
+        "loop_candidates": loop_candidates[:DIGEST_CANDIDATE_LIMIT],
+        "velocity_candidates": velocity_candidates[:DIGEST_CANDIDATE_LIMIT],
+        "command_gate": {
+            "gates_fired": len(gate_decisions),
+            "commands_blocked": len(blocked),
+        },
+        "survival": survival,
+        "recommendation": recommendation,
     }
 
 

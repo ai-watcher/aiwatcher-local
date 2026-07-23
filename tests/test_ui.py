@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from aiwatcher_cli import ui
-from aiwatcher_cli.local_state import record_intervention, record_outcome
+from aiwatcher_cli.local_state import record_command_decision, record_intervention, record_outcome
 from aiwatcher_cli.scanner import LocalEvent, LocalSession
 
 
@@ -464,6 +464,145 @@ class DashboardWindowTests(unittest.TestCase):
         titles = {item["title"] for item in summary["insights"]}
         self.assertNotIn("Large-context session", titles)
         self.assertNotIn("Possible iterative loop", titles)
+
+
+class WeeklyDigestTests(unittest.TestCase):
+    def _session(self, session_id: str, *, cost_usd: float = 1.0, hours_ago: int = 1) -> LocalSession:
+        now = datetime.now(timezone.utc)
+        return LocalSession(
+            session_id=session_id,
+            tool="claude-code",
+            project_path="/repo",
+            started_at=now - timedelta(hours=hours_ago, minutes=5),
+            updated_at=now - timedelta(hours=hours_ago),
+            cost_usd=cost_usd,
+        )
+
+    def test_digest_outcome_breakdown_uses_window_scoped_sessions(self) -> None:
+        rows = [self._session("useful-1"), self._session("rework-1")]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all", return_value=rows),
+                patch.object(ui, "scan_all_events", return_value=[]),
+                patch.object(ui, "evidence_for_sessions", return_value={}),
+                patch.object(ui, "survival_by_session", return_value={}),
+            ):
+                record_outcome("useful-1", "useful")
+                record_outcome("rework-1", "rework")
+                digest = ui.build_weekly_digest(7)
+
+        self.assertEqual(digest["outcomes"]["useful"], 1)
+        self.assertEqual(digest["outcomes"]["rework"], 1)
+        self.assertEqual(digest["outcomes"]["abandoned"], 0)
+
+    def test_digest_picks_highest_cost_useful_session(self) -> None:
+        rows = [
+            self._session("cheap", cost_usd=1.0),
+            self._session("expensive", cost_usd=9.0),
+            self._session("not-useful", cost_usd=99.0),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all", return_value=rows),
+                patch.object(ui, "scan_all_events", return_value=[]),
+                patch.object(ui, "evidence_for_sessions", return_value={}),
+                patch.object(ui, "survival_by_session", return_value={}),
+            ):
+                record_outcome("cheap", "useful")
+                record_outcome("expensive", "useful")
+                record_outcome("not-useful", "rework")
+                digest = ui.build_weekly_digest(7)
+
+        self.assertEqual(digest["highest_cost_useful_session"]["api_value_label"], "$9.00")
+
+    def test_digest_surfaces_loop_and_velocity_candidates(self) -> None:
+        rows = [self._session("s1")]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all", return_value=rows),
+                patch.object(ui, "scan_all_events", return_value=[]),
+                patch.object(ui, "evidence_for_sessions", return_value={}),
+                patch.object(ui, "survival_by_session", return_value={}),
+                patch.object(ui, "_loop_signal", return_value={"diagnosis": "Possible loop: identical content repeated 4x."}),
+                patch.object(ui, "_velocity_signal", return_value={"ratio": 3.2}),
+            ):
+                digest = ui.build_weekly_digest(7)
+
+        self.assertEqual(len(digest["loop_candidates"]), 1)
+        self.assertIn("identical content", digest["loop_candidates"][0]["diagnosis"])
+        self.assertEqual(len(digest["velocity_candidates"]), 1)
+        self.assertEqual(digest["velocity_candidates"][0]["ratio_label"], "3.2x baseline pace")
+
+    def test_digest_counts_gates_fired_and_blocked_within_window(self) -> None:
+        rows: list[LocalSession] = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all", return_value=rows),
+                patch.object(ui, "scan_all_events", return_value=[]),
+                patch.object(ui, "evidence_for_sessions", return_value={}),
+                patch.object(ui, "survival_by_session", return_value={}),
+            ):
+                record_command_decision(tool="claude", command="rm -rf /", pattern_id="rm_rf", reason="destructive", decision="block")
+                record_command_decision(tool="claude", command="git push -f", pattern_id="git_push_force", reason="force push", decision="allow_once")
+                digest = ui.build_weekly_digest(7)
+
+        self.assertEqual(digest["command_gate"]["gates_fired"], 2)
+        self.assertEqual(digest["command_gate"]["commands_blocked"], 1)
+
+    def test_digest_recommendation_prioritizes_blocked_commands(self) -> None:
+        rows = [self._session("s1")]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all", return_value=rows),
+                patch.object(ui, "scan_all_events", return_value=[]),
+                patch.object(ui, "evidence_for_sessions", return_value={}),
+                patch.object(ui, "survival_by_session", return_value={}),
+                patch.object(ui, "_loop_signal", return_value={"diagnosis": "Possible loop: identical content repeated 4x."}),
+            ):
+                record_command_decision(tool="claude", command="rm -rf /", pattern_id="rm_rf", reason="destructive", decision="block")
+                digest = ui.build_weekly_digest(7)
+
+        self.assertIn("blocked", digest["recommendation"])
+        self.assertIn("hook-status", digest["recommendation"])
+
+    def test_digest_recommendation_falls_back_to_healthy_with_no_signals(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all", return_value=[]),
+                patch.object(ui, "scan_all_events", return_value=[]),
+                patch.object(ui, "evidence_for_sessions", return_value={}),
+                patch.object(ui, "survival_by_session", return_value={}),
+            ):
+                digest = ui.build_weekly_digest(7)
+
+        self.assertIn("healthy", digest["recommendation"])
+
+    def test_build_report_includes_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all", return_value=[]),
+                patch.object(ui, "scan_all_events", return_value=[]),
+                patch.object(ui, "evidence_for_sessions", return_value={}),
+                patch.object(ui, "survival_by_session", return_value={}),
+            ):
+                report = ui.build_report(7)
+
+        self.assertIn("digest", report)
+        self.assertIn("recommendation", report["digest"])
 
 
 if __name__ == "__main__":
