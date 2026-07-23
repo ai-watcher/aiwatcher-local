@@ -1150,7 +1150,7 @@ HTML = r"""<!doctype html>
   <section id="view-prompt" class="view" hidden>
     <div class="prompt-shell">
       <div class="card">
-        <div class="section-title"><div><h2>Prompt Companion</h2><p>Preflight work before pasting it into Claude, Codex, Cursor, or any AI coding surface.</p></div></div>
+        <div class="section-title"><div><h2>Prompt Companion</h2><p>For surfaces AIWatcher cannot hook directly — Claude Desktop general chat, Codex Desktop chat, claude.ai/other browser chat. Draft here, then copy the result over yourself.</p></div></div>
         <textarea id="promptInput" class="prompt-box" placeholder="Paste or draft a prompt here. Example: Refactor the entire codebase and delete old auth secrets"></textarea>
         <div class="prompt-form-row">
           <select id="promptTool">
@@ -1165,7 +1165,7 @@ HTML = r"""<!doctype html>
           <button class="btn-primary" onclick="preflightPrompt()">Preflight prompt</button>
           <button class="btn-quiet" onclick="clearPromptCompanion()">Clear</button>
         </div>
-        <p style="margin-top:12px">This is the fallback for surfaces where AIWatcher cannot install a native hook yet. Prompt text is analyzed locally and not persisted.</p>
+        <p style="margin-top:12px">Claude Code CLI, Codex CLI/TUI, and Cursor already get this automatically via an installed hook — you don't need this tab for them. This is manual: nothing is sent anywhere or intercepted on your behalf, and prompt text is analyzed locally and not persisted.</p>
       </div>
       <div class="card">
         <div class="section-title"><div><h2>Decision</h2><p>Use the brief, edit it, or paste the original unchanged.</p></div></div>
@@ -1384,10 +1384,11 @@ async function preflightPrompt() {
       <h3>Execution brief</h3>
       <textarea id="promptBrief" class="brief-box">${esc(data.suggested_prompt)}</textarea>
       <div class="copy-row">
-        <button class="btn-primary" onclick="copyText(document.getElementById('promptBrief').value, 'Execution brief copied')">Copy brief</button>
-        <button class="btn-quiet" onclick="copyText(document.getElementById('promptInput').value, 'Original prompt copied')">Copy original</button>
+        <button class="btn-primary" onclick="copyText(document.getElementById('promptBrief').value, 'Execution brief copied — paste it into your AI tool now')">Copy brief</button>
+        <button class="btn-quiet" onclick="copyText(document.getElementById('promptInput').value, 'Original prompt copied — paste it into your AI tool now')">Copy original</button>
       </div>
-      <p style="margin-top:10px">${esc(data.privacy)}</p>
+      <p style="margin-top:10px">Paste whichever you choose as the first message in Claude Desktop, Codex Desktop, or your browser chat. AIWatcher cannot submit it for you on these surfaces.</p>
+      <p style="margin-top:6px">${esc(data.privacy)}</p>
     </div>`;
   } catch (error) {
     resultNode.innerHTML = '<div class="empty">Could not reach the local AIWatcher server.</div>';
