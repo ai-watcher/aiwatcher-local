@@ -215,6 +215,7 @@ class PromptSavingsBaselineTests(unittest.TestCase):
             "p75_calls": 20.0,
             "p75_tool_calls": 10.0,
             "p75_api_value": 0.25,
+            "p75_tokens_per_minute": 15014.0 / 15.0,
             "session_count": 10,
             "history_span_days": 19,
             "excluded_cumulative": 0,
@@ -732,6 +733,99 @@ class RunwayPressureTests(unittest.TestCase):
     def test_returns_none_for_tool_without_baseline_support(self) -> None:
         runway = cli._runway_pressure("cursor", [session(1, tool="cursor")])
         self.assertIsNone(runway)
+
+
+def _event(session_id, *, content_hash="h1", tokens_in=1000, tokens_out=200, timestamp=None, event_type="assistant_tool_use"):
+    return LocalEvent(
+        event_id=f"evt-{content_hash}-{timestamp}",
+        session_id=session_id,
+        tool="claude-code",
+        event_type=event_type,
+        timestamp=timestamp,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        content_hash=content_hash,
+    )
+
+
+class LoopSignalTests(unittest.TestCase):
+    def test_flags_repeated_identical_content_at_the_threshold(self) -> None:
+        events = [_event("s1", content_hash="dup") for _ in range(cli.LOOP_FLAG_REPEAT)]
+        loop = cli._loop_signal(events)
+        self.assertIsNotNone(loop)
+        self.assertEqual(loop["max_repeat"], cli.LOOP_FLAG_REPEAT)
+        self.assertIn("Possible loop", loop["diagnosis"])
+
+    def test_none_below_the_threshold(self) -> None:
+        events = [_event("s1", content_hash="dup") for _ in range(cli.LOOP_FLAG_REPEAT - 1)]
+        self.assertIsNone(cli._loop_signal(events))
+
+    def test_none_with_no_events(self) -> None:
+        self.assertIsNone(cli._loop_signal([]))
+
+    def test_distinct_content_is_not_a_loop(self) -> None:
+        events = [_event("s1", content_hash=f"unique-{i}") for i in range(5)]
+        self.assertIsNone(cli._loop_signal(events))
+
+
+class VelocitySignalTests(unittest.TestCase):
+    def test_flags_fast_recent_activity_against_real_duration_baseline(self) -> None:
+        now = datetime.now(timezone.utc)
+        rows = [session(index, tool="claude-code", age_days=index * 2, now=now) for index in range(10)]
+        baselines = _baselines_from_sessions(rows)
+        # Baseline sessions run 15 real minutes each (see session()); burn the
+        # same order of tokens in under a minute here to force a clear multiple.
+        events = [
+            _event("s1", content_hash=f"c{i}", tokens_in=5000, tokens_out=1000, timestamp=now - timedelta(seconds=i * 5))
+            for i in range(6)
+        ]
+        with patch.object(cli, "get_baselines", return_value=baselines):
+            velocity = cli._velocity_signal("claude-code", events)
+        self.assertIsNotNone(velocity)
+        self.assertGreaterEqual(velocity["ratio"], cli.VELOCITY_RATIO)
+
+    def test_none_without_enough_baseline_history(self) -> None:
+        baselines = _baselines_from_sessions([session(1, tool="claude-code")])
+        events = [_event("s1", tokens_in=50000, timestamp=datetime.now(timezone.utc))]
+        with patch.object(cli, "get_baselines", return_value=baselines):
+            self.assertIsNone(cli._velocity_signal("claude-code", events))
+
+    def test_none_for_tool_without_baseline_support(self) -> None:
+        events = [_event("s1", tokens_in=50000, timestamp=datetime.now(timezone.utc))]
+        self.assertIsNone(cli._velocity_signal("cursor", events))
+
+    def test_none_with_too_few_recent_events(self) -> None:
+        now = datetime.now(timezone.utc)
+        rows = [session(index, tool="claude-code", age_days=index * 2, now=now) for index in range(10)]
+        baselines = _baselines_from_sessions(rows)
+        with patch.object(cli, "get_baselines", return_value=baselines):
+            self.assertIsNone(cli._velocity_signal("claude-code", [_event("s1", timestamp=now)]))
+
+
+class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
+    def test_watch_loop_seeded_capsule_leads_with_loop_diagnosis(self) -> None:
+        row = session(1, project="/repo/orcha")
+        events = [_event(row.session_id, content_hash="dup", timestamp=row.started_at) for _ in range(cli.LOOP_CAPSULE_REPEAT)]
+        args = SimpleNamespace(days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000)
+        output = io.StringIO()
+        with (
+            patch.object(cli, "sessions_since", return_value=[row]),
+            patch.object(cli, "scan_all_events", return_value=events),
+            patch.object(cli, "get_baselines", return_value={}),
+            patch("sys.stdout", output),
+        ):
+            cli.command_watch(args)
+        rendered = output.getvalue()
+        self.assertIn("Recommended: create handoff capsule now", rendered)
+        self.assertIn("Loop       : Possible loop", rendered)
+        self.assertIn("AIWatcher handoff capsule", rendered)
+        # The loop diagnosis must lead "Why hand off now", ahead of the generic checks.
+        why_hand_off = rendered.index("Why hand off now")
+        loop_in_capsule = rendered.index("Possible loop", why_hand_off)
+        # The loop diagnosis is the extra_warnings entry -- it must come
+        # first in the bullet list, ahead of the generic cost/call checks.
+        first_bullet = rendered.index("- ", why_hand_off)
+        self.assertEqual(loop_in_capsule, first_bullet + 2)
 
     def test_low_risk_prompt_does_not_render_impact_section(self) -> None:
         with patch.object(
@@ -1405,7 +1499,210 @@ class HeadlessPromptGateTests(unittest.TestCase):
         self.assertEqual(record.call_args.kwargs["decision"], "brief_accepted")
 
 
+class CommandGateAnalyzerTests(unittest.TestCase):
+    def test_flags_rm_rf_combined_flag(self) -> None:
+        match = cli.analyze_tool_call("Bash", {"command": "rm -rf /tmp/build"})
+        self.assertIsNotNone(match)
+        self.assertEqual(match["pattern_id"], "rm-rf")
+
+    def test_flags_rm_rf_separate_flags(self) -> None:
+        match = cli.analyze_tool_call("Bash", {"command": "rm -r -f node_modules"})
+        self.assertEqual(match["pattern_id"], "rm-rf")
+
+    def test_flags_rm_rf_long_flags(self) -> None:
+        match = cli.analyze_tool_call("Bash", {"command": "rm --recursive --force build"})
+        self.assertEqual(match["pattern_id"], "rm-rf")
+
+    def test_rm_force_only_is_not_flagged(self) -> None:
+        self.assertIsNone(cli.analyze_tool_call("Bash", {"command": "rm -f singlefile.txt"}))
+
+    def test_rm_without_flags_is_not_flagged(self) -> None:
+        self.assertIsNone(cli.analyze_tool_call("Bash", {"command": "rm build/output.txt"}))
+
+    def test_flags_git_push_force_long_flag(self) -> None:
+        match = cli.analyze_tool_call("Bash", {"command": "git push origin main --force"})
+        self.assertEqual(match["pattern_id"], "git-push-force")
+
+    def test_flags_git_push_force_short_flag(self) -> None:
+        match = cli.analyze_tool_call("Bash", {"command": "git push -f origin main"})
+        self.assertEqual(match["pattern_id"], "git-push-force")
+
+    def test_ordinary_git_push_is_not_flagged(self) -> None:
+        self.assertIsNone(cli.analyze_tool_call("Bash", {"command": "git push origin main"}))
+
+    def test_flags_git_reset_hard(self) -> None:
+        match = cli.analyze_tool_call("Bash", {"command": "git reset --hard HEAD~3"})
+        self.assertEqual(match["pattern_id"], "git-reset-hard")
+
+    def test_soft_git_reset_is_not_flagged(self) -> None:
+        self.assertIsNone(cli.analyze_tool_call("Bash", {"command": "git reset HEAD~3"}))
+
+    def test_flags_credential_file_read(self) -> None:
+        match = cli.analyze_tool_call("Bash", {"command": "cat .env"})
+        self.assertEqual(match["pattern_id"], "credential-read")
+
+    def test_ordinary_file_read_is_not_flagged(self) -> None:
+        self.assertIsNone(cli.analyze_tool_call("Bash", {"command": "cat README.md"}))
+
+    def test_flags_prod_connection_string(self) -> None:
+        match = cli.analyze_tool_call("Bash", {"command": "psql postgres://user:pw@prod-db.example.com/app"})
+        self.assertEqual(match["pattern_id"], "prod-connection-string")
+
+    def test_local_connection_string_is_not_flagged(self) -> None:
+        self.assertIsNone(cli.analyze_tool_call("Bash", {"command": "psql postgres://user:pw@localhost/app"}))
+
+    def test_non_bash_tools_are_never_flagged(self) -> None:
+        self.assertIsNone(cli.analyze_tool_call("Write", {"command": "rm -rf /"}))
+        self.assertIsNone(cli.analyze_tool_call("Read", {"file_path": ".env"}))
+
+    def test_empty_or_missing_command_is_not_flagged(self) -> None:
+        self.assertIsNone(cli.analyze_tool_call("Bash", {"command": ""}))
+        self.assertIsNone(cli.analyze_tool_call("Bash", {}))
+
+
+class CommandGateHookTests(unittest.TestCase):
+    def test_safe_command_passes_through_with_empty_output(self) -> None:
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git status"}, "session_id": "s1"})
+        args = SimpleNamespace(text=None, gate=False)
+        with (
+            patch.object(cli, "_read_stdin_text", return_value=payload),
+            patch.object(cli, "run_command_gate") as gate_mock,
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_claude_pretooluse_hook(args)
+        self.assertEqual(result, 0)
+        self.assertEqual(stdout.getvalue().strip(), "{}")
+        gate_mock.assert_not_called()
+
+    def test_blocked_decision_denies_and_records_real_command_text(self) -> None:
+        payload = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "rm -rf /tmp/build"},
+            "session_id": "s1",
+            "cwd": "/repo",
+        })
+        args = SimpleNamespace(text=None, gate=False)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.object(cli, "_read_stdin_text", return_value=payload),
+                patch.object(cli, "run_command_gate", return_value="block"),
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                result = cli.command_claude_pretooluse_hook(args)
+            self.assertEqual(result, 0)
+            output = json.loads(stdout.getvalue())
+            self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+            self.assertIn("rm -rf /tmp/build", output["hookSpecificOutput"]["permissionDecisionReason"])
+
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                decisions = cli.recent_command_decisions(limit=5)
+            self.assertEqual(len(decisions), 1)
+            # The scenario spec explicitly requires the full real command text,
+            # unlike prompts (which are hashed) -- confirm it is NOT hashed.
+            self.assertEqual(decisions[0]["command"], "rm -rf /tmp/build")
+            self.assertEqual(decisions[0]["decision"], "block")
+            self.assertEqual(decisions[0]["session_id"], "s1")
+
+    def test_allow_once_permits_without_persisting_always_allow(self) -> None:
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git reset --hard"}, "session_id": "s1"})
+        args = SimpleNamespace(text=None, gate=False)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.object(cli, "_read_stdin_text", return_value=payload),
+                patch.object(cli, "run_command_gate", return_value="allow_once"),
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                result = cli.command_claude_pretooluse_hook(args)
+            self.assertEqual(result, 0)
+            output = json.loads(stdout.getvalue())
+            self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                self.assertFalse(cli.is_command_pattern_always_allowed("git-reset-hard"))
+
+    def test_always_allow_persists_and_skips_the_gate_next_time(self) -> None:
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git reset --hard"}, "session_id": "s1"})
+        args = SimpleNamespace(text=None, gate=False)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.object(cli, "_read_stdin_text", return_value=payload),
+                patch.object(cli, "run_command_gate", return_value="always_allow") as gate_mock,
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                cli.command_claude_pretooluse_hook(args)
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                self.assertTrue(cli.is_command_pattern_always_allowed("git-reset-hard"))
+
+            # Second occurrence of the same pattern must not re-open the gate.
+            with (
+                patch.object(cli, "_read_stdin_text", return_value=payload),
+                patch.object(cli, "run_command_gate", return_value="block") as gate_mock_2,
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch("sys.stdout", new_callable=io.StringIO) as stdout2,
+            ):
+                result = cli.command_claude_pretooluse_hook(args)
+            self.assertEqual(result, 0)
+            output = json.loads(stdout2.getvalue())
+            self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
+            gate_mock_2.assert_not_called()
+
+    def test_gate_timeout_fails_closed(self) -> None:
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git reset --hard"}, "session_id": "s1"})
+        args = SimpleNamespace(text=None, gate=False)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.object(cli, "_read_stdin_text", return_value=payload),
+                patch.object(cli, "run_command_gate", return_value=None),
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                result = cli.command_claude_pretooluse_hook(args)
+            self.assertEqual(result, 0)
+            output = json.loads(stdout.getvalue())
+            self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+
+
 class IntegrationConfigTests(unittest.TestCase):
+    def test_command_gate_hook_uses_pretoolusehook_transport_and_bash_matcher(self) -> None:
+        merged = cli._merge_claude_command_gate_hook({}, "python -m aiwatcher_cli")
+        entry = merged["hooks"]["PreToolUse"][0]
+        self.assertEqual(entry["matcher"], "Bash")
+        hook = entry["hooks"][0]
+        self.assertIn("claude-pretooluse-hook", hook["command"])
+        self.assertEqual(hook["timeout"], cli.PROMPT_GATE_HOST_TIMEOUT_SECONDS)
+
+    def test_command_gate_hook_does_not_clobber_existing_user_prompt_submit_hook(self) -> None:
+        existing = cli._merge_claude_hook({}, "python -m aiwatcher_cli", gate=True)
+        merged = cli._merge_claude_command_gate_hook(existing, "python -m aiwatcher_cli")
+        self.assertIn("UserPromptSubmit", merged["hooks"])
+        self.assertIn("PreToolUse", merged["hooks"])
+
+    def test_remove_command_gate_hook_preserves_other_hooks(self) -> None:
+        settings = {
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": "aiwatcher claude-pretooluse-hook"}]},
+                    {"matcher": "Write", "hooks": [{"type": "command", "command": "other-check"}]},
+                ],
+                "Stop": [{"hooks": [{"type": "command", "command": "finish"}]}],
+            }
+        }
+        updated, removed = cli._remove_claude_command_gate_hook(settings)
+        self.assertTrue(removed)
+        self.assertEqual(len(updated["hooks"]["PreToolUse"]), 1)
+        self.assertIn("Stop", updated["hooks"])
+
+    def test_remove_command_gate_hook_reinstall_is_idempotent(self) -> None:
+        merged = cli._merge_claude_command_gate_hook({}, "python -m aiwatcher_cli")
+        merged_again = cli._merge_claude_command_gate_hook(merged, "python -m aiwatcher_cli")
+        self.assertEqual(len(merged_again["hooks"]["PreToolUse"]), 1)
+
     def test_remove_claude_hook_preserves_other_hooks(self) -> None:
         settings = {
             "hooks": {
