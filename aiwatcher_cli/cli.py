@@ -24,7 +24,7 @@ import time as time_module
 import webbrowser
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Sequence
 
 from .correlate import link_recent_interventions_to_sessions
 from .local_state import (
@@ -46,6 +46,7 @@ from .handoff import TARGET_LABELS, build_handoff_capsule, render_handoff_capsul
 from .outcome_evidence import build_outcome_evidence
 from .pricing import is_subscription_model
 from .scanner import LocalEvent, LocalSession, discover_tools, scan_all, scan_all_events
+from .session_health import analyze_session_health
 
 
 CLOUD_URL = "https://www.getaiwatcher.com"
@@ -1877,14 +1878,174 @@ def command_journal(args: argparse.Namespace) -> int:
     return 0
 
 
+RUNWAY_WINDOW_HOURS = 5.0
+RUNWAY_PRESSURE_RATIO = 1.5
+
+
+def _runway_pressure(tool: str, sessions: Sequence[LocalSession]) -> dict[str, object] | None:
+    """Best-effort local estimate of usage pressure in the trailing window.
+
+    This is NOT a real quota/rate-limit reading -- AIWatcher has no access to
+    provider-side quota state (Claude's 5-hour subscription window, Codex/Cursor
+    limits, etc). It only sums this tool's own local session activity over the
+    last RUNWAY_WINDOW_HOURS and compares it against that tool's typical
+    single-session size (p75, from the cached baselines), so at best it is a
+    rough local proxy -- callers must label it as an estimate, never as "live"
+    or "remaining quota".
+    """
+    baseline_tool = _normalize_tool_for_baseline(tool)
+    if not baseline_tool:
+        return None
+    baselines = get_baselines()
+    per_tool = baselines.get("per_tool") if isinstance(baselines, dict) else None
+    stats = per_tool.get(baseline_tool) if isinstance(per_tool, dict) else None
+    if not isinstance(stats, dict):
+        return None
+    if (
+        stats.get("session_count", 0) < MIN_SAVINGS_SESSIONS
+        or stats.get("history_span_days", 0) < MIN_SAVINGS_HISTORY_DAYS
+    ):
+        return None
+    p75_tokens = float(stats.get("p75_tokens") or 0)
+    if p75_tokens <= 0:
+        return None
+
+    window_start = datetime.now(timezone.utc) - timedelta(hours=RUNWAY_WINDOW_HOURS)
+    window_tokens = 0
+    for row in sessions:
+        if row.tool != baseline_tool:
+            continue
+        stamp = row.updated_at or row.started_at
+        if not stamp:
+            continue
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        if stamp >= window_start:
+            window_tokens += row.tokens_in + row.tokens_out
+    if window_tokens <= 0:
+        return None
+    return {
+        "tool": baseline_tool,
+        "window_hours": RUNWAY_WINDOW_HOURS,
+        "window_tokens": window_tokens,
+        "p75_tokens": p75_tokens,
+        "pressure_ratio": window_tokens / p75_tokens,
+    }
+
+
+def _watch_status(
+    session: LocalSession,
+    events: Sequence[LocalEvent],
+    all_rows: Sequence[LocalSession],
+    *,
+    cost_threshold: float,
+    calls_threshold: int,
+    tokens_threshold: int,
+) -> dict[str, object]:
+    """Combine context health + runway pressure + session insights into one recommended action.
+
+    Action is always one of: continue | narrow scope | start fresh |
+    switch tool or lane | create handoff capsule now.
+    """
+    health = analyze_session_health(session, events)
+    runway = _runway_pressure(session.tool, all_rows)
+    insights = session_insights(
+        session,
+        cost_threshold=cost_threshold,
+        calls_threshold=calls_threshold,
+        tokens_threshold=tokens_threshold,
+    )
+
+    action = "continue"
+    reason = "No urgent local signal detected."
+    if health is not None and health.severity == "critical":
+        action = "create handoff capsule now"
+        reason = health.recommendations[0] if health.recommendations else "Context health is critical."
+    elif runway is not None and float(runway["pressure_ratio"]) >= RUNWAY_PRESSURE_RATIO:
+        action = "switch tool or lane"
+        reason = (
+            f"Estimated usage in the last {RUNWAY_WINDOW_HOURS:.0f}h is "
+            f"{float(runway['pressure_ratio']):.1f}x your typical {runway['tool']} session "
+            "(local estimate, not a real-time quota API)."
+        )
+    elif health is not None and health.severity == "warning":
+        action = "start fresh" if health.is_critical_stale else "narrow scope"
+        reason = health.recommendations[0] if health.recommendations else "Context pressure is elevated."
+    elif insights:
+        action = "narrow scope"
+        reason = insights[0]
+
+    return {"health": health, "runway": runway, "insights": insights, "action": action, "reason": reason}
+
+
+def _print_watch_status_card(session: LocalSession, all_rows: Sequence[LocalSession], args: argparse.Namespace) -> None:
+    events = events_for_session(session.session_id, days=max(args.days, 1))
+    status = _watch_status(
+        session,
+        events,
+        all_rows,
+        cost_threshold=args.cost_threshold,
+        calls_threshold=args.calls_threshold,
+        tokens_threshold=args.tokens_threshold,
+    )
+    health = status["health"]
+    runway = status["runway"]
+    stamp = session_sort_key(session)
+    when = format_short_datetime(stamp.astimezone()) if stamp != MIN_DT else "unknown"
+
+    print(f"Latest observed session ({when}, local logs only -- not a live feed)")
+    print(f"  Tool/model : {session.tool} / {session.model or 'unknown'}")
+    print(f"  Project    : {short_path(session.project_path)}")
+    print(
+        f"  Usage      : {money(session.cost_usd)} API-equivalent, "
+        f"{compact_int(session.tokens_in + session.tokens_out)} tokens, "
+        f"{session.agent_calls} model calls, {session.tool_calls} tool calls"
+    )
+    if health is not None:
+        print(
+            f"  Context    : {health.severity} "
+            f"({compact_int(health.latest_turn_tokens)} tokens/turn, {health.efficiency_pct:.0f}% efficiency)"
+        )
+    else:
+        print("  Context    : not enough per-turn token data locally to assess")
+    if runway is not None:
+        print(
+            f"  Usage pressure ({runway['window_hours']:.0f}h est.): "
+            f"{float(runway['pressure_ratio']):.1f}x typical {runway['tool']} session "
+            "-- local estimate, not a real-time quota API"
+        )
+    print(f"  Recommended: {status['action']} -- {status['reason']}")
+
+    if health is not None and health.severity == "critical":
+        outcome = get_outcome(session.session_id)
+        capsule = build_handoff_capsule(
+            session,
+            events,
+            outcome=outcome.get("outcome") if outcome else None,
+            target="generic",
+        )
+        print("\n  Context is critical -- generating a handoff capsule now:\n")
+        for line in render_handoff_capsule(capsule).splitlines():
+            print(f"  {line}" if line else "")
+    print()
+
+
 def command_watch(args: argparse.Namespace) -> int:
     print("AIWatcher Local watch")
-    print("Read-only local scan. No data leaves this machine. Press Ctrl+C to stop.\n")
+    print("Read-only local scan. No data leaves this machine. Press Ctrl+C to stop.")
+    print("This re-scans local session logs on a timer -- it is not a live hook into a running agent.\n")
 
     seen: dict[str, datetime] = {}
     try:
         while True:
             rows = sorted(sessions_since(args.days), key=session_sort_key, reverse=True)
+            if not rows:
+                print(f"No local AI sessions detected in the last {args.days} days.")
+                if args.once:
+                    return 0
+            else:
+                _print_watch_status_card(rows[0], rows, args)
+
             interesting: list[LocalSession] = []
             for row in rows:
                 stamp = session_sort_key(row)
@@ -1899,27 +2060,20 @@ def command_watch(args: argparse.Namespace) -> int:
                 ):
                     interesting.append(row)
 
-            if args.once:
-                if not rows:
-                    print(f"No local AI sessions detected in the last {args.days} days.")
-                    return 0
-                if not interesting:
-                    latest = rows[0]
-                    print_session_detail(latest, heading="Latest session, no urgent local signals")
-                    return 0
-
-            for row in interesting[:5]:
-                stamp = session_sort_key(row)
-                when = format_short_datetime(stamp.astimezone()) if stamp != MIN_DT else "unknown"
-                print(f"[{when}] {row.tool} | {short_path(row.project_path)} | {money(row.cost_usd)} | {compact_int(row.tokens_in + row.tokens_out)} tokens")
-                for insight in session_insights(
-                    row,
-                    cost_threshold=args.cost_threshold,
-                    calls_threshold=args.calls_threshold,
-                    tokens_threshold=args.tokens_threshold,
-                )[:3]:
-                    print(f"  - {insight}")
-                print(f"  Next: aiwatcher resume --session-id {row.session_id} --target codex --copy")
+            if interesting:
+                print("Other sessions with local signals:")
+                for row in interesting[:5]:
+                    stamp = session_sort_key(row)
+                    when = format_short_datetime(stamp.astimezone()) if stamp != MIN_DT else "unknown"
+                    print(f"[{when}] {row.tool} | {short_path(row.project_path)} | {money(row.cost_usd)} | {compact_int(row.tokens_in + row.tokens_out)} tokens")
+                    for insight in session_insights(
+                        row,
+                        cost_threshold=args.cost_threshold,
+                        calls_threshold=args.calls_threshold,
+                        tokens_threshold=args.tokens_threshold,
+                    )[:3]:
+                        print(f"  - {insight}")
+                    print(f"  Next: aiwatcher resume --session-id {row.session_id} --target codex --copy")
 
             if args.once:
                 return 0

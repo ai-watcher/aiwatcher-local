@@ -19,7 +19,7 @@ from unittest.mock import Mock, patch
 
 from aiwatcher_cli import cli, local_state
 from aiwatcher_cli.local_state import recent_decisions
-from aiwatcher_cli.scanner import LocalSession
+from aiwatcher_cli.scanner import LocalEvent, LocalSession
 
 
 def session(
@@ -522,11 +522,115 @@ class PromptPreflightTests(unittest.TestCase):
         )
         output = io.StringIO()
 
-        with patch.object(cli, "sessions_since", return_value=[row]), patch("sys.stdout", output):
+        with (
+            patch.object(cli, "sessions_since", return_value=[row]),
+            patch.object(cli, "scan_all_events", return_value=[]),
+            patch.object(cli, "get_baselines", return_value={}),
+            patch("sys.stdout", output),
+        ):
             result = cli.command_watch(args)
 
         self.assertEqual(result, 0)
+        self.assertIn("Latest observed session", output.getvalue())
+        self.assertIn("Recommended: narrow scope", output.getvalue())
         self.assertIn("aiwatcher resume --session-id session-1 --target codex --copy", output.getvalue())
+
+    def test_watch_labels_itself_as_log_based_not_live(self) -> None:
+        args = SimpleNamespace(days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000)
+        output = io.StringIO()
+        with (
+            patch.object(cli, "sessions_since", return_value=[session(1)]),
+            patch.object(cli, "scan_all_events", return_value=[]),
+            patch.object(cli, "get_baselines", return_value={}),
+            patch("sys.stdout", output),
+        ):
+            cli.command_watch(args)
+        self.assertIn("not a live hook into a running agent", output.getvalue())
+        self.assertIn("local logs only", output.getvalue())
+
+    def test_watch_critical_context_prints_handoff_capsule_inline(self) -> None:
+        row = session(1, project="/repo/orcha")
+        events = [
+            LocalEvent(
+                event_id=f"evt-{i}",
+                session_id=row.session_id,
+                tool=row.tool,
+                event_type="assistant",
+                timestamp=row.started_at,
+                tokens_in=210_000,
+                tokens_out=500,
+            )
+            for i in range(3)
+        ]
+        args = SimpleNamespace(days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000)
+        output = io.StringIO()
+        with (
+            patch.object(cli, "sessions_since", return_value=[row]),
+            patch.object(cli, "scan_all_events", return_value=events),
+            patch.object(cli, "get_baselines", return_value={}),
+            patch("sys.stdout", output),
+        ):
+            cli.command_watch(args)
+        rendered = output.getvalue()
+        self.assertIn("Context    : critical", rendered)
+        self.assertIn("Recommended: create handoff capsule now", rendered)
+        self.assertIn("generating a handoff capsule now", rendered)
+        self.assertIn("AIWatcher handoff capsule", rendered)
+        self.assertIn("Paste this as the first prompt in a fresh AI coding session.", rendered)
+
+    def test_watch_healthy_session_recommends_continue(self) -> None:
+        row = session(1)
+        args = SimpleNamespace(days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000)
+        output = io.StringIO()
+        with (
+            patch.object(cli, "sessions_since", return_value=[row]),
+            patch.object(cli, "scan_all_events", return_value=[]),
+            patch.object(cli, "get_baselines", return_value={}),
+            patch("sys.stdout", output),
+        ):
+            cli.command_watch(args)
+        self.assertIn("Recommended: continue", output.getvalue())
+
+    def test_watch_no_sessions_says_so_and_returns(self) -> None:
+        args = SimpleNamespace(days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000)
+        output = io.StringIO()
+        with patch.object(cli, "sessions_since", return_value=[]), patch("sys.stdout", output):
+            result = cli.command_watch(args)
+        self.assertEqual(result, 0)
+        self.assertIn("No local AI sessions detected", output.getvalue())
+
+
+class RunwayPressureTests(unittest.TestCase):
+    def test_flags_high_window_usage_against_baseline(self) -> None:
+        now = datetime.now(timezone.utc)
+        rows = [session(index, tool="claude-code", age_days=index * 2, now=now) for index in range(10)]
+        baselines = _baselines_from_sessions(rows)
+        window_rows = [session(90, tool="claude-code", age_days=0, now=now)]
+        window_rows[0].tokens_in = 400_000
+        window_rows[0].tokens_out = 100_000
+        with patch.object(cli, "get_baselines", return_value=baselines):
+            runway = cli._runway_pressure("claude-code", window_rows)
+        self.assertIsNotNone(runway)
+        self.assertGreaterEqual(runway["pressure_ratio"], 1.5)
+
+    def test_returns_none_without_enough_baseline_history(self) -> None:
+        baselines = _baselines_from_sessions([session(1, tool="claude-code")])
+        with patch.object(cli, "get_baselines", return_value=baselines):
+            runway = cli._runway_pressure("claude-code", [session(1, tool="claude-code")])
+        self.assertIsNone(runway)
+
+    def test_returns_none_outside_the_window(self) -> None:
+        now = datetime.now(timezone.utc)
+        rows = [session(index, tool="claude-code", age_days=index * 2, now=now) for index in range(10)]
+        baselines = _baselines_from_sessions(rows)
+        old_row = session(90, tool="claude-code", age_days=1, now=now)
+        with patch.object(cli, "get_baselines", return_value=baselines):
+            runway = cli._runway_pressure("claude-code", [old_row])
+        self.assertIsNone(runway)
+
+    def test_returns_none_for_tool_without_baseline_support(self) -> None:
+        runway = cli._runway_pressure("cursor", [session(1, tool="cursor")])
+        self.assertIsNone(runway)
 
     def test_low_risk_prompt_does_not_render_impact_section(self) -> None:
         with patch.object(
