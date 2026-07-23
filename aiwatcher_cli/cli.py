@@ -29,6 +29,7 @@ from typing import Callable, Iterable, Sequence
 from .correlate import link_recent_interventions_to_sessions
 from .local_state import (
     VALID_OUTCOMES,
+    evidence_snapshots_for_sessions,
     get_baselines,
     get_outcome,
     is_command_pattern_always_allowed,
@@ -43,11 +44,12 @@ from .local_state import (
     record_intervention,
     record_hook_event,
     record_outcome,
+    record_survival_check,
     save_baselines,
     state_path,
 )
 from .handoff import TARGET_LABELS, build_handoff_capsule, render_handoff_capsule
-from .outcome_evidence import build_outcome_evidence
+from .outcome_evidence import build_outcome_evidence, check_commit_survival, repo_root_for_session
 from .pricing import is_subscription_model
 from .scanner import LocalEvent, LocalSession, discover_tools, scan_all, scan_all_events
 from .session_health import analyze_session_health
@@ -613,6 +615,86 @@ def get_or_refresh_baselines(max_age_hours: int = 24) -> dict[str, object]:
     except OSError:
         pass
     return fresh
+
+
+SURVIVAL_BUCKETS_DAYS = {"7": 7, "14": 14, "30": 30}
+SURVIVAL_RECHECK_CAP = 20          # sessions checked per call, not (session, bucket) pairs
+SURVIVAL_MAX_COMMITS_CHECKED = 5   # per session -- each is its own git subprocess spawn
+
+
+def recheck_evidence_survival(cap: int = SURVIVAL_RECHECK_CAP) -> int:
+    """S-22: re-check existing evidence snapshots' commits for survival at 7/14/30-day marks.
+
+    Off the hot path -- call only from today/report/ui startup, same rule as
+    get_or_refresh_baselines(). Capped per call by *session* (a "capped
+    batch", matching S-30's passive-backfill pattern), computing survival
+    status once per session even when multiple buckets are due at once
+    (e.g. the first recheck after 20 days is due for both 7 and 14) --
+    each git check is its own subprocess spawn, so this matters for real
+    wall-clock cost, not just call count. Checks stop at the first
+    "survived" commit rather than exhausting every recorded sha, since one
+    survivor already answers the question. Whatever's left over past `cap`
+    catches up on a later call.
+    Returns how many sessions were actually (re)checked.
+    """
+    snapshots = evidence_snapshots_for_sessions()
+    if not snapshots:
+        return 0
+    now = datetime.now(timezone.utc)
+    due_buckets_by_session: dict[str, list[str]] = {}
+    for session_id, row in snapshots.items():
+        commit_shas = row.get("commit_shas") or []
+        if not commit_shas:
+            continue
+        try:
+            recorded_at = datetime.fromisoformat(str(row.get("recorded_at")))
+        except (TypeError, ValueError):
+            continue
+        if recorded_at.tzinfo is None:
+            recorded_at = recorded_at.replace(tzinfo=timezone.utc)
+        age_days = (now - recorded_at).total_seconds() / 86400
+        survival = row.get("survival") if isinstance(row.get("survival"), dict) else {}
+        due = [
+            bucket for bucket, bucket_days in SURVIVAL_BUCKETS_DAYS.items()
+            if age_days >= bucket_days and bucket not in survival
+        ]
+        if due:
+            due_buckets_by_session[session_id] = due
+    if not due_buckets_by_session:
+        return 0
+
+    sessions_by_id = {row.session_id: row for row in scan_all()}
+    checked = 0
+    for session_id, buckets in list(due_buckets_by_session.items())[:max(0, cap)]:
+        row = snapshots[session_id]
+        session = sessions_by_id.get(session_id)
+        status = "unknown"
+        if session is not None:
+            try:
+                repo = repo_root_for_session(session)
+            except OSError:
+                repo = None
+            if repo:
+                seen_churned = False
+                for sha in (row.get("commit_shas") or [])[:SURVIVAL_MAX_COMMITS_CHECKED]:
+                    result = check_commit_survival(repo, str(sha))
+                    if result == "survived":
+                        status = "survived"
+                        break
+                    if result == "churned":
+                        seen_churned = True
+                else:
+                    status = "churned" if seen_churned else "unknown"
+        # session is None: the underlying session log is no longer present, so
+        # its real repo path can't be re-derived -- record "unknown" rather
+        # than leaving it perpetually due for a recheck every call.
+        for bucket in buckets:
+            try:
+                record_survival_check(session_id, bucket, status)
+            except OSError:
+                pass
+        checked += 1
+    return checked
 
 
 def estimate_prompt_savings(prompt: str, *, risk_score: int, tool: str, cwd: str | None = None) -> dict[str, object]:
@@ -1952,6 +2034,10 @@ def command_today(_args: argparse.Namespace) -> int:
         get_or_refresh_baselines()
     except OSError:
         pass
+    try:
+        recheck_evidence_survival()
+    except OSError:
+        pass
     today = [row for row in all_sessions if in_window(row, today_start)]
     week = [row for row in all_sessions if in_window(row, week_start)]
     month = [row for row in all_sessions if in_window(row, month_start)]
@@ -2072,6 +2158,10 @@ def command_report(args: argparse.Namespace) -> int:
     rows = sessions_since(days)
     try:
         get_or_refresh_baselines()
+    except OSError:
+        pass
+    try:
+        recheck_evidence_survival()
     except OSError:
         pass
     stats = summarize(rows)
@@ -4440,6 +4530,10 @@ def command_ui(args: argparse.Namespace) -> int:
 
     try:
         get_or_refresh_baselines()
+    except OSError:
+        pass
+    try:
+        recheck_evidence_survival()
     except OSError:
         pass
 

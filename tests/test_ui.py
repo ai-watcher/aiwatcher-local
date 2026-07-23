@@ -187,12 +187,86 @@ class DashboardWindowTests(unittest.TestCase):
             patch.object(ui, "scan_all_events", return_value=[]),
             patch.object(ui, "discover_tools", return_value={}),
             patch.object(ui, "evidence_for_sessions", return_value={"recent": Evidence()}),
+            patch.object(ui, "survival_by_session", return_value={}),
         ):
             summary = ui.build_summary(7)
 
         self.assertEqual(summary["totals"]["inferred_useful_outcomes"], 1)
         self.assertEqual(summary["recent_sessions"][0]["inferred_outcome"], "useful")
         self.assertTrue(any(item["title"] == "Outcome evidence found" for item in summary["insights"]))
+
+    def test_cost_per_surviving_change_unavailable_below_sample_threshold(self) -> None:
+        rows = [
+            LocalSession(session_id=f"s{i}", tool="claude-code", project_path="/repo", cost_usd=1.0)
+            for i in range(3)
+        ]
+        snapshots = {
+            f"s{i}": {"survival": {"7": {"status": "survived"}}} for i in range(3)
+        }
+        with patch.object(ui, "evidence_snapshots_for_sessions", return_value=snapshots):
+            result = ui._cost_per_surviving_change(rows)
+        self.assertFalse(result["available"])
+        self.assertEqual(result["sample_count"], 3)
+
+    def test_cost_per_surviving_change_reports_survived_vs_churned_averages(self) -> None:
+        rows = (
+            [LocalSession(session_id=f"survived-{i}", tool="claude-code", project_path="/repo", cost_usd=2.0) for i in range(3)]
+            + [LocalSession(session_id=f"churned-{i}", tool="claude-code", project_path="/repo", cost_usd=4.0) for i in range(2)]
+        )
+        snapshots = {
+            **{f"survived-{i}": {"survival": {"7": {"status": "survived"}}} for i in range(3)},
+            **{f"churned-{i}": {"survival": {"7": {"status": "churned"}}} for i in range(2)},
+        }
+        with patch.object(ui, "evidence_snapshots_for_sessions", return_value=snapshots):
+            result = ui._cost_per_surviving_change(rows)
+        self.assertTrue(result["available"])
+        self.assertEqual(result["surviving_count"], 3)
+        self.assertEqual(result["churned_count"], 2)
+        self.assertEqual(result["cost_per_surviving_change"], "$2.00")
+        self.assertEqual(result["cost_per_churned_change"], "$4.00")
+
+    def test_cost_per_surviving_change_uses_earliest_checked_bucket(self) -> None:
+        rows = [
+            LocalSession(session_id=f"s{i}", tool="claude-code", project_path="/repo", cost_usd=1.0)
+            for i in range(5)
+        ]
+        # s0: 7-day bucket unchecked, 14-day says survived -- should still count via the 14-day result.
+        snapshots = {
+            "s0": {"survival": {"14": {"status": "survived"}}},
+            **{f"s{i}": {"survival": {"7": {"status": "survived"}}} for i in range(1, 5)},
+        }
+        with patch.object(ui, "evidence_snapshots_for_sessions", return_value=snapshots):
+            result = ui._cost_per_surviving_change(rows)
+        self.assertEqual(result["surviving_count"], 5)
+
+    def test_today_surfaces_churned_insight(self) -> None:
+        now = datetime.now(timezone.utc)
+        rows = [
+            LocalSession(
+                session_id="recent", tool="claude-code", project_path="/repo",
+                started_at=now - timedelta(hours=2), updated_at=now - timedelta(hours=1),
+                tokens_in=100, tokens_out=50, cost_usd=0.4,
+            )
+        ]
+
+        class ChurnedEvidence:
+            inferred_outcome = "churned"
+
+            def to_json(self):
+                return {"inferred_outcome": "churned"}
+
+        with (
+            patch.object(ui, "scan_all", return_value=rows),
+            patch.object(ui, "scan_all_events", return_value=[]),
+            patch.object(ui, "discover_tools", return_value={}),
+            patch.object(ui, "evidence_for_sessions", return_value={"recent": ChurnedEvidence()}),
+            patch.object(ui, "survival_by_session", return_value={}),
+            patch.object(ui, "evidence_snapshots_for_sessions", return_value={}),
+        ):
+            summary = ui.build_summary(7)
+
+        self.assertTrue(any(item["title"] == "Work that didn't stick" for item in summary["insights"]))
+        self.assertEqual(summary["recent_sessions"][0]["inferred_outcome"], "churned")
 
     def test_handoff_detail_returns_capsule_for_session(self) -> None:
         now = datetime.now(timezone.utc)
