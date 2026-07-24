@@ -1832,6 +1832,18 @@ class UIHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         return
 
+    def handle_error(self, request: object, client_address: object) -> None:
+        # A browser tab closing or refreshing mid-fetch (the dashboard fires
+        # several concurrent requests via Promise.all on every load()) causes a
+        # BrokenPipeError/ConnectionResetError when we try to write the response
+        # to an already-closed socket. That's expected client behavior, not a
+        # server bug — suppress the noisy traceback but still log anything else.
+        import sys
+        exc_type = sys.exc_info()[0]
+        if exc_type is not None and issubclass(exc_type, (BrokenPipeError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
+
     def _trusted_origin(self) -> str | None:
         """Echo back Origin only for the AIWatcher extension or local dev pages.
 
@@ -1854,16 +1866,20 @@ class UIHandler(BaseHTTPRequestHandler):
 
     def _send(self, status: int, body: str, content_type: str) -> None:
         encoded = body.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(encoded)))
-        self.send_header("Cache-Control", "no-store")
-        trusted = self._trusted_origin()
-        if trusted:
-            self.send_header("Access-Control-Allow-Origin", trusted)
-            self.send_header("Vary", "Origin")
-        self.end_headers()
-        self.wfile.write(encoded)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(encoded)))
+            self.send_header("Cache-Control", "no-store")
+            trusted = self._trusted_origin()
+            if trusted:
+                self.send_header("Access-Control-Allow-Origin", trusted)
+                self.send_header("Vary", "Origin")
+            self.end_headers()
+            self.wfile.write(encoded)
+        except (BrokenPipeError, ConnectionResetError):
+            # Client disconnected before the response finished — nothing to do.
+            pass
 
     def do_OPTIONS(self) -> None:
         trusted = self._trusted_origin()
