@@ -21,6 +21,8 @@ GIT_TIMEOUT_SECONDS = 2
 COMMIT_LOOKAHEAD_HOURS = 24
 REPROMPT_WINDOW_HOURS = 72.0  # a later session touching the same file(s) within this window is a rework signal
 
+VALID_EVIDENCE_OUTCOMES = {"useful", "needs_review", "churned"}  # OutcomeEvidence.inferred_outcome's non-None values
+
 
 @dataclass
 class OutcomeEvidence:

@@ -323,7 +323,7 @@ class PromptPreflightTests(unittest.TestCase):
             session(1, project="/repo/orcha"),
             session(2, tool="codex-cli", project="/repo/agentwatch"),
         ]
-        args = SimpleNamespace(days=7, limit=20, team=False, search="orcha")
+        args = SimpleNamespace(days=7, limit=20, team=False, search="orcha", outcome=None, evidence=None)
         output = io.StringIO()
 
         with patch.object(cli, "sessions_since", return_value=rows), patch("sys.stdout", output):
@@ -333,6 +333,50 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertIn("/repo/orcha", output.getvalue())
         self.assertNotIn("/repo/agentwatch", output.getvalue())
 
+    def test_sessions_outcome_filter_matches_recorded_outcome_only(self) -> None:
+        rows = [session(1, project="/repo/useful"), session(2, project="/repo/rework")]
+        args = SimpleNamespace(days=7, limit=20, team=False, search=None, outcome="useful", evidence=None)
+        output = io.StringIO()
+
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(temp_dir, "state.json")}),
+            patch.object(cli, "sessions_since", return_value=rows),
+            patch("sys.stdout", output),
+        ):
+            cli.record_outcome("session-1", "useful")
+            cli.record_outcome("session-2", "rework")
+            result = cli.command_sessions(args)
+
+        self.assertEqual(result, 0)
+        self.assertIn("/repo/useful", output.getvalue())
+        self.assertNotIn("/repo/rework", output.getvalue())
+
+    def test_sessions_evidence_filter_matches_inferred_outcome_only(self) -> None:
+        rows = [session(1, project="/repo/inferred-useful"), session(2, project="/repo/needs-review")]
+        args = SimpleNamespace(days=7, limit=20, team=False, search=None, outcome=None, evidence="useful")
+        output = io.StringIO()
+
+        class Evidence:
+            def __init__(self, inferred_outcome: str) -> None:
+                self.inferred_outcome = inferred_outcome
+
+        evidence_by_session = {
+            "session-1": Evidence("useful"),
+            "session-2": Evidence("needs_review"),
+        }
+
+        with (
+            patch.object(cli, "sessions_since", return_value=rows),
+            patch.object(cli, "evidence_for_sessions", return_value=evidence_by_session),
+            patch("sys.stdout", output),
+        ):
+            result = cli.command_sessions(args)
+
+        self.assertEqual(result, 0)
+        self.assertIn("/repo/inferred-useful", output.getvalue())
+        self.assertNotIn("/repo/needs-review", output.getvalue())
+
     def test_resume_uses_most_recent_matching_session(self) -> None:
         rows = [
             session(1, project="/repo/agentwatch"),
@@ -341,6 +385,8 @@ class PromptPreflightTests(unittest.TestCase):
         args = SimpleNamespace(
             session_id=None,
             search="orcha",
+            outcome=None,
+            evidence=None,
             days=7,
             target="codex",
             copy=False,
@@ -354,6 +400,130 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(args.session_id, "session-2")
         handoff.assert_called_once_with(args)
+
+    def test_resume_outcome_filter_finds_most_recent_matching_outcome(self) -> None:
+        now = datetime.now(timezone.utc)
+        rows = [
+            session(1, project="/repo/older-useful", age_days=2, now=now),
+            session(2, project="/repo/newer-rework", age_days=1, now=now),
+        ]
+        args = SimpleNamespace(
+            session_id=None,
+            search=None,
+            outcome="useful",
+            evidence=None,
+            days=7,
+            target="codex",
+            copy=False,
+            format="text",
+            include_prompt_excerpt=False,
+        )
+
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(temp_dir, "state.json")}),
+            patch.object(cli, "sessions_since", return_value=rows),
+            patch.object(cli, "command_handoff", return_value=0) as handoff,
+        ):
+            cli.record_outcome("session-1", "useful")
+            cli.record_outcome("session-2", "rework")
+            result = cli.command_resume(args)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(args.session_id, "session-1")
+        handoff.assert_called_once_with(args)
+
+    def test_resume_reports_no_match_across_all_active_filters(self) -> None:
+        rows = [session(1, project="/repo/orcha")]
+        args = SimpleNamespace(
+            session_id=None,
+            search="orcha",
+            outcome="useful",
+            evidence=None,
+            days=7,
+            target="codex",
+            copy=False,
+            format="text",
+            include_prompt_excerpt=False,
+        )
+        stderr = io.StringIO()
+
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(temp_dir, "state.json")}),
+            patch.object(cli, "sessions_since", return_value=rows),
+            patch("sys.stderr", stderr),
+        ):
+            result = cli.command_resume(args)
+
+        self.assertEqual(result, 2)
+        self.assertIn("search='orcha'", stderr.getvalue())
+        self.assertIn("outcome='useful'", stderr.getvalue())
+
+    def test_filter_sessions_combines_search_and_outcome(self) -> None:
+        rows = [
+            session(1, project="/repo/orcha"),
+            session(2, project="/repo/orcha-old"),
+            session(3, project="/repo/agentwatch"),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                cli.record_outcome("session-1", "useful")
+                cli.record_outcome("session-2", "abandoned")
+                result = cli.filter_sessions(rows, search="orcha", outcome="useful")
+
+        self.assertEqual([row.session_id for row in result], ["session-1"])
+
+    def test_filter_sessions_search_falls_back_to_topic_match_on_changed_files(self) -> None:
+        rows = [
+            session(1, project="/repo/no-field-match"),
+            session(2, project="/repo/also-no-field-match"),
+        ]
+
+        class Evidence:
+            def __init__(self, changed_files: list[str], files_touched: list[str] | None = None) -> None:
+                self.changed_files = changed_files
+                self.files_touched = files_touched or []
+
+        evidence_by_session = {
+            "session-1": Evidence(["aiwatcher_cli/outcome_evidence.py"]),
+            "session-2": Evidence(["README.md"]),
+        }
+
+        with patch.object(cli, "evidence_for_sessions", return_value=evidence_by_session) as mock_evidence:
+            result = cli.filter_sessions(rows, search="outcome_evidence")
+
+        self.assertEqual([row.session_id for row in result], ["session-1"])
+        # Only the sessions that didn't already match on project/tool/model/id should be
+        # sent through git evidence -- confirms the fallback is scoped, not a blanket rescan.
+        mock_evidence.assert_called_once()
+        (called_rows,), _ = mock_evidence.call_args
+        self.assertEqual({row.session_id for row in called_rows}, {"session-1", "session-2"})
+
+    def test_filter_sessions_topic_match_never_touches_prompt_or_commit_text(self) -> None:
+        rows = [session(1, project="/repo/x")]
+
+        class Evidence:
+            changed_files: list[str] = []
+            files_touched: list[str] = []
+            commits = [{"sha": "abc123", "subject": "fix auth bypass", "body": "long prompt-adjacent text"}]
+
+        with patch.object(cli, "evidence_for_sessions", return_value={"session-1": Evidence()}):
+            result = cli.filter_sessions(rows, search="auth bypass")
+
+        # "auth bypass" only appears in the commit subject/body, never in changed_files/files_touched --
+        # a match here would mean commit text leaked into "rough topic" search, which S-27 forbids.
+        self.assertEqual(result, [])
+
+    def test_filter_sessions_field_match_skips_evidence_lookup_entirely(self) -> None:
+        rows = [session(1, project="/repo/orcha")]
+
+        with patch.object(cli, "evidence_for_sessions") as mock_evidence:
+            result = cli.filter_sessions(rows, search="orcha")
+
+        self.assertEqual([row.session_id for row in result], ["session-1"])
+        mock_evidence.assert_not_called()
 
     def test_log_decision_defaults_to_latest_session(self) -> None:
         rows = [session(1, project="/repo/older", age_days=1), session(2, project="/repo/newest", age_days=0)]

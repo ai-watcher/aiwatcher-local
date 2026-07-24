@@ -35,6 +35,7 @@ from .local_state import (
     get_outcome,
     is_command_pattern_always_allowed,
     link_intervention_session,
+    outcomes_for_sessions,
     recent_command_decisions,
     recent_hook_events,
     recent_interventions,
@@ -50,7 +51,13 @@ from .local_state import (
     state_path,
 )
 from .handoff import TARGET_LABELS, build_handoff_capsule, render_handoff_capsule
-from .outcome_evidence import build_outcome_evidence, check_commit_survival, repo_root_for_session
+from .outcome_evidence import (
+    VALID_EVIDENCE_OUTCOMES,
+    build_outcome_evidence,
+    check_commit_survival,
+    evidence_for_sessions,
+    repo_root_for_session,
+)
 from .pricing import is_subscription_model
 from .processes import (
     DEFAULT_STALE_MINUTES,
@@ -237,6 +244,56 @@ def latest_session(sessions: Iterable[LocalSession]) -> LocalSession | None:
     if not rows:
         return None
     return max(rows, key=session_sort_key)
+
+
+def filter_sessions(
+    sessions: Sequence[LocalSession],
+    *,
+    search: str | None = None,
+    outcome: str | None = None,
+    evidence: str | None = None,
+) -> list[LocalSession]:
+    """Shared filter for `sessions --search`/`resume --search`, plus S-27's --outcome/--evidence.
+
+    search matches project path, tool, model, or session id first (the only
+    thing the two commands filtered on before this existed); sessions that
+    don't match on those fields get a second, "rough topic" pass against
+    changed/touched file paths from local git evidence (S-27's "search by
+    file/topic" gap) -- file paths only, never commit subjects, test output,
+    or anything derived from prompt/source text, to stay inside the "no
+    prompt/source content by default" privacy rule. outcome matches a
+    recorded (user-marked) outcome; evidence matches OutcomeEvidence's
+    inferred_outcome for sessions that were never marked.
+    """
+    rows = list(sessions)
+    if search:
+        needle = search.strip().lower()
+
+        def field_haystack(row: LocalSession) -> str:
+            return " ".join([row.session_id, row.tool, row.model or "", row.project_path or ""]).lower()
+
+        field_matched_ids = {row.session_id for row in rows if needle in field_haystack(row)}
+        unmatched = [row for row in rows if row.session_id not in field_matched_ids]
+        evidence_by_session = evidence_for_sessions(unmatched) if unmatched else {}
+        topic_matched_ids = {
+            row.session_id
+            for row in unmatched
+            if (row_evidence := evidence_by_session.get(row.session_id)) is not None
+            and needle in " ".join(row_evidence.changed_files + row_evidence.files_touched).lower()
+        }
+        matched_ids = field_matched_ids | topic_matched_ids
+        rows = [row for row in rows if row.session_id in matched_ids]
+    if outcome:
+        recorded = outcomes_for_sessions({row.session_id for row in rows})
+        rows = [row for row in rows if (recorded.get(row.session_id) or {}).get("outcome") == outcome]
+    if evidence:
+        evidence_by_session = evidence_for_sessions(rows)
+        rows = [
+            row for row in rows
+            if evidence_by_session.get(row.session_id) is not None
+            and evidence_by_session[row.session_id].inferred_outcome == evidence
+        ]
+    return rows
 
 
 def has_cumulative_totals(session: LocalSession) -> bool:
@@ -2352,17 +2409,7 @@ def command_sessions(args: argparse.Namespace) -> int:
         return 0
 
     sessions = sorted(sessions_since(args.days), key=session_sort_key, reverse=True)
-    if args.search:
-        needle = args.search.strip().lower()
-        sessions = [
-            row for row in sessions
-            if needle in " ".join([
-                row.session_id,
-                row.tool,
-                row.model or "",
-                row.project_path or "",
-            ]).lower()
-        ]
+    sessions = filter_sessions(sessions, search=args.search, outcome=args.outcome, evidence=args.evidence)
     print(f"Recent AI sessions - last {args.days} days\n")
     for row in sessions[: args.limit]:
         stamp = row.updated_at or row.started_at
@@ -2457,20 +2504,16 @@ def command_handoff(args: argparse.Namespace) -> int:
 
 
 def command_resume(args: argparse.Namespace) -> int:
-    if not args.session_id and args.search:
+    if not args.session_id and (args.search or args.outcome or args.evidence):
         rows = sorted(sessions_since(args.days), key=session_sort_key, reverse=True)
-        needle = args.search.strip().lower()
-        matches = [
-            row for row in rows
-            if needle in " ".join([
-                row.session_id,
-                row.tool,
-                row.model or "",
-                row.project_path or "",
-            ]).lower()
-        ]
+        matches = filter_sessions(rows, search=args.search, outcome=args.outcome, evidence=args.evidence)
         if not matches:
-            print(f"No local session matched {args.search!r} in the last {args.days} days.", file=sys.stderr)
+            filters = ", ".join(
+                f"{name}={value!r}"
+                for name, value in (("search", args.search), ("outcome", args.outcome), ("evidence", args.evidence))
+                if value
+            )
+            print(f"No local session matched {filters} in the last {args.days} days.", file=sys.stderr)
             return 2
         args.session_id = matches[0].session_id
     return command_handoff(args)
@@ -4722,7 +4765,15 @@ def build_parser() -> argparse.ArgumentParser:
     sessions = sub.add_parser("sessions", help="Show recent local AI sessions")
     sessions.add_argument("--days", type=int, default=1)
     sessions.add_argument("--limit", type=int, default=20)
-    sessions.add_argument("--search", help="Filter by project path, tool, model, or session id")
+    sessions.add_argument(
+        "--search",
+        help="Filter by project path, tool, model, or session id; falls back to a rough topic match over changed file names",
+    )
+    sessions.add_argument("--outcome", choices=sorted(VALID_OUTCOMES), help="Filter by recorded outcome")
+    sessions.add_argument(
+        "--evidence", choices=sorted(VALID_EVIDENCE_OUTCOMES),
+        help="Filter by inferred outcome evidence, for sessions never manually marked",
+    )
     sessions.add_argument("--team", action="store_true", help="Explain team session visibility in AIWatcher Cloud")
     sessions.set_defaults(func=command_sessions)
 
@@ -4748,7 +4799,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     resume = sub.add_parser("resume", help="Find a local session and create a target-ready continuation brief")
     resume.add_argument("--session-id")
-    resume.add_argument("--search", help="Find the most recent matching project, tool, model, or session id")
+    resume.add_argument(
+        "--search",
+        help="Find the most recent matching project, tool, model, or session id; falls back to a rough topic match over changed file names",
+    )
+    resume.add_argument("--outcome", choices=sorted(VALID_OUTCOMES), help="Find the most recent session with this recorded outcome")
+    resume.add_argument(
+        "--evidence", choices=sorted(VALID_EVIDENCE_OUTCOMES),
+        help="Find the most recent session with this inferred outcome evidence, for sessions never manually marked",
+    )
     resume.add_argument("--days", type=int, default=30)
     resume.add_argument("--target", choices=sorted(TARGET_LABELS), default="generic")
     resume.add_argument("--copy", action="store_true")
