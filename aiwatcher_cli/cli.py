@@ -2219,6 +2219,12 @@ def command_report(args: argparse.Namespace) -> int:
             f"{highest_cost_useful['project']} ({highest_cost_useful['tool']})"
         )
 
+    if digest["top_sessions"]:
+        print("\nTop sessions:")
+        for top_session in digest["top_sessions"]:
+            outcome_label = f" [{top_session['outcome']}]" if top_session["outcome"] else ""
+            print(f"  {top_session['api_value_label']:>10}  {top_session['project']} ({top_session['tool']}){outcome_label}")
+
     if digest["loop_candidates"] or digest["velocity_candidates"]:
         print("\nLoop/runaway candidates:")
         for candidate in digest["loop_candidates"]:
@@ -2229,6 +2235,10 @@ def command_report(args: argparse.Namespace) -> int:
     gate = digest["command_gate"]
     if gate["gates_fired"]:
         print(f"\nCommand gate: {gate['gates_fired']} fired, {gate['commands_blocked']} blocked")
+
+    prompt_gate = digest["prompt_gate"]
+    if prompt_gate["flagged"]:
+        print(f"\nRisky prompts modified: {prompt_gate['modified']} of {prompt_gate['flagged']} flagged")
 
     survival = digest["survival"]
     if survival.get("available"):

@@ -557,6 +557,60 @@ class WeeklyDigestTests(unittest.TestCase):
         self.assertEqual(digest["command_gate"]["gates_fired"], 2)
         self.assertEqual(digest["command_gate"]["commands_blocked"], 1)
 
+    def test_digest_prompt_gate_counts_flagged_and_modified(self) -> None:
+        rows: list[LocalSession] = []
+
+        def _intervention(decision: str) -> None:
+            record_intervention(
+                tool="claude", cwd="/repo", risk="high", score=8, findings=["Broad scope"],
+                original_prompt="delete everything", suggested_prompt="inspect first",
+                decision=decision, selected_prompt="inspect first",
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all", return_value=rows),
+                patch.object(ui, "scan_all_events", return_value=[]),
+                patch.object(ui, "evidence_for_sessions", return_value={}),
+                patch.object(ui, "survival_by_session", return_value={}),
+            ):
+                _intervention("brief_accepted")
+                _intervention("brief_edited")
+                _intervention("auto_brief_headless")
+                _intervention("context_added")
+                _intervention("allowed_original")
+                _intervention("cancelled")
+                _intervention("blocked")
+                digest = ui.build_weekly_digest(7)
+
+        self.assertEqual(digest["prompt_gate"]["flagged"], 7)
+        self.assertEqual(digest["prompt_gate"]["modified"], 4)
+
+    def test_digest_top_sessions_lists_costliest_regardless_of_outcome(self) -> None:
+        rows = [
+            self._session("cheap", cost_usd=1.0),
+            self._session("expensive-unmarked", cost_usd=50.0),
+            self._session("useful", cost_usd=9.0),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all", return_value=rows),
+                patch.object(ui, "scan_all_events", return_value=[]),
+                patch.object(ui, "evidence_for_sessions", return_value={}),
+                patch.object(ui, "survival_by_session", return_value={}),
+            ):
+                record_outcome("useful", "useful")
+                digest = ui.build_weekly_digest(7)
+
+        top = digest["top_sessions"]
+        self.assertEqual([s["api_value_label"] for s in top], ["$50.00", "$9.00", "$1.00"])
+        self.assertEqual(top[0]["outcome"], None)
+        self.assertEqual(top[1]["outcome"], "useful")
+
     def test_digest_recommendation_prioritizes_blocked_commands(self) -> None:
         rows = [self._session("s1")]
         with tempfile.TemporaryDirectory() as temp_dir:

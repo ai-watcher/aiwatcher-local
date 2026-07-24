@@ -18,6 +18,7 @@ from .handoff import build_handoff_capsule
 from .local_state import (
     COMMAND_GATE_BLOCKED_DECISIONS,
     MAX_COMMAND_DECISIONS_STORED,
+    PROMPT_MODIFIED_DECISIONS,
     VALID_OUTCOMES,
     evidence_snapshots_for_sessions,
     get_outcome,
@@ -423,8 +424,9 @@ def _recommend_weekly_improvement(
 
 def build_weekly_digest(days: int = 7) -> dict[str, object]:
     """P1-5 (S-26): richer weekly signals layered onto build_report's plain totals --
-    outcome breakdown, highest-cost useful session, loop/runaway candidates (P1-3),
-    command-gate activity (P1-3), survival economics (P1-4), and one recommendation.
+    outcome breakdown, highest-cost useful session, top sessions, loop/runaway
+    candidates (P1-3), command-gate activity (P1-3), prompt-preflight activity
+    (P1-1), survival economics (P1-4), and one recommendation.
     """
     all_rows = scan_all()
     rows = rows_for_window(days)
@@ -443,6 +445,8 @@ def build_weekly_digest(days: int = 7) -> dict[str, object]:
 
     useful_rows = [row for row in rows if (window_outcomes.get(row.session_id) or {}).get("outcome") == "useful"]
     highest_cost_useful = max(useful_rows, key=lambda row: row.cost_usd, default=None)
+
+    top_sessions = sorted(rows, key=lambda row: row.cost_usd, reverse=True)[:DIGEST_CANDIDATE_LIMIT]
 
     events_by_session = _events_by_session(rows)
     loop_candidates: list[dict[str, object]] = []
@@ -466,6 +470,9 @@ def build_weekly_digest(days: int = 7) -> dict[str, object]:
 
     gate_decisions = recent_command_decisions(limit=MAX_COMMAND_DECISIONS_STORED, days=days)
     blocked = [row for row in gate_decisions if row.get("decision") in COMMAND_GATE_BLOCKED_DECISIONS]
+
+    prompt_interventions = recent_interventions(limit=200, days=days)
+    prompts_modified = [row for row in prompt_interventions if row.get("decision") in PROMPT_MODIFIED_DECISIONS]
 
     survival = _cost_per_surviving_change(all_rows)
 
@@ -496,11 +503,25 @@ def build_weekly_digest(days: int = 7) -> dict[str, object]:
             if highest_cost_useful is not None
             else None
         ),
+        "top_sessions": [
+            {
+                "project": short_path(row.project_path),
+                "tool": row.tool,
+                "model": row.model or "unknown",
+                "api_value_label": money(row.cost_usd),
+                "outcome": (window_outcomes.get(row.session_id) or {}).get("outcome"),
+            }
+            for row in top_sessions
+        ],
         "loop_candidates": loop_candidates[:DIGEST_CANDIDATE_LIMIT],
         "velocity_candidates": velocity_candidates[:DIGEST_CANDIDATE_LIMIT],
         "command_gate": {
             "gates_fired": len(gate_decisions),
             "commands_blocked": len(blocked),
+        },
+        "prompt_gate": {
+            "flagged": len(prompt_interventions),
+            "modified": len(prompts_modified),
         },
         "survival": survival,
         "recommendation": recommendation,

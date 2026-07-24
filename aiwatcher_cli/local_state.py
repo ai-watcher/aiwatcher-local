@@ -274,6 +274,15 @@ def _safe_impact(impact: dict[str, Any] | None) -> dict[str, Any] | None:
     return safe
 
 
+PROMPT_MODIFIED_DECISIONS = frozenset({"brief_accepted", "brief_edited", "auto_brief_headless", "context_added"})
+# The decisions where what actually ran differs from the raw original prompt --
+# an explicit safer brief (brief_accepted/brief_edited), an automatic one when
+# no interactive gate was available (auto_brief_headless), or S-03's silent
+# medium-risk guardrail context (context_added). Excludes allowed_original
+# (nothing changed), cancelled (nothing ran), and blocked/auto_block_headless
+# (stopped entirely, not modified).
+
+
 def record_intervention(
     *,
     tool: str,
