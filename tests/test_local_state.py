@@ -427,6 +427,53 @@ class LocalStateTests(unittest.TestCase):
         self.assertNotIn("fix login bug", serialized)
         self.assertNotIn("acme", serialized)
 
+    def test_evidence_plaintext_never_leaks_into_any_other_stored_record(self) -> None:
+        # S-22 audit follow-up: test_evidence_snapshot_never_persists_commit_text
+        # above only guards record_evidence_snapshot()'s own filtering. This
+        # guards the broader claim -- that the same session's plaintext
+        # commit/file evidence (real text, by design -- see outcome_evidence.py's
+        # _recent_commits docstring) never ends up in *any* other persisted
+        # table (interventions, hook_events) just because those records were
+        # written around the same time for the same session.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_evidence_snapshot("session-1", {
+                    "repo_root": "/Users/dev/secret-project",
+                    "commits": [{
+                        "sha": "abcdef1234567890",
+                        "subject": "fix login bug for acme corp",
+                        "body": "Session tokens were not being refreshed for the acme account.",
+                        "committed_at": "2026-07-13T10:00:00Z",
+                    }],
+                    "changed_files": ["src/auth/secrets.py"],
+                    "tests": [{"artifact": "test-results/auth.xml"}],
+                    "inferred_outcome": "useful",
+                    "confidence": "low",
+                })
+                # cwd is intentionally stored in plaintext by these two (unrelated,
+                # pre-existing design choice -- see the cwd= fields in record_intervention/
+                # record_hook_event) -- use a *different* path than evidence's repo_root
+                # so this test isolates evidence-specific leakage, not that separate behavior.
+                local_state.record_intervention(
+                    tool="claude", cwd="/repo", risk="low", score=0,
+                    findings=[], original_prompt="prompt", suggested_prompt="prompt",
+                    decision="allowed_original", selected_prompt=None, session_id="session-1",
+                )
+                local_state.record_hook_event(
+                    tool="claude", cwd="/repo", event="received",
+                    prompt_found=True, session_id="session-1",
+                )
+                with open(state_file, encoding="utf-8") as handle:
+                    stored = json.load(handle)
+
+        serialized = json.dumps(stored)
+        self.assertNotIn("/Users/dev/secret-project", serialized)
+        self.assertNotIn("src/auth/secrets.py", serialized)
+        self.assertNotIn("test-results/auth.xml", serialized)
+        self.assertNotIn("fix login bug", serialized)
+        self.assertNotIn("acme", serialized)
+
     def test_record_survival_check_attaches_to_existing_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")
