@@ -624,7 +624,7 @@ class PromptPreflightTests(unittest.TestCase):
             with patch("sys.stdout", second_output):
                 cli._print_watch_status_card(row, [row], args, all_events.get(row.session_id, []), critical_capsule_seen)
             copy_mock.assert_called_once()  # still just the one call from the first poll
-            self.assertIn("capsule already generated", second_output.getvalue())
+            self.assertIn("Capsule already generated", second_output.getvalue())
             self.assertIn(f"--target {args.target}", second_output.getvalue())
 
     def test_watch_healthy_session_recommends_continue(self) -> None:
@@ -806,7 +806,7 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
     def test_watch_loop_seeded_capsule_leads_with_loop_diagnosis(self) -> None:
         row = session(1, project="/repo/orcha")
         events = [_event(row.session_id, content_hash="dup", timestamp=row.started_at) for _ in range(cli.LOOP_CAPSULE_REPEAT)]
-        args = SimpleNamespace(days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000)
+        args = SimpleNamespace(days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000, target="generic")
         output = io.StringIO()
         with (
             patch.object(cli, "sessions_since", return_value=[row]),
