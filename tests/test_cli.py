@@ -519,6 +519,7 @@ class PromptPreflightTests(unittest.TestCase):
             cost_threshold=5.0,
             calls_threshold=250,
             tokens_threshold=500_000,
+            target="generic",
         )
         output = io.StringIO()
 
@@ -536,7 +537,7 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertIn("aiwatcher resume --session-id session-1 --target codex --copy", output.getvalue())
 
     def test_watch_labels_itself_as_log_based_not_live(self) -> None:
-        args = SimpleNamespace(days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000)
+        args = SimpleNamespace(days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000, target="generic")
         output = io.StringIO()
         with (
             patch.object(cli, "sessions_since", return_value=[session(1)]),
@@ -562,12 +563,13 @@ class PromptPreflightTests(unittest.TestCase):
             )
             for i in range(3)
         ]
-        args = SimpleNamespace(days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000)
+        args = SimpleNamespace(days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000, target="generic")
         output = io.StringIO()
         with (
             patch.object(cli, "sessions_since", return_value=[row]),
             patch.object(cli, "scan_all_events", return_value=events),
             patch.object(cli, "get_baselines", return_value={}),
+            patch.object(cli, "_copy_to_clipboard", return_value=(False, "no clipboard command found")),
             patch("sys.stdout", output),
         ):
             cli.command_watch(args)
@@ -578,9 +580,48 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertIn("AIWatcher handoff capsule", rendered)
         self.assertIn("Paste this as the first prompt in a fresh AI coding session.", rendered)
 
+    def test_watch_critical_context_copies_to_clipboard_and_dedupes_across_polls(self) -> None:
+        row = session(1, project="/repo/orcha")
+        events = [
+            LocalEvent(
+                event_id=f"evt-{i}",
+                session_id=row.session_id,
+                tool=row.tool,
+                event_type="assistant",
+                timestamp=row.started_at,
+                tokens_in=210_000,
+                tokens_out=500,
+            )
+            for i in range(3)
+        ]
+        args = SimpleNamespace(days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000, target="codex")
+        output = io.StringIO()
+        critical_capsule_seen: dict = {}
+
+        with (
+            patch.object(cli, "sessions_since", return_value=[row]),
+            patch.object(cli, "scan_all_events", return_value=events),
+            patch.object(cli, "get_baselines", return_value={}),
+            patch.object(cli, "_copy_to_clipboard", return_value=(True, "clip")) as copy_mock,
+        ):
+            all_events = cli.events_by_session([row], days=1)
+            with patch("sys.stdout", output):
+                cli._print_watch_status_card(row, [row], args, all_events.get(row.session_id, []), critical_capsule_seen)
+            copy_mock.assert_called_once()
+            self.assertIn("Copied", output.getvalue())
+            self.assertIn(row.session_id, critical_capsule_seen)
+
+            # Second poll for the same (unchanged) session should not regenerate/recopy.
+            second_output = io.StringIO()
+            with patch("sys.stdout", second_output):
+                cli._print_watch_status_card(row, [row], args, all_events.get(row.session_id, []), critical_capsule_seen)
+            copy_mock.assert_called_once()  # still just the one call from the first poll
+            self.assertIn("capsule already generated", second_output.getvalue())
+            self.assertIn(f"--target {args.target}", second_output.getvalue())
+
     def test_watch_healthy_session_recommends_continue(self) -> None:
         row = session(1)
-        args = SimpleNamespace(days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000)
+        args = SimpleNamespace(days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000, target="generic")
         output = io.StringIO()
         with (
             patch.object(cli, "sessions_since", return_value=[row]),
@@ -592,12 +633,61 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertIn("Recommended: continue", output.getvalue())
 
     def test_watch_no_sessions_says_so_and_returns(self) -> None:
-        args = SimpleNamespace(days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000)
+        args = SimpleNamespace(days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000, target="generic")
         output = io.StringIO()
         with patch.object(cli, "sessions_since", return_value=[]), patch("sys.stdout", output):
             result = cli.command_watch(args)
         self.assertEqual(result, 0)
         self.assertIn("No local AI sessions detected", output.getvalue())
+
+    def test_watch_runway_pressure_names_target_and_resume_command(self) -> None:
+        now = datetime.now(timezone.utc)
+        baseline_rows = [session(index, tool="claude-code", age_days=index * 2, now=now) for index in range(10)]
+        baselines = _baselines_from_sessions(baseline_rows)
+        pressured = session(100, tool="claude-code", age_days=0, now=now)
+        pressured.tokens_in = int(baselines["per_tool"]["claude-code"]["p75_tokens"] * 3)
+        args = SimpleNamespace(days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000, target="generic")
+        output = io.StringIO()
+        with (
+            patch.object(cli, "sessions_since", return_value=[pressured]),
+            patch.object(cli, "scan_all_events", return_value=[]),
+            patch.object(cli, "get_baselines", return_value=baselines),
+            patch("sys.stdout", output),
+        ):
+            cli.command_watch(args)
+        rendered = output.getvalue()
+        self.assertIn("Recommended: switch tool or lane", rendered)
+        self.assertIn(f"aiwatcher resume --session-id {pressured.session_id} --target codex --copy", rendered)
+        self.assertIn("continue in Codex", rendered)
+
+    def test_watch_other_sessions_surface_context_health_not_just_thresholds(self) -> None:
+        latest = session(1, project="/repo/latest")
+        quiet_but_unhealthy = session(2, project="/repo/quiet")
+        events = [
+            LocalEvent(
+                event_id=f"evt-{i}",
+                session_id=quiet_but_unhealthy.session_id,
+                tool=quiet_but_unhealthy.tool,
+                event_type="assistant",
+                timestamp=quiet_but_unhealthy.started_at,
+                tokens_in=210_000,
+                tokens_out=500,
+            )
+            for i in range(3)
+        ]
+        args = SimpleNamespace(days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000, target="generic")
+        output = io.StringIO()
+        with (
+            patch.object(cli, "sessions_since", return_value=[latest, quiet_but_unhealthy]),
+            patch.object(cli, "scan_all_events", return_value=events),
+            patch.object(cli, "get_baselines", return_value={}),
+            patch("sys.stdout", output),
+        ):
+            cli.command_watch(args)
+        rendered = output.getvalue()
+        self.assertIn("Other sessions with local signals:", rendered)
+        self.assertIn("/repo/quiet", rendered)
+        self.assertIn("Context critical:", rendered)
 
 
 class RunwayPressureTests(unittest.TestCase):

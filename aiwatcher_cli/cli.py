@@ -466,6 +466,15 @@ def _normalize_tool_for_baseline(tool: str) -> str | None:
     return None
 
 
+def _alternate_target_for_tool(baseline_tool: str) -> str:
+    """S-21: which other tool to suggest handing off to when one is under runway pressure.
+
+    Only claude-code and codex-cli have baselines (see _normalize_tool_for_baseline),
+    so this is a simple swap between the two rather than a general router.
+    """
+    return "codex" if baseline_tool == "claude-code" else "claude"
+
+
 def _compute_baselines() -> dict[str, object]:
     """Scan local session history and aggregate per-tool p75 stats.
 
@@ -1435,6 +1444,25 @@ def events_for_session(session_id: str, *, days: int = 30) -> list[LocalEvent]:
     )
 
 
+def events_by_session(sessions: Sequence[LocalSession], *, days: int) -> dict[str, list[LocalEvent]]:
+    """Batched version of events_for_session for many sessions at once.
+
+    watch polls this for every session in its window each cycle -- calling
+    events_for_session() per session would rescan scan_all_events() (the
+    full local event history) once per session, per poll. This scans it
+    exactly once per poll instead.
+    """
+    since = datetime.now().astimezone() - timedelta(days=max(days, 1))
+    session_ids = {row.session_id for row in sessions}
+    grouped: dict[str, list[LocalEvent]] = defaultdict(list)
+    for event in scan_all_events():
+        if event.session_id in session_ids and event.timestamp and event.timestamp.astimezone() >= since:
+            grouped[event.session_id].append(event)
+    for session_events in grouped.values():
+        session_events.sort(key=event_sort_key)
+    return grouped
+
+
 def render_session_timeline(session_id: str, *, days: int = 30, limit: int = 30) -> str:
     events = events_for_session(session_id, days=days)
     session = next((row for row in scan_all() if row.session_id == session_id), None)
@@ -1963,10 +1991,13 @@ def _watch_status(
         reason = health.recommendations[0] if health.recommendations else "Context health is critical."
     elif runway is not None and float(runway["pressure_ratio"]) >= RUNWAY_PRESSURE_RATIO:
         action = "switch tool or lane"
+        suggested_target = _alternate_target_for_tool(str(runway["tool"]))
         reason = (
             f"Estimated usage in the last {RUNWAY_WINDOW_HOURS:.0f}h is "
             f"{float(runway['pressure_ratio']):.1f}x your typical {runway['tool']} session "
-            "(local estimate, not a real-time quota API)."
+            f"(local estimate, not a real-time quota API). Consider "
+            f"`aiwatcher resume --session-id {session.session_id} --target {suggested_target} --copy` "
+            f"to continue in {TARGET_LABELS[suggested_target]}."
         )
     elif health is not None and health.severity == "warning":
         action = "start fresh" if health.is_critical_stale else "narrow scope"
@@ -1978,8 +2009,13 @@ def _watch_status(
     return {"health": health, "runway": runway, "insights": insights, "action": action, "reason": reason}
 
 
-def _print_watch_status_card(session: LocalSession, all_rows: Sequence[LocalSession], args: argparse.Namespace) -> None:
-    events = events_for_session(session.session_id, days=max(args.days, 1))
+def _print_watch_status_card(
+    session: LocalSession,
+    all_rows: Sequence[LocalSession],
+    args: argparse.Namespace,
+    events: Sequence[LocalEvent],
+    critical_capsule_seen: dict[str, datetime],
+) -> None:
     status = _watch_status(
         session,
         events,
@@ -2017,16 +2053,33 @@ def _print_watch_status_card(session: LocalSession, all_rows: Sequence[LocalSess
     print(f"  Recommended: {status['action']} -- {status['reason']}")
 
     if health is not None and health.severity == "critical":
-        outcome = get_outcome(session.session_id)
-        capsule = build_handoff_capsule(
-            session,
-            events,
-            outcome=outcome.get("outcome") if outcome else None,
-            target="generic",
-        )
-        print("\n  Context is critical -- generating a handoff capsule now:\n")
-        for line in render_handoff_capsule(capsule).splitlines():
-            print(f"  {line}" if line else "")
+        # De-duped per session_id+stamp so a session sitting at CRITICAL across
+        # multiple --interval polls doesn't reprint/recopy the same capsule
+        # every cycle -- only scoped to this watch process's own run (in-memory,
+        # not persisted), so restarting watch will regenerate it once more.
+        if critical_capsule_seen.get(session.session_id) == stamp:
+            print(
+                f"\n  Context is critical -- capsule already generated this session. Run "
+                f"`aiwatcher resume --session-id {session.session_id} --target {args.target} --copy` to get it again."
+            )
+        else:
+            critical_capsule_seen[session.session_id] = stamp
+            outcome = get_outcome(session.session_id)
+            capsule = build_handoff_capsule(
+                session,
+                events,
+                outcome=outcome.get("outcome") if outcome else None,
+                target=args.target,
+            )
+            rendered = render_handoff_capsule(capsule)
+            print("\n  Context is critical -- generating a handoff capsule now:\n")
+            for line in rendered.splitlines():
+                print(f"  {line}" if line else "")
+            ok, detail = _copy_to_clipboard(str(capsule.get("next_brief") or rendered))
+            if ok:
+                print(f"\n  Copied {capsule.get('target_label') or 'handoff'} brief to clipboard.")
+            else:
+                print(f"\n  Could not copy to clipboard ({detail}).")
     print()
 
 
@@ -2036,6 +2089,7 @@ def command_watch(args: argparse.Namespace) -> int:
     print("This re-scans local session logs on a timer -- it is not a live hook into a running agent.\n")
 
     seen: dict[str, datetime] = {}
+    critical_capsule_seen: dict[str, datetime] = {}
     try:
         while True:
             rows = sorted(sessions_since(args.days), key=session_sort_key, reverse=True)
@@ -2044,36 +2098,50 @@ def command_watch(args: argparse.Namespace) -> int:
                 if args.once:
                     return 0
             else:
-                _print_watch_status_card(rows[0], rows, args)
+                all_events = events_by_session(rows, days=args.days)
+                _print_watch_status_card(
+                    rows[0], rows, args, all_events.get(rows[0].session_id, []), critical_capsule_seen,
+                )
 
-            interesting: list[LocalSession] = []
-            for row in rows:
-                stamp = session_sort_key(row)
-                if seen.get(row.session_id) == stamp:
-                    continue
-                seen[row.session_id] = stamp
-                if session_insights(
-                    row,
-                    cost_threshold=args.cost_threshold,
-                    calls_threshold=args.calls_threshold,
-                    tokens_threshold=args.tokens_threshold,
-                ):
-                    interesting.append(row)
-
-            if interesting:
-                print("Other sessions with local signals:")
-                for row in interesting[:5]:
+                interesting: list[LocalSession] = []
+                for row in rows:
                     stamp = session_sort_key(row)
-                    when = format_short_datetime(stamp.astimezone()) if stamp != MIN_DT else "unknown"
-                    print(f"[{when}] {row.tool} | {short_path(row.project_path)} | {money(row.cost_usd)} | {compact_int(row.tokens_in + row.tokens_out)} tokens")
-                    for insight in session_insights(
-                        row,
-                        cost_threshold=args.cost_threshold,
-                        calls_threshold=args.calls_threshold,
-                        tokens_threshold=args.tokens_threshold,
-                    )[:3]:
-                        print(f"  - {insight}")
-                    print(f"  Next: aiwatcher resume --session-id {row.session_id} --target codex --copy")
+                    if seen.get(row.session_id) == stamp:
+                        continue
+                    seen[row.session_id] = stamp
+                    # S-11: a session can be worth surfacing either because it crossed a
+                    # cost/calls/tokens threshold (session_insights) or because its context
+                    # health is already warning/critical -- previously only the single
+                    # latest session (above) ever got a health check at all.
+                    health = analyze_session_health(row, all_events.get(row.session_id, []))
+                    if (
+                        session_insights(
+                            row,
+                            cost_threshold=args.cost_threshold,
+                            calls_threshold=args.calls_threshold,
+                            tokens_threshold=args.tokens_threshold,
+                        )
+                        or (health is not None and health.severity in {"warning", "critical"})
+                    ):
+                        interesting.append(row)
+
+                if interesting:
+                    print("Other sessions with local signals:")
+                    for row in interesting[:5]:
+                        stamp = session_sort_key(row)
+                        when = format_short_datetime(stamp.astimezone()) if stamp != MIN_DT else "unknown"
+                        print(f"[{when}] {row.tool} | {short_path(row.project_path)} | {money(row.cost_usd)} | {compact_int(row.tokens_in + row.tokens_out)} tokens")
+                        health = analyze_session_health(row, all_events.get(row.session_id, []))
+                        if health is not None and health.severity in {"warning", "critical"}:
+                            print(f"  - Context {health.severity}: {compact_int(health.latest_turn_tokens)} tokens/turn, {health.efficiency_pct:.0f}% efficiency")
+                        for insight in session_insights(
+                            row,
+                            cost_threshold=args.cost_threshold,
+                            calls_threshold=args.calls_threshold,
+                            tokens_threshold=args.tokens_threshold,
+                        )[:3]:
+                            print(f"  - {insight}")
+                        print(f"  Next: aiwatcher resume --session-id {row.session_id} --target codex --copy")
 
             if args.once:
                 return 0
@@ -3738,6 +3806,10 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument("--cost-threshold", type=float, default=5.0)
     watch.add_argument("--calls-threshold", type=int, default=250)
     watch.add_argument("--tokens-threshold", type=int, default=500_000)
+    watch.add_argument(
+        "--target", choices=sorted(TARGET_LABELS), default="generic",
+        help="Format the auto-generated CRITICAL-context handoff capsule for this AI tool",
+    )
     watch.set_defaults(func=command_watch)
 
     run = sub.add_parser("run", help="Run a command and summarize the latest local AI session afterwards")
