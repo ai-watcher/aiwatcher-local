@@ -1,9 +1,11 @@
 name: Scenario docs and private status sync
 
 on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review, edited]
   push:
     branches:
-      - "**"
+      - main
   workflow_dispatch:
 
 permissions:
@@ -47,40 +49,44 @@ jobs:
           AIWATCHER_SCENARIOS_PATH="$PWD/private-docs/aiwatcher-local/scenarios.json" \
             python3 scripts/sync_notion_status.py
 
-  sync-private-html-suite:
+  notify-product-docs:
     runs-on: ubuntu-latest
     needs: verify-scenario-tooling
-    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'pull_request_target' || github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     env:
       PRIVATE_DOCS_REPO: ${{ secrets.AIWATCHER_PRIVATE_DOCS_REPO }}
       PRIVATE_DOCS_TOKEN: ${{ secrets.AIWATCHER_PRIVATE_DOCS_TOKEN }}
+      SOURCE_PR: ${{ github.event.pull_request.number || '' }}
+      SOURCE_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      SOURCE_URL: ${{ github.event.pull_request.html_url || format('{0}/{1}/commit/{2}', github.server_url, github.repository, github.sha) }}
+      SOURCE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Generate and copy scenario suite to private docs repo
+      - name: Notify private product docs
+        if: ${{ env.PRIVATE_DOCS_REPO != '' && env.PRIVATE_DOCS_TOKEN != '' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ env.PRIVATE_DOCS_TOKEN }}
+          script: |
+            const [owner, repo] = process.env.PRIVATE_DOCS_REPO.split("/");
+            await github.rest.repos.createDispatchEvent({
+              owner,
+              repo,
+              event_type: "product_docs_review_requested",
+              client_payload: {
+                product: "aiwatcher-local",
+                source_repo: context.repo.owner + "/" + context.repo.repo,
+                source_pr: process.env.SOURCE_PR,
+                source_sha: process.env.SOURCE_SHA,
+                source_ref: process.env.SOURCE_REF,
+                source_url: process.env.SOURCE_URL,
+                source_run_url: process.env.SOURCE_RUN_URL,
+                source_event: context.eventName
+              }
+            });
+      - name: Skip notification without secrets
+        if: ${{ env.PRIVATE_DOCS_REPO == '' || env.PRIVATE_DOCS_TOKEN == '' }}
         run: |
           if [ -z "$PRIVATE_DOCS_REPO" ] || [ -z "$PRIVATE_DOCS_TOKEN" ]; then
-            echo "Skipping private HTML suite sync: AIWATCHER_PRIVATE_DOCS_REPO and AIWATCHER_PRIVATE_DOCS_TOKEN are required."
-            exit 0
-          fi
-          git clone "https://x-access-token:${PRIVATE_DOCS_TOKEN}@github.com/${PRIVATE_DOCS_REPO}.git" private-docs
-          test -f private-docs/aiwatcher-local/scenarios.json
-          rm -f \
-            private-docs/aiwatcher-local/gaps.md \
-            private-docs/aiwatcher-local/workflows.md \
-            private-docs/aiwatcher-local/release-checklist.md \
-            private-docs/aiwatcher-local/scenario-status.md \
-            private-docs/aiwatcher-local/sync-metadata.md
-          AIWATCHER_SCENARIOS_PATH="$PWD/private-docs/aiwatcher-local/scenarios.json" \
-            AIWATCHER_SCENARIO_OUT_DIR="$PWD/private-docs/aiwatcher-local" \
-            python3 scripts/generate_scenario_docs.py
-          mv private-docs/aiwatcher-local/aiwatcher-scenario-tests.html private-docs/aiwatcher-local/index.html
-          cd private-docs
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add aiwatcher-local
-          if git diff --cached --quiet; then
-            echo "Private scenario suite already up to date."
-          else
-            git commit -m "Update AIWatcher Local scenario suite"
-            git push
+            echo "Skipping product docs notification: AIWATCHER_PRIVATE_DOCS_REPO and AIWATCHER_PRIVATE_DOCS_TOKEN are required."
           fi
