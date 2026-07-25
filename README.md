@@ -20,7 +20,8 @@ cost and security guidance with no account or cloud upload.
   - [4. Mark whether work was useful](#4-mark-whether-work-was-useful)
   - [5. Resume work without rebuilding context](#5-resume-work-without-rebuilding-context)
   - [6. Log a decision that never became a commit](#6-log-a-decision-that-never-became-a-commit)
-  - [7. Export local evidence](#7-export-local-evidence)
+  - [7. Check runtime hygiene](#7-check-runtime-hygiene)
+  - [8. Export local evidence](#8-export-local-evidence)
 - [Commands](#commands)
 - [Example Output](#example-output)
 - [The Local Control Loop](#the-local-control-loop)
@@ -217,7 +218,23 @@ collaborators:
 python -m aiwatcher_cli install-claude-decision-log --write
 ```
 
-### 7. Export local evidence
+### 7. Check runtime hygiene
+
+```sh
+python -m aiwatcher_cli processes --stale-only
+```
+
+Lists local AI-related runtime processes such as Codex/Claude/Cursor-ish
+wrappers, `node_repl` kernels, and Computer Use clients. AIWatcher highlights
+likely stale or orphaned runtimes by local process signals such as PPID=1, old
+age, stopped state, missing working directories, or missing temporary kernel
+paths.
+
+This is local CPU/RAM/battery and security hygiene, not a billing claim:
+AIWatcher does not assume a stale process is still making model/API calls.
+It prints a copyable kill command for review, but never kills a process for you.
+
+### 8. Export local evidence
 
 ```sh
 python -m aiwatcher_cli export --format json --days 30
@@ -251,6 +268,8 @@ python -m aiwatcher_cli journal            # daily usage summary plus one thing 
 python -m aiwatcher_cli watch --once       # detect expensive or loop-like work
 python -m aiwatcher_cli run -- npm test    # run any command, then summarize the AI session alongside it
 python -m aiwatcher_cli doctor             # check tool detection and hook/wrapper install status
+python -m aiwatcher_cli processes          # local AI runtime hygiene; suggests manual cleanup only
+python -m aiwatcher_cli processes --stale-only
 python -m aiwatcher_cli preflight "..."    # review work before execution
 python -m aiwatcher_cli codex "..."        # preflight, choose, and launch Codex
 python -m aiwatcher_cli claude "..."       # preflight, choose, and launch Claude
@@ -300,7 +319,8 @@ This month: $77.87
 - **Plan:** Preflight broad, destructive, vague, or potentially expensive work
   and produce an intent-preserving execution brief.
 - **Watch:** Detect large contexts, repeated calls, long sessions, and
-  subscription or API usage pressure.
+  subscription or API usage pressure, plus stale local AI runtimes that may be
+  wasting CPU/RAM/battery or expanding local attack surface.
 - **Control:** Let the developer use the brief, edit it, run the original, or
   cancel. High-risk automatic hooks pause before execution.
 - **Prove:** Inspect a privacy-safe intervention receipt and session timeline,
@@ -436,6 +456,10 @@ commands. Neither is described as universal editor-chat interception.
 - **Cursor / Cline / Windsurf:** detected where local history is exposed; token
   and cost detail are intentionally marked limited when a vendor does not store
   it locally.
+- **Runtime Hygiene:** local process metadata from `ps` on macOS/Linux:
+  PID/PPID, state, age, RSS, CPU, command arguments, and explicit
+  `--working-dir` / `--session-id` values when present. It does not read prompt
+  text, source files, process memory, or send data to the cloud.
 
 Tool coverage depends on what each vendor stores on your machine. When a tool is
 installed but token/cost history is not exposed, AIWatcher Local says so instead
