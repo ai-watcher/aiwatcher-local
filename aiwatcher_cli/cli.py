@@ -42,6 +42,16 @@ from .local_state import (
 from .handoff import TARGET_LABELS, build_handoff_capsule, render_handoff_capsule
 from .outcome_evidence import build_outcome_evidence
 from .pricing import is_subscription_model
+from .processes import (
+    DEFAULT_STALE_MINUTES,
+    cpu_label,
+    discover_runtime_processes,
+    platform_note,
+    process_hygiene_summary,
+    process_record,
+    rss_label,
+    seconds_label,
+)
 from .scanner import LocalEvent, LocalSession, discover_tools, scan_all, scan_all_events
 
 
@@ -86,6 +96,16 @@ def compact_int(value: int) -> str:
     if value >= 1_000:
         return f"{value / 1_000:.1f}k"
     return str(value)
+
+
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
 
 
 def compact_duration(seconds: int) -> str:
@@ -1451,6 +1471,9 @@ def command_today(_args: argparse.Namespace) -> int:
 
     print(f"\nThis week: {money(float(week_stats['cost_usd']))}")
     print(f"This month: {money(float(month_stats['cost_usd']))}")
+    hygiene = process_hygiene_summary()
+    if hygiene:
+        print(f"\n{hygiene}")
     if float(today_stats["cost_usd"]) > 0 or int(today_stats["sessions"]) >= 3:
         print_cloud_hint("See the same cost view for your whole team, with budget caps and anomaly alerts.")
     return 0
@@ -1526,7 +1549,72 @@ def command_report(args: argparse.Namespace) -> int:
     print("\nSuggested next checks:")
     print("- Review top project sessions for runaway or abandoned work.")
     print("- Compare API-priced tokens with plan/limited tokens before interpreting invoice impact.")
+    hygiene = process_hygiene_summary()
+    if hygiene:
+        print(f"- {hygiene}")
     print("- Run `aiwatcher ui` for clickable local drill-down.")
+    return 0
+
+
+def _truncate(value: str | None, width: int) -> str:
+    text = value or "unknown"
+    if len(text) <= width:
+        return text
+    return "..." + text[-(width - 3):]
+
+
+def command_processes(args: argparse.Namespace) -> int:
+    note = platform_note()
+    processes = discover_runtime_processes(stale_minutes=args.min_age_minutes)
+    if args.stale_only:
+        processes = [process for process in processes if process.stale]
+    if args.json:
+        print(json.dumps({
+            "schema": "aiwatcher.local_runtime_processes.v0",
+            "resource_note": "RSS/CPU are local process resources, not model/API spend.",
+            "platform_note": note,
+            "processes": [process_record(process) for process in processes],
+        }, indent=2))
+        return 0
+
+    print("AIWatcher Local runtime hygiene\n")
+    print("Read-only process scan. No prompts, source, or process memory are captured; nothing is killed automatically.")
+    print("RSS/CPU are local machine resources, not model/API spend.\n")
+    if note:
+        print(note)
+        if not processes:
+            return 0
+        print()
+    if not processes:
+        print("No local AI-related runtime processes detected.")
+        return 0
+
+    print(
+        f"{'PID':>7} {'Age':>8} {'State':>6} {'Runtime':16} "
+        f"{'RSS':>8} {'CPU':>7} {'Session':18} {'Working dir'}"
+    )
+    print("-" * 100)
+    for process in processes:
+        print(
+            f"{process.pid:>7} "
+            f"{seconds_label(process.age_seconds):>8} "
+            f"{process.state[:6]:>6} "
+            f"{process.tool[:16]:16} "
+            f"{rss_label(process.rss_kb):>8} "
+            f"{cpu_label(process.cpu_percent):>7} "
+            f"{_truncate(process.session_id, 18):18} "
+            f"{_truncate(process.cwd, 34)}"
+        )
+        reason = "; ".join(process.stale_reasons) if process.stale_reasons else "active or not enough stale signals"
+        print(f"        reason: {reason}")
+        if process.stale:
+            print(f"        suggest: review, then run `{process.kill_command}` only if this runtime is safe to stop")
+    stale_count = sum(1 for process in processes if process.stale)
+    total_rss = sum(process.rss_kb or 0 for process in processes)
+    print(
+        f"\nSummary: {len(processes)} AI-related process{'es' if len(processes) != 1 else ''}; "
+        f"{stale_count} likely stale; {rss_label(total_rss)} RSS observed locally."
+    )
     return 0
 
 
@@ -3189,6 +3277,12 @@ def build_parser() -> argparse.ArgumentParser:
     report = sub.add_parser("report", help="Show a local weekly AI usage report")
     report.add_argument("--days", type=int, default=7)
     report.set_defaults(func=command_report)
+
+    processes = sub.add_parser("processes", help="List local AI runtimes and likely stale/orphaned processes")
+    processes.add_argument("--stale-only", action="store_true", help="Only show processes with stale or orphaned signals")
+    processes.add_argument("--min-age-minutes", type=positive_int, default=DEFAULT_STALE_MINUTES, help="Age threshold for stale-runtime warnings")
+    processes.add_argument("--json", action="store_true", help="Emit JSON for local automation")
+    processes.set_defaults(func=command_processes)
 
     sessions = sub.add_parser("sessions", help="Show recent local AI sessions")
     sessions.add_argument("--days", type=int, default=1)
