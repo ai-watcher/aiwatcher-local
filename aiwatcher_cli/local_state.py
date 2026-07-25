@@ -547,8 +547,11 @@ def get_baselines() -> dict[str, Any]:
     (scanning session history) belongs in cli.py, off the hot path -- see
     get_or_refresh_baselines() there.
     """
-    with _locked_state():
-        data = _load()
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return {}
     baselines = data.get("baselines")
     return baselines if isinstance(baselines, dict) else {}
 

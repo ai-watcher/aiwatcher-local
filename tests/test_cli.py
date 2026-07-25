@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from aiwatcher_cli import cli
+from aiwatcher_cli import cli, local_state
 from aiwatcher_cli.local_state import recent_decisions
 from aiwatcher_cli.scanner import LocalSession
 
@@ -123,7 +123,7 @@ class PromptSavingsBaselineTests(unittest.TestCase):
         # baseline lock is unavailable. It should never crash the user's AI
         # tool or fall back to a live history scan.
         with (
-            patch.object(cli, "get_baselines", side_effect=OSError("read-only state")),
+            patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")),
             patch.object(cli, "sessions_since") as sessions_since,
         ):
             result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
@@ -132,6 +132,58 @@ class PromptSavingsBaselineTests(unittest.TestCase):
         impact = result["estimated_impact"]
         self.assertFalse(impact["available"])
         self.assertEqual(impact["basis"], "no comparable local history")
+
+    def test_today_continues_when_baseline_cache_is_unreadable(self) -> None:
+        with (
+            patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")),
+            patch.object(cli, "scan_all", return_value=[]),
+            patch.object(cli, "link_recent_interventions_to_sessions"),
+            patch.object(cli, "_compute_baselines", return_value={
+                "computed_at": datetime.now(timezone.utc).isoformat(),
+                "history_days": 30,
+                "per_tool": {},
+            }),
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            result = cli.command_today(SimpleNamespace())
+
+        self.assertEqual(result, 0)
+
+    def test_report_continues_when_baseline_cache_is_unreadable(self) -> None:
+        with (
+            patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")),
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "_compute_baselines", return_value={
+                "computed_at": datetime.now(timezone.utc).isoformat(),
+                "history_days": 30,
+                "per_tool": {},
+            }),
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            result = cli.command_report(SimpleNamespace(days=7))
+
+        self.assertEqual(result, 0)
+
+    def test_ui_startup_continues_when_baseline_cache_is_unreadable(self) -> None:
+        with (
+            patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")),
+            patch.object(cli, "_compute_baselines", return_value={
+                "computed_at": datetime.now(timezone.utc).isoformat(),
+                "history_days": 30,
+                "per_tool": {},
+            }),
+            patch("aiwatcher_cli.ui.serve") as serve,
+        ):
+            result = cli.command_ui(SimpleNamespace(
+                host="127.0.0.1",
+                port=8765,
+                no_port_fallback=True,
+                port_attempts=1,
+                restart=False,
+            ))
+
+        self.assertEqual(result, 0)
+        serve.assert_called_once()
 
     def test_today_refreshes_a_missing_cache(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]

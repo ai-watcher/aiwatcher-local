@@ -139,6 +139,10 @@ class LocalStateTests(unittest.TestCase):
 
         self.assertEqual(events[0]["session_id"], "sess-real-id")
 
+    def test_get_baselines_fails_soft_when_state_lock_is_unavailable(self) -> None:
+        with patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")):
+            self.assertEqual(local_state.get_baselines(), {})
+
     def test_outcome_replaces_previous_value_for_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")
