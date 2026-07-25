@@ -118,6 +118,21 @@ class PromptSavingsBaselineTests(unittest.TestCase):
         sessions_since.assert_not_called()
         self.assertFalse(result["estimated_impact"]["available"])
 
+    def test_unreadable_baseline_cache_does_not_break_preflight(self) -> None:
+        # A hook/preflight path must fail soft if the local state file or
+        # baseline lock is unavailable. It should never crash the user's AI
+        # tool or fall back to a live history scan.
+        with (
+            patch.object(cli, "get_baselines", side_effect=OSError("read-only state")),
+            patch.object(cli, "sessions_since") as sessions_since,
+        ):
+            result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
+
+        sessions_since.assert_not_called()
+        impact = result["estimated_impact"]
+        self.assertFalse(impact["available"])
+        self.assertEqual(impact["basis"], "no comparable local history")
+
     def test_today_refreshes_a_missing_cache(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]
         with (

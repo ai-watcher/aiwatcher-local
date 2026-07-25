@@ -543,7 +543,10 @@ def estimate_prompt_savings(prompt: str, *, risk_score: int, tool: str, cwd: str
     # hot-path fix is worth -- see the P0-3 tradeoff discussion.
     del cwd
     tool_key = _normalize_tool_for_baseline(tool)
-    baselines = get_baselines()
+    try:
+        baselines = get_baselines()
+    except OSError:
+        baselines = {}
     per_tool = baselines.get("per_tool") if isinstance(baselines, dict) else None
     stats = per_tool.get(tool_key) if isinstance(per_tool, dict) and tool_key else None
 
