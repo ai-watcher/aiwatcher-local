@@ -2064,7 +2064,10 @@ def _print_watch_status_card(
             )
         else:
             critical_capsule_seen[session.session_id] = stamp
-            outcome = get_outcome(session.session_id)
+            try:
+                outcome = get_outcome(session.session_id)
+            except OSError:
+                outcome = None
             capsule = build_handoff_capsule(
                 session,
                 events,
@@ -2085,7 +2088,10 @@ def _print_watch_status_card(
 
 def command_watch(args: argparse.Namespace) -> int:
     print("AIWatcher Local watch")
-    print("Read-only local scan. No data leaves this machine. Press Ctrl+C to stop.")
+    print(
+        "Read-only local scan. No data leaves this machine. "
+        "On critical context, AIWatcher may copy a local handoff brief. Press Ctrl+C to stop."
+    )
     print("This re-scans local session logs on a timer -- it is not a live hook into a running agent.\n")
 
     seen: dict[str, datetime] = {}
@@ -2104,7 +2110,7 @@ def command_watch(args: argparse.Namespace) -> int:
                 )
 
                 interesting: list[LocalSession] = []
-                for row in rows:
+                for row in rows[1:]:
                     stamp = session_sort_key(row)
                     if seen.get(row.session_id) == stamp:
                         continue

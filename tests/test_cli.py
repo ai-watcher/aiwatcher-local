@@ -510,7 +510,11 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertIn("No personal Claude memory file found", output.getvalue())
 
     def test_watch_points_high_pressure_session_to_resume(self) -> None:
-        row = session(1, project="/repo/orcha")
+        now = datetime.now(timezone.utc)
+        latest = session(1, project="/repo/latest", now=now)
+        row = session(2, project="/repo/orcha", now=now)
+        row.updated_at = latest.updated_at - timedelta(minutes=1)
+        row.started_at = row.updated_at - timedelta(minutes=15)
         row.agent_calls = 300
         args = SimpleNamespace(
             days=1,
@@ -524,7 +528,7 @@ class PromptPreflightTests(unittest.TestCase):
         output = io.StringIO()
 
         with (
-            patch.object(cli, "sessions_since", return_value=[row]),
+            patch.object(cli, "sessions_since", return_value=[latest, row]),
             patch.object(cli, "scan_all_events", return_value=[]),
             patch.object(cli, "get_baselines", return_value={}),
             patch("sys.stdout", output),
@@ -533,8 +537,8 @@ class PromptPreflightTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertIn("Latest observed session", output.getvalue())
-        self.assertIn("Recommended: narrow scope", output.getvalue())
-        self.assertIn("aiwatcher resume --session-id session-1 --target codex --copy", output.getvalue())
+        self.assertIn("Other sessions with local signals:", output.getvalue())
+        self.assertIn("aiwatcher resume --session-id session-2 --target codex --copy", output.getvalue())
 
     def test_watch_labels_itself_as_log_based_not_live(self) -> None:
         args = SimpleNamespace(days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000, target="generic")
@@ -548,6 +552,7 @@ class PromptPreflightTests(unittest.TestCase):
             cli.command_watch(args)
         self.assertIn("not a live hook into a running agent", output.getvalue())
         self.assertIn("local logs only", output.getvalue())
+        self.assertIn("may copy a local handoff brief", output.getvalue())
 
     def test_watch_critical_context_prints_handoff_capsule_inline(self) -> None:
         row = session(1, project="/repo/orcha")
@@ -569,6 +574,7 @@ class PromptPreflightTests(unittest.TestCase):
             patch.object(cli, "sessions_since", return_value=[row]),
             patch.object(cli, "scan_all_events", return_value=events),
             patch.object(cli, "get_baselines", return_value={}),
+            patch.object(cli, "get_outcome", side_effect=OSError("read-only state")),
             patch.object(cli, "_copy_to_clipboard", return_value=(False, "no clipboard command found")),
             patch("sys.stdout", output),
         ):
@@ -602,6 +608,7 @@ class PromptPreflightTests(unittest.TestCase):
             patch.object(cli, "sessions_since", return_value=[row]),
             patch.object(cli, "scan_all_events", return_value=events),
             patch.object(cli, "get_baselines", return_value={}),
+            patch.object(cli, "get_outcome", return_value=None),
             patch.object(cli, "_copy_to_clipboard", return_value=(True, "clip")) as copy_mock,
         ):
             all_events = cli.events_by_session([row], days=1)
@@ -661,8 +668,11 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertIn("continue in Codex", rendered)
 
     def test_watch_other_sessions_surface_context_health_not_just_thresholds(self) -> None:
-        latest = session(1, project="/repo/latest")
-        quiet_but_unhealthy = session(2, project="/repo/quiet")
+        now = datetime.now(timezone.utc)
+        latest = session(1, project="/repo/latest", now=now)
+        quiet_but_unhealthy = session(2, project="/repo/quiet", now=now)
+        quiet_but_unhealthy.updated_at = latest.updated_at - timedelta(minutes=1)
+        quiet_but_unhealthy.started_at = quiet_but_unhealthy.updated_at - timedelta(minutes=15)
         events = [
             LocalEvent(
                 event_id=f"evt-{i}",
@@ -687,6 +697,7 @@ class PromptPreflightTests(unittest.TestCase):
         rendered = output.getvalue()
         self.assertIn("Other sessions with local signals:", rendered)
         self.assertIn("/repo/quiet", rendered)
+        self.assertNotIn("/repo/latest |", rendered)
         self.assertIn("Context critical:", rendered)
 
 
