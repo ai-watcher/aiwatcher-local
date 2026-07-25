@@ -6,13 +6,13 @@ import json
 import os
 import socket
 import subprocess
-from collections import Counter, defaultdict
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
-from .cli import analyze_prompt, session_insights
+from .cli import analyze_prompt, session_insights, timeline_analysis
 from .correlate import link_recent_interventions_to_sessions
 from .handoff import build_handoff_capsule
 from .local_state import (
@@ -188,49 +188,6 @@ def build_project_detail(project: str, days: int = 7) -> dict[str, object]:
         "models": group_rows(rows, lambda row: row.model or "unknown"),
         "tools": group_rows(rows, lambda row: row.tool),
         "sessions": [session_json(row) for row in sessions[:20]],
-    }
-
-
-def timeline_analysis(events: list[LocalEvent]) -> dict[str, object]:
-    """Aggregate session events by type and detect duplicated content (loop/waste signal)."""
-    buckets: dict[str, dict[str, float]] = defaultdict(lambda: {"count": 0, "cost": 0.0, "tokens": 0})
-    total_cost = 0.0
-    hash_counts: Counter[str] = Counter()
-    for event in events:
-        bucket = buckets[event.event_type]
-        bucket["count"] += 1
-        bucket["cost"] += event.cost_usd
-        bucket["tokens"] += event.tokens_in + event.tokens_out
-        total_cost += event.cost_usd
-        if event.content_hash:
-            hash_counts[event.content_hash] += 1
-
-    cost_by_type = sorted(
-        (
-            {
-                "event_type": event_type,
-                "count": int(data["count"]),
-                "tokens_label": compact_int(int(data["tokens"])),
-                "api_value": money(data["cost"]),
-                "api_value_usd": round(data["cost"], 6),
-                "label": f"{money(data['cost'])} · {int(data['count'])}x",
-                "share_pct": round(data["cost"] / total_cost * 100) if total_cost else 0,
-            }
-            for event_type, data in buckets.items()
-        ),
-        key=lambda row: row["api_value_usd"],
-        reverse=True,
-    )
-
-    repeated = [count for count in hash_counts.values() if count > 1]
-    duplicate_events = sum(count - 1 for count in repeated)
-    return {
-        "cost_by_type": cost_by_type,
-        "repeats": {
-            "distinct_repeated": len(repeated),
-            "duplicate_events": duplicate_events,
-            "max_repeat": max(repeated, default=0),
-        },
     }
 
 

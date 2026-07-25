@@ -22,7 +22,7 @@ import tempfile
 import threading
 import time as time_module
 import webbrowser
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Callable, Iterable, Sequence
 
@@ -31,9 +31,13 @@ from .local_state import (
     VALID_OUTCOMES,
     get_baselines,
     get_outcome,
+    is_command_pattern_always_allowed,
     link_intervention_session,
+    recent_command_decisions,
     recent_hook_events,
     recent_interventions,
+    record_always_allow_command_pattern,
+    record_command_decision,
     record_decision,
     record_evidence_snapshot,
     record_intervention,
@@ -303,6 +307,63 @@ def print_session_detail(session: LocalSession, *, heading: str = "Latest local 
         print(f"\nMark the result: aiwatcher outcome useful --session-id {session.session_id}")
 
 
+def timeline_analysis(events: Sequence[LocalEvent]) -> dict[str, object]:
+    """Aggregate session events by type and detect duplicated content (loop/waste signal).
+
+    Shared by the session drawer (ui.py) and `watch`'s loop-detection card --
+    both read this instead of counting content_hash repeats themselves, so
+    "possible rework"/"possible loop" mean the exact same thing in both places.
+    """
+    buckets: dict[str, dict[str, float]] = defaultdict(lambda: {"count": 0, "cost": 0.0, "tokens": 0})
+    total_cost = 0.0
+    hash_counts: Counter[str] = Counter()
+    hash_cost: dict[str, float] = defaultdict(float)
+    hash_tokens: dict[str, int] = defaultdict(int)
+    for event in events:
+        bucket = buckets[event.event_type]
+        bucket["count"] += 1
+        bucket["cost"] += event.cost_usd
+        bucket["tokens"] += event.tokens_in + event.tokens_out
+        total_cost += event.cost_usd
+        if event.content_hash:
+            hash_counts[event.content_hash] += 1
+            hash_cost[event.content_hash] += event.cost_usd
+            hash_tokens[event.content_hash] += event.tokens_in + event.tokens_out
+
+    cost_by_type = sorted(
+        (
+            {
+                "event_type": event_type,
+                "count": int(data["count"]),
+                "tokens_label": compact_int(int(data["tokens"])),
+                "api_value": money(data["cost"]),
+                "api_value_usd": round(data["cost"], 6),
+                "label": f"{money(data['cost'])} · {int(data['count'])}x",
+                "share_pct": round(data["cost"] / total_cost * 100) if total_cost else 0,
+            }
+            for event_type, data in buckets.items()
+        ),
+        key=lambda row: row["api_value_usd"],
+        reverse=True,
+    )
+
+    repeated_hashes = [content_hash for content_hash, count in hash_counts.items() if count > 1]
+    repeated_counts = [hash_counts[content_hash] for content_hash in repeated_hashes]
+    duplicate_events = sum(count - 1 for count in repeated_counts)
+    duplicate_tokens = sum(hash_tokens[content_hash] for content_hash in repeated_hashes)
+    duplicate_cost = sum(hash_cost[content_hash] for content_hash in repeated_hashes)
+    return {
+        "cost_by_type": cost_by_type,
+        "repeats": {
+            "distinct_repeated": len(repeated_hashes),
+            "duplicate_events": duplicate_events,
+            "max_repeat": max(repeated_counts, default=0),
+            "duplicate_tokens": duplicate_tokens,
+            "duplicate_cost_usd": round(duplicate_cost, 6),
+        },
+    }
+
+
 def render_session_detail(session: LocalSession, *, heading: str = "Latest local AI session") -> str:
     stamp = session_sort_key(session)
     when = format_short_datetime(stamp.astimezone()) if stamp != MIN_DT else "unknown"
@@ -502,11 +563,20 @@ def _compute_baselines() -> dict[str, object]:
         call_values = [float(row.agent_calls) for row in relevant if row.agent_calls > 0]
         tool_values = [float(row.tool_calls) for row in relevant if row.tool_calls > 0]
         cost_values = [float(row.cost_usd) for row in relevant if row.cost_usd > 0]
+        # Real per-session tokens/minute (not an assumed session length) --
+        # only from sessions with both token usage and a measured duration,
+        # so this is grounded in what actually happened, not a guess.
+        velocity_values = [
+            (row.tokens_in + row.tokens_out) / (row.duration_seconds / 60.0)
+            for row in relevant
+            if row.tokens_in + row.tokens_out > 0 and row.duration_seconds >= 60
+        ]
         per_tool[tool_name] = {
             "p75_tokens": _quantile(token_values, 0.75),
             "p75_calls": _quantile(call_values, 0.75),
             "p75_tool_calls": _quantile(tool_values, 0.75),
             "p75_api_value": _quantile(cost_values, 0.75),
+            "p75_tokens_per_minute": _quantile(velocity_values, 0.75),
             "session_count": len(relevant),
             "history_span_days": history_span_days,
             "excluded_cumulative": excluded_cumulative,
@@ -1429,6 +1499,281 @@ def run_prompt_gate(
         server.server_close()
 
 
+# S-19: dangerous command gate. Claude Code CLI only -- this repo's own
+# install-codex-hook implementation only ever wires Codex to the same
+# UserPromptSubmit event Claude uses, and there is no verified evidence
+# anywhere in this codebase, the README, or the docs repo that Codex CLI/TUI
+# or Cursor expose a separate pre-tool-execution hook AIWatcher could gate
+# through. Rather than guess at an unverified schema and write untested JSON
+# into a real ~/.codex or ~/.cursor config file, this stays Claude-only until
+# that's actually confirmed -- see the docs-repo companion PR for S-19.
+def _command_tokens(command: str) -> list[str]:
+    try:
+        return shlex.split(command, posix=(os.name != "nt"))
+    except ValueError:
+        # Unbalanced quotes etc -- fall back to a plain whitespace split so a
+        # malformed command still gets *some* token-level check rather than
+        # silently skipping the rm/git-push detectors entirely.
+        return command.split()
+
+
+def _has_flag(tokens: list[str], sub_command_index: int, short: str, long_forms: tuple[str, ...]) -> bool:
+    """Whether a short flag letter or a long-form flag appears after `sub_command_index`.
+
+    Handles combined short flags (-rf, -fr) and flags given as separate
+    tokens (-r -f), not just one fixed spelling.
+    """
+    for token in tokens[sub_command_index + 1:]:
+        if token in long_forms:
+            return True
+        if token.startswith("--"):
+            continue
+        if token.startswith("-") and short in token[1:]:
+            return True
+    return False
+
+
+def _rm_rf_match(command: str) -> bool:
+    tokens = _command_tokens(command)
+    if "rm" not in tokens:
+        return False
+    index = tokens.index("rm")
+    return (
+        _has_flag(tokens, index, "r", ("--recursive",))
+        and _has_flag(tokens, index, "f", ("--force",))
+    )
+
+
+def _git_push_force_match(command: str) -> bool:
+    tokens = _command_tokens(command)
+    if "git" not in tokens or "push" not in tokens:
+        return False
+    git_index = tokens.index("git")
+    if "push" not in tokens[git_index + 1:]:
+        return False
+    push_index = tokens.index("push", git_index + 1)
+    return _has_flag(tokens, push_index, "f", ("--force", "--force-with-lease"))
+
+
+DANGEROUS_COMMAND_PATTERNS: list[dict[str, object]] = [
+    {
+        "id": "rm-rf",
+        "matcher": _rm_rf_match,
+        "reason": "Recursive force delete (rm -rf) can permanently destroy files with no undo.",
+    },
+    {
+        "id": "git-push-force",
+        "matcher": _git_push_force_match,
+        "reason": "Force-push can overwrite remote history other people rely on.",
+    },
+    {
+        "id": "git-reset-hard",
+        "matcher": lambda command: bool(re.search(r"\bgit\s+reset\s+--hard\b", command, re.IGNORECASE)),
+        "reason": "git reset --hard discards local changes with no way to recover them.",
+    },
+    {
+        "id": "credential-read",
+        "matcher": lambda command: bool(re.search(
+            r"\b(cat|type|less|more|head|tail|printenv|Get-Content)\b[^\n]*"
+            r"(\.env\b|\.pem\b|id_rsa\b|credentials\.json\b|\.aws[\\/]credentials\b|\.netrc\b)",
+            command, re.IGNORECASE,
+        )),
+        "reason": "Reading a credential/secret file can expose its contents in the agent's context or output.",
+    },
+    {
+        "id": "prod-connection-string",
+        "matcher": lambda command: bool(re.search(
+            r"(postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|mssql)://[^\s]*:[^\s]*@[^\s]*prod[^\s]*",
+            command, re.IGNORECASE,
+        )),
+        "reason": "This looks like a production database connection string with embedded credentials.",
+    },
+]
+
+
+def analyze_tool_call(tool_name: str, tool_input: dict[str, object]) -> dict[str, str] | None:
+    """Return match info if a Bash command matches the dangerous-command blocklist, else None.
+
+    Scoped to the Bash tool only -- other tools (Read/Write/Edit) don't carry
+    a shell command string in tool_input, and matching against file paths
+    would need different, unverified logic. A real follow-up, not silently
+    claimed here.
+    """
+    if tool_name != "Bash":
+        return None
+    command = str(tool_input.get("command") or "").strip()
+    if not command:
+        return None
+    for entry in DANGEROUS_COMMAND_PATTERNS:
+        if entry["matcher"](command):
+            return {"pattern_id": str(entry["id"]), "command": command, "reason": str(entry["reason"])}
+    return None
+
+
+def _command_gate_html(*, command: str, reason: str, pattern_id: str, tool_label: str) -> str:
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>AIWatcher command gate</title>
+<style>
+body {{ font-family: -apple-system, Segoe UI, sans-serif; background:#0b1118; color:#e6edf3; margin:0; padding:32px; }}
+.card {{ max-width:640px; margin:0 auto; border:1px solid #2a3646; border-radius:10px; padding:24px; background:#101925; }}
+h1 {{ font-size:18px; margin:0 0 6px; }}
+p {{ color:#9fb0c3; line-height:1.5; }}
+pre {{ background:#0b1118; border:1px solid #2a3646; border-radius:6px; padding:12px; overflow-x:auto; white-space:pre-wrap; word-break:break-word; }}
+.reason {{ border-left:3px solid #d9534f; padding:8px 12px; background:#181310; margin:14px 0; }}
+.row {{ display:flex; gap:10px; margin-top:20px; flex-wrap:wrap; }}
+button {{ padding:10px 16px; border-radius:6px; border:1px solid #2a3646; font-size:14px; cursor:pointer; }}
+.allow {{ background:#1b2b1f; color:#8fd19e; border-color:#2f6f3f; }}
+.block {{ background:#2b1b1b; color:#e08787; border-color:#6f2f2f; }}
+.always {{ background:#141d29; color:#9fb0c3; }}
+.status {{ margin-top:16px; font-size:13px; color:#9fb0c3; }}
+</style></head>
+<body><div class="card">
+<h1>AIWatcher paused a {html.escape(tool_label)} command</h1>
+<p>This command matched a local dangerous-command pattern before it ran. No data leaves this machine.</p>
+<pre>{html.escape(command)}</pre>
+<div class="reason">{html.escape(reason)}</div>
+<div class="row">
+<button class="allow" onclick="decide('allow_once')">Allow once</button>
+<button class="block" onclick="decide('block')">Block</button>
+<button class="always" onclick="decide('always_allow')">Always allow this pattern</button>
+</div>
+<div class="status" id="status"></div>
+</div>
+<script>
+async function decide(decision) {{
+  document.getElementById('status').textContent = 'Recording decision...';
+  try {{
+    const res = await fetch('/decision', {{
+      method: 'POST', headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{decision}})
+    }});
+    if (res.ok) {{
+      document.getElementById('status').textContent = 'Decision recorded (' + decision + '). You can close this tab.';
+    }} else {{
+      document.getElementById('status').textContent = 'Could not record decision. Try again.';
+    }}
+  }} catch (e) {{
+    document.getElementById('status').textContent = 'Could not reach AIWatcher. Try again.';
+  }}
+}}
+</script>
+</body></html>"""
+
+
+def _terminal_command_gate(*, command: str, reason: str, pattern_id: str) -> str:
+    print("\nNo display available for the AIWatcher command gate -- using the terminal instead.", file=sys.stderr)
+    print(f"Command: {command}", file=sys.stderr)
+    print(f"Why flagged: {reason}", file=sys.stderr)
+    while True:
+        sys.stderr.write("[a]llow once / [b]lock / always-allow-this-[p]attern: ")
+        sys.stderr.flush()
+        try:
+            choice = input().strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return "block"
+        if choice in {"a", "allow", "allow_once"}:
+            return "allow_once"
+        if choice in {"b", "block"}:
+            return "block"
+        if choice in {"p", "pattern", "always_allow"}:
+            return "always_allow"
+        print("Please enter a, b, or p.", file=sys.stderr)
+
+
+def _auto_decide_headless_command_gate() -> str:
+    """No display and no TTY: decide instantly instead of waiting to time out.
+
+    Defaults to block -- the same fail-safe direction as the prompt gate's
+    AIWATCHER_GATE_DEFAULT, just for a destructive command instead of a
+    risky prompt. AIWATCHER_COMMAND_GATE_DEFAULT=allow opts into the other
+    direction explicitly; nothing here is a real human decision either way.
+    """
+    default = os.environ.get("AIWATCHER_COMMAND_GATE_DEFAULT", "block").strip().lower()
+    return "auto_allow_headless" if default == "allow" else "auto_block_headless"
+
+
+def _fallback_command_gate(*, command: str, reason: str, pattern_id: str) -> str:
+    if sys.stdin.isatty():
+        return _terminal_command_gate(command=command, reason=reason, pattern_id=pattern_id)
+    return _auto_decide_headless_command_gate()
+
+
+def run_command_gate(
+    *,
+    command: str,
+    reason: str,
+    pattern_id: str,
+    tool_label: str = "Claude Code",
+    timeout_seconds: int = PROMPT_GATE_TIMEOUT_SECONDS,
+    open_browser: bool = True,
+    ready_callback: Callable[[str], None] | None = None,
+) -> str | None:
+    """Run the one-shot local command gate. Returns a decision string, or None on timeout."""
+    if open_browser and not _display_available():
+        return _fallback_command_gate(command=command, reason=reason, pattern_id=pattern_id)
+
+    decision_event = threading.Event()
+    state: dict[str, str] = {}
+
+    class CommandGateHandler(BaseHTTPRequestHandler):
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+        def _send(self, status: int, body: str, content_type: str = "text/html; charset=utf-8") -> None:
+            encoded = body.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(encoded)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(encoded)
+            self.wfile.flush()
+
+        def do_GET(self) -> None:
+            if self.path != "/":
+                self._send(404, "Not found", "text/plain; charset=utf-8")
+                return
+            self._send(200, _command_gate_html(command=command, reason=reason, pattern_id=pattern_id, tool_label=tool_label))
+
+        def do_POST(self) -> None:
+            if self.path != "/decision":
+                self._send(404, json.dumps({"error": "not found"}), "application/json; charset=utf-8")
+                return
+            length = int(self.headers.get("Content-Length") or "0")
+            try:
+                payload = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+            except json.JSONDecodeError:
+                payload = {}
+            decision = str(payload.get("decision") or "").strip()
+            if decision not in {"allow_once", "block", "always_allow"}:
+                self._send(400, json.dumps({"error": "unknown decision"}), "application/json; charset=utf-8")
+                return
+            state["decision"] = decision
+            self._send(200, json.dumps({"ok": True, "decision": decision}), "application/json; charset=utf-8")
+            decision_event.set()
+
+    server = LocalThreadingHTTPServer(("127.0.0.1", 0), CommandGateHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}/"
+    try:
+        if ready_callback:
+            ready_callback(url)
+        if open_browser:
+            try:
+                opened = webbrowser.open(url)
+            except Exception:
+                opened = False
+            if not opened:
+                return _fallback_command_gate(command=command, reason=reason, pattern_id=pattern_id)
+        if not decision_event.wait(max(1, timeout_seconds)):
+            return None
+        return state.get("decision")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def event_sort_key(event: LocalEvent) -> datetime:
     return event.timestamp or MIN_DT
 
@@ -1961,6 +2306,96 @@ def _runway_pressure(tool: str, sessions: Sequence[LocalSession]) -> dict[str, o
     }
 
 
+LOOP_FLAG_REPEAT = 3     # a single action repeated this many times (or more) is worth a mention
+LOOP_CAPSULE_REPEAT = 5  # this many repeats -- stop and get a rescoped brief, not just "narrow scope"
+VELOCITY_WINDOW_MINUTES = 10.0  # look at the most recent N minutes of a session's own events
+VELOCITY_RATIO = 2.0            # tokens/minute at or above this multiple of the tool's baseline = runaway
+
+
+def _loop_signal(events: Sequence[LocalEvent]) -> dict[str, object] | None:
+    """Repeated identical tool/model output within a session -- a real retry/loop signal.
+
+    Reuses timeline_analysis()'s content-hash repeat counting (the same
+    function the session drawer uses for its "possible rework" note), so
+    `watch` and the dashboard never disagree about what counts as a repeat.
+    This only catches literally-identical repeated content (e.g. re-running
+    the same failing command); it cannot detect "same file, different edits"
+    without decoding tool payloads, which the privacy-first event scanner
+    deliberately does not retain.
+    """
+    if not events:
+        return None
+    repeats = timeline_analysis(events).get("repeats")
+    if not isinstance(repeats, dict):
+        return None
+    max_repeat = int(repeats.get("max_repeat") or 0)
+    if max_repeat < LOOP_FLAG_REPEAT:
+        return None
+    duplicate_tokens = int(repeats.get("duplicate_tokens") or 0)
+    duplicate_cost = float(repeats.get("duplicate_cost_usd") or 0)
+    diagnosis = (
+        f"Possible loop: identical content repeated {max_repeat}x locally "
+        f"({compact_int(duplicate_tokens)} tokens, {money(duplicate_cost)} across the repeats)."
+    )
+    return {
+        "max_repeat": max_repeat,
+        "distinct_repeated": int(repeats.get("distinct_repeated") or 0),
+        "duplicate_tokens": duplicate_tokens,
+        "duplicate_cost_usd": duplicate_cost,
+        "diagnosis": diagnosis,
+    }
+
+
+def _velocity_signal(tool: str, events: Sequence[LocalEvent]) -> dict[str, object] | None:
+    """Runaway velocity: tokens/minute in this session's recent events vs. the tool's own baseline.
+
+    Distinct from the runway estimate (which looks across sessions over 5h):
+    this looks *within* the current session's most recent activity, so it can
+    flag a session that is burning tokens unusually fast right now, even if
+    total usage this window is still under the runway threshold. The baseline
+    (p75_tokens_per_minute) comes from real historical sessions' own measured
+    duration -- not an assumed session length. Same honesty rule applies:
+    advisory only, not a live per-second reading.
+    """
+    baseline_tool = _normalize_tool_for_baseline(tool)
+    if not baseline_tool or not events:
+        return None
+    baselines = get_baselines()
+    per_tool = baselines.get("per_tool") if isinstance(baselines, dict) else None
+    stats = per_tool.get(baseline_tool) if isinstance(per_tool, dict) else None
+    if not isinstance(stats, dict):
+        return None
+    if (
+        stats.get("session_count", 0) < MIN_SAVINGS_SESSIONS
+        or stats.get("history_span_days", 0) < MIN_SAVINGS_HISTORY_DAYS
+    ):
+        return None
+    baseline_tokens_per_minute = float(stats.get("p75_tokens_per_minute") or 0)
+    if baseline_tokens_per_minute <= 0:
+        return None
+
+    timestamped = [e for e in events if e.timestamp]
+    if not timestamped:
+        return None
+    latest = max(e.timestamp for e in timestamped)
+    window_start = latest - timedelta(minutes=VELOCITY_WINDOW_MINUTES)
+    window_events = [e for e in timestamped if e.timestamp >= window_start]
+    if len(window_events) < 2:
+        return None
+    window_tokens = sum(e.tokens_in + e.tokens_out for e in window_events)
+    span_minutes = max(1.0, (latest - min(e.timestamp for e in window_events)).total_seconds() / 60.0)
+    tokens_per_minute = window_tokens / span_minutes
+    ratio = tokens_per_minute / baseline_tokens_per_minute
+    if ratio < VELOCITY_RATIO:
+        return None
+    return {
+        "tool": baseline_tool,
+        "tokens_per_minute": tokens_per_minute,
+        "baseline_tokens_per_minute": baseline_tokens_per_minute,
+        "ratio": ratio,
+    }
+
+
 def _watch_status(
     session: LocalSession,
     events: Sequence[LocalEvent],
@@ -1970,12 +2405,14 @@ def _watch_status(
     calls_threshold: int,
     tokens_threshold: int,
 ) -> dict[str, object]:
-    """Combine context health + runway pressure + session insights into one recommended action.
+    """Combine context health + loop + velocity + runway signals into one recommended action.
 
     Action is always one of: continue | narrow scope | start fresh |
     switch tool or lane | create handoff capsule now.
     """
     health = analyze_session_health(session, events)
+    loop = _loop_signal(events)
+    velocity = _velocity_signal(session.tool, events)
     runway = _runway_pressure(session.tool, all_rows)
     insights = session_insights(
         session,
@@ -1989,6 +2426,16 @@ def _watch_status(
     if health is not None and health.severity == "critical":
         action = "create handoff capsule now"
         reason = health.recommendations[0] if health.recommendations else "Context health is critical."
+    elif loop is not None and loop["max_repeat"] >= LOOP_CAPSULE_REPEAT:
+        action = "create handoff capsule now"
+        reason = str(loop["diagnosis"])
+    elif velocity is not None:
+        action = "narrow scope"
+        reason = (
+            f"Velocity is {velocity['ratio']:.1f}x your typical {velocity['tool']} pace "
+            f"({compact_int(int(velocity['tokens_per_minute']))} tokens/min over the last "
+            f"{VELOCITY_WINDOW_MINUTES:.0f} minutes) -- local estimate, not a live per-second reading."
+        )
     elif runway is not None and float(runway["pressure_ratio"]) >= RUNWAY_PRESSURE_RATIO:
         action = "switch tool or lane"
         suggested_target = _alternate_target_for_tool(str(runway["tool"]))
@@ -2002,11 +2449,22 @@ def _watch_status(
     elif health is not None and health.severity == "warning":
         action = "start fresh" if health.is_critical_stale else "narrow scope"
         reason = health.recommendations[0] if health.recommendations else "Context pressure is elevated."
+    elif loop is not None:
+        action = "narrow scope"
+        reason = str(loop["diagnosis"])
     elif insights:
         action = "narrow scope"
         reason = insights[0]
 
-    return {"health": health, "runway": runway, "insights": insights, "action": action, "reason": reason}
+    return {
+        "health": health,
+        "loop": loop,
+        "velocity": velocity,
+        "runway": runway,
+        "insights": insights,
+        "action": action,
+        "reason": reason,
+    }
 
 
 def _print_watch_status_card(
@@ -2025,6 +2483,8 @@ def _print_watch_status_card(
         tokens_threshold=args.tokens_threshold,
     )
     health = status["health"]
+    loop = status["loop"]
+    velocity = status["velocity"]
     runway = status["runway"]
     stamp = session_sort_key(session)
     when = format_short_datetime(stamp.astimezone()) if stamp != MIN_DT else "unknown"
@@ -2044,6 +2504,13 @@ def _print_watch_status_card(
         )
     else:
         print("  Context    : not enough per-turn token data locally to assess")
+    if loop is not None:
+        print(f"  Loop       : {loop['diagnosis']}")
+    if velocity is not None:
+        print(
+            f"  Velocity   : {velocity['ratio']:.1f}x typical {velocity['tool']} pace "
+            f"({compact_int(int(velocity['tokens_per_minute']))} tokens/min) -- local estimate, not live"
+        )
     if runway is not None:
         print(
             f"  Usage pressure ({runway['window_hours']:.0f}h est.): "
@@ -2052,18 +2519,21 @@ def _print_watch_status_card(
         )
     print(f"  Recommended: {status['action']} -- {status['reason']}")
 
-    if health is not None and health.severity == "critical":
-        # De-duped per session_id+stamp so a session sitting at CRITICAL across
-        # multiple --interval polls doesn't reprint/recopy the same capsule
-        # every cycle -- only scoped to this watch process's own run (in-memory,
-        # not persisted), so restarting watch will regenerate it once more.
+    if status["action"] == "create handoff capsule now":
+        # De-duped per session_id+stamp so a session sitting at CRITICAL (or in a
+        # severe loop) across multiple --interval polls doesn't reprint/recopy the
+        # same capsule every cycle -- only scoped to this watch process's own run
+        # (in-memory, not persisted), so restarting watch will regenerate it once more.
         if critical_capsule_seen.get(session.session_id) == stamp:
             print(
-                f"\n  Context is critical -- capsule already generated this session. Run "
+                f"\n  Capsule already generated this session. Run "
                 f"`aiwatcher resume --session-id {session.session_id} --target {args.target} --copy` to get it again."
             )
         else:
             critical_capsule_seen[session.session_id] = stamp
+            extra_warnings: list[str] = []
+            if loop is not None:
+                extra_warnings.append(str(loop["diagnosis"]))
             try:
                 outcome = get_outcome(session.session_id)
             except OSError:
@@ -2073,9 +2543,10 @@ def _print_watch_status_card(
                 events,
                 outcome=outcome.get("outcome") if outcome else None,
                 target=args.target,
+                extra_warnings=extra_warnings or None,
             )
             rendered = render_handoff_capsule(capsule)
-            print("\n  Context is critical -- generating a handoff capsule now:\n")
+            print("\n  Stopping here is recommended -- generating a handoff capsule now:\n")
             for line in rendered.splitlines():
                 print(f"  {line}" if line else "")
             ok, detail = _copy_to_clipboard(str(capsule.get("next_brief") or rendered))
@@ -2553,6 +3024,89 @@ def _hook_block_output(reason: str, *, tool: str) -> dict[str, object]:
     }
 
 
+def _command_gate_permission_output(decision: str, reason: str) -> dict[str, object]:
+    """PreToolUse response. `decision` is Claude Code's own vocabulary: allow | deny | ask."""
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": decision,
+            "permissionDecisionReason": reason,
+        }
+    }
+
+
+def command_claude_pretooluse_hook(args: argparse.Namespace) -> int:
+    """S-19: gate a Claude Code tool call before it runs, if it matches the dangerous-command blocklist."""
+    raw = _read_stdin_text()
+    try:
+        payload = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError:
+        payload = {}
+    _log_hook_payload_keys(payload)
+    tool_name = str(payload.get("tool_name") or "")
+    tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+    cwd = str(payload.get("cwd") or os.getcwd())
+    session_id = _extract_session_meta(payload)["session_id"]
+
+    match = analyze_tool_call(tool_name, tool_input)
+    if not match:
+        print("{}")
+        return 0
+
+    if is_command_pattern_always_allowed(match["pattern_id"]):
+        print(json.dumps(_command_gate_permission_output(
+            "allow", "AIWatcher: command matches an always-allowed local pattern.",
+        )))
+        return 0
+
+    try:
+        decision = run_command_gate(
+            command=match["command"],
+            reason=match["reason"],
+            pattern_id=match["pattern_id"],
+            timeout_seconds=PROMPT_GATE_TIMEOUT_SECONDS,
+        )
+    except OSError:
+        decision = None
+    # run_command_gate() returns None only when a real gate opened (browser or
+    # terminal) but no answer arrived before the timeout -- distinct from
+    # "no display/TTY at all", which _auto_decide_headless_command_gate()
+    # already resolves instantly to one of the auto_*_headless decisions.
+    if decision is None:
+        decision = "gate_timeout_blocked"
+
+    if decision == "always_allow":
+        try:
+            record_always_allow_command_pattern(match["pattern_id"])
+        except OSError:
+            pass
+
+    try:
+        record_command_decision(
+            tool="claude",
+            command=match["command"],
+            pattern_id=match["pattern_id"],
+            reason=match["reason"],
+            decision=decision,
+            session_id=session_id,
+            cwd=cwd,
+        )
+    except OSError:
+        pass
+
+    if decision in {"block", "auto_block_headless", "gate_timeout_blocked"}:
+        print(json.dumps(_command_gate_permission_output(
+            "deny",
+            f"AIWatcher blocked this command ({decision}): {match['reason']} Command: {match['command']}",
+        )))
+        return 0
+
+    print(json.dumps(_command_gate_permission_output(
+        "allow", f"AIWatcher allowed this command after review ({decision}).",
+    )))
+    return 0
+
+
 def _prompt_gate_requested(args: argparse.Namespace) -> bool:
     return bool(
         getattr(args, "gate", False)
@@ -2913,6 +3467,74 @@ def _remove_claude_hook(settings: dict[str, object]) -> tuple[dict[str, object],
     return settings, True
 
 
+def _merge_claude_command_gate_hook(settings: dict[str, object], command: str) -> dict[str, object]:
+    """S-19: register a PreToolUse hook scoped to the Bash tool.
+
+    A separate hook entry/event from UserPromptSubmit (_merge_claude_hook) --
+    this one runs synchronously before a tool call, not before a prompt.
+    """
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+    event_hooks = hooks.get("PreToolUse")
+    if not isinstance(event_hooks, list):
+        event_hooks = []
+    event_hooks = [
+        item for item in event_hooks
+        if not (
+            isinstance(item, dict)
+            and any(
+                isinstance(hook, dict) and "claude-pretooluse-hook" in str(hook.get("command", ""))
+                for hook in item.get("hooks", [])
+            )
+        )
+    ]
+    event_hooks.append({
+        "matcher": "Bash",
+        "hooks": [
+            {
+                "type": "command",
+                "command": f"{command} claude-pretooluse-hook",
+                "statusMessage": "AIWatcher is checking this command",
+                "timeout": PROMPT_GATE_HOST_TIMEOUT_SECONDS,
+            }
+        ],
+    })
+    hooks["PreToolUse"] = event_hooks
+    settings["hooks"] = hooks
+    return settings
+
+
+def _remove_claude_command_gate_hook(settings: dict[str, object]) -> tuple[dict[str, object], bool]:
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return settings, False
+    event_hooks = hooks.get("PreToolUse")
+    if not isinstance(event_hooks, list):
+        return settings, False
+    filtered = [
+        item for item in event_hooks
+        if not (
+            isinstance(item, dict)
+            and any(
+                isinstance(hook, dict) and "claude-pretooluse-hook" in str(hook.get("command", ""))
+                for hook in item.get("hooks", [])
+            )
+        )
+    ]
+    if len(filtered) == len(event_hooks):
+        return settings, False
+    if filtered:
+        hooks["PreToolUse"] = filtered
+    else:
+        hooks.pop("PreToolUse", None)
+    if hooks:
+        settings["hooks"] = hooks
+    else:
+        settings.pop("hooks", None)
+    return settings, True
+
+
 def _merge_codex_hook(settings: dict[str, object], command: str, *, gate: bool = False) -> dict[str, object]:
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
@@ -3096,6 +3718,60 @@ def command_uninstall_claude_hook(args: argparse.Namespace) -> int:
         json.dump(updated, handle, indent=2)
         handle.write("\n")
     print(f"Removed AIWatcher Claude hook from {settings_path}")
+    return 0
+
+
+def command_install_claude_command_gate(args: argparse.Namespace) -> int:
+    """S-19: install the PreToolUse dangerous-command gate. Claude Code CLI only."""
+    command = args.command or _cli_command_for_current_file()
+    snippet = _merge_claude_command_gate_hook({}, command)
+    if not args.write:
+        print("Add this to your Claude Code settings JSON:")
+        print(json.dumps(snippet, indent=2))
+        print("\nProject-local path: .claude/settings.local.json")
+        print("User-global path: ~/.claude/settings.json")
+        print("\nDefault blocklist: rm -rf, git push --force, git reset --hard, credential/env file reads, prod connection strings.")
+        return 0
+
+    settings_path = _claude_settings_path(args.scope, args.project_dir)
+    os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+    existing: dict[str, object] = {}
+    if os.path.exists(settings_path):
+        with open(settings_path, "r", encoding="utf-8") as handle:
+            try:
+                existing = json.load(handle)
+            except json.JSONDecodeError:
+                backup = settings_path + ".aiwatcher.bak"
+                shutil.copyfile(settings_path, backup)
+                print(f"Existing settings were not valid JSON. Backed up to {backup}.")
+    merged = _merge_claude_command_gate_hook(existing, command)
+    with open(settings_path, "w", encoding="utf-8") as handle:
+        json.dump(merged, handle, indent=2)
+        handle.write("\n")
+    print(f"Installed AIWatcher Claude Code PreToolUse command gate at {settings_path}")
+    print("Restart Claude Code so it picks up the new hook, then try a blocklisted command to verify.")
+    return 0
+
+
+def command_uninstall_claude_command_gate(args: argparse.Namespace) -> int:
+    settings_path = _claude_settings_path(args.scope, args.project_dir)
+    if not os.path.exists(settings_path):
+        print(f"No Claude settings file found at {settings_path}.")
+        return 0
+    try:
+        with open(settings_path, "r", encoding="utf-8") as handle:
+            settings = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Could not read Claude settings at {settings_path}: {exc}", file=sys.stderr)
+        return 2
+    updated, removed = _remove_claude_command_gate_hook(settings)
+    if not removed:
+        print(f"No AIWatcher command gate found in {settings_path}.")
+        return 0
+    with open(settings_path, "w", encoding="utf-8") as handle:
+        json.dump(updated, handle, indent=2)
+        handle.write("\n")
+    print(f"Removed AIWatcher command gate from {settings_path}")
     return 0
 
 
@@ -3516,6 +4192,17 @@ def command_hook_status(_args: argparse.Namespace) -> int:
             if row.get("session_id"):
                 line += f" | session {row['session_id']}"
             print(line)
+    command_decisions = recent_command_decisions(limit=5)
+    if command_decisions:
+        print("\nRecent command gate decisions (S-19, Claude Code only)")
+        for row in command_decisions:
+            line = (
+                f"- {row.get('created_at', 'unknown')} | {row.get('pattern_id', 'unknown')} | "
+                f"{row.get('decision', 'unknown')} | {row.get('command', '')}"
+            )
+            if row.get("session_id"):
+                line += f" | session {row['session_id']}"
+            print(line)
     print("\nIf an event appears but the tool did not pause, inspect its risk and decision. If no event appears, reload the tool and verify its hook configuration.")
     return 0
 
@@ -3906,6 +4593,23 @@ def build_parser() -> argparse.ArgumentParser:
     uninstall_claude_hook.add_argument("--project-dir")
     uninstall_claude_hook.set_defaults(func=command_uninstall_claude_hook)
 
+    install_command_gate = sub.add_parser(
+        "install-claude-command-gate",
+        help="Print or install the Claude Code dangerous-command gate (PreToolUse, S-19). Claude Code CLI only.",
+    )
+    install_command_gate.add_argument("--write", action="store_true", help="Write the hook into Claude settings")
+    install_command_gate.add_argument("--scope", choices=["project", "user"], default="project")
+    install_command_gate.add_argument("--project-dir")
+    install_command_gate.add_argument("--command", help="AIWatcher command to put in Claude settings")
+    install_command_gate.set_defaults(func=command_install_claude_command_gate)
+
+    uninstall_command_gate = sub.add_parser(
+        "uninstall-claude-command-gate", help="Remove the AIWatcher Claude Code dangerous-command gate",
+    )
+    uninstall_command_gate.add_argument("--scope", choices=["project", "user"], default="project")
+    uninstall_command_gate.add_argument("--project-dir")
+    uninstall_command_gate.set_defaults(func=command_uninstall_claude_command_gate)
+
     install_decision_log = sub.add_parser(
         "install-claude-decision-log",
         help="Print or install a personal Claude Code convention for logging rejected decisions",
@@ -3982,7 +4686,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
-    if arguments and arguments[0] in {"claude-hook", "codex-hook", "cursor-hook"}:
+    if arguments and arguments[0] in {"claude-hook", "codex-hook", "cursor-hook", "claude-pretooluse-hook"}:
         hook_parser = argparse.ArgumentParser(add_help=False)
         hook_parser.add_argument("--text")
         hook_parser.add_argument("--gate", action="store_true")
@@ -3991,6 +4695,7 @@ def main(argv: list[str] | None = None) -> int:
             "claude-hook": command_claude_hook,
             "codex-hook": command_codex_hook,
             "cursor-hook": command_cursor_hook,
+            "claude-pretooluse-hook": command_claude_pretooluse_hook,
         }
         handler = handlers[arguments[0]]
         return int(handler(hook_args))

@@ -156,6 +156,8 @@ def _empty_state() -> dict[str, Any]:
         "evidence_snapshots": [],
         "decisions": [],
         "baselines": {},
+        "command_decisions": [],
+        "command_gate_allowlist": [],
     }
 
 
@@ -212,6 +214,8 @@ def _load() -> dict[str, Any]:
     data.setdefault("evidence_snapshots", [])
     data.setdefault("decisions", [])
     data.setdefault("baselines", {})
+    data.setdefault("command_decisions", [])
+    data.setdefault("command_gate_allowlist", [])
     return data
 
 
@@ -560,4 +564,72 @@ def save_baselines(baselines: dict[str, Any]) -> None:
     with _locked_state():
         data = _load()
         data["baselines"] = baselines
+        _save(data)
+
+
+MAX_COMMAND_DECISIONS_STORED = 500
+
+
+def record_command_decision(
+    *,
+    tool: str,
+    command: str,
+    pattern_id: str,
+    reason: str,
+    decision: str,
+    session_id: str | None = None,
+    cwd: str | None = None,
+) -> dict[str, Any]:
+    """Store a dangerous-command gate decision (S-19).
+
+    Unlike prompt interventions (which store only a hash of the prompt),
+    this intentionally stores the real command text -- the scenario spec
+    requires "decision recorded with full command text", and a shell
+    command is not private prompt/source content the same way a prompt is.
+    record_decision() above already sets this precedent for commit-message-
+    style text.
+    """
+    with _locked_state():
+        data = _load()
+        record = {
+            "id": str(uuid.uuid4()),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "tool": tool,
+            "cwd": cwd,
+            "command": command,
+            "pattern_id": pattern_id,
+            "reason": reason,
+            "decision": decision,
+            "session_id": session_id,
+        }
+        data["command_decisions"].append(record)
+        data["command_decisions"] = data["command_decisions"][-MAX_COMMAND_DECISIONS_STORED:]
+        _save(data)
+    return record
+
+
+def recent_command_decisions(limit: int = 20) -> list[dict[str, Any]]:
+    try:
+        with _locked_state():
+            rows = list(_load()["command_decisions"])
+    except OSError:
+        return []
+    return list(reversed(rows[-max(1, limit):]))
+
+
+def is_command_pattern_always_allowed(pattern_id: str) -> bool:
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return False
+    return pattern_id in data.get("command_gate_allowlist", [])
+
+
+def record_always_allow_command_pattern(pattern_id: str) -> None:
+    with _locked_state():
+        data = _load()
+        allowlist = data.setdefault("command_gate_allowlist", [])
+        if pattern_id not in allowlist:
+            allowlist.append(pattern_id)
         _save(data)

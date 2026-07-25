@@ -110,8 +110,13 @@ def build_handoff_capsule(
     outcome: str | None = None,
     include_prompt_excerpt: bool = False,
     target: HandoffTarget = "generic",
+    extra_warnings: Sequence[str] | None = None,
 ) -> dict[str, object]:
-    """Build a structured handoff capsule for UI/API rendering."""
+    """Build a structured handoff capsule for UI/API rendering.
+
+    extra_warnings (e.g. a loop diagnosis from `watch`) are prepended so they
+    lead the "why hand off now" list ahead of the generic health/cost checks.
+    """
     evidence = build_outcome_evidence(session)
     health = analyze_session_health(session, events)
     segments = segment_session_by_prompt(session.source_path)
@@ -125,7 +130,7 @@ def build_handoff_capsule(
                 "prompt_excerpt": _short(str(by_cost[0].get("prompt") or ""), 900),
             }
 
-    warnings: list[str] = []
+    warnings: list[str] = list(extra_warnings or [])
     if health:
         if health.severity != "healthy":
             warnings.append(
