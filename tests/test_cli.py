@@ -14,6 +14,7 @@ import time
 import unittest
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -700,6 +701,137 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertIn("/repo/quiet", rendered)
         self.assertNotIn("/repo/latest |", rendered)
         self.assertIn("Context critical:", rendered)
+
+
+def _snapshot(session_id, *, age_days, commit_shas=("abc123",), survival=None):
+    recorded_at = (datetime.now(timezone.utc) - timedelta(days=age_days)).isoformat()
+    return {
+        "session_id": session_id,
+        "recorded_at": recorded_at,
+        "commit_shas": list(commit_shas),
+        "survival": survival or {},
+    }
+
+
+class EvidenceSurvivalRecheckTests(unittest.TestCase):
+    def test_marks_survived_when_commit_still_reachable(self) -> None:
+        row = LocalSession(session_id="s1", tool="claude-code", project_path="/repo")
+        with (
+            patch.object(cli, "evidence_snapshots_for_sessions", return_value={"s1": _snapshot("s1", age_days=8)}),
+            patch.object(cli, "scan_all", return_value=[row]),
+            patch.object(cli, "repo_root_for_session", return_value="/repo"),
+            patch.object(cli, "check_commit_survival", return_value="survived"),
+            patch.object(cli, "record_survival_check") as record_mock,
+        ):
+            checked = cli.recheck_evidence_survival()
+        self.assertEqual(checked, 1)
+        record_mock.assert_called_once_with("s1", "7", "survived")
+
+    def test_not_yet_due_before_the_7_day_mark(self) -> None:
+        row = LocalSession(session_id="s1", tool="claude-code", project_path="/repo")
+        with (
+            patch.object(cli, "evidence_snapshots_for_sessions", return_value={"s1": _snapshot("s1", age_days=3)}),
+            patch.object(cli, "scan_all", return_value=[row]),
+            patch.object(cli, "record_survival_check") as record_mock,
+        ):
+            checked = cli.recheck_evidence_survival()
+        self.assertEqual(checked, 0)
+        record_mock.assert_not_called()
+
+    def test_skips_a_bucket_already_checked_but_still_checks_a_newly_due_one(self) -> None:
+        snapshot = _snapshot("s1", age_days=15, survival={"7": {"status": "survived", "checked_at": "x"}})
+        row = LocalSession(session_id="s1", tool="claude-code", project_path="/repo")
+        with (
+            patch.object(cli, "evidence_snapshots_for_sessions", return_value={"s1": snapshot}),
+            patch.object(cli, "scan_all", return_value=[row]),
+            patch.object(cli, "repo_root_for_session", return_value="/repo"),
+            patch.object(cli, "check_commit_survival", return_value="churned"),
+            patch.object(cli, "record_survival_check") as record_mock,
+        ):
+            checked = cli.recheck_evidence_survival()
+        self.assertEqual(checked, 1)
+        record_mock.assert_called_once_with("s1", "14", "churned")
+
+    def test_skips_snapshots_with_no_recorded_commits(self) -> None:
+        row = LocalSession(session_id="s1", tool="claude-code", project_path="/repo")
+        with (
+            patch.object(cli, "evidence_snapshots_for_sessions", return_value={"s1": _snapshot("s1", age_days=8, commit_shas=())}),
+            patch.object(cli, "scan_all", return_value=[row]),
+            patch.object(cli, "record_survival_check") as record_mock,
+        ):
+            checked = cli.recheck_evidence_survival()
+        self.assertEqual(checked, 0)
+        record_mock.assert_not_called()
+
+    def test_records_unknown_when_the_session_log_is_gone(self) -> None:
+        with (
+            patch.object(cli, "evidence_snapshots_for_sessions", return_value={"s1": _snapshot("s1", age_days=8)}),
+            patch.object(cli, "scan_all", return_value=[]),  # session no longer present locally
+            patch.object(cli, "record_survival_check") as record_mock,
+        ):
+            checked = cli.recheck_evidence_survival()
+        self.assertEqual(checked, 1)
+        record_mock.assert_called_once_with("s1", "7", "unknown")
+
+    def test_survived_wins_over_churned_across_multiple_commits(self) -> None:
+        row = LocalSession(session_id="s1", tool="claude-code", project_path="/repo")
+        snapshot = _snapshot("s1", age_days=8, commit_shas=("sha1", "sha2"))
+        with (
+            patch.object(cli, "evidence_snapshots_for_sessions", return_value={"s1": snapshot}),
+            patch.object(cli, "scan_all", return_value=[row]),
+            patch.object(cli, "repo_root_for_session", return_value="/repo"),
+            patch.object(cli, "check_commit_survival", side_effect=["churned", "survived"]),
+            patch.object(cli, "record_survival_check") as record_mock,
+        ):
+            cli.recheck_evidence_survival()
+        record_mock.assert_called_once_with("s1", "7", "survived")
+
+    def test_cap_limits_checks_per_call(self) -> None:
+        rows = [LocalSession(session_id=f"s{i}", tool="claude-code", project_path="/repo") for i in range(5)]
+        snapshots = {f"s{i}": _snapshot(f"s{i}", age_days=8) for i in range(5)}
+        with (
+            patch.object(cli, "evidence_snapshots_for_sessions", return_value=snapshots),
+            patch.object(cli, "scan_all", return_value=rows),
+            patch.object(cli, "repo_root_for_session", return_value="/repo"),
+            patch.object(cli, "check_commit_survival", return_value="survived"),
+            patch.object(cli, "record_survival_check") as record_mock,
+        ):
+            checked = cli.recheck_evidence_survival(cap=2)
+        self.assertEqual(checked, 2)
+        self.assertEqual(record_mock.call_count, 2)
+
+    def test_real_repo_end_to_end_survived_and_churned(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subprocess.run(["git", "init"], cwd=temp_dir, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=temp_dir, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "AIWatcher Test"], cwd=temp_dir, check=True, capture_output=True)
+            (Path(temp_dir) / "app.py").write_text("v1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "app.py"], cwd=temp_dir, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "keep me"], cwd=temp_dir, check=True, capture_output=True)
+            keep_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=temp_dir, check=True, capture_output=True, text=True).stdout.strip()
+            (Path(temp_dir) / "app.py").write_text("v2\n", encoding="utf-8")
+            subprocess.run(["git", "add", "app.py"], cwd=temp_dir, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "revert me"], cwd=temp_dir, check=True, capture_output=True)
+            drop_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=temp_dir, check=True, capture_output=True, text=True).stdout.strip()
+            subprocess.run(["git", "reset", "--hard", keep_sha], cwd=temp_dir, check=True, capture_output=True)
+
+            survived_row = LocalSession(session_id="survived-session", tool="claude-code", project_path=temp_dir, updated_at=now)
+            churned_row = LocalSession(session_id="churned-session", tool="claude-code", project_path=temp_dir, updated_at=now)
+            snapshots = {
+                "survived-session": _snapshot("survived-session", age_days=8, commit_shas=(keep_sha,)),
+                "churned-session": _snapshot("churned-session", age_days=8, commit_shas=(drop_sha,)),
+            }
+            with (
+                patch.object(cli, "evidence_snapshots_for_sessions", return_value=snapshots),
+                patch.object(cli, "scan_all", return_value=[survived_row, churned_row]),
+                patch.object(cli, "record_survival_check") as record_mock,
+            ):
+                checked = cli.recheck_evidence_survival()
+
+        self.assertEqual(checked, 2)
+        record_mock.assert_any_call("survived-session", "7", "survived")
+        record_mock.assert_any_call("churned-session", "7", "churned")
 
 
 class RunwayPressureTests(unittest.TestCase):

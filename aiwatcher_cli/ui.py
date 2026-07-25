@@ -17,6 +17,7 @@ from .correlate import link_recent_interventions_to_sessions
 from .handoff import build_handoff_capsule
 from .local_state import (
     VALID_OUTCOMES,
+    evidence_snapshots_for_sessions,
     get_outcome,
     outcome_counts,
     outcomes_for_sessions,
@@ -127,11 +128,42 @@ def rows_for_window(days: int) -> list[LocalSession]:
     return [row for row in scan_all() if in_window(row, since)]
 
 
+def _survival_for_session(session_id: str) -> dict[str, str] | None:
+    """Flatten a stored evidence_snapshot's survival history to {bucket: status}
+    for build_outcome_evidence(), which only needs the status, not checked_at."""
+    row = evidence_snapshots_for_sessions({session_id}).get(session_id)
+    survival = row.get("survival") if row and isinstance(row.get("survival"), dict) else None
+    if not survival:
+        return None
+    return {
+        bucket: entry.get("status")
+        for bucket, entry in survival.items()
+        if isinstance(entry, dict) and entry.get("status")
+    }
+
+
+def survival_by_session(sessions: list[LocalSession]) -> dict[str, dict[str, str]]:
+    snapshots = evidence_snapshots_for_sessions({row.session_id for row in sessions})
+    result: dict[str, dict[str, str]] = {}
+    for session_id, row in snapshots.items():
+        survival = row.get("survival") if isinstance(row.get("survival"), dict) else None
+        if not survival:
+            continue
+        flattened = {
+            bucket: entry.get("status")
+            for bucket, entry in survival.items()
+            if isinstance(entry, dict) and entry.get("status")
+        }
+        if flattened:
+            result[session_id] = flattened
+    return result
+
+
 def session_json(row: LocalSession) -> dict[str, object]:
     started = row.started_at.isoformat() if row.started_at else None
     updated = row.updated_at.isoformat() if row.updated_at else None
     outcome = get_outcome(row.session_id)
-    evidence = build_outcome_evidence(row)
+    evidence = build_outcome_evidence(row, survival=_survival_for_session(row.session_id))
     return {
         "session_id": row.session_id,
         "tool": row.tool,
@@ -262,7 +294,7 @@ def build_session_detail(session_id: str, days: int = 30) -> dict[str, object]:
     costliest = max(events, key=lambda event: (event.cost_usd, event.tokens_in + event.tokens_out), default=None)
     segments = segment_session_by_prompt(row.source_path)
     turn_prompts = {int(seg["turn"]): str(seg["prompt"])[:240] for seg in segments}
-    evidence = build_outcome_evidence(row)
+    evidence = build_outcome_evidence(row, survival=_survival_for_session(session_id))
     try:
         record_evidence_snapshot(session_id, evidence.to_json())
     except OSError:
@@ -562,6 +594,50 @@ def _build_intervention_receipts(
     return receipts
 
 
+MIN_SURVIVAL_SAMPLES = 5
+
+
+def _cost_per_surviving_change(all_rows: list[LocalSession]) -> dict[str, object]:
+    """S-23: cost of sessions whose commit survived vs. churned, at the earliest checked bucket.
+
+    Deliberately scans the whole local history (all_rows), not just the
+    current days-window: survival needs >=7 days of age by definition, so a
+    short display window would almost always show zero samples even once
+    survival data exists. Honesty-gated the same way baselines are --
+    "available: False" until there's enough history to say anything real.
+    """
+    snapshots = evidence_snapshots_for_sessions()
+    rows_by_id = {row.session_id: row for row in all_rows}
+    survived_costs: list[float] = []
+    churned_costs: list[float] = []
+    for session_id, snapshot in snapshots.items():
+        survival = snapshot.get("survival") if isinstance(snapshot.get("survival"), dict) else {}
+        status = None
+        for bucket in ("7", "14", "30"):
+            entry = survival.get(bucket)
+            if isinstance(entry, dict) and entry.get("status") in {"survived", "churned"}:
+                status = entry["status"]
+                break
+        if status is None:
+            continue
+        row = rows_by_id.get(session_id)
+        if row is None:
+            continue
+        (survived_costs if status == "survived" else churned_costs).append(row.cost_usd)
+
+    sample_count = len(survived_costs) + len(churned_costs)
+    if sample_count < MIN_SURVIVAL_SAMPLES:
+        return {"available": False, "sample_count": sample_count, "required_samples": MIN_SURVIVAL_SAMPLES}
+    return {
+        "available": True,
+        "sample_count": sample_count,
+        "surviving_count": len(survived_costs),
+        "churned_count": len(churned_costs),
+        "cost_per_surviving_change": money(sum(survived_costs) / len(survived_costs)) if survived_costs else "—",
+        "cost_per_churned_change": money(sum(churned_costs) / len(churned_costs)) if churned_costs else "—",
+    }
+
+
 def build_summary(days: int = 7) -> dict[str, object]:
     now = datetime.now().astimezone()
     since = now - timedelta(days=days)
@@ -633,7 +709,8 @@ def build_summary(days: int = 7) -> dict[str, object]:
     window_session_ids = {row.session_id for row in rows}
     window_outcomes = outcomes_for_sessions(window_session_ids)
     outcomes = outcome_counts(window_session_ids)
-    evidence_by_session = evidence_for_sessions(rows[:30])
+    sample_rows = rows[:30]
+    evidence_by_session = evidence_for_sessions(sample_rows, survival_by_session=survival_by_session(sample_rows))
     inferred_useful = sum(
         1
         for session_id, evidence in evidence_by_session.items()
@@ -644,6 +721,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
         for session_id, evidence in evidence_by_session.items()
         if session_id not in window_outcomes and evidence.inferred_outcome == "needs_review"
     )
+    churned = sum(1 for evidence in evidence_by_session.values() if evidence.inferred_outcome == "churned")
     if inferred_useful:
         insights.append({
             "title": "Outcome evidence found",
@@ -654,6 +732,12 @@ def build_summary(days: int = 7) -> dict[str, object]:
             "title": "Work needs outcome review",
             "body": f"{needs_review} unmarked session{'s' if needs_review != 1 else ''} changed files without a confirmed useful outcome.",
         })
+    if churned:
+        insights.append({
+            "title": "Work that didn't stick",
+            "body": f"{churned} session{'s' if churned != 1 else ''} looked useful at the time, but the commit was later reverted or rewritten.",
+        })
+    survival_summary = _cost_per_surviving_change(all_rows)
     interventions = recent_interventions(limit=200, days=days)
     receipt_events = scan_all_events() if interventions else []
     receipts = _build_intervention_receipts(interventions, all_rows, outcomes_for_sessions(), receipt_events)
@@ -691,6 +775,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
             "preflight_decisions": len(interventions),
             "cost_per_useful_change": money(cost_per_useful) if cost_per_useful is not None else "—",
         },
+        "survival": survival_summary,
         "projects": projects[:10],
         "tools": tools,
         "models": models[:10],
@@ -1066,7 +1151,7 @@ HTML = r"""<!doctype html>
       </div>
     </section>
     <section class="grid kpis">
-      <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub">Value per useful change: <span id="costPerUseful">-</span></div></div>
+      <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub">Value per useful change: <span id="costPerUseful">-</span></div><div class="sub" id="costPerSurvivingRow" hidden>Cost per surviving change: <span id="costPerSurviving">-</span></div></div>
       <div class="card metric-card metric-amber"><div class="label">Preflight decisions</div><div class="value" id="preflightDecisions">-</div><div class="sub"><span id="windowLabel">-</span></div></div>
       <div class="card metric-card metric-blue"><div class="label">Sessions observed</div><div class="value" id="sessions">-</div><div class="sub">This machine only</div></div>
       <div class="card metric-card metric-red"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div></div>
@@ -1379,9 +1464,21 @@ function outcomePill(outcome) {
 }
 function outcomeEvidencePill(session) {
   if (!session || session.outcome) return '';
+  if (session.inferred_outcome === 'churned') return '<span class="pill outcome-pill rework">Evidence: reverted/rewritten</span>';
   if (session.inferred_outcome === 'useful') return '<span class="pill outcome-pill useful">Evidence: likely useful</span>';
   if (session.inferred_outcome === 'needs_review') return '<span class="pill outcome-pill rework">Evidence: review changes</span>';
   return '';
+}
+function survivalLabel(survival) {
+  // evidence.survival is {bucket: "survived"|"churned"|"unknown"} -- already
+  // flattened server-side (see ui.py's _survival_for_session), not the raw
+  // {status, checked_at} shape local_state.py stores it in.
+  if (!survival) return null;
+  for (const bucket of ['7', '14', '30']) {
+    const status = survival[bucket];
+    if (status) return `${status} (${bucket}-day check)`;
+  }
+  return null;
 }
 function renderEvidence(evidence) {
   if (!evidence) return '';
@@ -1389,6 +1486,7 @@ function renderEvidence(evidence) {
   const files = evidence.changed_files || [];
   const tests = evidence.tests || [];
   const reasons = evidence.reasons || [];
+  const survival = survivalLabel(evidence.survival);
   return `<section class="detail-section"><h3>Outcome evidence</h3>
     <p>Local git/test signals. AIWatcher stores metadata, not source diffs.</p>
     <div class="mini-grid">
@@ -1397,6 +1495,8 @@ function renderEvidence(evidence) {
       <div class="mini"><span class="label">Nearby commits</span><strong>${esc(commits.length)}</strong></div>
       <div class="mini"><span class="label">Changed files</span><strong>${esc(files.length)}</strong></div>
     </div>
+    ${survival ? `<div class="pill-row"><span class="pill">Survival: ${esc(survival)}</span></div>` : ''}
+    ${evidence.same_file_reprompt ? '<div class="pill-row"><span class="pill rework">A later session touched the same file(s) again soon after</span></div>' : ''}
     ${tests.length ? `<div class="pill-row"><span class="pill">${esc(tests.length)} recent test artifact${tests.length === 1 ? '' : 's'}</span></div>` : ''}
     ${reasons.length ? `<ul class="insight-list">${reasons.map(reason => `<li>${esc(reason)}</li>`).join('')}</ul>` : ''}
     ${commits.length ? `<div class="pill-row">${commits.slice(0, 4).map(commit => `<span class="pill">commit ${esc(commit.sha)}</span>`).join('')}</div>` : ''}
@@ -1423,20 +1523,24 @@ function sessionVerdict(s) {
   const tokens = Number(s.tokens || 0);
   const cost = Number(s.api_value_usd || 0);
   const toolCalls = Number(s.tool_calls || 0);
+  const churned = !s.outcome && evidence.inferred_outcome === 'churned';
   const likelyUseful = !s.outcome && evidence.inferred_outcome === 'useful';
   const highCost = cost >= 5 || tokens >= 500000 || toolCalls >= 250;
   let title = 'Review this AI work';
   if (s.outcome) title = `Marked ${s.outcome}`;
+  else if (churned) title = "Looked useful, but didn't stick";
   else if (likelyUseful && highCost) title = 'Likely useful, but expensive';
   else if (likelyUseful) title = 'Likely useful, needs confirmation';
   else if (highCost) title = 'High-cost session, needs review';
   const bullets = [];
+  if (churned) bullets.push('The commit this session produced was later reverted or rewritten -- it did not survive on the current branch.');
   if (likelyUseful) bullets.push('A nearby commit or test signal suggests this produced useful work.');
+  if (evidence.same_file_reprompt) bullets.push('A later session touched the same file(s) again soon after -- this attempt may not have fully resolved the task.');
   if (cost >= 5) bullets.push(`${s.api_value} API-equivalent value is high for one local session.`);
   if (tokens >= 500000) bullets.push(`${s.tokens_label} tokens indicates heavy context pressure.`);
   if (toolCalls >= 250) bullets.push(`${s.tool_calls} tool calls suggests broad search, retries, or loop-like work.`);
   if (!bullets.length) bullets.push('No urgent cost or outcome signal was detected.');
-  return { title, tone: likelyUseful ? 'useful' : highCost ? 'high' : '', bullets };
+  return { title, tone: churned ? 'high' : likelyUseful ? 'useful' : highCost ? 'high' : '', bullets };
 }
 function renderVerdict(s) {
   const verdict = sessionVerdict(s);
@@ -1727,6 +1831,15 @@ async function load(resetDetail = true) {
   document.getElementById('sessions').textContent = totals.sessions;
   document.getElementById('usefulOutcomes').textContent = totals.useful_outcomes;
   document.getElementById('costPerUseful').textContent = `${totals.cost_per_useful_change}${totals.inferred_useful_outcomes ? ` · ${totals.inferred_useful_outcomes} to confirm` : ''}`;
+  const survival = data.survival || {};
+  const survivalRow = document.getElementById('costPerSurvivingRow');
+  if (survival.available) {
+    survivalRow.hidden = false;
+    document.getElementById('costPerSurviving').textContent =
+      `${survival.cost_per_surviving_change} vs ${survival.cost_per_churned_change} churned (${survival.surviving_count} survived / ${survival.churned_count} churned)`;
+  } else {
+    survivalRow.hidden = true;
+  }
   document.getElementById('preflightDecisions').textContent = totals.preflight_decisions;
   receiptCache = data.intervention_receipts || [];
   document.getElementById('latestIntervention').innerHTML = renderLatestReceipt(receiptCache[0]);

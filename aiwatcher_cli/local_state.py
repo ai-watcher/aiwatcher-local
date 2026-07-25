@@ -391,35 +391,47 @@ def record_evidence_snapshot(session_id: str, evidence: dict[str, Any]) -> dict[
 
     This keeps enough local history to support later survival/outcome analysis
     without storing prompt text, source diffs, commit subjects, or file content.
+
+    `recorded_at` and `survival` (S-22's day-bucket churn history) are
+    preserved across re-snapshots of the same session -- re-opening a session
+    in the dashboard days later must not reset the clock survival tracking
+    measures from, or erase churn checks already recorded.
     """
     commits = evidence.get("commits") if isinstance(evidence.get("commits"), list) else []
     changed_files = evidence.get("changed_files") if isinstance(evidence.get("changed_files"), list) else []
     tests = evidence.get("tests") if isinstance(evidence.get("tests"), list) else []
     repo_root = evidence.get("repo_root") if isinstance(evidence.get("repo_root"), str) else None
-    record = {
-        "session_id": session_id,
-        "recorded_at": datetime.now(timezone.utc).isoformat(),
-        "repo_root_hash": hash_prompt(repo_root)[:16] if repo_root else None,
-        "commit_shas": [
-            str(item.get("sha"))[:12]
-            for item in commits
-            if isinstance(item, dict) and item.get("sha")
-        ][:20],
-        "changed_file_hashes": [
-            hash_prompt(str(path))[:16]
-            for path in changed_files
-            if isinstance(path, str)
-        ][:100],
-        "test_artifact_hashes": [
-            hash_prompt(str(item.get("artifact")))[:16]
-            for item in tests
-            if isinstance(item, dict) and item.get("artifact")
-        ][:30],
-        "inferred_outcome": evidence.get("inferred_outcome") if isinstance(evidence.get("inferred_outcome"), str) else None,
-        "confidence": evidence.get("confidence") if isinstance(evidence.get("confidence"), str) else None,
-    }
     with _locked_state():
         data = _load()
+        existing = next(
+            (row for row in data["evidence_snapshots"] if row.get("session_id") == session_id),
+            None,
+        )
+        existing_survival = existing.get("survival") if existing and isinstance(existing.get("survival"), dict) else {}
+        record = {
+            "session_id": session_id,
+            "recorded_at": (existing.get("recorded_at") if existing and existing.get("recorded_at") else None)
+                or datetime.now(timezone.utc).isoformat(),
+            "repo_root_hash": hash_prompt(repo_root)[:16] if repo_root else None,
+            "commit_shas": [
+                str(item.get("sha"))[:12]
+                for item in commits
+                if isinstance(item, dict) and item.get("sha")
+            ][:20],
+            "changed_file_hashes": [
+                hash_prompt(str(path))[:16]
+                for path in changed_files
+                if isinstance(path, str)
+            ][:100],
+            "test_artifact_hashes": [
+                hash_prompt(str(item.get("artifact")))[:16]
+                for item in tests
+                if isinstance(item, dict) and item.get("artifact")
+            ][:30],
+            "inferred_outcome": evidence.get("inferred_outcome") if isinstance(evidence.get("inferred_outcome"), str) else None,
+            "confidence": evidence.get("confidence") if isinstance(evidence.get("confidence"), str) else None,
+            "survival": existing_survival,
+        }
         data["evidence_snapshots"] = [
             row for row in data["evidence_snapshots"]
             if row.get("session_id") != session_id
@@ -428,6 +440,35 @@ def record_evidence_snapshot(session_id: str, evidence: dict[str, Any]) -> dict[
         data["evidence_snapshots"] = data["evidence_snapshots"][-500:]
         _save(data)
     return record
+
+
+VALID_SURVIVAL_BUCKETS = ("7", "14", "30")
+VALID_SURVIVAL_STATUSES = {"survived", "churned", "unknown"}
+
+
+def record_survival_check(session_id: str, day_bucket: str, status: str) -> bool:
+    """Record a churn/survival check result for a snapshot's day-bucket (S-22).
+
+    Returns False if no snapshot exists yet for this session -- there's
+    nothing to attach the check to (the session was never viewed/marked).
+    """
+    if day_bucket not in VALID_SURVIVAL_BUCKETS or status not in VALID_SURVIVAL_STATUSES:
+        raise ValueError(f"Invalid survival check: bucket={day_bucket!r} status={status!r}")
+    with _locked_state():
+        data = _load()
+        for row in data["evidence_snapshots"]:
+            if row.get("session_id") == session_id:
+                survival = row.get("survival")
+                if not isinstance(survival, dict):
+                    survival = {}
+                survival[day_bucket] = {
+                    "status": status,
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                }
+                row["survival"] = survival
+                _save(data)
+                return True
+    return False
 
 
 def evidence_snapshots_for_sessions(session_ids: set[str] | None = None) -> dict[str, dict[str, Any]]:

@@ -8,10 +8,16 @@ from __future__ import annotations
 
 
 MODEL_PRICING: dict[str, dict[str, float | bool]] = {
+    # Sonnet 5 has a $2.00/$10.00 intro rate through 2026-08-31; using the
+    # standard post-intro rate here so this table doesn't silently under-price
+    # once the intro window closes -- nothing in this file is date-aware.
+    "claude-sonnet-5": {"in": 3.00, "out": 15.00, "subscription": False},
     "claude-sonnet-4-20250514": {"in": 3.00, "out": 15.00, "subscription": False},
     "claude-sonnet-4-5-20250514": {"in": 3.00, "out": 15.00, "subscription": False},
     "claude-sonnet-4-6": {"in": 3.00, "out": 15.00, "subscription": False},
     "claude-sonnet-4-5": {"in": 3.00, "out": 15.00, "subscription": False},
+    "claude-fable-5": {"in": 10.00, "out": 50.00, "subscription": False},
+    "claude-opus-4-8": {"in": 5.00, "out": 25.00, "subscription": False},
     "claude-opus-4-20250514": {"in": 5.00, "out": 25.00, "subscription": False},
     "claude-opus-4-7": {"in": 5.00, "out": 25.00, "subscription": False},
     "claude-opus-4-6": {"in": 5.00, "out": 25.00, "subscription": False},
