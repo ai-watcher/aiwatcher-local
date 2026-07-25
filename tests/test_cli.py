@@ -10,13 +10,14 @@ import socket
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from aiwatcher_cli import cli
+from aiwatcher_cli import cli, local_state
 from aiwatcher_cli.local_state import recent_decisions
 from aiwatcher_cli.scanner import LocalSession
 
@@ -28,8 +29,15 @@ def session(
     age_days: int = 0,
     project: str = "/repo",
     notes: list[str] | None = None,
+    now: datetime | None = None,
 ) -> LocalSession:
-    stamp = datetime.now(timezone.utc) - timedelta(days=age_days)
+    # `now` lets callers pin every session in a batch to one shared instant.
+    # Without it, back-to-back session(...) calls each take their own
+    # datetime.now(), and the microsecond drift between the first and last
+    # call can push a span like "exactly 18 days" to "17 days, 23:59:59.998"
+    # -- a flaky day-boundary flip in any test asserting an exact
+    # history_span_days from timedelta.days truncation.
+    stamp = (now or datetime.now(timezone.utc)) - timedelta(days=age_days)
     return LocalSession(
         session_id=f"session-{index}",
         tool=tool,
@@ -46,9 +54,206 @@ def session(
     )
 
 
+def _baselines_from_sessions(rows: list[LocalSession]) -> dict[str, object]:
+    # estimate_prompt_savings() now reads cached baselines (get_baselines())
+    # instead of scanning history live -- see P0-3. Route the test's synthetic
+    # session rows through the real _compute_baselines() aggregation so these
+    # tests still exercise the actual p75/honesty-gate math, not a hand-rolled
+    # stand-in for it.
+    with patch.object(cli, "sessions_since", return_value=rows):
+        return cli._compute_baselines()
+
+
+class PromptSavingsBaselineTests(unittest.TestCase):
+    """P0-3: prompt gate must read cached baselines, never rescan history live."""
+
+    def test_warm_cache_does_not_call_scanner(self) -> None:
+        fresh = {
+            "computed_at": datetime.now(timezone.utc).isoformat(),
+            "history_days": 30,
+            "per_tool": {"claude-code": {
+                "p75_tokens": 100_000, "p75_calls": 50, "p75_tool_calls": 20,
+                "p75_api_value": 1.0, "session_count": 12, "history_span_days": 20,
+                "excluded_cumulative": 0,
+            }},
+        }
+        with (
+            patch.object(cli, "get_baselines", return_value=fresh),
+            patch.object(cli, "sessions_since") as sessions_since,
+            patch.object(cli, "save_baselines") as save,
+        ):
+            result = cli.get_or_refresh_baselines()
+
+        sessions_since.assert_not_called()
+        save.assert_not_called()
+        self.assertEqual(result, fresh)
+
+    def test_stale_cache_is_recomputed_and_saved(self) -> None:
+        stale = {
+            "computed_at": (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat(),
+            "history_days": 30,
+            "per_tool": {},
+        }
+        with (
+            patch.object(cli, "get_baselines", return_value=stale),
+            patch.object(cli, "sessions_since", return_value=[]) as sessions_since,
+            patch.object(cli, "save_baselines") as save,
+        ):
+            result = cli.get_or_refresh_baselines(max_age_hours=24)
+
+        sessions_since.assert_called()
+        save.assert_called_once()
+        self.assertNotEqual(result["computed_at"], stale["computed_at"])
+
+    def test_cold_hook_path_never_scans_history(self) -> None:
+        # No cache at all (e.g. a brand new install) must still return
+        # quickly with an insufficient-confidence result -- never fall back
+        # to scanning, which is exactly the hot-path cost this fix removes.
+        with (
+            patch.object(cli, "get_baselines", return_value={}),
+            patch.object(cli, "sessions_since") as sessions_since,
+        ):
+            result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
+
+        sessions_since.assert_not_called()
+        self.assertFalse(result["estimated_impact"]["available"])
+
+    def test_unreadable_baseline_cache_does_not_break_preflight(self) -> None:
+        # A hook/preflight path must fail soft if the local state file or
+        # baseline lock is unavailable. It should never crash the user's AI
+        # tool or fall back to a live history scan.
+        with (
+            patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")),
+            patch.object(cli, "sessions_since") as sessions_since,
+        ):
+            result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
+
+        sessions_since.assert_not_called()
+        impact = result["estimated_impact"]
+        self.assertFalse(impact["available"])
+        self.assertEqual(impact["basis"], "no comparable local history")
+
+    def test_today_continues_when_baseline_cache_is_unreadable(self) -> None:
+        with (
+            patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")),
+            patch.object(cli, "scan_all", return_value=[]),
+            patch.object(cli, "link_recent_interventions_to_sessions"),
+            patch.object(cli, "_compute_baselines", return_value={
+                "computed_at": datetime.now(timezone.utc).isoformat(),
+                "history_days": 30,
+                "per_tool": {},
+            }),
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            result = cli.command_today(SimpleNamespace())
+
+        self.assertEqual(result, 0)
+
+    def test_report_continues_when_baseline_cache_is_unreadable(self) -> None:
+        with (
+            patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")),
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "_compute_baselines", return_value={
+                "computed_at": datetime.now(timezone.utc).isoformat(),
+                "history_days": 30,
+                "per_tool": {},
+            }),
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            result = cli.command_report(SimpleNamespace(days=7))
+
+        self.assertEqual(result, 0)
+
+    def test_ui_startup_continues_when_baseline_cache_is_unreadable(self) -> None:
+        with (
+            patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")),
+            patch.object(cli, "_compute_baselines", return_value={
+                "computed_at": datetime.now(timezone.utc).isoformat(),
+                "history_days": 30,
+                "per_tool": {},
+            }),
+            patch("aiwatcher_cli.ui.serve") as serve,
+        ):
+            result = cli.command_ui(SimpleNamespace(
+                host="127.0.0.1",
+                port=8765,
+                no_port_fallback=True,
+                port_attempts=1,
+                restart=False,
+            ))
+
+        self.assertEqual(result, 0)
+        serve.assert_called_once()
+
+    def test_today_refreshes_a_missing_cache(self) -> None:
+        rows = [session(index, age_days=index * 2) for index in range(10)]
+        with (
+            patch.object(cli, "scan_all", return_value=[]),
+            patch.object(cli, "link_recent_interventions_to_sessions"),
+            patch.object(cli, "get_baselines", return_value={}),
+            patch.object(cli, "sessions_since", return_value=rows),
+            patch.object(cli, "save_baselines") as save,
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            cli.command_today(SimpleNamespace())
+
+        save.assert_called_once()
+        saved = save.call_args.args[0]
+        self.assertEqual(saved["per_tool"]["claude-code"]["session_count"], 10)
+
+    def test_fixed_fixture_matches_locked_estimate(self) -> None:
+        # Regression lock: a known, fixed set of sessions must always produce
+        # this exact estimate. Guards against the cache-based rewrite quietly
+        # drifting from the pre-P0-3 live-scan math. All rows share one `now`
+        # so history_span_days is an exact 18-day span, not sensitive to
+        # inter-call timing drift (see session()'s `now` param docstring).
+        now = datetime.now(timezone.utc)
+        rows = [session(index, age_days=index * 2, now=now) for index in range(10)]
+        baselines = _baselines_from_sessions(rows)
+        self.assertEqual(baselines["per_tool"]["claude-code"], {
+            "p75_tokens": 15014.0,
+            "p75_calls": 20.0,
+            "p75_tool_calls": 10.0,
+            "p75_api_value": 0.25,
+            "session_count": 10,
+            "history_span_days": 19,
+            "excluded_cumulative": 0,
+        })
+        with patch.object(cli, "get_baselines", return_value=baselines):
+            impact = cli.estimate_prompt_savings(
+                "Refactor the entire codebase", risk_score=3, tool="claude", cwd="/repo"
+            )
+        self.assertEqual(impact, {
+            "available": True,
+            "confidence": "medium",
+            "basis": "10 local claude sessions spanning 19 days",
+            "sample_count": 10,
+            "history_span_days": 19,
+            "original": {
+                "tokens": [25139, 52212],
+                "model_calls": [33, 69],
+                "tool_calls": [16, 34],
+                "api_value_usd": [0.4186, 0.8694],
+            },
+            "safer": {
+                "tokens": [11312, 32893],
+                "model_calls": [14, 43],
+                "tool_calls": [7, 21],
+                "api_value_usd": [0.1884, 0.5477],
+            },
+            "savings": {
+                "tokens": [13827, 19319],
+                "model_calls": [19, 26],
+                "tool_calls": [9, 13],
+                "api_value_usd": [0.2302, 0.3217],
+            },
+        })
+
+
 class PromptPreflightTests(unittest.TestCase):
     def test_sparse_history_does_not_show_quantified_savings(self) -> None:
-        with patch.object(cli, "sessions_since", return_value=[session(1), session(2, age_days=2)]):
+        baselines = _baselines_from_sessions([session(1), session(2, age_days=2)])
+        with patch.object(cli, "get_baselines", return_value=baselines):
             result = cli.analyze_prompt(
                 "Refactor the entire codebase and delete old auth secrets",
                 tool="claude",
@@ -63,7 +268,8 @@ class PromptPreflightTests(unittest.TestCase):
 
     def test_quantified_ranges_require_enough_history_over_time(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]
-        with patch.object(cli, "sessions_since", return_value=rows):
+        baselines = _baselines_from_sessions(rows)
+        with patch.object(cli, "get_baselines", return_value=baselines):
             result = cli.analyze_prompt(
                 "Refactor the entire codebase, but inspect first",
                 tool="claude",
@@ -86,7 +292,8 @@ class PromptPreflightTests(unittest.TestCase):
             )
             for index in range(10)
         ]
-        with patch.object(cli, "sessions_since", return_value=rows):
+        baselines = _baselines_from_sessions(rows)
+        with patch.object(cli, "get_baselines", return_value=baselines):
             result = cli.analyze_prompt(
                 "Refactor the entire codebase",
                 tool="codex",
@@ -99,7 +306,8 @@ class PromptPreflightTests(unittest.TestCase):
 
     def test_codex_rollout_measurements_can_support_savings_ranges(self) -> None:
         rows = [session(index, tool="codex-cli", age_days=index * 2) for index in range(10)]
-        with patch.object(cli, "sessions_since", return_value=rows):
+        baselines = _baselines_from_sessions(rows)
+        with patch.object(cli, "get_baselines", return_value=baselines):
             result = cli.analyze_prompt(
                 "Refactor the entire codebase",
                 tool="codex",
@@ -371,7 +579,8 @@ class PromptPreflightTests(unittest.TestCase):
 
     def test_hero_savings_label_shows_compact_dollar_range_when_available(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]
-        with patch.object(cli, "sessions_since", return_value=rows):
+        baselines = _baselines_from_sessions(rows)
+        with patch.object(cli, "get_baselines", return_value=baselines):
             result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
         label = cli._hero_savings_label(result)
         self.assertIsNotNone(label)
@@ -380,7 +589,8 @@ class PromptPreflightTests(unittest.TestCase):
 
     def test_gate_html_shows_guardrail_chips_and_savings_badge_above_the_fold(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]
-        with patch.object(cli, "sessions_since", return_value=rows):
+        baselines = _baselines_from_sessions(rows)
+        with patch.object(cli, "get_baselines", return_value=baselines):
             result = cli.analyze_prompt(
                 "refactor everything and delete the production credential",
                 tool="claude",
@@ -404,7 +614,8 @@ class PromptPreflightTests(unittest.TestCase):
 
     def test_hero_pressure_label_shows_tokens_and_tool_calls_when_available(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]
-        with patch.object(cli, "sessions_since", return_value=rows):
+        baselines = _baselines_from_sessions(rows)
+        with patch.object(cli, "get_baselines", return_value=baselines):
             result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
         label = cli._hero_pressure_label(result)
         self.assertIsNotNone(label)
@@ -413,7 +624,8 @@ class PromptPreflightTests(unittest.TestCase):
 
     def test_gate_html_shows_pressure_caption_next_to_savings_badge(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]
-        with patch.object(cli, "sessions_since", return_value=rows):
+        baselines = _baselines_from_sessions(rows)
+        with patch.object(cli, "get_baselines", return_value=baselines):
             result = cli.analyze_prompt(
                 "refactor everything and delete the production credential",
                 tool="claude",
@@ -656,6 +868,212 @@ class PromptPreflightTests(unittest.TestCase):
         run.assert_called_once()
 
 
+class HeadlessPromptGateTests(unittest.TestCase):
+    """P0-5: the prompt gate must not hang waiting for a display that isn't there."""
+
+    GATE_RESULT = {
+        "risk": "high",
+        "score": 8,
+        "tool": "claude",
+        "findings": [],
+        "suggestions": [],
+        "suggested_prompt": "safer scoped brief",
+        "estimated_impact": {},
+    }
+
+    def test_display_available_true_on_windows_regardless_of_env(self) -> None:
+        with (
+            patch.object(cli.os, "name", "nt"),
+            patch.dict(os.environ, {"SSH_TTY": "/dev/ttys001", "DISPLAY": ""}, clear=True),
+        ):
+            self.assertTrue(cli._display_available())
+
+    def test_display_available_false_for_ssh_session_without_display(self) -> None:
+        with (
+            patch.object(cli.os, "name", "posix"),
+            patch.object(cli.sys, "platform", "darwin"),
+            patch.dict(os.environ, {"SSH_TTY": "/dev/ttys001", "DISPLAY": ""}, clear=True),
+        ):
+            self.assertFalse(cli._display_available())
+
+    def test_display_available_false_for_linux_without_display_even_without_ssh(self) -> None:
+        with (
+            patch.object(cli.os, "name", "posix"),
+            patch.object(cli.sys, "platform", "linux"),
+            patch.dict(os.environ, {"DISPLAY": ""}, clear=True),
+        ):
+            self.assertFalse(cli._display_available())
+
+    def test_display_available_true_on_macos_desktop_without_display_var(self) -> None:
+        # macOS's native GUI doesn't use $DISPLAY at all -- only Linux and an
+        # active SSH session should treat a missing DISPLAY as "no display".
+        with (
+            patch.object(cli.os, "name", "posix"),
+            patch.object(cli.sys, "platform", "darwin"),
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            self.assertTrue(cli._display_available())
+
+    def test_run_prompt_gate_still_uses_browser_when_display_available(self) -> None:
+        with (
+            patch.object(cli, "_display_available", return_value=True),
+            patch.object(cli, "webbrowser") as webbrowser_mock,
+        ):
+            webbrowser_mock.open.return_value = True
+            gate = cli.run_prompt_gate(
+                tool="claude", cwd="/repo", prompt="original prompt",
+                result=self.GATE_RESULT, timeout_seconds=1,
+            )
+        webbrowser_mock.open.assert_called_once()
+        self.assertIsNone(gate)  # nobody answered within the short timeout
+
+    def test_run_prompt_gate_shows_terminal_gate_when_no_display_and_tty(self) -> None:
+        fake_stdin = Mock()
+        fake_stdin.isatty.return_value = True
+        with (
+            patch.object(cli, "_display_available", return_value=False),
+            patch.object(cli.sys, "stdin", fake_stdin),
+            patch("builtins.input", return_value="b"),
+            patch("sys.stderr", new_callable=io.StringIO),
+        ):
+            gate = cli.run_prompt_gate(
+                tool="claude", cwd="/repo", prompt="original prompt", result=self.GATE_RESULT,
+            )
+        self.assertEqual(gate, {"decision": "use_brief", "prompt": "safer scoped brief"})
+
+    def test_terminal_gate_all_four_options_map_to_browser_decision_names(self) -> None:
+        fake_stdin = Mock()
+        fake_stdin.isatty.return_value = True
+        cases = [
+            ("o", {"decision": "run_original", "prompt": "original prompt"}),
+            ("c", {"decision": "cancel", "prompt": ""}),
+        ]
+        for choice, expected in cases:
+            with (
+                patch.object(cli, "_display_available", return_value=False),
+                patch.object(cli.sys, "stdin", fake_stdin),
+                patch("builtins.input", return_value=choice),
+                patch("sys.stderr", new_callable=io.StringIO),
+            ):
+                gate = cli.run_prompt_gate(
+                    tool="claude", cwd="/repo", prompt="original prompt", result=self.GATE_RESULT,
+                )
+            self.assertEqual(gate, expected)
+
+    def test_run_prompt_gate_auto_blocks_instantly_when_headless_without_tty(self) -> None:
+        fake_stdin = Mock()
+        fake_stdin.isatty.return_value = False
+        with (
+            patch.object(cli, "_display_available", return_value=False),
+            patch.object(cli.sys, "stdin", fake_stdin),
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            started = time.monotonic()
+            gate = cli.run_prompt_gate(
+                tool="claude", cwd="/repo", prompt="original prompt", result=self.GATE_RESULT,
+                timeout_seconds=180,
+            )
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 1.0)
+        self.assertEqual(gate, {"decision": "auto_block_headless", "prompt": ""})
+
+    def test_run_prompt_gate_auto_briefs_instantly_when_configured(self) -> None:
+        fake_stdin = Mock()
+        fake_stdin.isatty.return_value = False
+        with (
+            patch.object(cli, "_display_available", return_value=False),
+            patch.object(cli.sys, "stdin", fake_stdin),
+            patch.dict(os.environ, {"AIWATCHER_GATE_DEFAULT": "brief"}, clear=True),
+        ):
+            started = time.monotonic()
+            gate = cli.run_prompt_gate(
+                tool="claude", cwd="/repo", prompt="original prompt", result=self.GATE_RESULT,
+                timeout_seconds=180,
+            )
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 1.0)
+        self.assertEqual(gate, {"decision": "auto_brief_headless", "prompt": "safer scoped brief"})
+
+    def test_run_prompt_gate_falls_back_when_webbrowser_open_returns_false(self) -> None:
+        # A display can look available yet webbrowser.open() still can't
+        # launch anything (no known browser controller) -- must not wait out
+        # the full timeout for a decision that will never come.
+        fake_stdin = Mock()
+        fake_stdin.isatty.return_value = False
+        with (
+            patch.object(cli, "_display_available", return_value=True),
+            patch.object(cli, "webbrowser") as webbrowser_mock,
+            patch.object(cli.sys, "stdin", fake_stdin),
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            webbrowser_mock.open.return_value = False
+            started = time.monotonic()
+            gate = cli.run_prompt_gate(
+                tool="claude", cwd="/repo", prompt="original prompt", result=self.GATE_RESULT,
+                timeout_seconds=180,
+            )
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 1.0)
+        self.assertEqual(gate, {"decision": "auto_block_headless", "prompt": ""})
+
+    def test_claude_hook_records_auto_block_headless_decision(self) -> None:
+        payload = json.dumps({"prompt": "Refactor the entire codebase and delete old auth secrets", "cwd": "/repo"})
+        args = SimpleNamespace(text=None, gate=True)
+        with (
+            patch.object(cli, "_read_stdin_text", return_value=payload),
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "run_prompt_gate", return_value={"decision": "auto_block_headless", "prompt": ""}),
+            patch.object(cli, "record_intervention") as record,
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_claude_hook(args)
+
+        self.assertEqual(result, 0)
+        output = json.loads(stdout.getvalue())
+        self.assertEqual(output["decision"], "block")
+        self.assertEqual(record.call_args.kwargs["decision"], "auto_block_headless")
+
+    def test_claude_hook_records_auto_brief_headless_decision(self) -> None:
+        payload = json.dumps({"prompt": "Refactor the entire codebase and delete old auth secrets", "cwd": "/repo"})
+        args = SimpleNamespace(text=None, gate=True)
+        with (
+            patch.object(cli, "_read_stdin_text", return_value=payload),
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(
+                cli, "run_prompt_gate",
+                return_value={"decision": "auto_brief_headless", "prompt": "Edited safe brief"},
+            ),
+            patch.object(cli, "record_intervention") as record,
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_claude_hook(args)
+
+        self.assertEqual(result, 0)
+        output = json.loads(stdout.getvalue())
+        self.assertIn("Edited safe brief", output["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(record.call_args.kwargs["decision"], "auto_brief_headless")
+
+    def test_cursor_hook_records_auto_block_headless_decision(self) -> None:
+        payload = json.dumps({"prompt": "Refactor the entire codebase and delete old auth secrets", "cwd": "/repo"})
+        args = SimpleNamespace(text=None, gate=True)
+        with (
+            patch.object(cli, "_read_stdin_text", return_value=payload),
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "run_prompt_gate", return_value={"decision": "auto_block_headless", "prompt": ""}),
+            patch.object(cli, "record_intervention") as record,
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_cursor_hook(args)
+
+        self.assertEqual(result, 0)
+        output = json.loads(stdout.getvalue())
+        self.assertFalse(output["continue"])
+        self.assertEqual(record.call_args.kwargs["decision"], "auto_block_headless")
+
+
 class IntegrationConfigTests(unittest.TestCase):
     def test_remove_claude_hook_preserves_other_hooks(self) -> None:
         settings = {
@@ -752,6 +1170,79 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertIn("execution brief", output["systemMessage"].lower())
         context = output["hookSpecificOutput"]["additionalContext"]
         self.assertIn("Task\nRefactor the entire codebase", context)
+
+    def test_extract_session_meta_reads_top_level_keys(self) -> None:
+        meta = cli._extract_session_meta({
+            "session_id": "sess-abc123",
+            "transcript_path": "/home/dev/.claude/projects/x/sess-abc123.jsonl",
+        })
+        self.assertEqual(meta["session_id"], "sess-abc123")
+        self.assertEqual(meta["transcript_path"], "/home/dev/.claude/projects/x/sess-abc123.jsonl")
+
+    def test_extract_session_meta_falls_back_to_nested_hook_event(self) -> None:
+        meta = cli._extract_session_meta({"hook_event": {"session_id": "sess-nested"}})
+        self.assertEqual(meta["session_id"], "sess-nested")
+        self.assertIsNone(meta["transcript_path"])
+
+    def test_extract_session_meta_ignores_non_string_and_missing_values(self) -> None:
+        meta = cli._extract_session_meta({"session_id": 12345, "cwd": "/repo"})
+        self.assertIsNone(meta["session_id"])
+        self.assertIsNone(meta["transcript_path"])
+
+    def test_claude_hook_stores_session_id_on_intervention(self) -> None:
+        payload = json.dumps({
+            "prompt": "Refactor the entire codebase",
+            "cwd": "/repo",
+            "session_id": "sess-real-id",
+        })
+        args = SimpleNamespace(text=None, gate=False)
+        with (
+            patch.object(cli, "_read_stdin_text", return_value=payload),
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "record_intervention") as record,
+            patch.object(cli, "record_hook_event"),
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            result = cli.command_claude_hook(args)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(record.call_args.kwargs["session_id"], "sess-real-id")
+
+    def test_claude_hook_without_session_id_still_records(self) -> None:
+        payload = json.dumps({"prompt": "Refactor the entire codebase", "cwd": "/repo"})
+        args = SimpleNamespace(text=None, gate=False)
+        with (
+            patch.object(cli, "_read_stdin_text", return_value=payload),
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "record_intervention") as record,
+            patch.object(cli, "record_hook_event") as hook_event,
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            result = cli.command_claude_hook(args)
+
+        self.assertEqual(result, 0)
+        self.assertIsNone(record.call_args.kwargs["session_id"])
+        self.assertIsNone(hook_event.call_args.kwargs["session_id"])
+
+    def test_debug_hook_keys_env_var_logs_keys_not_values(self) -> None:
+        payload = json.dumps({"prompt": "delete the secret file", "session_id": "sess-secret"})
+        args = SimpleNamespace(text=None, gate=False)
+        with (
+            patch.object(cli, "_read_stdin_text", return_value=payload),
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "record_intervention"),
+            patch.object(cli, "record_hook_event"),
+            patch.dict(os.environ, {"AIWATCHER_DEBUG_HOOK_KEYS": "1"}),
+            patch("sys.stdout", new_callable=io.StringIO),
+            patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            cli.command_claude_hook(args)
+
+        logged = stderr.getvalue()
+        self.assertIn("prompt", logged)
+        self.assertIn("session_id", logged)
+        self.assertNotIn("delete the secret file", logged)
+        self.assertNotIn("sess-secret", logged)
 
     def test_codex_hook_medium_risk_skips_gate_even_when_requested(self) -> None:
         """Medium risk must never open the browser gate, even with gate=True —
@@ -1013,6 +1504,34 @@ class IntegrationConfigTests(unittest.TestCase):
         output = stdout.getvalue()
         self.assertIn("prompt found | risk high | score 8", output)
         self.assertIn("brief_edited | risk score 8 -> 2", output)
+
+    def test_hook_status_shows_session_id_when_present(self) -> None:
+        with (
+            patch.object(cli, "recent_hook_events", return_value=[{
+                "created_at": "2026-07-03T12:00:00+00:00",
+                "tool": "claude",
+                "event": "received",
+                "prompt_found": True,
+                "risk": "high",
+                "score": 8,
+                "session_id": "sess-real-id",
+            }]),
+            patch.object(cli, "recent_interventions", return_value=[{
+                "created_at": "2026-07-03T12:00:05+00:00",
+                "tool": "claude",
+                "decision": "brief_edited",
+                "score": 8,
+                "selected_score": 2,
+                "session_id": "sess-real-id",
+            }]),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_hook_status(SimpleNamespace())
+
+        self.assertEqual(result, 0)
+        output = stdout.getvalue()
+        self.assertIn("| session sess-real-id", output)
+        self.assertEqual(output.count("sess-real-id"), 2)
 
 
 if __name__ == "__main__":

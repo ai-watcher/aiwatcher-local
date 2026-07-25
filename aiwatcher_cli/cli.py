@@ -28,6 +28,7 @@ from typing import Callable, Iterable
 from .correlate import link_recent_interventions_to_sessions
 from .local_state import (
     VALID_OUTCOMES,
+    get_baselines,
     get_outcome,
     link_intervention_session,
     recent_hook_events,
@@ -37,6 +38,7 @@ from .local_state import (
     record_intervention,
     record_hook_event,
     record_outcome,
+    save_baselines,
     state_path,
 )
 from .handoff import TARGET_LABELS, build_handoff_capsule, render_handoff_capsule
@@ -450,45 +452,119 @@ def _quantile(values: list[float], q: float) -> float:
     return ordered[index]
 
 
-def estimate_prompt_savings(prompt: str, *, risk_score: int, tool: str, cwd: str | None = None) -> dict[str, object]:
-    sessions = sessions_since(30)
+BASELINE_HISTORY_DAYS = 30
+BASELINE_TOOLS = ("claude-code", "codex-cli")
+
+
+def _normalize_tool_for_baseline(tool: str) -> str | None:
     if tool in {"claude", "claude-code"}:
-        relevant = [row for row in sessions if row.tool == "claude-code"]
-    elif tool in {"codex", "codex-cli"}:
-        relevant = [row for row in sessions if row.tool == "codex-cli"]
-    else:
-        relevant = sessions
-
-    if cwd:
-        project_rows = [row for row in relevant if row.project_path and cwd.startswith(row.project_path)]
-        if project_rows:
-            relevant = project_rows
-
-    excluded_cumulative = 0
+        return "claude-code"
     if tool in {"codex", "codex-cli"}:
-        excluded_cumulative = sum(1 for row in relevant if has_cumulative_totals(row))
-        relevant = [row for row in relevant if not has_cumulative_totals(row)]
+        return "codex-cli"
+    return None
 
-    dated_rows = [row for row in relevant if session_sort_key(row) != MIN_DT]
-    history_span_days = 0
-    if dated_rows:
-        oldest = min(session_sort_key(row) for row in dated_rows)
-        newest = max(session_sort_key(row) for row in dated_rows)
-        history_span_days = max(1, (newest - oldest).days + 1)
+
+def _compute_baselines() -> dict[str, object]:
+    """Scan local session history and aggregate per-tool p75 stats.
+
+    This is the expensive full-history scan estimate_prompt_savings() used
+    to run on every hook invocation. It must only ever be called off the
+    hot path (see get_or_refresh_baselines()) -- never from a hook.
+    """
+    sessions = sessions_since(BASELINE_HISTORY_DAYS)
+    per_tool: dict[str, object] = {}
+    for tool_name in BASELINE_TOOLS:
+        relevant = [row for row in sessions if row.tool == tool_name]
+        excluded_cumulative = 0
+        if tool_name == "codex-cli":
+            excluded_cumulative = sum(1 for row in relevant if has_cumulative_totals(row))
+            relevant = [row for row in relevant if not has_cumulative_totals(row)]
+
+        dated_rows = [row for row in relevant if session_sort_key(row) != MIN_DT]
+        history_span_days = 0
+        if dated_rows:
+            oldest = min(session_sort_key(row) for row in dated_rows)
+            newest = max(session_sort_key(row) for row in dated_rows)
+            history_span_days = max(1, (newest - oldest).days + 1)
+
+        token_values = [float(row.tokens_in + row.tokens_out) for row in relevant if row.tokens_in + row.tokens_out > 0]
+        call_values = [float(row.agent_calls) for row in relevant if row.agent_calls > 0]
+        tool_values = [float(row.tool_calls) for row in relevant if row.tool_calls > 0]
+        cost_values = [float(row.cost_usd) for row in relevant if row.cost_usd > 0]
+        per_tool[tool_name] = {
+            "p75_tokens": _quantile(token_values, 0.75),
+            "p75_calls": _quantile(call_values, 0.75),
+            "p75_tool_calls": _quantile(tool_values, 0.75),
+            "p75_api_value": _quantile(cost_values, 0.75),
+            "session_count": len(relevant),
+            "history_span_days": history_span_days,
+            "excluded_cumulative": excluded_cumulative,
+        }
+    return {
+        "computed_at": datetime.now(timezone.utc).isoformat(),
+        "history_days": BASELINE_HISTORY_DAYS,
+        "per_tool": per_tool,
+    }
+
+
+def get_or_refresh_baselines(max_age_hours: int = 24) -> dict[str, object]:
+    """Return cached prompt-savings baselines, recomputing if missing/stale.
+
+    Callers on the hook hot path must use local_state.get_baselines()
+    directly instead -- that never scans, it only reads whatever is
+    already cached. This refreshing version belongs only in places that
+    aren't latency-sensitive: `today`, `report`, and `ui` startup.
+    """
+    cached = get_baselines()
+    computed_at = cached.get("computed_at") if isinstance(cached, dict) else None
+    stale = True
+    if computed_at:
+        try:
+            age = datetime.now(timezone.utc) - datetime.fromisoformat(str(computed_at))
+            stale = age > timedelta(hours=max_age_hours)
+        except ValueError:
+            stale = True
+    if cached and not stale:
+        return cached
+    fresh = _compute_baselines()
+    try:
+        save_baselines(fresh)
+    except OSError:
+        pass
+    return fresh
+
+
+def estimate_prompt_savings(prompt: str, *, risk_score: int, tool: str, cwd: str | None = None) -> dict[str, object]:
+    # cwd is accepted for call-site compatibility but intentionally unused:
+    # baselines are cached per-tool only (see get_or_refresh_baselines), not
+    # per-project, so a hook invocation can read the cache without ever
+    # touching disk. A project-scoped estimate would need a per-project
+    # cache dimension, which is more staleness/complexity than this
+    # hot-path fix is worth -- see the P0-3 tradeoff discussion.
+    del cwd
+    tool_key = _normalize_tool_for_baseline(tool)
+    baselines = get_baselines()
+    per_tool = baselines.get("per_tool") if isinstance(baselines, dict) else None
+    stats = per_tool.get(tool_key) if isinstance(per_tool, dict) and tool_key else None
+
+    sample_count = int(stats["session_count"]) if stats else 0
+    history_span_days = int(stats["history_span_days"]) if stats else 0
+    excluded_cumulative = int(stats.get("excluded_cumulative", 0)) if stats else 0
 
     history_sufficient = (
-        len(relevant) >= MIN_SAVINGS_SESSIONS
+        stats is not None
+        and sample_count >= MIN_SAVINGS_SESSIONS
         and history_span_days >= MIN_SAVINGS_HISTORY_DAYS
     )
     basis = (
-        f"{len(relevant)} local {'AI' if tool == 'agent' else tool} session{'s' if len(relevant) != 1 else ''} "
+        f"{sample_count} local {'AI' if tool == 'agent' else tool} session{'s' if sample_count != 1 else ''} "
         f"spanning {history_span_days} day{'s' if history_span_days != 1 else ''}"
-        if relevant
+        if sample_count
         else "no comparable local history"
     )
-    if tool in {"codex", "codex-cli"} and excluded_cumulative:
+    if tool_key == "codex-cli" and excluded_cumulative:
         basis += f"; excluded {excluded_cumulative} cumulative Codex thread total{'s' if excluded_cumulative != 1 else ''}"
-    if tool in {"codex", "codex-cli"} and not relevant:
+    if tool_key == "codex-cli" and not sample_count:
         basis += "; no per-session Codex rollout token events are available"
 
     if not history_sufficient:
@@ -496,29 +572,18 @@ def estimate_prompt_savings(prompt: str, *, risk_score: int, tool: str, cwd: str
             "available": False,
             "confidence": "insufficient",
             "basis": basis,
-            "sample_count": len(relevant),
+            "sample_count": sample_count,
             "history_span_days": history_span_days,
             "required_sessions": MIN_SAVINGS_SESSIONS,
             "required_history_days": MIN_SAVINGS_HISTORY_DAYS,
             "direction": "A narrower prompt with checkpoints should reduce context and tool-call pressure, but AIWatcher cannot quantify savings yet.",
         }
 
-    if relevant:
-        token_values = [float(row.tokens_in + row.tokens_out) for row in relevant if row.tokens_in + row.tokens_out > 0]
-        call_values = [float(row.agent_calls) for row in relevant if row.agent_calls > 0]
-        tool_values = [float(row.tool_calls) for row in relevant if row.tool_calls > 0]
-        cost_values = [float(row.cost_usd) for row in relevant if row.cost_usd > 0]
-        base_tokens = _quantile(token_values, 0.75) or 120_000
-        base_calls = _quantile(call_values, 0.75) or 80
-        base_tool_calls = _quantile(tool_values, 0.75) or 40
-        base_cost = _quantile(cost_values, 0.75) or 1.5
-        confidence = "medium"
-    else:
-        base_tokens = 180_000
-        base_calls = 120
-        base_tool_calls = 60
-        base_cost = 2.5
-        confidence = "low"
+    base_tokens = stats["p75_tokens"] or 120_000
+    base_calls = stats["p75_calls"] or 80
+    base_tool_calls = stats["p75_tool_calls"] or 40
+    base_cost = stats["p75_api_value"] or 1.5
+    confidence = "medium"
 
     risk_multiplier = 1.0 + min(8, max(0, risk_score)) * 0.28
     broad_bonus = 1.4 if any(term in prompt.lower() for term in ["entire codebase", "whole codebase", "all files", "everything"]) else 1.0
@@ -545,7 +610,7 @@ def estimate_prompt_savings(prompt: str, *, risk_score: int, tool: str, cwd: str
         "available": True,
         "confidence": confidence,
         "basis": basis,
-        "sample_count": len(relevant),
+        "sample_count": sample_count,
         "history_span_days": history_span_days,
         "original": {
             "tokens": [original_low_tokens, original_high_tokens],
@@ -1117,6 +1182,79 @@ async function sendDecision(decision) {{
 </html>"""
 
 
+def _display_available() -> bool:
+    """Best-effort check for whether a GUI display exists to open a browser.
+
+    Deliberately conservative (only returns False when we're fairly sure
+    there's no display) -- a false positive here just means we still try
+    webbrowser.open(), whose own failure is caught separately in
+    run_prompt_gate(). A false negative would wrongly deny a working
+    display, so this never denies Windows or a non-SSH, non-Linux POSIX
+    session (e.g. a normal macOS desktop, which doesn't use DISPLAY at all).
+    """
+    if os.name == "nt":
+        return True
+    is_ssh = bool(
+        os.environ.get("SSH_TTY") or os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_CLIENT")
+    )
+    display = os.environ.get("DISPLAY", "").strip()
+    if is_ssh and not display:
+        return False
+    if sys.platform.startswith("linux") and not display:
+        return False
+    return True
+
+
+def _terminal_prompt_gate(*, tool: str, prompt: str, result: dict[str, object]) -> dict[str, str]:
+    """Render the gate as plain text and prompt for a decision at the TTY.
+
+    Returns the same {"decision", "prompt"} shape as the browser gate, using
+    the same decision vocabulary (use_brief/edit/run_original/cancel), so
+    callers need no special-casing for this path.
+    """
+    print(f"\nNo display available for the {tool} prompt gate -- using the terminal instead.", file=sys.stderr)
+    print(render_preflight(result), file=sys.stderr)
+    print(file=sys.stderr)
+    while True:
+        sys.stderr.write("[b]rief / [e]dit / [o]riginal / [c]ancel: ")
+        sys.stderr.flush()
+        try:
+            choice = input().strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return {"decision": "cancel", "prompt": ""}
+        if choice in {"b", "brief"}:
+            return {"decision": "use_brief", "prompt": str(result["suggested_prompt"])}
+        if choice in {"e", "edit"}:
+            print("Enter the edited prompt, then press Enter:", file=sys.stderr)
+            edited = input()
+            return {"decision": "edit", "prompt": edited.strip() or str(result["suggested_prompt"])}
+        if choice in {"o", "original"}:
+            return {"decision": "run_original", "prompt": prompt}
+        if choice in {"c", "cancel"}:
+            return {"decision": "cancel", "prompt": ""}
+        print("Please enter b, e, o, or c.", file=sys.stderr)
+
+
+def _auto_decide_headless_gate(*, result: dict[str, object]) -> dict[str, str]:
+    """No display and no TTY: decide instantly instead of waiting to time out.
+
+    Returns a distinct auto_brief_headless/auto_block_headless decision
+    (rather than reusing use_brief/cancel) so a fully unattended default is
+    never confused with a real human's use_brief/cancel choice -- callers
+    must record these as their own decision, not translate them.
+    """
+    default = os.environ.get("AIWATCHER_GATE_DEFAULT", "block").strip().lower()
+    if default == "brief":
+        return {"decision": "auto_brief_headless", "prompt": str(result["suggested_prompt"])}
+    return {"decision": "auto_block_headless", "prompt": ""}
+
+
+def _fallback_prompt_gate(*, tool: str, prompt: str, result: dict[str, object]) -> dict[str, str]:
+    if sys.stdin.isatty():
+        return _terminal_prompt_gate(tool=tool, prompt=prompt, result=result)
+    return _auto_decide_headless_gate(result=result)
+
+
 def run_prompt_gate(
     *,
     tool: str,
@@ -1127,6 +1265,9 @@ def run_prompt_gate(
     open_browser: bool = True,
     ready_callback: Callable[[str], None] | None = None,
 ) -> dict[str, str] | None:
+    if open_browser and not _display_available():
+        return _fallback_prompt_gate(tool=tool, prompt=prompt, result=result)
+
     decision_event = threading.Event()
     state: dict[str, str] = {}
 
@@ -1206,9 +1347,15 @@ def run_prompt_gate(
             ready_callback(url)
         if open_browser:
             try:
-                webbrowser.open(url)
+                opened = webbrowser.open(url)
             except Exception:
-                pass
+                opened = False
+            if not opened:
+                # A display looked available, but webbrowser.open() itself
+                # couldn't launch anything (no known browser controller) --
+                # equivalent to no display: fall back rather than wait out
+                # the full timeout for a decision that will never come.
+                return _fallback_prompt_gate(tool=tool, prompt=prompt, result=result)
         if not decision_event.wait(max(1, timeout_seconds)):
             return None
         return dict(state)
@@ -1372,6 +1519,10 @@ def command_today(_args: argparse.Namespace) -> int:
         link_recent_interventions_to_sessions(all_sessions)
     except OSError:
         pass
+    try:
+        get_or_refresh_baselines()
+    except OSError:
+        pass
     today = [row for row in all_sessions if in_window(row, today_start)]
     week = [row for row in all_sessions if in_window(row, week_start)]
     month = [row for row in all_sessions if in_window(row, month_start)]
@@ -1490,6 +1641,10 @@ def command_projects(args: argparse.Namespace) -> int:
 def command_report(args: argparse.Namespace) -> int:
     days = args.days
     rows = sessions_since(days)
+    try:
+        get_or_refresh_baselines()
+    except OSError:
+        pass
     stats = summarize(rows)
     projects: dict[str, list[LocalSession]] = defaultdict(list)
     tools: dict[str, list[LocalSession]] = defaultdict(list)
@@ -1991,6 +2146,33 @@ def _extract_prompt_from_hook(payload: dict[str, object]) -> str:
     return ""
 
 
+def _extract_session_meta(payload: dict[str, object]) -> dict[str, str | None]:
+    """Pull only session_id/transcript_path from a hook payload.
+
+    Deliberately narrow: reads exactly two keys, only accepts them as plain
+    strings, and returns nothing else from the payload. This is the one
+    place allowed to look at hook payload shape beyond the prompt text
+    itself -- it must never grow into a general payload passthrough.
+    """
+    def _string(source: dict[str, object], key: str) -> str | None:
+        value = source.get(key)
+        return value if isinstance(value, str) and value else None
+
+    session_id = _string(payload, "session_id")
+    transcript_path = _string(payload, "transcript_path")
+    nested = payload.get("hook_event")
+    if isinstance(nested, dict):
+        session_id = session_id or _string(nested, "session_id")
+        transcript_path = transcript_path or _string(nested, "transcript_path")
+    return {"session_id": session_id, "transcript_path": transcript_path}
+
+
+def _log_hook_payload_keys(payload: dict[str, object]) -> None:
+    # Keys only, never values -- values may contain prompt/session content.
+    if os.environ.get("AIWATCHER_DEBUG_HOOK_KEYS", "").strip().lower() in {"1", "true", "yes", "on"}:
+        print(f"AIWatcher debug: hook payload keys = {sorted(payload.keys())}", file=sys.stderr)
+
+
 def _record_hook_intervention(
     *,
     tool: str,
@@ -1999,11 +2181,12 @@ def _record_hook_intervention(
     result: dict[str, object],
     decision: str,
     selected_prompt: str | None = None,
+    session_id: str | None = None,
 ) -> None:
     try:
         effective_prompt = (
             selected_prompt or str(result["suggested_prompt"])
-            if decision in {"context_added", "brief_accepted", "brief_edited"}
+            if decision in {"context_added", "brief_accepted", "brief_edited", "auto_brief_headless"}
             else prompt if decision == "allowed_original" else None
         )
         selected_risk, selected_score = _selected_prompt_assessment(
@@ -2030,6 +2213,7 @@ def _record_hook_intervention(
             ),
             selected_risk=selected_risk,
             selected_score=selected_score,
+            session_id=session_id,
         )
     except OSError:
         pass
@@ -2043,6 +2227,7 @@ def _record_hook_event(
     prompt_found: bool,
     result: dict[str, object] | None = None,
     error: str | None = None,
+    session_id: str | None = None,
 ) -> None:
     try:
         record_hook_event(
@@ -2053,6 +2238,7 @@ def _record_hook_event(
             risk=str(result.get("risk")) if result else None,
             score=int(result.get("score", 0)) if result else None,
             error=error,
+            session_id=session_id,
         )
     except OSError:
         pass
@@ -2097,8 +2283,10 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
         payload = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError:
         payload = {}
+    _log_hook_payload_keys(payload)
     prompt = args.text or _extract_prompt_from_hook(payload)
     cwd = str(payload.get("cwd") or payload.get("workspace") or os.getcwd())
+    session_id = _extract_session_meta(payload)["session_id"]
     result = analyze_prompt(prompt, tool=tool, cwd=cwd) if prompt else {
         "risk": "low",
         "score": 0,
@@ -2114,6 +2302,7 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
         event="received",
         prompt_found=bool(prompt),
         result=result,
+        session_id=session_id,
     )
     if result["risk"] == "low":
         print("{}")
@@ -2135,6 +2324,7 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
                 prompt_found=bool(prompt),
                 result=result,
                 error=str(exc),
+                session_id=session_id,
             )
         if gate:
             decision = gate.get("decision")
@@ -2147,6 +2337,7 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
                     result=result,
                     decision="brief_edited" if decision == "edit" else "brief_accepted",
                     selected_prompt=selected_prompt,
+                    session_id=session_id,
                 )
                 print(json.dumps(_hook_output_with_brief(tool, selected_prompt)))
                 return 0
@@ -2157,6 +2348,7 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
                     prompt=prompt,
                     result=result,
                     decision="allowed_original",
+                    session_id=session_id,
                 )
                 print("{}")
                 return 0
@@ -2167,8 +2359,37 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
                     prompt=prompt,
                     result=result,
                     decision="cancelled",
+                    session_id=session_id,
                 )
                 print(json.dumps(_hook_block_output("AIWatcher Prompt Gate cancelled this run.", tool=tool)))
+                return 0
+            if decision == "auto_brief_headless":
+                _record_hook_intervention(
+                    tool=tool,
+                    cwd=cwd,
+                    prompt=prompt,
+                    result=result,
+                    decision="auto_brief_headless",
+                    selected_prompt=selected_prompt,
+                    session_id=session_id,
+                )
+                print(json.dumps(_hook_output_with_brief(tool, selected_prompt)))
+                return 0
+            if decision == "auto_block_headless":
+                _record_hook_intervention(
+                    tool=tool,
+                    cwd=cwd,
+                    prompt=prompt,
+                    result=result,
+                    decision="auto_block_headless",
+                    session_id=session_id,
+                )
+                print(json.dumps(_hook_block_output(
+                    "AIWatcher blocked this high-risk prompt automatically: no interactive display or "
+                    "terminal was available to review it. Set AIWATCHER_GATE_DEFAULT=brief to add a safer "
+                    "brief automatically instead of blocking.",
+                    tool=tool,
+                )))
                 return 0
         # If the browser gate times out, fall back to the deterministic hook policy below.
 
@@ -2179,6 +2400,7 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
             prompt=prompt,
             result=result,
             decision="blocked",
+            session_id=session_id,
         )
         print(json.dumps(_hook_block_output(rendered, tool=tool)))
         return 0
@@ -2190,6 +2412,7 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
         prompt=prompt,
         result=result,
         decision="context_added",
+        session_id=session_id,
     )
     print(json.dumps(_hook_output_with_brief(tool, str(result["suggested_prompt"]))))
     return 0
@@ -2223,10 +2446,12 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
         payload = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError:
         payload = {}
+    _log_hook_payload_keys(payload)
     prompt = args.text or _extract_prompt_from_hook(payload)
     workspace_roots = payload.get("workspace_roots")
     workspace = workspace_roots[0] if isinstance(workspace_roots, list) and workspace_roots else None
     cwd = str(payload.get("cwd") or payload.get("workspace") or workspace or os.getcwd())
+    session_id = _extract_session_meta(payload)["session_id"]
     result = analyze_prompt(prompt, tool="cursor", cwd=cwd) if prompt else {
         "risk": "low",
         "score": 0,
@@ -2236,7 +2461,9 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
         "suggested_prompt": "",
         "estimated_impact": {},
     }
-    _record_hook_event(tool="cursor", cwd=cwd, event="received", prompt_found=bool(prompt), result=result)
+    _record_hook_event(
+        tool="cursor", cwd=cwd, event="received", prompt_found=bool(prompt), result=result, session_id=session_id
+    )
     if result["risk"] == "low":
         print(json.dumps(_cursor_hook_response(allow=True)))
         return 0
@@ -2250,14 +2477,16 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
         except OSError as exc:
             gate = None
             _record_hook_event(
-                tool="cursor", cwd=cwd, event="gate_failed", prompt_found=bool(prompt), result=result, error=str(exc)
+                tool="cursor", cwd=cwd, event="gate_failed", prompt_found=bool(prompt), result=result,
+                error=str(exc), session_id=session_id,
             )
         if gate:
             decision = gate.get("decision")
             selected_prompt = str(gate.get("prompt") or result["suggested_prompt"])
             if decision == "run_original":
                 _record_hook_intervention(
-                    tool="cursor", cwd=cwd, prompt=prompt, result=result, decision="allowed_original"
+                    tool="cursor", cwd=cwd, prompt=prompt, result=result, decision="allowed_original",
+                    session_id=session_id,
                 )
                 print(json.dumps(_cursor_hook_response(allow=True)))
                 return 0
@@ -2269,6 +2498,7 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
                     result=result,
                     decision="brief_edited" if decision == "edit" else "brief_accepted",
                     selected_prompt=selected_prompt,
+                    session_id=session_id,
                 )
                 message = (
                     "AIWatcher paused the original prompt. Cursor hooks cannot replace prompt text. "
@@ -2278,14 +2508,41 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
                 return 0
             if decision == "cancel":
                 _record_hook_intervention(
-                    tool="cursor", cwd=cwd, prompt=prompt, result=result, decision="cancelled"
+                    tool="cursor", cwd=cwd, prompt=prompt, result=result, decision="cancelled",
+                    session_id=session_id,
                 )
                 print(json.dumps(_cursor_hook_response(
                     allow=False, message="AIWatcher cancelled this prompt before execution."
                 )))
                 return 0
+            if decision == "auto_brief_headless":
+                _record_hook_intervention(
+                    tool="cursor", cwd=cwd, prompt=prompt, result=result, decision="auto_brief_headless",
+                    selected_prompt=selected_prompt, session_id=session_id,
+                )
+                message = (
+                    "AIWatcher paused the original prompt automatically (no interactive display or terminal "
+                    "was available to review it). Resubmit this scoped execution brief:\n\n" + selected_prompt
+                )
+                print(json.dumps(_cursor_hook_response(allow=False, message=message)))
+                return 0
+            if decision == "auto_block_headless":
+                _record_hook_intervention(
+                    tool="cursor", cwd=cwd, prompt=prompt, result=result, decision="auto_block_headless",
+                    session_id=session_id,
+                )
+                print(json.dumps(_cursor_hook_response(
+                    allow=False,
+                    message=(
+                        "AIWatcher blocked this high-risk prompt automatically: no interactive display or "
+                        "terminal was available to review it."
+                    ),
+                )))
+                return 0
 
-    _record_hook_intervention(tool="cursor", cwd=cwd, prompt=prompt, result=result, decision="blocked")
+    _record_hook_intervention(
+        tool="cursor", cwd=cwd, prompt=prompt, result=result, decision="blocked", session_id=session_id
+    )
     message = (
         f"AIWatcher paused this {result['risk']}-risk prompt (score {result['score']}). "
         "Cursor hooks cannot rewrite submitted text. Review and resubmit this scoped execution brief:\n\n"
@@ -2907,6 +3164,8 @@ def command_hook_status(_args: argparse.Namespace) -> int:
             line = f"- {stamp} | {tool} | {name} | {prompt_label} | risk {risk}"
             if score is not None:
                 line += f" | score {score}"
+            if event.get("session_id"):
+                line += f" | session {event['session_id']}"
             print(line)
             if event.get("error"):
                 print(f"  error: {event['error']}")
@@ -2915,10 +3174,13 @@ def command_hook_status(_args: argparse.Namespace) -> int:
         for row in interventions:
             selected_score = row.get("selected_score")
             change = f"{row.get('score', 'unknown')} -> {selected_score}" if selected_score is not None else str(row.get("score", "unknown"))
-            print(
+            line = (
                 f"- {row.get('created_at', 'unknown')} | {row.get('tool', 'unknown')} | "
                 f"{row.get('decision', 'recorded')} | risk score {change}"
             )
+            if row.get("session_id"):
+                line += f" | session {row['session_id']}"
+            print(line)
     print("\nIf an event appears but the tool did not pause, inspect its risk and decision. If no event appears, reload the tool and verify its hook configuration.")
     return 0
 
@@ -3153,6 +3415,11 @@ def command_export(args: argparse.Namespace) -> int:
 
 def command_ui(args: argparse.Namespace) -> int:
     from .ui import serve
+
+    try:
+        get_or_refresh_baselines()
+    except OSError:
+        pass
 
     try:
         serve(

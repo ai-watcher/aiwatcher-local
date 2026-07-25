@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -36,8 +37,29 @@ LOCK_TIMEOUT_SECONDS = 10
 LOCK_POLL_SECONDS = 0.05
 
 
-class StateLockTimeout(RuntimeError):
-    """Another AIWatcher process held the local-state lock too long."""
+class StateLockTimeout(OSError):
+    """Another AIWatcher process held the local-state lock too long.
+
+    Deliberately a subclass of OSError, for the same reason as
+    StateReadError above: hook write paths in cli.py already catch OSError
+    around record_*() calls so a slow/stuck lock skips recording instead of
+    blocking or crashing the user's prompt, with no cli.py changes needed.
+    """
+
+
+class StateReadError(OSError):
+    """local-state.json exists but could not be read (not a corrupt-JSON case).
+
+    Deliberately a subclass of OSError: callers up the stack (especially
+    hook write paths in cli.py) already catch OSError around record_*()
+    calls to avoid blocking the user's AI flow, so this propagates through
+    those existing handlers without each one needing a new except clause.
+    Distinct from corrupt/malformed JSON, which _load() recovers from by
+    quarantining the bad file and starting fresh -- a real read failure
+    (permissions, I/O error) must NOT be treated the same way, since doing
+    so would let a subsequent _save() silently overwrite a ledger that was
+    never actually read.
+    """
 
 
 def _lock_path() -> Path:
@@ -45,6 +67,10 @@ def _lock_path() -> Path:
 
 
 def _acquire_file_lock(handle) -> None:
+    # Both branches poll a non-blocking lock attempt against a deadline.
+    # fcntl.flock's blocking mode (LOCK_EX with no LOCK_NB) has no timeout
+    # at all, so a stuck holder would wedge every other AIWatcher process --
+    # including a prompt-gate hook -- forever instead of failing safe.
     if os.name == "nt":
         deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
         while True:
@@ -129,24 +155,63 @@ def _empty_state() -> dict[str, Any]:
         "hook_events": [],
         "evidence_snapshots": [],
         "decisions": [],
+        "baselines": {},
     }
+
+
+def _quarantine_corrupt_state(path: Path) -> None:
+    """Move an unparseable state file aside instead of discarding it.
+
+    Called only for malformed JSON / wrong top-level type, never for a
+    real read failure -- see StateReadError.
+    """
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    backup_path = path.with_name(f"local-state.corrupt-{timestamp}.json")
+    try:
+        path.replace(backup_path)
+    except OSError as exc:
+        print(
+            f"Warning: AIWatcher could not back up corrupt state file {path}: {exc}",
+            file=sys.stderr,
+        )
+        return
+    print(
+        f"Warning: AIWatcher local state at {path} was unreadable and has been "
+        f"backed up to {backup_path}. Starting from a fresh, empty state.",
+        file=sys.stderr,
+    )
 
 
 def _load() -> dict[str, Any]:
     path = state_path()
     try:
         with path.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (OSError, json.JSONDecodeError):
+            text = handle.read()
+    except FileNotFoundError:
         return _empty_state()
+    except OSError as exc:
+        # A real read failure (permissions, I/O error, etc). Never silently
+        # return empty state here: doing so would let a later _save() call
+        # overwrite a ledger this process never actually managed to read.
+        raise StateReadError(f"Could not read AIWatcher state at {path}: {exc}") from exc
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        _quarantine_corrupt_state(path)
+        return _empty_state()
+
     if not isinstance(data, dict):
+        _quarantine_corrupt_state(path)
         return _empty_state()
+
     data.setdefault("version", STATE_VERSION)
     data.setdefault("interventions", [])
     data.setdefault("outcomes", [])
     data.setdefault("hook_events", [])
     data.setdefault("evidence_snapshots", [])
     data.setdefault("decisions", [])
+    data.setdefault("baselines", {})
     return data
 
 
@@ -219,6 +284,7 @@ def record_intervention(
     estimated_impact: dict[str, Any] | None = None,
     selected_risk: str | None = None,
     selected_score: int | None = None,
+    session_id: str | None = None,
 ) -> str:
     with _locked_state():
         data = _load()
@@ -241,7 +307,13 @@ def record_intervention(
             "selected_prompt_hash": hash_prompt(selected_prompt) if selected_prompt else None,
             "decision": decision,
             "predicted_impact": _safe_impact(estimated_impact),
-            "session_id": None,
+            # A hook-provided session_id (see _extract_session_meta in cli.py) is
+            # ground truth from the tool itself. Anything left None here still
+            # gets a best-effort retroactive match from
+            # correlate.link_recent_interventions_to_sessions() -- see its
+            # `if intervention.get("session_id"): continue` guard, which skips
+            # interventions that already have a real id instead of overwriting them.
+            "session_id": session_id,
         })
         _save(data)
     return intervention_id
@@ -256,6 +328,7 @@ def record_hook_event(
     risk: str | None = None,
     score: int | None = None,
     error: str | None = None,
+    session_id: str | None = None,
 ) -> None:
     with _locked_state():
         data = _load()
@@ -268,6 +341,7 @@ def record_hook_event(
             "risk": risk,
             "score": score,
             "error": error,
+            "session_id": session_id,
         })
         data["hook_events"] = data["hook_events"][-50:]
         _save(data)
@@ -463,3 +537,27 @@ def outcome_counts(session_ids: set[str] | None = None) -> dict[str, int]:
         if outcome in counts:
             counts[outcome] += 1
     return counts
+
+
+def get_baselines() -> dict[str, Any]:
+    """Read-only cache lookup -- never scans local session history.
+
+    Safe to call from a hook's hot path: this only reads whatever is
+    already stored, it never computes anything. Computing fresh baselines
+    (scanning session history) belongs in cli.py, off the hot path -- see
+    get_or_refresh_baselines() there.
+    """
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return {}
+    baselines = data.get("baselines")
+    return baselines if isinstance(baselines, dict) else {}
+
+
+def save_baselines(baselines: dict[str, Any]) -> None:
+    with _locked_state():
+        data = _load()
+        data["baselines"] = baselines
+        _save(data)

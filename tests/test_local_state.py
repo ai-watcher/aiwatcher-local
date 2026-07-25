@@ -2,12 +2,31 @@ from __future__ import annotations
 
 import inspect
 import json
+import multiprocessing
 import os
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
 from aiwatcher_cli import local_state
+
+
+def _mp_record_intervention_worker(state_file: str, index: int) -> None:
+    # Runs in a freshly spawned child process (not a thread), so it exercises
+    # the cross-process file lock, not just _STATE_LOCK's in-process guard.
+    os.environ["AIWATCHER_STATE_FILE"] = state_file
+    local_state.record_intervention(
+        tool="claude",
+        cwd="/repo",
+        risk="low",
+        score=0,
+        findings=[],
+        original_prompt=f"prompt {index}",
+        suggested_prompt=f"prompt {index}",
+        decision="allowed_original",
+        selected_prompt=None,
+    )
 
 
 class LocalStateTests(unittest.TestCase):
@@ -84,6 +103,45 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(record["predicted_impact"]["savings"]["tokens"], [1000, 2000])
         self.assertEqual(record["selected_risk"], "low")
         self.assertEqual(record["risk_points_reduced"], 7)
+
+    def test_record_intervention_accepts_session_id_at_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_intervention(
+                    tool="claude",
+                    cwd="/repo",
+                    risk="low",
+                    score=0,
+                    findings=[],
+                    original_prompt="prompt",
+                    suggested_prompt="prompt",
+                    decision="allowed_original",
+                    selected_prompt=None,
+                    session_id="sess-real-id",
+                )
+                stored = local_state.recent_interventions(limit=1)
+
+        self.assertEqual(stored[0]["session_id"], "sess-real-id")
+
+    def test_record_hook_event_stores_session_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_hook_event(
+                    tool="claude",
+                    cwd="/repo",
+                    event="received",
+                    prompt_found=True,
+                    session_id="sess-real-id",
+                )
+                events = local_state.recent_hook_events(limit=1)
+
+        self.assertEqual(events[0]["session_id"], "sess-real-id")
+
+    def test_get_baselines_fails_soft_when_state_lock_is_unavailable(self) -> None:
+        with patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")):
+            self.assertEqual(local_state.get_baselines(), {})
 
     def test_outcome_replaces_previous_value_for_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -176,6 +234,132 @@ class LocalStateTests(unittest.TestCase):
                     stored = json.load(handle)
 
         self.assertEqual(len(stored["interventions"]), 20)
+
+    def test_multiprocess_record_intervention_does_not_drop_entries(self) -> None:
+        # test_concurrent_interventions_do_not_clobber_each_other above only
+        # covers threads within one process, which never exercises
+        # _cross_process_lock -- every real AIWatcher invocation (hooks
+        # especially) is a separate OS process. This spawns 8 real processes
+        # to prove the file lock, not just _STATE_LOCK, prevents a dropped
+        # write.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "local-state.json")
+            processes = [
+                multiprocessing.Process(target=_mp_record_intervention_worker, args=(state_file, i))
+                for i in range(8)
+            ]
+            for process in processes:
+                process.start()
+            for process in processes:
+                process.join(timeout=30)
+                self.assertEqual(process.exitcode, 0)
+
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                data = local_state._load()
+
+        self.assertEqual(len(data["interventions"]), 8)
+
+    def test_stale_lockfile_left_behind_does_not_deadlock_future_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "local-state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                lock_path = local_state._lock_path()
+                lock_path.parent.mkdir(parents=True, exist_ok=True)
+                # Simulate a lock file left behind by a process that
+                # exited without an active hold on it. The OS releases the
+                # advisory lock itself when the holding process's file
+                # descriptor closes, so the lock *file's* mere existence on
+                # disk must never be mistaken for an active hold.
+                lock_path.write_bytes(b"\0")
+
+                with patch.object(local_state, "LOCK_TIMEOUT_SECONDS", 0.5):
+                    started = time.monotonic()
+                    local_state.record_outcome("session-1", "useful")
+                    elapsed = time.monotonic() - started
+
+                outcome = local_state.get_outcome("session-1")
+
+        self.assertLess(elapsed, 0.5)
+        self.assertEqual(outcome["outcome"], "useful")
+
+    def test_lock_timeout_is_an_os_error(self) -> None:
+        # StateLockTimeout must subclass OSError so the existing
+        # `except OSError: pass` in cli.py's hook write paths
+        # (_record_hook_intervention / _record_hook_event) already skips
+        # recording on a stuck lock instead of crashing or blocking the
+        # user's prompt, with no cli.py changes needed.
+        self.assertTrue(issubclass(local_state.StateLockTimeout, OSError))
+
+    def test_truncated_json_quarantines_file_and_starts_fresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "local-state.json")
+            with open(state_file, "w", encoding="utf-8") as handle:
+                handle.write('{"version": 2, "interventions": [{"id": "x"')
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                data = local_state._load()
+
+            self.assertEqual(data, local_state._empty_state())
+            self.assertFalse(os.path.exists(state_file))
+            backups = [
+                name for name in os.listdir(temp_dir)
+                if name.startswith("local-state.corrupt-") and name.endswith(".json")
+            ]
+            self.assertEqual(len(backups), 1)
+            with open(os.path.join(temp_dir, backups[0]), encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), '{"version": 2, "interventions": [{"id": "x"')
+
+    def test_non_dict_json_quarantines_file_and_starts_fresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "local-state.json")
+            with open(state_file, "w", encoding="utf-8") as handle:
+                handle.write("[1, 2, 3]")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                data = local_state._load()
+
+            self.assertEqual(data, local_state._empty_state())
+            backups = [
+                name for name in os.listdir(temp_dir)
+                if name.startswith("local-state.corrupt-")
+            ]
+            self.assertEqual(len(backups), 1)
+
+    def test_valid_json_creates_no_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "local-state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_outcome("session-1", "useful")
+                data = local_state._load()
+
+            self.assertEqual(data["outcomes"][0]["session_id"], "session-1")
+            backups = [
+                name for name in os.listdir(temp_dir)
+                if name.startswith("local-state.corrupt-")
+            ]
+            self.assertEqual(backups, [])
+
+    def test_read_os_error_raises_and_leaves_file_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "local-state.json")
+            original_bytes = b'{"version": 2, "interventions": [], "outcomes": [], "hook_events": []}'
+            with open(state_file, "wb") as handle:
+                handle.write(original_bytes)
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(local_state.Path, "open", side_effect=PermissionError("denied")),
+            ):
+                with self.assertRaises(local_state.StateReadError):
+                    local_state._load()
+
+            with open(state_file, "rb") as handle:
+                self.assertEqual(handle.read(), original_bytes)
+
+    def test_state_read_error_from_hook_write_path_does_not_raise(self) -> None:
+        # Hook write paths (cli.py's _record_hook_intervention /
+        # _record_hook_event) already wrap record_intervention() in a bare
+        # `except OSError: pass` so a bad state file never blocks the user's
+        # AI flow. StateReadError must subclass OSError so that existing
+        # handling covers it without each call site needing a new except clause.
+        self.assertTrue(issubclass(local_state.StateReadError, OSError))
 
     def test_hook_events_are_privacy_safe_and_bounded(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
