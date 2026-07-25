@@ -572,8 +572,110 @@ class PromptPreflightTests(unittest.TestCase):
         # One chip per triggered finding, not a copy of the full prose findings list.
         self.assertEqual(len(result["guardrails"]), len(result["findings"]))
 
-    def test_hero_savings_label_omitted_without_sufficient_history(self) -> None:
+    def test_broad_multi_file_ui_work_is_flagged_without_security_terms(self) -> None:
+        # S-04: "Add a dark mode toggle to every page in the app" has no
+        # auth/delete/secret keyword, so only a breadth heuristic (quantifier
+        # + surface-area noun) can catch it.
         with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt(
+                "Add a dark mode toggle to every page in the app",
+                tool="claude",
+                cwd="/repo",
+            )
+
+        self.assertIn(result["risk"], ("medium", "high"))
+        self.assertTrue(
+            any("touches many files or pages" in finding for finding in result["findings"])
+        )
+        self.assertIn("Scope narrowed", [g["label"] for g in result["guardrails"]])
+
+    def test_breadth_heuristic_catches_all_and_each_quantifiers_too(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            all_result = cli.analyze_prompt("Update the styling on all screens", tool="claude", cwd="/repo")
+            each_result = cli.analyze_prompt("Rename this prop on each component", tool="claude", cwd="/repo")
+            throughout_result = cli.analyze_prompt("Apply the new spacing throughout the app", tool="claude", cwd="/repo")
+
+        for result in (all_result, each_result, throughout_result):
+            self.assertIn(result["risk"], ("medium", "high"))
+
+    def test_narrow_single_file_request_stays_low_risk(self) -> None:
+        # Sanity check the breadth heuristic doesn't fire on ordinary narrow asks.
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt(
+                "Fix the off-by-one error in parse_date inside utils.py",
+                tool="claude",
+                cwd="/repo",
+            )
+        self.assertEqual(result["risk"], "low")
+
+    def test_security_weakening_prompt_is_flagged(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            jwt_result = cli.analyze_prompt(
+                "Update JWT auth to remove signature check so login is faster",
+                tool="claude",
+                cwd="/repo",
+            )
+            loose_auth_result = cli.analyze_prompt(
+                "Make auth less strict so tests pass",
+                tool="claude",
+                cwd="/repo",
+            )
+            tls_result = cli.analyze_prompt(
+                "Disable TLS certificate verification in the client",
+                tool="claude",
+                cwd="/repo",
+            )
+
+        for result in (jwt_result, loose_auth_result, tls_result):
+            self.assertIn(result["risk"], ("medium", "high"))
+            self.assertTrue(
+                any("weakens or removes a security control" in finding for finding in result["findings"])
+            )
+
+    def test_security_weakening_heuristic_avoids_docs_ui_and_test_cleanup(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            ui_result = cli.analyze_prompt(
+                "Remove the validation error message from the signup form UI",
+                tool="claude",
+                cwd="/repo",
+            )
+            docs_result = cli.analyze_prompt(
+                "Update the auth docs to remove an obsolete screenshot",
+                tool="claude",
+                cwd="/repo",
+            )
+            tests_result = cli.analyze_prompt(
+                "Remove dead code from token parser tests",
+                tool="claude",
+                cwd="/repo",
+            )
+
+        for result in (ui_result, docs_result, tests_result):
+            self.assertFalse(
+                any("weakens or removes a security control" in finding for finding in result["findings"])
+            )
+            self.assertNotIn(result["risk"], ("medium", "high"))
+
+    def test_sensitive_token_phrase_still_gets_guardrail(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt(
+                "Rotate the production access token",
+                tool="claude",
+                cwd="/repo",
+            )
+
+        self.assertIn(result["risk"], ("medium", "high"))
+        self.assertTrue(
+            any("sensitive data" in finding for finding in result["findings"])
+        )
+
+    def test_hero_savings_label_omitted_without_sufficient_history(self) -> None:
+        # Also patch get_baselines(), not just sessions_since(): P0-3 made the
+        # estimator read the cached baseline file instead of scanning live, so
+        # a machine with a real (non-empty) local AIWatcher history would
+        # otherwise leak its own cached baselines into this "no history" case.
+        baselines = _baselines_from_sessions([])
+        with patch.object(cli, "sessions_since", return_value=[]), patch.object(cli, "get_baselines", return_value=baselines):
             result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
         self.assertIsNone(cli._hero_savings_label(result))
 
@@ -608,7 +710,8 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertLess(page.index('class="guardrails"'), page.index("What AIWatcher noticed"))
 
     def test_hero_pressure_label_omitted_without_sufficient_history(self) -> None:
-        with patch.object(cli, "sessions_since", return_value=[]):
+        baselines = _baselines_from_sessions([])
+        with patch.object(cli, "sessions_since", return_value=[]), patch.object(cli, "get_baselines", return_value=baselines):
             result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
         self.assertIsNone(cli._hero_pressure_label(result))
 

@@ -11,6 +11,7 @@ import argparse
 import html
 import json
 import os
+import re
 import shlex
 import shutil
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -743,8 +744,32 @@ def analyze_prompt(
         # unconditionally on broad_scope (regardless of scope_guardrails), so
         # the chip must match what's actually added to the brief.
         guardrails.append({"icon": "\U0001F50E", "label": "Scope narrowed"})
+    else:
+        # Multi-file/product-UI breadth doesn't always use the fixed
+        # broad_terms phrases above (e.g. "every page", "all screens") — this
+        # catches quantifier + surface-area-noun patterns the keyword list
+        # misses, so scope pressure is flagged even without a security word.
+        breadth_nouns = (
+            "page|pages|screen|screens|view|views|component|components|module|modules|"
+            "file|files|endpoint|endpoints|route|routes|service|services|api|apis"
+        )
+        breadth_match = re.search(
+            rf"\b(every|all|each)\b.{{0,20}}?\b(?:{breadth_nouns})\b", lower
+        ) or re.search(r"\bthroughout the (app|codebase|repo|project|site)\b", lower)
+        if breadth_match:
+            broad_scope = True
+            if scope_guardrails:
+                score += 1
+                findings.append("Scope is broad, but explicit phasing and stop conditions reduce execution pressure.")
+            else:
+                score += 3
+                findings.append("Request touches many files or pages across the app, which risks a large, hard-to-review change.")
+                suggestions.append(
+                    "Identify the shared pattern or component first and propose a phased rollout instead of touching every page at once."
+                )
+            guardrails.append({"icon": "\U0001F50E", "label": "Scope narrowed"})
 
-    edit_terms = ["change", "modify", "edit", "write", "implement", "refactor", "delete", "migrate", "rename"]
+    edit_terms = ["change", "modify", "edit", "write", "implement", "refactor", "delete", "migrate", "rename", "add", "update"]
     plan_terms = ["plan first", "do not edit", "inspect first", "propose", "before editing", "ask before"]
     needs_checkpoint = any(term in lower for term in edit_terms) and not any(term in lower for term in plan_terms)
     if needs_checkpoint:
@@ -754,10 +779,36 @@ def analyze_prompt(
         guardrails.append({"icon": "\U0001F4CB", "label": "Plan-first checkpoint"})
 
     risky_terms = [
-        "production", "prod database", "customer data", "pii", "secret", "api key", "token",
+        "production", "prod database", "customer data", "pii", "secret", "api key",
+        "access token", "auth token", "bearer token", "refresh token", "session token",
         ".env", "credential", "delete", "drop table", "rm -rf", "payment", "stripe",
     ]
-    sensitive_or_destructive = any(term in lower for term in risky_terms)
+    # Security-weakening prompts ("remove signature check", "make auth less
+    # strict") rarely use any risky_terms keyword — they read as ordinary
+    # feature work unless we also look for a security-control noun paired
+    # with a verb that removes or loosens it.
+    security_controls = (
+        r"signature (?:check|verification|validation)|jwt signature|"
+        r"token (?:check|validation|verification)|"
+        r"auth(?:entication|orization)? (?:check|guard|validation|verification|middleware)|"
+        r"permission(?:s)? (?:check|validation|verification)|access control|"
+        r"input validation|request validation|schema validation|"
+        r"csrf (?:check|validation|verification)|cors (?:check|validation|verification)|"
+        r"(?:ssl|tls|certificate) verification|encryption|2fa|mfa"
+    )
+    weaken_verbs = (
+        r"remove|disable|skip|bypass|turn off|weaken|ignore|less strict|"
+        r"no longer (?:check|verify|validate)|stop (?:checking|verifying|validating)"
+    )
+    security_weakening = bool(
+        re.search(rf"\b(?:{weaken_verbs})\b.{{0,35}}?\b(?:{security_controls})\b", lower)
+        or re.search(rf"\b(?:{security_controls})\b.{{0,35}}?\b(?:{weaken_verbs})\b", lower)
+        or re.search(
+            r"\bmake\s+(?:auth|authentication|authorization|permissions?|access control)\s+less strict\b",
+            lower,
+        )
+    )
+    sensitive_or_destructive = any(term in lower for term in risky_terms) or security_weakening
     safety_guardrails = any(term in lower for term in [
         "ask for confirmation before", "require confirmation before",
         "do not reveal secret", "do not make destructive changes",
@@ -767,6 +818,10 @@ def analyze_prompt(
         if safety_guardrails:
             score += 1
             findings.append("Sensitive or destructive work is present with an explicit confirmation boundary.")
+        elif security_weakening:
+            score += 3
+            findings.append("Prompt weakens or removes a security control (auth/signature/validation) without a guardrail.")
+            suggestions.append("Keep the existing check in place, or require explicit confirmation and a follow-up security review before removing it.")
         else:
             score += 3
             findings.append("Prompt mentions sensitive data, credentials, production systems, or destructive actions.")

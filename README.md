@@ -411,6 +411,22 @@ text. The experimental `browser-extension/` adapter currently supports
 `claude.ai`; `vscode-extension/` provides manual editor, clipboard, and input
 commands. Neither is described as universal editor-chat interception.
 
+`POST /api/preflight` contract (loopback-only, same-machine callers):
+
+```jsonc
+// Request
+{"prompt": "...", "tool": "agent", "cwd": "/path/to/project"}  // tool/cwd optional
+
+// Response
+{
+  "risk": "low|medium|high", "score": 0,
+  "findings": ["..."], "suggestions": ["..."],
+  "suggested_prompt": "...",       // the scoped execution brief
+  "impact_label": "...",           // human-readable estimated pressure, honesty-gated
+  "privacy": "..."                 // what is/isn't persisted, for display next to the result
+}
+```
+
 ## What It Reads
 
 - **Claude Code:** `~/.claude/projects/**/*.jsonl`, normalized to the git
