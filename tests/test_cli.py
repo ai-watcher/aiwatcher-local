@@ -1073,6 +1073,29 @@ class HeadlessPromptGateTests(unittest.TestCase):
         self.assertFalse(output["continue"])
         self.assertEqual(record.call_args.kwargs["decision"], "auto_block_headless")
 
+    def test_cursor_hook_medium_risk_uses_gate_when_requested(self) -> None:
+        payload = json.dumps({"prompt": "Refactor the entire codebase", "cwd": "/repo"})
+        args = SimpleNamespace(text=None, gate=True)
+        with (
+            patch.object(cli, "_read_stdin_text", return_value=payload),
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(
+                cli,
+                "run_prompt_gate",
+                return_value={"decision": "use_brief", "prompt": "Scoped Cursor brief"},
+            ) as gate_mock,
+            patch.object(cli, "record_intervention") as record,
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_cursor_hook(args)
+
+        self.assertEqual(result, 0)
+        gate_mock.assert_called_once()
+        output = json.loads(stdout.getvalue())
+        self.assertFalse(output["continue"])
+        self.assertIn("Scoped Cursor brief", output["user_message"])
+        self.assertEqual(record.call_args.kwargs["decision"], "brief_accepted")
+
 
 class IntegrationConfigTests(unittest.TestCase):
     def test_remove_claude_hook_preserves_other_hooks(self) -> None:
@@ -1244,24 +1267,27 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertNotIn("delete the secret file", logged)
         self.assertNotIn("sess-secret", logged)
 
-    def test_codex_hook_medium_risk_skips_gate_even_when_requested(self) -> None:
-        """Medium risk must never open the browser gate, even with gate=True —
-        only high risk warrants the round-trip. Silent context injection instead."""
+    def test_codex_hook_medium_risk_uses_gate_when_requested(self) -> None:
         payload = json.dumps({"prompt": "Refactor the entire codebase", "cwd": "/repo"})
         args = SimpleNamespace(text=None, gate=True)
         with (
             patch.object(cli, "_read_stdin_text", return_value=payload),
             patch.object(cli, "sessions_since", return_value=[]),
-            patch.object(cli, "run_prompt_gate") as gate_mock,
-            patch.object(cli, "record_intervention"),
+            patch.object(
+                cli,
+                "run_prompt_gate",
+                return_value={"decision": "edit", "prompt": "Edited medium-risk brief"},
+            ) as gate_mock,
+            patch.object(cli, "record_intervention") as record,
             patch("sys.stdout", new_callable=io.StringIO) as stdout,
         ):
             result = cli.command_codex_hook(args)
 
         self.assertEqual(result, 0)
-        gate_mock.assert_not_called()
+        gate_mock.assert_called_once()
         output = json.loads(stdout.getvalue())
-        self.assertIn("execution brief", output["systemMessage"].lower())
+        self.assertIn("Edited medium-risk brief", output["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(record.call_args.kwargs["decision"], "brief_edited")
 
     def test_codex_prompt_gate_can_allow_original_prompt(self) -> None:
         payload = json.dumps({"prompt": "Refactor the entire codebase and delete old auth secrets", "cwd": "/repo"})
@@ -1503,7 +1529,35 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertEqual(result, 0)
         output = stdout.getvalue()
         self.assertIn("prompt found | risk high | score 8", output)
-        self.assertIn("brief_edited | risk score 8 -> 2", output)
+        self.assertIn("action added edited brief", output)
+        self.assertIn("brief_edited (added edited brief) | risk score 8 -> 2", output)
+
+    def test_hook_status_explains_context_added_is_not_a_popup(self) -> None:
+        with (
+            patch.object(cli, "recent_hook_events", return_value=[{
+                "created_at": "2026-07-03T12:00:00+00:00",
+                "tool": "codex",
+                "event": "received",
+                "prompt_found": True,
+                "risk": "medium",
+                "score": 5,
+                "cwd": "/repo",
+            }]),
+            patch.object(cli, "recent_interventions", return_value=[{
+                "created_at": "2026-07-03T12:00:05+00:00",
+                "tool": "codex",
+                "cwd": "/repo",
+                "decision": "context_added",
+                "score": 5,
+                "selected_score": 2,
+            }]),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_hook_status(SimpleNamespace())
+
+        self.assertEqual(result, 0)
+        output = stdout.getvalue()
+        self.assertIn("action added brief context (no popup)", output)
 
     def test_hook_status_shows_session_id_when_present(self) -> None:
         with (

@@ -2309,10 +2309,10 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
         return 0
 
     rendered = render_preflight(result)
-    # Only high risk warrants the browser round-trip. Medium risk falls through to
-    # the silent additionalContext injection below — no gate, no copy/paste, and
-    # therefore no chance of a brief being resubmitted and double-wrapped.
-    if _prompt_gate_requested(args) and result["risk"] == "high":
+    # Prompt Gate is intentionally interactive for both medium and high risk
+    # prompts when the hook was installed with --gate. Low risk still passes
+    # unchanged above.
+    if _prompt_gate_requested(args) and result["risk"] in {"medium", "high"}:
         gate = None
         try:
             gate = run_prompt_gate(tool=tool, cwd=cwd, prompt=prompt, result=result)
@@ -2385,7 +2385,7 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
                     session_id=session_id,
                 )
                 print(json.dumps(_hook_block_output(
-                    "AIWatcher blocked this high-risk prompt automatically: no interactive display or "
+                    f"AIWatcher blocked this {result['risk']}-risk prompt automatically: no interactive display or "
                     "terminal was available to review it. Set AIWATCHER_GATE_DEFAULT=brief to add a safer "
                     "brief automatically instead of blocking.",
                     tool=tool,
@@ -2468,10 +2468,10 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
         print(json.dumps(_cursor_hook_response(allow=True)))
         return 0
 
-    # Only high risk warrants the interactive browser gate. Cursor's hook contract
-    # can't silently inject context (it can only block-and-ask-to-resubmit), so
-    # medium risk skips straight to the block message below instead of the round-trip.
-    if _prompt_gate_requested(args) and result["risk"] == "high":
+    # Prompt Gate is intentionally interactive for both medium and high risk
+    # prompts when the Cursor hook was installed with --gate. Cursor still cannot
+    # rewrite prompt text in place, so brief decisions return a resubmission note.
+    if _prompt_gate_requested(args) and result["risk"] in {"medium", "high"}:
         try:
             gate = run_prompt_gate(tool="cursor", cwd=cwd, prompt=prompt, result=result)
         except OSError as exc:
@@ -2534,7 +2534,7 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
                 print(json.dumps(_cursor_hook_response(
                     allow=False,
                     message=(
-                        "AIWatcher blocked this high-risk prompt automatically: no interactive display or "
+                        f"AIWatcher blocked this {result['risk']}-risk prompt automatically: no interactive display or "
                         "terminal was available to review it."
                     ),
                 )))
@@ -3140,10 +3140,61 @@ def command_doctor(_args: argparse.Namespace) -> int:
     print(f"Codex shell wrapper: {'installed' if file_contains(shell_rc, CODEX_WRAPPER_MARKER_START) else 'not installed'}")
     print(f"Codex MCP config: {'referenced' if file_contains(codex_config, 'aiwatcher') else 'not detected'}")
     print(f"Local state: {state_path()}")
+    print("\nSurface coverage")
+    print("- Claude Code CLI / Claude Desktop Code tab: hook-capable; verify with `aiwatcher hook-status`.")
+    print("- Claude Desktop general chat, browser chat, and editor sidebars: use Prompt Companion or an extension.")
+    print("- Codex CLI/TUI: hook-capable only when the host invokes UserPromptSubmit and the hook is trusted with `/hooks`.")
+    print("- Codex Desktop conversation surface: do not assume hook interception; verify with `aiwatcher hook-status`.")
+    print("- Cursor: hook can block and return a scoped brief for resubmission, but cannot replace prompt text in place.")
     print("\nPrivacy: local-only; AIWatcher Local does not upload prompts, source, or telemetry.")
     if os.name == "nt":
         print("Note: core scanning works on Windows; the Codex zsh wrapper is not available in PowerShell yet.")
     return 0
+
+
+def _hook_decision_action(decision: object) -> str:
+    labels = {
+        "context_added": "added brief context (no popup)",
+        "brief_accepted": "added safer brief",
+        "brief_edited": "added edited brief",
+        "allowed_original": "allowed original",
+        "blocked": "blocked by policy",
+        "cancelled": "cancelled in Prompt Gate",
+        "auto_block_headless": "blocked headless",
+        "auto_brief_headless": "added safer brief headless",
+    }
+    return labels.get(str(decision), str(decision or "recorded"))
+
+
+def _matching_hook_intervention(
+    event: dict[str, object],
+    interventions: list[dict[str, object]],
+) -> dict[str, object] | None:
+    event_tool = event.get("tool")
+    event_session = event.get("session_id")
+    event_cwd = event.get("cwd")
+    for row in interventions:
+        if row.get("tool") != event_tool:
+            continue
+        if event_session and row.get("session_id") != event_session:
+            continue
+        if event_cwd and row.get("cwd") and row.get("cwd") != event_cwd:
+            continue
+        return row
+    return None
+
+
+def _hook_event_action(event: dict[str, object], interventions: list[dict[str, object]]) -> str:
+    if not event.get("prompt_found"):
+        return "allowed uninspected"
+    if event.get("event") == "gate_failed":
+        return "gate failed; used fallback policy"
+    match = _matching_hook_intervention(event, interventions)
+    if match:
+        return _hook_decision_action(match.get("decision"))
+    if event.get("risk") == "low":
+        return "allowed unchanged"
+    return "received; check recent decisions"
 
 
 def command_hook_status(_args: argparse.Namespace) -> int:
@@ -3164,6 +3215,7 @@ def command_hook_status(_args: argparse.Namespace) -> int:
             line = f"- {stamp} | {tool} | {name} | {prompt_label} | risk {risk}"
             if score is not None:
                 line += f" | score {score}"
+            line += f" | action {_hook_event_action(event, interventions)}"
             if event.get("session_id"):
                 line += f" | session {event['session_id']}"
             print(line)
@@ -3176,7 +3228,7 @@ def command_hook_status(_args: argparse.Namespace) -> int:
             change = f"{row.get('score', 'unknown')} -> {selected_score}" if selected_score is not None else str(row.get("score", "unknown"))
             line = (
                 f"- {row.get('created_at', 'unknown')} | {row.get('tool', 'unknown')} | "
-                f"{row.get('decision', 'recorded')} | risk score {change}"
+                f"{row.get('decision', 'recorded')} ({_hook_decision_action(row.get('decision'))}) | risk score {change}"
             )
             if row.get("session_id"):
                 line += f" | session {row['session_id']}"
