@@ -124,6 +124,24 @@ class LocalStateTests(unittest.TestCase):
 
         self.assertEqual(stored[0]["session_id"], "sess-real-id")
 
+    def test_recent_command_decisions_filters_by_days(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_command_decision(
+                    tool="claude", command="rm -rf /", pattern_id="rm_rf", reason="destructive", decision="block",
+                )
+                with local_state._locked_state():
+                    data = local_state._load()
+                    data["command_decisions"][0]["created_at"] = "2000-01-01T00:00:00+00:00"
+                    local_state._save(data)
+
+                recent = local_state.recent_command_decisions(limit=20, days=7)
+                unfiltered = local_state.recent_command_decisions(limit=20)
+
+        self.assertEqual(recent, [])
+        self.assertEqual(len(unfiltered), 1)
+
     def test_record_hook_event_stores_session_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")

@@ -28,6 +28,7 @@ from typing import Callable, Iterable, Sequence
 
 from .correlate import link_recent_interventions_to_sessions
 from .local_state import (
+    COMMAND_GATE_BLOCKED_DECISIONS,
     VALID_OUTCOMES,
     evidence_snapshots_for_sessions,
     get_baselines,
@@ -2197,6 +2198,57 @@ def command_report(args: argparse.Namespace) -> int:
         model_stats = summarize(model_rows)
         print(f"Top model: {model} ({compact_int(int(model_stats['tokens_in']) + int(model_stats['tokens_out']))} tokens)")
 
+    from .ui import build_weekly_digest
+
+    digest = build_weekly_digest(days)
+    digest_outcomes = digest["outcomes"]
+    print(
+        f"\nOutcomes: {digest_outcomes['useful']} useful, {digest_outcomes['rework']} rework, "
+        f"{digest_outcomes['abandoned']} abandoned"
+    )
+    if digest_outcomes["inferred_useful"] or digest_outcomes["inferred_churned"]:
+        print(
+            f"  Inferred (unmarked): {digest_outcomes['inferred_useful']} likely useful, "
+            f"{digest_outcomes['inferred_churned']} churned"
+        )
+
+    highest_cost_useful = digest["highest_cost_useful_session"]
+    if highest_cost_useful:
+        print(
+            f"Highest-cost useful session: {highest_cost_useful['api_value_label']} - "
+            f"{highest_cost_useful['project']} ({highest_cost_useful['tool']})"
+        )
+
+    if digest["top_sessions"]:
+        print("\nTop sessions:")
+        for top_session in digest["top_sessions"]:
+            outcome_label = f" [{top_session['outcome']}]" if top_session["outcome"] else ""
+            print(f"  {top_session['api_value_label']:>10}  {top_session['project']} ({top_session['tool']}){outcome_label}")
+
+    if digest["loop_candidates"] or digest["velocity_candidates"]:
+        print("\nLoop/runaway candidates:")
+        for candidate in digest["loop_candidates"]:
+            print(f"  Loop: {candidate['project']} ({candidate['tool']}) - {candidate['diagnosis']}")
+        for candidate in digest["velocity_candidates"]:
+            print(f"  Velocity: {candidate['project']} ({candidate['tool']}) - {candidate['ratio_label']}")
+
+    gate = digest["command_gate"]
+    if gate["gates_fired"]:
+        print(f"\nCommand gate: {gate['gates_fired']} fired, {gate['commands_blocked']} blocked")
+
+    prompt_gate = digest["prompt_gate"]
+    if prompt_gate["flagged"]:
+        print(f"\nRisky prompts modified: {prompt_gate['modified']} of {prompt_gate['flagged']} flagged")
+
+    survival = digest["survival"]
+    if survival.get("available"):
+        print(
+            f"\nCost per surviving change: {survival['cost_per_surviving_change']} "
+            f"(vs {survival['cost_per_churned_change']} churned, {survival['sample_count']} samples)"
+        )
+
+    print(f"\nRecommended: {digest['recommendation']}")
+
     print("\nSuggested next checks:")
     print("- Review top project sessions for runaway or abandoned work.")
     print("- Compare API-priced tokens with plan/limited tokens before interpreting invoice impact.")
@@ -3184,7 +3236,7 @@ def command_claude_pretooluse_hook(args: argparse.Namespace) -> int:
     except OSError:
         pass
 
-    if decision in {"block", "auto_block_headless", "gate_timeout_blocked"}:
+    if decision in COMMAND_GATE_BLOCKED_DECISIONS:
         print(json.dumps(_command_gate_permission_output(
             "deny",
             f"AIWatcher blocked this command ({decision}): {match['reason']} Command: {match['command']}",

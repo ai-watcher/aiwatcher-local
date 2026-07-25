@@ -274,6 +274,15 @@ def _safe_impact(impact: dict[str, Any] | None) -> dict[str, Any] | None:
     return safe
 
 
+PROMPT_MODIFIED_DECISIONS = frozenset({"brief_accepted", "brief_edited", "auto_brief_headless", "context_added"})
+# The decisions where what actually ran differs from the raw original prompt --
+# an explicit safer brief (brief_accepted/brief_edited), an automatic one when
+# no interactive gate was available (auto_brief_headless), or S-03's silent
+# medium-risk guardrail context (context_added). Excludes allowed_original
+# (nothing changed), cancelled (nothing ran), and blocked/auto_block_headless
+# (stopped entirely, not modified).
+
+
 def record_intervention(
     *,
     tool: str,
@@ -609,6 +618,7 @@ def save_baselines(baselines: dict[str, Any]) -> None:
 
 
 MAX_COMMAND_DECISIONS_STORED = 500
+COMMAND_GATE_BLOCKED_DECISIONS = frozenset({"block", "auto_block_headless", "gate_timeout_blocked"})
 
 
 def record_command_decision(
@@ -649,12 +659,23 @@ def record_command_decision(
     return record
 
 
-def recent_command_decisions(limit: int = 20) -> list[dict[str, Any]]:
+def recent_command_decisions(limit: int = 20, days: int | None = None) -> list[dict[str, Any]]:
     try:
         with _locked_state():
             rows = list(_load()["command_decisions"])
     except OSError:
         return []
+    if days is not None:
+        cutoff = datetime.now(timezone.utc).timestamp() - max(1, days) * 86400
+        filtered = []
+        for row in rows:
+            try:
+                created_at = datetime.fromisoformat(str(row.get("created_at", ""))).timestamp()
+            except ValueError:
+                continue
+            if created_at >= cutoff:
+                filtered.append(row)
+        rows = filtered
     return list(reversed(rows[-max(1, limit):]))
 
 
