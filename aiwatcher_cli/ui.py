@@ -431,11 +431,18 @@ def build_weekly_digest(days: int = 7) -> dict[str, object]:
     all_rows = scan_all()
     rows = rows_for_window(days)
     window_session_ids = {row.session_id for row in rows}
-    window_outcomes = outcomes_for_sessions(window_session_ids)
-    outcomes = outcome_counts(window_session_ids)
+    try:
+        window_outcomes = outcomes_for_sessions(window_session_ids)
+        outcomes = outcome_counts(window_session_ids)
+    except OSError:
+        window_outcomes = {}
+        outcomes = {key: 0 for key in ("abandoned", "rework", "useful")}
 
     sample_rows = rows[:DIGEST_EVIDENCE_SAMPLE_SIZE]
-    evidence_by_session = evidence_for_sessions(sample_rows, survival_by_session=survival_by_session(sample_rows))
+    try:
+        evidence_by_session = evidence_for_sessions(sample_rows, survival_by_session=survival_by_session(sample_rows))
+    except OSError:
+        evidence_by_session = {}
     inferred_useful = sum(
         1
         for session_id, evidence in evidence_by_session.items()
@@ -468,13 +475,22 @@ def build_weekly_digest(days: int = 7) -> dict[str, object]:
                 "ratio_label": f"{float(velocity['ratio']):.1f}x baseline pace",
             })
 
-    gate_decisions = recent_command_decisions(limit=MAX_COMMAND_DECISIONS_STORED, days=days)
+    try:
+        gate_decisions = recent_command_decisions(limit=MAX_COMMAND_DECISIONS_STORED, days=days)
+    except OSError:
+        gate_decisions = []
     blocked = [row for row in gate_decisions if row.get("decision") in COMMAND_GATE_BLOCKED_DECISIONS]
 
-    prompt_interventions = recent_interventions(limit=200, days=days)
+    try:
+        prompt_interventions = recent_interventions(limit=200, days=days)
+    except OSError:
+        prompt_interventions = []
     prompts_modified = [row for row in prompt_interventions if row.get("decision") in PROMPT_MODIFIED_DECISIONS]
 
-    survival = _cost_per_surviving_change(all_rows)
+    try:
+        survival = _cost_per_surviving_change(all_rows)
+    except OSError:
+        survival = {"available": False, "sample_count": 0, "required_samples": MIN_SURVIVAL_SAMPLES}
 
     recommendation = _recommend_weekly_improvement(
         commands_blocked=len(blocked),
