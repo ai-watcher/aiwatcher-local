@@ -143,6 +143,14 @@ class LocalStateTests(unittest.TestCase):
         with patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")):
             self.assertEqual(local_state.get_baselines(), {})
 
+    def test_recent_command_decisions_fails_soft_when_state_lock_is_unavailable(self) -> None:
+        with patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")):
+            self.assertEqual(local_state.recent_command_decisions(), [])
+
+    def test_command_allowlist_fails_closed_when_state_lock_is_unavailable(self) -> None:
+        with patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")):
+            self.assertFalse(local_state.is_command_pattern_always_allowed("rm-rf"))
+
     def test_outcome_replaces_previous_value_for_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")

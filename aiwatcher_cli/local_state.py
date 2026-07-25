@@ -609,14 +609,20 @@ def record_command_decision(
 
 
 def recent_command_decisions(limit: int = 20) -> list[dict[str, Any]]:
-    with _locked_state():
-        rows = list(_load()["command_decisions"])
+    try:
+        with _locked_state():
+            rows = list(_load()["command_decisions"])
+    except OSError:
+        return []
     return list(reversed(rows[-max(1, limit):]))
 
 
 def is_command_pattern_always_allowed(pattern_id: str) -> bool:
-    with _locked_state():
-        data = _load()
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return False
     return pattern_id in data.get("command_gate_allowlist", [])
 
 
