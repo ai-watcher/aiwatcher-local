@@ -520,7 +520,7 @@ def render_today(days: int = 1) -> str:
         lines.append(f"Top tool: {tool} ({summarize(tool_rows)['sessions']} sessions)")
     if model_totals:
         model, model_stats = max(model_totals.items(), key=lambda item: item[1]["cost_usd"])
-        lines.append(f"Top model: {model} ({compact_int(int(model_stats['tokens_in']) + int(model_stats['tokens_out']))} tokens)")
+        lines.append(f"Top model: {display_model_name(model)} ({compact_int(int(model_stats['tokens_in']) + int(model_stats['tokens_out']))} tokens)")
     return "\n".join(lines)
 
 
@@ -2162,7 +2162,7 @@ def command_today(_args: argparse.Namespace) -> int:
         print("-" * 58)
         for model, stats in sorted(model_totals.items(), key=lambda item: item[1]["cost_usd"], reverse=True)[:8]:
             print(
-                f"{model[:28]:28} "
+                f"{display_model_name(model)[:28]:28} "
                 f"{money(float(stats['cost_usd'])):>10} "
                 f"{compact_int(int(stats['tokens_in']) + int(stats['tokens_out'])):>9} "
                 f"{int(stats['agent_calls']):>7}"
@@ -2273,7 +2273,7 @@ def command_report(args: argparse.Namespace) -> int:
         print(f"Top tool: {tool} ({tool_stats['sessions']} sessions)")
     if ranked_models:
         model, model_stats = ranked_models[0]
-        print(f"Top model: {model} ({compact_int(int(model_stats['tokens_in']) + int(model_stats['tokens_out']))} tokens)")
+        print(f"Top model: {display_model_name(model)} ({compact_int(int(model_stats['tokens_in']) + int(model_stats['tokens_out']))} tokens)")
 
     from .ui import build_weekly_digest
 

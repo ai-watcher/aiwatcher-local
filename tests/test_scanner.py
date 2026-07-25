@@ -235,6 +235,15 @@ class ModelAttributionTests(unittest.TestCase):
         self.assertEqual(totals["cursor-ai"]["tokens_in"], 10)
         self.assertEqual(totals["claude-fable-5"]["sessions"], 1)
 
+    def test_display_model_name_relabels_synthetic_rate_limit_marker(self) -> None:
+        """"<synthetic>" is Claude's own marker for a client-injected message
+        (e.g. a rate-limit notice) with zero tokens/cost — not a real model.
+        The raw model_breakdown key stays "<synthetic>"; only the label shown
+        to the user changes."""
+        self.assertEqual(scanner.display_model_name("<synthetic>"), "Session limit model")
+        self.assertEqual(scanner.display_model_name("claude-sonnet-4-6"), "claude-sonnet-4-6")
+        self.assertEqual(scanner.display_model_name(None), "unknown")
+
 
 class CodexOriginatorTests(unittest.TestCase):
     def test_codex_desktop_originator_is_recorded_as_surface(self) -> None:

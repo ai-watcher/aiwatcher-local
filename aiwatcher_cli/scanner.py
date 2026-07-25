@@ -882,6 +882,22 @@ def scan_cursor_limited() -> list[LocalSession]:
     return sessions
 
 
+# Display-only relabeling for model identifiers that aren't really models.
+# "<synthetic>" is Claude Code/Desktop's own marker for a client-injected
+# message (e.g. a rate-limit notice) with zero tokens and zero cost — not an
+# actual model response. Kept as the raw dict key everywhere internally;
+# only the label shown to the user changes.
+MODEL_DISPLAY_NAMES: dict[str, str] = {
+    "<synthetic>": "Session limit model",
+}
+
+
+def display_model_name(model: str | None) -> str:
+    if not model:
+        return "unknown"
+    return MODEL_DISPLAY_NAMES.get(model, model)
+
+
 def model_usage_totals(sessions: Iterable[LocalSession]) -> dict[str, dict[str, float]]:
     """Flatten each session's model_breakdown into a global per-model total.
 

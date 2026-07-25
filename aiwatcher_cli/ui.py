@@ -36,6 +36,7 @@ from .scanner import (
     LocalEvent,
     LocalSession,
     discover_tools,
+    display_model_name,
     extract_opening_prompt,
     model_usage_totals,
     scan_all,
@@ -146,10 +147,11 @@ def group_by_model_breakdown(rows: list[LocalSession]) -> list[dict[str, object]
     result = []
     for key, bucket in totals.items():
         tokens = bucket["tokens_in"] + bucket["tokens_out"]
+        display_name = display_model_name(key)
         result.append({
-            "name": key,
+            "name": display_name,
             "id": key,
-            "short_name": short_path(key),
+            "short_name": short_path(display_name),
             "sessions": int(bucket["sessions"]),
             "tokens": int(tokens),
             "tokens_label": compact_int(int(tokens)),
@@ -208,7 +210,7 @@ def session_json(row: LocalSession) -> dict[str, object]:
         "tool": row.tool,
         "project": row.project_path or "unknown",
         "project_short": short_path(row.project_path),
-        "model": row.model or "unknown",
+        "model": display_model_name(row.model),
         "tokens": row.tokens_in + row.tokens_out,
         "tokens_label": compact_int(row.tokens_in + row.tokens_out),
         "tokens_in_label": compact_int(row.tokens_in),
@@ -232,7 +234,7 @@ def event_json(row: LocalEvent) -> dict[str, object]:
         "event_id": row.event_id,
         "event_type": row.event_type,
         "timestamp": row.timestamp.isoformat() if row.timestamp else None,
-        "model": row.model or "unknown",
+        "model": display_model_name(row.model),
         "tokens": row.tokens_in + row.tokens_out,
         "tokens_label": compact_int(row.tokens_in + row.tokens_out),
         "api_value": money(row.cost_usd),
@@ -997,7 +999,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
                 "session_id": row.session_id,
                 "project": short_path(row.project_path),
                 "project_full": row.project_path or "unknown",
-                "model": row.model or "unknown",
+                "model": display_model_name(row.model),
                 "tokens": compact_int(row.tokens_in + row.tokens_out),
                 "api_value": money(row.cost_usd),
                 "outcome": (window_outcomes.get(row.session_id) or {}).get("outcome"),
