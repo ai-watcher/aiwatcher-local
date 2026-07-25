@@ -1129,6 +1129,32 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         first_bullet = rendered.index("- ", why_hand_off)
         self.assertEqual(loop_in_capsule, first_bullet + 2)
 
+    def test_today_shows_every_model_used_and_tool_surface(self) -> None:
+        """Regression for the bug where a session that used more than one model
+        (e.g. Fable via Claude Desktop, then Sonnet) only showed its last model
+        in the "By model" table, and Desktop usage was indistinguishable from CLI."""
+        row = session(1, project="/repo/orcha")
+        row.surface = "desktop"
+        row.model = "claude-sonnet-4-6"
+        row.model_breakdown = {
+            "claude-fable-5": {"tokens_in": 1000, "tokens_out": 200, "cost_usd": 0.5, "agent_calls": 1, "tool_calls": 0},
+            "claude-sonnet-4-6": {"tokens_in": 2000, "tokens_out": 400, "cost_usd": 1.0, "agent_calls": 1, "tool_calls": 1},
+        }
+        output = io.StringIO()
+
+        with (
+            patch.object(cli, "scan_all", return_value=[row]),
+            patch.object(cli, "link_recent_interventions_to_sessions", return_value=None),
+            patch("sys.stdout", output),
+        ):
+            result = cli.command_today(SimpleNamespace())
+
+        self.assertEqual(result, 0)
+        rendered = output.getvalue()
+        self.assertIn("claude-fable-5", rendered)
+        self.assertIn("claude-sonnet-4-6", rendered)
+        self.assertIn("claude-code (desktop)", rendered)
+
     def test_low_risk_prompt_does_not_render_impact_section(self) -> None:
         with patch.object(
             cli,

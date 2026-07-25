@@ -69,7 +69,7 @@ from .processes import (
     rss_label,
     seconds_label,
 )
-from .scanner import LocalEvent, LocalSession, discover_tools, scan_all, scan_all_events
+from .scanner import LocalEvent, LocalSession, discover_tools, display_model_name, model_usage_totals, scan_all, scan_all_events
 from .session_health import analyze_session_health
 
 
@@ -497,11 +497,11 @@ def render_today(days: int = 1) -> str:
     stats = summarize(rows)
     by_tool: dict[str, list[LocalSession]] = defaultdict(list)
     by_project: dict[str, list[LocalSession]] = defaultdict(list)
-    by_model: dict[str, list[LocalSession]] = defaultdict(list)
     for row in rows:
-        by_tool[row.tool].append(row)
+        tool_key = f"{row.tool} ({row.surface})" if row.surface else row.tool
+        by_tool[tool_key].append(row)
         by_project[row.project_path or "unknown"].append(row)
-        by_model[row.model or "unknown"].append(row)
+    model_totals = model_usage_totals(rows)
 
     lines = [
         f"AIWatcher Local summary - last {days} day{'s' if days != 1 else ''}",
@@ -518,10 +518,9 @@ def render_today(days: int = 1) -> str:
     if by_tool:
         tool, tool_rows = max(by_tool.items(), key=lambda item: summarize(item[1])["cost_usd"])
         lines.append(f"Top tool: {tool} ({summarize(tool_rows)['sessions']} sessions)")
-    if by_model:
-        model, model_rows = max(by_model.items(), key=lambda item: summarize(item[1])["cost_usd"])
-        model_stats = summarize(model_rows)
-        lines.append(f"Top model: {model} ({compact_int(int(model_stats['tokens_in']) + int(model_stats['tokens_out']))} tokens)")
+    if model_totals:
+        model, model_stats = max(model_totals.items(), key=lambda item: item[1]["cost_usd"])
+        lines.append(f"Top model: {display_model_name(model)} ({compact_int(int(model_stats['tokens_in']) + int(model_stats['tokens_out']))} tokens)")
     return "\n".join(lines)
 
 
@@ -2123,7 +2122,8 @@ def command_today(_args: argparse.Namespace) -> int:
     print(f"Today - {format_full_date(now)}")
     by_tool: dict[str, list[LocalSession]] = defaultdict(list)
     for session in today:
-        by_tool[session.tool].append(session)
+        tool_key = f"{session.tool} ({session.surface})" if session.surface else session.tool
+        by_tool[tool_key].append(session)
 
     if not by_tool:
         print("No local AI coding sessions detected today.")
@@ -2156,16 +2156,13 @@ def command_today(_args: argparse.Namespace) -> int:
                 f"{int(stats['sessions']):>8}"
             )
 
-        by_model: dict[str, list[LocalSession]] = defaultdict(list)
-        for session in today:
-            by_model[session.model or "unknown"].append(session)
+        model_totals = model_usage_totals(today)
         print("\nBy model")
         print(f"{'Model':28} {'API value':>10} {'Tokens':>9} {'Calls':>7}")
         print("-" * 58)
-        for model, rows in sorted(by_model.items(), key=lambda item: summarize(item[1])["cost_usd"], reverse=True)[:8]:
-            stats = summarize(rows)
+        for model, stats in sorted(model_totals.items(), key=lambda item: item[1]["cost_usd"], reverse=True)[:8]:
             print(
-                f"{model[:28]:28} "
+                f"{display_model_name(model)[:28]:28} "
                 f"{money(float(stats['cost_usd'])):>10} "
                 f"{compact_int(int(stats['tokens_in']) + int(stats['tokens_out'])):>9} "
                 f"{int(stats['agent_calls']):>7}"
@@ -2207,7 +2204,8 @@ def command_tools(args: argparse.Namespace) -> int:
     sessions = sessions_since(args.days)
     by_tool: dict[str, list[LocalSession]] = defaultdict(list)
     for session in sessions:
-        by_tool[session.tool].append(session)
+        tool_key = f"{session.tool} ({session.surface})" if session.surface else session.tool
+        by_tool[tool_key].append(session)
     print(f"AI usage by tool - last {args.days} days")
     print("Cost is shown as API-equivalent value; subscription plans may differ.\n")
     for tool, rows in sorted(by_tool.items(), key=lambda item: summarize(item[1])["cost_usd"], reverse=True):
@@ -2248,15 +2246,15 @@ def command_report(args: argparse.Namespace) -> int:
     stats = summarize(rows)
     projects: dict[str, list[LocalSession]] = defaultdict(list)
     tools: dict[str, list[LocalSession]] = defaultdict(list)
-    models: dict[str, list[LocalSession]] = defaultdict(list)
     for row in rows:
         projects[row.project_path or "unknown"].append(row)
-        tools[row.tool].append(row)
-        models[row.model or "unknown"].append(row)
+        tool_key = f"{row.tool} ({row.surface})" if row.surface else row.tool
+        tools[tool_key].append(row)
+    model_totals = model_usage_totals(rows)
 
     ranked_projects = sorted(projects.items(), key=lambda item: summarize(item[1])["cost_usd"], reverse=True)
     ranked_tools = sorted(tools.items(), key=lambda item: summarize(item[1])["cost_usd"], reverse=True)
-    ranked_models = sorted(models.items(), key=lambda item: summarize(item[1])["cost_usd"], reverse=True)
+    ranked_models = sorted(model_totals.items(), key=lambda item: item[1]["cost_usd"], reverse=True)
 
     print(f"AIWatcher Local report - last {days} days\n")
     print(f"Sessions: {stats['sessions']}")
@@ -2274,9 +2272,8 @@ def command_report(args: argparse.Namespace) -> int:
         tool_stats = summarize(tool_rows)
         print(f"Top tool: {tool} ({tool_stats['sessions']} sessions)")
     if ranked_models:
-        model, model_rows = ranked_models[0]
-        model_stats = summarize(model_rows)
-        print(f"Top model: {model} ({compact_int(int(model_stats['tokens_in']) + int(model_stats['tokens_out']))} tokens)")
+        model, model_stats = ranked_models[0]
+        print(f"Top model: {display_model_name(model)} ({compact_int(int(model_stats['tokens_in']) + int(model_stats['tokens_out']))} tokens)")
 
     from .ui import build_weekly_digest
 

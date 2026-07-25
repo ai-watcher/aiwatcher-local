@@ -36,7 +36,9 @@ from .scanner import (
     LocalEvent,
     LocalSession,
     discover_tools,
+    display_model_name,
     extract_opening_prompt,
+    model_usage_totals,
     scan_all,
     scan_all_events,
     segment_session_by_prompt,
@@ -127,6 +129,41 @@ def group_rows(rows: list[LocalSession], key_fn) -> list[dict[str, object]]:
     return result
 
 
+def _tool_surface_key(row: LocalSession) -> str:
+    """Group key that separates CLI from Desktop usage of the same tool, when known."""
+    if row.surface:
+        return f"{row.tool} ({row.surface})"
+    return row.tool
+
+
+def group_by_model_breakdown(rows: list[LocalSession]) -> list[dict[str, object]]:
+    """Aggregate model usage from each session's model_breakdown.
+
+    A session that used more than one model (e.g. Fable then Sonnet in the same
+    conversation) contributes to every model's bucket here, instead of only the
+    single last-used model that row.model records for backward compatibility.
+    """
+    totals = model_usage_totals(rows)
+    result = []
+    for key, bucket in totals.items():
+        tokens = bucket["tokens_in"] + bucket["tokens_out"]
+        display_name = display_model_name(key)
+        result.append({
+            "name": display_name,
+            "id": key,
+            "short_name": short_path(display_name),
+            "sessions": int(bucket["sessions"]),
+            "tokens": int(tokens),
+            "tokens_label": compact_int(int(tokens)),
+            "api_value_usd": round(bucket["cost_usd"], 6),
+            "api_value_label": money(bucket["cost_usd"]),
+            "calls": int(bucket["agent_calls"]),
+            "tool_calls": int(bucket["tool_calls"]),
+        })
+    result.sort(key=lambda item: (float(item["api_value_usd"]), int(item["tokens"])), reverse=True)
+    return result
+
+
 def rows_for_window(days: int) -> list[LocalSession]:
     since = datetime.now().astimezone() - timedelta(days=days)
     return [row for row in scan_all() if in_window(row, since)]
@@ -173,7 +210,7 @@ def session_json(row: LocalSession) -> dict[str, object]:
         "tool": row.tool,
         "project": row.project_path or "unknown",
         "project_short": short_path(row.project_path),
-        "model": row.model or "unknown",
+        "model": display_model_name(row.model),
         "tokens": row.tokens_in + row.tokens_out,
         "tokens_label": compact_int(row.tokens_in + row.tokens_out),
         "tokens_in_label": compact_int(row.tokens_in),
@@ -197,7 +234,7 @@ def event_json(row: LocalEvent) -> dict[str, object]:
         "event_id": row.event_id,
         "event_type": row.event_type,
         "timestamp": row.timestamp.isoformat() if row.timestamp else None,
-        "model": row.model or "unknown",
+        "model": display_model_name(row.model),
         "tokens": row.tokens_in + row.tokens_out,
         "tokens_label": compact_int(row.tokens_in + row.tokens_out),
         "api_value": money(row.cost_usd),
@@ -221,8 +258,8 @@ def build_project_detail(project: str, days: int = 7) -> dict[str, object]:
             "calls": stats["calls"],
             "tool_calls": stats["tool_calls"],
         },
-        "models": group_rows(rows, lambda row: row.model or "unknown"),
-        "tools": group_rows(rows, lambda row: row.tool),
+        "models": group_by_model_breakdown(rows),
+        "tools": group_rows(rows, _tool_surface_key),
         "sessions": [session_json(row) for row in sessions[:20]],
     }
 
@@ -350,8 +387,8 @@ def build_report(days: int = 7) -> dict[str, object]:
     rows = rows_for_window(days)
     stats = summarize(rows)
     projects = group_rows(rows, lambda row: row.project_path or "unknown")
-    tools = group_rows(rows, lambda row: row.tool)
-    models = group_rows(rows, lambda row: row.model or "unknown")
+    tools = group_rows(rows, _tool_surface_key)
+    models = group_by_model_breakdown(rows)
     return {
         "title": f"Your AI coding week" if days == 7 else f"Your last {days} days",
         "summary": [
@@ -832,8 +869,8 @@ def build_summary(days: int = 7) -> dict[str, object]:
     projected_month = float(month_stats["api_value_usd"]) / day_of_month * 30
 
     projects = group_rows(rows, lambda row: row.project_path or "unknown")
-    tools = group_rows(rows, lambda row: row.tool)
-    models = group_rows(rows, lambda row: row.model or "unknown")
+    tools = group_rows(rows, _tool_surface_key)
+    models = group_by_model_breakdown(rows)
 
     recent = sorted(rows, key=lambda row: row.updated_at or row.started_at or MIN_DT, reverse=True)[:12]
     detected = discover_tools()
@@ -962,7 +999,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
                 "session_id": row.session_id,
                 "project": short_path(row.project_path),
                 "project_full": row.project_path or "unknown",
-                "model": row.model or "unknown",
+                "model": display_model_name(row.model),
                 "tokens": compact_int(row.tokens_in + row.tokens_out),
                 "api_value": money(row.cost_usd),
                 "outcome": (window_outcomes.get(row.session_id) or {}).get("outcome"),
