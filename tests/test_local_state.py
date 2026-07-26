@@ -142,6 +142,33 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(recent, [])
         self.assertEqual(len(unfiltered), 1)
 
+    def test_command_decision_redacts_secret_bearing_commands(self) -> None:
+        command = (
+            "PGPASSWORD=hunter2 psql "
+            "postgres://admin:supersecret@prod-db.example.com/app "
+            "--api-key sk-testsecret123456"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_command_decision(
+                    tool="claude",
+                    command=command,
+                    pattern_id="prod-connection-string",
+                    reason="prod connection",
+                    decision="block",
+                )
+                stored = local_state.recent_command_decisions(limit=1)[0]
+
+        self.assertTrue(stored["command_redacted"])
+        self.assertEqual(stored["command_hash"], local_state.command_hash(command))
+        self.assertIn("PGPASSWORD=[redacted]", stored["command"])
+        self.assertIn("postgres://[redacted]@prod-db.example.com/app", stored["command"])
+        self.assertIn("--api-key [redacted]", stored["command"])
+        self.assertNotIn("hunter2", stored["command"])
+        self.assertNotIn("supersecret", stored["command"])
+        self.assertNotIn("sk-testsecret123456", stored["command"])
+
     def test_record_hook_event_stores_session_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")

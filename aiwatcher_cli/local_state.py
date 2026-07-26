@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -621,6 +622,48 @@ MAX_COMMAND_DECISIONS_STORED = 500
 COMMAND_GATE_BLOCKED_DECISIONS = frozenset({"block", "auto_block_headless", "gate_timeout_blocked"})
 
 
+_CONNECTION_URI_RE = re.compile(
+    r"\b(?P<scheme>postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|mssql)://(?P<userinfo>[^\s/@]+(?::[^\s/@]*)?)@",
+    re.IGNORECASE,
+)
+_ENV_SECRET_RE = re.compile(
+    r"\b(?P<name>[A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|ACCESS_KEY|PRIVATE_KEY)[A-Z0-9_]*)=(?P<value>[^\s]+)",
+    re.IGNORECASE,
+)
+_LONG_SECRET_FLAG_RE = re.compile(
+    r"(?P<flag>--(?:password|passwd|token|api-key|secret|access-key|private-key))(?:=|\s+)(?P<value>[^\s]+)",
+    re.IGNORECASE,
+)
+_COMMON_SECRET_VALUE_RE = re.compile(
+    r"\b("
+    r"sk-[A-Za-z0-9_-]{12,}|"
+    r"AKIA[0-9A-Z]{12,}|"
+    r"gh[pousr]_[A-Za-z0-9_]{20,}|"
+    r"xox[baprs]-[A-Za-z0-9-]{20,}"
+    r")\b"
+)
+
+
+def command_hash(command: str) -> str:
+    return hashlib.sha256(command.encode("utf-8")).hexdigest()
+
+
+def redact_command_for_storage(command: str) -> tuple[str, bool]:
+    """Return a receipt-safe command preview and whether anything was redacted.
+
+    Command-gate receipts need enough context for a developer to recognize the
+    blocked action, but shell commands can contain database URLs, API keys, or
+    env-var assignments. Store a redacted preview plus a hash instead of raw
+    secret-bearing command text.
+    """
+    preview = str(command)
+    preview = _CONNECTION_URI_RE.sub(lambda m: f"{m.group('scheme')}://[redacted]@", preview)
+    preview = _ENV_SECRET_RE.sub(lambda m: f"{m.group('name')}=[redacted]", preview)
+    preview = _LONG_SECRET_FLAG_RE.sub(lambda m: f"{m.group('flag')} [redacted]", preview)
+    preview = _COMMON_SECRET_VALUE_RE.sub("[redacted-token]", preview)
+    return preview, preview != command
+
+
 def record_command_decision(
     *,
     tool: str,
@@ -633,13 +676,11 @@ def record_command_decision(
 ) -> dict[str, Any]:
     """Store a dangerous-command gate decision (S-19).
 
-    Unlike prompt interventions (which store only a hash of the prompt),
-    this intentionally stores the real command text -- the scenario spec
-    requires "decision recorded with full command text", and a shell
-    command is not private prompt/source content the same way a prompt is.
-    record_decision() above already sets this precedent for commit-message-
-    style text.
+    Receipts store a privacy-safe command preview plus a stable command hash.
+    They must not persist raw secret-bearing command strings such as production
+    connection URLs or API tokens.
     """
+    command_preview, was_redacted = redact_command_for_storage(command)
     with _locked_state():
         data = _load()
         record = {
@@ -647,7 +688,9 @@ def record_command_decision(
             "created_at": datetime.now(timezone.utc).isoformat(),
             "tool": tool,
             "cwd": cwd,
-            "command": command,
+            "command": command_preview,
+            "command_hash": command_hash(command),
+            "command_redacted": was_redacted,
             "pattern_id": pattern_id,
             "reason": reason,
             "decision": decision,

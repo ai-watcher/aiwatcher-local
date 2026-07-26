@@ -460,6 +460,11 @@ commands. Neither is described as universal editor-chat interception.
   PID/PPID, state, age, RSS, CPU, command arguments, and explicit
   `--working-dir` / `--session-id` values when present. It does not read prompt
   text, source files, process memory, or send data to the cloud.
+- **Dangerous-command gate receipts:** when Claude Code's `PreToolUse` gate
+  flags a shell command, AIWatcher stores a command preview, pattern, decision,
+  session id, and SHA-256 command hash. Secret-bearing substrings such as
+  database URL credentials, token values, and password/API-key flags are
+  redacted before anything is persisted or returned to the AI tool.
 
 Tool coverage depends on what each vendor stores on your machine. When a tool is
 installed but token/cost history is not exposed, AIWatcher Local says so instead
