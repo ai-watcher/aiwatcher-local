@@ -186,6 +186,13 @@ The Prompt Gate page may display the prompt while you decide, but it does not
 persist prompt text. Local state stores hashes, decisions, risk findings, and
 predicted impact only.
 
+The Claude Code dangerous-command gate follows the same trust posture. The
+local decision page may display the command while you decide, but persisted
+receipts keep a command preview plus SHA-256 hash. Secret-bearing substrings
+such as database URL credentials, token values, password env vars, and
+password/API-key flags are redacted before storage or before the hook returns a
+block reason to the AI tool.
+
 This wording is deliberate. Claude's `UserPromptSubmit` hook can add context
 alongside a submitted prompt or block it; it cannot replace the submitted text.
 Gate installations configure a 210-second host timeout around AIWatcher's
