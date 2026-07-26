@@ -69,7 +69,16 @@ from .processes import (
     rss_label,
     seconds_label,
 )
-from .scanner import LocalEvent, LocalSession, discover_tools, display_model_name, model_usage_totals, scan_all, scan_all_events
+from .scanner import (
+    LocalEvent,
+    LocalSession,
+    discover_tools,
+    display_model_name,
+    model_usage_totals,
+    scan_all,
+    scan_all_events,
+    surface_coverage,
+)
 from .session_health import analyze_session_health
 
 
@@ -2065,20 +2074,13 @@ def render_journal(days: int = 1) -> str:
 
 
 def command_start(_args: argparse.Namespace) -> int:
-    detected = discover_tools()
     sessions = sessions_since(1)
     print("AIWatcher v0.1.0 - local mode")
     print("Read-only scan. No data leaves this machine.\n")
-    print("Watching:")
-    labels = {
-        "claude-code": "Claude Code",
-        "cursor": "Cursor",
-        "codex-cli": "Codex CLI",
-        "cline": "Cline",
-        "windsurf": "Windsurf",
-    }
-    for key, label in labels.items():
-        print(f"  {'[OK]' if detected.get(key) else '[--]'} {label}")
+    print("Surface coverage:")
+    for row in surface_coverage(sessions):
+        marker = "[OK]" if row.status == "automatic" else "[..]" if row.status in {"limited", "companion", "unverified"} else "[--]"
+        print(f"  {marker} {row.label:26} {row.status_label}")
     print(f"\nCollected {len(sessions)} sessions from the last 24 hours.")
     print("Run `aiwatcher today` or `python -m aiwatcher_cli today` to see your usage.")
     print("Connect Cloud later for team spend, budget guardrails, and audit evidence.")
@@ -2086,12 +2088,11 @@ def command_start(_args: argparse.Namespace) -> int:
 
 
 def command_status(_args: argparse.Namespace) -> int:
-    detected = discover_tools()
     sessions = scan_all()
     print("AIWatcher Local status\n")
-    for tool, installed in detected.items():
-        tool_sessions = [row for row in sessions if row.tool == tool]
-        print(f"{'[OK]' if installed else '[--]'} {tool:12} {len(tool_sessions):>5} sessions")
+    for row in surface_coverage(sessions):
+        marker = "[OK]" if row.status == "automatic" else "[..]" if row.status in {"limited", "companion", "unverified"} else "[--]"
+        print(f"{marker} {row.label:26} {row.status_label:28} {row.session_count:>5} sessions")
     print("\nMode: local-only")
     print("Network: disabled unless hosted sync is configured separately")
     return 0
@@ -4370,11 +4371,9 @@ def command_doctor(_args: argparse.Namespace) -> int:
     print(f"Codex MCP config: {'referenced' if file_contains(codex_config, 'aiwatcher') else 'not detected'}")
     print(f"Local state: {state_path()}")
     print("\nSurface coverage")
-    print("- Claude Code CLI / Claude Desktop Code tab: hook-capable; verify with `aiwatcher hook-status`.")
-    print("- Claude Desktop general chat, browser chat, and editor sidebars: use Prompt Companion or an extension.")
-    print("- Codex CLI/TUI: hook-capable only when the host invokes UserPromptSubmit and the hook is trusted with `/hooks`.")
-    print("- Codex Desktop conversation surface: do not assume hook interception; verify with `aiwatcher hook-status`.")
-    print("- Cursor: hook can block and return a scoped brief for resubmission, but cannot replace prompt text in place.")
+    for row in surface_coverage(scan_all()):
+        marker = "[OK]" if row.status == "automatic" else "[..]" if row.status in {"limited", "companion", "unverified"} else "[--]"
+        print(f"- {marker} {row.label}: {row.status_label}. {row.action}")
     print("\nPrivacy: local-only; AIWatcher Local does not upload prompts, source, or telemetry.")
     if os.name == "nt":
         print("Note: core scanning works on Windows; the Codex zsh wrapper is not available in PowerShell yet.")

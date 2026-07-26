@@ -164,6 +164,34 @@ class LocalEvent:
         }
 
 
+@dataclass
+class SurfaceCoverage:
+    surface_id: str
+    label: str
+    status: str
+    status_label: str
+    detected: bool
+    automatic_gate: str
+    history: str
+    action: str
+    detail: str
+    session_count: int = 0
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "surface_id": self.surface_id,
+            "label": self.label,
+            "status": self.status,
+            "status_label": self.status_label,
+            "detected": self.detected,
+            "automatic_gate": self.automatic_gate,
+            "history": self.history,
+            "action": self.action,
+            "detail": self.detail,
+            "session_count": self.session_count,
+        }
+
+
 def _hash_text(value: Any) -> str | None:
     if value is None:
         return None
@@ -429,6 +457,137 @@ def discover_tools() -> dict[str, bool]:
         "cline": any(path.exists() for path in CLINE_DIRS),
         "windsurf": any(path.exists() for path in WINDSURF_DIRS),
     }
+
+
+def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[SurfaceCoverage]:
+    """Explain what AIWatcher can and cannot protect for each local surface.
+
+    This is intentionally separate from `discover_tools()`: detection only says
+    something exists on disk. Coverage tells the user whether AIWatcher can gate
+    prompts automatically, read history, or only offer a manual companion flow.
+    """
+    detected = discover_tools()
+    rows = list(sessions or [])
+
+    def count(tool: str, surface: str | None = None) -> int:
+        return sum(
+            1
+            for row in rows
+            if row.tool == tool and (surface is None or row.surface == surface)
+        )
+
+    claude_sessions = count("claude-code")
+    claude_desktop_sessions = count("claude-code", "desktop")
+    codex_sessions = count("codex-cli")
+    codex_desktop_sessions = count("codex-cli", "desktop")
+    cursor_sessions = count("cursor")
+
+    return [
+        SurfaceCoverage(
+            surface_id="claude-code-cli",
+            label="Claude Code CLI",
+            status="automatic" if detected.get("claude-code") else "not_detected",
+            status_label="Automatic gate + history" if detected.get("claude-code") else "Not detected",
+            detected=bool(detected.get("claude-code")),
+            automatic_gate="UserPromptSubmit and command gates when installed/trusted",
+            history="Full local JSONL session and token history",
+            action="Verify with `aiwatcher hook-status`.",
+            detail="Best-covered Claude surface. Prompt/source content stays local.",
+            session_count=claude_sessions,
+        ),
+        SurfaceCoverage(
+            surface_id="claude-desktop-code",
+            label="Claude Desktop Code tab",
+            status="limited" if detected.get("claude-code") else "unknown",
+            status_label="Hook-capable, verify locally",
+            detected=bool(detected.get("claude-code") or claude_desktop_sessions),
+            automatic_gate="Works only when the Desktop Code tab invokes Claude Code hooks",
+            history="Visible when the host writes Claude Code JSONL",
+            action="Submit a test prompt, then run `aiwatcher hook-status`.",
+            detail="Do not assume every Claude Desktop surface behaves the same.",
+            session_count=claude_desktop_sessions,
+        ),
+        SurfaceCoverage(
+            surface_id="claude-desktop-chat",
+            label="Claude Desktop general chat",
+            status="companion",
+            status_label="Companion only",
+            detected=False,
+            automatic_gate="No verified local hook interception",
+            history="No reliable local token/cost scanner yet",
+            action="Use the Prompt tab or MCP/manual preflight before sending risky prompts.",
+            detail="AIWatcher should not claim automatic protection for general chat.",
+        ),
+        SurfaceCoverage(
+            surface_id="claude-ai-browser",
+            label="claude.ai browser",
+            status="companion",
+            status_label="Extension/companion",
+            detected=False,
+            automatic_gate="Browser companion can preflight when installed; no desktop hook",
+            history="No local session history scanner",
+            action="Use Prompt Companion or the browser extension when available.",
+            detail="Browser surfaces are protected only by explicit local companion tooling.",
+        ),
+        SurfaceCoverage(
+            surface_id="codex-cli",
+            label="Codex CLI/TUI",
+            status="automatic" if detected.get("codex-cli") else "not_detected",
+            status_label="Hook-capable + partial history" if detected.get("codex-cli") else "Not detected",
+            detected=bool(detected.get("codex-cli")),
+            automatic_gate="UserPromptSubmit when the host invokes and trusts the hook",
+            history="SQLite/JSONL history; subscription cost is observed usage, not invoice spend",
+            action="Use `/hooks` and `aiwatcher hook-status` to verify invocation.",
+            detail="Codex local token totals can be cumulative, so AIWatcher labels estimates carefully.",
+            session_count=codex_sessions,
+        ),
+        SurfaceCoverage(
+            surface_id="codex-desktop",
+            label="Codex Desktop",
+            status="unverified" if codex_desktop_sessions else "companion",
+            status_label="Unverified automatic gate",
+            detected=bool(codex_desktop_sessions),
+            automatic_gate="Do not assume Desktop conversation prompts invoke hooks",
+            history="Visible only when Codex writes readable local sessions",
+            action="Use Prompt Companion unless `hook-status` proves the hook fired.",
+            detail="This surface needs real-device verification before stronger claims.",
+            session_count=codex_desktop_sessions,
+        ),
+        SurfaceCoverage(
+            surface_id="cursor",
+            label="Cursor",
+            status="limited" if detected.get("cursor") else "not_detected",
+            status_label="Limited local history" if detected.get("cursor") else "Not detected",
+            detected=bool(detected.get("cursor")),
+            automatic_gate="Prompt hook can pause and return a resubmittable brief when configured",
+            history="Presence/log detection only; token/cost details may be unavailable",
+            action="Treat Cursor numbers as coverage-limited until session fixtures improve.",
+            detail="AIWatcher should be honest when Cursor is installed but not measurable.",
+            session_count=cursor_sessions,
+        ),
+        SurfaceCoverage(
+            surface_id="cline",
+            label="Cline",
+            status="unsupported" if detected.get("cline") else "not_detected",
+            status_label="Detected, not scanned" if detected.get("cline") else "Not detected",
+            detected=bool(detected.get("cline")),
+            automatic_gate="No verified hook",
+            history="Not scanned yet",
+            action="No local cost/session claims yet.",
+            detail="Detection is not coverage; this avoids a false green check.",
+        ),
+        SurfaceCoverage(
+            surface_id="windsurf",
+            label="Windsurf",
+            status="unsupported" if detected.get("windsurf") else "not_detected",
+            status_label="Detected, not scanned" if detected.get("windsurf") else "Not detected",
+            detected=bool(detected.get("windsurf")),
+            automatic_gate="No verified hook",
+            history="Not scanned yet",
+            action="No local cost/session claims yet.",
+            detail="Detection is not coverage; this avoids a false green check.",
+        ),
+    ]
 
 
 def scan_claude_code() -> list[LocalSession]:

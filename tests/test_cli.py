@@ -20,7 +20,7 @@ from unittest.mock import Mock, patch
 
 from aiwatcher_cli import cli, local_state
 from aiwatcher_cli.local_state import recent_decisions
-from aiwatcher_cli.scanner import LocalEvent, LocalSession
+from aiwatcher_cli.scanner import LocalEvent, LocalSession, SurfaceCoverage
 
 
 def session(
@@ -63,6 +63,50 @@ def _baselines_from_sessions(rows: list[LocalSession]) -> dict[str, object]:
     # stand-in for it.
     with patch.object(cli, "sessions_since", return_value=rows):
         return cli._compute_baselines()
+
+
+class SurfaceCoverageCliTests(unittest.TestCase):
+    def test_status_uses_coverage_language_not_watching_every_detected_tool(self) -> None:
+        coverage = [
+            SurfaceCoverage(
+                surface_id="claude-code-cli",
+                label="Claude Code CLI",
+                status="automatic",
+                status_label="Automatic gate + history",
+                detected=True,
+                automatic_gate="hook",
+                history="history",
+                action="verify",
+                detail="detail",
+                session_count=2,
+            ),
+            SurfaceCoverage(
+                surface_id="cline",
+                label="Cline",
+                status="unsupported",
+                status_label="Detected, not scanned",
+                detected=True,
+                automatic_gate="none",
+                history="Not scanned yet",
+                action="No local claims yet.",
+                detail="Detection is not coverage.",
+                session_count=0,
+            ),
+        ]
+        with (
+            patch.object(cli, "scan_all", return_value=[]),
+            patch.object(cli, "surface_coverage", return_value=coverage),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_status(SimpleNamespace())
+
+        self.assertEqual(result, 0)
+        output = stdout.getvalue()
+        self.assertIn("Claude Code CLI", output)
+        self.assertIn("Automatic gate + history", output)
+        self.assertIn("Cline", output)
+        self.assertIn("Detected, not scanned", output)
+        self.assertNotIn("Watching:", output)
 
 
 class PromptSavingsBaselineTests(unittest.TestCase):
