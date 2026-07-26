@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
-from .cli import _loop_signal, _velocity_signal, analyze_prompt, session_insights, timeline_analysis
+from .cli import _loop_signal, _velocity_signal, analyze_prompt, session_insights, setup_checklist, timeline_analysis
 from .correlate import link_recent_interventions_to_sessions
 from .handoff import build_handoff_capsule
 from .local_state import (
@@ -1071,6 +1071,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
         "insights": insights,
         "notes": notes[:5],
         "coverage": [row.to_json() for row in surface_coverage(all_rows)],
+        "setup": setup_checklist(),
         "context_health": context_health,
         "recent_sessions": [
             {
@@ -1440,6 +1441,7 @@ HTML = r"""<!doctype html>
     <button class="nav-tab" data-view="receipts" onclick="showView('receipts')">Receipts</button>
     <button class="nav-tab" data-view="insights" onclick="showView('insights')">Insights</button>
     <button class="nav-tab" data-view="coverage" onclick="showView('coverage')">Coverage</button>
+    <button class="nav-tab" data-view="setup" onclick="showView('setup')">Setup</button>
   </nav>
 
   <section id="view-today" class="view">
@@ -1604,6 +1606,17 @@ HTML = r"""<!doctype html>
         <span class="pill">Verified locally</span>
       </div>
       <div id="coverageRows" class="coverage-grid"></div>
+    </div>
+  </section>
+
+  <section id="view-setup" class="view" hidden>
+    <div class="card">
+      <div class="section-title">
+        <div><h2>Setup Checklist</h2><p>Get to first value without overclaiming which surfaces are protected.</p></div>
+        <span class="pill">Local only</span>
+      </div>
+      <p class="receipt-note">For ambient warnings while you work, run <code>aiwatcher watch --notify --interval 60</code>.</p>
+      <div id="setupRows" class="coverage-grid"></div>
     </div>
   </section>
 </main>
@@ -1954,6 +1967,20 @@ function renderCoverage(rows) {
     </div>
   </div>`).join('');
 }
+function renderSetup(rows) {
+  if (!rows.length) return '<div class="empty">Setup checklist unavailable.</div>';
+  return rows.map((row, index) => `<div class="coverage-card">
+    <div class="coverage-head">
+      <h3>${index + 1}. ${esc(row.title)}</h3>
+      <span class="coverage-status ${esc(row.status)}">${esc(row.status)}</span>
+    </div>
+    <div class="coverage-detail">
+      <div>${esc(row.why)}</div>
+      <code>${esc(row.command)}</code>
+      <button class="btn-quiet" data-command="${esc(row.command)}" onclick="copyText(this.dataset.command, 'Command copied')">Copy command</button>
+    </div>
+  </div>`).join('');
+}
 function costliestShare(event, session) {
   const total = Number(session.api_value_usd || 0);
   const part = Number(event.api_value_usd || 0);
@@ -2202,6 +2229,7 @@ async function load(resetDetail = true) {
   document.getElementById('receiptRows').innerHTML = renderReceiptRows(receiptCache);
   document.getElementById('contextHealth').innerHTML = renderContextHealth(data.context_health || []);
   document.getElementById('coverageRows').innerHTML = renderCoverage(data.coverage || []);
+  document.getElementById('setupRows').innerHTML = renderSetup(data.setup || []);
   const latest = data.recent_sessions[0];
   document.getElementById('latestSession').innerHTML = latest
     ? `<div class="session-summary"><div class="session-title">${esc(latest.project)}</div>

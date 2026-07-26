@@ -1641,7 +1641,10 @@ def run_prompt_gate(
             }), "application/json; charset=utf-8")
             decision_event.set()
 
-    server = LocalThreadingHTTPServer(("127.0.0.1", 0), GateHandler)
+    try:
+        server = LocalThreadingHTTPServer(("127.0.0.1", 0), GateHandler)
+    except OSError:
+        return _fallback_prompt_gate(tool=tool, prompt=prompt, result=result)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     url = f"http://127.0.0.1:{server.server_port}/"
@@ -2087,6 +2090,77 @@ def command_start(_args: argparse.Namespace) -> int:
     return 0
 
 
+def setup_checklist() -> list[dict[str, str]]:
+    return [
+        {
+            "title": "Open the local dashboard",
+            "why": "Today shows recent work, outcomes, receipts, session health, and coverage.",
+            "command": "aiwatcher ui",
+            "status": "recommended",
+        },
+        {
+            "title": "Verify local history coverage",
+            "why": "Shows which tools are scanned automatically and which are companion-only.",
+            "command": "aiwatcher doctor",
+            "status": "recommended",
+        },
+        {
+            "title": "Install Claude prompt gate",
+            "why": "Adds prompt preflight in Claude Code hook surfaces that actually invoke UserPromptSubmit.",
+            "command": "aiwatcher install-claude-hook --write --scope user --gate",
+            "status": "optional",
+        },
+        {
+            "title": "Install Codex prompt gate",
+            "why": "Adds prompt preflight where your Codex build invokes UserPromptSubmit; verify with hook-status.",
+            "command": "aiwatcher install-codex-hook --write --scope user --gate",
+            "status": "optional",
+        },
+        {
+            "title": "Install Cursor prompt gate",
+            "why": "Pauses risky Cursor prompts with a resubmittable scoped brief.",
+            "command": "aiwatcher install-cursor-hook --write --scope user --gate",
+            "status": "optional",
+        },
+        {
+            "title": "Turn on ambient watch notifications",
+            "why": "While this command is running, AIWatcher can notify on context, loop, runway, or velocity pressure.",
+            "command": "aiwatcher watch --notify --interval 60",
+            "status": "recommended",
+        },
+        {
+            "title": "Prove hook invocation",
+            "why": "hook-status is the source of truth; session logs alone do not prove a prompt was intercepted.",
+            "command": "aiwatcher hook-status",
+            "status": "recommended",
+        },
+        {
+            "title": "Try one safe test prompt",
+            "why": "Confirms the gate behavior before relying on it during real work.",
+            "command": 'aiwatcher preflight "Refactor the entire codebase and delete old auth secrets" --tool claude',
+            "status": "recommended",
+        },
+    ]
+
+
+def command_setup(_args: argparse.Namespace) -> int:
+    sessions = scan_all()
+    print("AIWatcher Local setup")
+    print("Private, local-first control loop. No prompt, source, or telemetry upload by default.\n")
+    print("Surface coverage")
+    for row in surface_coverage(sessions):
+        marker = "[OK]" if row.status == "automatic" else "[..]" if row.status in {"limited", "companion", "unverified"} else "[--]"
+        print(f"  {marker} {row.label:26} {row.status_label}")
+    print("\nFirst-value checklist")
+    for index, step in enumerate(setup_checklist(), 1):
+        print(f"{index}. {step['title']} ({step['status']})")
+        print(f"   {step['why']}")
+        print(f"   $ {step['command']}")
+    print("\nAfter installing hooks, run `aiwatcher hook-status` from the same AI surface you tested.")
+    print("For Desktop/chat surfaces without hooks, use the dashboard Prompt tab or MCP/companion fallback.")
+    return 0
+
+
 def command_status(_args: argparse.Namespace) -> int:
     sessions = scan_all()
     print("AIWatcher Local status\n")
@@ -2436,6 +2510,53 @@ def _copy_to_clipboard(text: str) -> tuple[bool, str]:
     return False, "no clipboard command found"
 
 
+def _send_local_notification(title: str, body: str) -> tuple[bool, str]:
+    """Best-effort local OS notification with no network dependency."""
+    if os.environ.get("AIWATCHER_DISABLE_NOTIFICATIONS", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False, "disabled by AIWATCHER_DISABLE_NOTIFICATIONS"
+    clean_title = title.replace("\n", " ").strip()[:80]
+    clean_body = body.replace("\n", " ").strip()[:220]
+    try:
+        if sys.platform == "darwin" and shutil.which("terminal-notifier"):
+            subprocess.run(
+                ["terminal-notifier", "-title", clean_title, "-message", clean_body],
+                check=True,
+                timeout=3,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True, "terminal-notifier"
+        if sys.platform == "darwin" and shutil.which("osascript"):
+            script = (
+                f"display notification {json.dumps(clean_body)} "
+                f"with title {json.dumps(clean_title)}"
+            )
+            subprocess.run(
+                ["osascript", "-l", "AppleScript", "-e", script],
+                check=True,
+                timeout=3,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True, "osascript"
+        if shutil.which("notify-send"):
+            subprocess.run(
+                ["notify-send", clean_title, clean_body],
+                check=True,
+                timeout=3,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True, "notify-send"
+    except subprocess.CalledProcessError:
+        return False, "notifier command failed"
+    except subprocess.TimeoutExpired:
+        return False, "notifier command timed out"
+    except OSError as exc:
+        return False, str(exc)
+    return False, "local notifications unsupported on this platform"
+
+
 def command_last(args: argparse.Namespace) -> int:
     rows = sessions_since(args.days)
     if args.session_id:
@@ -2744,6 +2865,7 @@ def _print_watch_status_card(
     args: argparse.Namespace,
     events: Sequence[LocalEvent],
     critical_capsule_seen: dict[str, datetime],
+    notification_seen: dict[str, datetime] | None = None,
 ) -> None:
     status = _watch_status(
         session,
@@ -2789,6 +2911,19 @@ def _print_watch_status_card(
             "-- local estimate, not a real-time quota API"
         )
     print(f"  Recommended: {status['action']} -- {status['reason']}")
+
+    if getattr(args, "notify", False) and status["action"] != "continue":
+        key = f"{session.session_id}:{status['action']}"
+        if notification_seen is not None and notification_seen.get(key) == stamp:
+            print("  Notification: already sent for this session state")
+        else:
+            if notification_seen is not None:
+                notification_seen[key] = stamp
+            ok, detail = _send_local_notification(
+                f"AIWatcher: {status['action']}",
+                f"{short_path(session.project_path)} - {status['reason']}",
+            )
+            print(f"  Notification: {'sent' if ok else 'not sent'} ({detail})")
 
     if status["action"] == "create handoff capsule now":
         # De-duped per session_id+stamp so a session sitting at CRITICAL (or in a
@@ -2838,6 +2973,7 @@ def command_watch(args: argparse.Namespace) -> int:
 
     seen: dict[str, datetime] = {}
     critical_capsule_seen: dict[str, datetime] = {}
+    notification_seen: dict[str, datetime] = {}
     try:
         while True:
             rows = sorted(sessions_since(args.days), key=session_sort_key, reverse=True)
@@ -2848,7 +2984,12 @@ def command_watch(args: argparse.Namespace) -> int:
             else:
                 all_events = events_by_session(rows, days=args.days)
                 _print_watch_status_card(
-                    rows[0], rows, args, all_events.get(rows[0].session_id, []), critical_capsule_seen,
+                    rows[0],
+                    rows,
+                    args,
+                    all_events.get(rows[0].session_id, []),
+                    critical_capsule_seen,
+                    notification_seen,
                 )
 
                 interesting: list[LocalSession] = []
@@ -3269,6 +3410,64 @@ def _record_hook_event(
         pass
 
 
+def _low_risk_hook_result(tool: str, finding: str, suggestion: str = "Allowing without a prompt gate.") -> dict[str, object]:
+    return {
+        "risk": "low",
+        "score": 0,
+        "tool": tool,
+        "findings": [finding],
+        "suggestions": [suggestion],
+        "suggested_prompt": "",
+        "estimated_impact": {},
+    }
+
+
+def _classify_hook_prompt_source(prompt: str | None) -> dict[str, object]:
+    """Classify hook text before scoring it as a user prompt.
+
+    Some hosts send lifecycle messages, task notifications, or AIWatcher's own
+    continuation briefs through UserPromptSubmit-shaped payloads. Those are
+    useful provenance, but gating them as if the developer typed them creates
+    confusing false positives and can recursively wrap our own safer brief.
+    """
+    text = (prompt or "").strip()
+    if not text:
+        return {
+            "source": "missing",
+            "actionable": False,
+            "event": "prompt_missing",
+            "finding": "No prompt text found in hook payload.",
+            "suggestion": "Allowing prompt because AIWatcher could not inspect it.",
+        }
+    head = text[:4000].lower()
+    if (
+        "<task-notification>" in head
+        or ("<task-id>" in head and "<tool-use-id>" in head)
+        or ("<output-file>" in head and "</output-file>" in head and "<status>" in head)
+    ):
+        return {
+            "source": "host_task_notification",
+            "actionable": False,
+            "event": "skipped_internal",
+            "finding": "Hook payload looks like a host-generated task notification, not a direct user prompt.",
+            "suggestion": "Allowing the host notification; AIWatcher will continue watching the resulting session metadata.",
+        }
+    if (
+        text.startswith("AIWatcher handoff capsule")
+        or text.startswith("AIWatcher continuation brief")
+        or (text.startswith("Task\n") and "Execution approach" in text and "Completion report" in text)
+        or ("AIWatcher added a scoped execution brief" in text[:1200])
+    ):
+        return {
+            "source": "aiwatcher_generated_brief",
+            "actionable": False,
+            "event": "skipped_generated_brief",
+            "finding": "Hook payload is an AIWatcher-generated brief that has already been scoped.",
+            "suggestion": "Allowing the scoped brief without opening another prompt gate.",
+        }
+    return {"source": "direct_user_prompt", "actionable": True, "event": "received"}
+
+
 def _hook_output_with_brief(tool: str, selected_prompt: str) -> dict[str, object]:
     return {
         "systemMessage": "AIWatcher added a scoped execution brief alongside the submitted request.",
@@ -3395,19 +3594,24 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
     prompt = args.text or _extract_prompt_from_hook(payload)
     cwd = str(payload.get("cwd") or payload.get("workspace") or os.getcwd())
     session_id = _extract_session_meta(payload)["session_id"]
-    result = analyze_prompt(prompt, tool=tool, cwd=cwd) if prompt else {
-        "risk": "low",
-        "score": 0,
-        "tool": tool,
-        "findings": ["No prompt text found in hook payload."],
-        "suggestions": ["Allowing prompt because AIWatcher could not inspect it."],
-        "suggested_prompt": "",
-        "estimated_impact": {},
-    }
+    source = _classify_hook_prompt_source(prompt)
+    if not source["actionable"]:
+        result = _low_risk_hook_result(tool, str(source["finding"]), str(source["suggestion"]))
+        _record_hook_event(
+            tool=tool,
+            cwd=cwd,
+            event=str(source["event"]),
+            prompt_found=bool(prompt),
+            result=result,
+            session_id=session_id,
+        )
+        print("{}")
+        return 0
+    result = analyze_prompt(prompt, tool=tool, cwd=cwd)
     _record_hook_event(
         tool=tool,
         cwd=cwd,
-        event="received",
+        event=str(source["event"]),
         prompt_found=bool(prompt),
         result=result,
         session_id=session_id,
@@ -3560,17 +3764,22 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
     workspace = workspace_roots[0] if isinstance(workspace_roots, list) and workspace_roots else None
     cwd = str(payload.get("cwd") or payload.get("workspace") or workspace or os.getcwd())
     session_id = _extract_session_meta(payload)["session_id"]
-    result = analyze_prompt(prompt, tool="cursor", cwd=cwd) if prompt else {
-        "risk": "low",
-        "score": 0,
-        "tool": "cursor",
-        "findings": ["No prompt text found in hook payload."],
-        "suggestions": ["Allowing prompt because AIWatcher could not inspect it."],
-        "suggested_prompt": "",
-        "estimated_impact": {},
-    }
+    source = _classify_hook_prompt_source(prompt)
+    if not source["actionable"]:
+        result = _low_risk_hook_result("cursor", str(source["finding"]), str(source["suggestion"]))
+        _record_hook_event(
+            tool="cursor",
+            cwd=cwd,
+            event=str(source["event"]),
+            prompt_found=bool(prompt),
+            result=result,
+            session_id=session_id,
+        )
+        print(json.dumps(_cursor_hook_response(allow=True)))
+        return 0
+    result = analyze_prompt(prompt, tool="cursor", cwd=cwd)
     _record_hook_event(
-        tool="cursor", cwd=cwd, event="received", prompt_found=bool(prompt), result=result, session_id=session_id
+        tool="cursor", cwd=cwd, event=str(source["event"]), prompt_found=bool(prompt), result=result, session_id=session_id
     )
     if result["risk"] == "low":
         print(json.dumps(_cursor_hook_response(allow=True)))
@@ -4736,6 +4945,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("start", help="Detect local AI coding tools and run a one-time local scan").set_defaults(func=command_start)
+    sub.add_parser("setup", help="Show first-run setup, hook, coverage, and ambient watch steps").set_defaults(func=command_setup)
     sub.add_parser("status", help="Show detected tools and local AIWatcher status").set_defaults(func=command_status)
     sub.add_parser("today", help="Show today's local AI usage").set_defaults(func=command_today)
 
@@ -4846,6 +5056,11 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument("--cost-threshold", type=float, default=5.0)
     watch.add_argument("--calls-threshold", type=int, default=250)
     watch.add_argument("--tokens-threshold", type=int, default=500_000)
+    watch.add_argument(
+        "--notify",
+        action="store_true",
+        help="Send a best-effort local OS notification when watch recommends action",
+    )
     watch.add_argument(
         "--target", choices=sorted(TARGET_LABELS), default="generic",
         help="Format the auto-generated CRITICAL-context handoff capsule for this AI tool",

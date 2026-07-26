@@ -842,6 +842,35 @@ class PromptPreflightTests(unittest.TestCase):
             self.assertIn("Capsule already generated", second_output.getvalue())
             self.assertIn(f"--target {args.target}", second_output.getvalue())
 
+    def test_watch_notify_sends_one_local_notification_per_session_state(self) -> None:
+        row = session(1, project="/repo/orcha")
+        row.agent_calls = 300
+        args = SimpleNamespace(
+            days=1,
+            interval=15,
+            once=True,
+            cost_threshold=5.0,
+            calls_threshold=250,
+            tokens_threshold=500_000,
+            target="generic",
+            notify=True,
+        )
+        notification_seen: dict = {}
+        output = io.StringIO()
+
+        with (
+            patch.object(cli, "get_baselines", return_value={}),
+            patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
+            patch("sys.stdout", output),
+        ):
+            cli._print_watch_status_card(row, [row], args, [], {}, notification_seen)
+            cli._print_watch_status_card(row, [row], args, [], {}, notification_seen)
+
+        notify.assert_called_once()
+        rendered = output.getvalue()
+        self.assertIn("Notification: sent", rendered)
+        self.assertIn("Notification: already sent", rendered)
+
     def test_watch_healthy_session_recommends_continue(self) -> None:
         row = session(1)
         args = SimpleNamespace(days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000, target="generic")
@@ -1689,6 +1718,13 @@ class HeadlessPromptGateTests(unittest.TestCase):
             self.assertTrue(cli._display_available())
 
     def test_run_prompt_gate_still_uses_browser_when_display_available(self) -> None:
+        probe = socket.socket()
+        try:
+            probe.bind(("127.0.0.1", 0))
+        except PermissionError:
+            self.skipTest("loopback sockets are unavailable in this test sandbox")
+        finally:
+            probe.close()
         with (
             patch.object(cli, "_display_available", return_value=True),
             patch.object(cli, "webbrowser") as webbrowser_mock,
@@ -2243,6 +2279,51 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertIn("session_id", logged)
         self.assertNotIn("delete the secret file", logged)
         self.assertNotIn("sess-secret", logged)
+
+    def test_claude_hook_skips_host_task_notification_without_gate(self) -> None:
+        task_notification = """<task-notification>
+<task-id>abc123</task-id>
+<tool-use-id>toolu_123</tool-use-id>
+<output-file>/tmp/claude-task.output</output-file>
+<status>completed</status>
+<summary>Agent finished</summary>
+</task-notification>"""
+        payload = json.dumps({"prompt": task_notification, "cwd": "/repo", "session_id": "sess-task"})
+        args = SimpleNamespace(text=None, gate=True)
+        with (
+            patch.object(cli, "_read_stdin_text", return_value=payload),
+            patch.object(cli, "run_prompt_gate") as gate_mock,
+            patch.object(cli, "record_intervention") as record,
+            patch.object(cli, "record_hook_event") as hook_event,
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_claude_hook(args)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(json.loads(stdout.getvalue()), {})
+        gate_mock.assert_not_called()
+        record.assert_not_called()
+        self.assertEqual(hook_event.call_args.kwargs["event"], "skipped_internal")
+        self.assertEqual(hook_event.call_args.kwargs["session_id"], "sess-task")
+
+    def test_cursor_hook_skips_aiwatcher_generated_brief_without_blocking(self) -> None:
+        generated = "AIWatcher handoff capsule\nPaste this as the first prompt in a fresh AI coding session."
+        payload = json.dumps({"prompt": generated, "workspace_roots": ["/repo"]})
+        args = SimpleNamespace(text=None, gate=True)
+        with (
+            patch.object(cli, "_read_stdin_text", return_value=payload),
+            patch.object(cli, "run_prompt_gate") as gate_mock,
+            patch.object(cli, "record_intervention") as record,
+            patch.object(cli, "record_hook_event") as hook_event,
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_cursor_hook(args)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(json.loads(stdout.getvalue()), {"continue": True})
+        gate_mock.assert_not_called()
+        record.assert_not_called()
+        self.assertEqual(hook_event.call_args.kwargs["event"], "skipped_generated_brief")
 
     def test_codex_hook_medium_risk_uses_gate_when_requested(self) -> None:
         payload = json.dumps({"prompt": "Refactor the entire codebase", "cwd": "/repo"})
