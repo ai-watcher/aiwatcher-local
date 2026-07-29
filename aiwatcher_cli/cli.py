@@ -31,6 +31,7 @@ from .correlate import link_recent_interventions_to_sessions
 from .local_state import (
     COMMAND_GATE_BLOCKED_DECISIONS,
     VALID_OUTCOMES,
+    command_hash,
     consume_brief_token,
     evidence_snapshots_for_sessions,
     get_baselines,
@@ -55,6 +56,7 @@ from .local_state import (
     record_survival_check,
     record_watch_notification,
     recent_watch_notifications,
+    redact_command_for_storage,
     save_baselines,
     state_path,
 )
@@ -4039,9 +4041,10 @@ def command_claude_pretooluse_hook(args: argparse.Namespace) -> int:
         pass
 
     if decision in COMMAND_GATE_BLOCKED_DECISIONS:
+        command_preview, _ = redact_command_for_storage(match["command"])
         print(json.dumps(_command_gate_permission_output(
             "deny",
-            f"AIWatcher blocked this command ({decision}): {match['reason']} Command: {match['command']}",
+            f"AIWatcher blocked this command ({decision}): {match['reason']} Command preview: {command_preview}",
         )))
         return 0
 

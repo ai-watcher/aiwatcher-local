@@ -2718,7 +2718,7 @@ class CommandGateHookTests(unittest.TestCase):
         self.assertEqual(stdout.getvalue().strip(), "{}")
         gate_mock.assert_not_called()
 
-    def test_blocked_decision_denies_and_records_real_command_text(self) -> None:
+    def test_blocked_decision_denies_and_records_command_preview_and_hash(self) -> None:
         payload = json.dumps({
             "tool_name": "Bash",
             "tool_input": {"command": "rm -rf /tmp/build"},
@@ -2743,11 +2743,42 @@ class CommandGateHookTests(unittest.TestCase):
             with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
                 decisions = cli.recent_command_decisions(limit=5)
             self.assertEqual(len(decisions), 1)
-            # The scenario spec explicitly requires the full real command text,
-            # unlike prompts (which are hashed) -- confirm it is NOT hashed.
             self.assertEqual(decisions[0]["command"], "rm -rf /tmp/build")
+            self.assertEqual(decisions[0]["command_hash"], cli.command_hash("rm -rf /tmp/build"))
+            self.assertFalse(decisions[0]["command_redacted"])
             self.assertEqual(decisions[0]["decision"], "block")
             self.assertEqual(decisions[0]["session_id"], "s1")
+
+    def test_blocked_decision_redacts_secret_command_in_state_and_hook_reason(self) -> None:
+        command = "psql postgres://user:pw@prod-db.example.com/app"
+        payload = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "session_id": "s1",
+            "cwd": "/repo",
+        })
+        args = SimpleNamespace(text=None, gate=False)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.object(cli, "_read_stdin_text", return_value=payload),
+                patch.object(cli, "run_command_gate", return_value="block"),
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                result = cli.command_claude_pretooluse_hook(args)
+            self.assertEqual(result, 0)
+            output = json.loads(stdout.getvalue())
+            reason = output["hookSpecificOutput"]["permissionDecisionReason"]
+            self.assertIn("postgres://[redacted]@prod-db.example.com/app", reason)
+            self.assertNotIn("user:pw", reason)
+
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                decisions = cli.recent_command_decisions(limit=5)
+            self.assertEqual(decisions[0]["command"], "psql postgres://[redacted]@prod-db.example.com/app")
+            self.assertEqual(decisions[0]["command_hash"], cli.command_hash(command))
+            self.assertTrue(decisions[0]["command_redacted"])
+            self.assertNotIn("user:pw", decisions[0]["command"])
 
     def test_allow_once_permits_without_persisting_always_allow(self) -> None:
         payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git reset --hard"}, "session_id": "s1"})
