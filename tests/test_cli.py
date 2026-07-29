@@ -871,6 +871,137 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertIn("Notification: sent", rendered)
         self.assertIn("Notification: already sent", rendered)
 
+    def test_watch_notify_passes_dashboard_deep_link_url(self) -> None:
+        """Issue #31 (S-32): the notification should carry a deep link back
+        into the local dashboard's session review, not just plain text."""
+        row = session(1, project="/repo/orcha")
+        row.agent_calls = 300
+        args = SimpleNamespace(
+            days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250,
+            tokens_threshold=500_000, target="generic", notify=True,
+        )
+        output = io.StringIO()
+
+        with (
+            patch.object(cli, "get_baselines", return_value={}),
+            patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
+            patch("sys.stdout", output),
+        ):
+            cli._print_watch_status_card(row, [row], args, [], {}, {})
+
+        notify.assert_called_once()
+        _, kwargs = notify.call_args
+        expected_url = f"http://127.0.0.1:{cli.DEFAULT_UI_PORT}/?session={row.session_id}"
+        self.assertEqual(kwargs.get("url"), expected_url)
+        body = notify.call_args.args[1]
+        self.assertIn(expected_url, body)
+
+    def test_watch_notify_deep_link_follows_actual_running_dashboard_port(self) -> None:
+        """Regression guard: found while manually testing issue #31 -- `aiwatcher
+        ui` had fallen back off its default port (8765 was busy), so a
+        notification hardcoded to that default 404ed. The deep link must
+        follow wherever the dashboard actually bound."""
+        row = session(1, project="/repo/orcha")
+        row.agent_calls = 300
+        args = SimpleNamespace(
+            days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250,
+            tokens_threshold=500_000, target="generic", notify=True,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_ui_server("127.0.0.1", 8799)
+            output = io.StringIO()
+            with (
+                patch.object(cli, "get_baselines", return_value={}),
+                patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch("sys.stdout", output),
+            ):
+                cli._print_watch_status_card(row, [row], args, [], {}, {})
+
+        _, kwargs = notify.call_args
+        self.assertEqual(kwargs.get("url"), f"http://127.0.0.1:8799/?session={row.session_id}")
+
+    def test_watch_notify_records_notification_locally(self) -> None:
+        """Issue #31 (S-32): notification firings must survive the watch
+        process exiting, not just live in the in-memory dedup dict."""
+        row = session(1, project="/repo/orcha")
+        row.agent_calls = 300
+        args = SimpleNamespace(
+            days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250,
+            tokens_threshold=500_000, target="generic", notify=True,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.object(cli, "get_baselines", return_value={}),
+                patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")),
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch("sys.stdout", io.StringIO()),
+            ):
+                cli._print_watch_status_card(row, [row], args, [], {}, {})
+                rows = local_state.recent_watch_notifications(limit=5)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["session_id"], row.session_id)
+        self.assertTrue(rows[0]["sent"])
+        self.assertEqual(rows[0]["detail"], "test-notifier")
+        self.assertIn(f"session={row.session_id}", rows[0]["url"])
+
+    def test_send_local_notification_terminal_notifier_opens_url_on_click(self) -> None:
+        """Issue #31 (S-32): on macOS, terminal-notifier's `-open` flag makes
+        clicking the notification itself open the dashboard deep link --
+        unverified end-to-end since this was written without a real macOS
+        desktop session, but `-open` is a documented terminal-notifier flag."""
+        with (
+            patch.object(cli.sys, "platform", "darwin"),
+            patch.object(cli.shutil, "which", side_effect=lambda name: "/usr/local/bin/terminal-notifier" if name == "terminal-notifier" else None),
+            patch.object(cli.subprocess, "run") as run_mock,
+        ):
+            ok, detail = cli._send_local_notification(
+                "Context pressure", "Session is at 92% context", url="http://127.0.0.1:8765/?session=abc",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "terminal-notifier")
+        command = run_mock.call_args.args[0]
+        self.assertIn("-open", command)
+        self.assertIn("http://127.0.0.1:8765/?session=abc", command)
+
+    def test_send_local_notification_terminal_notifier_omits_open_without_url(self) -> None:
+        with (
+            patch.object(cli.sys, "platform", "darwin"),
+            patch.object(cli.shutil, "which", side_effect=lambda name: "/usr/local/bin/terminal-notifier" if name == "terminal-notifier" else None),
+            patch.object(cli.subprocess, "run") as run_mock,
+        ):
+            cli._send_local_notification("Context pressure", "Session is at 92% context")
+
+        command = run_mock.call_args.args[0]
+        self.assertNotIn("-open", command)
+
+    def test_send_local_notification_powershell_messagebox_offers_yesno_when_url_given(self) -> None:
+        """Issue #31 (S-32): with a dashboard URL available, the Windows
+        fallback should offer a Yes/No choice so clicking Yes opens it --
+        unverified against a real interactive Windows desktop session (a
+        MessageBox can't be dismissed non-interactively to observe the
+        click), but the generated script was confirmed to parse cleanly."""
+        with (
+            patch.object(cli.sys, "platform", "win32"),
+            patch.object(cli.shutil, "which", side_effect=lambda name: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" if name == "powershell" else None),
+            patch.object(cli.subprocess, "Popen") as popen_mock,
+        ):
+            ok, detail = cli._send_local_notification(
+                "Context pressure", "Session is at 92% context", url="http://127.0.0.1:8765/?session=abc",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "powershell-messagebox")
+        script = popen_mock.call_args.args[0][-1]
+        self.assertIn("MessageBoxButtons]::YesNo", script)
+        self.assertIn("Start-Process 'http://127.0.0.1:8765/?session=abc'", script)
+        self.assertIn("DialogResult]::Yes", script)
+
     def test_send_local_notification_uses_msg_exe_on_windows(self) -> None:
         """P1 fix: --notify previously had no Windows branch at all and
         silently returned unsupported on every win32 call, despite the

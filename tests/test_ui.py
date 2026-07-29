@@ -14,6 +14,23 @@ from aiwatcher_cli.local_state import record_command_decision, record_interventi
 from aiwatcher_cli.scanner import LocalEvent, LocalSession, SurfaceCoverage
 
 
+class DashboardServeTests(unittest.TestCase):
+    def test_serve_records_the_actually_bound_port(self) -> None:
+        """Issue #31 (S-32): `watch --notify`'s dashboard deep link has to
+        know where the dashboard actually landed after auto-port fallback,
+        not just assume the requested default -- regression found by
+        manually testing this feature against a real fallback port."""
+        with (
+            patch.object(ui, "find_available_port", return_value=8799),
+            patch.object(ui, "ThreadingHTTPServer") as server_cls,
+            patch.object(ui, "record_ui_server") as record_mock,
+        ):
+            server_cls.return_value.serve_forever.side_effect = KeyboardInterrupt
+            ui.serve(host="127.0.0.1", port=8765, auto_port=True)
+
+        record_mock.assert_called_once_with("127.0.0.1", 8799)
+
+
 class DashboardWindowTests(unittest.TestCase):
     def test_dashboard_script_is_valid_javascript(self) -> None:
         # A single unquoted/malformed token anywhere in this one large inline

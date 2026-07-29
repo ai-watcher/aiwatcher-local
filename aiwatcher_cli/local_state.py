@@ -164,6 +164,8 @@ def _empty_state() -> dict[str, Any]:
         "command_decisions": [],
         "command_gate_allowlist": [],
         "brief_tokens": [],
+        "watch_notifications": [],
+        "ui_server": None,
     }
 
 
@@ -223,6 +225,8 @@ def _load() -> dict[str, Any]:
     data.setdefault("command_decisions", [])
     data.setdefault("command_gate_allowlist", [])
     data.setdefault("brief_tokens", [])
+    data.setdefault("watch_notifications", [])
+    data.setdefault("ui_server", None)
     return data
 
 
@@ -427,6 +431,78 @@ def recent_hook_events(limit: int = 10) -> list[dict[str, Any]]:
     with _locked_state():
         data = _load()
     rows = [row for row in data["hook_events"] if isinstance(row, dict)]
+    return list(reversed(rows[-max(1, limit):]))
+
+
+def record_watch_notification(
+    *,
+    session_id: str,
+    tool: str,
+    action: str,
+    reason: str,
+    sent: bool,
+    detail: str,
+    url: str | None = None,
+) -> None:
+    """Record an ambient `watch --notify` firing so it survives the watch process exiting.
+
+    Issue #31 (S-32, Ambient Watch delivery) requires notification/intervention
+    metadata to be recorded locally, not just deduped in the watch loop's
+    in-memory state.
+    """
+    with _locked_state():
+        data = _load()
+        data["watch_notifications"].append({
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "session_id": session_id,
+            "tool": tool,
+            "action": action,
+            "reason": reason,
+            "sent": sent,
+            "detail": detail,
+            "url": url,
+        })
+        data["watch_notifications"] = data["watch_notifications"][-50:]
+        _save(data)
+
+
+def record_ui_server(host: str, port: int) -> None:
+    """Remember where the local dashboard last actually bound.
+
+    `aiwatcher ui` falls back to the next free port when its default is
+    taken, so a notification built in a separate `watch` process can't just
+    assume the default port -- it has to look this up instead.
+    """
+    try:
+        with _locked_state():
+            data = _load()
+            data["ui_server"] = {
+                "host": host,
+                "port": port,
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            }
+            _save(data)
+    except OSError:
+        pass
+
+
+def get_ui_server() -> dict[str, Any] | None:
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return None
+    server = data.get("ui_server")
+    return server if isinstance(server, dict) and server.get("port") else None
+
+
+def recent_watch_notifications(limit: int = 10) -> list[dict[str, Any]]:
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return []
+    rows = [row for row in data["watch_notifications"] if isinstance(row, dict)]
     return list(reversed(rows[-max(1, limit):]))
 
 

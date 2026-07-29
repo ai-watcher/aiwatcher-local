@@ -28,6 +28,7 @@ from .local_state import (
     recent_interventions,
     record_evidence_snapshot,
     record_outcome,
+    record_ui_server,
 )
 from .outcome_evidence import build_outcome_evidence, evidence_for_sessions
 from .pricing import is_subscription_model
@@ -2278,7 +2279,13 @@ async function load(resetDetail = true) {
   if (resetDetail && document.getElementById('detailDrawer').classList.contains('open')) closeDrawer();
 }
 document.addEventListener('keydown', event => { if (event.key === 'Escape') closeDrawer(); });
-load();
+(async () => {
+  await load();
+  // Deep link from `aiwatcher watch --notify` (issue #31): ?session=<id>
+  // opens straight to that session's review instead of the overview.
+  const deepLinkSession = new URLSearchParams(location.search).get('session');
+  if (deepLinkSession) selectSession(deepLinkSession);
+})();
 </script>
 </body>
 </html>
@@ -2600,6 +2607,7 @@ def serve(
             print(f"Port {port} is busy. Using {selected_port} instead.")
 
     server = ThreadingHTTPServer((host, selected_port), UIHandler)
+    record_ui_server(host, selected_port)
     print(f"AIWatcher Local UI running at http://{host}:{selected_port}")
     print("Local-only. No data leaves this machine. Press Ctrl+C to stop.")
     try:

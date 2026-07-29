@@ -25,6 +25,7 @@ import webbrowser
 from collections import Counter, defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Callable, Iterable, Sequence
+from urllib.parse import quote
 
 from .correlate import link_recent_interventions_to_sessions
 from .local_state import (
@@ -34,6 +35,7 @@ from .local_state import (
     evidence_snapshots_for_sessions,
     get_baselines,
     get_outcome,
+    get_ui_server,
     is_command_pattern_always_allowed,
     issue_brief_token,
     link_intervention_session,
@@ -49,6 +51,8 @@ from .local_state import (
     record_hook_event,
     record_outcome,
     record_survival_check,
+    record_watch_notification,
+    recent_watch_notifications,
     save_baselines,
     state_path,
 )
@@ -85,6 +89,7 @@ from .session_health import analyze_session_health
 
 
 CLOUD_URL = "https://www.getaiwatcher.com"
+DEFAULT_UI_PORT = 8765
 MIN_DT = datetime.min.replace(tzinfo=timezone.utc)
 DEFAULT_DAILY_BUDGET_USD = 10.0
 DEFAULT_MONTHLY_BUDGET_USD = 100.0
@@ -2573,16 +2578,33 @@ def _powershell_single_quoted(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def _send_local_notification(title: str, body: str) -> tuple[bool, str]:
-    """Best-effort local OS notification with no network dependency."""
+def _send_local_notification(title: str, body: str, *, url: str | None = None) -> tuple[bool, str]:
+    """Best-effort local OS notification with no network dependency.
+
+    `url` is an optional local dashboard deep link. Where the platform's
+    notifier supports a real click-through action (macOS terminal-notifier,
+    Windows MessageBox buttons) it is wired up; elsewhere the caller is
+    expected to have already put the URL in `body` as plain text, since the
+    only other option is no link at all.
+
+    Caution: the click-through paths (terminal-notifier `-open`, and the
+    PowerShell MessageBox Yes/No branch below) could not be exercised on a
+    real macOS or interactive Windows desktop session while writing this --
+    they follow documented flag/API behavior but are unverified end-to-end.
+    """
     if os.environ.get("AIWATCHER_DISABLE_NOTIFICATIONS", "").strip().lower() in {"1", "true", "yes", "on"}:
         return False, "disabled by AIWATCHER_DISABLE_NOTIFICATIONS"
     clean_title = title.replace("\n", " ").strip()[:80]
     clean_body = body.replace("\n", " ").strip()[:220]
     try:
         if sys.platform == "darwin" and shutil.which("terminal-notifier"):
+            cmd = ["terminal-notifier", "-title", clean_title, "-message", clean_body]
+            if url:
+                # terminal-notifier opens this URL when the user clicks the
+                # notification itself -- no dispatcher/action-menu needed.
+                cmd += ["-open", url]
             subprocess.run(
-                ["terminal-notifier", "-title", clean_title, "-message", clean_body],
+                cmd,
                 check=True,
                 timeout=3,
                 stdout=subprocess.DEVNULL,
@@ -2640,11 +2662,26 @@ def _send_local_notification(title: str, body: str) -> tuple[bool, str]:
             # silently close -- the dialog out from under the user the
             # instant the timeout elapsed. Popen (fire-and-forget, no wait)
             # lets it linger naturally instead.
-            script = (
-                "Add-Type -AssemblyName System.Windows.Forms; "
-                f"[System.Windows.Forms.MessageBox]::Show({_powershell_single_quoted(clean_body)}, "
-                f"{_powershell_single_quoted(clean_title)}) | Out-Null"
-            )
+            if url:
+                # Give the dialog a Yes/No choice instead of a bare OK so
+                # clicking through can open the dashboard deep link -- the
+                # whole Start-Process call runs inside this already-detached
+                # PowerShell process, so no callback into Python is needed.
+                dialog_body = f"{clean_body}\n\n(Yes = open in AIWatcher dashboard)"
+                script = (
+                    "Add-Type -AssemblyName System.Windows.Forms; "
+                    f"$result = [System.Windows.Forms.MessageBox]::Show({_powershell_single_quoted(dialog_body)}, "
+                    f"{_powershell_single_quoted(clean_title)}, "
+                    "[System.Windows.Forms.MessageBoxButtons]::YesNo, "
+                    "[System.Windows.Forms.MessageBoxIcon]::Information); "
+                    f"if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {{ Start-Process {_powershell_single_quoted(url)} }}"
+                )
+            else:
+                script = (
+                    "Add-Type -AssemblyName System.Windows.Forms; "
+                    f"[System.Windows.Forms.MessageBox]::Show({_powershell_single_quoted(clean_body)}, "
+                    f"{_powershell_single_quoted(clean_title)}) | Out-Null"
+                )
             subprocess.Popen(
                 ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script],
                 stdin=subprocess.DEVNULL,
@@ -3023,11 +3060,37 @@ def _print_watch_status_card(
         else:
             if notification_seen is not None:
                 notification_seen[key] = stamp
+            # `aiwatcher ui` falls back to the next free port when its default
+            # is busy (this is the actual reason the link 404ed while testing
+            # this feature: the dashboard had fallen back off DEFAULT_UI_PORT).
+            # Prefer wherever it last actually bound; only guess the default
+            # if no dashboard has been recorded as having run yet.
+            ui_server = get_ui_server()
+            ui_host = ui_server["host"] if ui_server else "127.0.0.1"
+            if ui_host in ("0.0.0.0", "::", ""):
+                # Not browsable as-is; 127.0.0.1 always reaches a server
+                # bound to all interfaces on the same machine.
+                ui_host = "127.0.0.1"
+            ui_port = ui_server["port"] if ui_server else DEFAULT_UI_PORT
+            dashboard_url = f"http://{ui_host}:{ui_port}/?session={quote(session.session_id, safe='')}"
             ok, detail = _send_local_notification(
                 f"AIWatcher: {status['action']}",
-                f"{short_path(session.project_path)} - {status['reason']}",
+                f"{short_path(session.project_path)} - {status['reason']} - Review: {dashboard_url}",
+                url=dashboard_url,
             )
             print(f"  Notification: {'sent' if ok else 'not sent'} ({detail})")
+            try:
+                record_watch_notification(
+                    session_id=session.session_id,
+                    tool=session.tool,
+                    action=str(status["action"]),
+                    reason=str(status["reason"]),
+                    sent=ok,
+                    detail=detail,
+                    url=dashboard_url,
+                )
+            except OSError:
+                pass
 
     if status["action"] == "create handoff capsule now":
         # De-duped per session_id+stamp so a session sitting at CRITICAL (or in a
@@ -4809,6 +4872,18 @@ def command_hook_status(_args: argparse.Namespace) -> int:
             if row.get("session_id"):
                 line += f" | session {row['session_id']}"
             print(line)
+    watch_notifications = recent_watch_notifications(limit=5)
+    if watch_notifications:
+        print("\nRecent ambient watch notifications (`aiwatcher watch --notify`)")
+        for row in watch_notifications:
+            sent_label = "sent" if row.get("sent") else "not sent"
+            line = (
+                f"- {row.get('created_at', 'unknown')} | {row.get('tool', 'unknown')} | "
+                f"{row.get('action', 'unknown')} | {sent_label} ({row.get('detail', 'unknown')})"
+            )
+            if row.get("session_id"):
+                line += f" | session {row['session_id']}"
+            print(line)
     print("\nIf an event appears but the tool did not pause, inspect its risk and decision. If no event appears, reload the tool and verify its hook configuration.")
     return 0
 
@@ -5313,7 +5388,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ui = sub.add_parser("ui", help="Run the local-only AIWatcher dashboard")
     ui.add_argument("--host", default="127.0.0.1")
-    ui.add_argument("--port", type=int, default=8765)
+    ui.add_argument("--port", type=int, default=DEFAULT_UI_PORT)
     ui.add_argument("--port-attempts", type=int, default=20, help="How many sequential ports to try when the requested port is busy")
     ui.add_argument("--no-port-fallback", action="store_true", help="Fail instead of trying the next available port")
     ui.add_argument("--restart", action="store_true", help="Stop an existing local process on the requested port before starting")
