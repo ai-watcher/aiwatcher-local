@@ -36,6 +36,7 @@ from .local_state import (
     get_baselines,
     get_outcome,
     get_ui_server,
+    has_sent_notification,
     is_command_pattern_always_allowed,
     issue_brief_token,
     link_intervention_session,
@@ -49,6 +50,7 @@ from .local_state import (
     record_evidence_snapshot,
     record_intervention,
     record_hook_event,
+    record_notification_sent,
     record_outcome,
     record_survival_check,
     record_watch_notification,
@@ -713,6 +715,26 @@ def get_or_refresh_baselines(max_age_hours: int = 24) -> dict[str, object]:
 SURVIVAL_BUCKETS_DAYS = {"7": 7, "14": 14, "30": 30}
 SURVIVAL_RECHECK_CAP = 20          # sessions checked per call, not (session, bucket) pairs
 SURVIVAL_MAX_COMMITS_CHECKED = 5   # per session -- each is its own git subprocess spawn
+
+# Issue #32: how often `aiwatcher watch --notify` re-derives outcome-review
+# signals (survival/churn, same-file re-prompt, cost-per-surviving-change).
+# These are day/hour-granularity signals, not per-second ones, and each pass
+# spawns git subprocesses per session -- rechecking every --interval tick
+# (default 15s) would be wasteful. 5 minutes is responsive enough for
+# 72h-window re-prompt detection without adding real load to the watch loop.
+OUTCOME_SIGNAL_INTERVAL_SECONDS = 300
+OUTCOME_SIGNAL_EVIDENCE_WINDOW_DAYS = 3  # >= REPROMPT_WINDOW_HOURS/24 so a same-file re-prompt pair isn't split across two disjoint scans
+OUTCOME_SIGNAL_SAMPLE_CAP = 10  # bounds subprocess spawns per pass, same reasoning as SURVIVAL_RECHECK_CAP
+
+# Outcome-review notifications intentionally look across ALL historical
+# evidence snapshots, not just ones resolved by this pass -- a bucket that
+# resolved earlier via `today`/`ui`, before `watch --notify` was ever run,
+# still needs to be surfaced once. Left uncapped, the very first pass against
+# an established local-state.json (weeks of resolved-but-unnotified backlog)
+# would fire every one of them as a notification storm in a single burst.
+# Capping per pass spreads the backlog across subsequent OUTCOME_SIGNAL_INTERVAL_SECONDS
+# passes instead -- a few every 5 minutes rather than dozens all at once.
+MAX_OUTCOME_NOTIFICATIONS_PER_PASS = 3
 
 
 def recheck_evidence_survival(cap: int = SURVIVAL_RECHECK_CAP) -> int:
@@ -3055,7 +3077,16 @@ def _print_watch_status_card(
 
     if getattr(args, "notify", False) and status["action"] != "continue":
         key = f"{session.session_id}:{status['action']}"
-        if notification_seen is not None and notification_seen.get(key) == stamp:
+        # persist_key includes the session's own stamp, so a later run against
+        # unchanged local activity recognizes "already told you about this
+        # exact state" even though notification_seen (in-memory) resets on
+        # every fresh `--once` process -- without this, repeated `--once`
+        # invocations re-fire the same recommendation forever.
+        persist_key = f"{key}:{stamp.isoformat()}"
+        already_seen = (notification_seen is not None and notification_seen.get(key) == stamp) or has_sent_notification(
+            persist_key
+        )
+        if already_seen:
             print("  Notification: already sent for this session state")
         else:
             if notification_seen is not None:
@@ -3078,6 +3109,7 @@ def _print_watch_status_card(
                 f"{short_path(session.project_path)} - {status['reason']} - Review: {dashboard_url}",
                 url=dashboard_url,
             )
+            record_notification_sent(persist_key)
             print(f"  Notification: {'sent' if ok else 'not sent'} ({detail})")
             try:
                 record_watch_notification(
@@ -3130,6 +3162,233 @@ def _print_watch_status_card(
     print()
 
 
+def _outcome_dashboard_url(session_id: str | None = None) -> str:
+    # Mirrors _print_watch_status_card's dashboard_url derivation: prefer
+    # wherever `aiwatcher ui` last actually bound (it falls back off its
+    # default port when busy), only guessing DEFAULT_UI_PORT if no dashboard
+    # has been recorded as having run yet.
+    ui_server = get_ui_server()
+    ui_host = ui_server["host"] if ui_server else "127.0.0.1"
+    if ui_host in ("0.0.0.0", "::", ""):
+        ui_host = "127.0.0.1"
+    ui_port = ui_server["port"] if ui_server else DEFAULT_UI_PORT
+    base = f"http://{ui_host}:{ui_port}/"
+    return f"{base}?session={quote(session_id, safe='')}" if session_id else base
+
+
+def _fire_outcome_notification(
+    *, signal_key: str, signal_type: str, session_id: str, tool: str, title: str, reason: str, url: str
+) -> None:
+    ok, detail = _send_local_notification(title, f"{reason} Review: {url}", url=url)
+    record_notification_sent(signal_key)
+    try:
+        record_watch_notification(
+            session_id=session_id,
+            tool=tool,
+            action=f"outcome_review:{signal_type}",
+            reason=reason,
+            sent=ok,
+            detail=detail,
+            url=url,
+        )
+    except OSError:
+        pass
+
+
+def _check_outcome_review_signals(rows: Sequence[LocalSession]) -> None:
+    """Issue #32: surface PR25's survival/churn, same-file re-prompt, and
+    cost-per-surviving-change signals as ambient local notifications.
+
+    These signals were previously visible only by opening the dashboard,
+    because evidence snapshots (the thing survival tracking is built on) were
+    only ever recorded when a developer looked at a specific session there.
+    Snapshotting sessions here too means a developer who only ever runs
+    `aiwatcher watch --notify` still gets tracked. Each signal notifies at
+    most once, ever (see has_sent_notification), and never includes
+    prompt text, diffs, commit subjects, or file contents -- only short
+    templated strings and the local dashboard deep link, matching issue #31's
+    established notification-payload convention.
+
+    Capped at MAX_OUTCOME_NOTIFICATIONS_PER_PASS actual notifications sent per
+    call: resolved-but-unnotified signals can span weeks of pre-existing local
+    history (e.g. the very first pass against an already-populated
+    local-state.json), and firing all of them at once would be a notification
+    storm, not the "lightweight nudge" this feature is meant to be. Whatever's
+    left over is still un-notified afterwards and catches up on a later pass.
+    """
+    if not rows:
+        return
+    rows = rows[:OUTCOME_SIGNAL_SAMPLE_CAP]
+    try:
+        evidence_by_session = evidence_for_sessions(rows)
+    except OSError:
+        evidence_by_session = {}
+    for session in rows:
+        evidence = evidence_by_session.get(session.session_id)
+        if evidence is None:
+            continue
+        try:
+            record_evidence_snapshot(session.session_id, evidence.to_json())
+        except OSError:
+            pass
+
+    try:
+        recheck_evidence_survival()
+    except OSError:
+        pass
+
+    rows_by_id = {row.session_id: row for row in rows}
+    # Full lookup, not just `rows` (scoped to OUTCOME_SIGNAL_EVIDENCE_WINDOW_DAYS):
+    # the survival loop below intentionally looks across ALL historical evidence
+    # snapshots, including ones far outside that window, so whether a candidate
+    # session can still be found has to be checked just as broadly -- otherwise
+    # we'd notify "mark it useful?" with a dashboard link to a session whose
+    # underlying log the source tool (e.g. Claude Code) has since pruned from
+    # disk, and the drawer would just say "session not found".
+    try:
+        all_rows_by_id = {row.session_id: row for row in scan_all()}
+    except OSError:
+        all_rows_by_id = {}
+    notifications_sent = 0
+    already_reviewed = 0  # resolved signals that were skipped -- already notified, or no longer reviewable
+
+    # Survival / churn: notify once per (session, bucket) that has resolved
+    # but hasn't been surfaced yet -- not just ones resolved by the recheck()
+    # call above, since a bucket can have already resolved via `today`/`ui`
+    # before `watch --notify` was ever started.
+    try:
+        snapshots = evidence_snapshots_for_sessions()
+    except OSError:
+        snapshots = {}
+    for session_id, snapshot in snapshots.items():
+        if notifications_sent >= MAX_OUTCOME_NOTIFICATIONS_PER_PASS:
+            break
+        survival = snapshot.get("survival") if isinstance(snapshot.get("survival"), dict) else {}
+        for bucket in SURVIVAL_BUCKETS_DAYS:
+            if notifications_sent >= MAX_OUTCOME_NOTIFICATIONS_PER_PASS:
+                break
+            entry = survival.get(bucket)
+            status = entry.get("status") if isinstance(entry, dict) else None
+            if status not in ("survived", "churned"):
+                continue
+            signal_key = f"{session_id}:survival:{bucket}"
+            if has_sent_notification(signal_key):
+                already_reviewed += 1
+                continue
+            session = all_rows_by_id.get(session_id)
+            if session is None:
+                # The session that earned this evidence snapshot is no longer
+                # discoverable at all (its source log aged out locally) -- there
+                # is nothing left to review, so mark it handled without ever
+                # popping a notification for a dead dashboard link.
+                record_notification_sent(signal_key)
+                already_reviewed += 1
+                continue
+            if status == "survived":
+                # "Mark it useful?" is moot if the developer already recorded
+                # an outcome for this session -- they've already answered the
+                # question this notification exists to ask. A churn result is
+                # deliberately NOT skipped the same way just below: it can
+                # contradict an earlier "useful" mark, so it stays worth
+                # surfacing even after one.
+                try:
+                    already_marked = get_outcome(session_id) is not None
+                except OSError:
+                    already_marked = False
+                if already_marked:
+                    record_notification_sent(signal_key)
+                    already_reviewed += 1
+                    continue
+            project_label = short_path(session.project_path)
+            if status == "survived":
+                title = "AIWatcher: change survived"
+                reason = f"{project_label} - This session's change survived {bucket} days. Mark it useful?"
+            else:
+                title = "AIWatcher: change churned"
+                reason = f"{project_label} - This session looked useful, but the commit no longer exists on the branch."
+            _fire_outcome_notification(
+                signal_key=signal_key,
+                signal_type=f"survival_{bucket}",
+                session_id=session_id,
+                tool=session.tool,
+                title=title,
+                reason=reason,
+                url=_outcome_dashboard_url(session_id),
+            )
+            notifications_sent += 1
+
+    # Same-file re-prompt: a later session in the same project touched the
+    # same file(s) again soon after -- a rework smell for the earlier one.
+    for session in rows:
+        if notifications_sent >= MAX_OUTCOME_NOTIFICATIONS_PER_PASS:
+            break
+        evidence = evidence_by_session.get(session.session_id)
+        if evidence is None or not evidence.same_file_reprompt:
+            continue
+        signal_key = f"{session.session_id}:reprompt"
+        if has_sent_notification(signal_key):
+            already_reviewed += 1
+            continue
+        # "Was the earlier session rework?" is moot once the developer has
+        # already recorded any outcome for it -- they've already made that call.
+        try:
+            already_marked = get_outcome(session.session_id) is not None
+        except OSError:
+            already_marked = False
+        if already_marked:
+            record_notification_sent(signal_key)
+            already_reviewed += 1
+            continue
+        _fire_outcome_notification(
+            signal_key=signal_key,
+            signal_type="reprompt",
+            session_id=session.session_id,
+            tool=session.tool,
+            title="AIWatcher: possible rework",
+            reason=(
+                f"{short_path(session.project_path)} - A later session touched the same file(s) again. "
+                "Was the earlier session rework?"
+            ),
+            url=_outcome_dashboard_url(session.session_id),
+        )
+        notifications_sent += 1
+
+    # Cost-per-surviving-change: a one-time, project-agnostic nudge that this
+    # honesty-gated local stat has enough history to be shown at all.
+    signal_key = "cost_per_surviving_change:available"
+    cost_signal_already_sent = has_sent_notification(signal_key)
+    if notifications_sent < MAX_OUTCOME_NOTIFICATIONS_PER_PASS and not cost_signal_already_sent:
+        from .ui import _cost_per_surviving_change  # deferred: ui.py imports from cli.py, so import here to dodge a cycle
+
+        try:
+            survival_stat = _cost_per_surviving_change(list(all_rows_by_id.values()))
+        except OSError:
+            survival_stat = {"available": False}
+        if survival_stat.get("available"):
+            _fire_outcome_notification(
+                signal_key=signal_key,
+                signal_type="cost_per_surviving_change",
+                session_id="",
+                tool="local",
+                title="AIWatcher: cost-per-surviving-change available",
+                reason="Cost per surviving change is now available for your local history.",
+                url=_outcome_dashboard_url(),
+            )
+            notifications_sent += 1
+    elif cost_signal_already_sent:
+        already_reviewed += 1
+
+    # Give the developer console feedback either way -- previously this whole
+    # pass was silent, so running `watch --notify --once` repeatedly with no
+    # new local activity gave no sign of whether it had run at all.
+    if notifications_sent:
+        plural = "" if notifications_sent == 1 else "s"
+        print(f"  Outcome review: {notifications_sent} new signal{plural} surfaced.")
+    elif already_reviewed:
+        plural = "" if already_reviewed == 1 else "s"
+        print(f"  Outcome review: nothing new ({already_reviewed} signal{plural} already reviewed).")
+
+
 def command_watch(args: argparse.Namespace) -> int:
     print("AIWatcher Local watch")
     print(
@@ -3141,9 +3400,34 @@ def command_watch(args: argparse.Namespace) -> int:
     seen: dict[str, datetime] = {}
     critical_capsule_seen: dict[str, datetime] = {}
     notification_seen: dict[str, datetime] = {}
+    last_outcome_signal_check: datetime | None = None
     try:
         while True:
             rows = sorted(sessions_since(args.days), key=session_sort_key, reverse=True)
+
+            if getattr(args, "notify", False):
+                now = datetime.now(timezone.utc)
+                if (
+                    last_outcome_signal_check is None
+                    or (now - last_outcome_signal_check).total_seconds() >= OUTCOME_SIGNAL_INTERVAL_SECONDS
+                ):
+                    last_outcome_signal_check = now
+                    # Issue #32: a wider window than --days on purpose -- survival
+                    # tracking needs sessions old enough to have a due bucket, and
+                    # re-prompt detection needs both sides of a 72h pair, neither of
+                    # which --days=1 (watch's default) would reliably contain.
+                    outcome_signal_rows = (
+                        rows
+                        if args.days >= OUTCOME_SIGNAL_EVIDENCE_WINDOW_DAYS
+                        else sorted(
+                            sessions_since(OUTCOME_SIGNAL_EVIDENCE_WINDOW_DAYS), key=session_sort_key, reverse=True
+                        )
+                    )
+                    try:
+                        _check_outcome_review_signals(outcome_signal_rows)
+                    except OSError:
+                        pass
+
             if not rows:
                 print(f"No local AI sessions detected in the last {args.days} days.")
                 if args.once:
@@ -5262,7 +5546,11 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument(
         "--notify",
         action="store_true",
-        help="Send a best-effort local OS notification when watch recommends action",
+        help=(
+            "Send a best-effort local OS notification when watch recommends action, "
+            "and for outcome-review signals (survival, churn, same-file re-prompt, "
+            "cost-per-surviving-change)"
+        ),
     )
     watch.add_argument(
         "--target", choices=sorted(TARGET_LABELS), default="generic",

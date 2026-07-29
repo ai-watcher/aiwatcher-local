@@ -165,6 +165,7 @@ def _empty_state() -> dict[str, Any]:
         "command_gate_allowlist": [],
         "brief_tokens": [],
         "watch_notifications": [],
+        "sent_notification_keys": [],
         "ui_server": None,
     }
 
@@ -226,6 +227,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("command_gate_allowlist", [])
     data.setdefault("brief_tokens", [])
     data.setdefault("watch_notifications", [])
+    data.setdefault("sent_notification_keys", [])
     data.setdefault("ui_server", None)
     return data
 
@@ -504,6 +506,45 @@ def recent_watch_notifications(limit: int = 10) -> list[dict[str, Any]]:
         return []
     rows = [row for row in data["watch_notifications"] if isinstance(row, dict)]
     return list(reversed(rows[-max(1, limit):]))
+
+
+MAX_NOTIFICATION_KEYS_SENT = 500
+
+
+def has_sent_notification(signal_key: str) -> bool:
+    """Has a local notification already fired for `signal_key`?
+
+    Persistent, unlike command_watch's in-memory notification_seen/
+    critical_capsule_seen dicts (which only dedupe within one process run).
+    Shared by two notification families that both need "don't repeat this
+    until something actually changes" to survive a `watch` restart or a
+    one-shot `--once` invocation:
+      - issue #32's outcome-review signals (survival/churn, same-file
+        re-prompt, cost-per-surviving-change), keyed `{session_id}:{signal}`
+        -- each fires at most once, ever, since the signal itself doesn't
+        change once resolved.
+      - the watch-status recommendation (issue #31's "narrow scope"/"create
+        handoff capsule now"/etc.), keyed `{session_id}:{action}:{stamp}`
+        where `stamp` is the session's last-updated timestamp -- so a new
+        stamp (new activity) is treated as a fresh state worth re-notifying,
+        while an unchanged stamp across repeated `--once` runs is not.
+    """
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return False
+    return signal_key in data.get("sent_notification_keys", [])
+
+
+def record_notification_sent(signal_key: str) -> None:
+    with _locked_state():
+        data = _load()
+        sent = data.setdefault("sent_notification_keys", [])
+        if signal_key not in sent:
+            sent.append(signal_key)
+        data["sent_notification_keys"] = sent[-MAX_NOTIFICATION_KEYS_SENT:]
+        _save(data)
 
 
 def link_intervention_session(intervention_id: str, session_id: str) -> bool:

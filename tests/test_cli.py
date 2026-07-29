@@ -20,6 +20,7 @@ from unittest.mock import Mock, patch
 
 from aiwatcher_cli import cli, local_state
 from aiwatcher_cli.local_state import recent_decisions
+from aiwatcher_cli.outcome_evidence import OutcomeEvidence
 from aiwatcher_cli.scanner import LocalEvent, LocalSession, SurfaceCoverage
 
 
@@ -949,6 +950,61 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertEqual(rows[0]["detail"], "test-notifier")
         self.assertIn(f"session={row.session_id}", rows[0]["url"])
 
+    def test_watch_notify_does_not_repeat_across_separate_once_invocations(self) -> None:
+        """A user running `watch --notify --once` repeatedly with no new local
+        activity got the same popup every single time, since notification_seen
+        (in-memory) starts empty on every fresh process. The notification must
+        instead be recognized as already-sent via persisted state, the same way
+        issue #32's outcome-review signals are."""
+        row = session(1, project="/repo/orcha")
+        row.agent_calls = 300
+        args = SimpleNamespace(
+            days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250,
+            tokens_threshold=500_000, target="generic", notify=True,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.object(cli, "get_baselines", return_value={}),
+                patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch("sys.stdout", io.StringIO()),
+            ):
+                # Two separate calls with a *fresh* notification_seen dict each
+                # time -- simulating two separate `--once` process invocations,
+                # not two iterations of one continuous `watch` loop.
+                cli._print_watch_status_card(row, [row], args, [], {}, {})
+                output = io.StringIO()
+                with patch("sys.stdout", output):
+                    cli._print_watch_status_card(row, [row], args, [], {}, {})
+
+        notify.assert_called_once()
+        self.assertIn("already sent for this session state", output.getvalue())
+
+    def test_watch_notify_fires_again_once_session_state_actually_changes(self) -> None:
+        """The persisted dedup key includes the session's stamp, so new local
+        activity (a later updated_at) must still be treated as a fresh,
+        notification-worthy state -- not suppressed forever."""
+        row = session(1, project="/repo/orcha")
+        row.agent_calls = 300
+        args = SimpleNamespace(
+            days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250,
+            tokens_threshold=500_000, target="generic", notify=True,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.object(cli, "get_baselines", return_value={}),
+                patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch("sys.stdout", io.StringIO()),
+            ):
+                cli._print_watch_status_card(row, [row], args, [], {}, {})
+                row.updated_at = row.updated_at + timedelta(minutes=5)
+                cli._print_watch_status_card(row, [row], args, [], {}, {})
+
+        self.assertEqual(notify.call_count, 2)
+
     def test_send_local_notification_terminal_notifier_opens_url_on_click(self) -> None:
         """Issue #31 (S-32): on macOS, terminal-notifier's `-open` flag makes
         clicking the notification itself open the dashboard deep link --
@@ -1295,6 +1351,403 @@ class EvidenceSurvivalRecheckTests(unittest.TestCase):
         self.assertEqual(checked, 2)
         record_mock.assert_any_call("survived-session", "7", "survived")
         record_mock.assert_any_call("churned-session", "7", "churned")
+
+
+def _survival_snapshot(session_id: str, *, bucket: str, status: str) -> dict:
+    return {"session_id": session_id, "survival": {bucket: {"status": status, "checked_at": "x"}}}
+
+
+def _only_cost_signal_already_sent(signal_key: str) -> bool:
+    # Used to isolate a single signal under test from the real machine's
+    # local-state.json: without this, the deferred `_cost_per_surviving_change`
+    # branch would read this developer's actual AIWatcher history instead of
+    # the test's mocked-out one.
+    return signal_key == "cost_per_surviving_change:available"
+
+
+class OutcomeReviewSignalTests(unittest.TestCase):
+    """Issue #32: PR25's survival/churn, same-file re-prompt, and
+    cost-per-surviving-change signals surfaced as ambient local notifications."""
+
+    def test_notifies_once_for_a_newly_survived_bucket(self) -> None:
+        row = session(1, project="/repo/orcha")
+        snapshot = _survival_snapshot(row.session_id, bucket="7", status="survived")
+        with (
+            patch.object(cli, "evidence_for_sessions", return_value={}),
+            patch.object(cli, "recheck_evidence_survival", return_value=0),
+            patch.object(cli, "evidence_snapshots_for_sessions", return_value={row.session_id: snapshot}),
+            patch.object(cli, "scan_all", return_value=[row]),
+            patch.object(cli, "get_outcome", return_value=None),
+            # Pretend the global cost-per-surviving-change nudge already fired,
+            # so this test only exercises (and only patches machine state for)
+            # the survival signal under test.
+            patch.object(cli, "has_sent_notification", side_effect=_only_cost_signal_already_sent),
+            patch.object(cli, "record_notification_sent") as record_sent,
+            patch.object(cli, "record_watch_notification") as record_watch,
+            patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
+        ):
+            cli._check_outcome_review_signals([row])
+
+        notify.assert_called_once()
+        title, body = notify.call_args.args[0], notify.call_args.args[1]
+        self.assertIn("survived", title.lower())
+        self.assertIn("survived 7 days", body)
+        self.assertIn("Mark it useful?", body)
+        record_sent.assert_called_once_with(f"{row.session_id}:survival:7")
+        record_watch.assert_called_once()
+        _, kwargs = record_watch.call_args
+        self.assertEqual(kwargs["action"], "outcome_review:survival_7")
+        self.assertEqual(kwargs["session_id"], row.session_id)
+
+    def test_skips_survived_notification_when_outcome_already_marked(self) -> None:
+        """"Mark it useful?" is moot once the developer already recorded any
+        outcome for this session (e.g. via the dashboard, or a bulk mark) --
+        they've already answered the question this notification exists to ask."""
+        row = session(1, project="/repo/orcha")
+        snapshot = _survival_snapshot(row.session_id, bucket="7", status="survived")
+        with (
+            patch.object(cli, "evidence_for_sessions", return_value={}),
+            patch.object(cli, "recheck_evidence_survival", return_value=0),
+            patch.object(cli, "evidence_snapshots_for_sessions", return_value={row.session_id: snapshot}),
+            patch.object(cli, "scan_all", return_value=[row]),
+            patch.object(cli, "get_outcome", return_value={"session_id": row.session_id, "outcome": "useful"}),
+            patch.object(cli, "has_sent_notification", side_effect=_only_cost_signal_already_sent),
+            patch.object(cli, "record_notification_sent") as record_sent,
+            patch.object(cli, "_send_local_notification") as notify,
+        ):
+            cli._check_outcome_review_signals([row])
+
+        notify.assert_not_called()
+        record_sent.assert_called_once_with(f"{row.session_id}:survival:7")
+
+    def test_churn_notification_still_fires_even_when_outcome_already_marked(self) -> None:
+        """Unlike survived, a churn result can contradict an earlier "useful"
+        mark, so it must stay worth surfacing even after one -- it's telling
+        the developer their prior belief may now be wrong, not asking a
+        question they've already answered."""
+        row = session(1, project="/repo/orcha")
+        snapshot = _survival_snapshot(row.session_id, bucket="7", status="churned")
+        with (
+            patch.object(cli, "evidence_for_sessions", return_value={}),
+            patch.object(cli, "recheck_evidence_survival", return_value=0),
+            patch.object(cli, "evidence_snapshots_for_sessions", return_value={row.session_id: snapshot}),
+            patch.object(cli, "scan_all", return_value=[row]),
+            patch.object(cli, "get_outcome", return_value={"session_id": row.session_id, "outcome": "useful"}),
+            patch.object(cli, "has_sent_notification", side_effect=_only_cost_signal_already_sent),
+            patch.object(cli, "record_notification_sent"),
+            patch.object(cli, "record_watch_notification"),
+            patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
+        ):
+            cli._check_outcome_review_signals([row])
+
+        notify.assert_called_once()
+        body = notify.call_args.args[1]
+        self.assertIn("commit no longer exists on the branch", body)
+
+    def test_skips_reprompt_notification_when_outcome_already_marked(self) -> None:
+        row = session(1, project="/repo/orcha")
+        evidence = OutcomeEvidence(session_id=row.session_id, project_path=row.project_path, same_file_reprompt=True)
+        with (
+            patch.object(cli, "evidence_for_sessions", return_value={row.session_id: evidence}),
+            patch.object(cli, "record_evidence_snapshot"),
+            patch.object(cli, "recheck_evidence_survival", return_value=0),
+            patch.object(cli, "evidence_snapshots_for_sessions", return_value={}),
+            patch.object(cli, "get_outcome", return_value={"session_id": row.session_id, "outcome": "rework"}),
+            patch.object(cli, "has_sent_notification", side_effect=_only_cost_signal_already_sent),
+            patch.object(cli, "record_notification_sent") as record_sent,
+            patch.object(cli, "_send_local_notification") as notify,
+        ):
+            cli._check_outcome_review_signals([row])
+
+        notify.assert_not_called()
+        record_sent.assert_called_once_with(f"{row.session_id}:reprompt")
+
+    def test_churned_bucket_uses_churned_wording_not_survived(self) -> None:
+        row = session(1, project="/repo/orcha")
+        snapshot = _survival_snapshot(row.session_id, bucket="7", status="churned")
+        with (
+            patch.object(cli, "evidence_for_sessions", return_value={}),
+            patch.object(cli, "recheck_evidence_survival", return_value=0),
+            patch.object(cli, "evidence_snapshots_for_sessions", return_value={row.session_id: snapshot}),
+            patch.object(cli, "scan_all", return_value=[row]),
+            patch.object(cli, "has_sent_notification", side_effect=_only_cost_signal_already_sent),
+            patch.object(cli, "record_notification_sent"),
+            patch.object(cli, "record_watch_notification"),
+            patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
+        ):
+            cli._check_outcome_review_signals([row])
+
+        body = notify.call_args_list[0].args[1]
+        self.assertIn("commit no longer exists on the branch", body)
+
+    def test_skips_a_survived_session_whose_log_no_longer_exists_locally(self) -> None:
+        """Regression: a session can resolve to "survived" and then have its
+        own source log pruned/rotated away by the AI tool before the
+        notification ever fires (survival buckets take 7+ days, plenty of
+        time for that). Notifying with a dashboard link at that point would
+        just show the user "session not found" -- there's nothing left to
+        review, so mark it handled without ever popping a dead-link notification."""
+        row = session(1, project="/repo/orcha")
+        snapshot = _survival_snapshot(row.session_id, bucket="7", status="survived")
+        with (
+            patch.object(cli, "evidence_for_sessions", return_value={}),
+            patch.object(cli, "recheck_evidence_survival", return_value=0),
+            patch.object(cli, "evidence_snapshots_for_sessions", return_value={row.session_id: snapshot}),
+            patch.object(cli, "scan_all", return_value=[]),  # the session's own log is gone, unlike `rows` below
+            patch.object(cli, "has_sent_notification", side_effect=_only_cost_signal_already_sent),
+            patch.object(cli, "record_notification_sent") as record_sent,
+            patch.object(cli, "_send_local_notification") as notify,
+        ):
+            cli._check_outcome_review_signals([row])
+
+        notify.assert_not_called()
+        record_sent.assert_called_once_with(f"{row.session_id}:survival:7")
+
+    def test_skips_a_survival_signal_already_notified(self) -> None:
+        row = session(1, project="/repo/orcha")
+        snapshot = _survival_snapshot(row.session_id, bucket="7", status="survived")
+        with (
+            patch.object(cli, "evidence_for_sessions", return_value={}),
+            patch.object(cli, "recheck_evidence_survival", return_value=0),
+            patch.object(cli, "evidence_snapshots_for_sessions", return_value={row.session_id: snapshot}),
+            patch.object(cli, "has_sent_notification", return_value=True),
+            patch.object(cli, "_send_local_notification") as notify,
+        ):
+            cli._check_outcome_review_signals([row])
+        notify.assert_not_called()
+
+    def test_notifies_for_same_file_reprompt(self) -> None:
+        row = session(1, project="/repo/orcha")
+        evidence = OutcomeEvidence(session_id=row.session_id, project_path=row.project_path, same_file_reprompt=True)
+        with (
+            patch.object(cli, "evidence_for_sessions", return_value={row.session_id: evidence}),
+            patch.object(cli, "record_evidence_snapshot"),
+            patch.object(cli, "recheck_evidence_survival", return_value=0),
+            patch.object(cli, "evidence_snapshots_for_sessions", return_value={}),
+            patch.object(cli, "get_outcome", return_value=None),
+            patch.object(cli, "has_sent_notification", side_effect=_only_cost_signal_already_sent),
+            patch.object(cli, "record_notification_sent") as record_sent,
+            patch.object(cli, "record_watch_notification") as record_watch,
+            patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
+        ):
+            cli._check_outcome_review_signals([row])
+
+        notify.assert_called_once()
+        body = notify.call_args.args[1]
+        self.assertIn("touched the same file(s) again", body)
+        self.assertIn("rework", body.lower())
+        record_sent.assert_called_once_with(f"{row.session_id}:reprompt")
+        _, kwargs = record_watch.call_args
+        self.assertEqual(kwargs["action"], "outcome_review:reprompt")
+
+    def test_no_reprompt_notification_when_flag_is_false(self) -> None:
+        row = session(1, project="/repo/orcha")
+        evidence = OutcomeEvidence(session_id=row.session_id, project_path=row.project_path, same_file_reprompt=False)
+        with (
+            patch.object(cli, "evidence_for_sessions", return_value={row.session_id: evidence}),
+            patch.object(cli, "record_evidence_snapshot"),
+            patch.object(cli, "recheck_evidence_survival", return_value=0),
+            patch.object(cli, "evidence_snapshots_for_sessions", return_value={}),
+            patch.object(cli, "has_sent_notification", side_effect=_only_cost_signal_already_sent),
+            patch.object(cli, "_send_local_notification") as notify,
+        ):
+            cli._check_outcome_review_signals([row])
+        notify.assert_not_called()
+
+    def test_notifies_once_when_cost_per_surviving_change_becomes_available(self) -> None:
+        row = session(1, project="/repo/orcha")
+        with (
+            patch.object(cli, "evidence_for_sessions", return_value={}),
+            patch.object(cli, "recheck_evidence_survival", return_value=0),
+            patch.object(cli, "evidence_snapshots_for_sessions", return_value={}),
+            patch.object(cli, "has_sent_notification", return_value=False),
+            patch.object(cli, "record_notification_sent") as record_sent,
+            patch.object(cli, "record_watch_notification") as record_watch,
+            patch("aiwatcher_cli.ui._cost_per_surviving_change", return_value={"available": True}),
+            patch.object(cli, "scan_all", return_value=[row]),
+            patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
+        ):
+            cli._check_outcome_review_signals([row])
+
+        notify.assert_called_once()
+        body = notify.call_args.args[1]
+        self.assertIn("Cost per surviving change is now available", body)
+        record_sent.assert_called_once_with("cost_per_surviving_change:available")
+        _, kwargs = record_watch.call_args
+        self.assertEqual(kwargs["session_id"], "")
+        self.assertEqual(kwargs["action"], "outcome_review:cost_per_surviving_change")
+
+    def test_no_notification_when_cost_per_surviving_change_still_unavailable(self) -> None:
+        row = session(1, project="/repo/orcha")
+        with (
+            patch.object(cli, "evidence_for_sessions", return_value={}),
+            patch.object(cli, "recheck_evidence_survival", return_value=0),
+            patch.object(cli, "evidence_snapshots_for_sessions", return_value={}),
+            patch.object(cli, "has_sent_notification", return_value=False),
+            patch("aiwatcher_cli.ui._cost_per_surviving_change", return_value={"available": False}),
+            patch.object(cli, "scan_all", return_value=[row]),
+            patch.object(cli, "_send_local_notification") as notify,
+        ):
+            cli._check_outcome_review_signals([row])
+        notify.assert_not_called()
+
+    def test_notification_payload_never_carries_raw_commit_subject_text(self) -> None:
+        """Acceptance criterion: no prompt text, diffs, commit subjects, or file
+        contents may appear in a notification -- only synthesized template text
+        and the local dashboard link, matching issue #31's established convention."""
+        row = session(1, project="/repo/orcha")
+        secret_commit_subject = "fix: rotate the totally-secret API key rotation script"
+        snapshot = _survival_snapshot(row.session_id, bucket="7", status="survived")
+        snapshot["commit_shas"] = ["abc123"]
+        evidence = OutcomeEvidence(
+            session_id=row.session_id,
+            project_path=row.project_path,
+            commits=[{"sha": "abc123", "subject": secret_commit_subject, "body": "", "committed_at": "x"}],
+        )
+        with (
+            patch.object(cli, "evidence_for_sessions", return_value={row.session_id: evidence}),
+            patch.object(cli, "record_evidence_snapshot"),
+            patch.object(cli, "recheck_evidence_survival", return_value=0),
+            patch.object(cli, "evidence_snapshots_for_sessions", return_value={row.session_id: snapshot}),
+            patch.object(cli, "scan_all", return_value=[row]),
+            patch.object(cli, "get_outcome", return_value=None),
+            patch.object(cli, "has_sent_notification", side_effect=_only_cost_signal_already_sent),
+            patch.object(cli, "record_notification_sent"),
+            patch.object(cli, "record_watch_notification"),
+            patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
+        ):
+            cli._check_outcome_review_signals([row])
+
+        notify.assert_called_once()  # otherwise the loop below would vacuously pass without checking anything
+        for call in notify.call_args_list:
+            title, body = call.args[0], call.args[1]
+            self.assertNotIn(secret_commit_subject, title)
+            self.assertNotIn(secret_commit_subject, body)
+
+    def test_caps_notifications_sent_per_pass_to_avoid_a_backlog_storm(self) -> None:
+        """Regression guard: a fresh local-state.json can already have many
+        resolved-but-unnotified survival buckets (e.g. from weeks of `today`/`ui`
+        usage before `watch --notify` was ever run). The first pass must not
+        fire all of them as one notification storm."""
+        rows = [session(i, project="/repo/orcha") for i in range(10)]
+        snapshots = {
+            row.session_id: _survival_snapshot(row.session_id, bucket="7", status="survived") for row in rows
+        }
+        with (
+            patch.object(cli, "evidence_for_sessions", return_value={}),
+            patch.object(cli, "recheck_evidence_survival", return_value=0),
+            patch.object(cli, "evidence_snapshots_for_sessions", return_value=snapshots),
+            patch.object(cli, "scan_all", return_value=rows),
+            patch.object(cli, "get_outcome", return_value=None),
+            patch.object(cli, "has_sent_notification", side_effect=_only_cost_signal_already_sent),
+            patch.object(cli, "record_notification_sent") as record_sent,
+            patch.object(cli, "record_watch_notification"),
+            patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
+        ):
+            cli._check_outcome_review_signals(rows)
+
+        self.assertEqual(notify.call_count, cli.MAX_OUTCOME_NOTIFICATIONS_PER_PASS)
+        self.assertEqual(record_sent.call_count, cli.MAX_OUTCOME_NOTIFICATIONS_PER_PASS)
+
+    def test_prints_nothing_new_when_every_resolved_signal_was_already_reviewed(self) -> None:
+        """Previously this whole pass was silent either way, so running
+        `watch --notify --once` repeatedly with no new local activity gave no
+        sign of whether anything had actually been checked."""
+        row = session(1, project="/repo/orcha")
+        snapshot = _survival_snapshot(row.session_id, bucket="7", status="survived")
+        output = io.StringIO()
+        with (
+            patch.object(cli, "evidence_for_sessions", return_value={}),
+            patch.object(cli, "recheck_evidence_survival", return_value=0),
+            patch.object(cli, "evidence_snapshots_for_sessions", return_value={row.session_id: snapshot}),
+            patch.object(cli, "has_sent_notification", side_effect=lambda key: key != "cost_per_surviving_change:available"),
+            patch("aiwatcher_cli.ui._cost_per_surviving_change", return_value={"available": False}),
+            patch.object(cli, "scan_all", return_value=[row]),
+            patch.object(cli, "_send_local_notification") as notify,
+            patch("sys.stdout", output),
+        ):
+            cli._check_outcome_review_signals([row])
+
+        notify.assert_not_called()
+        self.assertIn("Outcome review: nothing new (1 signal already reviewed).", output.getvalue())
+
+    def test_prints_a_summary_line_when_a_new_signal_fires(self) -> None:
+        row = session(1, project="/repo/orcha")
+        snapshot = _survival_snapshot(row.session_id, bucket="7", status="survived")
+        output = io.StringIO()
+        with (
+            patch.object(cli, "evidence_for_sessions", return_value={}),
+            patch.object(cli, "recheck_evidence_survival", return_value=0),
+            patch.object(cli, "evidence_snapshots_for_sessions", return_value={row.session_id: snapshot}),
+            patch.object(cli, "scan_all", return_value=[row]),
+            patch.object(cli, "get_outcome", return_value=None),
+            patch.object(cli, "has_sent_notification", side_effect=_only_cost_signal_already_sent),
+            patch.object(cli, "record_notification_sent"),
+            patch.object(cli, "record_watch_notification"),
+            patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")),
+            patch("sys.stdout", output),
+        ):
+            cli._check_outcome_review_signals([row])
+
+        self.assertIn("Outcome review: 1 new signal surfaced.", output.getvalue())
+        self.assertNotIn("nothing new", output.getvalue())
+
+    def test_prints_nothing_when_no_signals_have_resolved_yet(self) -> None:
+        row = session(1, project="/repo/orcha")
+        output = io.StringIO()
+        with (
+            patch.object(cli, "evidence_for_sessions", return_value={}),
+            patch.object(cli, "recheck_evidence_survival", return_value=0),
+            patch.object(cli, "evidence_snapshots_for_sessions", return_value={}),
+            patch.object(cli, "has_sent_notification", return_value=False),
+            patch("aiwatcher_cli.ui._cost_per_surviving_change", return_value={"available": False}),
+            patch.object(cli, "scan_all", return_value=[row]),
+            patch.object(cli, "_send_local_notification") as notify,
+            patch("sys.stdout", output),
+        ):
+            cli._check_outcome_review_signals([row])
+
+        notify.assert_not_called()
+        self.assertNotIn("Outcome review", output.getvalue())
+
+    def test_empty_rows_is_a_noop(self) -> None:
+        with patch.object(cli, "_send_local_notification") as notify:
+            cli._check_outcome_review_signals([])
+        notify.assert_not_called()
+
+    def test_command_watch_runs_outcome_signal_check_when_notify_enabled(self) -> None:
+        row = session(1, project="/repo/orcha")
+        args = SimpleNamespace(
+            days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250,
+            tokens_threshold=500_000, target="generic", notify=True,
+        )
+        output = io.StringIO()
+        with (
+            patch.object(cli, "sessions_since", return_value=[row]),
+            patch.object(cli, "scan_all_events", return_value=[]),
+            patch.object(cli, "get_baselines", return_value={}),
+            patch.object(cli, "_check_outcome_review_signals") as outcome_check,
+            patch("sys.stdout", output),
+        ):
+            cli.command_watch(args)
+        outcome_check.assert_called_once_with([row])
+
+    def test_command_watch_skips_outcome_signal_check_without_notify(self) -> None:
+        row = session(1, project="/repo/orcha")
+        args = SimpleNamespace(
+            days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250,
+            tokens_threshold=500_000, target="generic",
+        )
+        output = io.StringIO()
+        with (
+            patch.object(cli, "sessions_since", return_value=[row]),
+            patch.object(cli, "scan_all_events", return_value=[]),
+            patch.object(cli, "get_baselines", return_value={}),
+            patch.object(cli, "_check_outcome_review_signals") as outcome_check,
+            patch("sys.stdout", output),
+        ):
+            cli.command_watch(args)
+        outcome_check.assert_not_called()
 
 
 class RunwayPressureTests(unittest.TestCase):

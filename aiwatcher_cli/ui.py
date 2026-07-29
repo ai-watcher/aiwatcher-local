@@ -1377,9 +1377,10 @@ HTML = r"""<!doctype html>
     .outcome-button.useful { color: #bff5df; border-color: rgba(53,211,153,.45); }
     .outcome-button.rework { color: #ffe2a4; border-color: rgba(246,189,96,.45); }
     .outcome-button.abandoned { color: #ffc4ce; border-color: rgba(242,125,143,.45); }
-    .outcome-button.selected.useful { background: var(--green-soft); box-shadow: inset 0 0 0 1px var(--green); }
-    .outcome-button.selected.rework { background: var(--amber-soft); box-shadow: inset 0 0 0 1px var(--amber); }
-    .outcome-button.selected.abandoned { background: var(--red-soft); box-shadow: inset 0 0 0 1px var(--red); }
+    .outcome-button.selected { font-weight: 700; }
+    .outcome-button.selected.useful { background: rgba(53,211,153,.28); box-shadow: inset 0 0 0 2px var(--green); color: #eafff5; }
+    .outcome-button.selected.rework { background: rgba(246,189,96,.28); box-shadow: inset 0 0 0 2px var(--amber); color: #fff3dc; }
+    .outcome-button.selected.abandoned { background: rgba(242,125,143,.28); box-shadow: inset 0 0 0 2px var(--red); color: #ffe3e8; }
     .toast { position: fixed; right: 20px; bottom: 20px; z-index: 30; max-width: 420px; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: 8px; background: #18212c; color: white; box-shadow: 0 12px 32px rgba(0,0,0,.35); opacity: 0; transform: translateY(12px); pointer-events: none; transition: opacity .18s ease, transform .18s ease; }
     .toast.show { opacity: 1; transform: translateY(0); }
     .toast.error { border-color: rgba(242,125,143,.55); background: #2a171d; }
@@ -1876,8 +1877,11 @@ function sessionVerdict(s) {
 }
 function renderVerdict(s) {
   const verdict = sessionVerdict(s);
+  const subtitle = s.outcome
+    ? 'Saved locally. Pick a different button below anytime to change it.'
+    : 'Confirm the outcome, then use the expensive asks below to improve the next run.';
   return `<div class="verdict-card ${esc(verdict.tone)}"><h3>${esc(verdict.title)}</h3>
-    <p>Confirm the outcome, then use the expensive asks below to improve the next run.</p>
+    <p>${esc(subtitle)}</p>
     <ul>${verdict.bullets.map(item => `<li>${esc(item)}</li>`).join('')}</ul>
   </div>`;
 }
@@ -2082,9 +2086,9 @@ async function selectSession(sessionId) {
   const outcomeActions = `<div class="outcome-control"><h3>Was this work useful?</h3>
     <p>Mark the result so AIWatcher can measure value instead of tokens alone.</p>
     <div class="outcome-options">
-      <button data-testid="outcome-useful" class="outcome-button useful ${s.outcome === 'useful' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','useful')">Useful</button>
-      <button data-testid="outcome-rework" class="outcome-button rework ${s.outcome === 'rework' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','rework')">Needs rework</button>
-      <button data-testid="outcome-abandoned" class="outcome-button abandoned ${s.outcome === 'abandoned' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','abandoned')">Abandoned</button>
+      <button data-testid="outcome-useful" class="outcome-button useful ${s.outcome === 'useful' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','useful')">${s.outcome === 'useful' ? '✓ ' : ''}Useful</button>
+      <button data-testid="outcome-rework" class="outcome-button rework ${s.outcome === 'rework' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','rework')">${s.outcome === 'rework' ? '✓ ' : ''}Needs rework</button>
+      <button data-testid="outcome-abandoned" class="outcome-button abandoned ${s.outcome === 'abandoned' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','abandoned')">${s.outcome === 'abandoned' ? '✓ ' : ''}Abandoned</button>
     </div>
     <div class="handoff-cta">
       <div>

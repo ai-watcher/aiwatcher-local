@@ -214,6 +214,25 @@ class LocalStateTests(unittest.TestCase):
         with patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")):
             self.assertEqual(local_state.recent_watch_notifications(), [])
 
+    def test_outcome_notification_dedup_round_trips(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                self.assertFalse(local_state.has_sent_notification("sess-1:survival:7"))
+                local_state.record_notification_sent("sess-1:survival:7")
+                self.assertTrue(local_state.has_sent_notification("sess-1:survival:7"))
+                # A different signal_key for the same session must not be conflated.
+                self.assertFalse(local_state.has_sent_notification("sess-1:reprompt"))
+                # Recording the same key twice must not duplicate it.
+                local_state.record_notification_sent("sess-1:survival:7")
+                with local_state._locked_state():
+                    data = local_state._load()
+                self.assertEqual(data["sent_notification_keys"].count("sess-1:survival:7"), 1)
+
+    def test_has_sent_notification_fails_soft_when_state_lock_is_unavailable(self) -> None:
+        with patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")):
+            self.assertFalse(local_state.has_sent_notification("sess-1:survival:7"))
+
     def test_get_baselines_fails_soft_when_state_lock_is_unavailable(self) -> None:
         with patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")):
             self.assertEqual(local_state.get_baselines(), {})
