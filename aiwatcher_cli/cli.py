@@ -30,10 +30,12 @@ from .correlate import link_recent_interventions_to_sessions
 from .local_state import (
     COMMAND_GATE_BLOCKED_DECISIONS,
     VALID_OUTCOMES,
+    consume_brief_token,
     evidence_snapshots_for_sessions,
     get_baselines,
     get_outcome,
     is_command_pattern_always_allowed,
+    issue_brief_token,
     link_intervention_session,
     outcomes_for_sessions,
     recent_command_decisions,
@@ -933,18 +935,62 @@ def build_execution_brief(
     return "\n".join(lines)
 
 
-def _is_generated_brief(text: str) -> bool:
-    """Detect text that is already an AIWatcher execution brief.
+_BRIEF_TOKEN_LINE_RE = re.compile(r"^(Brief-Id|Capsule-Id):\s*(\S+)\s*$", re.MULTILINE)
 
-    Prevents re-scoring and re-wrapping a brief the user pasted back in — without
-    this, `build_execution_brief` nests a second Task/Execution approach/Completion
-    report shell around the first one every time a brief is resubmitted.
+
+def _extract_brief_token(text: str, kind: str) -> str | None:
+    label = "Brief-Id" if kind == "execution_brief" else "Capsule-Id"
+    for match in _BRIEF_TOKEN_LINE_RE.finditer(text):
+        if match.group(1) == label:
+            return match.group(2)
+    return None
+
+
+def _brief_text_for_delivery(selected_prompt: str) -> str:
+    """Stamp a live, single-use Brief-Id onto brief text right before it leaves
+    this process as something the developer (or Cursor) could resubmit verbatim.
+
+    Deliberately not done inside build_execution_brief: that function is a pure
+    formatter called throughout tests and gate-preview code that never actually
+    hands text back to a hook, and minting a token on every one of those calls
+    would mean touching local state far outside where it matters. Only text
+    that reaches an actual hook response (_hook_output_with_brief, Cursor's
+    resubmit message) needs a provable, single-use origin token.
+    """
+    return selected_prompt + f"\n\nBrief-Id: {issue_brief_token('execution_brief')}"
+
+
+def _looks_like_execution_brief(text: str) -> bool:
+    """Shape-only check: does this text already carry the Task/Execution
+    approach/Completion report structure build_execution_brief produces?
+
+    Not a trust signal by itself -- shape is public and trivially copyable.
+    Used only to avoid nesting a second brief shell around text that already
+    has one; see _is_generated_brief for the security-relevant, token-verified
+    check that actually decides whether to skip risk scoring.
     """
     return (
         text.startswith("Task\n")
         and "\nExecution approach\n" in text
         and "\nCompletion report\n" in text
     )
+
+
+def _is_generated_brief(text: str) -> bool:
+    """Detect text that is a *verified* AIWatcher execution brief.
+
+    Shape alone (Task/Execution approach/Completion report headers) is public
+    and trivially copyable, so it is never enough on its own to skip risk
+    scoring — it must also carry a live, single-use Brief-Id token stamped on
+    at delivery time by _brief_text_for_delivery. Text that merely looks like
+    a brief but lacks a valid token is fully scored like any other prompt
+    (see _looks_like_execution_brief for the shape-only check that still
+    prevents double-wrapping in that case).
+    """
+    if not _looks_like_execution_brief(text):
+        return False
+    token = _extract_brief_token(text, "execution_brief")
+    return consume_brief_token(token, "execution_brief")
 
 
 def analyze_prompt(
@@ -1104,7 +1150,11 @@ def analyze_prompt(
     elif score >= 3:
         risk = "medium"
 
-    safer_prompt = build_execution_brief(
+    # text already carries its own Task/Execution approach/Completion report
+    # shell (just not a *verified* one, or _is_generated_brief above would
+    # have short-circuited already) -- reuse it rather than nesting a second
+    # shell around it.
+    safer_prompt = text if _looks_like_execution_brief(text) else build_execution_brief(
         text,
         cwd=cwd,
         broad_scope=broad_scope,
@@ -2510,6 +2560,19 @@ def _copy_to_clipboard(text: str) -> tuple[bool, str]:
     return False, "no clipboard command found"
 
 
+def _powershell_single_quoted(value: str) -> str:
+    """Quote `value` as a literal PowerShell single-quoted string.
+
+    Single quotes in PowerShell never interpolate $variables/subexpressions/
+    backticks -- unlike Python's repr() (which escapes for Python syntax, not
+    PowerShell), this is the one quoting style that is actually safe to embed
+    untrusted text inside without risking the text being interpreted as script.
+    The only special case inside a single-quoted PowerShell string is a
+    literal quote, escaped by doubling it.
+    """
+    return "'" + value.replace("'", "''") + "'"
+
+
 def _send_local_notification(title: str, body: str) -> tuple[bool, str]:
     """Best-effort local OS notification with no network dependency."""
     if os.environ.get("AIWATCHER_DISABLE_NOTIFICATIONS", "").strip().lower() in {"1", "true", "yes", "on"}:
@@ -2548,6 +2611,47 @@ def _send_local_notification(title: str, body: str) -> tuple[bool, str]:
                 stderr=subprocess.DEVNULL,
             )
             return True, "notify-send"
+        if sys.platform == "win32" and shutil.which("msg"):
+            # msg.exe is built into Windows (Remote Desktop Services), so this
+            # needs no extra dependency and no user setup, unlike a toast via
+            # win10toast/WinRT. It pops a modal dialog rather than a modern
+            # toast -- less pretty, but it actually ships everywhere. /TIME
+            # auto-dismisses it so a missed notification doesn't sit blocking
+            # the desktop forever; "console" targets the local session only.
+            subprocess.run(
+                ["msg", "console", "/TIME:10", f"{clean_title}: {clean_body}"],
+                check=True,
+                timeout=3,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True, "msg.exe"
+        if sys.platform == "win32" and shutil.which("powershell"):
+            # msg.exe ships only with Remote Desktop Services, which Windows
+            # Home editions don't include -- shutil.which("msg") returns None
+            # there. This fallback uses System.Windows.Forms.MessageBox,
+            # which ships with every Windows edition's .NET Framework, so it
+            # still needs no extra dependency.
+            #
+            # Unlike msg.exe (which hands the popup off to a separate OS
+            # component and returns immediately), MessageBox.Show() blocks
+            # the calling process until the user dismisses it. Waiting on
+            # that with subprocess.run(timeout=...) would kill -- and so
+            # silently close -- the dialog out from under the user the
+            # instant the timeout elapsed. Popen (fire-and-forget, no wait)
+            # lets it linger naturally instead.
+            script = (
+                "Add-Type -AssemblyName System.Windows.Forms; "
+                f"[System.Windows.Forms.MessageBox]::Show({_powershell_single_quoted(clean_body)}, "
+                f"{_powershell_single_quoted(clean_title)}) | Out-Null"
+            )
+            subprocess.Popen(
+                ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True, "powershell-messagebox"
     except subprocess.CalledProcessError:
         return False, "notifier command failed"
     except subprocess.TimeoutExpired:
@@ -3216,7 +3320,8 @@ def command_agent_prompt(args: argparse.Namespace) -> int:
 
     run_started = datetime.now().astimezone()
     binary = args.binary or args.agent
-    command = [binary, selected_prompt]
+    launch_prompt = _brief_text_for_delivery(selected_prompt) if decision in {"suggested", "edited"} else selected_prompt
+    command = [binary, launch_prompt]
     print()
     print(f"Launching {args.agent} with {decision} prompt.")
     sys.stdout.flush()
@@ -3423,18 +3528,27 @@ def _low_risk_hook_result(tool: str, finding: str, suggestion: str = "Allowing w
 
 
 def _classify_hook_prompt_source(prompt: str | None) -> dict[str, object]:
-    """Classify hook text before scoring it as a user prompt.
+    """Classify hook text before deciding whether it still needs risk scoring.
 
     Some hosts send lifecycle messages, task notifications, or AIWatcher's own
-    continuation briefs through UserPromptSubmit-shaped payloads. Those are
-    useful provenance, but gating them as if the developer typed them creates
-    confusing false positives and can recursively wrap our own safer brief.
+    briefs through UserPromptSubmit-shaped payloads. Labeling those correctly
+    avoids confusing "did you mean to ask this?" framing for text nobody
+    typed. But shape alone is not proof of origin -- these marker strings and
+    tag names are public in this repository, so anyone can prepend them to a
+    real prompt. Only `aiwatcher_generated_brief` is ever exempt from scoring,
+    and only when the text carries a live, single-use token that
+    _brief_text_for_delivery/render_handoff_capsule actually issued (see
+    local_state.issue_brief_token/consume_brief_token). Host-authored text
+    like task notifications can't be signed by us, so it is always scored --
+    classification there only changes the event label and UI framing, never
+    whether the content gets analyzed.
     """
     text = (prompt or "").strip()
     if not text:
         return {
             "source": "missing",
             "actionable": False,
+            "skip_scoring": True,
             "event": "prompt_missing",
             "finding": "No prompt text found in hook payload.",
             "suggestion": "Allowing prompt because AIWatcher could not inspect it.",
@@ -3448,24 +3562,37 @@ def _classify_hook_prompt_source(prompt: str | None) -> dict[str, object]:
         return {
             "source": "host_task_notification",
             "actionable": False,
+            "skip_scoring": False,
             "event": "skipped_internal",
             "finding": "Hook payload looks like a host-generated task notification, not a direct user prompt.",
             "suggestion": "Allowing the host notification; AIWatcher will continue watching the resulting session metadata.",
         }
-    if (
-        text.startswith("AIWatcher handoff capsule")
-        or text.startswith("AIWatcher continuation brief")
-        or (text.startswith("Task\n") and "Execution approach" in text and "Completion report" in text)
-        or ("AIWatcher added a scoped execution brief" in text[:1200])
+    if text.startswith("AIWatcher handoff capsule") and consume_brief_token(
+        _extract_brief_token(text, "handoff_capsule"), "handoff_capsule"
     ):
         return {
             "source": "aiwatcher_generated_brief",
             "actionable": False,
+            "skip_scoring": True,
             "event": "skipped_generated_brief",
-            "finding": "Hook payload is an AIWatcher-generated brief that has already been scoped.",
+            "finding": "Hook payload is an AIWatcher-generated handoff capsule with a verified token.",
+            "suggestion": "Allowing the scoped capsule without opening another prompt gate.",
+        }
+    looks_like_execution_brief = (
+        text.startswith("Task\n") and "Execution approach" in text and "Completion report" in text
+    ) or ("AIWatcher added a scoped execution brief" in text[:1200])
+    if looks_like_execution_brief and consume_brief_token(
+        _extract_brief_token(text, "execution_brief"), "execution_brief"
+    ):
+        return {
+            "source": "aiwatcher_generated_brief",
+            "actionable": False,
+            "skip_scoring": True,
+            "event": "skipped_generated_brief",
+            "finding": "Hook payload is an AIWatcher-generated execution brief with a verified token.",
             "suggestion": "Allowing the scoped brief without opening another prompt gate.",
         }
-    return {"source": "direct_user_prompt", "actionable": True, "event": "received"}
+    return {"source": "direct_user_prompt", "actionable": True, "skip_scoring": False, "event": "received"}
 
 
 def _hook_output_with_brief(tool: str, selected_prompt: str) -> dict[str, object]:
@@ -3477,7 +3604,7 @@ def _hook_output_with_brief(tool: str, selected_prompt: str) -> dict[str, object
                 "AIWatcher identified avoidable cost or safety pressure. "
                 "Treat the following execution brief as controlling guidance for how to execute "
                 "the user's submitted request while preserving its intended outcome:\n\n"
-                + selected_prompt
+                + _brief_text_for_delivery(selected_prompt)
             ),
         },
     }
@@ -3595,7 +3722,7 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
     cwd = str(payload.get("cwd") or payload.get("workspace") or os.getcwd())
     session_id = _extract_session_meta(payload)["session_id"]
     source = _classify_hook_prompt_source(prompt)
-    if not source["actionable"]:
+    if source["skip_scoring"]:
         result = _low_risk_hook_result(tool, str(source["finding"]), str(source["suggestion"]))
         _record_hook_event(
             tool=tool,
@@ -3765,7 +3892,7 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
     cwd = str(payload.get("cwd") or payload.get("workspace") or workspace or os.getcwd())
     session_id = _extract_session_meta(payload)["session_id"]
     source = _classify_hook_prompt_source(prompt)
-    if not source["actionable"]:
+    if source["skip_scoring"]:
         result = _low_risk_hook_result("cursor", str(source["finding"]), str(source["suggestion"]))
         _record_hook_event(
             tool="cursor",
@@ -3819,7 +3946,7 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
                 )
                 message = (
                     "AIWatcher paused the original prompt. Cursor hooks cannot replace prompt text. "
-                    "Resubmit this scoped execution brief:\n\n" + selected_prompt
+                    "Resubmit this scoped execution brief:\n\n" + _brief_text_for_delivery(selected_prompt)
                 )
                 print(json.dumps(_cursor_hook_response(allow=False, message=message)))
                 return 0
@@ -3839,7 +3966,8 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
                 )
                 message = (
                     "AIWatcher paused the original prompt automatically (no interactive display or terminal "
-                    "was available to review it). Resubmit this scoped execution brief:\n\n" + selected_prompt
+                    "was available to review it). Resubmit this scoped execution brief:\n\n"
+                    + _brief_text_for_delivery(selected_prompt)
                 )
                 print(json.dumps(_cursor_hook_response(allow=False, message=message)))
                 return 0

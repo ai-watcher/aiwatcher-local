@@ -11,7 +11,7 @@ import tempfile
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +23,11 @@ else:
 
 STATE_VERSION = 2
 VALID_OUTCOMES = {"useful", "rework", "abandoned"}
+
+# How long an issued brief/capsule token remains redeemable. Short enough to
+# limit the window a leaked local-state.json could be replayed in, long
+# enough to cover copy-paste into a fresh session.
+BRIEF_TOKEN_TTL_SECONDS = 900
 
 # Private: guards this process's own threads only. Every hook invocation is
 # a separate OS process though, so this alone does not prevent two
@@ -158,6 +163,7 @@ def _empty_state() -> dict[str, Any]:
         "baselines": {},
         "command_decisions": [],
         "command_gate_allowlist": [],
+        "brief_tokens": [],
     }
 
 
@@ -216,6 +222,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("baselines", {})
     data.setdefault("command_decisions", [])
     data.setdefault("command_gate_allowlist", [])
+    data.setdefault("brief_tokens", [])
     return data
 
 
@@ -358,6 +365,62 @@ def record_hook_event(
         })
         data["hook_events"] = data["hook_events"][-50:]
         _save(data)
+
+
+def _prune_brief_tokens(data: dict[str, Any]) -> None:
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=BRIEF_TOKEN_TTL_SECONDS)
+    kept = []
+    for row in data.get("brief_tokens", []):
+        issued_at = row.get("issued_at") if isinstance(row, dict) else None
+        try:
+            issued = datetime.fromisoformat(issued_at) if issued_at else None
+        except ValueError:
+            issued = None
+        if issued is not None and issued >= cutoff:
+            kept.append(row)
+    data["brief_tokens"] = kept
+
+
+def issue_brief_token(kind: str) -> str:
+    """Issue a random, single-use token proving AIWatcher itself generated a brief/capsule.
+
+    Recognizing our own generated text by a static phrase is spoofable by anyone
+    who reads this open-source repo. A per-instance token recorded here and
+    required by consume_brief_token() cannot be guessed from the source alone.
+    """
+    token = uuid.uuid4().hex
+    with _locked_state():
+        data = _load()
+        _prune_brief_tokens(data)
+        data["brief_tokens"].append({
+            "token": token,
+            "kind": kind,
+            "issued_at": datetime.now(timezone.utc).isoformat(),
+        })
+        data["brief_tokens"] = data["brief_tokens"][-200:]
+        _save(data)
+    return token
+
+
+def consume_brief_token(token: str | None, kind: str) -> bool:
+    """Validate and single-use-consume a brief/capsule token.
+
+    Returns False for an unknown, wrong-kind, expired, or already-consumed
+    token -- callers must treat that as "not proven to be AIWatcher-generated",
+    not as a soft warning.
+    """
+    if not token:
+        return False
+    with _locked_state():
+        data = _load()
+        _prune_brief_tokens(data)
+        for index, row in enumerate(data["brief_tokens"]):
+            if isinstance(row, dict) and row.get("token") == token and row.get("kind") == kind:
+                data["brief_tokens"].pop(index)
+                _save(data)
+                return True
+        _save(data)
+    return False
 
 
 def recent_hook_events(limit: int = 10) -> list[dict[str, Any]]:
