@@ -610,6 +610,8 @@ class WeeklyDigestTests(unittest.TestCase):
         self.assertEqual([s["api_value_label"] for s in top], ["$50.00", "$9.00", "$1.00"])
         self.assertEqual(top[0]["outcome"], None)
         self.assertEqual(top[1]["outcome"], "useful")
+        self.assertEqual(top[0]["session_id"], "expensive-unmarked")
+        self.assertTrue(all(s["session_id"] for s in top), "top_sessions must carry session_id for UI drill-down links")
 
     def test_digest_recommendation_prioritizes_blocked_commands(self) -> None:
         rows = [self._session("s1")]
