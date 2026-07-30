@@ -9,6 +9,7 @@ import subprocess
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
@@ -206,8 +207,13 @@ def build_session_search(
     total_matched = len(matched)
     matched = matched[:SESSION_SEARCH_RESULT_LIMIT]
     window_outcomes = outcomes_for_sessions({row.session_id for row in matched})
+    # Every git-backed evidence lookup shells out per session with no cache, so
+    # this is the dominant cost of a search request -- only pay it when the
+    # caller actually asked for evidence (an `evidence` filter already implies
+    # every returned row has that exact inferred_outcome, so label it directly
+    # instead of recomputing what filter_sessions() just computed internally).
     evidence_by_session = (
-        evidence_for_sessions(matched, survival_by_session=survival_by_session(matched)) if matched else {}
+        {row.session_id: SimpleNamespace(inferred_outcome=evidence) for row in matched} if evidence else {}
     )
     return {
         "query": {"search": search or "", "outcome": outcome or "", "evidence": evidence or ""},
@@ -2109,6 +2115,7 @@ function clearSessionFilters() {
   document.getElementById('sessionEvidenceFilter').value = '';
   loadSessions();
 }
+let sessionSearchToken = 0;
 async function loadSessions() {
   const days = document.getElementById('days').value;
   const search = document.getElementById('sessionSearch').value.trim();
@@ -2118,8 +2125,15 @@ async function loadSessions() {
   if (search) params.set('search', search);
   if (outcome) params.set('outcome', outcome);
   if (evidence) params.set('evidence', evidence);
+  // A search that doesn't field-match every session in the window falls back
+  // to an uncached per-session git evidence lookup (filter_sessions()'s rough
+  // topic match) -- that can take several seconds, so show a visible pending
+  // state, and drop this response if a newer search has since been fired.
+  const token = ++sessionSearchToken;
+  document.getElementById('sessionResultsNote').textContent = 'Searching local sessions...';
   const res = await fetch(`/api/sessions?${params.toString()}`);
   const data = await res.json();
+  if (token !== sessionSearchToken) return;
   const filtered = Boolean(search || outcome || evidence);
   document.getElementById('sessionResultsNote').textContent = filtered
     ? `${data.total_matched} matching session${data.total_matched === 1 ? '' : 's'} of ${data.total_scanned} in this window.`

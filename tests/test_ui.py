@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiwatcher_cli import ui
@@ -722,6 +723,40 @@ class SessionSearchTests(unittest.TestCase):
 
         self.assertEqual(result["sessions"][0]["session_id"], "s1")
         self.assertIn("api_value", result["sessions"][0])
+
+    def test_session_search_skips_evidence_lookup_without_evidence_filter(self) -> None:
+        # evidence_for_sessions() shells out to git per session with no cache --
+        # it's the dominant cost of a search request, so it must only run when
+        # the caller actually filters by evidence. Regression test for a bug
+        # where every search unconditionally paid this cost (multi-second lag
+        # on every keystroke, even a plain outcome filter or no filter at all).
+        rows = [self._session("s1"), self._session("s2")]
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(temp_dir, "state.json")}),
+            patch.object(ui, "scan_all", return_value=rows),
+            patch.object(ui, "evidence_for_sessions") as mock_evidence,
+        ):
+            ui.build_session_search(30)
+            ui.build_session_search(30, outcome="useful")
+
+        mock_evidence.assert_not_called()
+
+    def test_session_search_evidence_filter_labels_results_without_recomputing(self) -> None:
+        rows = [self._session("s1")]
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(temp_dir, "state.json")}),
+            patch.object(ui, "scan_all", return_value=rows),
+            patch.object(ui, "evidence_for_sessions") as mock_evidence,
+            patch("aiwatcher_cli.cli.evidence_for_sessions", return_value={"s1": SimpleNamespace(inferred_outcome="needs_review")}),
+        ):
+            result = ui.build_session_search(30, evidence="needs_review")
+
+        # filter_sessions() already computed this internally to filter -- build_session_search()
+        # must label results from the `evidence` param directly, not call evidence_for_sessions again.
+        mock_evidence.assert_not_called()
+        self.assertEqual(result["sessions"][0]["inferred_outcome"], "needs_review")
 
 
 if __name__ == "__main__":
