@@ -659,5 +659,70 @@ class WeeklyDigestTests(unittest.TestCase):
         self.assertIn("recommendation", report["digest"])
 
 
+class SessionSearchTests(unittest.TestCase):
+    """S-27 UI surface: build_session_search() must delegate matching to
+    cli.filter_sessions() rather than re-implementing it (issue #34)."""
+
+    def _session(self, session_id: str, *, project_path: str = "/repo", cost_usd: float = 1.0, hours_ago: int = 1) -> LocalSession:
+        now = datetime.now(timezone.utc)
+        return LocalSession(
+            session_id=session_id,
+            tool="claude-code",
+            project_path=project_path,
+            started_at=now - timedelta(hours=hours_ago, minutes=5),
+            updated_at=now - timedelta(hours=hours_ago),
+            cost_usd=cost_usd,
+        )
+
+    def test_session_search_filters_by_text_and_outcome(self) -> None:
+        rows = [
+            self._session("s1", project_path="/repo/alpha"),
+            self._session("s2", project_path="/repo/alpha"),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all", return_value=rows),
+                patch.object(ui, "evidence_for_sessions", return_value={}),
+                patch.object(ui, "survival_by_session", return_value={}),
+            ):
+                record_outcome("s1", "useful")
+                result = ui.build_session_search(30, search="alpha", outcome="useful")
+
+        self.assertEqual(result["total_matched"], 1)
+        self.assertEqual(result["sessions"][0]["session_id"], "s1")
+        self.assertEqual(result["query"], {"search": "alpha", "outcome": "useful", "evidence": ""})
+
+    def test_session_search_no_match_returns_empty_list(self) -> None:
+        rows = [self._session("s1", project_path="/repo/alpha")]
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(temp_dir, "state.json")}),
+            patch.object(ui, "scan_all", return_value=rows),
+            patch.object(ui, "evidence_for_sessions", return_value={}),
+            patch.object(ui, "survival_by_session", return_value={}),
+            patch("aiwatcher_cli.cli.evidence_for_sessions", return_value={}),
+        ):
+            result = ui.build_session_search(30, search="nonexistent-project-xyz")
+
+        self.assertEqual(result["total_matched"], 0)
+        self.assertEqual(result["sessions"], [])
+
+    def test_session_search_result_carries_session_id_for_drilldown(self) -> None:
+        rows = [self._session("s1")]
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(temp_dir, "state.json")}),
+            patch.object(ui, "scan_all", return_value=rows),
+            patch.object(ui, "evidence_for_sessions", return_value={}),
+            patch.object(ui, "survival_by_session", return_value={}),
+        ):
+            result = ui.build_session_search(30)
+
+        self.assertEqual(result["sessions"][0]["session_id"], "s1")
+        self.assertIn("api_value", result["sessions"][0])
+
+
 if __name__ == "__main__":
     unittest.main()
