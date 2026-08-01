@@ -90,6 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.title = "AIWatcher Handoff"
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.hidesOnDeactivate = false
         window.isReleasedWhenClosed = false
 
         let view = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
@@ -138,7 +139,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         view.addSubview(statusLabel)
 
         window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: false)
+        window.orderFrontRegardless()
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     func finish(_ message: String) {

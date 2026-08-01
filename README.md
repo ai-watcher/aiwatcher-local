@@ -206,13 +206,14 @@ python -m aiwatcher_cli ui
 python -m aiwatcher_cli watch --notify --overlay
 ```
 
-When context gets heavy, AIWatcher opens a small local handoff companion outside
-Claude, Codex, Cursor, or your editor. It first tries a native always-on-top
-desktop bubble and falls back to the browser companion if native UI is not
-available. From there you can copy a fresh-session brief, continue here, or
-inspect the session without first navigating to the dashboard. AIWatcher does
-not inject UI into third-party apps. Set `AIWATCHER_OVERLAY_MODE=browser` if
-you prefer the browser companion.
+Keep `watch --notify --overlay` running while you work. When context gets
+heavy, AIWatcher opens a small local handoff companion outside Claude, Codex,
+Cursor, or your editor. It first tries a native always-on-top desktop bubble
+and falls back to the browser companion if native UI is not available. From
+there you can copy a fresh-session brief, continue here, or inspect the session
+without first navigating to the dashboard. AIWatcher does not inject UI into
+third-party apps. Use `watch --once --overlay` only as a one-shot smoke test,
+and set `AIWATCHER_OVERLAY_MODE=browser` if you prefer the browser companion.
 
 Targets: `generic`, `claude`, `codex`, `cursor`, and `vscode`. The brief lists
 recent commit subjects/bodies and changed files for context, any decisions
