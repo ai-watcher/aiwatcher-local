@@ -3509,6 +3509,7 @@ class IntegrationConfigTests(unittest.TestCase):
                 "score": 8,
                 "selected_score": 2,
             }]),
+            patch.object(cli, "recent_handoff_decisions", return_value=[]),
             patch("sys.stdout", new_callable=io.StringIO) as stdout,
         ):
             result = cli.command_hook_status(SimpleNamespace())
@@ -3538,6 +3539,7 @@ class IntegrationConfigTests(unittest.TestCase):
                 "score": 5,
                 "selected_score": 2,
             }]),
+            patch.object(cli, "recent_handoff_decisions", return_value=[]),
             patch("sys.stdout", new_callable=io.StringIO) as stdout,
         ):
             result = cli.command_hook_status(SimpleNamespace())
@@ -3565,6 +3567,7 @@ class IntegrationConfigTests(unittest.TestCase):
                 "selected_score": 2,
                 "session_id": "sess-real-id",
             }]),
+            patch.object(cli, "recent_handoff_decisions", return_value=[]),
             patch("sys.stdout", new_callable=io.StringIO) as stdout,
         ):
             result = cli.command_hook_status(SimpleNamespace())
@@ -3573,6 +3576,29 @@ class IntegrationConfigTests(unittest.TestCase):
         output = stdout.getvalue()
         self.assertIn("| session sess-real-id", output)
         self.assertEqual(output.count("sess-real-id"), 2)
+
+    def test_hook_status_shows_handoff_bubble_decisions(self) -> None:
+        with (
+            patch.object(cli, "recent_hook_events", return_value=[]),
+            patch.object(cli, "recent_interventions", return_value=[]),
+            patch.object(cli, "recent_command_decisions", return_value=[]),
+            patch.object(cli, "recent_watch_notifications", return_value=[]),
+            patch.object(cli, "recent_handoff_decisions", return_value=[{
+                "created_at": "2026-07-31T12:00:00+00:00",
+                "session_id": "sess-heavy",
+                "decision": "copy_handoff",
+                "expected_saved_context_tokens": 240_000,
+            }]),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_hook_status(SimpleNamespace())
+
+        self.assertEqual(result, 0)
+        output = stdout.getvalue()
+        self.assertIn("Recent handoff bubble decisions", output)
+        self.assertIn("copy_handoff", output)
+        self.assertIn("~240.0k context avoided", output)
+        self.assertIn("session sess-heavy", output)
 
 
 if __name__ == "__main__":

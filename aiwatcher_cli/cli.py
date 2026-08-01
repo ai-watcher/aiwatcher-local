@@ -43,6 +43,7 @@ from .local_state import (
     link_intervention_session,
     outcomes_for_sessions,
     recent_command_decisions,
+    recent_handoff_decisions,
     recent_hook_events,
     recent_interventions,
     record_always_allow_command_pattern,
@@ -5177,6 +5178,19 @@ def command_hook_status(_args: argparse.Namespace) -> int:
             line = (
                 f"- {row.get('created_at', 'unknown')} | {row.get('tool', 'unknown')} | "
                 f"{row.get('action', 'unknown')} | {sent_label} ({row.get('detail', 'unknown')})"
+            )
+            if row.get("session_id"):
+                line += f" | session {row['session_id']}"
+            print(line)
+    handoff_decisions = recent_handoff_decisions(limit=5)
+    if handoff_decisions:
+        print("\nRecent handoff bubble decisions")
+        for row in handoff_decisions:
+            expected = row.get("expected_saved_context_tokens")
+            saved = f" | ~{compact_int(expected)} context avoided" if isinstance(expected, int) and expected > 0 else ""
+            line = (
+                f"- {row.get('created_at', 'unknown')} | "
+                f"{row.get('decision', 'unknown')}{saved}"
             )
             if row.get("session_id"):
                 line += f" | session {row['session_id']}"

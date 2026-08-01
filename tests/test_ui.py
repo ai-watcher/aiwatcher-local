@@ -66,6 +66,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn('id="latestIntervention"', ui.HTML)
         self.assertIn('id="contextHealth"', ui.HTML)
         self.assertIn('id="handoffBubble"', ui.HTML)
+        self.assertIn('id="latestHandoffDecision"', ui.HTML)
+        self.assertIn('id="handoffDecisionRows"', ui.HTML)
         self.assertIn('id="coverageRows"', ui.HTML)
         self.assertIn('id="setupRows"', ui.HTML)
         self.assertIn('id="promptInput"', ui.HTML)
@@ -81,6 +83,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("watch --notify", ui.HTML)
         self.assertIn("/api/handoff", ui.HTML)
         self.assertIn("/api/handoff-decision", ui.HTML)
+        self.assertIn("copyHandoffFromBubble", ui.HTML)
+        self.assertIn("Copy handoff", ui.HTML)
         self.assertIn("Include prompt excerpt", ui.HTML)
         self.assertNotIn("window.alert", ui.HTML)
 
@@ -144,6 +148,7 @@ class DashboardWindowTests(unittest.TestCase):
             patch.object(ui, "survival_by_session", return_value={}),
             patch.object(ui, "analyze_all_sessions", return_value=[health]),
             patch.object(ui, "surface_coverage", return_value=coverage),
+            patch.object(ui, "recent_handoff_decisions", return_value=[]),
         ):
             summary = ui.build_summary(7)
 
@@ -154,7 +159,66 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(summary["handoff_bubble"]["session_id"], "bloated")
         self.assertIn("Start a new chat", summary["handoff_bubble"]["title"])
         self.assertEqual(summary["handoff_bubble"]["expected_saved_context_tokens"], 220_500)
+        self.assertEqual(summary["handoff_decisions"], [])
         self.assertTrue(any(item["title"] == "Context health needs attention" for item in summary["insights"]))
+
+    def test_recent_handoff_decision_suppresses_repeat_bubble(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="bloated",
+            tool="claude-code",
+            project_path="/repo",
+            started_at=now - timedelta(hours=4),
+            updated_at=now - timedelta(minutes=10),
+            tokens_in=500_000,
+            tokens_out=10_000,
+            cost_usd=2.0,
+        )
+        health = ui.ContextHealth(
+            session_id="bloated",
+            tool="claude-code",
+            project_path="/repo",
+            age_hours=4,
+            age_days=0.16,
+            event_count=4,
+            total_input_tokens=500_000,
+            total_output_tokens=10_000,
+            latest_turn_tokens=225_000,
+            peak_turn_tokens=225_000,
+            avg_turn_tokens=125_000,
+            growth_rate=20_000,
+            bloat_ratio=0.98,
+            efficiency_pct=2.0,
+            is_stale=False,
+            is_critical_stale=False,
+            is_context_pressure=True,
+            is_context_critical=True,
+            is_high_bloat=True,
+            is_extreme_bloat=True,
+            severity="critical",
+            recommendations=["Start a fresh session before continuing."],
+        )
+        with (
+            patch.object(ui, "scan_all", return_value=[row]),
+            patch.object(ui, "scan_all_events", return_value=[]),
+            patch.object(ui, "discover_tools", return_value={}),
+            patch.object(ui, "evidence_for_sessions", return_value={}),
+            patch.object(ui, "survival_by_session", return_value={}),
+            patch.object(ui, "analyze_all_sessions", return_value=[health]),
+            patch.object(ui, "surface_coverage", return_value=[]),
+            patch.object(ui, "recent_handoff_decisions", return_value=[{
+                "created_at": now.isoformat(),
+                "session_id": "bloated",
+                "decision": "continue_here",
+                "reason": "User already chose to continue.",
+                "expected_saved_context_tokens": 220_500,
+            }]),
+        ):
+            summary = ui.build_summary(7)
+
+        self.assertIsNone(summary["handoff_bubble"])
+        self.assertEqual(summary["handoff_decisions"][0]["decision"], "continue_here")
+        self.assertEqual(summary["handoff_decisions"][0]["expected_saved_context_label"], "220.5k")
 
     def test_handoff_bubble_is_absent_when_context_is_healthy(self) -> None:
         now = datetime.now(timezone.utc)
@@ -176,6 +240,7 @@ class DashboardWindowTests(unittest.TestCase):
             patch.object(ui, "survival_by_session", return_value={}),
             patch.object(ui, "analyze_all_sessions", return_value=[]),
             patch.object(ui, "surface_coverage", return_value=[]),
+            patch.object(ui, "recent_handoff_decisions", return_value=[]),
         ):
             summary = ui.build_summary(7)
 

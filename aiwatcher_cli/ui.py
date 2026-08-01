@@ -25,6 +25,7 @@ from .local_state import (
     outcome_counts,
     outcomes_for_sessions,
     recent_command_decisions,
+    recent_handoff_decisions,
     recent_interventions,
     record_handoff_decision,
     record_evidence_snapshot,
@@ -957,6 +958,41 @@ def _cost_per_surviving_change(all_rows: list[LocalSession]) -> dict[str, object
     }
 
 
+def _handoff_decision_rows(limit: int = 10) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for row in recent_handoff_decisions(limit=limit):
+        expected = row.get("expected_saved_context_tokens")
+        expected_int = expected if isinstance(expected, int) and expected > 0 else None
+        rows.append({
+            "id": row.get("id"),
+            "created_at": row.get("created_at"),
+            "session_id": row.get("session_id"),
+            "decision": row.get("decision"),
+            "reason": row.get("reason"),
+            "expected_saved_context_tokens": expected_int,
+            "expected_saved_context_label": compact_int(expected_int) if expected_int else None,
+        })
+    return rows
+
+
+def _recent_handoff_decision_session_ids(rows: list[dict[str, object]]) -> set[str]:
+    session_ids: set[str] = set()
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    for row in rows:
+        session_id = row.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            continue
+        created_at = row.get("created_at")
+        if isinstance(created_at, str):
+            try:
+                if datetime.fromisoformat(created_at).astimezone(timezone.utc) < cutoff:
+                    continue
+            except ValueError:
+                pass
+        session_ids.add(session_id)
+    return session_ids
+
+
 def build_summary(days: int = 7) -> dict[str, object]:
     now = datetime.now().astimezone()
     since = now - timedelta(days=days)
@@ -987,7 +1023,12 @@ def build_summary(days: int = 7) -> dict[str, object]:
     except OSError:
         all_events = []
     context_health = _context_health_cards(rows, all_events)
-    handoff_bubble = _handoff_bubble(context_health)
+    handoff_decisions = _handoff_decision_rows(limit=10)
+    suppressed_handoff_sessions = _recent_handoff_decision_session_ids(handoff_decisions)
+    handoff_bubble = _handoff_bubble([
+        row for row in context_health
+        if str(row.get("session_id", "")) not in suppressed_handoff_sessions
+    ])
 
     insights = []
     if projects:
@@ -1131,6 +1172,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
         "setup": setup_checklist(),
         "context_health": context_health,
         "handoff_bubble": handoff_bubble,
+        "handoff_decisions": handoff_decisions,
         "recent_sessions": [
             {
                 "tool": row.tool,
@@ -1556,6 +1598,11 @@ HTML = r"""<!doctype html>
     </section>
 
     <section class="card" style="margin-bottom:14px">
+      <div class="section-title"><div><h2>Latest handoff decision</h2><p>Fresh-session handoff choices and expected context avoided.</p></div></div>
+      <div id="latestHandoffDecision"></div>
+    </section>
+
+    <section class="card" style="margin-bottom:14px">
       <div class="section-title"><div><h2>Session health</h2><p>Context bloat, runway pressure, and handoff actions for active local work.</p></div></div>
       <div id="contextHealth"></div>
     </section>
@@ -1641,6 +1688,16 @@ HTML = r"""<!doctype html>
   </section>
 
   <section id="view-receipts" class="view" hidden>
+    <div class="card" style="margin-bottom:14px">
+      <div class="section-title">
+        <div><h2>Handoff decisions</h2><p>When AIWatcher suggested a fresh session, what you chose, and expected context avoided.</p></div>
+        <span class="pill">Metadata only</span>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Time</th><th>Decision</th><th>Expected context avoided</th><th>Session</th><th></th></tr></thead>
+        <tbody id="handoffDecisionRows"></tbody>
+      </table></div>
+    </div>
     <div class="card">
       <div class="section-title">
         <div><h2>Intervention receipts</h2><p>Risk decisions, predicted impact, resulting usage, and developer outcomes.</p></div>
@@ -1768,6 +1825,38 @@ function renderReceiptRows(receipts) {
     <td>${esc(receipt.original_score ?? '—')} → ${esc(receipt.selected_score ?? '—')}</td>
     <td>${esc(receipt.outcome || receipt.session_status)}</td>
     <td><button class="row-action">Review</button></td>
+  </tr>`).join('');
+}
+function handoffDecisionLabel(value) {
+  const labels = {
+    new_chat: 'Prepared fresh-session handoff',
+    continue_here: 'Continued in current session',
+    copy_handoff: 'Copied handoff brief',
+    dismissed: 'Dismissed'
+  };
+  return labels[value] || value || 'unknown';
+}
+function renderLatestHandoffDecision(decisions) {
+  const decision = (decisions || [])[0];
+  if (!decision) return '<div class="empty">No handoff bubble decisions recorded yet.</div>';
+  const saved = decision.expected_saved_context_label
+    ? `<span class="pill">~${esc(decision.expected_saved_context_label)} context avoided</span>`
+    : '';
+  return `<div class="receipt-summary"><div>
+    <div class="session-title">${esc(handoffDecisionLabel(decision.decision))}</div>
+    <div class="session-meta">${esc(dateLabel(decision.created_at))} · session ${esc(decision.session_id || 'unknown')}</div>
+    <p>${esc(decision.reason || 'AIWatcher recommended a fresh-session handoff because local context health crossed a threshold.')}</p>
+    <div class="pill-row"><span class="pill">handoff bubble</span>${saved}</div>
+  </div>${decision.session_id ? `<button class="btn-quiet" onclick="selectSession('${esc(decision.session_id)}')">Inspect session</button>` : ''}</div>`;
+}
+function renderHandoffDecisionRows(decisions) {
+  if (!decisions.length) return '<tr><td colspan="5"><div class="empty">No handoff decisions recorded yet.</div></td></tr>';
+  return decisions.map(decision => `<tr>
+    <td>${esc(dateLabel(decision.created_at))}</td>
+    <td>${esc(handoffDecisionLabel(decision.decision))}</td>
+    <td>${esc(decision.expected_saved_context_label ? `~${decision.expected_saved_context_label}` : '—')}</td>
+    <td>${esc(decision.session_id || 'unknown')}</td>
+    <td>${decision.session_id ? `<button class="row-action" onclick="selectSession('${esc(decision.session_id)}')">Inspect</button>` : ''}</td>
   </tr>`).join('');
 }
 function openReceipt(receiptId) {
@@ -2018,6 +2107,16 @@ async function openHandoff(sessionId, target = 'generic', includePrompt = false)
   }
   document.getElementById('detailContent').innerHTML = renderHandoff(capsule);
 }
+async function copyHandoffFromBubble(sessionId) {
+  if (window.currentHandoffBubble) await recordHandoffDecision(window.currentHandoffBubble, 'copy_handoff');
+  const res = await fetch(`/api/handoff?id=${encodeURIComponent(sessionId)}&target=generic&prompt=0`);
+  const capsule = await res.json();
+  if (capsule.error) {
+    showToast(capsule.error, 'error');
+    return;
+  }
+  await copyText(capsule.next_brief || '', 'Handoff brief copied');
+}
 async function recordHandoffDecision(bubble, decision) {
   if (!bubble || !bubble.session_id) return;
   try {
@@ -2063,6 +2162,7 @@ function renderHandoffBubble(bubble) {
     <div class="pill-row">${(bubble.tags || []).map(tag => `<span class="pill">${esc(tag)}</span>`).join('')}</div>
     <div class="actions" style="margin-top:14px">
       <button class="btn-primary" data-session="${esc(bubble.session_id)}" onclick="startFreshFromBubble(this.dataset.session)">${esc(bubble.primary_label || 'New chat')}</button>
+      <button class="btn-quiet" data-session="${esc(bubble.session_id)}" onclick="copyHandoffFromBubble(this.dataset.session)">Copy handoff</button>
       <button class="btn-quiet" onclick="continueFromBubble()">${esc(bubble.continue_label || 'Continue here')}</button>
       <button class="btn-quiet" data-session="${esc(bubble.session_id)}" onclick="selectSession(this.dataset.session)">Inspect session</button>
     </div>`;
@@ -2459,8 +2559,11 @@ async function load(resetDetail = true) {
   }
   document.getElementById('preflightDecisions').textContent = totals.preflight_decisions;
   receiptCache = data.intervention_receipts || [];
+  const handoffDecisions = data.handoff_decisions || [];
   document.getElementById('latestIntervention').innerHTML = renderLatestReceipt(receiptCache[0]);
+  document.getElementById('latestHandoffDecision').innerHTML = renderLatestHandoffDecision(handoffDecisions);
   document.getElementById('receiptRows').innerHTML = renderReceiptRows(receiptCache);
+  document.getElementById('handoffDecisionRows').innerHTML = renderHandoffDecisionRows(handoffDecisions);
   document.getElementById('contextHealth').innerHTML = renderContextHealth(data.context_health || []);
   document.getElementById('coverageRows').innerHTML = renderCoverage(data.coverage || []);
   document.getElementById('setupRows').innerHTML = renderSetup(data.setup || []);
