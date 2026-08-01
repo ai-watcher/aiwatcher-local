@@ -560,6 +560,7 @@ def build_weekly_digest(days: int = 7) -> dict[str, object]:
         ),
         "top_sessions": [
             {
+                "session_id": row.session_id,
                 "project": short_path(row.project_path),
                 "tool": row.tool,
                 "model": row.model or "unknown",
@@ -1279,6 +1280,11 @@ HTML = r"""<!doctype html>
     tr.clickable:hover { background: rgba(112,167,255,.05); }
     .row-action { min-height: 30px; padding: 5px 9px; color: #ddecff; background: var(--blue-soft); border-color: #3d6594; font-size: 12px; }
     .empty { color: var(--muted); padding: 16px; border: 1px dashed var(--line); border-radius: 8px; }
+    .digest-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+    .digest-row:last-child { border-bottom: 0; }
+    .digest-row.clickable { cursor: pointer; }
+    .digest-row.clickable:hover { background: rgba(255,255,255,.03); }
+    .digest-row .digest-row-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dce6f6; }
     .detail-section { padding: 20px 0; border-bottom: 1px solid var(--line); }
     .detail-section:last-child { border-bottom: 0; }
     .verdict-card { border: 1px solid var(--line-strong); border-left: 4px solid var(--blue); border-radius: 8px; padding: 16px; background: #101925; margin-top: 14px; }
@@ -1457,6 +1463,15 @@ HTML = r"""<!doctype html>
         <div id="todayRecommendation"></div>
       </div>
     </section>
+
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title">
+        <div><h2>This week's digest</h2><p>A quick pulse on cost, outcomes, and what to change next.</p></div>
+        <button class="btn-quiet" onclick="showView('insights')">View full digest</button>
+      </div>
+      <div id="todayDigest"></div>
+    </section>
+
     <section class="grid kpis">
       <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub">Value per useful change: <span id="costPerUseful">-</span></div><div class="sub" id="costPerSurvivingRow" hidden>Cost per surviving change: <span id="costPerSurviving">-</span></div></div>
       <div class="card metric-card metric-amber"><div class="label">Preflight decisions</div><div class="value" id="preflightDecisions">-</div><div class="sub"><span id="windowLabel">-</span></div></div>
@@ -1568,6 +1583,13 @@ HTML = r"""<!doctype html>
   </section>
 
   <section id="view-insights" class="view" hidden>
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title">
+        <div><h2>Weekly Digest</h2><p>What your AI work cost this week, what stuck, and what to change next.</p></div>
+        <span class="pill">Local logs, inferred outcomes</span>
+      </div>
+      <div id="report"></div>
+    </section>
     <section class="grid two">
       <div class="card">
         <div class="section-title"><div><h2>Local Insights</h2><p>Suggestions to reduce waste without uploading prompts.</p></div></div>
@@ -1576,10 +1598,6 @@ HTML = r"""<!doctype html>
       <div class="card">
         <h2>Daily Journal</h2>
         <div id="journal"></div>
-        <div class="detail-section">
-          <h2>Local Weekly Report</h2>
-          <div id="report"></div>
-        </div>
       </div>
     </section>
     <section class="grid two" style="margin-top:14px">
@@ -2183,11 +2201,100 @@ async function markOutcome(sessionId, outcome) {
     buttons.forEach(button => { button.disabled = false; });
   }
 }
+function renderTodayDigest(digest) {
+  if (!digest) return '<div class="empty">Not enough local history yet to build a weekly digest.</div>';
+  const o = digest.outcomes;
+  const tally = [
+    o.useful ? `${o.useful} useful` : '',
+    o.rework ? `${o.rework} rework` : '',
+    o.abandoned ? `${o.abandoned} abandoned` : '',
+  ].filter(Boolean).join(', ');
+  const survival = digest.survival && digest.survival.available
+    ? `<span class="pill">${esc(digest.survival.cost_per_surviving_change)} per surviving change</span>`
+    : '';
+  return `<div class="insight"><strong>${esc(digest.recommendation)}</strong></div>
+    <div class="pill-row">
+      ${tally ? `<span class="pill">${esc(tally)}</span>` : ''}
+      ${digest.command_gate.commands_blocked ? `<span class="pill">${esc(digest.command_gate.commands_blocked)} dangerous commands blocked</span>` : ''}
+      ${digest.prompt_gate.modified ? `<span class="pill">${esc(digest.prompt_gate.modified)} risky prompts modified</span>` : ''}
+      ${survival}
+    </div>`;
+}
 function renderReport(report) {
-  return `<p>${esc(report.title)}</p>
-    <div class="pill-row">${report.summary.map(item => `<span class="pill">${esc(item)}</span>`).join('')}</div>
-    ${report.highlights.map(item => `<div class="insight"><strong>${esc(item)}</strong></div>`).join('')}
-    <p>${esc(report.next_checks.join(' '))}</p>`;
+  const digest = report.digest;
+  if (!digest) {
+    return `<p>${esc(report.title)}</p>
+      <div class="pill-row">${report.summary.map(item => `<span class="pill">${esc(item)}</span>`).join('')}</div>
+      ${report.highlights.map(item => `<div class="insight"><strong>${esc(item)}</strong></div>`).join('')}
+      <p>${esc(report.next_checks.join(' '))}</p>`;
+  }
+  const sections = [];
+  const o = digest.outcomes;
+  const outcomeTotal = o.useful + o.rework + o.abandoned + o.inferred_useful + o.inferred_churned;
+  if (outcomeTotal > 0) {
+    sections.push(`<div class="detail-section">
+      <h2>Outcomes</h2>
+      <div class="mini-grid">
+        ${o.useful ? `<div class="mini"><span class="label">Useful</span><strong>${esc(o.useful)}</strong></div>` : ''}
+        ${o.rework ? `<div class="mini"><span class="label">Rework</span><strong>${esc(o.rework)}</strong></div>` : ''}
+        ${o.abandoned ? `<div class="mini"><span class="label">Abandoned</span><strong>${esc(o.abandoned)}</strong></div>` : ''}
+        ${o.inferred_useful ? `<div class="mini"><span class="label">Inferred useful</span><strong>${esc(o.inferred_useful)}</strong></div>` : ''}
+        ${o.inferred_churned ? `<div class="mini"><span class="label">Inferred churned</span><strong>${esc(o.inferred_churned)}</strong></div>` : ''}
+      </div>
+    </div>`);
+  }
+  if (digest.highest_cost_useful_session) {
+    const h = digest.highest_cost_useful_session;
+    sections.push(`<div class="detail-section">
+      <h2>Highest-cost useful session</h2>
+      <p>${esc(h.project)} &middot; ${esc(h.tool)} &middot; ${esc(h.model)} &mdash; <span class="mono">${esc(h.api_value_label)}</span></p>
+    </div>`);
+  }
+  if (digest.top_sessions && digest.top_sessions.length) {
+    sections.push(`<div class="detail-section">
+      <h2>Costliest sessions</h2>
+      ${digest.top_sessions.map(s => `<div class="digest-row${s.session_id ? ' clickable' : ''}" ${s.session_id ? `onclick="selectSession('${esc(s.session_id)}')"` : ''}>
+        <span class="digest-row-label">${esc(s.project)} &middot; ${esc(s.tool)} &middot; ${esc(s.model)}</span>
+        <span class="mono">${esc(s.api_value_label)}</span>
+        ${s.outcome ? `<span class="outcome-pill ${esc(s.outcome)}">${esc(s.outcome)}</span>` : '<span class="pill">unreviewed</span>'}
+      </div>`).join('')}
+    </div>`);
+  }
+  const candidates = [
+    ...digest.loop_candidates.map(c => ({ ...c, kind: 'Loop' })),
+    ...digest.velocity_candidates.map(c => ({ ...c, kind: 'Runaway pace' })),
+  ];
+  if (candidates.length) {
+    sections.push(`<div class="detail-section">
+      <h2>Loop &amp; runaway signals</h2>
+      ${candidates.map(c => `<div class="insight"><strong>${esc(c.kind)} &middot; ${esc(c.project)} (${esc(c.tool)})</strong><p>${esc(c.diagnosis || c.ratio_label)}</p></div>`).join('')}
+    </div>`);
+  }
+  if (digest.command_gate.gates_fired > 0 || digest.prompt_gate.flagged > 0) {
+    sections.push(`<div class="detail-section">
+      <h2>Guardrails this window</h2>
+      <div class="pill-row">
+        ${digest.command_gate.gates_fired ? `<span class="pill">${esc(digest.command_gate.commands_blocked)} of ${esc(digest.command_gate.gates_fired)} dangerous commands blocked</span>` : ''}
+        ${digest.prompt_gate.flagged ? `<span class="pill">${esc(digest.prompt_gate.modified)} of ${esc(digest.prompt_gate.flagged)} risky prompts modified</span>` : ''}
+      </div>
+    </div>`);
+  }
+  if (digest.survival && digest.survival.available) {
+    const s = digest.survival;
+    sections.push(`<div class="detail-section">
+      <h2>Cost per surviving change</h2>
+      <div class="mini-grid">
+        <div class="mini"><span class="label">Survived</span><strong>${esc(s.surviving_count)}</strong></div>
+        <div class="mini"><span class="label">Churned</span><strong>${esc(s.churned_count)}</strong></div>
+        <div class="mini"><span class="label">$/surviving change</span><strong>${esc(s.cost_per_surviving_change)}</strong></div>
+        <div class="mini"><span class="label">$/churned change</span><strong>${esc(s.cost_per_churned_change)}</strong></div>
+      </div>
+    </div>`);
+  }
+  return `<div class="verdict-card"><h3>${esc(digest.recommendation)}</h3></div>
+    <div class="pill-row" style="margin-top:14px">${report.summary.map(item => `<span class="pill">${esc(item)}</span>`).join('')}</div>
+    ${sections.join('')}
+    <p class="receipt-note">API-equivalent value, not invoice spend. Outcomes are inferred from local signals, not guaranteed truth. Based on local logs only, not live provider quota.</p>`;
 }
 function renderJournal(journal) {
   return `<p>${esc(journal.title)}</p>
@@ -2213,6 +2320,7 @@ async function load(resetDetail = true) {
   const data = await summaryRes.json();
   const report = await reportRes.json();
   const journal = await journalRes.json();
+  document.getElementById('todayDigest').innerHTML = renderTodayDigest(report.digest);
   const totals = data.totals;
   document.getElementById('apiValue').textContent = totals.api_value_label;
   document.getElementById('windowLabel').textContent = totals.window_label;
