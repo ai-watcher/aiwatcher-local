@@ -192,8 +192,10 @@ before reading further.
 
 The dashboard also surfaces this as a **handoff bubble** on Today when active
 local work reaches warning or critical context pressure: start a fresh chat,
-continue here, or inspect the session. AIWatcher records only the local decision
-metadata and estimated replayed context avoided, not prompt or source text.
+copy a handoff brief, continue here, or inspect the session. AIWatcher records
+only the local decision metadata and estimated replayed context avoided, not
+prompt or source text. Recent handoff decisions appear in Today, Receipts, and
+`aiwatcher hook-status`.
 
 Targets: `generic`, `claude`, `codex`, `cursor`, and `vscode`. The brief lists
 recent commit subjects/bodies and changed files for context, any decisions
