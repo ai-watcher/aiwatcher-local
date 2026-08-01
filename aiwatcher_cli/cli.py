@@ -25,16 +25,21 @@ import webbrowser
 from collections import Counter, defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Callable, Iterable, Sequence
+from urllib.parse import quote
 
 from .correlate import link_recent_interventions_to_sessions
 from .local_state import (
     COMMAND_GATE_BLOCKED_DECISIONS,
     VALID_OUTCOMES,
     command_hash,
+    consume_brief_token,
     evidence_snapshots_for_sessions,
     get_baselines,
     get_outcome,
+    get_ui_server,
+    has_sent_notification,
     is_command_pattern_always_allowed,
+    issue_brief_token,
     link_intervention_session,
     outcomes_for_sessions,
     recent_command_decisions,
@@ -46,8 +51,11 @@ from .local_state import (
     record_evidence_snapshot,
     record_intervention,
     record_hook_event,
+    record_notification_sent,
     record_outcome,
     record_survival_check,
+    record_watch_notification,
+    recent_watch_notifications,
     redact_command_for_storage,
     save_baselines,
     state_path,
@@ -71,11 +79,21 @@ from .processes import (
     rss_label,
     seconds_label,
 )
-from .scanner import LocalEvent, LocalSession, discover_tools, display_model_name, model_usage_totals, scan_all, scan_all_events
+from .scanner import (
+    LocalEvent,
+    LocalSession,
+    discover_tools,
+    display_model_name,
+    model_usage_totals,
+    scan_all,
+    scan_all_events,
+    surface_coverage,
+)
 from .session_health import analyze_session_health
 
 
 CLOUD_URL = "https://www.getaiwatcher.com"
+DEFAULT_UI_PORT = 8765
 MIN_DT = datetime.min.replace(tzinfo=timezone.utc)
 DEFAULT_DAILY_BUDGET_USD = 10.0
 DEFAULT_MONTHLY_BUDGET_USD = 100.0
@@ -700,6 +718,26 @@ SURVIVAL_BUCKETS_DAYS = {"7": 7, "14": 14, "30": 30}
 SURVIVAL_RECHECK_CAP = 20          # sessions checked per call, not (session, bucket) pairs
 SURVIVAL_MAX_COMMITS_CHECKED = 5   # per session -- each is its own git subprocess spawn
 
+# Issue #32: how often `aiwatcher watch --notify` re-derives outcome-review
+# signals (survival/churn, same-file re-prompt, cost-per-surviving-change).
+# These are day/hour-granularity signals, not per-second ones, and each pass
+# spawns git subprocesses per session -- rechecking every --interval tick
+# (default 15s) would be wasteful. 5 minutes is responsive enough for
+# 72h-window re-prompt detection without adding real load to the watch loop.
+OUTCOME_SIGNAL_INTERVAL_SECONDS = 300
+OUTCOME_SIGNAL_EVIDENCE_WINDOW_DAYS = 3  # >= REPROMPT_WINDOW_HOURS/24 so a same-file re-prompt pair isn't split across two disjoint scans
+OUTCOME_SIGNAL_SAMPLE_CAP = 10  # bounds subprocess spawns per pass, same reasoning as SURVIVAL_RECHECK_CAP
+
+# Outcome-review notifications intentionally look across ALL historical
+# evidence snapshots, not just ones resolved by this pass -- a bucket that
+# resolved earlier via `today`/`ui`, before `watch --notify` was ever run,
+# still needs to be surfaced once. Left uncapped, the very first pass against
+# an established local-state.json (weeks of resolved-but-unnotified backlog)
+# would fire every one of them as a notification storm in a single burst.
+# Capping per pass spreads the backlog across subsequent OUTCOME_SIGNAL_INTERVAL_SECONDS
+# passes instead -- a few every 5 minutes rather than dozens all at once.
+MAX_OUTCOME_NOTIFICATIONS_PER_PASS = 3
+
 
 def recheck_evidence_survival(cap: int = SURVIVAL_RECHECK_CAP) -> int:
     """S-22: re-check existing evidence snapshots' commits for survival at 7/14/30-day marks.
@@ -926,18 +964,72 @@ def build_execution_brief(
     return "\n".join(lines)
 
 
-def _is_generated_brief(text: str) -> bool:
-    """Detect text that is already an AIWatcher execution brief.
+_BRIEF_TOKEN_LINE_RE = re.compile(r"^(Brief-Id|Capsule-Id):\s*(\S+)\s*$", re.MULTILINE)
 
-    Prevents re-scoring and re-wrapping a brief the user pasted back in — without
-    this, `build_execution_brief` nests a second Task/Execution approach/Completion
-    report shell around the first one every time a brief is resubmitted.
+
+def _extract_brief_token(text: str, kind: str) -> str | None:
+    label = "Brief-Id" if kind == "execution_brief" else "Capsule-Id"
+    for match in _BRIEF_TOKEN_LINE_RE.finditer(text):
+        if match.group(1) == label:
+            return match.group(2)
+    return None
+
+
+def _consume_brief_token_safely(token: str | None, kind: str) -> bool:
+    try:
+        return consume_brief_token(token, kind)
+    except OSError:
+        return False
+
+
+def _brief_text_for_delivery(selected_prompt: str) -> str:
+    """Stamp a live, single-use Brief-Id onto brief text right before it leaves
+    this process as something the developer (or Cursor) could resubmit verbatim.
+
+    Deliberately not done inside build_execution_brief: that function is a pure
+    formatter called throughout tests and gate-preview code that never actually
+    hands text back to a hook, and minting a token on every one of those calls
+    would mean touching local state far outside where it matters. Only text
+    that reaches an actual hook response (_hook_output_with_brief, Cursor's
+    resubmit message) needs a provable, single-use origin token.
+    """
+    try:
+        return selected_prompt + f"\n\nBrief-Id: {issue_brief_token('execution_brief')}"
+    except OSError:
+        return selected_prompt
+
+
+def _looks_like_execution_brief(text: str) -> bool:
+    """Shape-only check: does this text already carry the Task/Execution
+    approach/Completion report structure build_execution_brief produces?
+
+    Not a trust signal by itself -- shape is public and trivially copyable.
+    Used only to avoid nesting a second brief shell around text that already
+    has one; see _is_generated_brief for the security-relevant, token-verified
+    check that actually decides whether to skip risk scoring.
     """
     return (
         text.startswith("Task\n")
         and "\nExecution approach\n" in text
         and "\nCompletion report\n" in text
     )
+
+
+def _is_generated_brief(text: str) -> bool:
+    """Detect text that is a *verified* AIWatcher execution brief.
+
+    Shape alone (Task/Execution approach/Completion report headers) is public
+    and trivially copyable, so it is never enough on its own to skip risk
+    scoring — it must also carry a live, single-use Brief-Id token stamped on
+    at delivery time by _brief_text_for_delivery. Text that merely looks like
+    a brief but lacks a valid token is fully scored like any other prompt
+    (see _looks_like_execution_brief for the shape-only check that still
+    prevents double-wrapping in that case).
+    """
+    if not _looks_like_execution_brief(text):
+        return False
+    token = _extract_brief_token(text, "execution_brief")
+    return _consume_brief_token_safely(token, "execution_brief")
 
 
 def analyze_prompt(
@@ -1097,7 +1189,11 @@ def analyze_prompt(
     elif score >= 3:
         risk = "medium"
 
-    safer_prompt = build_execution_brief(
+    # text already carries its own Task/Execution approach/Completion report
+    # shell (just not a *verified* one, or _is_generated_brief above would
+    # have short-circuited already) -- reuse it rather than nesting a second
+    # shell around it.
+    safer_prompt = text if _looks_like_execution_brief(text) else build_execution_brief(
         text,
         cwd=cwd,
         broad_scope=broad_scope,
@@ -1634,7 +1730,10 @@ def run_prompt_gate(
             }), "application/json; charset=utf-8")
             decision_event.set()
 
-    server = LocalThreadingHTTPServer(("127.0.0.1", 0), GateHandler)
+    try:
+        server = LocalThreadingHTTPServer(("127.0.0.1", 0), GateHandler)
+    except OSError:
+        return _fallback_prompt_gate(tool=tool, prompt=prompt, result=result)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     url = f"http://127.0.0.1:{server.server_port}/"
@@ -2067,33 +2166,96 @@ def render_journal(days: int = 1) -> str:
 
 
 def command_start(_args: argparse.Namespace) -> int:
-    detected = discover_tools()
     sessions = sessions_since(1)
     print("AIWatcher v0.1.0 - local mode")
     print("Read-only scan. No data leaves this machine.\n")
-    print("Watching:")
-    labels = {
-        "claude-code": "Claude Code",
-        "cursor": "Cursor",
-        "codex-cli": "Codex CLI",
-        "cline": "Cline",
-        "windsurf": "Windsurf",
-    }
-    for key, label in labels.items():
-        print(f"  {'[OK]' if detected.get(key) else '[--]'} {label}")
+    print("Surface coverage:")
+    for row in surface_coverage(sessions):
+        marker = "[OK]" if row.status == "automatic" else "[..]" if row.status in {"limited", "companion", "unverified"} else "[--]"
+        print(f"  {marker} {row.label:26} {row.status_label}")
     print(f"\nCollected {len(sessions)} sessions from the last 24 hours.")
     print("Run `aiwatcher today` or `python -m aiwatcher_cli today` to see your usage.")
     print("Connect Cloud later for team spend, budget guardrails, and audit evidence.")
     return 0
 
 
+def setup_checklist() -> list[dict[str, str]]:
+    return [
+        {
+            "title": "Open the local dashboard",
+            "why": "Today shows recent work, outcomes, receipts, session health, and coverage.",
+            "command": "aiwatcher ui",
+            "status": "recommended",
+        },
+        {
+            "title": "Verify local history coverage",
+            "why": "Shows which tools are scanned automatically and which are companion-only.",
+            "command": "aiwatcher doctor",
+            "status": "recommended",
+        },
+        {
+            "title": "Install Claude prompt gate",
+            "why": "Adds prompt preflight in Claude Code hook surfaces that actually invoke UserPromptSubmit.",
+            "command": "aiwatcher install-claude-hook --write --scope user --gate",
+            "status": "optional",
+        },
+        {
+            "title": "Install Codex prompt gate",
+            "why": "Adds prompt preflight where your Codex build invokes UserPromptSubmit; verify with hook-status.",
+            "command": "aiwatcher install-codex-hook --write --scope user --gate",
+            "status": "optional",
+        },
+        {
+            "title": "Install Cursor prompt gate",
+            "why": "Pauses risky Cursor prompts with a resubmittable scoped brief.",
+            "command": "aiwatcher install-cursor-hook --write --scope user --gate",
+            "status": "optional",
+        },
+        {
+            "title": "Turn on ambient watch notifications",
+            "why": "While this command is running, AIWatcher can notify on context, loop, runway, or velocity pressure.",
+            "command": "aiwatcher watch --notify --interval 60",
+            "status": "recommended",
+        },
+        {
+            "title": "Prove hook invocation",
+            "why": "hook-status is the source of truth; session logs alone do not prove a prompt was intercepted.",
+            "command": "aiwatcher hook-status",
+            "status": "recommended",
+        },
+        {
+            "title": "Try one safe test prompt",
+            "why": "Confirms the gate behavior before relying on it during real work.",
+            "command": 'aiwatcher preflight "Refactor the entire codebase and delete old auth secrets" --tool claude',
+            "status": "recommended",
+        },
+    ]
+
+
+def command_setup(_args: argparse.Namespace) -> int:
+    sessions = scan_all()
+    print("AIWatcher Local setup")
+    print("Private, local-first control loop. No prompt, source, or telemetry upload by default.\n")
+    print("Surface coverage")
+    for row in surface_coverage(sessions):
+        marker = "[OK]" if row.status == "automatic" else "[..]" if row.status in {"limited", "companion", "unverified"} else "[--]"
+        print(f"  {marker} {row.label:26} {row.status_label}")
+    print("\nFirst-value checklist")
+    for index, step in enumerate(setup_checklist(), 1):
+        print(f"{index}. {step['title']} ({step['status']})")
+        print(f"   {step['why']}")
+        print(f"   $ {step['command']}")
+    print("\nAfter installing hooks, run `aiwatcher hook-status` from the same AI surface you tested.")
+    print("For Desktop/chat surfaces without hooks, use the dashboard Prompt tab or MCP/companion fallback.")
+    return 0
+
+
 def command_status(_args: argparse.Namespace) -> int:
-    detected = discover_tools()
     sessions = scan_all()
     print("AIWatcher Local status\n")
-    for tool, installed in detected.items():
-        tool_sessions = [row for row in sessions if row.tool == tool]
-        print(f"{'[OK]' if installed else '[--]'} {tool:12} {len(tool_sessions):>5} sessions")
+    for row in surface_coverage(sessions):
+        marker = "[OK]" if row.status == "automatic" else "[..]" if row.status in {"limited", "companion", "unverified"} else "[--]"
+        print(f"{marker} {row.label:26} {row.status_label:28} {row.session_count:>5} sessions")
     print("\nMode: local-only")
     print("Network: disabled unless hosted sync is configured separately")
     return 0
@@ -2437,6 +2599,139 @@ def _copy_to_clipboard(text: str) -> tuple[bool, str]:
     return False, "no clipboard command found"
 
 
+def _powershell_single_quoted(value: str) -> str:
+    """Quote `value` as a literal PowerShell single-quoted string.
+
+    Single quotes in PowerShell never interpolate $variables/subexpressions/
+    backticks -- unlike Python's repr() (which escapes for Python syntax, not
+    PowerShell), this is the one quoting style that is actually safe to embed
+    untrusted text inside without risking the text being interpreted as script.
+    The only special case inside a single-quoted PowerShell string is a
+    literal quote, escaped by doubling it.
+    """
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _send_local_notification(title: str, body: str, *, url: str | None = None) -> tuple[bool, str]:
+    """Best-effort local OS notification with no network dependency.
+
+    `url` is an optional local dashboard deep link. Where the platform's
+    notifier supports a real click-through action (macOS terminal-notifier,
+    Windows MessageBox buttons) it is wired up; elsewhere the caller is
+    expected to have already put the URL in `body` as plain text, since the
+    only other option is no link at all.
+
+    Caution: the click-through paths (terminal-notifier `-open`, and the
+    PowerShell MessageBox Yes/No branch below) could not be exercised on a
+    real macOS or interactive Windows desktop session while writing this --
+    they follow documented flag/API behavior but are unverified end-to-end.
+    """
+    if os.environ.get("AIWATCHER_DISABLE_NOTIFICATIONS", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False, "disabled by AIWATCHER_DISABLE_NOTIFICATIONS"
+    clean_title = title.replace("\n", " ").strip()[:80]
+    clean_body = body.replace("\n", " ").strip()[:220]
+    try:
+        if sys.platform == "darwin" and shutil.which("terminal-notifier"):
+            cmd = ["terminal-notifier", "-title", clean_title, "-message", clean_body]
+            if url:
+                # terminal-notifier opens this URL when the user clicks the
+                # notification itself -- no dispatcher/action-menu needed.
+                cmd += ["-open", url]
+            subprocess.run(
+                cmd,
+                check=True,
+                timeout=3,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True, "terminal-notifier"
+        if sys.platform == "darwin" and shutil.which("osascript"):
+            script = (
+                f"display notification {json.dumps(clean_body)} "
+                f"with title {json.dumps(clean_title)}"
+            )
+            subprocess.run(
+                ["osascript", "-l", "AppleScript", "-e", script],
+                check=True,
+                timeout=3,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True, "osascript"
+        if shutil.which("notify-send"):
+            subprocess.run(
+                ["notify-send", clean_title, clean_body],
+                check=True,
+                timeout=3,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True, "notify-send"
+        if sys.platform == "win32" and shutil.which("msg"):
+            # msg.exe is built into Windows (Remote Desktop Services), so this
+            # needs no extra dependency and no user setup, unlike a toast via
+            # win10toast/WinRT. It pops a modal dialog rather than a modern
+            # toast -- less pretty, but it actually ships everywhere. /TIME
+            # auto-dismisses it so a missed notification doesn't sit blocking
+            # the desktop forever; "console" targets the local session only.
+            subprocess.run(
+                ["msg", "console", "/TIME:10", f"{clean_title}: {clean_body}"],
+                check=True,
+                timeout=3,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True, "msg.exe"
+        if sys.platform == "win32" and shutil.which("powershell"):
+            # msg.exe ships only with Remote Desktop Services, which Windows
+            # Home editions don't include -- shutil.which("msg") returns None
+            # there. This fallback uses System.Windows.Forms.MessageBox,
+            # which ships with every Windows edition's .NET Framework, so it
+            # still needs no extra dependency.
+            #
+            # Unlike msg.exe (which hands the popup off to a separate OS
+            # component and returns immediately), MessageBox.Show() blocks
+            # the calling process until the user dismisses it. Waiting on
+            # that with subprocess.run(timeout=...) would kill -- and so
+            # silently close -- the dialog out from under the user the
+            # instant the timeout elapsed. Popen (fire-and-forget, no wait)
+            # lets it linger naturally instead.
+            if url:
+                # Give the dialog a Yes/No choice instead of a bare OK so
+                # clicking through can open the dashboard deep link -- the
+                # whole Start-Process call runs inside this already-detached
+                # PowerShell process, so no callback into Python is needed.
+                dialog_body = f"{clean_body}\n\n(Yes = open in AIWatcher dashboard)"
+                script = (
+                    "Add-Type -AssemblyName System.Windows.Forms; "
+                    f"$result = [System.Windows.Forms.MessageBox]::Show({_powershell_single_quoted(dialog_body)}, "
+                    f"{_powershell_single_quoted(clean_title)}, "
+                    "[System.Windows.Forms.MessageBoxButtons]::YesNo, "
+                    "[System.Windows.Forms.MessageBoxIcon]::Information); "
+                    f"if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {{ Start-Process {_powershell_single_quoted(url)} }}"
+                )
+            else:
+                script = (
+                    "Add-Type -AssemblyName System.Windows.Forms; "
+                    f"[System.Windows.Forms.MessageBox]::Show({_powershell_single_quoted(clean_body)}, "
+                    f"{_powershell_single_quoted(clean_title)}) | Out-Null"
+                )
+            subprocess.Popen(
+                ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True, "powershell-messagebox"
+    except subprocess.CalledProcessError:
+        return False, "notifier command failed"
+    except subprocess.TimeoutExpired:
+        return False, "notifier command timed out"
+    except OSError as exc:
+        return False, str(exc)
+    return False, "local notifications unsupported on this platform"
+
+
 def command_last(args: argparse.Namespace) -> int:
     rows = sessions_since(args.days)
     if args.session_id:
@@ -2745,6 +3040,7 @@ def _print_watch_status_card(
     args: argparse.Namespace,
     events: Sequence[LocalEvent],
     critical_capsule_seen: dict[str, datetime],
+    notification_seen: dict[str, datetime] | None = None,
 ) -> None:
     status = _watch_status(
         session,
@@ -2791,6 +3087,55 @@ def _print_watch_status_card(
         )
     print(f"  Recommended: {status['action']} -- {status['reason']}")
 
+    if getattr(args, "notify", False) and status["action"] != "continue":
+        key = f"{session.session_id}:{status['action']}"
+        # persist_key includes the session's own stamp, so a later run against
+        # unchanged local activity recognizes "already told you about this
+        # exact state" even though notification_seen (in-memory) resets on
+        # every fresh `--once` process -- without this, repeated `--once`
+        # invocations re-fire the same recommendation forever.
+        persist_key = f"{key}:{stamp.isoformat()}"
+        already_seen = (notification_seen is not None and notification_seen.get(key) == stamp) or has_sent_notification(
+            persist_key
+        )
+        if already_seen:
+            print("  Notification: already sent for this session state")
+        else:
+            if notification_seen is not None:
+                notification_seen[key] = stamp
+            # `aiwatcher ui` falls back to the next free port when its default
+            # is busy (this is the actual reason the link 404ed while testing
+            # this feature: the dashboard had fallen back off DEFAULT_UI_PORT).
+            # Prefer wherever it last actually bound; only guess the default
+            # if no dashboard has been recorded as having run yet.
+            ui_server = get_ui_server()
+            ui_host = ui_server["host"] if ui_server else "127.0.0.1"
+            if ui_host in ("0.0.0.0", "::", ""):
+                # Not browsable as-is; 127.0.0.1 always reaches a server
+                # bound to all interfaces on the same machine.
+                ui_host = "127.0.0.1"
+            ui_port = ui_server["port"] if ui_server else DEFAULT_UI_PORT
+            dashboard_url = f"http://{ui_host}:{ui_port}/?session={quote(session.session_id, safe='')}"
+            ok, detail = _send_local_notification(
+                f"AIWatcher: {status['action']}",
+                f"{short_path(session.project_path)} - {status['reason']} - Review: {dashboard_url}",
+                url=dashboard_url,
+            )
+            record_notification_sent(persist_key)
+            print(f"  Notification: {'sent' if ok else 'not sent'} ({detail})")
+            try:
+                record_watch_notification(
+                    session_id=session.session_id,
+                    tool=session.tool,
+                    action=str(status["action"]),
+                    reason=str(status["reason"]),
+                    sent=ok,
+                    detail=detail,
+                    url=dashboard_url,
+                )
+            except OSError:
+                pass
+
     if status["action"] == "create handoff capsule now":
         # De-duped per session_id+stamp so a session sitting at CRITICAL (or in a
         # severe loop) across multiple --interval polls doesn't reprint/recopy the
@@ -2829,6 +3174,233 @@ def _print_watch_status_card(
     print()
 
 
+def _outcome_dashboard_url(session_id: str | None = None) -> str:
+    # Mirrors _print_watch_status_card's dashboard_url derivation: prefer
+    # wherever `aiwatcher ui` last actually bound (it falls back off its
+    # default port when busy), only guessing DEFAULT_UI_PORT if no dashboard
+    # has been recorded as having run yet.
+    ui_server = get_ui_server()
+    ui_host = ui_server["host"] if ui_server else "127.0.0.1"
+    if ui_host in ("0.0.0.0", "::", ""):
+        ui_host = "127.0.0.1"
+    ui_port = ui_server["port"] if ui_server else DEFAULT_UI_PORT
+    base = f"http://{ui_host}:{ui_port}/"
+    return f"{base}?session={quote(session_id, safe='')}" if session_id else base
+
+
+def _fire_outcome_notification(
+    *, signal_key: str, signal_type: str, session_id: str, tool: str, title: str, reason: str, url: str
+) -> None:
+    ok, detail = _send_local_notification(title, f"{reason} Review: {url}", url=url)
+    record_notification_sent(signal_key)
+    try:
+        record_watch_notification(
+            session_id=session_id,
+            tool=tool,
+            action=f"outcome_review:{signal_type}",
+            reason=reason,
+            sent=ok,
+            detail=detail,
+            url=url,
+        )
+    except OSError:
+        pass
+
+
+def _check_outcome_review_signals(rows: Sequence[LocalSession]) -> None:
+    """Issue #32: surface PR25's survival/churn, same-file re-prompt, and
+    cost-per-surviving-change signals as ambient local notifications.
+
+    These signals were previously visible only by opening the dashboard,
+    because evidence snapshots (the thing survival tracking is built on) were
+    only ever recorded when a developer looked at a specific session there.
+    Snapshotting sessions here too means a developer who only ever runs
+    `aiwatcher watch --notify` still gets tracked. Each signal notifies at
+    most once, ever (see has_sent_notification), and never includes
+    prompt text, diffs, commit subjects, or file contents -- only short
+    templated strings and the local dashboard deep link, matching issue #31's
+    established notification-payload convention.
+
+    Capped at MAX_OUTCOME_NOTIFICATIONS_PER_PASS actual notifications sent per
+    call: resolved-but-unnotified signals can span weeks of pre-existing local
+    history (e.g. the very first pass against an already-populated
+    local-state.json), and firing all of them at once would be a notification
+    storm, not the "lightweight nudge" this feature is meant to be. Whatever's
+    left over is still un-notified afterwards and catches up on a later pass.
+    """
+    if not rows:
+        return
+    rows = rows[:OUTCOME_SIGNAL_SAMPLE_CAP]
+    try:
+        evidence_by_session = evidence_for_sessions(rows)
+    except OSError:
+        evidence_by_session = {}
+    for session in rows:
+        evidence = evidence_by_session.get(session.session_id)
+        if evidence is None:
+            continue
+        try:
+            record_evidence_snapshot(session.session_id, evidence.to_json())
+        except OSError:
+            pass
+
+    try:
+        recheck_evidence_survival()
+    except OSError:
+        pass
+
+    rows_by_id = {row.session_id: row for row in rows}
+    # Full lookup, not just `rows` (scoped to OUTCOME_SIGNAL_EVIDENCE_WINDOW_DAYS):
+    # the survival loop below intentionally looks across ALL historical evidence
+    # snapshots, including ones far outside that window, so whether a candidate
+    # session can still be found has to be checked just as broadly -- otherwise
+    # we'd notify "mark it useful?" with a dashboard link to a session whose
+    # underlying log the source tool (e.g. Claude Code) has since pruned from
+    # disk, and the drawer would just say "session not found".
+    try:
+        all_rows_by_id = {row.session_id: row for row in scan_all()}
+    except OSError:
+        all_rows_by_id = {}
+    notifications_sent = 0
+    already_reviewed = 0  # resolved signals that were skipped -- already notified, or no longer reviewable
+
+    # Survival / churn: notify once per (session, bucket) that has resolved
+    # but hasn't been surfaced yet -- not just ones resolved by the recheck()
+    # call above, since a bucket can have already resolved via `today`/`ui`
+    # before `watch --notify` was ever started.
+    try:
+        snapshots = evidence_snapshots_for_sessions()
+    except OSError:
+        snapshots = {}
+    for session_id, snapshot in snapshots.items():
+        if notifications_sent >= MAX_OUTCOME_NOTIFICATIONS_PER_PASS:
+            break
+        survival = snapshot.get("survival") if isinstance(snapshot.get("survival"), dict) else {}
+        for bucket in SURVIVAL_BUCKETS_DAYS:
+            if notifications_sent >= MAX_OUTCOME_NOTIFICATIONS_PER_PASS:
+                break
+            entry = survival.get(bucket)
+            status = entry.get("status") if isinstance(entry, dict) else None
+            if status not in ("survived", "churned"):
+                continue
+            signal_key = f"{session_id}:survival:{bucket}"
+            if has_sent_notification(signal_key):
+                already_reviewed += 1
+                continue
+            session = all_rows_by_id.get(session_id)
+            if session is None:
+                # The session that earned this evidence snapshot is no longer
+                # discoverable at all (its source log aged out locally) -- there
+                # is nothing left to review, so mark it handled without ever
+                # popping a notification for a dead dashboard link.
+                record_notification_sent(signal_key)
+                already_reviewed += 1
+                continue
+            if status == "survived":
+                # "Mark it useful?" is moot if the developer already recorded
+                # an outcome for this session -- they've already answered the
+                # question this notification exists to ask. A churn result is
+                # deliberately NOT skipped the same way just below: it can
+                # contradict an earlier "useful" mark, so it stays worth
+                # surfacing even after one.
+                try:
+                    already_marked = get_outcome(session_id) is not None
+                except OSError:
+                    already_marked = False
+                if already_marked:
+                    record_notification_sent(signal_key)
+                    already_reviewed += 1
+                    continue
+            project_label = short_path(session.project_path)
+            if status == "survived":
+                title = "AIWatcher: change survived"
+                reason = f"{project_label} - This session's change survived {bucket} days. Mark it useful?"
+            else:
+                title = "AIWatcher: change churned"
+                reason = f"{project_label} - This session looked useful, but the commit no longer exists on the branch."
+            _fire_outcome_notification(
+                signal_key=signal_key,
+                signal_type=f"survival_{bucket}",
+                session_id=session_id,
+                tool=session.tool,
+                title=title,
+                reason=reason,
+                url=_outcome_dashboard_url(session_id),
+            )
+            notifications_sent += 1
+
+    # Same-file re-prompt: a later session in the same project touched the
+    # same file(s) again soon after -- a rework smell for the earlier one.
+    for session in rows:
+        if notifications_sent >= MAX_OUTCOME_NOTIFICATIONS_PER_PASS:
+            break
+        evidence = evidence_by_session.get(session.session_id)
+        if evidence is None or not evidence.same_file_reprompt:
+            continue
+        signal_key = f"{session.session_id}:reprompt"
+        if has_sent_notification(signal_key):
+            already_reviewed += 1
+            continue
+        # "Was the earlier session rework?" is moot once the developer has
+        # already recorded any outcome for it -- they've already made that call.
+        try:
+            already_marked = get_outcome(session.session_id) is not None
+        except OSError:
+            already_marked = False
+        if already_marked:
+            record_notification_sent(signal_key)
+            already_reviewed += 1
+            continue
+        _fire_outcome_notification(
+            signal_key=signal_key,
+            signal_type="reprompt",
+            session_id=session.session_id,
+            tool=session.tool,
+            title="AIWatcher: possible rework",
+            reason=(
+                f"{short_path(session.project_path)} - A later session touched the same file(s) again. "
+                "Was the earlier session rework?"
+            ),
+            url=_outcome_dashboard_url(session.session_id),
+        )
+        notifications_sent += 1
+
+    # Cost-per-surviving-change: a one-time, project-agnostic nudge that this
+    # honesty-gated local stat has enough history to be shown at all.
+    signal_key = "cost_per_surviving_change:available"
+    cost_signal_already_sent = has_sent_notification(signal_key)
+    if notifications_sent < MAX_OUTCOME_NOTIFICATIONS_PER_PASS and not cost_signal_already_sent:
+        from .ui import _cost_per_surviving_change  # deferred: ui.py imports from cli.py, so import here to dodge a cycle
+
+        try:
+            survival_stat = _cost_per_surviving_change(list(all_rows_by_id.values()))
+        except OSError:
+            survival_stat = {"available": False}
+        if survival_stat.get("available"):
+            _fire_outcome_notification(
+                signal_key=signal_key,
+                signal_type="cost_per_surviving_change",
+                session_id="",
+                tool="local",
+                title="AIWatcher: cost-per-surviving-change available",
+                reason="Cost per surviving change is now available for your local history.",
+                url=_outcome_dashboard_url(),
+            )
+            notifications_sent += 1
+    elif cost_signal_already_sent:
+        already_reviewed += 1
+
+    # Give the developer console feedback either way -- previously this whole
+    # pass was silent, so running `watch --notify --once` repeatedly with no
+    # new local activity gave no sign of whether it had run at all.
+    if notifications_sent:
+        plural = "" if notifications_sent == 1 else "s"
+        print(f"  Outcome review: {notifications_sent} new signal{plural} surfaced.")
+    elif already_reviewed:
+        plural = "" if already_reviewed == 1 else "s"
+        print(f"  Outcome review: nothing new ({already_reviewed} signal{plural} already reviewed).")
+
+
 def command_watch(args: argparse.Namespace) -> int:
     print("AIWatcher Local watch")
     print(
@@ -2839,9 +3411,35 @@ def command_watch(args: argparse.Namespace) -> int:
 
     seen: dict[str, datetime] = {}
     critical_capsule_seen: dict[str, datetime] = {}
+    notification_seen: dict[str, datetime] = {}
+    last_outcome_signal_check: datetime | None = None
     try:
         while True:
             rows = sorted(sessions_since(args.days), key=session_sort_key, reverse=True)
+
+            if getattr(args, "notify", False):
+                now = datetime.now(timezone.utc)
+                if (
+                    last_outcome_signal_check is None
+                    or (now - last_outcome_signal_check).total_seconds() >= OUTCOME_SIGNAL_INTERVAL_SECONDS
+                ):
+                    last_outcome_signal_check = now
+                    # Issue #32: a wider window than --days on purpose -- survival
+                    # tracking needs sessions old enough to have a due bucket, and
+                    # re-prompt detection needs both sides of a 72h pair, neither of
+                    # which --days=1 (watch's default) would reliably contain.
+                    outcome_signal_rows = (
+                        rows
+                        if args.days >= OUTCOME_SIGNAL_EVIDENCE_WINDOW_DAYS
+                        else sorted(
+                            sessions_since(OUTCOME_SIGNAL_EVIDENCE_WINDOW_DAYS), key=session_sort_key, reverse=True
+                        )
+                    )
+                    try:
+                        _check_outcome_review_signals(outcome_signal_rows)
+                    except OSError:
+                        pass
+
             if not rows:
                 print(f"No local AI sessions detected in the last {args.days} days.")
                 if args.once:
@@ -2849,7 +3447,12 @@ def command_watch(args: argparse.Namespace) -> int:
             else:
                 all_events = events_by_session(rows, days=args.days)
                 _print_watch_status_card(
-                    rows[0], rows, args, all_events.get(rows[0].session_id, []), critical_capsule_seen,
+                    rows[0],
+                    rows,
+                    args,
+                    all_events.get(rows[0].session_id, []),
+                    critical_capsule_seen,
+                    notification_seen,
                 )
 
                 interesting: list[LocalSession] = []
@@ -3076,7 +3679,8 @@ def command_agent_prompt(args: argparse.Namespace) -> int:
 
     run_started = datetime.now().astimezone()
     binary = args.binary or args.agent
-    command = [binary, selected_prompt]
+    launch_prompt = _brief_text_for_delivery(selected_prompt) if decision in {"suggested", "edited"} else selected_prompt
+    command = [binary, launch_prompt]
     print()
     print(f"Launching {args.agent} with {decision} prompt.")
     sys.stdout.flush()
@@ -3270,6 +3874,86 @@ def _record_hook_event(
         pass
 
 
+def _low_risk_hook_result(tool: str, finding: str, suggestion: str = "Allowing without a prompt gate.") -> dict[str, object]:
+    return {
+        "risk": "low",
+        "score": 0,
+        "tool": tool,
+        "findings": [finding],
+        "suggestions": [suggestion],
+        "suggested_prompt": "",
+        "estimated_impact": {},
+    }
+
+
+def _classify_hook_prompt_source(prompt: str | None) -> dict[str, object]:
+    """Classify hook text before deciding whether it still needs risk scoring.
+
+    Some hosts send lifecycle messages, task notifications, or AIWatcher's own
+    briefs through UserPromptSubmit-shaped payloads. Labeling those correctly
+    avoids confusing "did you mean to ask this?" framing for text nobody
+    typed. But shape alone is not proof of origin -- these marker strings and
+    tag names are public in this repository, so anyone can prepend them to a
+    real prompt. Only `aiwatcher_generated_brief` is ever exempt from scoring,
+    and only when the text carries a live, single-use token that
+    _brief_text_for_delivery/render_handoff_capsule actually issued (see
+    local_state.issue_brief_token/consume_brief_token). Host-authored text
+    like task notifications can't be signed by us, so it is always scored --
+    classification there only changes the event label and UI framing, never
+    whether the content gets analyzed.
+    """
+    text = (prompt or "").strip()
+    if not text:
+        return {
+            "source": "missing",
+            "actionable": False,
+            "skip_scoring": True,
+            "event": "prompt_missing",
+            "finding": "No prompt text found in hook payload.",
+            "suggestion": "Allowing prompt because AIWatcher could not inspect it.",
+        }
+    head = text[:4000].lower()
+    if (
+        "<task-notification>" in head
+        or ("<task-id>" in head and "<tool-use-id>" in head)
+        or ("<output-file>" in head and "</output-file>" in head and "<status>" in head)
+    ):
+        return {
+            "source": "host_task_notification",
+            "actionable": False,
+            "skip_scoring": False,
+            "event": "skipped_internal",
+            "finding": "Hook payload looks like a host-generated task notification, not a direct user prompt.",
+            "suggestion": "Allowing the host notification; AIWatcher will continue watching the resulting session metadata.",
+        }
+    if text.startswith("AIWatcher handoff capsule") and _consume_brief_token_safely(
+        _extract_brief_token(text, "handoff_capsule"), "handoff_capsule"
+    ):
+        return {
+            "source": "aiwatcher_generated_brief",
+            "actionable": False,
+            "skip_scoring": True,
+            "event": "skipped_generated_brief",
+            "finding": "Hook payload is an AIWatcher-generated handoff capsule with a verified token.",
+            "suggestion": "Allowing the scoped capsule without opening another prompt gate.",
+        }
+    looks_like_execution_brief = (
+        text.startswith("Task\n") and "Execution approach" in text and "Completion report" in text
+    ) or ("AIWatcher added a scoped execution brief" in text[:1200])
+    if looks_like_execution_brief and _consume_brief_token_safely(
+        _extract_brief_token(text, "execution_brief"), "execution_brief"
+    ):
+        return {
+            "source": "aiwatcher_generated_brief",
+            "actionable": False,
+            "skip_scoring": True,
+            "event": "skipped_generated_brief",
+            "finding": "Hook payload is an AIWatcher-generated execution brief with a verified token.",
+            "suggestion": "Allowing the scoped brief without opening another prompt gate.",
+        }
+    return {"source": "direct_user_prompt", "actionable": True, "skip_scoring": False, "event": "received"}
+
+
 def _hook_output_with_brief(tool: str, selected_prompt: str) -> dict[str, object]:
     return {
         "systemMessage": "AIWatcher added a scoped execution brief alongside the submitted request.",
@@ -3279,7 +3963,7 @@ def _hook_output_with_brief(tool: str, selected_prompt: str) -> dict[str, object
                 "AIWatcher identified avoidable cost or safety pressure. "
                 "Treat the following execution brief as controlling guidance for how to execute "
                 "the user's submitted request while preserving its intended outcome:\n\n"
-                + selected_prompt
+                + _brief_text_for_delivery(selected_prompt)
             ),
         },
     }
@@ -3397,19 +4081,24 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
     prompt = args.text or _extract_prompt_from_hook(payload)
     cwd = str(payload.get("cwd") or payload.get("workspace") or os.getcwd())
     session_id = _extract_session_meta(payload)["session_id"]
-    result = analyze_prompt(prompt, tool=tool, cwd=cwd) if prompt else {
-        "risk": "low",
-        "score": 0,
-        "tool": tool,
-        "findings": ["No prompt text found in hook payload."],
-        "suggestions": ["Allowing prompt because AIWatcher could not inspect it."],
-        "suggested_prompt": "",
-        "estimated_impact": {},
-    }
+    source = _classify_hook_prompt_source(prompt)
+    if source["skip_scoring"]:
+        result = _low_risk_hook_result(tool, str(source["finding"]), str(source["suggestion"]))
+        _record_hook_event(
+            tool=tool,
+            cwd=cwd,
+            event=str(source["event"]),
+            prompt_found=bool(prompt),
+            result=result,
+            session_id=session_id,
+        )
+        print("{}")
+        return 0
+    result = analyze_prompt(prompt, tool=tool, cwd=cwd)
     _record_hook_event(
         tool=tool,
         cwd=cwd,
-        event="received",
+        event=str(source["event"]),
         prompt_found=bool(prompt),
         result=result,
         session_id=session_id,
@@ -3562,17 +4251,22 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
     workspace = workspace_roots[0] if isinstance(workspace_roots, list) and workspace_roots else None
     cwd = str(payload.get("cwd") or payload.get("workspace") or workspace or os.getcwd())
     session_id = _extract_session_meta(payload)["session_id"]
-    result = analyze_prompt(prompt, tool="cursor", cwd=cwd) if prompt else {
-        "risk": "low",
-        "score": 0,
-        "tool": "cursor",
-        "findings": ["No prompt text found in hook payload."],
-        "suggestions": ["Allowing prompt because AIWatcher could not inspect it."],
-        "suggested_prompt": "",
-        "estimated_impact": {},
-    }
+    source = _classify_hook_prompt_source(prompt)
+    if source["skip_scoring"]:
+        result = _low_risk_hook_result("cursor", str(source["finding"]), str(source["suggestion"]))
+        _record_hook_event(
+            tool="cursor",
+            cwd=cwd,
+            event=str(source["event"]),
+            prompt_found=bool(prompt),
+            result=result,
+            session_id=session_id,
+        )
+        print(json.dumps(_cursor_hook_response(allow=True)))
+        return 0
+    result = analyze_prompt(prompt, tool="cursor", cwd=cwd)
     _record_hook_event(
-        tool="cursor", cwd=cwd, event="received", prompt_found=bool(prompt), result=result, session_id=session_id
+        tool="cursor", cwd=cwd, event=str(source["event"]), prompt_found=bool(prompt), result=result, session_id=session_id
     )
     if result["risk"] == "low":
         print(json.dumps(_cursor_hook_response(allow=True)))
@@ -3612,7 +4306,7 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
                 )
                 message = (
                     "AIWatcher paused the original prompt. Cursor hooks cannot replace prompt text. "
-                    "Resubmit this scoped execution brief:\n\n" + selected_prompt
+                    "Resubmit this scoped execution brief:\n\n" + _brief_text_for_delivery(selected_prompt)
                 )
                 print(json.dumps(_cursor_hook_response(allow=False, message=message)))
                 return 0
@@ -3632,7 +4326,8 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
                 )
                 message = (
                     "AIWatcher paused the original prompt automatically (no interactive display or terminal "
-                    "was available to review it). Resubmit this scoped execution brief:\n\n" + selected_prompt
+                    "was available to review it). Resubmit this scoped execution brief:\n\n"
+                    + _brief_text_for_delivery(selected_prompt)
                 )
                 print(json.dumps(_cursor_hook_response(allow=False, message=message)))
                 return 0
@@ -4373,11 +5068,9 @@ def command_doctor(_args: argparse.Namespace) -> int:
     print(f"Codex MCP config: {'referenced' if file_contains(codex_config, 'aiwatcher') else 'not detected'}")
     print(f"Local state: {state_path()}")
     print("\nSurface coverage")
-    print("- Claude Code CLI / Claude Desktop Code tab: hook-capable; verify with `aiwatcher hook-status`.")
-    print("- Claude Desktop general chat, browser chat, and editor sidebars: use Prompt Companion or an extension.")
-    print("- Codex CLI/TUI: hook-capable only when the host invokes UserPromptSubmit and the hook is trusted with `/hooks`.")
-    print("- Codex Desktop conversation surface: do not assume hook interception; verify with `aiwatcher hook-status`.")
-    print("- Cursor: hook can block and return a scoped brief for resubmission, but cannot replace prompt text in place.")
+    for row in surface_coverage(scan_all()):
+        marker = "[OK]" if row.status == "automatic" else "[..]" if row.status in {"limited", "companion", "unverified"} else "[--]"
+        print(f"- {marker} {row.label}: {row.status_label}. {row.action}")
     print("\nPrivacy: local-only; AIWatcher Local does not upload prompts, source, or telemetry.")
     if os.name == "nt":
         print("Note: core scanning works on Windows; the Codex zsh wrapper is not available in PowerShell yet.")
@@ -4472,6 +5165,18 @@ def command_hook_status(_args: argparse.Namespace) -> int:
             line = (
                 f"- {row.get('created_at', 'unknown')} | {row.get('pattern_id', 'unknown')} | "
                 f"{row.get('decision', 'unknown')} | {row.get('command', '')}"
+            )
+            if row.get("session_id"):
+                line += f" | session {row['session_id']}"
+            print(line)
+    watch_notifications = recent_watch_notifications(limit=5)
+    if watch_notifications:
+        print("\nRecent ambient watch notifications (`aiwatcher watch --notify`)")
+        for row in watch_notifications:
+            sent_label = "sent" if row.get("sent") else "not sent"
+            line = (
+                f"- {row.get('created_at', 'unknown')} | {row.get('tool', 'unknown')} | "
+                f"{row.get('action', 'unknown')} | {sent_label} ({row.get('detail', 'unknown')})"
             )
             if row.get("session_id"):
                 line += f" | session {row['session_id']}"
@@ -4740,6 +5445,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("start", help="Detect local AI coding tools and run a one-time local scan").set_defaults(func=command_start)
+    sub.add_parser("setup", help="Show first-run setup, hook, coverage, and ambient watch steps").set_defaults(func=command_setup)
     sub.add_parser("status", help="Show detected tools and local AIWatcher status").set_defaults(func=command_status)
     sub.add_parser("today", help="Show today's local AI usage").set_defaults(func=command_today)
 
@@ -4850,6 +5556,15 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument("--cost-threshold", type=float, default=5.0)
     watch.add_argument("--calls-threshold", type=int, default=250)
     watch.add_argument("--tokens-threshold", type=int, default=500_000)
+    watch.add_argument(
+        "--notify",
+        action="store_true",
+        help=(
+            "Send a best-effort local OS notification when watch recommends action, "
+            "and for outcome-review signals (survival, churn, same-file re-prompt, "
+            "cost-per-surviving-change)"
+        ),
+    )
     watch.add_argument(
         "--target", choices=sorted(TARGET_LABELS), default="generic",
         help="Format the auto-generated CRITICAL-context handoff capsule for this AI tool",
@@ -4974,7 +5689,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ui = sub.add_parser("ui", help="Run the local-only AIWatcher dashboard")
     ui.add_argument("--host", default="127.0.0.1")
-    ui.add_argument("--port", type=int, default=8765)
+    ui.add_argument("--port", type=int, default=DEFAULT_UI_PORT)
     ui.add_argument("--port-attempts", type=int, default=20, help="How many sequential ports to try when the requested port is busy")
     ui.add_argument("--no-port-fallback", action="store_true", help="Fail instead of trying the next available port")
     ui.add_argument("--restart", action="store_true", help="Stop an existing local process on the requested port before starting")

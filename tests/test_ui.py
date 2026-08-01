@@ -12,7 +12,24 @@ from unittest.mock import patch
 
 from aiwatcher_cli import ui
 from aiwatcher_cli.local_state import record_command_decision, record_intervention, record_outcome
-from aiwatcher_cli.scanner import LocalEvent, LocalSession
+from aiwatcher_cli.scanner import LocalEvent, LocalSession, SurfaceCoverage
+
+
+class DashboardServeTests(unittest.TestCase):
+    def test_serve_records_the_actually_bound_port(self) -> None:
+        """Issue #31 (S-32): `watch --notify`'s dashboard deep link has to
+        know where the dashboard actually landed after auto-port fallback,
+        not just assume the requested default -- regression found by
+        manually testing this feature against a real fallback port."""
+        with (
+            patch.object(ui, "find_available_port", return_value=8799),
+            patch.object(ui, "ThreadingHTTPServer") as server_cls,
+            patch.object(ui, "record_ui_server") as record_mock,
+        ):
+            server_cls.return_value.serve_forever.side_effect = KeyboardInterrupt
+            ui.serve(host="127.0.0.1", port=8765, auto_port=True)
+
+        record_mock.assert_called_once_with("127.0.0.1", 8799)
 
 
 class DashboardWindowTests(unittest.TestCase):
@@ -40,7 +57,12 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn('id="detailDrawer"', ui.HTML)
         self.assertIn('data-view="prompt"', ui.HTML)
         self.assertIn('data-view="receipts"', ui.HTML)
+        self.assertIn('data-view="coverage"', ui.HTML)
+        self.assertIn('data-view="setup"', ui.HTML)
         self.assertIn('id="latestIntervention"', ui.HTML)
+        self.assertIn('id="contextHealth"', ui.HTML)
+        self.assertIn('id="coverageRows"', ui.HTML)
+        self.assertIn('id="setupRows"', ui.HTML)
         self.assertIn('id="promptInput"', ui.HTML)
         self.assertIn('class="outcome-button useful', ui.HTML)
         self.assertIn('class="outcome-button rework', ui.HTML)
@@ -51,9 +73,79 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Continue in a fresh session", ui.HTML)
         self.assertIn("Create handoff capsule", ui.HTML)
         self.assertIn('class="btn-primary" onclick="openHandoff', ui.HTML)
+        self.assertIn("watch --notify", ui.HTML)
         self.assertIn("/api/handoff", ui.HTML)
         self.assertIn("Include prompt excerpt", ui.HTML)
         self.assertNotIn("window.alert", ui.HTML)
+
+    def test_summary_includes_surface_coverage_and_context_health(self) -> None:
+        now = datetime.now(timezone.utc)
+        rows = [
+            LocalSession(
+                session_id="bloated",
+                tool="claude-code",
+                project_path="/repo",
+                started_at=now - timedelta(hours=4),
+                updated_at=now - timedelta(minutes=10),
+                tokens_in=500_000,
+                tokens_out=10_000,
+                cost_usd=2.0,
+            )
+        ]
+        health = ui.ContextHealth(
+            session_id="bloated",
+            tool="claude-code",
+            project_path="/repo",
+            age_hours=4,
+            age_days=0.16,
+            event_count=4,
+            total_input_tokens=500_000,
+            total_output_tokens=10_000,
+            latest_turn_tokens=225_000,
+            peak_turn_tokens=225_000,
+            avg_turn_tokens=125_000,
+            growth_rate=20_000,
+            bloat_ratio=0.98,
+            efficiency_pct=2.0,
+            is_stale=False,
+            is_critical_stale=False,
+            is_context_pressure=True,
+            is_context_critical=True,
+            is_high_bloat=True,
+            is_extreme_bloat=True,
+            severity="critical",
+            recommendations=["Start a fresh session before continuing."],
+        )
+        coverage = [
+            SurfaceCoverage(
+                surface_id="claude-code-cli",
+                label="Claude Code CLI",
+                status="automatic",
+                status_label="Automatic gate + history",
+                detected=True,
+                automatic_gate="hook",
+                history="Full local history",
+                action="Verify with hook-status.",
+                detail="Best-covered surface.",
+                session_count=1,
+            )
+        ]
+        with (
+            patch.object(ui, "scan_all", return_value=rows),
+            patch.object(ui, "scan_all_events", return_value=[]),
+            patch.object(ui, "discover_tools", return_value={}),
+            patch.object(ui, "evidence_for_sessions", return_value={}),
+            patch.object(ui, "survival_by_session", return_value={}),
+            patch.object(ui, "analyze_all_sessions", return_value=[health]),
+            patch.object(ui, "surface_coverage", return_value=coverage),
+        ):
+            summary = ui.build_summary(7)
+
+        self.assertEqual(summary["coverage"][0]["surface_id"], "claude-code-cli")
+        self.assertTrue(any(step["command"] == "aiwatcher hook-status" for step in summary["setup"]))
+        self.assertEqual(summary["context_health"][0]["severity"], "critical")
+        self.assertEqual(summary["context_health"][0]["action"]["label"], "Start fresh")
+        self.assertTrue(any(item["title"] == "Context health needs attention" for item in summary["insights"]))
 
     def test_prompt_preflight_response_is_privacy_scoped(self) -> None:
         with patch.object(
@@ -611,6 +703,8 @@ class WeeklyDigestTests(unittest.TestCase):
         self.assertEqual([s["api_value_label"] for s in top], ["$50.00", "$9.00", "$1.00"])
         self.assertEqual(top[0]["outcome"], None)
         self.assertEqual(top[1]["outcome"], "useful")
+        self.assertEqual(top[0]["session_id"], "expensive-unmarked")
+        self.assertTrue(all(s["session_id"] for s in top), "top_sessions must carry session_id for UI drill-down links")
 
     def test_digest_recommendation_prioritizes_blocked_commands(self) -> None:
         rows = [self._session("s1")]

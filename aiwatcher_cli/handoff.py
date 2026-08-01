@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Literal, Sequence
 
-from .local_state import recent_decisions
+from .local_state import issue_brief_token, recent_decisions
 from .outcome_evidence import build_outcome_evidence
 from .pricing import is_subscription_model
 from .scanner import LocalEvent, LocalSession, segment_session_by_prompt
@@ -300,5 +300,7 @@ def render_handoff_capsule(capsule: dict[str, object]) -> str:
         "",
         "Paste this brief into the next AI tool",
         str(capsule.get("next_brief") or ""),
+        "",
+        f"Capsule-Id: {issue_brief_token('handoff_capsule')}",
     ])
     return "\n".join(lines)

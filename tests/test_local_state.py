@@ -184,6 +184,82 @@ class LocalStateTests(unittest.TestCase):
 
         self.assertEqual(events[0]["session_id"], "sess-real-id")
 
+    def test_record_ui_server_round_trips_through_get(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_ui_server("127.0.0.1", 8799)
+                server = local_state.get_ui_server()
+
+        self.assertEqual(server["host"], "127.0.0.1")
+        self.assertEqual(server["port"], 8799)
+
+    def test_record_ui_server_overwrites_previous_port(self) -> None:
+        """`aiwatcher ui` falls back to the next free port on each run --
+        watch --notify's deep link must follow the latest bind, not a stale
+        one from an earlier, now-stopped instance."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_ui_server("127.0.0.1", 8765)
+                local_state.record_ui_server("127.0.0.1", 8799)
+                server = local_state.get_ui_server()
+
+        self.assertEqual(server["port"], 8799)
+
+    def test_get_ui_server_returns_none_when_never_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                self.assertIsNone(local_state.get_ui_server())
+
+    def test_get_ui_server_fails_soft_when_state_lock_is_unavailable(self) -> None:
+        with patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")):
+            self.assertIsNone(local_state.get_ui_server())
+
+    def test_record_watch_notification_round_trips_through_recent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_watch_notification(
+                    session_id="sess-abc",
+                    tool="claude-code",
+                    action="create handoff capsule now",
+                    reason="context critical",
+                    sent=True,
+                    detail="terminal-notifier",
+                    url="http://127.0.0.1:8765/?session=sess-abc",
+                )
+                rows = local_state.recent_watch_notifications(limit=5)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["session_id"], "sess-abc")
+        self.assertTrue(rows[0]["sent"])
+        self.assertEqual(rows[0]["url"], "http://127.0.0.1:8765/?session=sess-abc")
+
+    def test_recent_watch_notifications_fails_soft_when_state_lock_is_unavailable(self) -> None:
+        with patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")):
+            self.assertEqual(local_state.recent_watch_notifications(), [])
+
+    def test_outcome_notification_dedup_round_trips(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                self.assertFalse(local_state.has_sent_notification("sess-1:survival:7"))
+                local_state.record_notification_sent("sess-1:survival:7")
+                self.assertTrue(local_state.has_sent_notification("sess-1:survival:7"))
+                # A different signal_key for the same session must not be conflated.
+                self.assertFalse(local_state.has_sent_notification("sess-1:reprompt"))
+                # Recording the same key twice must not duplicate it.
+                local_state.record_notification_sent("sess-1:survival:7")
+                with local_state._locked_state():
+                    data = local_state._load()
+                self.assertEqual(data["sent_notification_keys"].count("sess-1:survival:7"), 1)
+
+    def test_has_sent_notification_fails_soft_when_state_lock_is_unavailable(self) -> None:
+        with patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")):
+            self.assertFalse(local_state.has_sent_notification("sess-1:survival:7"))
+
     def test_get_baselines_fails_soft_when_state_lock_is_unavailable(self) -> None:
         with patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")):
             self.assertEqual(local_state.get_baselines(), {})

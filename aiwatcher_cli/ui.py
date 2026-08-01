@@ -13,7 +13,15 @@ from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
-from .cli import _loop_signal, _velocity_signal, analyze_prompt, filter_sessions, session_insights, timeline_analysis
+from .cli import (
+    _loop_signal,
+    _velocity_signal,
+    analyze_prompt,
+    filter_sessions,
+    session_insights,
+    setup_checklist,
+    timeline_analysis,
+)
 from .correlate import link_recent_interventions_to_sessions
 from .handoff import build_handoff_capsule
 from .local_state import (
@@ -29,6 +37,7 @@ from .local_state import (
     recent_interventions,
     record_evidence_snapshot,
     record_outcome,
+    record_ui_server,
 )
 from .outcome_evidence import VALID_EVIDENCE_OUTCOMES, build_outcome_evidence, evidence_for_sessions
 from .pricing import is_subscription_model
@@ -43,6 +52,7 @@ from .scanner import (
     scan_all,
     scan_all_events,
     segment_session_by_prompt,
+    surface_coverage,
 )
 
 
@@ -612,6 +622,7 @@ def build_weekly_digest(days: int = 7) -> dict[str, object]:
         ),
         "top_sessions": [
             {
+                "session_id": row.session_id,
                 "project": short_path(row.project_path),
                 "tool": row.tool,
                 "model": row.model or "unknown",
@@ -677,6 +688,56 @@ def build_journal(days: int = 1) -> dict[str, object]:
         ],
         "improvement": improvement,
     }
+
+
+def _context_action(health: ContextHealth) -> dict[str, str]:
+    if health.severity == "critical":
+        return {
+            "label": "Start fresh",
+            "secondary_label": "Copy handoff",
+            "reason": "Critical context pressure is likely to waste turns or miss details.",
+        }
+    if health.is_context_pressure or health.is_high_bloat:
+        return {
+            "label": "Compact",
+            "secondary_label": "Prepare handoff",
+            "reason": "Context is growing; compact before it compounds further.",
+        }
+    if health.is_stale:
+        return {
+            "label": "Review",
+            "secondary_label": "Fresh session",
+            "reason": "The session is old enough that a focused restart may be cleaner.",
+        }
+    return {
+        "label": "Keep going",
+        "secondary_label": "Review",
+        "reason": "Context looks healthy.",
+    }
+
+
+def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) -> list[dict[str, object]]:
+    cards: list[dict[str, object]] = []
+    sessions_by_id = {row.session_id: row for row in rows}
+    for health in analyze_all_sessions(rows, events)[:5]:
+        session = sessions_by_id.get(health.session_id)
+        action = _context_action(health)
+        cards.append({
+            "session_id": health.session_id,
+            "tool": health.tool,
+            "project": short_path(health.project_path),
+            "severity": health.severity,
+            "latest_turn_tokens": compact_int(health.latest_turn_tokens),
+            "peak_turn_tokens": compact_int(health.peak_turn_tokens),
+            "efficiency_label": f"{health.efficiency_pct:.0f}%",
+            "bloat_label": f"{health.bloat_ratio * 100:.0f}%",
+            "age_label": f"{health.age_days:.1f}d" if health.age_days >= 1 else f"{health.age_hours:.0f}h",
+            "recommendation": health.recommendations[0] if health.recommendations else "Context is healthy.",
+            "action": action,
+            "can_handoff": bool(session),
+            "compact_prompt": _build_compact_prompt(health),
+        })
+    return cards
 
 
 def build_prompt_preflight(prompt: str, *, tool: str = "agent", cwd: str | None = None) -> dict[str, object]:
@@ -929,6 +990,11 @@ def build_summary(days: int = 7) -> dict[str, object]:
     recent = sorted(rows, key=lambda row: row.updated_at or row.started_at or MIN_DT, reverse=True)[:12]
     detected = discover_tools()
     notes = sorted({note for row in rows for note in row.notes})
+    try:
+        all_events = scan_all_events()
+    except OSError:
+        all_events = []
+    context_health = _context_health_cards(rows, all_events)
 
     insights = []
     if projects:
@@ -971,6 +1037,27 @@ def build_summary(days: int = 7) -> dict[str, object]:
             "title": "Cursor detected, but usage is limited",
             "body": "Cursor is installed, but local token/cost history is not reliably exposed yet.",
         })
+    if detected.get("cline"):
+        insights.append({
+            "title": "Cline detected, not scanned yet",
+            "body": "AIWatcher can see Cline is present, but does not claim session, token, or cost coverage for it yet.",
+        })
+    if detected.get("windsurf"):
+        insights.append({
+            "title": "Windsurf detected, not scanned yet",
+            "body": "AIWatcher can see Windsurf is present, but does not claim session, token, or cost coverage for it yet.",
+        })
+    if context_health:
+        top_health = context_health[0]
+        if top_health["severity"] in {"warning", "critical"}:
+            insights.append({
+                "title": "Context health needs attention",
+                "body": (
+                    f"{top_health['project']} is {top_health['severity']} at "
+                    f"{top_health['latest_turn_tokens']} tokens/turn. "
+                    f"Suggested action: {top_health['action']['label']}."
+                ),
+            })
 
     window_session_ids = {row.session_id for row in rows}
     window_outcomes = outcomes_for_sessions(window_session_ids)
@@ -1005,7 +1092,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
         })
     survival_summary = _cost_per_surviving_change(all_rows)
     interventions = recent_interventions(limit=200, days=days)
-    receipt_events = scan_all_events() if interventions else []
+    receipt_events = all_events if interventions else []
     receipts = _build_intervention_receipts(interventions, all_rows, outcomes_for_sessions(), receipt_events)
     useful_rows = [
         row for row in rows
@@ -1047,6 +1134,9 @@ def build_summary(days: int = 7) -> dict[str, object]:
         "models": models[:10],
         "insights": insights,
         "notes": notes[:5],
+        "coverage": [row.to_json() for row in surface_coverage(all_rows)],
+        "setup": setup_checklist(),
+        "context_health": context_health,
         "recent_sessions": [
             {
                 "tool": row.tool,
@@ -1232,6 +1322,16 @@ HTML = r"""<!doctype html>
     .insight strong { display: block; margin-bottom: 3px; color: white; }
     .pill-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
     .pill { border: 1px solid var(--line); background: #0b1118; border-radius: 999px; padding: 5px 9px; color: #bdc9d9; font-size: 11px; }
+    .coverage-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .coverage-card, .health-card { border: 1px solid var(--line); border-radius: 8px; background: #0b1118; padding: 14px; }
+    .coverage-head, .health-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+    .coverage-status, .health-severity { border-radius: 999px; border: 1px solid var(--line); padding: 4px 8px; font-size: 11px; font-weight: 800; white-space: nowrap; }
+    .coverage-status.automatic, .health-severity.healthy { color: #bff5df; border-color: rgba(53,211,153,.45); background: var(--green-soft); }
+    .coverage-status.limited, .coverage-status.unverified, .health-severity.warning { color: #ffe2a4; border-color: rgba(246,189,96,.45); background: var(--amber-soft); }
+    .coverage-status.companion { color: #dceaff; border-color: rgba(112,167,255,.45); background: var(--blue-soft); }
+    .coverage-status.unsupported, .coverage-status.not_detected, .health-severity.critical { color: #ffc4ce; border-color: rgba(242,125,143,.45); background: var(--red-soft); }
+    .coverage-detail, .health-detail { display: grid; gap: 6px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .health-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
     .outcome-pill.useful { color: #bff5df; border-color: rgba(53,211,153,.38); background: var(--green-soft); }
     .outcome-pill.rework { color: #ffe2a4; border-color: rgba(246,189,96,.38); background: var(--amber-soft); }
     .outcome-pill.abandoned { color: #ffc4ce; border-color: rgba(242,125,143,.38); background: var(--red-soft); }
@@ -1248,6 +1348,11 @@ HTML = r"""<!doctype html>
     .session-filters input[type="text"]:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
     .row-action { min-height: 30px; padding: 5px 9px; color: #ddecff; background: var(--blue-soft); border-color: #3d6594; font-size: 12px; }
     .empty { color: var(--muted); padding: 16px; border: 1px dashed var(--line); border-radius: 8px; }
+    .digest-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+    .digest-row:last-child { border-bottom: 0; }
+    .digest-row.clickable { cursor: pointer; }
+    .digest-row.clickable:hover { background: rgba(255,255,255,.03); }
+    .digest-row .digest-row-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dce6f6; }
     .detail-section { padding: 20px 0; border-bottom: 1px solid var(--line); }
     .detail-section:last-child { border-bottom: 0; }
     .verdict-card { border: 1px solid var(--line-strong); border-left: 4px solid var(--blue); border-radius: 8px; padding: 16px; background: #101925; margin-top: 14px; }
@@ -1346,9 +1451,10 @@ HTML = r"""<!doctype html>
     .outcome-button.useful { color: #bff5df; border-color: rgba(53,211,153,.45); }
     .outcome-button.rework { color: #ffe2a4; border-color: rgba(246,189,96,.45); }
     .outcome-button.abandoned { color: #ffc4ce; border-color: rgba(242,125,143,.45); }
-    .outcome-button.selected.useful { background: var(--green-soft); box-shadow: inset 0 0 0 1px var(--green); }
-    .outcome-button.selected.rework { background: var(--amber-soft); box-shadow: inset 0 0 0 1px var(--amber); }
-    .outcome-button.selected.abandoned { background: var(--red-soft); box-shadow: inset 0 0 0 1px var(--red); }
+    .outcome-button.selected { font-weight: 700; }
+    .outcome-button.selected.useful { background: rgba(53,211,153,.28); box-shadow: inset 0 0 0 2px var(--green); color: #eafff5; }
+    .outcome-button.selected.rework { background: rgba(246,189,96,.28); box-shadow: inset 0 0 0 2px var(--amber); color: #fff3dc; }
+    .outcome-button.selected.abandoned { background: rgba(242,125,143,.28); box-shadow: inset 0 0 0 2px var(--red); color: #ffe3e8; }
     .toast { position: fixed; right: 20px; bottom: 20px; z-index: 30; max-width: 420px; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: 8px; background: #18212c; color: white; box-shadow: 0 12px 32px rgba(0,0,0,.35); opacity: 0; transform: translateY(12px); pointer-events: none; transition: opacity .18s ease, transform .18s ease; }
     .toast.show { opacity: 1; transform: translateY(0); }
     .toast.error { border-color: rgba(242,125,143,.55); background: #2a171d; }
@@ -1361,6 +1467,7 @@ HTML = r"""<!doctype html>
       .kpis { grid-template-columns: 1fr 1fr; }
       .two { grid-template-columns: 1fr; }
       .prompt-shell { grid-template-columns: 1fr; }
+      .coverage-grid { grid-template-columns: 1fr; }
       .receipt-summary { grid-template-columns: 1fr; }
       .bar-row { grid-template-columns: 1fr; gap: 6px; }
       .amount { text-align: left; }
@@ -1409,6 +1516,8 @@ HTML = r"""<!doctype html>
     <button class="nav-tab" data-view="sessions" onclick="showView('sessions')">Sessions</button>
     <button class="nav-tab" data-view="receipts" onclick="showView('receipts')">Receipts</button>
     <button class="nav-tab" data-view="insights" onclick="showView('insights')">Insights</button>
+    <button class="nav-tab" data-view="coverage" onclick="showView('coverage')">Coverage</button>
+    <button class="nav-tab" data-view="setup" onclick="showView('setup')">Setup</button>
   </nav>
 
   <section id="view-today" class="view">
@@ -1422,6 +1531,15 @@ HTML = r"""<!doctype html>
         <div id="todayRecommendation"></div>
       </div>
     </section>
+
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title">
+        <div><h2>This week's digest</h2><p>A quick pulse on cost, outcomes, and what to change next.</p></div>
+        <button class="btn-quiet" onclick="showView('insights')">View full digest</button>
+      </div>
+      <div id="todayDigest"></div>
+    </section>
+
     <section class="grid kpis">
       <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub">Value per useful change: <span id="costPerUseful">-</span></div><div class="sub" id="costPerSurvivingRow" hidden>Cost per surviving change: <span id="costPerSurviving">-</span></div></div>
       <div class="card metric-card metric-amber"><div class="label">Preflight decisions</div><div class="value" id="preflightDecisions">-</div><div class="sub"><span id="windowLabel">-</span></div></div>
@@ -1432,6 +1550,11 @@ HTML = r"""<!doctype html>
     <section class="card" style="margin-bottom:14px">
       <div class="section-title"><div><h2>Latest intervention</h2><p>What AIWatcher changed before execution and what happened afterward.</p></div></div>
       <div id="latestIntervention"></div>
+    </section>
+
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title"><div><h2>Session health</h2><p>Context bloat, runway pressure, and handoff actions for active local work.</p></div></div>
+      <div id="contextHealth"></div>
     </section>
 
     <section class="grid two">
@@ -1545,6 +1668,13 @@ HTML = r"""<!doctype html>
   </section>
 
   <section id="view-insights" class="view" hidden>
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title">
+        <div><h2>Weekly Digest</h2><p>What your AI work cost this week, what stuck, and what to change next.</p></div>
+        <span class="pill">Local logs, inferred outcomes</span>
+      </div>
+      <div id="report"></div>
+    </section>
     <section class="grid two">
       <div class="card">
         <div class="section-title"><div><h2>Local Insights</h2><p>Suggestions to reduce waste without uploading prompts.</p></div></div>
@@ -1553,10 +1683,6 @@ HTML = r"""<!doctype html>
       <div class="card">
         <h2>Daily Journal</h2>
         <div id="journal"></div>
-        <div class="detail-section">
-          <h2>Local Weekly Report</h2>
-          <div id="report"></div>
-        </div>
       </div>
     </section>
     <section class="grid two" style="margin-top:14px">
@@ -1576,6 +1702,27 @@ HTML = r"""<!doctype html>
         </div>
       </div>
     </section>
+  </section>
+
+  <section id="view-coverage" class="view" hidden>
+    <div class="card">
+      <div class="section-title">
+        <div><h2>Surface Coverage</h2><p>What AIWatcher can gate, scan, or only help with manually on this machine.</p></div>
+        <span class="pill">Verified locally</span>
+      </div>
+      <div id="coverageRows" class="coverage-grid"></div>
+    </div>
+  </section>
+
+  <section id="view-setup" class="view" hidden>
+    <div class="card">
+      <div class="section-title">
+        <div><h2>Setup Checklist</h2><p>Get to first value without overclaiming which surfaces are protected.</p></div>
+        <span class="pill">Local only</span>
+      </div>
+      <p class="receipt-note">For ambient warnings while you work, run <code>aiwatcher watch --notify --interval 60</code>.</p>
+      <div id="setupRows" class="coverage-grid"></div>
+    </div>
   </section>
 </main>
 <div class="drawer-backdrop" id="drawerBackdrop" onclick="closeDrawer()"></div>
@@ -1833,8 +1980,11 @@ function sessionVerdict(s) {
 }
 function renderVerdict(s) {
   const verdict = sessionVerdict(s);
+  const subtitle = s.outcome
+    ? 'Saved locally. Pick a different button below anytime to change it.'
+    : 'Confirm the outcome, then use the expensive asks below to improve the next run.';
   return `<div class="verdict-card ${esc(verdict.tone)}"><h3>${esc(verdict.title)}</h3>
-    <p>Confirm the outcome, then use the expensive asks below to improve the next run.</p>
+    <p>${esc(subtitle)}</p>
     <ul>${verdict.bullets.map(item => `<li>${esc(item)}</li>`).join('')}</ul>
   </div>`;
 }
@@ -1886,6 +2036,58 @@ function dateLabel(value) {
   if (!value) return 'unknown';
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+function renderContextHealth(rows) {
+  if (!rows.length) return '<div class="empty">No active context-health warnings. AIWatcher will surface bloat, stale sessions, and handoff opportunities here.</div>';
+  return `<div class="coverage-grid">${rows.map(row => `<div class="health-card">
+    <div class="health-head">
+      <div><h3>${esc(row.project)}</h3><p>${esc(row.tool)} · ${esc(row.age_label)}</p></div>
+      <span class="health-severity ${esc(row.severity)}">${esc(row.severity)}</span>
+    </div>
+    <div class="mini-grid">
+      <div class="mini"><span class="label">Latest turn</span><strong>${esc(row.latest_turn_tokens)}</strong></div>
+      <div class="mini"><span class="label">Peak turn</span><strong>${esc(row.peak_turn_tokens)}</strong></div>
+      <div class="mini"><span class="label">Efficiency</span><strong>${esc(row.efficiency_label)}</strong></div>
+      <div class="mini"><span class="label">Replayed</span><strong>${esc(row.bloat_label)}</strong></div>
+    </div>
+    <p>${esc(row.recommendation)}</p>
+    <div class="health-actions">
+      <button class="btn-primary" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.action.label)}</button>
+      ${row.can_handoff ? `<button class="btn-quiet" data-session="${esc(row.session_id)}" onclick="openHandoff(this.dataset.session)">${esc(row.action.secondary_label)}</button>` : ''}
+      <button class="btn-quiet" data-compact="${esc(row.compact_prompt || '/compact')}" onclick="copyText(this.dataset.compact, 'Compact prompt copied')">Copy compact prompt</button>
+    </div>
+    <p class="receipt-note">${esc(row.action.reason)}</p>
+  </div>`).join('')}</div>`;
+}
+function renderCoverage(rows) {
+  if (!rows.length) return '<div class="empty">Coverage could not be determined on this machine.</div>';
+  return rows.map(row => `<div class="coverage-card">
+    <div class="coverage-head">
+      <h3>${esc(row.label)}</h3>
+      <span class="coverage-status ${esc(row.status)}">${esc(row.status_label)}</span>
+    </div>
+    <div class="coverage-detail">
+      <div><strong>Gate:</strong> ${esc(row.automatic_gate)}</div>
+      <div><strong>History:</strong> ${esc(row.history)}</div>
+      <div><strong>Sessions:</strong> ${esc(row.session_count)}</div>
+      <div><strong>Next:</strong> ${esc(row.action)}</div>
+      <div>${esc(row.detail)}</div>
+    </div>
+  </div>`).join('');
+}
+function renderSetup(rows) {
+  if (!rows.length) return '<div class="empty">Setup checklist unavailable.</div>';
+  return rows.map((row, index) => `<div class="coverage-card">
+    <div class="coverage-head">
+      <h3>${index + 1}. ${esc(row.title)}</h3>
+      <span class="coverage-status ${esc(row.status)}">${esc(row.status)}</span>
+    </div>
+    <div class="coverage-detail">
+      <div>${esc(row.why)}</div>
+      <code>${esc(row.command)}</code>
+      <button class="btn-quiet" data-command="${esc(row.command)}" onclick="copyText(this.dataset.command, 'Command copied')">Copy command</button>
+    </div>
+  </div>`).join('');
 }
 function costliestShare(event, session) {
   const total = Number(session.api_value_usd || 0);
@@ -1987,9 +2189,9 @@ async function selectSession(sessionId) {
   const outcomeActions = `<div class="outcome-control"><h3>Was this work useful?</h3>
     <p>Mark the result so AIWatcher can measure value instead of tokens alone.</p>
     <div class="outcome-options">
-      <button data-testid="outcome-useful" class="outcome-button useful ${s.outcome === 'useful' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','useful')">Useful</button>
-      <button data-testid="outcome-rework" class="outcome-button rework ${s.outcome === 'rework' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','rework')">Needs rework</button>
-      <button data-testid="outcome-abandoned" class="outcome-button abandoned ${s.outcome === 'abandoned' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','abandoned')">Abandoned</button>
+      <button data-testid="outcome-useful" class="outcome-button useful ${s.outcome === 'useful' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','useful')">${s.outcome === 'useful' ? '✓ ' : ''}Useful</button>
+      <button data-testid="outcome-rework" class="outcome-button rework ${s.outcome === 'rework' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','rework')">${s.outcome === 'rework' ? '✓ ' : ''}Needs rework</button>
+      <button data-testid="outcome-abandoned" class="outcome-button abandoned ${s.outcome === 'abandoned' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','abandoned')">${s.outcome === 'abandoned' ? '✓ ' : ''}Abandoned</button>
     </div>
     <div class="handoff-cta">
       <div>
@@ -2084,11 +2286,100 @@ async function markOutcome(sessionId, outcome) {
     buttons.forEach(button => { button.disabled = false; });
   }
 }
+function renderTodayDigest(digest) {
+  if (!digest) return '<div class="empty">Not enough local history yet to build a weekly digest.</div>';
+  const o = digest.outcomes;
+  const tally = [
+    o.useful ? `${o.useful} useful` : '',
+    o.rework ? `${o.rework} rework` : '',
+    o.abandoned ? `${o.abandoned} abandoned` : '',
+  ].filter(Boolean).join(', ');
+  const survival = digest.survival && digest.survival.available
+    ? `<span class="pill">${esc(digest.survival.cost_per_surviving_change)} per surviving change</span>`
+    : '';
+  return `<div class="insight"><strong>${esc(digest.recommendation)}</strong></div>
+    <div class="pill-row">
+      ${tally ? `<span class="pill">${esc(tally)}</span>` : ''}
+      ${digest.command_gate.commands_blocked ? `<span class="pill">${esc(digest.command_gate.commands_blocked)} dangerous commands blocked</span>` : ''}
+      ${digest.prompt_gate.modified ? `<span class="pill">${esc(digest.prompt_gate.modified)} risky prompts modified</span>` : ''}
+      ${survival}
+    </div>`;
+}
 function renderReport(report) {
-  return `<p>${esc(report.title)}</p>
-    <div class="pill-row">${report.summary.map(item => `<span class="pill">${esc(item)}</span>`).join('')}</div>
-    ${report.highlights.map(item => `<div class="insight"><strong>${esc(item)}</strong></div>`).join('')}
-    <p>${esc(report.next_checks.join(' '))}</p>`;
+  const digest = report.digest;
+  if (!digest) {
+    return `<p>${esc(report.title)}</p>
+      <div class="pill-row">${report.summary.map(item => `<span class="pill">${esc(item)}</span>`).join('')}</div>
+      ${report.highlights.map(item => `<div class="insight"><strong>${esc(item)}</strong></div>`).join('')}
+      <p>${esc(report.next_checks.join(' '))}</p>`;
+  }
+  const sections = [];
+  const o = digest.outcomes;
+  const outcomeTotal = o.useful + o.rework + o.abandoned + o.inferred_useful + o.inferred_churned;
+  if (outcomeTotal > 0) {
+    sections.push(`<div class="detail-section">
+      <h2>Outcomes</h2>
+      <div class="mini-grid">
+        ${o.useful ? `<div class="mini"><span class="label">Useful</span><strong>${esc(o.useful)}</strong></div>` : ''}
+        ${o.rework ? `<div class="mini"><span class="label">Rework</span><strong>${esc(o.rework)}</strong></div>` : ''}
+        ${o.abandoned ? `<div class="mini"><span class="label">Abandoned</span><strong>${esc(o.abandoned)}</strong></div>` : ''}
+        ${o.inferred_useful ? `<div class="mini"><span class="label">Inferred useful</span><strong>${esc(o.inferred_useful)}</strong></div>` : ''}
+        ${o.inferred_churned ? `<div class="mini"><span class="label">Inferred churned</span><strong>${esc(o.inferred_churned)}</strong></div>` : ''}
+      </div>
+    </div>`);
+  }
+  if (digest.highest_cost_useful_session) {
+    const h = digest.highest_cost_useful_session;
+    sections.push(`<div class="detail-section">
+      <h2>Highest-cost useful session</h2>
+      <p>${esc(h.project)} &middot; ${esc(h.tool)} &middot; ${esc(h.model)} &mdash; <span class="mono">${esc(h.api_value_label)}</span></p>
+    </div>`);
+  }
+  if (digest.top_sessions && digest.top_sessions.length) {
+    sections.push(`<div class="detail-section">
+      <h2>Costliest sessions</h2>
+      ${digest.top_sessions.map(s => `<div class="digest-row${s.session_id ? ' clickable' : ''}" ${s.session_id ? `onclick="selectSession('${esc(s.session_id)}')"` : ''}>
+        <span class="digest-row-label">${esc(s.project)} &middot; ${esc(s.tool)} &middot; ${esc(s.model)}</span>
+        <span class="mono">${esc(s.api_value_label)}</span>
+        ${s.outcome ? `<span class="outcome-pill ${esc(s.outcome)}">${esc(s.outcome)}</span>` : '<span class="pill">unreviewed</span>'}
+      </div>`).join('')}
+    </div>`);
+  }
+  const candidates = [
+    ...digest.loop_candidates.map(c => ({ ...c, kind: 'Loop' })),
+    ...digest.velocity_candidates.map(c => ({ ...c, kind: 'Runaway pace' })),
+  ];
+  if (candidates.length) {
+    sections.push(`<div class="detail-section">
+      <h2>Loop &amp; runaway signals</h2>
+      ${candidates.map(c => `<div class="insight"><strong>${esc(c.kind)} &middot; ${esc(c.project)} (${esc(c.tool)})</strong><p>${esc(c.diagnosis || c.ratio_label)}</p></div>`).join('')}
+    </div>`);
+  }
+  if (digest.command_gate.gates_fired > 0 || digest.prompt_gate.flagged > 0) {
+    sections.push(`<div class="detail-section">
+      <h2>Guardrails this window</h2>
+      <div class="pill-row">
+        ${digest.command_gate.gates_fired ? `<span class="pill">${esc(digest.command_gate.commands_blocked)} of ${esc(digest.command_gate.gates_fired)} dangerous commands blocked</span>` : ''}
+        ${digest.prompt_gate.flagged ? `<span class="pill">${esc(digest.prompt_gate.modified)} of ${esc(digest.prompt_gate.flagged)} risky prompts modified</span>` : ''}
+      </div>
+    </div>`);
+  }
+  if (digest.survival && digest.survival.available) {
+    const s = digest.survival;
+    sections.push(`<div class="detail-section">
+      <h2>Cost per surviving change</h2>
+      <div class="mini-grid">
+        <div class="mini"><span class="label">Survived</span><strong>${esc(s.surviving_count)}</strong></div>
+        <div class="mini"><span class="label">Churned</span><strong>${esc(s.churned_count)}</strong></div>
+        <div class="mini"><span class="label">$/surviving change</span><strong>${esc(s.cost_per_surviving_change)}</strong></div>
+        <div class="mini"><span class="label">$/churned change</span><strong>${esc(s.cost_per_churned_change)}</strong></div>
+      </div>
+    </div>`);
+  }
+  return `<div class="verdict-card"><h3>${esc(digest.recommendation)}</h3></div>
+    <div class="pill-row" style="margin-top:14px">${report.summary.map(item => `<span class="pill">${esc(item)}</span>`).join('')}</div>
+    ${sections.join('')}
+    <p class="receipt-note">API-equivalent value, not invoice spend. Outcomes are inferred from local signals, not guaranteed truth. Based on local logs only, not live provider quota.</p>`;
 }
 function renderJournal(journal) {
   return `<p>${esc(journal.title)}</p>
@@ -2160,6 +2451,7 @@ async function load(resetDetail = true) {
   const data = await summaryRes.json();
   const report = await reportRes.json();
   const journal = await journalRes.json();
+  document.getElementById('todayDigest').innerHTML = renderTodayDigest(report.digest);
   const totals = data.totals;
   document.getElementById('apiValue').textContent = totals.api_value_label;
   document.getElementById('windowLabel').textContent = totals.window_label;
@@ -2179,6 +2471,9 @@ async function load(resetDetail = true) {
   receiptCache = data.intervention_receipts || [];
   document.getElementById('latestIntervention').innerHTML = renderLatestReceipt(receiptCache[0]);
   document.getElementById('receiptRows').innerHTML = renderReceiptRows(receiptCache);
+  document.getElementById('contextHealth').innerHTML = renderContextHealth(data.context_health || []);
+  document.getElementById('coverageRows').innerHTML = renderCoverage(data.coverage || []);
+  document.getElementById('setupRows').innerHTML = renderSetup(data.setup || []);
   const latest = data.recent_sessions[0];
   document.getElementById('latestSession').innerHTML = latest
     ? `<div class="session-summary"><div class="session-title">${esc(latest.project)}</div>
@@ -2219,7 +2514,13 @@ async function load(resetDetail = true) {
   if (resetDetail && document.getElementById('detailDrawer').classList.contains('open')) closeDrawer();
 }
 document.addEventListener('keydown', event => { if (event.key === 'Escape') closeDrawer(); });
-load();
+(async () => {
+  await load();
+  // Deep link from `aiwatcher watch --notify` (issue #31): ?session=<id>
+  // opens straight to that session's review instead of the overview.
+  const deepLinkSession = new URLSearchParams(location.search).get('session');
+  if (deepLinkSession) selectSession(deepLinkSession);
+})();
 </script>
 </body>
 </html>
@@ -2560,6 +2861,7 @@ def serve(
             print(f"Port {port} is busy. Using {selected_port} instead.")
 
     server = ThreadingHTTPServer((host, selected_port), UIHandler)
+    record_ui_server(host, selected_port)
     print(f"AIWatcher Local UI running at http://{host}:{selected_port}")
     print("Local-only. No data leaves this machine. Press Ctrl+C to stop.")
     try:
