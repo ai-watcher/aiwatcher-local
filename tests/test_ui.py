@@ -10,7 +10,12 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from aiwatcher_cli import ui
-from aiwatcher_cli.local_state import record_command_decision, record_intervention, record_outcome
+from aiwatcher_cli.local_state import (
+    recent_handoff_decisions,
+    record_command_decision,
+    record_intervention,
+    record_outcome,
+)
 from aiwatcher_cli.scanner import LocalEvent, LocalSession, SurfaceCoverage
 
 
@@ -60,6 +65,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn('data-view="setup"', ui.HTML)
         self.assertIn('id="latestIntervention"', ui.HTML)
         self.assertIn('id="contextHealth"', ui.HTML)
+        self.assertIn('id="handoffBubble"', ui.HTML)
         self.assertIn('id="coverageRows"', ui.HTML)
         self.assertIn('id="setupRows"', ui.HTML)
         self.assertIn('id="promptInput"', ui.HTML)
@@ -74,6 +80,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn('class="btn-primary" onclick="openHandoff', ui.HTML)
         self.assertIn("watch --notify", ui.HTML)
         self.assertIn("/api/handoff", ui.HTML)
+        self.assertIn("/api/handoff-decision", ui.HTML)
         self.assertIn("Include prompt excerpt", ui.HTML)
         self.assertNotIn("window.alert", ui.HTML)
 
@@ -144,7 +151,51 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertTrue(any(step["command"] == "aiwatcher hook-status" for step in summary["setup"]))
         self.assertEqual(summary["context_health"][0]["severity"], "critical")
         self.assertEqual(summary["context_health"][0]["action"]["label"], "Start fresh")
+        self.assertEqual(summary["handoff_bubble"]["session_id"], "bloated")
+        self.assertIn("Start a new chat", summary["handoff_bubble"]["title"])
+        self.assertEqual(summary["handoff_bubble"]["expected_saved_context_tokens"], 220_500)
         self.assertTrue(any(item["title"] == "Context health needs attention" for item in summary["insights"]))
+
+    def test_handoff_bubble_is_absent_when_context_is_healthy(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="healthy",
+            tool="claude-code",
+            project_path="/repo",
+            started_at=now - timedelta(minutes=30),
+            updated_at=now,
+            tokens_in=30_000,
+            tokens_out=10_000,
+            cost_usd=0.1,
+        )
+        with (
+            patch.object(ui, "scan_all", return_value=[row]),
+            patch.object(ui, "scan_all_events", return_value=[]),
+            patch.object(ui, "discover_tools", return_value={}),
+            patch.object(ui, "evidence_for_sessions", return_value={}),
+            patch.object(ui, "survival_by_session", return_value={}),
+            patch.object(ui, "analyze_all_sessions", return_value=[]),
+            patch.object(ui, "surface_coverage", return_value=[]),
+        ):
+            summary = ui.build_summary(7)
+
+        self.assertIsNone(summary["handoff_bubble"])
+
+    def test_handoff_decision_endpoint_records_local_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                record = ui.record_handoff_decision(
+                    session_id="s1",
+                    decision="continue_here",
+                    reason="User chose to continue despite context pressure.",
+                    expected_saved_context_tokens=123_000,
+                )
+                decisions = recent_handoff_decisions()
+
+        self.assertEqual(record["decision"], "continue_here")
+        self.assertEqual(decisions[0]["session_id"], "s1")
+        self.assertEqual(decisions[0]["expected_saved_context_tokens"], 123_000)
 
     def test_prompt_preflight_response_is_privacy_scoped(self) -> None:
         with patch.object(

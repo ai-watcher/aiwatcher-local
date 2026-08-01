@@ -26,6 +26,7 @@ from .local_state import (
     outcomes_for_sessions,
     recent_command_decisions,
     recent_interventions,
+    record_handoff_decision,
     record_evidence_snapshot,
     record_outcome,
     record_ui_server,
@@ -667,6 +668,8 @@ def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) ->
             "severity": health.severity,
             "latest_turn_tokens": compact_int(health.latest_turn_tokens),
             "peak_turn_tokens": compact_int(health.peak_turn_tokens),
+            "estimated_replayed_context_tokens": int(health.latest_turn_tokens * health.bloat_ratio),
+            "estimated_replayed_context_label": compact_int(int(health.latest_turn_tokens * health.bloat_ratio)),
             "efficiency_label": f"{health.efficiency_pct:.0f}%",
             "bloat_label": f"{health.bloat_ratio * 100:.0f}%",
             "age_label": f"{health.age_days:.1f}d" if health.age_days >= 1 else f"{health.age_hours:.0f}h",
@@ -676,6 +679,57 @@ def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) ->
             "compact_prompt": _build_compact_prompt(health),
         })
     return cards
+
+
+def _handoff_bubble(context_health: list[dict[str, object]]) -> dict[str, object] | None:
+    """Pick the single highest-value handoff prompt for Today.
+
+    The full health list remains available below; this bubble is the
+    developer-facing intervention: one timely choice, like "start fresh" or
+    "continue here", with an honest estimate of context pressure avoided.
+    """
+    candidate = next(
+        (row for row in context_health if row.get("severity") in {"critical", "warning"} and row.get("can_handoff")),
+        None,
+    )
+    if not candidate:
+        return None
+    severity = str(candidate.get("severity") or "warning")
+    saved_label = str(candidate.get("estimated_replayed_context_label") or candidate.get("latest_turn_tokens") or "context")
+    project = str(candidate.get("project") or "this session")
+    if severity == "critical":
+        title = f"Start a new chat to save ~{saved_label} tokens of context"
+        body = (
+            f"{project} is at critical context pressure. Create a fresh-session handoff brief so the next agent "
+            "keeps the goal, repo, files, and guardrails without replaying the bloated history."
+        )
+        primary_label = "New chat"
+    else:
+        title = f"This session is getting heavy: ~{saved_label} tokens are replayed context"
+        body = (
+            f"{project} is showing context pressure. Compact or start fresh before the next broad task so usage "
+            "does not compound."
+        )
+        primary_label = "Prepare handoff"
+    reason = str(candidate.get("recommendation") or candidate.get("action", {}).get("reason") or body)
+    return {
+        "session_id": candidate.get("session_id"),
+        "project": project,
+        "tool": candidate.get("tool"),
+        "severity": severity,
+        "title": title,
+        "body": body,
+        "reason": reason,
+        "primary_label": primary_label,
+        "continue_label": "Continue here",
+        "saved_context_label": saved_label,
+        "expected_saved_context_tokens": candidate.get("estimated_replayed_context_tokens"),
+        "tags": [
+            f"{candidate.get('latest_turn_tokens')} tokens/turn",
+            f"{candidate.get('efficiency_label')} efficiency",
+            f"{candidate.get('bloat_label')} replayed context",
+        ],
+    }
 
 
 def build_prompt_preflight(prompt: str, *, tool: str = "agent", cwd: str | None = None) -> dict[str, object]:
@@ -933,6 +987,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
     except OSError:
         all_events = []
     context_health = _context_health_cards(rows, all_events)
+    handoff_bubble = _handoff_bubble(context_health)
 
     insights = []
     if projects:
@@ -1075,6 +1130,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
         "coverage": [row.to_json() for row in surface_coverage(all_rows)],
         "setup": setup_checklist(),
         "context_health": context_health,
+        "handoff_bubble": handoff_bubble,
         "recent_sessions": [
             {
                 "tool": row.tool,
@@ -1270,6 +1326,19 @@ HTML = r"""<!doctype html>
     .coverage-status.unsupported, .coverage-status.not_detected, .health-severity.critical { color: #ffc4ce; border-color: rgba(242,125,143,.45); background: var(--red-soft); }
     .coverage-detail, .health-detail { display: grid; gap: 6px; color: var(--muted); font-size: 12px; line-height: 1.45; }
     .health-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .handoff-bubble {
+      border-color: rgba(112,167,255,.5);
+      background: #eaf2ff;
+      color: #172237;
+      box-shadow: 0 10px 26px rgba(7,18,32,.18);
+    }
+    .handoff-bubble h2 { color: #1f5fa8; }
+    .handoff-bubble p, .handoff-bubble .sub { color: #4b5870; }
+    .handoff-bubble .pill { background: rgba(255,255,255,.72); border-color: #bfd2ec; color: #37445a; }
+    .handoff-bubble .btn-primary { background: #ffffff; border-color: #c5d7ee; color: #172237; }
+    .handoff-bubble .btn-primary:hover { background: #f8fbff; border-color: #8fb6e8; }
+    .handoff-bubble .btn-quiet { background: transparent; border-color: transparent; color: #4b5870; }
+    .handoff-bubble .btn-quiet:hover { background: rgba(255,255,255,.6); border-color: #c5d7ee; color: #172237; }
     .outcome-pill.useful { color: #bff5df; border-color: rgba(53,211,153,.38); background: var(--green-soft); }
     .outcome-pill.rework { color: #ffe2a4; border-color: rgba(246,189,96,.38); background: var(--amber-soft); }
     .outcome-pill.abandoned { color: #ffc4ce; border-color: rgba(242,125,143,.38); background: var(--red-soft); }
@@ -1453,6 +1522,8 @@ HTML = r"""<!doctype html>
   </nav>
 
   <section id="view-today" class="view">
+    <section id="handoffBubble" class="card handoff-bubble" style="margin-bottom:14px" hidden></section>
+
     <section class="grid two" style="margin-bottom:14px">
       <div class="card hero-card">
         <div class="section-title"><div><h2>Latest AI work</h2><p>Your most recent local session and its outcome.</p></div></div>
@@ -1947,6 +2018,55 @@ async function openHandoff(sessionId, target = 'generic', includePrompt = false)
   }
   document.getElementById('detailContent').innerHTML = renderHandoff(capsule);
 }
+async function recordHandoffDecision(bubble, decision) {
+  if (!bubble || !bubble.session_id) return;
+  try {
+    await fetch('/api/handoff-decision', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: bubble.session_id,
+        decision,
+        reason: bubble.reason || bubble.body || '',
+        expected_saved_context_tokens: bubble.expected_saved_context_tokens || null,
+      })
+    });
+  } catch (error) {
+    // Decision receipts should never block the user's flow.
+  }
+}
+async function startFreshFromBubble(sessionId) {
+  if (window.currentHandoffBubble) await recordHandoffDecision(window.currentHandoffBubble, 'new_chat');
+  await openHandoff(sessionId);
+}
+async function continueFromBubble() {
+  if (window.currentHandoffBubble) await recordHandoffDecision(window.currentHandoffBubble, 'continue_here');
+  document.getElementById('handoffBubble').hidden = true;
+  showToast('Handoff decision saved: continue here');
+}
+function renderHandoffBubble(bubble) {
+  const node = document.getElementById('handoffBubble');
+  window.currentHandoffBubble = bubble || null;
+  if (!bubble) {
+    node.hidden = true;
+    node.innerHTML = '';
+    return;
+  }
+  node.hidden = false;
+  node.innerHTML = `<div class="section-title">
+      <div>
+        <h2>${esc(bubble.title)}</h2>
+        <p>${esc(bubble.body)}</p>
+      </div>
+      <span class="pill">${esc(bubble.severity)}</span>
+    </div>
+    <div class="pill-row">${(bubble.tags || []).map(tag => `<span class="pill">${esc(tag)}</span>`).join('')}</div>
+    <div class="actions" style="margin-top:14px">
+      <button class="btn-primary" data-session="${esc(bubble.session_id)}" onclick="startFreshFromBubble(this.dataset.session)">${esc(bubble.primary_label || 'New chat')}</button>
+      <button class="btn-quiet" onclick="continueFromBubble()">${esc(bubble.continue_label || 'Continue here')}</button>
+      <button class="btn-quiet" data-session="${esc(bubble.session_id)}" onclick="selectSession(this.dataset.session)">Inspect session</button>
+    </div>`;
+}
 function dateLabel(value) {
   if (!value) return 'unknown';
   const date = new Date(value);
@@ -2320,6 +2440,7 @@ async function load(resetDetail = true) {
   const data = await summaryRes.json();
   const report = await reportRes.json();
   const journal = await journalRes.json();
+  renderHandoffBubble(data.handoff_bubble || null);
   document.getElementById('todayDigest').innerHTML = renderTodayDigest(report.digest);
   const totals = data.totals;
   document.getElementById('apiValue').textContent = totals.api_value_label;
@@ -2580,7 +2701,7 @@ class UIHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path not in {"/api/outcome", "/api/preflight"}:
+        if parsed.path not in {"/api/outcome", "/api/preflight", "/api/handoff-decision"}:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
@@ -2603,6 +2724,33 @@ class UIHandler(BaseHTTPRequestHandler):
             response = build_prompt_preflight(prompt, tool=tool, cwd=cwd)
             status = 400 if response.get("error") else 200
             self._send(status, json.dumps(response), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/handoff-decision":
+            session_id = str(payload.get("session_id", "")).strip()
+            decision = str(payload.get("decision", "")).strip()
+            reason = str(payload.get("reason", "")).strip()
+            expected = payload.get("expected_saved_context_tokens")
+            if not session_id:
+                self._send(400, json.dumps({"error": "session_id is required"}), "application/json; charset=utf-8")
+                return
+            try:
+                record = record_handoff_decision(
+                    session_id=session_id,
+                    decision=decision,
+                    reason=reason,
+                    expected_saved_context_tokens=expected if isinstance(expected, int) else None,
+                )
+            except ValueError as exc:
+                self._send(400, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")
+                return
+            except OSError as exc:
+                self._send(
+                    500,
+                    json.dumps({"error": f"Could not save handoff decision: {exc}"}),
+                    "application/json; charset=utf-8",
+                )
+                return
+            self._send(200, json.dumps(record), "application/json; charset=utf-8")
             return
         session_id = str(payload.get("session_id", "")).strip()
         outcome = str(payload.get("outcome", "")).strip()
