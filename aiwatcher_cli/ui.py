@@ -9,10 +9,19 @@ import subprocess
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
-from .cli import _loop_signal, _velocity_signal, analyze_prompt, session_insights, setup_checklist, timeline_analysis
+from .cli import (
+    _loop_signal,
+    _velocity_signal,
+    analyze_prompt,
+    filter_sessions,
+    session_insights,
+    setup_checklist,
+    timeline_analysis,
+)
 from .correlate import link_recent_interventions_to_sessions
 from .handoff import build_handoff_capsule
 from .local_state import (
@@ -30,7 +39,7 @@ from .local_state import (
     record_outcome,
     record_ui_server,
 )
-from .outcome_evidence import build_outcome_evidence, evidence_for_sessions
+from .outcome_evidence import VALID_EVIDENCE_OUTCOMES, build_outcome_evidence, evidence_for_sessions
 from .pricing import is_subscription_model
 from .session_health import ContextHealth, analyze_all_sessions, gate_health_warning
 from .scanner import (
@@ -169,6 +178,59 @@ def group_by_model_breakdown(rows: list[LocalSession]) -> list[dict[str, object]
 def rows_for_window(days: int) -> list[LocalSession]:
     since = datetime.now().astimezone() - timedelta(days=days)
     return [row for row in scan_all() if in_window(row, since)]
+
+
+def _session_row_json(
+    row: LocalSession,
+    window_outcomes: dict[str, dict[str, object]],
+    evidence_by_session: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "tool": row.tool,
+        "session_id": row.session_id,
+        "project": short_path(row.project_path),
+        "project_full": row.project_path or "unknown",
+        "model": display_model_name(row.model),
+        "tokens": compact_int(row.tokens_in + row.tokens_out),
+        "api_value": money(row.cost_usd),
+        "outcome": (window_outcomes.get(row.session_id) or {}).get("outcome"),
+        "inferred_outcome": evidence_by_session.get(row.session_id).inferred_outcome if evidence_by_session.get(row.session_id) else None,
+        "updated_at": (row.updated_at or row.started_at).isoformat() if (row.updated_at or row.started_at) else None,
+    }
+
+
+SESSION_SEARCH_RESULT_LIMIT = 50
+
+
+def build_session_search(
+    days: int = 30,
+    *,
+    search: str | None = None,
+    outcome: str | None = None,
+    evidence: str | None = None,
+) -> dict[str, object]:
+    """S-27: UI-facing search/filter over local sessions, reusing filter_sessions()
+    (cli.py) rather than re-implementing matching here."""
+    rows = rows_for_window(days)
+    matched = filter_sessions(rows, search=search, outcome=outcome, evidence=evidence)
+    matched = sorted(matched, key=lambda row: row.updated_at or row.started_at or MIN_DT, reverse=True)
+    total_matched = len(matched)
+    matched = matched[:SESSION_SEARCH_RESULT_LIMIT]
+    window_outcomes = outcomes_for_sessions({row.session_id for row in matched})
+    # Every git-backed evidence lookup shells out per session with no cache, so
+    # this is the dominant cost of a search request -- only pay it when the
+    # caller actually asked for evidence (an `evidence` filter already implies
+    # every returned row has that exact inferred_outcome, so label it directly
+    # instead of recomputing what filter_sessions() just computed internally).
+    evidence_by_session = (
+        {row.session_id: SimpleNamespace(inferred_outcome=evidence) for row in matched} if evidence else {}
+    )
+    return {
+        "query": {"search": search or "", "outcome": outcome or "", "evidence": evidence or ""},
+        "total_scanned": len(rows),
+        "total_matched": total_matched,
+        "sessions": [_session_row_json(row, window_outcomes, evidence_by_session) for row in matched],
+    }
 
 
 def _survival_for_session(session_id: str) -> dict[str, str] | None:
@@ -1278,6 +1340,12 @@ HTML = r"""<!doctype html>
     th { color: var(--muted); font-weight: 600; }
     td:last-child, th:last-child { text-align: right; }
     tr.clickable:hover { background: rgba(112,167,255,.05); }
+    .session-filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 14px 0 4px; }
+    .session-filters input[type="text"] {
+      flex: 1; min-width: 220px; border: 1px solid var(--line-strong); background: var(--surface-raised);
+      color: var(--text); border-radius: 8px; min-height: 38px; padding: 8px 12px; font: inherit;
+    }
+    .session-filters input[type="text"]:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
     .row-action { min-height: 30px; padding: 5px 9px; color: #ddecff; background: var(--blue-soft); border-color: #3d6594; font-size: 12px; }
     .empty { color: var(--muted); padding: 16px; border: 1px dashed var(--line); border-radius: 8px; }
     .digest-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
@@ -1559,9 +1627,26 @@ HTML = r"""<!doctype html>
   <section id="view-sessions" class="view" hidden>
     <div class="card">
       <div class="section-title">
-        <div><h2>Sessions</h2><p>Recent local AI runs. Click any row to inspect locally — prompt text is shown for your own review only, never uploaded.</p></div>
+        <div><h2>Sessions</h2><p>Search and resume prior local AI work. Click any row to inspect locally — prompt text is shown for your own review only, never uploaded.</p></div>
         <span class="pill">Local machine only</span>
       </div>
+      <div class="session-filters">
+        <input id="sessionSearch" type="text" placeholder="Search project, tool, model, session id, or a file/topic keyword" oninput="debounceSessionSearch()">
+        <select id="sessionOutcomeFilter" onchange="loadSessions()">
+          <option value="">Any outcome</option>
+          <option value="useful">Useful</option>
+          <option value="rework">Rework</option>
+          <option value="abandoned">Abandoned</option>
+        </select>
+        <select id="sessionEvidenceFilter" onchange="loadSessions()">
+          <option value="">Any evidence</option>
+          <option value="useful">Evidence: likely useful</option>
+          <option value="needs_review">Evidence: needs review</option>
+          <option value="churned">Evidence: reverted/rewritten</option>
+        </select>
+        <button class="btn-quiet" onclick="clearSessionFilters()">Clear</button>
+      </div>
+      <p class="receipt-note" id="sessionResultsNote"></p>
       <div class="table-wrap"><table>
         <thead><tr><th>Tool</th><th>Project</th><th>Model</th><th>Tokens</th><th></th></tr></thead>
         <tbody id="sessionRows"></tbody>
@@ -2310,6 +2395,52 @@ function showView(view) {
     node.classList.toggle('active', node.dataset.view === view);
   });
 }
+let sessionSearchTimer = null;
+function debounceSessionSearch() {
+  clearTimeout(sessionSearchTimer);
+  sessionSearchTimer = setTimeout(loadSessions, 250);
+}
+function clearSessionFilters() {
+  document.getElementById('sessionSearch').value = '';
+  document.getElementById('sessionOutcomeFilter').value = '';
+  document.getElementById('sessionEvidenceFilter').value = '';
+  loadSessions();
+}
+let sessionSearchToken = 0;
+async function loadSessions() {
+  const days = document.getElementById('days').value;
+  const search = document.getElementById('sessionSearch').value.trim();
+  const outcome = document.getElementById('sessionOutcomeFilter').value;
+  const evidence = document.getElementById('sessionEvidenceFilter').value;
+  const params = new URLSearchParams({ days });
+  if (search) params.set('search', search);
+  if (outcome) params.set('outcome', outcome);
+  if (evidence) params.set('evidence', evidence);
+  // A search that doesn't field-match every session in the window falls back
+  // to an uncached per-session git evidence lookup (filter_sessions()'s rough
+  // topic match) -- that can take several seconds, so show a visible pending
+  // state, and drop this response if a newer search has since been fired.
+  const token = ++sessionSearchToken;
+  document.getElementById('sessionResultsNote').textContent = 'Searching local sessions...';
+  const res = await fetch(`/api/sessions?${params.toString()}`);
+  const data = await res.json();
+  if (token !== sessionSearchToken) return;
+  const filtered = Boolean(search || outcome || evidence);
+  document.getElementById('sessionResultsNote').textContent = filtered
+    ? `${data.total_matched} matching session${data.total_matched === 1 ? '' : 's'} of ${data.total_scanned} in this window.`
+    : `${data.total_scanned} session${data.total_scanned === 1 ? '' : 's'} in this window.`;
+  document.getElementById('sessionRows').innerHTML = data.sessions.length
+    ? data.sessions.map(s => `<tr class="clickable" onclick="selectSession('${esc(s.session_id)}')">
+        <td>${esc(s.tool)}</td>
+        <td>${esc(s.project)}<br>${s.outcome ? outcomePill(s.outcome) : outcomeEvidencePill(s)}</td>
+        <td>${esc(s.model)}</td>
+        <td class="mono">${esc(s.tokens)}</td>
+        <td><button class="row-action">Review</button></td>
+      </tr>`).join('')
+    : `<tr><td colspan="5"><div class="empty">${filtered
+        ? 'No sessions match those filters. Try clearing the search or a different outcome/evidence filter.'
+        : 'No local sessions found for this window.'}</div></td></tr>`;
+}
 async function load(resetDetail = true) {
   const days = document.getElementById('days').value;
   const [summaryRes, reportRes, journalRes] = await Promise.all([
@@ -2377,15 +2508,7 @@ async function load(resetDetail = true) {
         <td class="mono">${esc(p.api_value_label)}</td>
       </tr>`).join('')
     : '<tr><td colspan="5"><div class="empty">No local project usage found for this window.</div></td></tr>';
-  document.getElementById('sessionRows').innerHTML = data.recent_sessions.length
-    ? data.recent_sessions.map(s => `<tr class="clickable" onclick="selectSession('${s.session_id}')">
-        <td>${esc(s.tool)}</td>
-        <td>${esc(s.project)}</td>
-        <td>${esc(s.model)}</td>
-        <td class="mono">${esc(s.tokens)}</td>
-        <td><button class="row-action">Review</button></td>
-      </tr>`).join('')
-    : '<tr><td colspan="5"><div class="empty">No local sessions found for this window.</div></td></tr>';
+  loadSessions();
   document.getElementById('report').innerHTML = renderReport(report);
   document.getElementById('journal').innerHTML = renderJournal(journal);
   if (resetDetail && document.getElementById('detailDrawer').classList.contains('open')) closeDrawer();
@@ -2489,6 +2612,25 @@ class UIHandler(BaseHTTPRequestHandler):
             except ValueError:
                 days = 7
             self._send(200, json.dumps(build_summary(days)), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/sessions":
+            params = parse_qs(parsed.query)
+            try:
+                days = max(1, min(90, int(params.get("days", ["30"])[0])))
+            except ValueError:
+                days = 30
+            search = params.get("search", [""])[0].strip() or None
+            outcome = params.get("outcome", [""])[0].strip() or None
+            if outcome not in VALID_OUTCOMES:
+                outcome = None
+            evidence = params.get("evidence", [""])[0].strip() or None
+            if evidence not in VALID_EVIDENCE_OUTCOMES:
+                evidence = None
+            self._send(
+                200,
+                json.dumps(build_session_search(days, search=search, outcome=outcome, evidence=evidence)),
+                "application/json; charset=utf-8",
+            )
             return
         if parsed.path == "/api/project":
             params = parse_qs(parsed.query)
