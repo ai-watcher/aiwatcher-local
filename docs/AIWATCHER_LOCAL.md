@@ -358,6 +358,9 @@ What to check:
 - The Today dashboard should show a handoff bubble for warning/critical context
   health with fresh-session and continue-here choices, then save only local
   decision metadata.
+- `watch --overlay` should open the local `/overlay` companion when watch
+  recommends action, giving desktop users a dismissible handoff surface outside
+  Claude/Codex/Cursor instead of requiring them to visit the full dashboard.
 - `resume`/`handoff` without `--include-prompt-excerpt` should not contain
   prompt text; with it, the brief should contain a labeled excerpt and nothing
   else in the surrounding output should change.

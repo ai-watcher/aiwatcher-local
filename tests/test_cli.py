@@ -897,6 +897,41 @@ class PromptPreflightTests(unittest.TestCase):
         body = notify.call_args.args[1]
         self.assertIn(expected_url, body)
 
+    def test_watch_overlay_opens_companion_without_notification(self) -> None:
+        row = session(1, project="/repo/orcha")
+        row.agent_calls = 300
+        args = SimpleNamespace(
+            days=1,
+            interval=15,
+            once=True,
+            cost_threshold=5.0,
+            calls_threshold=250,
+            tokens_threshold=500_000,
+            target="generic",
+            notify=False,
+            overlay=True,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.object(cli, "get_baselines", return_value={}),
+                patch.object(cli, "_send_local_notification") as notify,
+                patch.object(cli, "_open_handoff_overlay", return_value=(True, "test-overlay")) as overlay,
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch("sys.stdout", io.StringIO()) as stdout,
+            ):
+                cli._print_watch_status_card(row, [row], args, [], {}, {})
+                notifications = local_state.recent_watch_notifications(limit=5)
+
+        notify.assert_not_called()
+        overlay.assert_called_once()
+        self.assertEqual(
+            overlay.call_args.args[0],
+            f"http://127.0.0.1:{cli.DEFAULT_UI_PORT}/overlay?session={row.session_id}",
+        )
+        self.assertIn("Overlay: opened", stdout.getvalue())
+        self.assertEqual(notifications[0]["detail"], "overlay test-overlay")
+
     def test_watch_notify_deep_link_follows_actual_running_dashboard_port(self) -> None:
         """Regression guard: found while manually testing issue #31 -- `aiwatcher
         ui` had fallen back off its default port (8765 was busy), so a

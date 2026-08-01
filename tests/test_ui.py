@@ -88,6 +88,28 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Include prompt excerpt", ui.HTML)
         self.assertNotIn("window.alert", ui.HTML)
 
+    def test_overlay_page_is_a_local_handoff_companion(self) -> None:
+        self.assertIn("AIWatcher Handoff", ui.OVERLAY_HTML)
+        self.assertIn("/api/summary?days=7", ui.OVERLAY_HTML)
+        self.assertIn("/api/handoff-decision", ui.OVERLAY_HTML)
+        self.assertIn("Copy handoff", ui.OVERLAY_HTML)
+        self.assertIn("Continue here", ui.OVERLAY_HTML)
+        self.assertIn("Prompt/source content is not stored", ui.OVERLAY_HTML)
+
+    def test_overlay_script_is_valid_javascript(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not available to check JS syntax")
+        script = re.search(r"<script>(.*?)</script>", ui.OVERLAY_HTML, re.S).group(1)
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as handle:
+            handle.write(script)
+            script_path = handle.name
+        try:
+            completed = subprocess.run([node, "-c", script_path], capture_output=True, text=True)
+        finally:
+            os.unlink(script_path)
+        self.assertEqual(completed.returncode, 0, f"Overlay inline JS has a syntax error:\n{completed.stderr}")
+
     def test_summary_includes_surface_coverage_and_context_health(self) -> None:
         now = datetime.now(timezone.utc)
         rows = [

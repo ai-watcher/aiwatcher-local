@@ -197,6 +197,19 @@ only the local decision metadata and estimated replayed context avoided, not
 prompt or source text. Recent handoff decisions appear in Today, Receipts, and
 `aiwatcher hook-status`.
 
+For a lower-friction desktop flow, run ambient watch with the local companion
+overlay:
+
+```bash
+python -m aiwatcher_cli ui
+python -m aiwatcher_cli watch --notify --overlay
+```
+
+When context gets heavy, AIWatcher opens a small local handoff companion outside
+Claude, Codex, Cursor, or your editor. From there you can copy a fresh-session
+brief, continue here, or inspect the session without first navigating to the
+dashboard. AIWatcher does not inject UI into third-party apps.
+
 Targets: `generic`, `claude`, `codex`, `cursor`, and `vscode`. The brief lists
 recent commit subjects/bodies and changed files for context, any decisions
 logged for the session (see below), and keeps the next run focused on one

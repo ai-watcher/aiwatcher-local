@@ -2733,6 +2733,62 @@ def _send_local_notification(title: str, body: str, *, url: str | None = None) -
     return False, "local notifications unsupported on this platform"
 
 
+def _watch_ui_base_url() -> str:
+    ui_server = get_ui_server()
+    ui_host = ui_server["host"] if ui_server else "127.0.0.1"
+    if ui_host in ("0.0.0.0", "::", ""):
+        ui_host = "127.0.0.1"
+    ui_port = ui_server["port"] if ui_server else DEFAULT_UI_PORT
+    return f"http://{ui_host}:{ui_port}"
+
+
+def _open_handoff_overlay(url: str) -> tuple[bool, str]:
+    """Best-effort local companion overlay outside the AI tool UI."""
+    if os.environ.get("AIWATCHER_DISABLE_OVERLAY", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False, "disabled by AIWATCHER_DISABLE_OVERLAY"
+    try:
+        if sys.platform == "darwin" and shutil.which("open"):
+            for app in ("Google Chrome", "Microsoft Edge", "Brave Browser"):
+                completed = subprocess.run(
+                    ["open", "-na", app, "--args", f"--app={url}", "--window-size=760,360"],
+                    check=False,
+                    timeout=3,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                if completed.returncode == 0:
+                    return True, f"{app} app window"
+            subprocess.run(
+                ["open", url],
+                check=True,
+                timeout=3,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True, "open"
+        if os.name == "nt":
+            os.startfile(url)  # type: ignore[attr-defined]
+            return True, "startfile"
+        if shutil.which("xdg-open"):
+            subprocess.run(
+                ["xdg-open", url],
+                check=True,
+                timeout=3,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True, "xdg-open"
+        if webbrowser.open(url):
+            return True, "webbrowser"
+    except subprocess.CalledProcessError:
+        return False, "overlay opener failed"
+    except subprocess.TimeoutExpired:
+        return False, "overlay opener timed out"
+    except OSError as exc:
+        return False, str(exc)
+    return False, "no overlay opener available"
+
+
 def command_last(args: argparse.Namespace) -> int:
     rows = sessions_since(args.days)
     if args.session_id:
@@ -3088,7 +3144,7 @@ def _print_watch_status_card(
         )
     print(f"  Recommended: {status['action']} -- {status['reason']}")
 
-    if getattr(args, "notify", False) and status["action"] != "continue":
+    if (getattr(args, "notify", False) or getattr(args, "overlay", False)) and status["action"] != "continue":
         key = f"{session.session_id}:{status['action']}"
         # persist_key includes the session's own stamp, so a later run against
         # unchanged local activity recognizes "already told you about this
@@ -3104,34 +3160,39 @@ def _print_watch_status_card(
         else:
             if notification_seen is not None:
                 notification_seen[key] = stamp
-            # `aiwatcher ui` falls back to the next free port when its default
-            # is busy (this is the actual reason the link 404ed while testing
-            # this feature: the dashboard had fallen back off DEFAULT_UI_PORT).
-            # Prefer wherever it last actually bound; only guess the default
-            # if no dashboard has been recorded as having run yet.
-            ui_server = get_ui_server()
-            ui_host = ui_server["host"] if ui_server else "127.0.0.1"
-            if ui_host in ("0.0.0.0", "::", ""):
-                # Not browsable as-is; 127.0.0.1 always reaches a server
-                # bound to all interfaces on the same machine.
-                ui_host = "127.0.0.1"
-            ui_port = ui_server["port"] if ui_server else DEFAULT_UI_PORT
-            dashboard_url = f"http://{ui_host}:{ui_port}/?session={quote(session.session_id, safe='')}"
-            ok, detail = _send_local_notification(
-                f"AIWatcher: {status['action']}",
-                f"{short_path(session.project_path)} - {status['reason']} - Review: {dashboard_url}",
-                url=dashboard_url,
-            )
+            base_url = _watch_ui_base_url()
+            dashboard_url = f"{base_url}/?session={quote(session.session_id, safe='')}"
+            overlay_url = f"{base_url}/overlay?session={quote(session.session_id, safe='')}"
+            ok = False
+            detail = "not requested"
+            if getattr(args, "notify", False):
+                ok, detail = _send_local_notification(
+                    f"AIWatcher: {status['action']}",
+                    f"{short_path(session.project_path)} - {status['reason']} - Review: {dashboard_url}",
+                    url=dashboard_url,
+                )
+                print(f"  Notification: {'sent' if ok else 'not sent'} ({detail})")
+            overlay_ok = False
+            overlay_detail = "not requested"
+            if getattr(args, "overlay", False):
+                overlay_ok, overlay_detail = _open_handoff_overlay(overlay_url)
+                print(f"  Overlay: {'opened' if overlay_ok else 'not opened'} ({overlay_detail})")
             record_notification_sent(persist_key)
-            print(f"  Notification: {'sent' if ok else 'not sent'} ({detail})")
             try:
                 record_watch_notification(
                     session_id=session.session_id,
                     tool=session.tool,
                     action=str(status["action"]),
                     reason=str(status["reason"]),
-                    sent=ok,
-                    detail=detail,
+                    sent=ok or overlay_ok,
+                    detail=", ".join(
+                        part
+                        for part in [
+                            detail if detail != "not requested" else "",
+                            f"overlay {overlay_detail}" if overlay_detail != "not requested" else "",
+                        ]
+                        if part
+                    ),
                     url=dashboard_url,
                 )
             except OSError:
@@ -3176,16 +3237,7 @@ def _print_watch_status_card(
 
 
 def _outcome_dashboard_url(session_id: str | None = None) -> str:
-    # Mirrors _print_watch_status_card's dashboard_url derivation: prefer
-    # wherever `aiwatcher ui` last actually bound (it falls back off its
-    # default port when busy), only guessing DEFAULT_UI_PORT if no dashboard
-    # has been recorded as having run yet.
-    ui_server = get_ui_server()
-    ui_host = ui_server["host"] if ui_server else "127.0.0.1"
-    if ui_host in ("0.0.0.0", "::", ""):
-        ui_host = "127.0.0.1"
-    ui_port = ui_server["port"] if ui_server else DEFAULT_UI_PORT
-    base = f"http://{ui_host}:{ui_port}/"
+    base = f"{_watch_ui_base_url()}/"
     return f"{base}?session={quote(session_id, safe='')}" if session_id else base
 
 
@@ -5578,6 +5630,11 @@ def build_parser() -> argparse.ArgumentParser:
             "and for outcome-review signals (survival, churn, same-file re-prompt, "
             "cost-per-surviving-change)"
         ),
+    )
+    watch.add_argument(
+        "--overlay",
+        action="store_true",
+        help="Open a local AIWatcher companion overlay when watch recommends a handoff or other action",
     )
     watch.add_argument(
         "--target", choices=sorted(TARGET_LABELS), default="generic",

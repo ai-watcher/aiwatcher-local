@@ -2628,6 +2628,216 @@ document.addEventListener('keydown', event => { if (event.key === 'Escape') clos
 """
 
 
+OVERLAY_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIWatcher Handoff</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: transparent;
+      color: #edf6ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: end center;
+      padding: 18px;
+      background:
+        radial-gradient(circle at 12% 0%, rgba(79, 209, 197, 0.16), transparent 34%),
+        rgba(4, 9, 18, 0.78);
+    }
+    .bubble {
+      width: min(780px, 100%);
+      border: 1px solid rgba(126, 172, 255, 0.45);
+      background: rgba(16, 25, 40, 0.96);
+      box-shadow: 0 22px 70px rgba(0, 0, 0, 0.36);
+      border-radius: 18px;
+      overflow: hidden;
+    }
+    .top {
+      padding: 20px 22px 16px;
+      border-bottom: 1px solid rgba(126, 172, 255, 0.22);
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    h1 { margin: 0 0 8px; font-size: clamp(22px, 4vw, 30px); letter-spacing: 0; }
+    p { margin: 0; color: #a9b6c8; line-height: 1.45; }
+    .badge {
+      align-self: flex-start;
+      border: 1px solid rgba(255, 119, 150, 0.52);
+      color: #ff9bad;
+      padding: 8px 12px;
+      border-radius: 999px;
+      white-space: nowrap;
+      font-weight: 800;
+    }
+    .body { padding: 16px 22px 18px; }
+    .tags { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
+    .tag {
+      border: 1px solid rgba(126, 172, 255, 0.24);
+      background: rgba(255, 255, 255, 0.04);
+      color: #d9e5f7;
+      padding: 7px 10px;
+      border-radius: 999px;
+      font-weight: 700;
+      font-size: 13px;
+    }
+    .actions {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 16px;
+    }
+    button, a {
+      border: 1px solid rgba(126, 172, 255, 0.3);
+      border-radius: 12px;
+      color: #edf6ff;
+      background: rgba(15, 23, 42, 0.92);
+      padding: 12px 14px;
+      min-height: 46px;
+      font-size: 15px;
+      font-weight: 850;
+      text-align: center;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    .primary {
+      border: 0;
+      background: linear-gradient(135deg, #44d7b6, #68a8ff);
+      color: #06111f;
+    }
+    .foot {
+      padding: 0 22px 18px;
+      color: #7f8da3;
+      font-size: 13px;
+    }
+    .empty { padding: 24px; color: #a9b6c8; }
+    @media (max-width: 660px) {
+      body { padding: 10px; }
+      .top { display: block; }
+      .badge { display: inline-block; margin-top: 12px; }
+      .actions { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="bubble" id="bubble">
+    <div class="empty">Loading AIWatcher handoff recommendation...</div>
+  </main>
+<script>
+function esc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[ch]));
+}
+function queryParam(name) {
+  return new URLSearchParams(window.location.search).get(name);
+}
+async function copyText(value, label = 'Copied') {
+  try {
+    await navigator.clipboard.writeText(value || '');
+    renderSaved(label);
+  } catch (error) {
+    renderSaved('Copy failed. Open dashboard and copy from the handoff drawer.');
+  }
+}
+async function recordDecision(decision, bubble) {
+  if (!bubble || !bubble.session_id) return;
+  try {
+    await fetch('/api/handoff-decision', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: bubble.session_id,
+        decision,
+        reason: bubble.reason || bubble.body || '',
+        expected_saved_context_tokens: bubble.expected_saved_context_tokens || null,
+      })
+    });
+  } catch (error) {}
+}
+function renderSaved(message) {
+  document.getElementById('bubble').innerHTML = `<div class="top"><div><h1>${esc(message)}</h1><p>You can close this AIWatcher companion and return to your AI tool.</p></div><span class="badge">saved</span></div>
+    <div class="body"><div class="actions"><button class="primary" onclick="window.close()">Close</button><a href="/">Open dashboard</a></div></div>`;
+}
+async function copyHandoff(bubble, decision) {
+  await recordDecision(decision, bubble);
+  const res = await fetch(`/api/handoff?id=${encodeURIComponent(bubble.session_id)}&target=generic&prompt=0`);
+  const capsule = await res.json();
+  if (capsule.error) {
+    renderSaved(capsule.error);
+    return;
+  }
+  await copyText(capsule.next_brief || '', decision === 'new_chat' ? 'Fresh-session handoff copied' : 'Handoff brief copied');
+}
+async function continueHere(bubble) {
+  await recordDecision('continue_here', bubble);
+  renderSaved('Decision saved: continue here');
+}
+function renderBubble(bubble) {
+  const tags = (bubble.tags || []).map(tag => `<span class="tag">${esc(tag)}</span>`).join('');
+  document.getElementById('bubble').innerHTML = `<div class="top">
+    <div><h1>${esc(bubble.title || 'Start a fresh AI session')}</h1><p>${esc(bubble.body || 'AIWatcher found context pressure that may waste your next turns.')}</p></div>
+    <span class="badge">${esc(bubble.severity || 'warning')}</span>
+  </div>
+  <div class="body">
+    <div class="tags">${tags}</div>
+    <p>${esc(bubble.reason || 'Use a handoff brief to preserve the outcome without carrying the full chat history.')}</p>
+    <div class="actions">
+      <button class="primary" id="newChat">New chat</button>
+      <button id="copyBrief">Copy handoff</button>
+      <button id="continueHere">Continue here</button>
+      <a href="/?session=${encodeURIComponent(bubble.session_id || '')}">Inspect</a>
+    </div>
+  </div>
+  <div class="foot">Local-only. Prompt/source content is not stored in this decision.</div>`;
+  document.getElementById('newChat').onclick = () => copyHandoff(bubble, 'new_chat');
+  document.getElementById('copyBrief').onclick = () => copyHandoff(bubble, 'copy_handoff');
+  document.getElementById('continueHere').onclick = () => continueHere(bubble);
+}
+async function load() {
+  const wanted = queryParam('session');
+  const res = await fetch('/api/summary?days=7');
+  const data = await res.json();
+  let bubble = data.handoff_bubble;
+  if (wanted && (!bubble || bubble.session_id !== wanted)) {
+    const health = (data.context_health || []).find(row => row.session_id === wanted);
+    if (health) {
+      const saved = health.estimated_replayed_context_label || health.bloat_label || 'context';
+      bubble = {
+        session_id: health.session_id,
+        project: health.project,
+        tool: health.tool,
+        severity: health.severity,
+        title: `Start a new chat to save ~${saved} tokens of context`,
+        body: health.recommendation || 'This session is getting heavy. Use a handoff brief before continuing.',
+        reason: health.recommendation || 'Context pressure is elevated.',
+        expected_saved_context_tokens: health.estimated_replayed_context_tokens || null,
+        tags: [`${health.latest_turn_tokens} tokens/turn`, `${health.efficiency_label} efficiency`, `${saved} replayed`],
+      };
+    }
+  }
+  if (!bubble) {
+    document.getElementById('bubble').innerHTML = `<div class="top"><div><h1>No handoff needed right now</h1><p>AIWatcher did not find warning or critical context pressure in the current local window.</p></div><span class="badge">healthy</span></div>
+      <div class="body"><div class="actions"><a class="primary" href="/">Open dashboard</a><button onclick="window.close()">Close</button></div></div>`;
+    return;
+  }
+  renderBubble(bubble);
+}
+load();
+</script>
+</body>
+</html>
+"""
+
+
 class UIHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         return
@@ -2698,6 +2908,9 @@ class UIHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/":
             self._send(200, HTML, "text/html; charset=utf-8")
+            return
+        if parsed.path == "/overlay":
+            self._send(200, OVERLAY_HTML, "text/html; charset=utf-8")
             return
         if parsed.path == "/api/health":
             self._send(200, json.dumps({
