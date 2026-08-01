@@ -975,6 +975,13 @@ def _extract_brief_token(text: str, kind: str) -> str | None:
     return None
 
 
+def _consume_brief_token_safely(token: str | None, kind: str) -> bool:
+    try:
+        return consume_brief_token(token, kind)
+    except OSError:
+        return False
+
+
 def _brief_text_for_delivery(selected_prompt: str) -> str:
     """Stamp a live, single-use Brief-Id onto brief text right before it leaves
     this process as something the developer (or Cursor) could resubmit verbatim.
@@ -986,7 +993,10 @@ def _brief_text_for_delivery(selected_prompt: str) -> str:
     that reaches an actual hook response (_hook_output_with_brief, Cursor's
     resubmit message) needs a provable, single-use origin token.
     """
-    return selected_prompt + f"\n\nBrief-Id: {issue_brief_token('execution_brief')}"
+    try:
+        return selected_prompt + f"\n\nBrief-Id: {issue_brief_token('execution_brief')}"
+    except OSError:
+        return selected_prompt
 
 
 def _looks_like_execution_brief(text: str) -> bool:
@@ -1019,7 +1029,7 @@ def _is_generated_brief(text: str) -> bool:
     if not _looks_like_execution_brief(text):
         return False
     token = _extract_brief_token(text, "execution_brief")
-    return consume_brief_token(token, "execution_brief")
+    return _consume_brief_token_safely(token, "execution_brief")
 
 
 def analyze_prompt(
@@ -3916,7 +3926,7 @@ def _classify_hook_prompt_source(prompt: str | None) -> dict[str, object]:
             "finding": "Hook payload looks like a host-generated task notification, not a direct user prompt.",
             "suggestion": "Allowing the host notification; AIWatcher will continue watching the resulting session metadata.",
         }
-    if text.startswith("AIWatcher handoff capsule") and consume_brief_token(
+    if text.startswith("AIWatcher handoff capsule") and _consume_brief_token_safely(
         _extract_brief_token(text, "handoff_capsule"), "handoff_capsule"
     ):
         return {
@@ -3930,7 +3940,7 @@ def _classify_hook_prompt_source(prompt: str | None) -> dict[str, object]:
     looks_like_execution_brief = (
         text.startswith("Task\n") and "Execution approach" in text and "Completion report" in text
     ) or ("AIWatcher added a scoped execution brief" in text[:1200])
-    if looks_like_execution_brief and consume_brief_token(
+    if looks_like_execution_brief and _consume_brief_token_safely(
         _extract_brief_token(text, "execution_brief"), "execution_brief"
     ):
         return {
