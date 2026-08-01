@@ -2742,10 +2742,62 @@ def _watch_ui_base_url() -> str:
     return f"http://{ui_host}:{ui_port}"
 
 
-def _open_handoff_overlay(url: str) -> tuple[bool, str]:
+def _open_native_handoff_overlay(url: str, *, title: str, body: str, severity: str) -> tuple[bool, str]:
+    """Launch the small always-on-top desktop companion when available."""
+    mode = os.environ.get("AIWATCHER_OVERLAY_MODE", "native").strip().lower()
+    if mode in {"browser", "web"}:
+        return False, "native overlay skipped by AIWATCHER_OVERLAY_MODE"
+    if os.environ.get("AIWATCHER_DISABLE_NATIVE_OVERLAY", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False, "disabled by AIWATCHER_DISABLE_NATIVE_OVERLAY"
+    if sys.platform not in {"darwin", "win32"} and not os.environ.get("DISPLAY"):
+        return False, "native overlay needs a desktop display"
+    has_native_runtime = False
+    try:
+        __import__("tkinter")
+        has_native_runtime = True
+    except Exception:
+        has_native_runtime = bool(sys.platform == "darwin" and shutil.which("swift"))
+    if not has_native_runtime:
+        return False, "native overlay unavailable: no tkinter or macOS Swift runtime"
+    try:
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "aiwatcher_cli.native_overlay",
+                "--url",
+                url,
+                "--title",
+                title,
+                "--body",
+                body,
+                "--severity",
+                severity,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        return False, str(exc)
+    return True, "native desktop window"
+
+
+def _open_handoff_overlay(
+    url: str,
+    *,
+    title: str = "AIWatcher handoff recommended",
+    body: str = "",
+    severity: str = "warning",
+) -> tuple[bool, str]:
     """Best-effort local companion overlay outside the AI tool UI."""
     if os.environ.get("AIWATCHER_DISABLE_OVERLAY", "").strip().lower() in {"1", "true", "yes", "on"}:
         return False, "disabled by AIWATCHER_DISABLE_OVERLAY"
+    native_ok, native_detail = _open_native_handoff_overlay(url, title=title, body=body, severity=severity)
+    if native_ok:
+        return True, native_detail
+    if os.environ.get("AIWATCHER_OVERLAY_MODE", "").strip().lower() in {"native", "desktop", "native-only"}:
+        return False, native_detail
     try:
         if sys.platform == "darwin" and shutil.which("open"):
             for app in ("Google Chrome", "Microsoft Edge", "Brave Browser"):
@@ -3175,7 +3227,15 @@ def _print_watch_status_card(
             overlay_ok = False
             overlay_detail = "not requested"
             if getattr(args, "overlay", False):
-                overlay_ok, overlay_detail = _open_handoff_overlay(overlay_url)
+                overlay_title = "AIWatcher: start a fresh chat"
+                overlay_body = f"{short_path(session.project_path)} — {status['reason']}"
+                overlay_severity = health.severity if health is not None else "warning"
+                overlay_ok, overlay_detail = _open_handoff_overlay(
+                    overlay_url,
+                    title=overlay_title,
+                    body=overlay_body,
+                    severity=str(overlay_severity),
+                )
                 print(f"  Overlay: {'opened' if overlay_ok else 'not opened'} ({overlay_detail})")
             record_notification_sent(persist_key)
             try:

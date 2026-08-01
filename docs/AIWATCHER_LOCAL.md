@@ -363,6 +363,8 @@ What to check:
 - `watch --overlay` should open the local `/overlay` companion when watch
   recommends action, giving desktop users a dismissible handoff surface outside
   Claude/Codex/Cursor instead of requiring them to visit the full dashboard.
+  It should prefer the native always-on-top desktop bubble and fall back to the
+  browser companion when native UI is unavailable.
 - `resume`/`handoff` without `--include-prompt-excerpt` should not contain
   prompt text; with it, the brief should contain a labeled excerpt and nothing
   else in the surrounding output should change.

@@ -934,6 +934,36 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertIn("Overlay: opened", stdout.getvalue())
         self.assertEqual(notifications[0]["detail"], "overlay test-overlay")
 
+    def test_open_handoff_overlay_prefers_native_companion(self) -> None:
+        with (
+            patch.object(cli, "_open_native_handoff_overlay", return_value=(True, "native desktop window")) as native,
+            patch.object(cli, "webbrowser") as browser,
+        ):
+            ok, detail = cli._open_handoff_overlay(
+                "http://127.0.0.1:8765/overlay?session=session-1",
+                title="AIWatcher: start fresh",
+                body="/repo — context is critical",
+                severity="critical",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "native desktop window")
+        native.assert_called_once()
+        browser.open.assert_not_called()
+
+    def test_open_handoff_overlay_falls_back_to_browser_when_native_unavailable(self) -> None:
+        with (
+            patch.object(cli, "_open_native_handoff_overlay", return_value=(False, "native unavailable")),
+            patch.object(cli.sys, "platform", "linux"),
+            patch.object(cli.shutil, "which", return_value=None),
+            patch.object(cli.webbrowser, "open", return_value=True) as browser_open,
+        ):
+            ok, detail = cli._open_handoff_overlay("http://127.0.0.1:8765/overlay?session=session-1")
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "webbrowser")
+        browser_open.assert_called_once()
+
     def test_watch_notify_deep_link_follows_actual_running_dashboard_port(self) -> None:
         """Regression guard: found while manually testing issue #31 -- `aiwatcher
         ui` had fallen back off its default port (8765 was busy), so a
