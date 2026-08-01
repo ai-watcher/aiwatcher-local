@@ -195,7 +195,8 @@ local work reaches warning or critical context pressure: start a fresh chat,
 copy a handoff brief, continue here, or inspect the session. AIWatcher records
 only the local decision metadata and estimated replayed context avoided, not
 prompt or source text. Recent handoff decisions appear in Today, Receipts, and
-`aiwatcher hook-status`.
+`aiwatcher hook-status`. After you copy a handoff, the bubble changes into a
+next-step confirmation instead of continuing to nag the same session.
 
 For a lower-friction desktop flow, run ambient watch with the local companion
 overlay:

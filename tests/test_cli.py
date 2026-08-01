@@ -801,7 +801,9 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertIn("Recommended: create handoff capsule now", rendered)
         self.assertIn("generating a handoff capsule now", rendered)
         self.assertIn("AIWatcher handoff capsule", rendered)
-        self.assertIn("Paste this as the first prompt in a fresh AI coding session.", rendered)
+        self.assertIn("AIWatcher fresh-session handoff", rendered)
+        self.assertIn("Do not assume access to the previous chat", rendered)
+        self.assertIn("First reply with what appears done", rendered)
 
     def test_watch_critical_context_copies_to_clipboard_and_dedupes_across_polls(self) -> None:
         row = session(1, project="/repo/orcha")

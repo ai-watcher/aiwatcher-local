@@ -358,6 +358,8 @@ What to check:
 - The Today dashboard should show a handoff bubble for warning/critical context
   health with fresh-session and continue-here choices, then save only local
   decision metadata.
+- Copying a handoff from the Today bubble should replace the recommendation
+  with a clear "paste into a fresh chat" confirmation and receipt link.
 - `watch --overlay` should open the local `/overlay` companion when watch
   recommends action, giving desktop users a dismissible handoff surface outside
   Claude/Codex/Cursor instead of requiring them to visit the full dashboard.

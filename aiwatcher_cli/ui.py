@@ -1895,8 +1895,10 @@ async function copyText(value, label = 'Copied') {
   try {
     await navigator.clipboard.writeText(value || '');
     showToast(label);
+    return true;
   } catch (error) {
     showToast('Copy failed. Select the text manually.', 'error');
+    return false;
   }
 }
 function clearPromptCompanion() {
@@ -2115,7 +2117,8 @@ async function copyHandoffFromBubble(sessionId) {
     showToast(capsule.error, 'error');
     return;
   }
-  await copyText(capsule.next_brief || '', 'Handoff brief copied');
+  const copied = await copyText(capsule.next_brief || '', 'Handoff copied — paste it into a fresh AI chat');
+  if (copied) renderHandoffCopied(window.currentHandoffBubble, sessionId);
 }
 async function recordHandoffDecision(bubble, decision) {
   if (!bubble || !bubble.session_id) return;
@@ -2142,6 +2145,28 @@ async function continueFromBubble() {
   if (window.currentHandoffBubble) await recordHandoffDecision(window.currentHandoffBubble, 'continue_here');
   document.getElementById('handoffBubble').hidden = true;
   showToast('Handoff decision saved: continue here');
+}
+function renderHandoffCopied(bubble, sessionId) {
+  const node = document.getElementById('handoffBubble');
+  if (!node || !bubble) return;
+  node.hidden = false;
+  node.innerHTML = `<div class="section-title">
+      <div>
+        <h2>Handoff copied. Start a fresh chat now.</h2>
+        <p>Paste the copied brief into Claude, Codex, Cursor, or your next AI tool. AIWatcher saved this decision locally and will stop nudging this session for now.</p>
+      </div>
+      <span class="pill">saved</span>
+    </div>
+    <div class="pill-row">
+      <span class="pill">${esc(bubble.expected_saved_context_label || 'fresh context')}</span>
+      <span class="pill">privacy-safe metadata</span>
+      <span class="pill">decision receipt saved</span>
+    </div>
+    <div class="actions" style="margin-top:14px">
+      <button class="btn-primary" data-session="${esc(sessionId)}" onclick="openHandoff(this.dataset.session)">Open capsule</button>
+      <button class="btn-quiet" onclick="showView('receipts')">View receipt</button>
+      <button class="btn-quiet" onclick="document.getElementById('handoffBubble').hidden = true">Dismiss</button>
+    </div>`;
 }
 function renderHandoffBubble(bubble) {
   const node = document.getElementById('handoffBubble');

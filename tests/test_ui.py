@@ -85,6 +85,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("/api/handoff-decision", ui.HTML)
         self.assertIn("copyHandoffFromBubble", ui.HTML)
         self.assertIn("Copy handoff", ui.HTML)
+        self.assertIn("renderHandoffCopied", ui.HTML)
+        self.assertIn("Handoff copied. Start a fresh chat now.", ui.HTML)
+        self.assertIn("decision receipt saved", ui.HTML)
         self.assertIn("Include prompt excerpt", ui.HTML)
         self.assertNotIn("window.alert", ui.HTML)
 
