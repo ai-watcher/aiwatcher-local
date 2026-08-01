@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,11 @@ else:
 
 STATE_VERSION = 2
 VALID_OUTCOMES = {"useful", "rework", "abandoned"}
+
+# How long an issued brief/capsule token remains redeemable. Short enough to
+# limit the window a leaked local-state.json could be replayed in, long
+# enough to cover copy-paste into a fresh session.
+BRIEF_TOKEN_TTL_SECONDS = 900
 
 # Private: guards this process's own threads only. Every hook invocation is
 # a separate OS process though, so this alone does not prevent two
@@ -159,6 +164,10 @@ def _empty_state() -> dict[str, Any]:
         "baselines": {},
         "command_decisions": [],
         "command_gate_allowlist": [],
+        "brief_tokens": [],
+        "watch_notifications": [],
+        "sent_notification_keys": [],
+        "ui_server": None,
     }
 
 
@@ -217,6 +226,10 @@ def _load() -> dict[str, Any]:
     data.setdefault("baselines", {})
     data.setdefault("command_decisions", [])
     data.setdefault("command_gate_allowlist", [])
+    data.setdefault("brief_tokens", [])
+    data.setdefault("watch_notifications", [])
+    data.setdefault("sent_notification_keys", [])
+    data.setdefault("ui_server", None)
     return data
 
 
@@ -361,11 +374,178 @@ def record_hook_event(
         _save(data)
 
 
+def _prune_brief_tokens(data: dict[str, Any]) -> None:
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=BRIEF_TOKEN_TTL_SECONDS)
+    kept = []
+    for row in data.get("brief_tokens", []):
+        issued_at = row.get("issued_at") if isinstance(row, dict) else None
+        try:
+            issued = datetime.fromisoformat(issued_at) if issued_at else None
+        except ValueError:
+            issued = None
+        if issued is not None and issued >= cutoff:
+            kept.append(row)
+    data["brief_tokens"] = kept
+
+
+def issue_brief_token(kind: str) -> str:
+    """Issue a random, single-use token proving AIWatcher itself generated a brief/capsule.
+
+    Recognizing our own generated text by a static phrase is spoofable by anyone
+    who reads this open-source repo. A per-instance token recorded here and
+    required by consume_brief_token() cannot be guessed from the source alone.
+    """
+    token = uuid.uuid4().hex
+    with _locked_state():
+        data = _load()
+        _prune_brief_tokens(data)
+        data["brief_tokens"].append({
+            "token": token,
+            "kind": kind,
+            "issued_at": datetime.now(timezone.utc).isoformat(),
+        })
+        data["brief_tokens"] = data["brief_tokens"][-200:]
+        _save(data)
+    return token
+
+
+def consume_brief_token(token: str | None, kind: str) -> bool:
+    """Validate and single-use-consume a brief/capsule token.
+
+    Returns False for an unknown, wrong-kind, expired, or already-consumed
+    token -- callers must treat that as "not proven to be AIWatcher-generated",
+    not as a soft warning.
+    """
+    if not token:
+        return False
+    with _locked_state():
+        data = _load()
+        _prune_brief_tokens(data)
+        for index, row in enumerate(data["brief_tokens"]):
+            if isinstance(row, dict) and row.get("token") == token and row.get("kind") == kind:
+                data["brief_tokens"].pop(index)
+                _save(data)
+                return True
+        _save(data)
+    return False
+
+
 def recent_hook_events(limit: int = 10) -> list[dict[str, Any]]:
     with _locked_state():
         data = _load()
     rows = [row for row in data["hook_events"] if isinstance(row, dict)]
     return list(reversed(rows[-max(1, limit):]))
+
+
+def record_watch_notification(
+    *,
+    session_id: str,
+    tool: str,
+    action: str,
+    reason: str,
+    sent: bool,
+    detail: str,
+    url: str | None = None,
+) -> None:
+    """Record an ambient `watch --notify` firing so it survives the watch process exiting.
+
+    Issue #31 (S-32, Ambient Watch delivery) requires notification/intervention
+    metadata to be recorded locally, not just deduped in the watch loop's
+    in-memory state.
+    """
+    with _locked_state():
+        data = _load()
+        data["watch_notifications"].append({
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "session_id": session_id,
+            "tool": tool,
+            "action": action,
+            "reason": reason,
+            "sent": sent,
+            "detail": detail,
+            "url": url,
+        })
+        data["watch_notifications"] = data["watch_notifications"][-50:]
+        _save(data)
+
+
+def record_ui_server(host: str, port: int) -> None:
+    """Remember where the local dashboard last actually bound.
+
+    `aiwatcher ui` falls back to the next free port when its default is
+    taken, so a notification built in a separate `watch` process can't just
+    assume the default port -- it has to look this up instead.
+    """
+    try:
+        with _locked_state():
+            data = _load()
+            data["ui_server"] = {
+                "host": host,
+                "port": port,
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            }
+            _save(data)
+    except OSError:
+        pass
+
+
+def get_ui_server() -> dict[str, Any] | None:
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return None
+    server = data.get("ui_server")
+    return server if isinstance(server, dict) and server.get("port") else None
+
+
+def recent_watch_notifications(limit: int = 10) -> list[dict[str, Any]]:
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return []
+    rows = [row for row in data["watch_notifications"] if isinstance(row, dict)]
+    return list(reversed(rows[-max(1, limit):]))
+
+
+MAX_NOTIFICATION_KEYS_SENT = 500
+
+
+def has_sent_notification(signal_key: str) -> bool:
+    """Has a local notification already fired for `signal_key`?
+
+    Persistent, unlike command_watch's in-memory notification_seen/
+    critical_capsule_seen dicts (which only dedupe within one process run).
+    Shared by two notification families that both need "don't repeat this
+    until something actually changes" to survive a `watch` restart or a
+    one-shot `--once` invocation:
+      - issue #32's outcome-review signals (survival/churn, same-file
+        re-prompt, cost-per-surviving-change), keyed `{session_id}:{signal}`
+        -- each fires at most once, ever, since the signal itself doesn't
+        change once resolved.
+      - the watch-status recommendation (issue #31's "narrow scope"/"create
+        handoff capsule now"/etc.), keyed `{session_id}:{action}:{stamp}`
+        where `stamp` is the session's last-updated timestamp -- so a new
+        stamp (new activity) is treated as a fresh state worth re-notifying,
+        while an unchanged stamp across repeated `--once` runs is not.
+    """
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return False
+    return signal_key in data.get("sent_notification_keys", [])
+
+
+def record_notification_sent(signal_key: str) -> None:
+    with _locked_state():
+        data = _load()
+        sent = data.setdefault("sent_notification_keys", [])
+        if signal_key not in sent:
+            sent.append(signal_key)
+        data["sent_notification_keys"] = sent[-MAX_NOTIFICATION_KEYS_SENT:]
+        _save(data)
 
 
 def link_intervention_session(intervention_id: str, session_id: str) -> bool:

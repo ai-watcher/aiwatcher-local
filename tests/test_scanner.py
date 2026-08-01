@@ -12,6 +12,52 @@ from aiwatcher_cli import scanner
 
 
 class ProjectPathTests(unittest.TestCase):
+    def test_surface_coverage_marks_detected_unsupported_tools_honestly(self) -> None:
+        with patch.object(
+            scanner,
+            "discover_tools",
+            return_value={
+                "claude-code": False,
+                "codex-cli": False,
+                "cursor": False,
+                "cline": True,
+                "windsurf": True,
+            },
+        ):
+            coverage = {row.surface_id: row for row in scanner.surface_coverage([])}
+
+        self.assertEqual(coverage["cline"].status, "unsupported")
+        self.assertEqual(coverage["cline"].status_label, "Detected, not scanned")
+        self.assertEqual(coverage["windsurf"].history, "Not scanned yet")
+        self.assertIn("Detection is not coverage", coverage["windsurf"].detail)
+
+    def test_surface_coverage_distinguishes_desktop_chat_from_code_tab(self) -> None:
+        rows = [
+            scanner.LocalSession(
+                session_id="desktop",
+                tool="claude-code",
+                surface="desktop",
+                tokens_in=10,
+            )
+        ]
+        with patch.object(
+            scanner,
+            "discover_tools",
+            return_value={
+                "claude-code": True,
+                "codex-cli": False,
+                "cursor": False,
+                "cline": False,
+                "windsurf": False,
+            },
+        ):
+            coverage = {row.surface_id: row for row in scanner.surface_coverage(rows)}
+
+        self.assertEqual(coverage["claude-desktop-code"].status, "limited")
+        self.assertEqual(coverage["claude-desktop-code"].session_count, 1)
+        self.assertEqual(coverage["claude-desktop-chat"].status, "companion")
+        self.assertIn("No verified local hook", coverage["claude-desktop-chat"].automatic_gate)
+
     def test_decode_claude_path_preserves_hyphenated_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir) / "my-project"
