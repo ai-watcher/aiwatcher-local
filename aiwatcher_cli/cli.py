@@ -1142,7 +1142,26 @@ def analyze_prompt(
             lower,
         )
     )
-    sensitive_or_destructive = any(term in lower for term in risky_terms) or security_weakening
+    destructive_verbs = (
+        r"delete|remove|wipe|erase|destroy|nuke|purge|drop|truncate|clear|reset"
+    )
+    high_impact_targets = (
+        r"repo|repository|codebase|project|workspace|working tree|source tree|"
+        r"all files|all code|entire app|whole app|database|db|table|schema|"
+        r"customer data|production data|prod data|account|tenant|environment|"
+        r"credentials?|secrets?|api keys?|access tokens?|auth tokens?|bearer tokens?|"
+        r"refresh tokens?|session tokens?"
+    )
+    high_impact_destructive = bool(
+        re.search(rf"\b(?:{destructive_verbs})\b.{{0,35}}?\b(?:{high_impact_targets})\b", lower)
+        or re.search(rf"\b(?:{high_impact_targets})\b.{{0,35}}?\b(?:{destructive_verbs})\b", lower)
+        or re.search(r"\b(?:rm\s+-rf|git\s+reset\s+--hard|git\s+push\s+--force|drop\s+table|truncate\s+table)\b", lower)
+    )
+    sensitive_or_destructive = (
+        any(term in lower for term in risky_terms)
+        or security_weakening
+        or high_impact_destructive
+    )
     safety_guardrails = any(term in lower for term in [
         "ask for confirmation before", "require confirmation before",
         "do not reveal secret", "do not make destructive changes",
@@ -1152,6 +1171,10 @@ def analyze_prompt(
         if safety_guardrails:
             score += 1
             findings.append("Sensitive or destructive work is present with an explicit confirmation boundary.")
+        elif high_impact_destructive:
+            score += 6
+            findings.append("Prompt asks for a high-impact destructive action against code, data, credentials, or an environment.")
+            suggestions.append("Block or require explicit confirmation before deleting repositories, project files, databases, credentials, or production resources.")
         elif security_weakening:
             score += 3
             findings.append("Prompt weakens or removes a security control (auth/signature/validation) without a guardrail.")

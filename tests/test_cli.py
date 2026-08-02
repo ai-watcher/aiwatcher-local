@@ -2009,7 +2009,8 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
                 cwd="/repo",
             )
 
-        self.assertEqual(original["score"], 8)
+        self.assertGreaterEqual(original["score"], 8)
+        self.assertEqual(original["risk"], "high")
         self.assertLess(selected["score"], original["score"])
         self.assertEqual(selected["risk"], "low")
 
@@ -2087,6 +2088,42 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
             self.assertTrue(
                 any("weakens or removes a security control" in finding for finding in result["findings"])
             )
+
+    def test_high_impact_destructive_prompt_is_high_risk(self) -> None:
+        examples = [
+            "delete the repo",
+            "wipe the project folder",
+            "remove all code from the repository",
+            "drop the production database",
+            "run git reset --hard and delete old credentials",
+        ]
+
+        with patch.object(cli, "sessions_since", return_value=[]):
+            results = [
+                cli.analyze_prompt(example, tool="codex", cwd="/repo")
+                for example in examples
+            ]
+
+        for result in results:
+            self.assertEqual(result["risk"], "high")
+            self.assertGreaterEqual(result["score"], 6)
+            self.assertTrue(
+                any("high-impact destructive action" in finding for finding in result["findings"])
+            )
+            self.assertIn("Confirm before destructive changes", [g["label"] for g in result["guardrails"]])
+
+    def test_high_impact_destructive_heuristic_avoids_narrow_cleanup(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt(
+                "Remove the obsolete screenshot from the auth docs",
+                tool="codex",
+                cwd="/repo",
+            )
+
+        self.assertFalse(
+            any("high-impact destructive action" in finding for finding in result["findings"])
+        )
+        self.assertNotEqual(result["risk"], "high")
 
     def test_security_weakening_heuristic_avoids_docs_ui_and_test_cleanup(self) -> None:
         with patch.object(cli, "sessions_since", return_value=[]):
