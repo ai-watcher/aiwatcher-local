@@ -25,7 +25,9 @@ from .local_state import (
     outcome_counts,
     outcomes_for_sessions,
     recent_command_decisions,
+    recent_handoff_decisions,
     recent_interventions,
+    record_handoff_decision,
     record_evidence_snapshot,
     record_outcome,
     record_ui_server,
@@ -560,6 +562,7 @@ def build_weekly_digest(days: int = 7) -> dict[str, object]:
         ),
         "top_sessions": [
             {
+                "session_id": row.session_id,
                 "project": short_path(row.project_path),
                 "tool": row.tool,
                 "model": row.model or "unknown",
@@ -666,6 +669,8 @@ def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) ->
             "severity": health.severity,
             "latest_turn_tokens": compact_int(health.latest_turn_tokens),
             "peak_turn_tokens": compact_int(health.peak_turn_tokens),
+            "estimated_replayed_context_tokens": int(health.latest_turn_tokens * health.bloat_ratio),
+            "estimated_replayed_context_label": compact_int(int(health.latest_turn_tokens * health.bloat_ratio)),
             "efficiency_label": f"{health.efficiency_pct:.0f}%",
             "bloat_label": f"{health.bloat_ratio * 100:.0f}%",
             "age_label": f"{health.age_days:.1f}d" if health.age_days >= 1 else f"{health.age_hours:.0f}h",
@@ -675,6 +680,57 @@ def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) ->
             "compact_prompt": _build_compact_prompt(health),
         })
     return cards
+
+
+def _handoff_bubble(context_health: list[dict[str, object]]) -> dict[str, object] | None:
+    """Pick the single highest-value handoff prompt for Today.
+
+    The full health list remains available below; this bubble is the
+    developer-facing intervention: one timely choice, like "start fresh" or
+    "continue here", with an honest estimate of context pressure avoided.
+    """
+    candidate = next(
+        (row for row in context_health if row.get("severity") in {"critical", "warning"} and row.get("can_handoff")),
+        None,
+    )
+    if not candidate:
+        return None
+    severity = str(candidate.get("severity") or "warning")
+    saved_label = str(candidate.get("estimated_replayed_context_label") or candidate.get("latest_turn_tokens") or "context")
+    project = str(candidate.get("project") or "this session")
+    if severity == "critical":
+        title = f"Start a new chat to save ~{saved_label} tokens of context"
+        body = (
+            f"{project} is at critical context pressure. Create a fresh-session handoff brief so the next agent "
+            "keeps the goal, repo, files, and guardrails without replaying the bloated history."
+        )
+        primary_label = "New chat"
+    else:
+        title = f"This session is getting heavy: ~{saved_label} tokens are replayed context"
+        body = (
+            f"{project} is showing context pressure. Compact or start fresh before the next broad task so usage "
+            "does not compound."
+        )
+        primary_label = "Prepare handoff"
+    reason = str(candidate.get("recommendation") or candidate.get("action", {}).get("reason") or body)
+    return {
+        "session_id": candidate.get("session_id"),
+        "project": project,
+        "tool": candidate.get("tool"),
+        "severity": severity,
+        "title": title,
+        "body": body,
+        "reason": reason,
+        "primary_label": primary_label,
+        "continue_label": "Continue here",
+        "saved_context_label": saved_label,
+        "expected_saved_context_tokens": candidate.get("estimated_replayed_context_tokens"),
+        "tags": [
+            f"{candidate.get('latest_turn_tokens')} tokens/turn",
+            f"{candidate.get('efficiency_label')} efficiency",
+            f"{candidate.get('bloat_label')} replayed context",
+        ],
+    }
 
 
 def build_prompt_preflight(prompt: str, *, tool: str = "agent", cwd: str | None = None) -> dict[str, object]:
@@ -902,6 +958,41 @@ def _cost_per_surviving_change(all_rows: list[LocalSession]) -> dict[str, object
     }
 
 
+def _handoff_decision_rows(limit: int = 10) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for row in recent_handoff_decisions(limit=limit):
+        expected = row.get("expected_saved_context_tokens")
+        expected_int = expected if isinstance(expected, int) and expected > 0 else None
+        rows.append({
+            "id": row.get("id"),
+            "created_at": row.get("created_at"),
+            "session_id": row.get("session_id"),
+            "decision": row.get("decision"),
+            "reason": row.get("reason"),
+            "expected_saved_context_tokens": expected_int,
+            "expected_saved_context_label": compact_int(expected_int) if expected_int else None,
+        })
+    return rows
+
+
+def _recent_handoff_decision_session_ids(rows: list[dict[str, object]]) -> set[str]:
+    session_ids: set[str] = set()
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    for row in rows:
+        session_id = row.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            continue
+        created_at = row.get("created_at")
+        if isinstance(created_at, str):
+            try:
+                if datetime.fromisoformat(created_at).astimezone(timezone.utc) < cutoff:
+                    continue
+            except ValueError:
+                pass
+        session_ids.add(session_id)
+    return session_ids
+
+
 def build_summary(days: int = 7) -> dict[str, object]:
     now = datetime.now().astimezone()
     since = now - timedelta(days=days)
@@ -932,6 +1023,12 @@ def build_summary(days: int = 7) -> dict[str, object]:
     except OSError:
         all_events = []
     context_health = _context_health_cards(rows, all_events)
+    handoff_decisions = _handoff_decision_rows(limit=10)
+    suppressed_handoff_sessions = _recent_handoff_decision_session_ids(handoff_decisions)
+    handoff_bubble = _handoff_bubble([
+        row for row in context_health
+        if str(row.get("session_id", "")) not in suppressed_handoff_sessions
+    ])
 
     insights = []
     if projects:
@@ -1074,6 +1171,8 @@ def build_summary(days: int = 7) -> dict[str, object]:
         "coverage": [row.to_json() for row in surface_coverage(all_rows)],
         "setup": setup_checklist(),
         "context_health": context_health,
+        "handoff_bubble": handoff_bubble,
+        "handoff_decisions": handoff_decisions,
         "recent_sessions": [
             {
                 "tool": row.tool,
@@ -1269,6 +1368,19 @@ HTML = r"""<!doctype html>
     .coverage-status.unsupported, .coverage-status.not_detected, .health-severity.critical { color: #ffc4ce; border-color: rgba(242,125,143,.45); background: var(--red-soft); }
     .coverage-detail, .health-detail { display: grid; gap: 6px; color: var(--muted); font-size: 12px; line-height: 1.45; }
     .health-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .handoff-bubble {
+      border-color: rgba(112,167,255,.5);
+      background: #eaf2ff;
+      color: #172237;
+      box-shadow: 0 10px 26px rgba(7,18,32,.18);
+    }
+    .handoff-bubble h2 { color: #1f5fa8; }
+    .handoff-bubble p, .handoff-bubble .sub { color: #4b5870; }
+    .handoff-bubble .pill { background: rgba(255,255,255,.72); border-color: #bfd2ec; color: #37445a; }
+    .handoff-bubble .btn-primary { background: #ffffff; border-color: #c5d7ee; color: #172237; }
+    .handoff-bubble .btn-primary:hover { background: #f8fbff; border-color: #8fb6e8; }
+    .handoff-bubble .btn-quiet { background: transparent; border-color: transparent; color: #4b5870; }
+    .handoff-bubble .btn-quiet:hover { background: rgba(255,255,255,.6); border-color: #c5d7ee; color: #172237; }
     .outcome-pill.useful { color: #bff5df; border-color: rgba(53,211,153,.38); background: var(--green-soft); }
     .outcome-pill.rework { color: #ffe2a4; border-color: rgba(246,189,96,.38); background: var(--amber-soft); }
     .outcome-pill.abandoned { color: #ffc4ce; border-color: rgba(242,125,143,.38); background: var(--red-soft); }
@@ -1279,6 +1391,11 @@ HTML = r"""<!doctype html>
     tr.clickable:hover { background: rgba(112,167,255,.05); }
     .row-action { min-height: 30px; padding: 5px 9px; color: #ddecff; background: var(--blue-soft); border-color: #3d6594; font-size: 12px; }
     .empty { color: var(--muted); padding: 16px; border: 1px dashed var(--line); border-radius: 8px; }
+    .digest-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+    .digest-row:last-child { border-bottom: 0; }
+    .digest-row.clickable { cursor: pointer; }
+    .digest-row.clickable:hover { background: rgba(255,255,255,.03); }
+    .digest-row .digest-row-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dce6f6; }
     .detail-section { padding: 20px 0; border-bottom: 1px solid var(--line); }
     .detail-section:last-child { border-bottom: 0; }
     .verdict-card { border: 1px solid var(--line-strong); border-left: 4px solid var(--blue); border-radius: 8px; padding: 16px; background: #101925; margin-top: 14px; }
@@ -1447,6 +1564,8 @@ HTML = r"""<!doctype html>
   </nav>
 
   <section id="view-today" class="view">
+    <section id="handoffBubble" class="card handoff-bubble" style="margin-bottom:14px" hidden></section>
+
     <section class="grid two" style="margin-bottom:14px">
       <div class="card hero-card">
         <div class="section-title"><div><h2>Latest AI work</h2><p>Your most recent local session and its outcome.</p></div></div>
@@ -1457,6 +1576,15 @@ HTML = r"""<!doctype html>
         <div id="todayRecommendation"></div>
       </div>
     </section>
+
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title">
+        <div><h2>This week's digest</h2><p>A quick pulse on cost, outcomes, and what to change next.</p></div>
+        <button class="btn-quiet" onclick="showView('insights')">View full digest</button>
+      </div>
+      <div id="todayDigest"></div>
+    </section>
+
     <section class="grid kpis">
       <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub">Value per useful change: <span id="costPerUseful">-</span></div><div class="sub" id="costPerSurvivingRow" hidden>Cost per surviving change: <span id="costPerSurviving">-</span></div></div>
       <div class="card metric-card metric-amber"><div class="label">Preflight decisions</div><div class="value" id="preflightDecisions">-</div><div class="sub"><span id="windowLabel">-</span></div></div>
@@ -1467,6 +1595,11 @@ HTML = r"""<!doctype html>
     <section class="card" style="margin-bottom:14px">
       <div class="section-title"><div><h2>Latest intervention</h2><p>What AIWatcher changed before execution and what happened afterward.</p></div></div>
       <div id="latestIntervention"></div>
+    </section>
+
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title"><div><h2>Latest handoff decision</h2><p>Fresh-session handoff choices and expected context avoided.</p></div></div>
+      <div id="latestHandoffDecision"></div>
     </section>
 
     <section class="card" style="margin-bottom:14px">
@@ -1555,6 +1688,16 @@ HTML = r"""<!doctype html>
   </section>
 
   <section id="view-receipts" class="view" hidden>
+    <div class="card" style="margin-bottom:14px">
+      <div class="section-title">
+        <div><h2>Handoff decisions</h2><p>When AIWatcher suggested a fresh session, what you chose, and expected context avoided.</p></div>
+        <span class="pill">Metadata only</span>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Time</th><th>Decision</th><th>Expected context avoided</th><th>Session</th><th></th></tr></thead>
+        <tbody id="handoffDecisionRows"></tbody>
+      </table></div>
+    </div>
     <div class="card">
       <div class="section-title">
         <div><h2>Intervention receipts</h2><p>Risk decisions, predicted impact, resulting usage, and developer outcomes.</p></div>
@@ -1568,6 +1711,13 @@ HTML = r"""<!doctype html>
   </section>
 
   <section id="view-insights" class="view" hidden>
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title">
+        <div><h2>Weekly Digest</h2><p>What your AI work cost this week, what stuck, and what to change next.</p></div>
+        <span class="pill">Local logs, inferred outcomes</span>
+      </div>
+      <div id="report"></div>
+    </section>
     <section class="grid two">
       <div class="card">
         <div class="section-title"><div><h2>Local Insights</h2><p>Suggestions to reduce waste without uploading prompts.</p></div></div>
@@ -1576,10 +1726,6 @@ HTML = r"""<!doctype html>
       <div class="card">
         <h2>Daily Journal</h2>
         <div id="journal"></div>
-        <div class="detail-section">
-          <h2>Local Weekly Report</h2>
-          <div id="report"></div>
-        </div>
       </div>
     </section>
     <section class="grid two" style="margin-top:14px">
@@ -1681,6 +1827,38 @@ function renderReceiptRows(receipts) {
     <td><button class="row-action">Review</button></td>
   </tr>`).join('');
 }
+function handoffDecisionLabel(value) {
+  const labels = {
+    new_chat: 'Prepared fresh-session handoff',
+    continue_here: 'Continued in current session',
+    copy_handoff: 'Copied handoff brief',
+    dismissed: 'Dismissed'
+  };
+  return labels[value] || value || 'unknown';
+}
+function renderLatestHandoffDecision(decisions) {
+  const decision = (decisions || [])[0];
+  if (!decision) return '<div class="empty">No handoff bubble decisions recorded yet.</div>';
+  const saved = decision.expected_saved_context_label
+    ? `<span class="pill">~${esc(decision.expected_saved_context_label)} context avoided</span>`
+    : '';
+  return `<div class="receipt-summary"><div>
+    <div class="session-title">${esc(handoffDecisionLabel(decision.decision))}</div>
+    <div class="session-meta">${esc(dateLabel(decision.created_at))} · session ${esc(decision.session_id || 'unknown')}</div>
+    <p>${esc(decision.reason || 'AIWatcher recommended a fresh-session handoff because local context health crossed a threshold.')}</p>
+    <div class="pill-row"><span class="pill">handoff bubble</span>${saved}</div>
+  </div>${decision.session_id ? `<button class="btn-quiet" onclick="selectSession('${esc(decision.session_id)}')">Inspect session</button>` : ''}</div>`;
+}
+function renderHandoffDecisionRows(decisions) {
+  if (!decisions.length) return '<tr><td colspan="5"><div class="empty">No handoff decisions recorded yet.</div></td></tr>';
+  return decisions.map(decision => `<tr>
+    <td>${esc(dateLabel(decision.created_at))}</td>
+    <td>${esc(handoffDecisionLabel(decision.decision))}</td>
+    <td>${esc(decision.expected_saved_context_label ? `~${decision.expected_saved_context_label}` : '—')}</td>
+    <td>${esc(decision.session_id || 'unknown')}</td>
+    <td>${decision.session_id ? `<button class="row-action" onclick="selectSession('${esc(decision.session_id)}')">Inspect</button>` : ''}</td>
+  </tr>`).join('');
+}
 function openReceipt(receiptId) {
   const receipt = receiptCache.find(item => item.id === receiptId);
   if (!receipt) return;
@@ -1717,8 +1895,10 @@ async function copyText(value, label = 'Copied') {
   try {
     await navigator.clipboard.writeText(value || '');
     showToast(label);
+    return true;
   } catch (error) {
     showToast('Copy failed. Select the text manually.', 'error');
+    return false;
   }
 }
 function clearPromptCompanion() {
@@ -1928,6 +2108,89 @@ async function openHandoff(sessionId, target = 'generic', includePrompt = false)
     return;
   }
   document.getElementById('detailContent').innerHTML = renderHandoff(capsule);
+}
+async function copyHandoffFromBubble(sessionId) {
+  if (window.currentHandoffBubble) await recordHandoffDecision(window.currentHandoffBubble, 'copy_handoff');
+  const res = await fetch(`/api/handoff?id=${encodeURIComponent(sessionId)}&target=generic&prompt=0`);
+  const capsule = await res.json();
+  if (capsule.error) {
+    showToast(capsule.error, 'error');
+    return;
+  }
+  const copied = await copyText(capsule.next_brief || '', 'Handoff copied — paste it into a fresh AI chat');
+  if (copied) renderHandoffCopied(window.currentHandoffBubble, sessionId);
+}
+async function recordHandoffDecision(bubble, decision) {
+  if (!bubble || !bubble.session_id) return;
+  try {
+    await fetch('/api/handoff-decision', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: bubble.session_id,
+        decision,
+        reason: bubble.reason || bubble.body || '',
+        expected_saved_context_tokens: bubble.expected_saved_context_tokens || null,
+      })
+    });
+  } catch (error) {
+    // Decision receipts should never block the user's flow.
+  }
+}
+async function startFreshFromBubble(sessionId) {
+  if (window.currentHandoffBubble) await recordHandoffDecision(window.currentHandoffBubble, 'new_chat');
+  await openHandoff(sessionId);
+}
+async function continueFromBubble() {
+  if (window.currentHandoffBubble) await recordHandoffDecision(window.currentHandoffBubble, 'continue_here');
+  document.getElementById('handoffBubble').hidden = true;
+  showToast('Handoff decision saved: continue here');
+}
+function renderHandoffCopied(bubble, sessionId) {
+  const node = document.getElementById('handoffBubble');
+  if (!node || !bubble) return;
+  node.hidden = false;
+  node.innerHTML = `<div class="section-title">
+      <div>
+        <h2>Handoff copied. Start a fresh chat now.</h2>
+        <p>Paste the copied brief into Claude, Codex, Cursor, or your next AI tool. AIWatcher saved this decision locally and will stop nudging this session for now.</p>
+      </div>
+      <span class="pill">saved</span>
+    </div>
+    <div class="pill-row">
+      <span class="pill">${esc(bubble.expected_saved_context_label || 'fresh context')}</span>
+      <span class="pill">privacy-safe metadata</span>
+      <span class="pill">decision receipt saved</span>
+    </div>
+    <div class="actions" style="margin-top:14px">
+      <button class="btn-primary" data-session="${esc(sessionId)}" onclick="openHandoff(this.dataset.session)">Open capsule</button>
+      <button class="btn-quiet" onclick="showView('receipts')">View receipt</button>
+      <button class="btn-quiet" onclick="document.getElementById('handoffBubble').hidden = true">Dismiss</button>
+    </div>`;
+}
+function renderHandoffBubble(bubble) {
+  const node = document.getElementById('handoffBubble');
+  window.currentHandoffBubble = bubble || null;
+  if (!bubble) {
+    node.hidden = true;
+    node.innerHTML = '';
+    return;
+  }
+  node.hidden = false;
+  node.innerHTML = `<div class="section-title">
+      <div>
+        <h2>${esc(bubble.title)}</h2>
+        <p>${esc(bubble.body)}</p>
+      </div>
+      <span class="pill">${esc(bubble.severity)}</span>
+    </div>
+    <div class="pill-row">${(bubble.tags || []).map(tag => `<span class="pill">${esc(tag)}</span>`).join('')}</div>
+    <div class="actions" style="margin-top:14px">
+      <button class="btn-primary" data-session="${esc(bubble.session_id)}" onclick="startFreshFromBubble(this.dataset.session)">${esc(bubble.primary_label || 'New chat')}</button>
+      <button class="btn-quiet" data-session="${esc(bubble.session_id)}" onclick="copyHandoffFromBubble(this.dataset.session)">Copy handoff</button>
+      <button class="btn-quiet" onclick="continueFromBubble()">${esc(bubble.continue_label || 'Continue here')}</button>
+      <button class="btn-quiet" data-session="${esc(bubble.session_id)}" onclick="selectSession(this.dataset.session)">Inspect session</button>
+    </div>`;
 }
 function dateLabel(value) {
   if (!value) return 'unknown';
@@ -2183,11 +2446,100 @@ async function markOutcome(sessionId, outcome) {
     buttons.forEach(button => { button.disabled = false; });
   }
 }
+function renderTodayDigest(digest) {
+  if (!digest) return '<div class="empty">Not enough local history yet to build a weekly digest.</div>';
+  const o = digest.outcomes;
+  const tally = [
+    o.useful ? `${o.useful} useful` : '',
+    o.rework ? `${o.rework} rework` : '',
+    o.abandoned ? `${o.abandoned} abandoned` : '',
+  ].filter(Boolean).join(', ');
+  const survival = digest.survival && digest.survival.available
+    ? `<span class="pill">${esc(digest.survival.cost_per_surviving_change)} per surviving change</span>`
+    : '';
+  return `<div class="insight"><strong>${esc(digest.recommendation)}</strong></div>
+    <div class="pill-row">
+      ${tally ? `<span class="pill">${esc(tally)}</span>` : ''}
+      ${digest.command_gate.commands_blocked ? `<span class="pill">${esc(digest.command_gate.commands_blocked)} dangerous commands blocked</span>` : ''}
+      ${digest.prompt_gate.modified ? `<span class="pill">${esc(digest.prompt_gate.modified)} risky prompts modified</span>` : ''}
+      ${survival}
+    </div>`;
+}
 function renderReport(report) {
-  return `<p>${esc(report.title)}</p>
-    <div class="pill-row">${report.summary.map(item => `<span class="pill">${esc(item)}</span>`).join('')}</div>
-    ${report.highlights.map(item => `<div class="insight"><strong>${esc(item)}</strong></div>`).join('')}
-    <p>${esc(report.next_checks.join(' '))}</p>`;
+  const digest = report.digest;
+  if (!digest) {
+    return `<p>${esc(report.title)}</p>
+      <div class="pill-row">${report.summary.map(item => `<span class="pill">${esc(item)}</span>`).join('')}</div>
+      ${report.highlights.map(item => `<div class="insight"><strong>${esc(item)}</strong></div>`).join('')}
+      <p>${esc(report.next_checks.join(' '))}</p>`;
+  }
+  const sections = [];
+  const o = digest.outcomes;
+  const outcomeTotal = o.useful + o.rework + o.abandoned + o.inferred_useful + o.inferred_churned;
+  if (outcomeTotal > 0) {
+    sections.push(`<div class="detail-section">
+      <h2>Outcomes</h2>
+      <div class="mini-grid">
+        ${o.useful ? `<div class="mini"><span class="label">Useful</span><strong>${esc(o.useful)}</strong></div>` : ''}
+        ${o.rework ? `<div class="mini"><span class="label">Rework</span><strong>${esc(o.rework)}</strong></div>` : ''}
+        ${o.abandoned ? `<div class="mini"><span class="label">Abandoned</span><strong>${esc(o.abandoned)}</strong></div>` : ''}
+        ${o.inferred_useful ? `<div class="mini"><span class="label">Inferred useful</span><strong>${esc(o.inferred_useful)}</strong></div>` : ''}
+        ${o.inferred_churned ? `<div class="mini"><span class="label">Inferred churned</span><strong>${esc(o.inferred_churned)}</strong></div>` : ''}
+      </div>
+    </div>`);
+  }
+  if (digest.highest_cost_useful_session) {
+    const h = digest.highest_cost_useful_session;
+    sections.push(`<div class="detail-section">
+      <h2>Highest-cost useful session</h2>
+      <p>${esc(h.project)} &middot; ${esc(h.tool)} &middot; ${esc(h.model)} &mdash; <span class="mono">${esc(h.api_value_label)}</span></p>
+    </div>`);
+  }
+  if (digest.top_sessions && digest.top_sessions.length) {
+    sections.push(`<div class="detail-section">
+      <h2>Costliest sessions</h2>
+      ${digest.top_sessions.map(s => `<div class="digest-row${s.session_id ? ' clickable' : ''}" ${s.session_id ? `onclick="selectSession('${esc(s.session_id)}')"` : ''}>
+        <span class="digest-row-label">${esc(s.project)} &middot; ${esc(s.tool)} &middot; ${esc(s.model)}</span>
+        <span class="mono">${esc(s.api_value_label)}</span>
+        ${s.outcome ? `<span class="outcome-pill ${esc(s.outcome)}">${esc(s.outcome)}</span>` : '<span class="pill">unreviewed</span>'}
+      </div>`).join('')}
+    </div>`);
+  }
+  const candidates = [
+    ...digest.loop_candidates.map(c => ({ ...c, kind: 'Loop' })),
+    ...digest.velocity_candidates.map(c => ({ ...c, kind: 'Runaway pace' })),
+  ];
+  if (candidates.length) {
+    sections.push(`<div class="detail-section">
+      <h2>Loop &amp; runaway signals</h2>
+      ${candidates.map(c => `<div class="insight"><strong>${esc(c.kind)} &middot; ${esc(c.project)} (${esc(c.tool)})</strong><p>${esc(c.diagnosis || c.ratio_label)}</p></div>`).join('')}
+    </div>`);
+  }
+  if (digest.command_gate.gates_fired > 0 || digest.prompt_gate.flagged > 0) {
+    sections.push(`<div class="detail-section">
+      <h2>Guardrails this window</h2>
+      <div class="pill-row">
+        ${digest.command_gate.gates_fired ? `<span class="pill">${esc(digest.command_gate.commands_blocked)} of ${esc(digest.command_gate.gates_fired)} dangerous commands blocked</span>` : ''}
+        ${digest.prompt_gate.flagged ? `<span class="pill">${esc(digest.prompt_gate.modified)} of ${esc(digest.prompt_gate.flagged)} risky prompts modified</span>` : ''}
+      </div>
+    </div>`);
+  }
+  if (digest.survival && digest.survival.available) {
+    const s = digest.survival;
+    sections.push(`<div class="detail-section">
+      <h2>Cost per surviving change</h2>
+      <div class="mini-grid">
+        <div class="mini"><span class="label">Survived</span><strong>${esc(s.surviving_count)}</strong></div>
+        <div class="mini"><span class="label">Churned</span><strong>${esc(s.churned_count)}</strong></div>
+        <div class="mini"><span class="label">$/surviving change</span><strong>${esc(s.cost_per_surviving_change)}</strong></div>
+        <div class="mini"><span class="label">$/churned change</span><strong>${esc(s.cost_per_churned_change)}</strong></div>
+      </div>
+    </div>`);
+  }
+  return `<div class="verdict-card"><h3>${esc(digest.recommendation)}</h3></div>
+    <div class="pill-row" style="margin-top:14px">${report.summary.map(item => `<span class="pill">${esc(item)}</span>`).join('')}</div>
+    ${sections.join('')}
+    <p class="receipt-note">API-equivalent value, not invoice spend. Outcomes are inferred from local signals, not guaranteed truth. Based on local logs only, not live provider quota.</p>`;
 }
 function renderJournal(journal) {
   return `<p>${esc(journal.title)}</p>
@@ -2213,6 +2565,8 @@ async function load(resetDetail = true) {
   const data = await summaryRes.json();
   const report = await reportRes.json();
   const journal = await journalRes.json();
+  renderHandoffBubble(data.handoff_bubble || null);
+  document.getElementById('todayDigest').innerHTML = renderTodayDigest(report.digest);
   const totals = data.totals;
   document.getElementById('apiValue').textContent = totals.api_value_label;
   document.getElementById('windowLabel').textContent = totals.window_label;
@@ -2230,8 +2584,11 @@ async function load(resetDetail = true) {
   }
   document.getElementById('preflightDecisions').textContent = totals.preflight_decisions;
   receiptCache = data.intervention_receipts || [];
+  const handoffDecisions = data.handoff_decisions || [];
   document.getElementById('latestIntervention').innerHTML = renderLatestReceipt(receiptCache[0]);
+  document.getElementById('latestHandoffDecision').innerHTML = renderLatestHandoffDecision(handoffDecisions);
   document.getElementById('receiptRows').innerHTML = renderReceiptRows(receiptCache);
+  document.getElementById('handoffDecisionRows').innerHTML = renderHandoffDecisionRows(handoffDecisions);
   document.getElementById('contextHealth').innerHTML = renderContextHealth(data.context_health || []);
   document.getElementById('coverageRows').innerHTML = renderCoverage(data.coverage || []);
   document.getElementById('setupRows').innerHTML = renderSetup(data.setup || []);
@@ -2290,6 +2647,216 @@ document.addEventListener('keydown', event => { if (event.key === 'Escape') clos
   const deepLinkSession = new URLSearchParams(location.search).get('session');
   if (deepLinkSession) selectSession(deepLinkSession);
 })();
+</script>
+</body>
+</html>
+"""
+
+
+OVERLAY_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIWatcher Handoff</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: transparent;
+      color: #edf6ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: end center;
+      padding: 18px;
+      background:
+        radial-gradient(circle at 12% 0%, rgba(79, 209, 197, 0.16), transparent 34%),
+        rgba(4, 9, 18, 0.78);
+    }
+    .bubble {
+      width: min(780px, 100%);
+      border: 1px solid rgba(126, 172, 255, 0.45);
+      background: rgba(16, 25, 40, 0.96);
+      box-shadow: 0 22px 70px rgba(0, 0, 0, 0.36);
+      border-radius: 18px;
+      overflow: hidden;
+    }
+    .top {
+      padding: 20px 22px 16px;
+      border-bottom: 1px solid rgba(126, 172, 255, 0.22);
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    h1 { margin: 0 0 8px; font-size: clamp(22px, 4vw, 30px); letter-spacing: 0; }
+    p { margin: 0; color: #a9b6c8; line-height: 1.45; }
+    .badge {
+      align-self: flex-start;
+      border: 1px solid rgba(255, 119, 150, 0.52);
+      color: #ff9bad;
+      padding: 8px 12px;
+      border-radius: 999px;
+      white-space: nowrap;
+      font-weight: 800;
+    }
+    .body { padding: 16px 22px 18px; }
+    .tags { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
+    .tag {
+      border: 1px solid rgba(126, 172, 255, 0.24);
+      background: rgba(255, 255, 255, 0.04);
+      color: #d9e5f7;
+      padding: 7px 10px;
+      border-radius: 999px;
+      font-weight: 700;
+      font-size: 13px;
+    }
+    .actions {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 16px;
+    }
+    button, a {
+      border: 1px solid rgba(126, 172, 255, 0.3);
+      border-radius: 12px;
+      color: #edf6ff;
+      background: rgba(15, 23, 42, 0.92);
+      padding: 12px 14px;
+      min-height: 46px;
+      font-size: 15px;
+      font-weight: 850;
+      text-align: center;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    .primary {
+      border: 0;
+      background: linear-gradient(135deg, #44d7b6, #68a8ff);
+      color: #06111f;
+    }
+    .foot {
+      padding: 0 22px 18px;
+      color: #7f8da3;
+      font-size: 13px;
+    }
+    .empty { padding: 24px; color: #a9b6c8; }
+    @media (max-width: 660px) {
+      body { padding: 10px; }
+      .top { display: block; }
+      .badge { display: inline-block; margin-top: 12px; }
+      .actions { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="bubble" id="bubble">
+    <div class="empty">Loading AIWatcher handoff recommendation...</div>
+  </main>
+<script>
+function esc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[ch]));
+}
+function queryParam(name) {
+  return new URLSearchParams(window.location.search).get(name);
+}
+async function copyText(value, label = 'Copied') {
+  try {
+    await navigator.clipboard.writeText(value || '');
+    renderSaved(label);
+  } catch (error) {
+    renderSaved('Copy failed. Open dashboard and copy from the handoff drawer.');
+  }
+}
+async function recordDecision(decision, bubble) {
+  if (!bubble || !bubble.session_id) return;
+  try {
+    await fetch('/api/handoff-decision', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: bubble.session_id,
+        decision,
+        reason: bubble.reason || bubble.body || '',
+        expected_saved_context_tokens: bubble.expected_saved_context_tokens || null,
+      })
+    });
+  } catch (error) {}
+}
+function renderSaved(message) {
+  document.getElementById('bubble').innerHTML = `<div class="top"><div><h1>${esc(message)}</h1><p>You can close this AIWatcher companion and return to your AI tool.</p></div><span class="badge">saved</span></div>
+    <div class="body"><div class="actions"><button class="primary" onclick="window.close()">Close</button><a href="/">Open dashboard</a></div></div>`;
+}
+async function copyHandoff(bubble, decision) {
+  await recordDecision(decision, bubble);
+  const res = await fetch(`/api/handoff?id=${encodeURIComponent(bubble.session_id)}&target=generic&prompt=0`);
+  const capsule = await res.json();
+  if (capsule.error) {
+    renderSaved(capsule.error);
+    return;
+  }
+  await copyText(capsule.next_brief || '', decision === 'new_chat' ? 'Fresh-session handoff copied' : 'Handoff brief copied');
+}
+async function continueHere(bubble) {
+  await recordDecision('continue_here', bubble);
+  renderSaved('Decision saved: continue here');
+}
+function renderBubble(bubble) {
+  const tags = (bubble.tags || []).map(tag => `<span class="tag">${esc(tag)}</span>`).join('');
+  document.getElementById('bubble').innerHTML = `<div class="top">
+    <div><h1>${esc(bubble.title || 'Start a fresh AI session')}</h1><p>${esc(bubble.body || 'AIWatcher found context pressure that may waste your next turns.')}</p></div>
+    <span class="badge">${esc(bubble.severity || 'warning')}</span>
+  </div>
+  <div class="body">
+    <div class="tags">${tags}</div>
+    <p>${esc(bubble.reason || 'Use a handoff brief to preserve the outcome without carrying the full chat history.')}</p>
+    <div class="actions">
+      <button class="primary" id="newChat">New chat</button>
+      <button id="copyBrief">Copy handoff</button>
+      <button id="continueHere">Continue here</button>
+      <a href="/?session=${encodeURIComponent(bubble.session_id || '')}">Inspect</a>
+    </div>
+  </div>
+  <div class="foot">Local-only. Prompt/source content is not stored in this decision.</div>`;
+  document.getElementById('newChat').onclick = () => copyHandoff(bubble, 'new_chat');
+  document.getElementById('copyBrief').onclick = () => copyHandoff(bubble, 'copy_handoff');
+  document.getElementById('continueHere').onclick = () => continueHere(bubble);
+}
+async function load() {
+  const wanted = queryParam('session');
+  const res = await fetch('/api/summary?days=7');
+  const data = await res.json();
+  let bubble = data.handoff_bubble;
+  if (wanted && (!bubble || bubble.session_id !== wanted)) {
+    const health = (data.context_health || []).find(row => row.session_id === wanted);
+    if (health) {
+      const saved = health.estimated_replayed_context_label || health.bloat_label || 'context';
+      bubble = {
+        session_id: health.session_id,
+        project: health.project,
+        tool: health.tool,
+        severity: health.severity,
+        title: `Start a new chat to save ~${saved} tokens of context`,
+        body: health.recommendation || 'This session is getting heavy. Use a handoff brief before continuing.',
+        reason: health.recommendation || 'Context pressure is elevated.',
+        expected_saved_context_tokens: health.estimated_replayed_context_tokens || null,
+        tags: [`${health.latest_turn_tokens} tokens/turn`, `${health.efficiency_label} efficiency`, `${saved} replayed`],
+      };
+    }
+  }
+  if (!bubble) {
+    document.getElementById('bubble').innerHTML = `<div class="top"><div><h1>No handoff needed right now</h1><p>AIWatcher did not find warning or critical context pressure in the current local window.</p></div><span class="badge">healthy</span></div>
+      <div class="body"><div class="actions"><a class="primary" href="/">Open dashboard</a><button onclick="window.close()">Close</button></div></div>`;
+    return;
+  }
+  renderBubble(bubble);
+}
+load();
 </script>
 </body>
 </html>
@@ -2366,6 +2933,9 @@ class UIHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/":
             self._send(200, HTML, "text/html; charset=utf-8")
+            return
+        if parsed.path == "/overlay":
+            self._send(200, OVERLAY_HTML, "text/html; charset=utf-8")
             return
         if parsed.path == "/api/health":
             self._send(200, json.dumps({
@@ -2472,7 +3042,7 @@ class UIHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path not in {"/api/outcome", "/api/preflight"}:
+        if parsed.path not in {"/api/outcome", "/api/preflight", "/api/handoff-decision"}:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
@@ -2495,6 +3065,33 @@ class UIHandler(BaseHTTPRequestHandler):
             response = build_prompt_preflight(prompt, tool=tool, cwd=cwd)
             status = 400 if response.get("error") else 200
             self._send(status, json.dumps(response), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/handoff-decision":
+            session_id = str(payload.get("session_id", "")).strip()
+            decision = str(payload.get("decision", "")).strip()
+            reason = str(payload.get("reason", "")).strip()
+            expected = payload.get("expected_saved_context_tokens")
+            if not session_id:
+                self._send(400, json.dumps({"error": "session_id is required"}), "application/json; charset=utf-8")
+                return
+            try:
+                record = record_handoff_decision(
+                    session_id=session_id,
+                    decision=decision,
+                    reason=reason,
+                    expected_saved_context_tokens=expected if isinstance(expected, int) else None,
+                )
+            except ValueError as exc:
+                self._send(400, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")
+                return
+            except OSError as exc:
+                self._send(
+                    500,
+                    json.dumps({"error": f"Could not save handoff decision: {exc}"}),
+                    "application/json; charset=utf-8",
+                )
+                return
+            self._send(200, json.dumps(record), "application/json; charset=utf-8")
             return
         session_id = str(payload.get("session_id", "")).strip()
         outcome = str(payload.get("outcome", "")).strip()
