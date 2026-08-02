@@ -954,6 +954,7 @@ class PromptPreflightTests(unittest.TestCase):
     def test_open_handoff_overlay_falls_back_to_browser_when_native_unavailable(self) -> None:
         with (
             patch.object(cli, "_open_native_handoff_overlay", return_value=(False, "native unavailable")),
+            patch.object(cli.os, "name", "posix"),
             patch.object(cli.sys, "platform", "linux"),
             patch.object(cli.shutil, "which", return_value=None),
             patch.object(cli.webbrowser, "open", return_value=True) as browser_open,
@@ -963,6 +964,21 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(detail, "webbrowser")
         browser_open.assert_called_once()
+
+    def test_open_handoff_overlay_uses_startfile_on_windows(self) -> None:
+        with (
+            patch.object(cli, "_open_native_handoff_overlay", return_value=(False, "native unavailable")),
+            patch.object(cli.os, "name", "nt"),
+            patch.object(cli.sys, "platform", "win32"),
+            patch.object(cli.os, "startfile", create=True) as startfile,
+            patch.object(cli.webbrowser, "open") as browser_open,
+        ):
+            ok, detail = cli._open_handoff_overlay("http://127.0.0.1:8765/overlay?session=session-1")
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "startfile")
+        startfile.assert_called_once_with("http://127.0.0.1:8765/overlay?session=session-1")
+        browser_open.assert_not_called()
 
     def test_watch_notify_deep_link_follows_actual_running_dashboard_port(self) -> None:
         """Regression guard: found while manually testing issue #31 -- `aiwatcher
