@@ -1115,7 +1115,7 @@ def analyze_prompt(
     risky_terms = [
         "production", "prod database", "customer data", "pii", "secret", "api key",
         "access token", "auth token", "bearer token", "refresh token", "session token",
-        ".env", "credential", "delete", "drop table", "rm -rf", "payment", "stripe",
+        ".env", "credential", "drop table", "rm -rf", "payment", "stripe",
     ]
     # Security-weakening prompts ("remove signature check", "make auth less
     # strict") rarely use any risky_terms keyword — they read as ordinary
@@ -1143,10 +1143,13 @@ def analyze_prompt(
         )
     )
     destructive_verbs = (
-        r"delete|remove|wipe|erase|destroy|nuke|purge|drop|truncate|clear|reset"
+        r"delet(?:e|ing)|remov(?:e|ing)|wip(?:e|ing)|eras(?:e|ing)|"
+        r"destroy(?:ing)?|nuk(?:e|ing)|purg(?:e|ing)|drop(?:ping)?|"
+        r"truncat(?:e|ing)|clear(?:ing)?|reset(?:ting)?"
     )
     high_impact_targets = (
-        r"repo|repository|codebase|project|workspace|working tree|source tree|"
+        r"repo|repository|codebase|workspace|working tree|source tree|"
+        r"project(?:\s+(?:folder|directory|root|workspace|repo|repository))?|"
         r"all files|all code|entire app|whole app|database|db|table|schema|"
         r"customer data|production data|prod data|account|tenant|environment|"
         r"credentials?|secrets?|api keys?|access tokens?|auth tokens?|bearer tokens?|"
@@ -1168,13 +1171,18 @@ def analyze_prompt(
         "avoid exposing secrets",
     ])
     if sensitive_or_destructive:
-        if safety_guardrails:
+        if high_impact_destructive:
+            if safety_guardrails:
+                score += 3
+                findings.append("Prompt asks for a high-impact destructive action, but includes an explicit confirmation boundary.")
+                suggestions.append("Confirm the exact target before deleting repositories, project files, databases, credentials, or production resources.")
+            else:
+                score += 6
+                findings.append("Prompt asks for a high-impact destructive action against code, data, credentials, or an environment.")
+                suggestions.append("Block or require explicit confirmation before deleting repositories, project files, databases, credentials, or production resources.")
+        elif safety_guardrails:
             score += 1
             findings.append("Sensitive or destructive work is present with an explicit confirmation boundary.")
-        elif high_impact_destructive:
-            score += 6
-            findings.append("Prompt asks for a high-impact destructive action against code, data, credentials, or an environment.")
-            suggestions.append("Block or require explicit confirmation before deleting repositories, project files, databases, credentials, or production resources.")
         elif security_weakening:
             score += 3
             findings.append("Prompt weakens or removes a security control (auth/signature/validation) without a guardrail.")

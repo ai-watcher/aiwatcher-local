@@ -2012,7 +2012,7 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         self.assertGreaterEqual(original["score"], 8)
         self.assertEqual(original["risk"], "high")
         self.assertLess(selected["score"], original["score"])
-        self.assertEqual(selected["risk"], "low")
+        self.assertNotEqual(selected["risk"], "high")
 
     def test_guardrail_chips_match_triggered_findings(self) -> None:
         with patch.object(cli, "sessions_since", return_value=[]):
@@ -2092,6 +2092,7 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
     def test_high_impact_destructive_prompt_is_high_risk(self) -> None:
         examples = [
             "delete the repo",
+            "delete codebase",
             "wipe the project folder",
             "remove all code from the repository",
             "drop the production database",
@@ -2113,17 +2114,38 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
             self.assertIn("Confirm before destructive changes", [g["label"] for g in result["guardrails"]])
 
     def test_high_impact_destructive_heuristic_avoids_narrow_cleanup(self) -> None:
+        examples = [
+            "Remove the obsolete screenshot from the auth docs",
+            "delete dead code in one test file",
+            "clear cache",
+            "remove old code from utils.py",
+        ]
+
+        with patch.object(cli, "sessions_since", return_value=[]):
+            results = [
+                cli.analyze_prompt(example, tool="codex", cwd="/repo")
+                for example in examples
+            ]
+
+        for result in results:
+            self.assertFalse(
+                any("high-impact destructive action" in finding for finding in result["findings"])
+            )
+            self.assertNotEqual(result["risk"], "high")
+
+    def test_guarded_high_impact_destructive_prompt_still_gets_attention(self) -> None:
         with patch.object(cli, "sessions_since", return_value=[]):
             result = cli.analyze_prompt(
-                "Remove the obsolete screenshot from the auth docs",
+                "Inspect first and ask for confirmation before deleting the repository",
                 tool="codex",
                 cwd="/repo",
             )
 
-        self.assertFalse(
-            any("high-impact destructive action" in finding for finding in result["findings"])
+        self.assertEqual(result["risk"], "medium")
+        self.assertGreaterEqual(result["score"], 3)
+        self.assertTrue(
+            any("explicit confirmation boundary" in finding for finding in result["findings"])
         )
-        self.assertNotEqual(result["risk"], "high")
 
     def test_security_weakening_heuristic_avoids_docs_ui_and_test_cleanup(self) -> None:
         with patch.object(cli, "sessions_since", return_value=[]):
