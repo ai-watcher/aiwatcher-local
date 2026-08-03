@@ -166,6 +166,7 @@ def _empty_state() -> dict[str, Any]:
         "command_gate_allowlist": [],
         "brief_tokens": [],
         "watch_notifications": [],
+        "handoff_decisions": [],
         "sent_notification_keys": [],
         "ui_server": None,
     }
@@ -228,6 +229,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("command_gate_allowlist", [])
     data.setdefault("brief_tokens", [])
     data.setdefault("watch_notifications", [])
+    data.setdefault("handoff_decisions", [])
     data.setdefault("sent_notification_keys", [])
     data.setdefault("ui_server", None)
     return data
@@ -506,6 +508,59 @@ def recent_watch_notifications(limit: int = 10) -> list[dict[str, Any]]:
     except OSError:
         return []
     rows = [row for row in data["watch_notifications"] if isinstance(row, dict)]
+    return list(reversed(rows[-max(1, limit):]))
+
+
+VALID_HANDOFF_DECISIONS = {"new_chat", "continue_here", "copy_handoff", "dismissed"}
+MAX_HANDOFF_DECISIONS_STORED = 200
+
+
+def record_handoff_decision(
+    *,
+    session_id: str,
+    decision: str,
+    reason: str,
+    expected_saved_context_tokens: int | None = None,
+) -> dict[str, Any]:
+    """Record a local, privacy-safe handoff bubble decision.
+
+    The handoff bubble is a Control-phase intervention: AIWatcher suggests
+    continuing in a fresh session when context pressure is likely to waste
+    turns. Store only metadata and the user's choice, not prompt/source text.
+    """
+    if decision not in VALID_HANDOFF_DECISIONS:
+        raise ValueError(f"decision must be one of: {', '.join(sorted(VALID_HANDOFF_DECISIONS))}")
+    if not session_id.strip():
+        raise ValueError("session_id is required")
+    with _locked_state():
+        data = _load()
+        record = {
+            "id": str(uuid.uuid4()),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "phase": "control",
+            "intervention_type": "handoff_bubble",
+            "session_id": session_id,
+            "decision": decision,
+            "reason": reason.strip()[:500],
+            "expected_saved_context_tokens": (
+                int(expected_saved_context_tokens)
+                if isinstance(expected_saved_context_tokens, int) and expected_saved_context_tokens > 0
+                else None
+            ),
+        }
+        data["handoff_decisions"].append(record)
+        data["handoff_decisions"] = data["handoff_decisions"][-MAX_HANDOFF_DECISIONS_STORED:]
+        _save(data)
+    return record
+
+
+def recent_handoff_decisions(limit: int = 10) -> list[dict[str, Any]]:
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return []
+    rows = [row for row in data["handoff_decisions"] if isinstance(row, dict)]
     return list(reversed(rows[-max(1, limit):]))
 
 

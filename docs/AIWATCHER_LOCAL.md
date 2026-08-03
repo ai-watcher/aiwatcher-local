@@ -132,8 +132,9 @@ keeping authority with the individual developer:
    and safety controls relevant to the original request.
 2. **Watch** — detect large contexts, repeated calls, long sessions, and unusual
    local usage while work is happening.
-3. **Control** — use the execution brief, edit it, run the original, cancel, or
-   stop work that is becoming wasteful.
+3. **Control** — use the execution brief, edit it, run the original, cancel,
+   stop wasteful work, or start a fresh-session handoff when context pressure
+   would make the next turn expensive.
 4. **Prove** — inspect the local timeline, review inferred evidence, and record
    whether the result was useful, needed rework, or was abandoned.
 5. **Improve** — compare interventions and outcomes, log a decision that never
@@ -354,6 +355,16 @@ What to check:
 - The event export should contain hashes, not prompt text or code.
 - The dashboard time-window selector should visibly update the values.
 - Project rows and recent sessions should open useful detail.
+- The Today dashboard should show a handoff bubble for warning/critical context
+  health with fresh-session and continue-here choices, then save only local
+  decision metadata.
+- Copying a handoff from the Today bubble should replace the recommendation
+  with a clear "paste into a fresh chat" confirmation and receipt link.
+- `watch --overlay` should open the local `/overlay` companion when watch
+  recommends action, giving desktop users a dismissible handoff surface outside
+  Claude/Codex/Cursor instead of requiring them to visit the full dashboard.
+  It should prefer the native always-on-top desktop bubble and fall back to the
+  browser companion when native UI is unavailable.
 - `resume`/`handoff` without `--include-prompt-excerpt` should not contain
   prompt text; with it, the brief should contain a labeled excerpt and nothing
   else in the surrounding output should change.

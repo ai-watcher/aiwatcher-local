@@ -67,6 +67,24 @@ class LocalStateTests(unittest.TestCase):
 
         self.assertEqual(len(stored), 20)
 
+    def test_handoff_decisions_store_metadata_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                record = local_state.record_handoff_decision(
+                    session_id="session-1",
+                    decision="new_chat",
+                    reason="Critical context pressure.",
+                    expected_saved_context_tokens=240_000,
+                )
+                recent = local_state.recent_handoff_decisions()
+
+        self.assertEqual(record["phase"], "control")
+        self.assertEqual(record["intervention_type"], "handoff_bubble")
+        self.assertEqual(recent[0]["decision"], "new_chat")
+        self.assertEqual(recent[0]["expected_saved_context_tokens"], 240_000)
+        self.assertNotIn("prompt", json.dumps(recent).lower())
+
     def test_intervention_stores_hashes_not_prompt_text(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")

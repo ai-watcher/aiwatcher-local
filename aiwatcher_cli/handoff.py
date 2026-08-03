@@ -79,26 +79,26 @@ TARGET_LABELS: dict[str, str] = {
 def _target_guidance(target: str) -> list[str]:
     if target == "codex":
         return [
-            "Paste this as the first prompt in a fresh Codex session.",
-            "Ask Codex to inspect before editing and to keep the checkpoint narrow.",
+            "Treat this as a fresh Codex session with no prior chat context.",
+            "Inspect repo state before editing and keep the checkpoint narrow.",
         ]
     if target == "claude":
         return [
-            "Paste this as the first prompt in a fresh Claude Code session.",
-            "Let Claude summarize current repo state before continuing.",
+            "Treat this as a fresh Claude Code session with no prior chat context.",
+            "Summarize current repo state before continuing the work.",
         ]
     if target == "cursor":
         return [
-            "Paste this into Cursor composer for the relevant project.",
+            "Treat this as a fresh Cursor composer thread for this project.",
             "Keep the edit scope to the files Cursor confirms are related.",
         ]
     if target == "vscode":
         return [
-            "Paste this into your selected AI assistant from VS Code.",
-            "Use AIWatcher preflight on the brief again if you edit it materially.",
+            "Treat this as a fresh VS Code assistant thread for this project.",
+            "Use AIWatcher preflight again if you edit this brief materially.",
         ]
     return [
-        "Paste this as the first prompt in a fresh AI coding session.",
+        "Treat this as a fresh AI coding session with no prior chat context.",
         "Keep the next session focused on one checkpoint.",
     ]
 
@@ -153,14 +153,15 @@ def build_handoff_capsule(
     target_guidance = _target_guidance(target)
 
     evidence_lines = [
-        f"- Local evidence: {len(evidence.commits)} nearby commit(s), "
-        f"{len(evidence.changed_files)} changed file(s), {len(evidence.tests)} test artifact(s)",
+        f"- Nearby commits: {len(evidence.commits)}",
+        f"- Changed files: {len(evidence.changed_files)}",
+        f"- Test artifacts: {len(evidence.tests)}",
     ]
     shown_commits = evidence.commits[:3]
     for commit in shown_commits:
         subject = str(commit.get("subject") or "").strip()
         label = f"{commit.get('sha')}: {subject}" if subject else str(commit.get("sha"))
-        evidence_lines.append(f"  - Commit {label}")
+        evidence_lines.append(f"  - Commit: {label}")
     if len(evidence.commits) > len(shown_commits):
         evidence_lines.append(f"  - ...and {len(evidence.commits) - len(shown_commits)} more commit(s) (see git log)")
     shown_files = evidence.changed_files[:5]
@@ -172,6 +173,12 @@ def build_handoff_capsule(
         )
     if evidence.commits:
         evidence_lines.append(f"- Suggested check: git show {evidence.commits[0].get('sha')} --stat")
+    evidence_lines.append("- Suggested check: git status --short")
+    evidence_lines.append("- Suggested check: git diff --stat")
+    if not evidence.commits and evidence.changed_files:
+        evidence_lines.append(
+            "- No nearby commit evidence was found; treat this as in-progress work and avoid overwriting local edits."
+        )
 
     commit_message_lines: list[str] = []
     if evidence.commits:
@@ -212,30 +219,46 @@ def build_handoff_capsule(
             str(costliest_prompt.get("prompt_excerpt")),
         ]
 
+    warning_lines = [f"- {item}" for item in warnings[:5]]
+
     next_brief = "\n".join([
-        "You are continuing AI-assisted coding work from a previous local session.",
+        "AIWatcher fresh-session handoff",
+        "",
+        "You are starting a fresh AI coding session. Do not assume access to the previous chat.",
+        "Continue from the repository state on disk, not from hidden conversation history.",
         f"Target tool: {TARGET_LABELS[target]}.",
+        "",
+        "Objective",
+        "- Reconstruct the current state of the work from git status, recent commits, and the files listed below.",
+        "- Identify the smallest safe next checkpoint.",
+        "- Continue only that checkpoint after summarizing your plan.",
         "",
         "Project",
         session.project_path or "unknown",
         "",
-        "Current status",
+        "Previous session",
         f"- Previous tool/model: {session.tool} / {session.model or 'unknown'}",
-        f"- Previous session usage: {_compact_int(session.tokens_in + session.tokens_out)} tokens, "
+        f"- Usage observed: {_compact_int(session.tokens_in + session.tokens_out)} tokens, "
         f"{session.agent_calls} model calls, {session.tool_calls} tool calls, "
         f"{_money(session.cost_usd)} API-equivalent value",
         f"- Outcome status: {outcome or evidence.inferred_outcome or 'not confirmed'}",
+        "",
+        "Why hand off now",
+        *warning_lines,
+        "",
+        "Local evidence to inspect",
         *evidence_lines,
         *commit_message_lines,
         *decision_lines,
         *task_context_lines,
         "",
-        "Before editing",
+        "Fresh-session instructions",
         *[f"- {item}" for item in target_guidance],
-        "- Inspect the current git status and the smallest relevant files.",
-        "- Summarize what appears already done and what remains.",
-        "- Continue one checkpoint at a time; do not restart broad exploration.",
+        "- First reply with what appears done, what remains uncertain, and the smallest next checkpoint.",
+        "- State which files or commands you will inspect before editing.",
+        "- Implement only the smallest checkpoint after the plan is clear.",
         "- Preserve unrelated changes and do not expose secrets.",
+        "- Stop before destructive changes, broad refactors, secret exposure, or unrelated cleanup.",
         "",
         "When finished",
         "- Report changed files, verification run, remaining uncertainty, and whether the result looks useful.",

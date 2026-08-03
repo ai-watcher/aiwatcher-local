@@ -44,7 +44,10 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(capsule["usage"]["tokens_label"], "720.0k")
         self.assertIn("continue with a smaller checkpoint", "\n".join(capsule["warnings"]))
         self.assertIn("fresh Claude/Codex/Cursor session", rendered)
-        self.assertIn("Inspect the current git status", capsule["next_brief"])
+        self.assertIn("fresh AI coding session", capsule["next_brief"])
+        self.assertIn("Do not assume access to the previous chat", capsule["next_brief"])
+        self.assertIn("git status --short", capsule["next_brief"])
+        self.assertIn("smallest next checkpoint", capsule["next_brief"])
         self.assertNotIn("source diff", rendered.lower())
 
     def test_handoff_capsule_formats_for_target_tool(self) -> None:
@@ -65,7 +68,8 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(capsule["target"], "codex")
         self.assertEqual(capsule["target_label"], "Codex")
         self.assertIn("fresh Codex session", rendered)
-        self.assertIn("Paste this as the first prompt in a fresh Codex session", capsule["next_brief"])
+        self.assertIn("Treat this as a fresh Codex session with no prior chat context", capsule["next_brief"])
+        self.assertNotIn("Paste this as the first prompt", capsule["next_brief"])
 
     def test_next_brief_includes_commit_sha_and_changed_files(self) -> None:
         now = datetime.now(timezone.utc)
@@ -96,11 +100,12 @@ class HandoffTests(unittest.TestCase):
                 capsule = build_handoff_capsule(session, [], outcome="useful")
 
         commit_sha = capsule["evidence"]["commits"][0]["sha"]
-        self.assertIn(f"Commit {commit_sha}: fix login bug", capsule["next_brief"])
+        self.assertIn(f"Commit: {commit_sha}: fix login bug", capsule["next_brief"])
         self.assertIn(f"git show {commit_sha} --stat", capsule["next_brief"])
         self.assertIn("Changed file: app.py", capsule["next_brief"])
         self.assertIn(f"Most recent commit message ({commit_sha})", capsule["next_brief"])
         self.assertIn("Session tokens were not being refreshed.", capsule["next_brief"])
+        self.assertIn("git diff --stat", capsule["next_brief"])
 
     def test_body_less_commit_omits_commit_message_section(self) -> None:
         now = datetime.now(timezone.utc)
@@ -126,7 +131,7 @@ class HandoffTests(unittest.TestCase):
                 capsule = build_handoff_capsule(session, [], outcome="useful")
 
         commit_sha = capsule["evidence"]["commits"][0]["sha"]
-        self.assertIn(f"Commit {commit_sha}: wip", capsule["next_brief"])
+        self.assertIn(f"Commit: {commit_sha}: wip", capsule["next_brief"])
         self.assertNotIn("Most recent commit message", capsule["next_brief"])
 
     def test_commit_message_body_truncates_at_line_boundary_not_mid_word(self) -> None:
@@ -156,7 +161,7 @@ class HandoffTests(unittest.TestCase):
 
         brief = capsule["next_brief"]
         self.assertNotIn(long_body, brief)
-        section = brief.split("Most recent commit message")[1].split("\n\nBefore editing")[0]
+        section = brief.split("Most recent commit message")[1].split("\n\nFresh-session instructions")[0]
         header_line, _, body_text = section.partition("\n")
         self.assertTrue(body_text.rstrip().endswith("..."))
         kept_text = body_text.rstrip()[:-3].rstrip()
@@ -205,6 +210,30 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(len(capsule["evidence"]["changed_files"]), 6)
         self.assertIn("...and 2 more commit(s) (see git log)", brief)
         self.assertIn("...and 1 more changed file(s) (see git status)", brief)
+
+    def test_changed_files_without_commits_warns_not_to_overwrite_work(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            run(["git", "init"], temp_dir)
+            run(["git", "config", "user.email", "test@example.com"], temp_dir)
+            run(["git", "config", "user.name", "AIWatcher Test"], temp_dir)
+            (repo / "app.py").write_text("print('in progress')\n", encoding="utf-8")
+
+            session = LocalSession(
+                session_id="session-no-commit",
+                tool="codex-cli",
+                project_path=temp_dir,
+                started_at=now,
+                updated_at=now + timedelta(minutes=1),
+            )
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(temp_dir, "state.json")}):
+                capsule = build_handoff_capsule(session, [], outcome=None)
+
+        brief = capsule["next_brief"]
+        self.assertIn("Changed file: app.py", brief)
+        self.assertIn("No nearby commit evidence was found", brief)
+        self.assertIn("avoid overwriting local edits", brief)
 
     def test_prompt_excerpt_is_embedded_only_when_opted_in(self) -> None:
         now = datetime.now(timezone.utc)

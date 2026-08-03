@@ -11,7 +11,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiwatcher_cli import ui
-from aiwatcher_cli.local_state import record_command_decision, record_intervention, record_outcome
+from aiwatcher_cli.local_state import (
+    recent_handoff_decisions,
+    record_command_decision,
+    record_intervention,
+    record_outcome,
+)
 from aiwatcher_cli.scanner import LocalEvent, LocalSession, SurfaceCoverage
 
 
@@ -61,6 +66,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn('data-view="setup"', ui.HTML)
         self.assertIn('id="latestIntervention"', ui.HTML)
         self.assertIn('id="contextHealth"', ui.HTML)
+        self.assertIn('id="handoffBubble"', ui.HTML)
+        self.assertIn('id="latestHandoffDecision"', ui.HTML)
+        self.assertIn('id="handoffDecisionRows"', ui.HTML)
         self.assertIn('id="coverageRows"', ui.HTML)
         self.assertIn('id="setupRows"', ui.HTML)
         self.assertIn('id="promptInput"', ui.HTML)
@@ -75,8 +83,36 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn('class="btn-primary" onclick="openHandoff', ui.HTML)
         self.assertIn("watch --notify", ui.HTML)
         self.assertIn("/api/handoff", ui.HTML)
+        self.assertIn("/api/handoff-decision", ui.HTML)
+        self.assertIn("copyHandoffFromBubble", ui.HTML)
+        self.assertIn("Copy handoff", ui.HTML)
+        self.assertIn("renderHandoffCopied", ui.HTML)
+        self.assertIn("Handoff copied. Start a fresh chat now.", ui.HTML)
+        self.assertIn("decision receipt saved", ui.HTML)
         self.assertIn("Include prompt excerpt", ui.HTML)
         self.assertNotIn("window.alert", ui.HTML)
+
+    def test_overlay_page_is_a_local_handoff_companion(self) -> None:
+        self.assertIn("AIWatcher Handoff", ui.OVERLAY_HTML)
+        self.assertIn("/api/summary?days=7", ui.OVERLAY_HTML)
+        self.assertIn("/api/handoff-decision", ui.OVERLAY_HTML)
+        self.assertIn("Copy handoff", ui.OVERLAY_HTML)
+        self.assertIn("Continue here", ui.OVERLAY_HTML)
+        self.assertIn("Prompt/source content is not stored", ui.OVERLAY_HTML)
+
+    def test_overlay_script_is_valid_javascript(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not available to check JS syntax")
+        script = re.search(r"<script>(.*?)</script>", ui.OVERLAY_HTML, re.S).group(1)
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as handle:
+            handle.write(script)
+            script_path = handle.name
+        try:
+            completed = subprocess.run([node, "-c", script_path], capture_output=True, text=True)
+        finally:
+            os.unlink(script_path)
+        self.assertEqual(completed.returncode, 0, f"Overlay inline JS has a syntax error:\n{completed.stderr}")
 
     def test_summary_includes_surface_coverage_and_context_health(self) -> None:
         now = datetime.now(timezone.utc)
@@ -138,6 +174,7 @@ class DashboardWindowTests(unittest.TestCase):
             patch.object(ui, "survival_by_session", return_value={}),
             patch.object(ui, "analyze_all_sessions", return_value=[health]),
             patch.object(ui, "surface_coverage", return_value=coverage),
+            patch.object(ui, "recent_handoff_decisions", return_value=[]),
         ):
             summary = ui.build_summary(7)
 
@@ -145,7 +182,111 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertTrue(any(step["command"] == "aiwatcher hook-status" for step in summary["setup"]))
         self.assertEqual(summary["context_health"][0]["severity"], "critical")
         self.assertEqual(summary["context_health"][0]["action"]["label"], "Start fresh")
+        self.assertEqual(summary["handoff_bubble"]["session_id"], "bloated")
+        self.assertIn("Start a new chat", summary["handoff_bubble"]["title"])
+        self.assertEqual(summary["handoff_bubble"]["expected_saved_context_tokens"], 220_500)
+        self.assertEqual(summary["handoff_decisions"], [])
         self.assertTrue(any(item["title"] == "Context health needs attention" for item in summary["insights"]))
+
+    def test_recent_handoff_decision_suppresses_repeat_bubble(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="bloated",
+            tool="claude-code",
+            project_path="/repo",
+            started_at=now - timedelta(hours=4),
+            updated_at=now - timedelta(minutes=10),
+            tokens_in=500_000,
+            tokens_out=10_000,
+            cost_usd=2.0,
+        )
+        health = ui.ContextHealth(
+            session_id="bloated",
+            tool="claude-code",
+            project_path="/repo",
+            age_hours=4,
+            age_days=0.16,
+            event_count=4,
+            total_input_tokens=500_000,
+            total_output_tokens=10_000,
+            latest_turn_tokens=225_000,
+            peak_turn_tokens=225_000,
+            avg_turn_tokens=125_000,
+            growth_rate=20_000,
+            bloat_ratio=0.98,
+            efficiency_pct=2.0,
+            is_stale=False,
+            is_critical_stale=False,
+            is_context_pressure=True,
+            is_context_critical=True,
+            is_high_bloat=True,
+            is_extreme_bloat=True,
+            severity="critical",
+            recommendations=["Start a fresh session before continuing."],
+        )
+        with (
+            patch.object(ui, "scan_all", return_value=[row]),
+            patch.object(ui, "scan_all_events", return_value=[]),
+            patch.object(ui, "discover_tools", return_value={}),
+            patch.object(ui, "evidence_for_sessions", return_value={}),
+            patch.object(ui, "survival_by_session", return_value={}),
+            patch.object(ui, "analyze_all_sessions", return_value=[health]),
+            patch.object(ui, "surface_coverage", return_value=[]),
+            patch.object(ui, "recent_handoff_decisions", return_value=[{
+                "created_at": now.isoformat(),
+                "session_id": "bloated",
+                "decision": "continue_here",
+                "reason": "User already chose to continue.",
+                "expected_saved_context_tokens": 220_500,
+            }]),
+        ):
+            summary = ui.build_summary(7)
+
+        self.assertIsNone(summary["handoff_bubble"])
+        self.assertEqual(summary["handoff_decisions"][0]["decision"], "continue_here")
+        self.assertEqual(summary["handoff_decisions"][0]["expected_saved_context_label"], "220.5k")
+
+    def test_handoff_bubble_is_absent_when_context_is_healthy(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="healthy",
+            tool="claude-code",
+            project_path="/repo",
+            started_at=now - timedelta(minutes=30),
+            updated_at=now,
+            tokens_in=30_000,
+            tokens_out=10_000,
+            cost_usd=0.1,
+        )
+        with (
+            patch.object(ui, "scan_all", return_value=[row]),
+            patch.object(ui, "scan_all_events", return_value=[]),
+            patch.object(ui, "discover_tools", return_value={}),
+            patch.object(ui, "evidence_for_sessions", return_value={}),
+            patch.object(ui, "survival_by_session", return_value={}),
+            patch.object(ui, "analyze_all_sessions", return_value=[]),
+            patch.object(ui, "surface_coverage", return_value=[]),
+            patch.object(ui, "recent_handoff_decisions", return_value=[]),
+        ):
+            summary = ui.build_summary(7)
+
+        self.assertIsNone(summary["handoff_bubble"])
+
+    def test_handoff_decision_endpoint_records_local_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                record = ui.record_handoff_decision(
+                    session_id="s1",
+                    decision="continue_here",
+                    reason="User chose to continue despite context pressure.",
+                    expected_saved_context_tokens=123_000,
+                )
+                decisions = recent_handoff_decisions()
+
+        self.assertEqual(record["decision"], "continue_here")
+        self.assertEqual(decisions[0]["session_id"], "s1")
+        self.assertEqual(decisions[0]["expected_saved_context_tokens"], 123_000)
 
     def test_prompt_preflight_response_is_privacy_scoped(self) -> None:
         with patch.object(

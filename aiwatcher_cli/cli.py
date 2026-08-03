@@ -43,6 +43,7 @@ from .local_state import (
     link_intervention_session,
     outcomes_for_sessions,
     recent_command_decisions,
+    recent_handoff_decisions,
     recent_hook_events,
     recent_interventions,
     record_always_allow_command_pattern,
@@ -1141,7 +1142,26 @@ def analyze_prompt(
             lower,
         )
     )
-    sensitive_or_destructive = any(term in lower for term in risky_terms) or security_weakening
+    destructive_verbs = (
+        r"delete|remove|wipe|erase|destroy|nuke|purge|drop|truncate|clear|reset"
+    )
+    high_impact_targets = (
+        r"repo|repository|codebase|project|workspace|working tree|source tree|"
+        r"all files|all code|entire app|whole app|database|db|table|schema|"
+        r"customer data|production data|prod data|account|tenant|environment|"
+        r"credentials?|secrets?|api keys?|access tokens?|auth tokens?|bearer tokens?|"
+        r"refresh tokens?|session tokens?"
+    )
+    high_impact_destructive = bool(
+        re.search(rf"\b(?:{destructive_verbs})\b.{{0,35}}?\b(?:{high_impact_targets})\b", lower)
+        or re.search(rf"\b(?:{high_impact_targets})\b.{{0,35}}?\b(?:{destructive_verbs})\b", lower)
+        or re.search(r"\b(?:rm\s+-rf|git\s+reset\s+--hard|git\s+push\s+--force|drop\s+table|truncate\s+table)\b", lower)
+    )
+    sensitive_or_destructive = (
+        any(term in lower for term in risky_terms)
+        or security_weakening
+        or high_impact_destructive
+    )
     safety_guardrails = any(term in lower for term in [
         "ask for confirmation before", "require confirmation before",
         "do not reveal secret", "do not make destructive changes",
@@ -1151,6 +1171,10 @@ def analyze_prompt(
         if safety_guardrails:
             score += 1
             findings.append("Sensitive or destructive work is present with an explicit confirmation boundary.")
+        elif high_impact_destructive:
+            score += 6
+            findings.append("Prompt asks for a high-impact destructive action against code, data, credentials, or an environment.")
+            suggestions.append("Block or require explicit confirmation before deleting repositories, project files, databases, credentials, or production resources.")
         elif security_weakening:
             score += 3
             findings.append("Prompt weakens or removes a security control (auth/signature/validation) without a guardrail.")
@@ -2732,6 +2756,114 @@ def _send_local_notification(title: str, body: str, *, url: str | None = None) -
     return False, "local notifications unsupported on this platform"
 
 
+def _watch_ui_base_url() -> str:
+    ui_server = get_ui_server()
+    ui_host = ui_server["host"] if ui_server else "127.0.0.1"
+    if ui_host in ("0.0.0.0", "::", ""):
+        ui_host = "127.0.0.1"
+    ui_port = ui_server["port"] if ui_server else DEFAULT_UI_PORT
+    return f"http://{ui_host}:{ui_port}"
+
+
+def _open_native_handoff_overlay(url: str, *, title: str, body: str, severity: str) -> tuple[bool, str]:
+    """Launch the small always-on-top desktop companion when available."""
+    mode = os.environ.get("AIWATCHER_OVERLAY_MODE", "native").strip().lower()
+    if mode in {"browser", "web"}:
+        return False, "native overlay skipped by AIWATCHER_OVERLAY_MODE"
+    if os.environ.get("AIWATCHER_DISABLE_NATIVE_OVERLAY", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False, "disabled by AIWATCHER_DISABLE_NATIVE_OVERLAY"
+    if sys.platform not in {"darwin", "win32"} and not os.environ.get("DISPLAY"):
+        return False, "native overlay needs a desktop display"
+    has_native_runtime = False
+    try:
+        __import__("tkinter")
+        has_native_runtime = True
+    except Exception:
+        has_native_runtime = bool(sys.platform == "darwin" and shutil.which("swift"))
+    if not has_native_runtime:
+        return False, "native overlay unavailable: no tkinter or macOS Swift runtime"
+    try:
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "aiwatcher_cli.native_overlay",
+                "--url",
+                url,
+                "--title",
+                title,
+                "--body",
+                body,
+                "--severity",
+                severity,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        return False, str(exc)
+    return True, "native desktop window"
+
+
+def _open_handoff_overlay(
+    url: str,
+    *,
+    title: str = "AIWatcher handoff recommended",
+    body: str = "",
+    severity: str = "warning",
+) -> tuple[bool, str]:
+    """Best-effort local companion overlay outside the AI tool UI."""
+    if os.environ.get("AIWATCHER_DISABLE_OVERLAY", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False, "disabled by AIWATCHER_DISABLE_OVERLAY"
+    native_ok, native_detail = _open_native_handoff_overlay(url, title=title, body=body, severity=severity)
+    if native_ok:
+        return True, native_detail
+    if os.environ.get("AIWATCHER_OVERLAY_MODE", "").strip().lower() in {"native", "desktop", "native-only"}:
+        return False, native_detail
+    try:
+        if sys.platform == "darwin" and shutil.which("open"):
+            for app in ("Google Chrome", "Microsoft Edge", "Brave Browser"):
+                completed = subprocess.run(
+                    ["open", "-na", app, "--args", f"--app={url}", "--window-size=760,360"],
+                    check=False,
+                    timeout=3,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                if completed.returncode == 0:
+                    return True, f"{app} app window"
+            subprocess.run(
+                ["open", url],
+                check=True,
+                timeout=3,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True, "open"
+        if os.name == "nt":
+            os.startfile(url)  # type: ignore[attr-defined]
+            return True, "startfile"
+        if shutil.which("xdg-open"):
+            subprocess.run(
+                ["xdg-open", url],
+                check=True,
+                timeout=3,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True, "xdg-open"
+        if webbrowser.open(url):
+            return True, "webbrowser"
+    except subprocess.CalledProcessError:
+        return False, "overlay opener failed"
+    except subprocess.TimeoutExpired:
+        return False, "overlay opener timed out"
+    except OSError as exc:
+        return False, str(exc)
+    return False, "no overlay opener available"
+
+
 def command_last(args: argparse.Namespace) -> int:
     rows = sessions_since(args.days)
     if args.session_id:
@@ -3087,7 +3219,7 @@ def _print_watch_status_card(
         )
     print(f"  Recommended: {status['action']} -- {status['reason']}")
 
-    if getattr(args, "notify", False) and status["action"] != "continue":
+    if (getattr(args, "notify", False) or getattr(args, "overlay", False)) and status["action"] != "continue":
         key = f"{session.session_id}:{status['action']}"
         # persist_key includes the session's own stamp, so a later run against
         # unchanged local activity recognizes "already told you about this
@@ -3103,34 +3235,47 @@ def _print_watch_status_card(
         else:
             if notification_seen is not None:
                 notification_seen[key] = stamp
-            # `aiwatcher ui` falls back to the next free port when its default
-            # is busy (this is the actual reason the link 404ed while testing
-            # this feature: the dashboard had fallen back off DEFAULT_UI_PORT).
-            # Prefer wherever it last actually bound; only guess the default
-            # if no dashboard has been recorded as having run yet.
-            ui_server = get_ui_server()
-            ui_host = ui_server["host"] if ui_server else "127.0.0.1"
-            if ui_host in ("0.0.0.0", "::", ""):
-                # Not browsable as-is; 127.0.0.1 always reaches a server
-                # bound to all interfaces on the same machine.
-                ui_host = "127.0.0.1"
-            ui_port = ui_server["port"] if ui_server else DEFAULT_UI_PORT
-            dashboard_url = f"http://{ui_host}:{ui_port}/?session={quote(session.session_id, safe='')}"
-            ok, detail = _send_local_notification(
-                f"AIWatcher: {status['action']}",
-                f"{short_path(session.project_path)} - {status['reason']} - Review: {dashboard_url}",
-                url=dashboard_url,
-            )
+            base_url = _watch_ui_base_url()
+            dashboard_url = f"{base_url}/?session={quote(session.session_id, safe='')}"
+            overlay_url = f"{base_url}/overlay?session={quote(session.session_id, safe='')}"
+            ok = False
+            detail = "not requested"
+            if getattr(args, "notify", False):
+                ok, detail = _send_local_notification(
+                    f"AIWatcher: {status['action']}",
+                    f"{short_path(session.project_path)} - {status['reason']} - Review: {dashboard_url}",
+                    url=dashboard_url,
+                )
+                print(f"  Notification: {'sent' if ok else 'not sent'} ({detail})")
+            overlay_ok = False
+            overlay_detail = "not requested"
+            if getattr(args, "overlay", False):
+                overlay_title = "AIWatcher: start a fresh chat"
+                overlay_body = f"{short_path(session.project_path)} — {status['reason']}"
+                overlay_severity = health.severity if health is not None else "warning"
+                overlay_ok, overlay_detail = _open_handoff_overlay(
+                    overlay_url,
+                    title=overlay_title,
+                    body=overlay_body,
+                    severity=str(overlay_severity),
+                )
+                print(f"  Overlay: {'opened' if overlay_ok else 'not opened'} ({overlay_detail})")
             record_notification_sent(persist_key)
-            print(f"  Notification: {'sent' if ok else 'not sent'} ({detail})")
             try:
                 record_watch_notification(
                     session_id=session.session_id,
                     tool=session.tool,
                     action=str(status["action"]),
                     reason=str(status["reason"]),
-                    sent=ok,
-                    detail=detail,
+                    sent=ok or overlay_ok,
+                    detail=", ".join(
+                        part
+                        for part in [
+                            detail if detail != "not requested" else "",
+                            f"overlay {overlay_detail}" if overlay_detail != "not requested" else "",
+                        ]
+                        if part
+                    ),
                     url=dashboard_url,
                 )
             except OSError:
@@ -3175,16 +3320,7 @@ def _print_watch_status_card(
 
 
 def _outcome_dashboard_url(session_id: str | None = None) -> str:
-    # Mirrors _print_watch_status_card's dashboard_url derivation: prefer
-    # wherever `aiwatcher ui` last actually bound (it falls back off its
-    # default port when busy), only guessing DEFAULT_UI_PORT if no dashboard
-    # has been recorded as having run yet.
-    ui_server = get_ui_server()
-    ui_host = ui_server["host"] if ui_server else "127.0.0.1"
-    if ui_host in ("0.0.0.0", "::", ""):
-        ui_host = "127.0.0.1"
-    ui_port = ui_server["port"] if ui_server else DEFAULT_UI_PORT
-    base = f"http://{ui_host}:{ui_port}/"
+    base = f"{_watch_ui_base_url()}/"
     return f"{base}?session={quote(session_id, safe='')}" if session_id else base
 
 
@@ -5181,6 +5317,19 @@ def command_hook_status(_args: argparse.Namespace) -> int:
             if row.get("session_id"):
                 line += f" | session {row['session_id']}"
             print(line)
+    handoff_decisions = recent_handoff_decisions(limit=5)
+    if handoff_decisions:
+        print("\nRecent handoff bubble decisions")
+        for row in handoff_decisions:
+            expected = row.get("expected_saved_context_tokens")
+            saved = f" | ~{compact_int(expected)} context avoided" if isinstance(expected, int) and expected > 0 else ""
+            line = (
+                f"- {row.get('created_at', 'unknown')} | "
+                f"{row.get('decision', 'unknown')}{saved}"
+            )
+            if row.get("session_id"):
+                line += f" | session {row['session_id']}"
+            print(line)
     print("\nIf an event appears but the tool did not pause, inspect its risk and decision. If no event appears, reload the tool and verify its hook configuration.")
     return 0
 
@@ -5564,6 +5713,11 @@ def build_parser() -> argparse.ArgumentParser:
             "and for outcome-review signals (survival, churn, same-file re-prompt, "
             "cost-per-surviving-change)"
         ),
+    )
+    watch.add_argument(
+        "--overlay",
+        action="store_true",
+        help="Open a local AIWatcher companion overlay when watch recommends a handoff or other action",
     )
     watch.add_argument(
         "--target", choices=sorted(TARGET_LABELS), default="generic",
