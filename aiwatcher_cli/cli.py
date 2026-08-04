@@ -2236,6 +2236,12 @@ def setup_checklist() -> list[dict[str, str]]:
             "status": "optional",
         },
         {
+            "title": "Install Claude dangerous-command gate",
+            "why": "Reviews destructive shell commands before Claude Code runs them; Claude Code CLI only.",
+            "command": "aiwatcher install-claude-command-gate --write --scope user",
+            "status": "optional",
+        },
+        {
             "title": "Turn on ambient watch notifications",
             "why": "While this command is running, AIWatcher can notify on context, loop, runway, or velocity pressure.",
             "command": "aiwatcher watch --notify --interval 60",
@@ -5599,16 +5605,16 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("today", help="Show today's local AI usage").set_defaults(func=command_today)
 
     tools = sub.add_parser("tools", help="Rank AI usage by tool")
-    tools.add_argument("--days", type=int, default=7)
+    tools.add_argument("--days", type=int, default=7, help="How many days of local history to rank")
     tools.set_defaults(func=command_tools)
 
     projects = sub.add_parser("projects", help="Rank AI usage by project")
-    projects.add_argument("--days", type=int, default=7)
-    projects.add_argument("--limit", type=int, default=10)
+    projects.add_argument("--days", type=int, default=7, help="How many days of local history to rank")
+    projects.add_argument("--limit", type=int, default=10, help="Maximum number of projects to show")
     projects.set_defaults(func=command_projects)
 
     report = sub.add_parser("report", help="Show a local weekly AI usage report")
-    report.add_argument("--days", type=int, default=7)
+    report.add_argument("--days", type=int, default=7, help="How many days the report should cover")
     report.set_defaults(func=command_report)
 
     processes = sub.add_parser("processes", help="List local AI runtimes and likely stale/orphaned processes")
@@ -5618,8 +5624,8 @@ def build_parser() -> argparse.ArgumentParser:
     processes.set_defaults(func=command_processes)
 
     sessions = sub.add_parser("sessions", help="Show recent local AI sessions")
-    sessions.add_argument("--days", type=int, default=1)
-    sessions.add_argument("--limit", type=int, default=20)
+    sessions.add_argument("--days", type=int, default=1, help="How many days back to look for sessions")
+    sessions.add_argument("--limit", type=int, default=20, help="Maximum number of sessions to list")
     sessions.add_argument(
         "--search",
         help="Filter by project path, tool, model, or session id; falls back to a rough topic match over changed file names",
@@ -5633,27 +5639,27 @@ def build_parser() -> argparse.ArgumentParser:
     sessions.set_defaults(func=command_sessions)
 
     last = sub.add_parser("last", help="Inspect the latest local AI session")
-    last.add_argument("--days", type=int, default=30)
-    last.add_argument("--session-id")
+    last.add_argument("--days", type=int, default=30, help="How many days back to search for the session")
+    last.add_argument("--session-id", help="Inspect this session instead of the most recent one")
     last.set_defaults(func=command_last)
 
     timeline = sub.add_parser("timeline", help="Show a privacy-safe event timeline for a local AI session")
-    timeline.add_argument("--session-id")
-    timeline.add_argument("--days", type=int, default=30)
-    timeline.add_argument("--limit", type=int, default=30)
+    timeline.add_argument("--session-id", help="Show the timeline for this session instead of the most recent one")
+    timeline.add_argument("--days", type=int, default=30, help="How many days back to search for the session")
+    timeline.add_argument("--limit", type=int, default=30, help="Maximum number of events to show")
     timeline.set_defaults(func=command_timeline)
 
     handoff = sub.add_parser("handoff", help="Create a local handoff capsule for continuing work in a fresh AI session")
-    handoff.add_argument("--session-id")
-    handoff.add_argument("--days", type=int, default=30)
+    handoff.add_argument("--session-id", help="Build the capsule from this session instead of the most recent one")
+    handoff.add_argument("--days", type=int, default=30, help="How many days back to search for the session")
     handoff.add_argument("--target", choices=sorted(TARGET_LABELS), default="generic", help="Format the brief for a target AI tool")
     handoff.add_argument("--copy", action="store_true", help="Copy the next-session brief to the clipboard when supported")
-    handoff.add_argument("--format", choices=["text", "json"], default="text")
+    handoff.add_argument("--format", choices=["text", "json"], default="text", help="Print the capsule as text or JSON")
     handoff.add_argument("--include-prompt-excerpt", action="store_true", help="Include a local prompt excerpt in the capsule output")
     handoff.set_defaults(func=command_handoff)
 
     resume = sub.add_parser("resume", help="Find a local session and create a target-ready continuation brief")
-    resume.add_argument("--session-id")
+    resume.add_argument("--session-id", help="Resume this session instead of searching for one")
     resume.add_argument(
         "--search",
         help="Find the most recent matching project, tool, model, or session id; falls back to a rough topic match over changed file names",
@@ -5663,22 +5669,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--evidence", choices=sorted(VALID_EVIDENCE_OUTCOMES),
         help="Find the most recent session with this inferred outcome evidence, for sessions never manually marked",
     )
-    resume.add_argument("--days", type=int, default=30)
-    resume.add_argument("--target", choices=sorted(TARGET_LABELS), default="generic")
-    resume.add_argument("--copy", action="store_true")
-    resume.add_argument("--format", choices=["text", "json"], default="text")
-    resume.add_argument("--include-prompt-excerpt", action="store_true")
+    resume.add_argument("--days", type=int, default=30, help="How many days back to search for the session")
+    resume.add_argument(
+        "--target", choices=sorted(TARGET_LABELS), default="generic", help="Format the brief for a target AI tool",
+    )
+    resume.add_argument("--copy", action="store_true", help="Copy the continuation brief to the clipboard when supported")
+    resume.add_argument("--format", choices=["text", "json"], default="text", help="Print the brief as text or JSON")
+    resume.add_argument(
+        "--include-prompt-excerpt", action="store_true", help="Include a local prompt excerpt in the brief output",
+    )
     resume.set_defaults(func=command_resume)
 
     journal = sub.add_parser("journal", help="Show a personal local AI work journal")
-    journal.add_argument("--days", type=int, default=1)
+    journal.add_argument("--days", type=int, default=1, help="How many days the journal should cover")
     journal.set_defaults(func=command_journal)
 
     outcome = sub.add_parser("outcome", help="Mark a local AI session as useful, rework, or abandoned")
-    outcome.add_argument("outcome", choices=sorted(VALID_OUTCOMES))
-    outcome.add_argument("--session-id")
-    outcome.add_argument("--note")
-    outcome.add_argument("--days", type=int, default=30)
+    outcome.add_argument("outcome", choices=sorted(VALID_OUTCOMES), help="How the session turned out")
+    outcome.add_argument("--session-id", help="Mark this session instead of the most recent one")
+    outcome.add_argument("--note", help="Optional local note explaining the outcome")
+    outcome.add_argument("--days", type=int, default=30, help="How many days back to search for the session")
     outcome.set_defaults(func=command_outcome)
 
     log_decision = sub.add_parser(
@@ -5694,17 +5704,19 @@ def build_parser() -> argparse.ArgumentParser:
         dest="alternatives_rejected",
         help="An alternative that was considered and rejected; repeat for multiple",
     )
-    log_decision.add_argument("--session-id")
-    log_decision.add_argument("--days", type=int, default=30)
+    log_decision.add_argument("--session-id", help="Attach the note to this session instead of the most recent one")
+    log_decision.add_argument("--days", type=int, default=30, help="How many days back to search for the session")
     log_decision.set_defaults(func=command_log_decision)
 
     watch = sub.add_parser("watch", help="Watch local AI sessions for high-cost or looping behavior")
-    watch.add_argument("--days", type=int, default=1)
-    watch.add_argument("--interval", type=int, default=15)
+    watch.add_argument("--days", type=int, default=1, help="How many days of sessions each scan considers")
+    watch.add_argument("--interval", type=int, default=15, help="Seconds to wait between scans when not using --once")
     watch.add_argument("--once", action="store_true", help="Run one scan and exit")
-    watch.add_argument("--cost-threshold", type=float, default=5.0)
-    watch.add_argument("--calls-threshold", type=int, default=250)
-    watch.add_argument("--tokens-threshold", type=int, default=500_000)
+    watch.add_argument(
+        "--cost-threshold", type=float, default=5.0, help="Flag a session above this API-equivalent cost, in dollars",
+    )
+    watch.add_argument("--calls-threshold", type=int, default=250, help="Flag a session above this many model calls")
+    watch.add_argument("--tokens-threshold", type=int, default=500_000, help="Flag a session above this many tokens")
     watch.add_argument(
         "--notify",
         action="store_true",
@@ -5726,22 +5738,24 @@ def build_parser() -> argparse.ArgumentParser:
     watch.set_defaults(func=command_watch)
 
     run = sub.add_parser("run", help="Run a command and summarize the latest local AI session afterwards")
-    run.add_argument("command", nargs=argparse.REMAINDER)
+    run.add_argument(
+        "command", nargs=argparse.REMAINDER, help="The command to run, after `--`; for example `-- npm test`",
+    )
     run.set_defaults(func=command_run)
 
     preflight = sub.add_parser("preflight", help="Review a prompt for local cost, scope, and safety risk")
-    preflight.add_argument("prompt", nargs="*")
-    preflight.add_argument("--text")
-    preflight.add_argument("--tool", default="agent")
-    preflight.add_argument("--cwd")
-    preflight.add_argument("--fail-on-high", action="store_true")
+    preflight.add_argument("prompt", nargs="*", help="The prompt to review; quote it, or use --text")
+    preflight.add_argument("--text", help="The prompt to review, as a single string")
+    preflight.add_argument("--tool", default="agent", help="Which AI tool the prompt is headed for")
+    preflight.add_argument("--cwd", help="Project directory to judge the prompt against; defaults to the current one")
+    preflight.add_argument("--fail-on-high", action="store_true", help="Exit non-zero when the prompt is high risk")
     preflight.set_defaults(func=command_preflight)
 
     for agent in ("codex", "claude"):
         agent_parser = sub.add_parser(agent, help=f"Preflight a prompt, then launch {agent}")
-        agent_parser.add_argument("prompt", nargs="*")
-        agent_parser.add_argument("--text")
-        agent_parser.add_argument("--cwd")
+        agent_parser.add_argument("prompt", nargs="*", help="The prompt to preflight and send; quote it, or use --text")
+        agent_parser.add_argument("--text", help="The prompt to preflight and send, as a single string")
+        agent_parser.add_argument("--cwd", help=f"Directory to run {agent} in; defaults to the current one")
         agent_parser.add_argument("--binary", help=f"Path to the real {agent} binary")
         agent_parser.add_argument("--yes", action="store_true", help="Launch even when AIWatcher marks the prompt high risk")
         agent_parser.add_argument("--apply-suggestion", action="store_true", help="Launch the safer prompt suggested by AIWatcher")
@@ -5750,15 +5764,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     install_claude_hook = sub.add_parser("install-claude-hook", help="Print or install a Claude Code prompt preflight hook")
     install_claude_hook.add_argument("--write", action="store_true", help="Write the hook into Claude settings")
-    install_claude_hook.add_argument("--scope", choices=["project", "user"], default="project")
-    install_claude_hook.add_argument("--project-dir")
+    install_claude_hook.add_argument(
+        "--scope", choices=["project", "user"], default="project",
+        help="Write to this project's Claude settings or your user-level settings",
+    )
+    install_claude_hook.add_argument("--project-dir", help="Project to target with --scope project; defaults to the current directory")
     install_claude_hook.add_argument("--command", help="AIWatcher command to put in Claude settings")
     install_claude_hook.add_argument("--gate", action="store_true", help="Open the local Prompt Gate decision screen for risky prompts")
     install_claude_hook.set_defaults(func=command_install_claude_hook)
 
     uninstall_claude_hook = sub.add_parser("uninstall-claude-hook", help="Remove the AIWatcher Claude Code preflight hook")
-    uninstall_claude_hook.add_argument("--scope", choices=["project", "user"], default="project")
-    uninstall_claude_hook.add_argument("--project-dir")
+    uninstall_claude_hook.add_argument(
+        "--scope", choices=["project", "user"], default="project",
+        help="Remove from this project's Claude settings or your user-level settings",
+    )
+    uninstall_claude_hook.add_argument("--project-dir", help="Project to target with --scope project; defaults to the current directory")
     uninstall_claude_hook.set_defaults(func=command_uninstall_claude_hook)
 
     install_command_gate = sub.add_parser(
@@ -5766,16 +5786,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print or install the Claude Code dangerous-command gate (PreToolUse, S-19). Claude Code CLI only.",
     )
     install_command_gate.add_argument("--write", action="store_true", help="Write the hook into Claude settings")
-    install_command_gate.add_argument("--scope", choices=["project", "user"], default="project")
-    install_command_gate.add_argument("--project-dir")
+    install_command_gate.add_argument(
+        "--scope", choices=["project", "user"], default="project",
+        help="Write to this project's Claude settings or your user-level settings",
+    )
+    install_command_gate.add_argument("--project-dir", help="Project to target with --scope project; defaults to the current directory")
     install_command_gate.add_argument("--command", help="AIWatcher command to put in Claude settings")
     install_command_gate.set_defaults(func=command_install_claude_command_gate)
 
     uninstall_command_gate = sub.add_parser(
         "uninstall-claude-command-gate", help="Remove the AIWatcher Claude Code dangerous-command gate",
     )
-    uninstall_command_gate.add_argument("--scope", choices=["project", "user"], default="project")
-    uninstall_command_gate.add_argument("--project-dir")
+    uninstall_command_gate.add_argument(
+        "--scope", choices=["project", "user"], default="project",
+        help="Remove from this project's Claude settings or your user-level settings",
+    )
+    uninstall_command_gate.add_argument("--project-dir", help="Project to target with --scope project; defaults to the current directory")
     uninstall_command_gate.set_defaults(func=command_uninstall_claude_command_gate)
 
     install_decision_log = sub.add_parser(
@@ -5793,40 +5819,54 @@ def build_parser() -> argparse.ArgumentParser:
 
     install_codex_hook = sub.add_parser("install-codex-hook", help="Print or install a native Codex prompt preflight hook")
     install_codex_hook.add_argument("--write", action="store_true", help="Write the hook into Codex hooks.json")
-    install_codex_hook.add_argument("--scope", choices=["project", "user"], default="user")
-    install_codex_hook.add_argument("--project-dir")
+    install_codex_hook.add_argument(
+        "--scope", choices=["project", "user"], default="user",
+        help="Write to this project's Codex hooks or your user-level hooks",
+    )
+    install_codex_hook.add_argument("--project-dir", help="Project to target with --scope project; defaults to the current directory")
     install_codex_hook.add_argument("--command", help="AIWatcher command to put in Codex hooks")
     install_codex_hook.add_argument("--gate", action="store_true", help="Open the local Prompt Gate decision screen for risky prompts")
     install_codex_hook.set_defaults(func=command_install_codex_hook)
 
     uninstall_codex_hook = sub.add_parser("uninstall-codex-hook", help="Remove the native AIWatcher Codex prompt hook")
-    uninstall_codex_hook.add_argument("--scope", choices=["project", "user"], default="user")
-    uninstall_codex_hook.add_argument("--project-dir")
+    uninstall_codex_hook.add_argument(
+        "--scope", choices=["project", "user"], default="user",
+        help="Remove from this project's Codex hooks or your user-level hooks",
+    )
+    uninstall_codex_hook.add_argument("--project-dir", help="Project to target with --scope project; defaults to the current directory")
     uninstall_codex_hook.set_defaults(func=command_uninstall_codex_hook)
 
     install_cursor_hook = sub.add_parser("install-cursor-hook", help="Print or install a native Cursor prompt preflight hook")
     install_cursor_hook.add_argument("--write", action="store_true", help="Write the hook into Cursor hooks.json")
-    install_cursor_hook.add_argument("--scope", choices=["project", "user"], default="user")
-    install_cursor_hook.add_argument("--project-dir")
+    install_cursor_hook.add_argument(
+        "--scope", choices=["project", "user"], default="user",
+        help="Write to this project's Cursor hooks or your user-level hooks",
+    )
+    install_cursor_hook.add_argument("--project-dir", help="Project to target with --scope project; defaults to the current directory")
     install_cursor_hook.add_argument("--command", help="AIWatcher command to put in Cursor hooks")
     install_cursor_hook.add_argument("--gate", action="store_true", help="Open the local Prompt Gate decision screen for risky prompts")
     install_cursor_hook.set_defaults(func=command_install_cursor_hook)
 
     uninstall_cursor_hook = sub.add_parser("uninstall-cursor-hook", help="Remove the native AIWatcher Cursor prompt hook")
-    uninstall_cursor_hook.add_argument("--scope", choices=["project", "user"], default="user")
-    uninstall_cursor_hook.add_argument("--project-dir")
+    uninstall_cursor_hook.add_argument(
+        "--scope", choices=["project", "user"], default="user",
+        help="Remove from this project's Cursor hooks or your user-level hooks",
+    )
+    uninstall_cursor_hook.add_argument("--project-dir", help="Project to target with --scope project; defaults to the current directory")
     uninstall_cursor_hook.set_defaults(func=command_uninstall_cursor_hook)
 
     install_codex_wrapper = sub.add_parser("install-codex-wrapper", help="Print or install a shell wrapper that preflights Codex prompts")
     install_codex_wrapper.add_argument("--write", action="store_true", help="Write the wrapper into your shell rc file")
-    install_codex_wrapper.add_argument("--shell-rc", default="~/.zshrc")
+    install_codex_wrapper.add_argument("--shell-rc", default="~/.zshrc", help="Shell rc file to write the wrapper into")
     install_codex_wrapper.add_argument("--codex-binary", help="Path to the real Codex binary")
     install_codex_wrapper.add_argument("--command", help="AIWatcher command to call from the shell function")
-    install_codex_wrapper.add_argument("--function-name", default="codex")
+    install_codex_wrapper.add_argument(
+        "--function-name", default="codex", help="Shell function name to define; shadows the real binary by default",
+    )
     install_codex_wrapper.set_defaults(func=command_install_codex_wrapper)
 
     uninstall_codex_wrapper = sub.add_parser("uninstall-codex-wrapper", help="Remove the AIWatcher Codex shell wrapper")
-    uninstall_codex_wrapper.add_argument("--shell-rc", default="~/.zshrc")
+    uninstall_codex_wrapper.add_argument("--shell-rc", default="~/.zshrc", help="Shell rc file to remove the wrapper from")
     uninstall_codex_wrapper.set_defaults(func=command_uninstall_codex_wrapper)
 
     sub.add_parser("doctor", help="Check local tool detection and AIWatcher integrations").set_defaults(func=command_doctor)
@@ -5835,15 +5875,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("mcp", help="Run AIWatcher Local as a stdio MCP server").set_defaults(func=command_mcp)
 
     export = sub.add_parser("export", help="Export local session summaries")
-    export.add_argument("--format", default="json", choices=["json"])
+    export.add_argument("--format", default="json", choices=["json"], help="Output format")
     export.add_argument("--level", default="sessions", choices=["sessions", "events"], help="Export session summaries or privacy-safe event hashes")
     export.add_argument("--since", help="ISO date/datetime, for example 2026-06-01")
-    export.add_argument("--days", type=int, default=30)
+    export.add_argument("--days", type=int, default=30, help="How many days to export when --since is not given")
     export.set_defaults(func=command_export)
 
     ui = sub.add_parser("ui", help="Run the local-only AIWatcher dashboard")
-    ui.add_argument("--host", default="127.0.0.1")
-    ui.add_argument("--port", type=int, default=DEFAULT_UI_PORT)
+    ui.add_argument("--host", default="127.0.0.1", help="Address to bind; stays on loopback by default")
+    ui.add_argument("--port", type=int, default=DEFAULT_UI_PORT, help="Port to serve the dashboard on")
     ui.add_argument("--port-attempts", type=int, default=20, help="How many sequential ports to try when the requested port is busy")
     ui.add_argument("--no-port-fallback", action="store_true", help="Fail instead of trying the next available port")
     ui.add_argument("--restart", action="store_true", help="Stop an existing local process on the requested port before starting")

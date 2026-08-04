@@ -115,7 +115,7 @@ python -m aiwatcher_cli tools --days 7
 python -m aiwatcher_cli projects --days 7
 python -m aiwatcher_cli report --days 7
 python -m aiwatcher_cli sessions --days 1
-python -m aiwatcher_cli sessions --search orcha --days 30
+python -m aiwatcher_cli sessions --search <your-project> --days 30
 python -m aiwatcher_cli export --format json --days 30
 python -m aiwatcher_cli export --format json --level events --days 7
 python -m aiwatcher_cli ui
@@ -334,7 +334,7 @@ python -m aiwatcher_cli tools --days 7
 python -m aiwatcher_cli projects --days 7 --limit 5
 python -m aiwatcher_cli report --days 7
 python -m aiwatcher_cli sessions --days 1 --limit 5
-python -m aiwatcher_cli sessions --search orcha --days 30
+python -m aiwatcher_cli sessions --search aiwatcher --days 30
 python -m aiwatcher_cli resume --target codex --copy
 python -m aiwatcher_cli log-decision "test decision" --reasoning "why" --rejected "alternative"
 python -m aiwatcher_cli install-claude-decision-log
