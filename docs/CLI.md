@@ -435,6 +435,7 @@ aiwatcher watch [--days DAYS] [--interval INTERVAL] [--once]
                 [--cost-threshold COST_THRESHOLD]
                 [--calls-threshold CALLS_THRESHOLD]
                 [--tokens-threshold TOKENS_THRESHOLD] [--notify]
+                [--overlay]
                 [--target {claude,codex,cursor,generic,vscode}]
 ```
 
@@ -454,6 +455,7 @@ aiwatcher watch --interval 30 --notify
 | `--calls-threshold` | integer | `250` | Flag a session above this many model calls |
 | `--tokens-threshold` | integer | `500000` | Flag a session above this many tokens |
 | `--notify` | flag |  | Send a best-effort local OS notification when watch recommends action, and for outcome-review signals (survival, churn, same-file re-prompt, cost-per-surviving-change) |
+| `--overlay` | flag |  | Open a local AIWatcher companion overlay when watch recommends a handoff or other action |
 | `--target` | `claude`, `codex`, `cursor`, `generic`, `vscode` | `generic` | Format the auto-generated CRITICAL-context handoff capsule for this AI tool |
 
 ### `aiwatcher processes`

@@ -29,6 +29,9 @@ from aiwatcher_cli.local_state import COMMAND_GATE_BLOCKED_DECISIONS  # noqa: E4
 
 OUTPUT_PATH = REPO_ROOT / "docs" / "CLI.md"
 
+# Usage lines wrap here regardless of the terminal the generator runs in.
+USAGE_WIDTH = 78
+
 # Ordered command groups. Every subparser must appear in exactly one group;
 # anything unlisted lands in "Other" and the generator warns, so a newly added
 # command cannot silently go undocumented.
@@ -316,9 +319,17 @@ falls back to exactly the policy above, so nothing is skipped.""",
 
 
 def _format_usage(parser: argparse.ArgumentParser) -> str:
-    """Usage line without the `usage: ` prefix, the noisy `-h`, or its indentation."""
+    """Usage line without the `usage: ` prefix, the noisy `-h`, or its indentation.
+
+    Formats at a fixed width rather than calling parser.format_usage(), which
+    wraps to the caller's terminal size. Otherwise the same commit regenerates
+    differently on a wide terminal and the staleness check fails for a reason
+    that has nothing to do with the CLI.
+    """
+    formatter = argparse.HelpFormatter(prog=parser.prog, width=USAGE_WIDTH)
+    formatter.add_usage(parser.usage, parser._actions, parser._mutually_exclusive_groups)  # noqa: SLF001
     prefix = "usage: "
-    raw = parser.format_usage().rstrip()
+    raw = formatter.format_help().rstrip()
     dedented = [
         line[len(prefix):] if line.startswith(prefix) else line.removeprefix(" " * len(prefix))
         for line in raw.splitlines()

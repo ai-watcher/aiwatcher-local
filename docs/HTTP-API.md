@@ -28,8 +28,9 @@ Specifics worth knowing before you build against it:
   `localhost`. The check compares the parsed hostname exactly, so lookalike
   hosts such as `http://127.0.0.1.evil.com` are rejected. The server never
   answers with `Access-Control-Allow-Origin: *`.
-- **Methods.** Only `/api/preflight` and `/api/outcome` accept `POST`. Any other
-  path returns `404` before the request body is read.
+- **Methods.** `POST` is accepted only on `/api/preflight`, `/api/outcome`, and
+  the internal `/api/handoff-decision`. Any other path returns `404` before the
+  request body is read.
 - **Content type.** `POST` requires `Content-Type: application/json`, else `415`.
 - **Body size.** Requests larger than 64 KiB return `413`.
 
@@ -109,13 +110,17 @@ than appending, so the call is idempotent.
 
 ## Internal endpoints
 
-The dashboard also serves the `GET` endpoints below. They exist to render the
-UI, their shapes track whatever the current dashboard needs, and they are **not
+The dashboard also serves the endpoints below. They exist to render the UI,
+their shapes track whatever the current dashboard needs, and they are **not
 supported for external callers** — treat them as private and expect them to
 change without a deprecation period.
 
-`/api/health`, `/api/summary`, `/api/sessions`, `/api/session`, `/api/project`,
-`/api/report`, `/api/journal`, `/api/handoff`, `/api/context-health`
+`GET` — `/api/health`, `/api/summary`, `/api/sessions`, `/api/session`,
+`/api/project`, `/api/report`, `/api/journal`, `/api/handoff`,
+`/api/context-health`
+
+`POST` — `/api/handoff-decision`, which records which action you took on a
+handoff bubble. It is called by the dashboard and the native overlay only.
 
 If you need one of these programmatically, prefer the equivalent CLI command
 with `--format json` where available, or

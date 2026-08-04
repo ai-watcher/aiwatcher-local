@@ -3743,12 +3743,15 @@ class HttpApiDocsTests(unittest.TestCase):
         return get_routes, post
 
     def test_supported_endpoints_still_accept_post(self):
+        # Supported endpoints must not disappear -- removing one is a breaking
+        # change for the extensions that call it. New POST routes are allowed;
+        # test_every_server_route_is_accounted_for_in_the_doc forces those to be
+        # classified as supported or internal before they can land.
         _, post = self.server_routes()
         self.assertEqual(
-            post,
-            self.SUPPORTED,
-            "docs/HTTP-API.md documents these as the supported POST surface. "
-            "If the server's POST routes changed, update the doc deliberately.",
+            sorted(self.SUPPORTED - post),
+            [],
+            "docs/HTTP-API.md promises these endpoints accept POST, but the server no longer routes them.",
         )
 
     def test_every_server_route_is_accounted_for_in_the_doc(self):
@@ -3865,6 +3868,30 @@ class CliReferenceDocsTests(unittest.TestCase):
             [],
             "These MCP tools are handled by tools/call but never advertised, so no agent can discover them.",
         )
+
+    def test_output_does_not_depend_on_terminal_width(self):
+        # argparse wraps usage to the caller's terminal size. If the generator
+        # inherited that, regenerating on a wide terminal would produce a
+        # different file and fail the staleness check for no real reason.
+        generator = self.load_generator()
+        original = os.environ.get("COLUMNS")
+        renders = {}
+        try:
+            for width in ("40", "80", "200"):
+                os.environ["COLUMNS"] = width
+                renders[width] = generator.render()
+        finally:
+            if original is None:
+                os.environ.pop("COLUMNS", None)
+            else:
+                os.environ["COLUMNS"] = original
+
+        self.assertEqual(
+            renders["40"],
+            renders["200"],
+            "Generated output changes with terminal width; usage formatting is not pinned.",
+        )
+        self.assertEqual(renders["80"], renders["200"])
 
     def test_no_example_merely_restates_the_command(self):
         # An example identical to `aiwatcher <command>` duplicates the usage line
