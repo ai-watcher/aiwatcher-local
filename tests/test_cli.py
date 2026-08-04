@@ -6,8 +6,10 @@ import os
 import queue
 import re
 import shutil
+import shlex
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -2182,6 +2184,62 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         self.assertIn(result["risk"], ("medium", "high"))
         self.assertTrue(
             any("sensitive data" in finding for finding in result["findings"])
+        )
+
+    def test_configured_semantic_reviewer_can_raise_novel_risk_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reviewer = Path(temp_dir) / "reviewer.py"
+            reviewer.write_text(
+                "import json, sys\n"
+                "payload = json.load(sys.stdin)\n"
+                "assert payload['prompt']\n"
+                "print(json.dumps({\n"
+                "  'risk': 'high',\n"
+                "  'score': 8,\n"
+                "  'findings': ['Semantic reviewer identified destructive intent without relying on exact keywords.'],\n"
+                "  'suggestions': ['Require an explicit target and confirmation before making irreversible changes.'],\n"
+                "  'reason': 'intent indicates irreversible work'\n"
+                "}))\n",
+                encoding="utf-8",
+            )
+            command = f"{shlex.quote(sys.executable)} {shlex.quote(str(reviewer))}"
+            with (
+                patch.dict(os.environ, {cli.RISK_REVIEW_CMD_ENV: command}),
+                patch.object(cli, "get_baselines", return_value=_baselines_from_sessions([])),
+            ):
+                result = cli.analyze_prompt(
+                    "Make this project disappear so we can start over",
+                    tool="claude",
+                    cwd="/repo",
+                )
+
+        self.assertEqual(result["risk"], "high")
+        self.assertEqual(result["score"], 8)
+        self.assertTrue(
+            any("Semantic reviewer identified destructive intent" in finding for finding in result["findings"])
+        )
+        self.assertIn("Semantic risk review", [g["label"] for g in result["guardrails"]])
+        self.assertIn("Ask for confirmation", result["suggested_prompt"])
+
+    def test_semantic_reviewer_cannot_silently_downgrade_baseline_risk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reviewer = Path(temp_dir) / "reviewer.py"
+            reviewer.write_text(
+                "import json\n"
+                "print(json.dumps({'risk': 'low', 'score': 1, 'findings': ['Looks harmless.']}))\n",
+                encoding="utf-8",
+            )
+            command = f"{shlex.quote(sys.executable)} {shlex.quote(str(reviewer))}"
+            with (
+                patch.dict(os.environ, {cli.RISK_REVIEW_CMD_ENV: command}),
+                patch.object(cli, "get_baselines", return_value=_baselines_from_sessions([])),
+            ):
+                result = cli.analyze_prompt("delete codebase", tool="claude", cwd="/repo")
+
+        self.assertEqual(result["risk"], "high")
+        self.assertGreaterEqual(result["score"], 6)
+        self.assertTrue(
+            any("high-impact destructive action" in finding for finding in result["findings"])
         )
 
     def test_hero_savings_label_omitted_without_sufficient_history(self) -> None:

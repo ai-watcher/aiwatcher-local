@@ -110,6 +110,9 @@ PROMPT_GATE_TIMEOUT_SECONDS = 180
 PROMPT_GATE_HOST_TIMEOUT_SECONDS = PROMPT_GATE_TIMEOUT_SECONDS + 30
 CODEX_WRAPPER_MARKER_START = "# >>> aiwatcher codex wrapper >>>"
 CODEX_WRAPPER_MARKER_END = "# <<< aiwatcher codex wrapper <<<"
+RISK_REVIEW_CMD_ENV = "AIWATCHER_RISK_REVIEW_CMD"
+RISK_REVIEW_TIMEOUT_ENV = "AIWATCHER_RISK_REVIEW_TIMEOUT_SECONDS"
+RISK_REVIEW_ALLOW_LOWERING_ENV = "AIWATCHER_RISK_REVIEW_ALLOW_LOWERING"
 
 
 class LocalThreadingHTTPServer(ThreadingHTTPServer):
@@ -1033,6 +1036,145 @@ def _is_generated_brief(text: str) -> bool:
     return _consume_brief_token_safely(token, "execution_brief")
 
 
+def _risk_for_score(score: int) -> str:
+    if score >= 6:
+        return "high"
+    if score >= 3:
+        return "medium"
+    return "low"
+
+
+def _risk_rank(risk: str) -> int:
+    return {"low": 0, "medium": 1, "high": 2}.get(risk, 0)
+
+
+def _run_external_risk_reviewer(
+    *,
+    prompt: str,
+    tool: str,
+    cwd: str | None,
+    score: int,
+    risk: str,
+    findings: list[str],
+    suggestions: list[str],
+) -> dict[str, object] | None:
+    """Optionally ask a user-configured semantic reviewer to re-score risk.
+
+    OSS stays local/offline by default. If a developer or Enterprise deployment
+    explicitly sets AIWATCHER_RISK_REVIEW_CMD, AIWatcher sends the prompt and
+    current deterministic assessment to that command over stdin and expects a
+    small JSON object back. This supports local models such as Ollama, an
+    internal policy model, or a test shim without hardwiring any vendor.
+    """
+    command = os.environ.get(RISK_REVIEW_CMD_ENV, "").strip()
+    if not command:
+        return None
+    try:
+        timeout = float(os.environ.get(RISK_REVIEW_TIMEOUT_ENV, "3"))
+    except ValueError:
+        timeout = 3.0
+    payload = {
+        "prompt": prompt,
+        "tool": tool,
+        "cwd": cwd,
+        "baseline": {
+            "risk": risk,
+            "score": score,
+            "findings": findings,
+            "suggestions": suggestions,
+        },
+        "instructions": (
+            "Return JSON only. Fields: risk low|medium|high, score 0-10, "
+            "findings array, suggestions array, reason string. Identify broad, "
+            "destructive, security-weakening, data-exposure, production, and "
+            "runaway-cost intent even when phrased without obvious keywords."
+        ),
+    }
+    try:
+        completed = subprocess.run(
+            shlex.split(command),
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=max(0.2, timeout),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        parsed = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    try:
+        reviewer_score = int(parsed.get("score", score))
+    except (TypeError, ValueError):
+        reviewer_score = score
+    reviewer_score = max(0, min(10, reviewer_score))
+    reviewer_risk = str(parsed.get("risk") or _risk_for_score(reviewer_score)).lower()
+    if reviewer_risk not in {"low", "medium", "high"}:
+        reviewer_risk = _risk_for_score(reviewer_score)
+    reviewer_findings = [
+        str(item).strip()
+        for item in parsed.get("findings", [])
+        if str(item).strip()
+    ] if isinstance(parsed.get("findings"), list) else []
+    reviewer_suggestions = [
+        str(item).strip()
+        for item in parsed.get("suggestions", [])
+        if str(item).strip()
+    ] if isinstance(parsed.get("suggestions"), list) else []
+    return {
+        "risk": reviewer_risk,
+        "score": reviewer_score,
+        "findings": reviewer_findings,
+        "suggestions": reviewer_suggestions,
+        "reason": str(parsed.get("reason", "")).strip(),
+        "reviewer": command,
+    }
+
+
+def _apply_external_risk_review(
+    *,
+    prompt: str,
+    tool: str,
+    cwd: str | None,
+    score: int,
+    risk: str,
+    findings: list[str],
+    suggestions: list[str],
+) -> tuple[int, str, dict[str, object] | None]:
+    review = _run_external_risk_reviewer(
+        prompt=prompt,
+        tool=tool,
+        cwd=cwd,
+        score=score,
+        risk=risk,
+        findings=findings,
+        suggestions=suggestions,
+    )
+    if not review:
+        return score, risk, None
+
+    reviewer_score = int(review["score"])
+    reviewer_risk = str(review["risk"])
+    allow_lowering = os.environ.get(RISK_REVIEW_ALLOW_LOWERING_ENV, "").lower() in {"1", "true", "yes"}
+    should_raise = reviewer_score > score or _risk_rank(reviewer_risk) > _risk_rank(risk)
+    should_lower = allow_lowering and (reviewer_score < score or _risk_rank(reviewer_risk) < _risk_rank(risk))
+    if should_raise or should_lower:
+        score = reviewer_score
+        risk = reviewer_risk
+    else:
+        # Never let an external reviewer silently downgrade deterministic
+        # safety findings unless the user explicitly opts into that behavior.
+        score = max(score, reviewer_score)
+        risk = _risk_for_score(score)
+    return score, risk, review
+
+
 def analyze_prompt(
     prompt: str,
     *,
@@ -1215,11 +1357,44 @@ def analyze_prompt(
         findings.append("No obvious cost or safety risk found from prompt text alone.")
         suggestions.append("Keep the task scoped and ask for a brief plan before large edits.")
 
-    risk = "low"
-    if score >= 6:
-        risk = "high"
-    elif score >= 3:
-        risk = "medium"
+    risk = _risk_for_score(score)
+    semantic_review = None
+    if score > 0 or os.environ.get(RISK_REVIEW_CMD_ENV, "").strip():
+        score, risk, semantic_review = _apply_external_risk_review(
+            prompt=text,
+            tool=tool,
+            cwd=cwd,
+            score=score,
+            risk=risk,
+            findings=findings,
+            suggestions=suggestions,
+        )
+        if semantic_review:
+            if (
+                semantic_review.get("findings")
+                and findings == ["No obvious cost or safety risk found from prompt text alone."]
+            ):
+                findings = []
+                suggestions = []
+            if semantic_review.get("findings"):
+                for finding in semantic_review["findings"]:
+                    if finding not in findings:
+                        findings.append(str(finding))
+            elif semantic_review.get("reason"):
+                reason = str(semantic_review["reason"])
+                findings.append(f"Semantic risk reviewer: {reason}")
+            if semantic_review.get("suggestions"):
+                for suggestion in semantic_review["suggestions"]:
+                    if suggestion not in suggestions:
+                        suggestions.append(str(suggestion))
+            if (score >= 3 or risk in {"medium", "high"}) and not any(
+                item.get("label") == "Semantic risk review" for item in guardrails
+            ):
+                guardrails.append({"icon": "\U0001F9E0", "label": "Semantic risk review"})
+            if score >= 3:
+                needs_checkpoint = True
+            if score >= 6:
+                sensitive_or_destructive = True
 
     # text already carries its own Task/Execution approach/Completion report
     # shell (just not a *verified* one, or _is_generated_brief above would
@@ -1241,6 +1416,7 @@ def analyze_prompt(
         "findings": findings,
         "suggestions": suggestions,
         "guardrails": guardrails,
+        "semantic_review": semantic_review or {},
         "suggested_prompt": safer_prompt,
         "estimated_impact": (
             estimate_prompt_savings(text, risk_score=score, tool=tool, cwd=cwd)
