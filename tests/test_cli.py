@@ -11,8 +11,10 @@ import queue
 import re
 import shlex
 import shutil
+import shlex
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -2017,7 +2019,7 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         self.assertGreaterEqual(original["score"], 8)
         self.assertEqual(original["risk"], "high")
         self.assertLess(selected["score"], original["score"])
-        self.assertEqual(selected["risk"], "low")
+        self.assertNotEqual(selected["risk"], "high")
 
     def test_guardrail_chips_match_triggered_findings(self) -> None:
         with patch.object(cli, "sessions_since", return_value=[]):
@@ -2097,6 +2099,7 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
     def test_high_impact_destructive_prompt_is_high_risk(self) -> None:
         examples = [
             "delete the repo",
+            "delete codebase",
             "wipe the project folder",
             "remove all code from the repository",
             "drop the production database",
@@ -2118,17 +2121,38 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
             self.assertIn("Confirm before destructive changes", [g["label"] for g in result["guardrails"]])
 
     def test_high_impact_destructive_heuristic_avoids_narrow_cleanup(self) -> None:
+        examples = [
+            "Remove the obsolete screenshot from the auth docs",
+            "delete dead code in one test file",
+            "clear cache",
+            "remove old code from utils.py",
+        ]
+
+        with patch.object(cli, "sessions_since", return_value=[]):
+            results = [
+                cli.analyze_prompt(example, tool="codex", cwd="/repo")
+                for example in examples
+            ]
+
+        for result in results:
+            self.assertFalse(
+                any("high-impact destructive action" in finding for finding in result["findings"])
+            )
+            self.assertNotEqual(result["risk"], "high")
+
+    def test_guarded_high_impact_destructive_prompt_still_gets_attention(self) -> None:
         with patch.object(cli, "sessions_since", return_value=[]):
             result = cli.analyze_prompt(
-                "Remove the obsolete screenshot from the auth docs",
+                "Inspect first and ask for confirmation before deleting the repository",
                 tool="codex",
                 cwd="/repo",
             )
 
-        self.assertFalse(
-            any("high-impact destructive action" in finding for finding in result["findings"])
+        self.assertEqual(result["risk"], "medium")
+        self.assertGreaterEqual(result["score"], 3)
+        self.assertTrue(
+            any("explicit confirmation boundary" in finding for finding in result["findings"])
         )
-        self.assertNotEqual(result["risk"], "high")
 
     def test_security_weakening_heuristic_avoids_docs_ui_and_test_cleanup(self) -> None:
         with patch.object(cli, "sessions_since", return_value=[]):
@@ -2165,6 +2189,62 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         self.assertIn(result["risk"], ("medium", "high"))
         self.assertTrue(
             any("sensitive data" in finding for finding in result["findings"])
+        )
+
+    def test_configured_semantic_reviewer_can_raise_novel_risk_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reviewer = Path(temp_dir) / "reviewer.py"
+            reviewer.write_text(
+                "import json, sys\n"
+                "payload = json.load(sys.stdin)\n"
+                "assert payload['prompt']\n"
+                "print(json.dumps({\n"
+                "  'risk': 'high',\n"
+                "  'score': 8,\n"
+                "  'findings': ['Semantic reviewer identified destructive intent without relying on exact keywords.'],\n"
+                "  'suggestions': ['Require an explicit target and confirmation before making irreversible changes.'],\n"
+                "  'reason': 'intent indicates irreversible work'\n"
+                "}))\n",
+                encoding="utf-8",
+            )
+            command = f"{shlex.quote(sys.executable)} {shlex.quote(str(reviewer))}"
+            with (
+                patch.dict(os.environ, {cli.RISK_REVIEW_CMD_ENV: command}),
+                patch.object(cli, "get_baselines", return_value=_baselines_from_sessions([])),
+            ):
+                result = cli.analyze_prompt(
+                    "Make this project disappear so we can start over",
+                    tool="claude",
+                    cwd="/repo",
+                )
+
+        self.assertEqual(result["risk"], "high")
+        self.assertEqual(result["score"], 8)
+        self.assertTrue(
+            any("Semantic reviewer identified destructive intent" in finding for finding in result["findings"])
+        )
+        self.assertIn("Semantic risk review", [g["label"] for g in result["guardrails"]])
+        self.assertIn("Ask for confirmation", result["suggested_prompt"])
+
+    def test_semantic_reviewer_cannot_silently_downgrade_baseline_risk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reviewer = Path(temp_dir) / "reviewer.py"
+            reviewer.write_text(
+                "import json\n"
+                "print(json.dumps({'risk': 'low', 'score': 1, 'findings': ['Looks harmless.']}))\n",
+                encoding="utf-8",
+            )
+            command = f"{shlex.quote(sys.executable)} {shlex.quote(str(reviewer))}"
+            with (
+                patch.dict(os.environ, {cli.RISK_REVIEW_CMD_ENV: command}),
+                patch.object(cli, "get_baselines", return_value=_baselines_from_sessions([])),
+            ):
+                result = cli.analyze_prompt("delete codebase", tool="claude", cwd="/repo")
+
+        self.assertEqual(result["risk"], "high")
+        self.assertGreaterEqual(result["score"], 6)
+        self.assertTrue(
+            any("high-impact destructive action" in finding for finding in result["findings"])
         )
 
     def test_hero_savings_label_omitted_without_sufficient_history(self) -> None:

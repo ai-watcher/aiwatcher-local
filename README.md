@@ -549,6 +549,21 @@ for same-machine callers, alongside `POST /api/outcome`. Request and response
 shapes, the origin and size limits, and which endpoints are internal and may
 change are in the [HTTP API reference](docs/HTTP-API.md).
 
+Optional semantic risk review: by default AIWatcher scores prompts locally with
+fast deterministic rules and makes no LLM calls. If you want a local model or
+internal policy service to double-check intent, set:
+
+```sh
+export AIWATCHER_RISK_REVIEW_CMD='python /path/to/risk_reviewer.py'
+```
+
+AIWatcher sends that command JSON on stdin with the prompt, tool, cwd, and
+baseline score; the command returns JSON with `risk`, `score`, `findings`, and
+`suggestions`. This lets teams plug in Ollama, a private model, or an
+Enterprise policy scorer without hardcoding every destructive phrase. External
+reviewers can raise risk by default; lowering deterministic safety findings
+requires explicitly setting `AIWATCHER_RISK_REVIEW_ALLOW_LOWERING=1`.
+
 ## What It Reads
 
 - **Claude Code:** `~/.claude/projects/**/*.jsonl`, normalized to the git
