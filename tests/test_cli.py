@@ -806,7 +806,9 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertIn("Recommended: create handoff capsule now", rendered)
         self.assertIn("generating a handoff capsule now", rendered)
         self.assertIn("AIWatcher handoff capsule", rendered)
-        self.assertIn("Paste this as the first prompt in a fresh AI coding session.", rendered)
+        self.assertIn("AIWatcher fresh-session handoff", rendered)
+        self.assertIn("Do not assume access to the previous chat", rendered)
+        self.assertIn("First reply with what appears done", rendered)
 
     def test_watch_critical_context_copies_to_clipboard_and_dedupes_across_polls(self) -> None:
         row = session(1, project="/repo/orcha")
@@ -901,6 +903,87 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertEqual(kwargs.get("url"), expected_url)
         body = notify.call_args.args[1]
         self.assertIn(expected_url, body)
+
+    def test_watch_overlay_opens_companion_without_notification(self) -> None:
+        row = session(1, project="/repo/orcha")
+        row.agent_calls = 300
+        args = SimpleNamespace(
+            days=1,
+            interval=15,
+            once=True,
+            cost_threshold=5.0,
+            calls_threshold=250,
+            tokens_threshold=500_000,
+            target="generic",
+            notify=False,
+            overlay=True,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.object(cli, "get_baselines", return_value={}),
+                patch.object(cli, "_send_local_notification") as notify,
+                patch.object(cli, "_open_handoff_overlay", return_value=(True, "test-overlay")) as overlay,
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch("sys.stdout", io.StringIO()) as stdout,
+            ):
+                cli._print_watch_status_card(row, [row], args, [], {}, {})
+                notifications = local_state.recent_watch_notifications(limit=5)
+
+        notify.assert_not_called()
+        overlay.assert_called_once()
+        self.assertEqual(
+            overlay.call_args.args[0],
+            f"http://127.0.0.1:{cli.DEFAULT_UI_PORT}/overlay?session={row.session_id}",
+        )
+        self.assertIn("Overlay: opened", stdout.getvalue())
+        self.assertEqual(notifications[0]["detail"], "overlay test-overlay")
+
+    def test_open_handoff_overlay_prefers_native_companion(self) -> None:
+        with (
+            patch.object(cli, "_open_native_handoff_overlay", return_value=(True, "native desktop window")) as native,
+            patch.object(cli, "webbrowser") as browser,
+        ):
+            ok, detail = cli._open_handoff_overlay(
+                "http://127.0.0.1:8765/overlay?session=session-1",
+                title="AIWatcher: start fresh",
+                body="/repo — context is critical",
+                severity="critical",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "native desktop window")
+        native.assert_called_once()
+        browser.open.assert_not_called()
+
+    def test_open_handoff_overlay_falls_back_to_browser_when_native_unavailable(self) -> None:
+        with (
+            patch.object(cli, "_open_native_handoff_overlay", return_value=(False, "native unavailable")),
+            patch.object(cli.os, "name", "posix"),
+            patch.object(cli.sys, "platform", "linux"),
+            patch.object(cli.shutil, "which", return_value=None),
+            patch.object(cli.webbrowser, "open", return_value=True) as browser_open,
+        ):
+            ok, detail = cli._open_handoff_overlay("http://127.0.0.1:8765/overlay?session=session-1")
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "webbrowser")
+        browser_open.assert_called_once()
+
+    def test_open_handoff_overlay_uses_startfile_on_windows(self) -> None:
+        with (
+            patch.object(cli, "_open_native_handoff_overlay", return_value=(False, "native unavailable")),
+            patch.object(cli.os, "name", "nt"),
+            patch.object(cli.sys, "platform", "win32"),
+            patch.object(cli.os, "startfile", create=True) as startfile,
+            patch.object(cli.webbrowser, "open") as browser_open,
+        ):
+            ok, detail = cli._open_handoff_overlay("http://127.0.0.1:8765/overlay?session=session-1")
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "startfile")
+        startfile.assert_called_once_with("http://127.0.0.1:8765/overlay?session=session-1")
+        browser_open.assert_not_called()
 
     def test_watch_notify_deep_link_follows_actual_running_dashboard_port(self) -> None:
         """Regression guard: found while manually testing issue #31 -- `aiwatcher
@@ -1931,7 +2014,8 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
                 cwd="/repo",
             )
 
-        self.assertEqual(original["score"], 8)
+        self.assertGreaterEqual(original["score"], 8)
+        self.assertEqual(original["risk"], "high")
         self.assertLess(selected["score"], original["score"])
         self.assertEqual(selected["risk"], "low")
 
@@ -2009,6 +2093,42 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
             self.assertTrue(
                 any("weakens or removes a security control" in finding for finding in result["findings"])
             )
+
+    def test_high_impact_destructive_prompt_is_high_risk(self) -> None:
+        examples = [
+            "delete the repo",
+            "wipe the project folder",
+            "remove all code from the repository",
+            "drop the production database",
+            "run git reset --hard and delete old credentials",
+        ]
+
+        with patch.object(cli, "sessions_since", return_value=[]):
+            results = [
+                cli.analyze_prompt(example, tool="codex", cwd="/repo")
+                for example in examples
+            ]
+
+        for result in results:
+            self.assertEqual(result["risk"], "high")
+            self.assertGreaterEqual(result["score"], 6)
+            self.assertTrue(
+                any("high-impact destructive action" in finding for finding in result["findings"])
+            )
+            self.assertIn("Confirm before destructive changes", [g["label"] for g in result["guardrails"]])
+
+    def test_high_impact_destructive_heuristic_avoids_narrow_cleanup(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt(
+                "Remove the obsolete screenshot from the auth docs",
+                tool="codex",
+                cwd="/repo",
+            )
+
+        self.assertFalse(
+            any("high-impact destructive action" in finding for finding in result["findings"])
+        )
+        self.assertNotEqual(result["risk"], "high")
 
     def test_security_weakening_heuristic_avoids_docs_ui_and_test_cleanup(self) -> None:
         with patch.object(cli, "sessions_since", return_value=[]):
@@ -3514,6 +3634,7 @@ class IntegrationConfigTests(unittest.TestCase):
                 "score": 8,
                 "selected_score": 2,
             }]),
+            patch.object(cli, "recent_handoff_decisions", return_value=[]),
             patch("sys.stdout", new_callable=io.StringIO) as stdout,
         ):
             result = cli.command_hook_status(SimpleNamespace())
@@ -3543,6 +3664,7 @@ class IntegrationConfigTests(unittest.TestCase):
                 "score": 5,
                 "selected_score": 2,
             }]),
+            patch.object(cli, "recent_handoff_decisions", return_value=[]),
             patch("sys.stdout", new_callable=io.StringIO) as stdout,
         ):
             result = cli.command_hook_status(SimpleNamespace())
@@ -3570,6 +3692,7 @@ class IntegrationConfigTests(unittest.TestCase):
                 "selected_score": 2,
                 "session_id": "sess-real-id",
             }]),
+            patch.object(cli, "recent_handoff_decisions", return_value=[]),
             patch("sys.stdout", new_callable=io.StringIO) as stdout,
         ):
             result = cli.command_hook_status(SimpleNamespace())
@@ -3578,6 +3701,29 @@ class IntegrationConfigTests(unittest.TestCase):
         output = stdout.getvalue()
         self.assertIn("| session sess-real-id", output)
         self.assertEqual(output.count("sess-real-id"), 2)
+
+    def test_hook_status_shows_handoff_bubble_decisions(self) -> None:
+        with (
+            patch.object(cli, "recent_hook_events", return_value=[]),
+            patch.object(cli, "recent_interventions", return_value=[]),
+            patch.object(cli, "recent_command_decisions", return_value=[]),
+            patch.object(cli, "recent_watch_notifications", return_value=[]),
+            patch.object(cli, "recent_handoff_decisions", return_value=[{
+                "created_at": "2026-07-31T12:00:00+00:00",
+                "session_id": "sess-heavy",
+                "decision": "copy_handoff",
+                "expected_saved_context_tokens": 240_000,
+            }]),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_hook_status(SimpleNamespace())
+
+        self.assertEqual(result, 0)
+        output = stdout.getvalue()
+        self.assertIn("Recent handoff bubble decisions", output)
+        self.assertIn("copy_handoff", output)
+        self.assertIn("~240.0k context avoided", output)
+        self.assertIn("session sess-heavy", output)
 
 
 class HttpApiDocsTests(unittest.TestCase):

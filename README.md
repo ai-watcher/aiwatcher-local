@@ -231,8 +231,8 @@ The mockups below use synthetic data — like the PR that introduced them, this
 README does not embed real dashboard screenshots, since those can expose
 private local paths, project names, and AI usage history.
 
-- **Today**: latest work, useful outcomes, preflight decisions, and one next
-  recommendation.
+- **Today**: latest work, useful outcomes, preflight decisions, one next
+  recommendation, and a handoff bubble when context is getting expensive.
 - **Prompt**: local Prompt Companion for surfaces AIWatcher cannot hook yet.
 - **Projects**: local repos and folders driving usage.
 - **Sessions**: inspect recent work, rank every prompt in a session by cost
@@ -301,6 +301,31 @@ The brief opens with why AIWatcher is suggesting a handoff now: degraded
 context health or a stale session, 250+ model calls, 80+ tool calls, or
 $5+ in API-equivalent value — so you know whether it's worth acting on
 before reading further.
+
+The dashboard also surfaces this as a **handoff bubble** on Today when active
+local work reaches warning or critical context pressure: start a fresh chat,
+copy a handoff brief, continue here, or inspect the session. AIWatcher records
+only the local decision metadata and estimated replayed context avoided, not
+prompt or source text. Recent handoff decisions appear in Today, Receipts, and
+`aiwatcher hook-status`. After you copy a handoff, the bubble changes into a
+next-step confirmation instead of continuing to nag the same session.
+
+For a lower-friction desktop flow, run ambient watch with the local companion
+overlay:
+
+```bash
+python -m aiwatcher_cli ui
+python -m aiwatcher_cli watch --notify --overlay
+```
+
+Keep `watch --notify --overlay` running while you work. When context gets
+heavy, AIWatcher opens a small local handoff companion outside Claude, Codex,
+Cursor, or your editor. It first tries a native always-on-top desktop bubble
+and falls back to the browser companion if native UI is not available. From
+there you can copy a fresh-session brief, continue here, or inspect the session
+without first navigating to the dashboard. AIWatcher does not inject UI into
+third-party apps. Use `watch --once --overlay` only as a one-shot smoke test,
+and set `AIWATCHER_OVERLAY_MODE=browser` if you prefer the browser companion.
 
 Targets: `generic`, `claude`, `codex`, `cursor`, and `vscode`. The brief lists
 recent commit subjects/bodies and changed files for context, any decisions
@@ -435,8 +460,9 @@ This month: $77.87
 - **Watch:** Detect large contexts, repeated calls, long sessions, and
   subscription or API usage pressure, plus stale local AI runtimes that may be
   wasting CPU/RAM/battery or expanding local attack surface.
-- **Control:** Let the developer use the brief, edit it, run the original, or
-  cancel. High-risk automatic hooks pause before execution.
+- **Control:** Let the developer use the brief, edit it, run the original,
+  cancel, or start a fresh-session handoff when context pressure would waste
+  turns. High-risk automatic hooks pause before execution.
 - **Prove:** Inspect a privacy-safe intervention receipt and session timeline,
   review local git/test evidence, then mark the result useful, rework, or
   abandoned.
