@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import argparse
+import contextlib
+import importlib.util
+import inspect
 import io
 import json
 import os
 import queue
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -18,7 +23,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from aiwatcher_cli import cli, local_state
+from aiwatcher_cli import cli, local_state, ui
 from aiwatcher_cli.local_state import recent_decisions
 from aiwatcher_cli.outcome_evidence import OutcomeEvidence
 from aiwatcher_cli.scanner import LocalEvent, LocalSession, SurfaceCoverage
@@ -3573,6 +3578,178 @@ class IntegrationConfigTests(unittest.TestCase):
         output = stdout.getvalue()
         self.assertIn("| session sess-real-id", output)
         self.assertEqual(output.count("sess-real-id"), 2)
+
+
+class HttpApiDocsTests(unittest.TestCase):
+    """docs/HTTP-API.md is hand-written, so pin its route inventory to the server."""
+
+    DOC = Path(__file__).resolve().parent.parent / "docs" / "HTTP-API.md"
+    SUPPORTED = {"/api/preflight", "/api/outcome"}
+
+    @staticmethod
+    def server_routes():
+        source = inspect.getsource(ui)
+        get_source = source.split("def do_GET", 1)[1].split("def do_POST", 1)[0]
+        post_source = source.split("def do_POST", 1)[1]
+        get_routes = set(re.findall(r'parsed\.path == "(/api/[a-z-]+)"', get_source))
+        post_routes = set(re.findall(r'parsed\.path not in \{([^}]+)\}', post_source))
+        post = set(re.findall(r'"(/api/[a-z-]+)"', next(iter(post_routes)))) if post_routes else set()
+        return get_routes, post
+
+    def test_supported_endpoints_still_accept_post(self):
+        _, post = self.server_routes()
+        self.assertEqual(
+            post,
+            self.SUPPORTED,
+            "docs/HTTP-API.md documents these as the supported POST surface. "
+            "If the server's POST routes changed, update the doc deliberately.",
+        )
+
+    def test_every_server_route_is_accounted_for_in_the_doc(self):
+        get_routes, post = self.server_routes()
+        doc = self.DOC.read_text(encoding="utf-8")
+        missing = sorted(route for route in (get_routes | post) if route not in doc)
+
+        self.assertEqual(
+            missing,
+            [],
+            "These routes exist in ui.py but appear nowhere in docs/HTTP-API.md — "
+            "list them as supported or as internal.",
+        )
+
+
+class SetupChecklistTests(unittest.TestCase):
+    """setup is the first thing a new user runs, so a broken command there is costly."""
+
+    def test_every_recommended_command_actually_parses(self):
+        # Catches a typo'd flag, a renamed command, or a checklist entry left
+        # behind after the command it names was removed.
+        parser = cli.build_parser()
+        failures = []
+        for step in cli.setup_checklist():
+            command = step["command"]
+            self.assertTrue(
+                command.startswith("aiwatcher "),
+                f"checklist commands should be written as `aiwatcher ...`: {command!r}",
+            )
+            argv = shlex.split(command)[1:]
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    parser.parse_args(argv)
+            except SystemExit:
+                failures.append(command)
+
+        self.assertEqual(failures, [], "These setup checklist commands are not valid CLI invocations.")
+
+    def test_every_step_is_fully_populated(self):
+        valid_status = {"recommended", "optional"}
+        for step in cli.setup_checklist():
+            for field in ("title", "why", "command", "status"):
+                self.assertTrue(step.get(field), f"{step.get('title', '?')} is missing {field}")
+            self.assertIn(step["status"], valid_status, f"{step['title']} has an unknown status")
+
+
+class CliReferenceDocsTests(unittest.TestCase):
+    """docs/CLI.md is generated from build_parser(), so it must never drift.
+
+    A hand-maintained command list is what went stale before: the README
+    documented 29 of 38 commands and silently lost the whole install/uninstall
+    surface. These tests make that failure mode impossible to merge.
+    """
+
+    REGENERATE = "Run: python3 scripts/generate_cli_reference.py"
+
+    @staticmethod
+    def load_generator():
+        # scripts/ is not an importable package, so load the file directly.
+        module_path = Path(__file__).resolve().parent.parent / "scripts" / "generate_cli_reference.py"
+        spec = importlib.util.spec_from_file_location("generate_cli_reference", module_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_cli_reference_matches_the_parser(self):
+        generator = self.load_generator()
+        self.assertTrue(
+            generator.OUTPUT_PATH.exists(),
+            f"docs/CLI.md is missing. {self.REGENERATE}",
+        )
+        self.assertEqual(
+            generator.OUTPUT_PATH.read_text(encoding="utf-8"),
+            generator.render(),
+            f"docs/CLI.md is out of date with the CLI. {self.REGENERATE}",
+        )
+
+    def test_every_command_is_categorized(self):
+        # The generator only warns about uncategorized commands and files them
+        # under "Other". Regenerating would therefore make the staleness test
+        # above pass while leaving a new command in a junk drawer, so fail here
+        # instead and force it into a real section.
+        generator = self.load_generator()
+        commands = set(generator._iter_subparsers(cli.build_parser()))
+        categorized = {name for _, _, names in generator.CATEGORIES for name in names}
+
+        self.assertEqual(
+            sorted(commands - categorized),
+            [],
+            "New commands are missing from CATEGORIES in scripts/generate_cli_reference.py. "
+            "Add them to a section.",
+        )
+        self.assertEqual(
+            sorted(categorized - commands),
+            [],
+            "CATEGORIES in scripts/generate_cli_reference.py lists commands that no longer exist.",
+        )
+
+    def test_advertised_mcp_tools_are_all_dispatchable(self):
+        # tools/list advertises _mcp_tool_specs(); tools/call dispatches by name
+        # in _mcp_tool_call. A tool advertised but not dispatched would be
+        # visible to an agent and then fail when called.
+        advertised = {str(spec["name"]) for spec in cli._mcp_tool_specs()}
+        source = inspect.getsource(cli._mcp_tool_call)
+        dispatched = set(re.findall(r'name == "([a-z_]+)"', source))
+
+        self.assertEqual(
+            sorted(advertised - dispatched),
+            [],
+            "These MCP tools are advertised by tools/list but not handled by tools/call.",
+        )
+        self.assertEqual(
+            sorted(dispatched - advertised),
+            [],
+            "These MCP tools are handled by tools/call but never advertised, so no agent can discover them.",
+        )
+
+    def test_no_example_merely_restates_the_command(self):
+        # An example identical to `aiwatcher <command>` duplicates the usage line
+        # printed directly above it, so it teaches nothing. Zero-argument
+        # commands should carry no example at all.
+        generator = self.load_generator()
+        redundant = [
+            f"{name}: {example!r}"
+            for name, examples in generator.EXAMPLES.items()
+            for example in examples
+            if example.strip() == f"aiwatcher {name}"
+        ]
+
+        self.assertEqual(
+            redundant,
+            [],
+            "These examples just repeat the usage line. Drop them, or make them show a flag.",
+        )
+
+    def test_every_argument_has_help_text(self):
+        # Blank help produces blank Description cells in the generated tables,
+        # which is what made the first draft of the reference look unfinished.
+        missing = []
+        for name, subparser in self.load_generator()._iter_subparsers(cli.build_parser()).items():
+            for action in subparser._actions:
+                if isinstance(action, argparse._HelpAction):
+                    continue
+                if not action.help:
+                    missing.append(f"{name} {'/'.join(action.option_strings) or action.dest}")
+
+        self.assertEqual(missing, [], "These arguments need a help= string in build_parser().")
 
 
 if __name__ == "__main__":

@@ -13,23 +13,27 @@ cost and security guidance with no account or cloud upload.
 
 - [Privacy](#privacy)
 - [Quickstart](#quickstart)
+  - [1. Install](#1-install)
+  - [2. See where you stand](#2-see-where-you-stand)
+  - [3. Install hooks so work is reviewed before it runs](#3-install-hooks-so-work-is-reviewed-before-it-runs)
+    - [Prompt preflight hook](#prompt-preflight-hook)
+    - [Dangerous-command gate](#dangerous-command-gate)
 - [Try the Core Workflows](#try-the-core-workflows)
   - [1. See today's AI work](#1-see-todays-ai-work)
-  - [2. Preflight a risky prompt](#2-preflight-a-risky-prompt)
+  - [2. Check a prompt by hand](#2-check-a-prompt-by-hand)
   - [3. Use the local dashboard](#3-use-the-local-dashboard)
   - [4. Mark whether work was useful](#4-mark-whether-work-was-useful)
   - [5. Resume work without rebuilding context](#5-resume-work-without-rebuilding-context)
   - [6. Log a decision that never became a commit](#6-log-a-decision-that-never-became-a-commit)
   - [7. Check runtime hygiene](#7-check-runtime-hygiene)
   - [8. Export local evidence](#8-export-local-evidence)
-- [Commands](#commands)
+- [Commands](#commands) — day-one subset; [full CLI reference](docs/CLI.md)
 - [Example Output](#example-output)
 - [The Local Control Loop](#the-local-control-loop)
-  - [Automatic Prompt Preflight](#automatic-prompt-preflight)
+  - [Hook coverage by tool](#hook-coverage-by-tool)
   - [Prompt Companion for Non-Hook Surfaces](#prompt-companion-for-non-hook-surfaces)
 - [What It Reads](#what-it-reads)
 - [AIWatcher Local vs AIWatcher Enterprise](#aiwatcher-local-vs-aiwatcher-enterprise)
-- [After PyPI Release](#after-pypi-release)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -47,13 +51,43 @@ reads and why, it should not read it.
 
 ## Quickstart
 
-Clone and run directly with Python 3.10+:
+### 1. Install
+
+Clone and run directly with Python 3.9+:
 
 ```sh
 git clone https://github.com/ai-watcher/aiwatcher-local.git
 cd aiwatcher-local
+python -m pip install -e .
+```
+
+After the PyPI release, this becomes:
+
+```sh
+pipx install aiwatcher-cli
+```
+
+On Windows PowerShell the same commands work. If `python` is not on PATH, use
+the Python launcher (`py -m pip install -e .`).
+
+Examples below use `python -m aiwatcher_cli`, which works from a clone with no
+install at all. Once installed, `aiwatcher <command>` is equivalent everywhere.
+
+### 2. See where you stand
+
+```sh
+python -m aiwatcher_cli setup
+```
+
+`setup` detects which AI coding tools you have, reports what history it can
+already read, and prints the exact next steps for your machine. Start here — it
+tells you which of the commands below will actually have data.
+
+Because AIWatcher reads history your tools have already written, these work
+immediately, before you install any integration:
+
+```sh
 python -m aiwatcher_cli today
-python -m aiwatcher_cli preflight "Refactor auth and delete old credentials"
 python -m aiwatcher_cli last
 python -m aiwatcher_cli ui
 ```
@@ -62,26 +96,92 @@ python -m aiwatcher_cli ui
 busy, AIWatcher Local automatically tries the next available port and prints the
 URL it picked.
 
-For local development, install the package entrypoint:
+### 3. Install hooks so work is reviewed before it runs
+
+Everything above is retrospective. Hooks are what make AIWatcher act *before*
+execution. There are two, on different lifecycle events. They are independent —
+install either, or both:
+
+| Hook | Event | Reviews | Tools |
+| --- | --- | --- | --- |
+| **Prompt preflight** | `UserPromptSubmit` | Your prompt, before the agent starts | Claude, Codex, Cursor |
+| **Dangerous-command gate** | `PreToolUse` | A shell command, before it executes | Claude Code CLI only |
+
+#### Prompt preflight hook
+
+Install the one matching your tool:
 
 ```sh
-python -m pip install -e .
-aiwatcher today
-aiwatcher ui
+python -m aiwatcher_cli install-claude-hook --write --scope user
+python -m aiwatcher_cli install-codex-hook --write --scope user
+python -m aiwatcher_cli install-cursor-hook --write --scope user
 ```
 
-On Windows PowerShell, the same commands work. If `python` is not on PATH, use
-the Python launcher:
+Low-risk prompts pass through untouched. Medium-risk prompts get a scoped
+execution brief added alongside them. High-risk prompts pause before execution.
 
-```powershell
-py -m aiwatcher_cli today
-py -m aiwatcher_cli ui
-py -m pip install -e .
-aiwatcher today
+**Add `--gate` for the interactive Prompt Gate.** This does not replace the
+behavior above — it adds a review step in front of it. A medium- or high-risk
+prompt opens a local decision screen with **Add safer brief**, **Add edited
+brief**, **Run original**, and **Cancel run**. If that screen times out or no
+display is available, AIWatcher falls back to the same deterministic policy
+described above, so nothing is skipped:
+
+```sh
+python -m aiwatcher_cli install-claude-hook --write --scope user --gate
 ```
 
-The examples below use `python -m aiwatcher_cli`; Windows users can replace
-`python` with `py` when needed.
+![AIWatcher Prompt Gate: a local decision screen showing risk score, guardrail chips, findings and suggestions, the original prompt, a proposed execution brief, and the Add safer brief / Add edited brief / Run original / Cancel run actions.](docs/dashboard-prompt-gate.svg)
+
+Prompt text stays transient in that local browser page: AIWatcher persists
+hashes, decisions, and predicted impact only.
+
+**Using Codex?** Some Codex builds — including the current Codex Desktop
+conversation surface — never invoke `UserPromptSubmit`, so the hook above
+installs cleanly and then does nothing. Run `hook-status` after a test prompt to
+check. If no event appears, add the shell wrapper instead:
+
+```sh
+python -m aiwatcher_cli install-codex-wrapper --write
+```
+
+This defines a `codex` shell function that preflights before handing off to the
+real binary. It covers prompts you pass when launching Codex from the command
+line, not ones typed inside an already-running session. Writes to `~/.zshrc` by
+default — pass `--shell-rc ~/.bashrc` for bash.
+
+#### Dangerous-command gate
+
+A separate hook on a separate event. It reviews shell commands the agent is
+about to run, independently of how the prompt that produced them was handled:
+
+```sh
+python -m aiwatcher_cli install-claude-command-gate --write --scope user
+```
+
+**Claude Code CLI only.** Unlike prompt preflight, there is no Codex or Cursor
+equivalent — this hook needs the host to expose a lifecycle event *before a tool
+call*, and Claude Code's `PreToolUse` is the only one AIWatcher supports today.
+On Codex and Cursor, prompt preflight is the whole story.
+
+Where it is available, running both is the normal setup: the prompt hook catches
+risky *intent*, the command gate catches a risky *command* that a perfectly
+reasonable prompt happened to produce.
+
+#### Verify and undo
+
+Every installer prints the change and writes nothing unless you pass `--write`,
+so you can inspect first by dropping that flag. After a test prompt, confirm the
+hook actually fired — and back any of them out at any time:
+
+```sh
+python -m aiwatcher_cli hook-status
+python -m aiwatcher_cli uninstall-claude-hook --scope user
+python -m aiwatcher_cli uninstall-claude-command-gate --scope user
+```
+
+See [Hook coverage by tool](#hook-coverage-by-tool) for per-tool
+setup notes and which surfaces do and do not support hooks.
 
 ## Try the Core Workflows
 
@@ -95,7 +195,14 @@ Shows local sessions, top project, tools, models, API-equivalent value, and
 subscription/limited usage notes. API-equivalent value is not always invoice
 spend; it is a normalized usage-pressure signal.
 
-### 2. Preflight a risky prompt
+### 2. Check a prompt by hand
+
+The same risk analysis is reachable three ways: **automatically**, via the
+[hook](#prompt-preflight-hook) from the Quickstart; **by hand**, with the
+command below; and **by paste**, in the dashboard's Prompt tab for
+[surfaces that expose no hook](#prompt-companion-for-non-hook-surfaces). This is
+the by-hand version — useful for sizing up a prompt before pasting it somewhere,
+or on a machine where no hook is installed.
 
 macOS/Linux:
 
@@ -181,9 +288,14 @@ When a session gets stale, expensive, or you want to move from Claude to Codex,
 generate a target-ready continuation brief:
 
 ```sh
-python -m aiwatcher_cli resume --search orcha --target codex --copy
+python -m aiwatcher_cli resume --search <your-project> --target codex --copy
 python -m aiwatcher_cli handoff --session-id <session-id> --target cursor
 ```
+
+Replace `<your-project>` with part of your own project's name — for a repo at
+`~/code/payments-api`, `--search payments` finds it. `--search` matches a
+project path, tool, model, or session id, and falls back to a rough topic match
+over changed file names, so a fragment is usually enough.
 
 The brief opens with why AIWatcher is suggesting a handoff now: degraded
 context health or a stale session, 250+ model calls, 80+ tool calls, or
@@ -196,6 +308,16 @@ logged for the session (see below), and keeps the next run focused on one
 checkpoint. Add `--include-prompt-excerpt` to also include your own
 highest-cost prompt from the session — off by default, and labeled as a
 privacy opt-in in both the CLI and the dashboard.
+
+**Or do the whole thing in the dashboard.** Run `python -m aiwatcher_cli ui`,
+open the **Sessions** tab, search for the work, click the session, then press
+**Create handoff capsule**. The drawer exposes the same controls as the flags
+above: the five targets as buttons, the prompt excerpt as a checkbox, and
+**Copy handoff brief** in place of `--copy`. Same capability either way — use
+whichever suits the moment.
+
+The **Today** tab also surfaces a handoff button directly on sessions under
+context pressure, so you can act on one without going looking for it.
 
 ### 6. Log a decision that never became a commit
 
@@ -254,37 +376,29 @@ Cost is shown as **API-equivalent value**. AIWatcher Local separates API-priced
 tokens from subscription/plan-limited tokens so you can read the numbers
 honestly. Subscription plans may not bill this as incremental spend.
 
-```sh
-python -m aiwatcher_cli start              # detect tools and run a one-time local scan
-python -m aiwatcher_cli status             # show detected tools and local status
-python -m aiwatcher_cli today              # today's local AI usage
-python -m aiwatcher_cli last               # inspect the latest local AI session
-python -m aiwatcher_cli timeline           # privacy-safe event timeline
-python -m aiwatcher_cli handoff            # create a fresh-session handoff capsule
-python -m aiwatcher_cli resume --target codex --copy  # find a session and continue it elsewhere
-python -m aiwatcher_cli log-decision "..." --reasoning "..." --rejected "..."  # note a rejected approach
-python -m aiwatcher_cli install-claude-decision-log --write  # personal convention to log decisions automatically
-python -m aiwatcher_cli journal            # daily usage summary plus one thing to change next time
-python -m aiwatcher_cli watch --once       # detect expensive or loop-like work
-python -m aiwatcher_cli run -- npm test    # run any command, then summarize the AI session alongside it
-python -m aiwatcher_cli doctor             # check tool detection and hook/wrapper install status
-python -m aiwatcher_cli processes          # local AI runtime hygiene; suggests manual cleanup only
-python -m aiwatcher_cli processes --stale-only
-python -m aiwatcher_cli preflight "..."    # review work before execution
-python -m aiwatcher_cli codex "..."        # preflight, choose, and launch Codex
-python -m aiwatcher_cli claude "..."       # preflight, choose, and launch Claude
-python -m aiwatcher_cli outcome useful     # mark the latest result
-python -m aiwatcher_cli hook-status        # inspect hook invocations and recent decisions
-python -m aiwatcher_cli tools --days 7     # rank usage by tool
-python -m aiwatcher_cli projects --days 7  # rank usage by project
-python -m aiwatcher_cli report --days 7    # weekly local report
-python -m aiwatcher_cli sessions --days 1  # recent local sessions
-python -m aiwatcher_cli sessions --search orcha --days 30
-python -m aiwatcher_cli export --format json --days 30      # export session summaries
-python -m aiwatcher_cli export --format json --level events # privacy-safe event hashes
-python -m aiwatcher_cli ui                 # local-only browser dashboard
-python -m aiwatcher_cli mcp                # local stdio MCP server
-```
+These are the commands worth knowing on day one:
+
+| Command | What it does |
+| --- | --- |
+| `setup` | Detect your tools and print the next steps for your machine |
+| `today` | Today's local AI usage, by tool, model, and project |
+| `last` | Inspect the most recent session in detail |
+| `sessions` | List and search recent sessions |
+| `preflight "..."` | Review a prompt for cost, scope, and safety before running it |
+| `outcome useful` | Mark how the last session turned out |
+| `journal` | Daily summary plus one thing to change next time |
+| `resume --target codex --copy` | Continue work in a different tool without rebuilding context |
+| `watch --once` | Flag expensive or loop-like work |
+| `ui` | Local-only browser dashboard |
+| `doctor` | Check tool detection and integration status |
+
+**[Full CLI reference →](docs/CLI.md)** — every command with all its flags,
+defaults, and examples, including the hook and wrapper installers, `export`,
+`mcp`, `handoff`, `log-decision`, `timeline`, `processes`, and `run`.
+
+That reference is generated from the CLI itself and verified by a test, so it
+cannot drift out of date. This table is the curated subset; it is not the
+complete list and does not try to be.
 
 ## Example Output
 
@@ -330,40 +444,23 @@ This month: $77.87
   log a decision that never became a commit, then recommend one better
   behavior or create a handoff capsule for the next fresh session.
 
-**Prompt Gate** is what makes **Control** interactive instead of just a log:
-install a native hook with `--gate` and a risky prompt opens a local decision
-screen with **Add safer brief**, **Add edited brief**, **Run original**, and
-**Cancel run** before anything executes. Prompt text stays transient in that
-local browser page — AIWatcher persists hashes, decisions, and predicted
-impact only. See [Automatic Prompt Preflight](#automatic-prompt-preflight)
-below for install commands and per-tool setup notes.
-
-![AIWatcher Prompt Gate: a local decision screen showing risk score, guardrail chips, findings and suggestions, the original prompt, a proposed execution brief, and the Add safer brief / Add edited brief / Run original / Cancel run actions.](docs/dashboard-prompt-gate.svg)
+The [Prompt Gate](#prompt-preflight-hook) is what makes **Control** interactive
+instead of just a log: install the prompt hook with `--gate` and you get to
+choose per prompt, rather than reading about the decision afterwards. The
+[dangerous-command gate](#dangerous-command-gate) applies the same idea one
+layer down, at the shell command rather than the prompt.
 
 Prompt content is processed locally. AIWatcher stores hashes, decisions,
 predicted impact, and outcomes, not the original or suggested prompt text.
 
-### Automatic Prompt Preflight
+### Hook coverage by tool
 
 Claude Code CLI, the Code tab in Claude Desktop, Codex CLI/TUI builds that
-invoke `UserPromptSubmit`, and Cursor support prompt lifecycle hooks. Install
-AIWatcher once:
-
-```sh
-python -m aiwatcher_cli install-claude-hook --write --scope user
-python -m aiwatcher_cli install-codex-hook --write --scope user
-python -m aiwatcher_cli install-cursor-hook --write --scope user
-```
-
-For the richer beta workflow, add `--gate`. Risky prompts open a local decision
-screen with **Add safer brief**, **Add edited brief**, **Run original**, and
-**Cancel run**:
-
-```sh
-python -m aiwatcher_cli install-claude-hook --write --scope user --gate
-python -m aiwatcher_cli install-codex-hook --write --scope user --gate
-python -m aiwatcher_cli install-cursor-hook --write --scope user --gate
-```
+invoke `UserPromptSubmit`, and Cursor support prompt lifecycle hooks. The
+[Quickstart](#3-install-hooks-so-work-is-reviewed-before-it-runs) covers
+the basic install; this section covers per-tool behavior and the surfaces where
+hooks are not available. Every installer flag is documented in the
+[CLI reference](docs/CLI.md#hooks-and-wrappers).
 
 Codex requires one additional trust review: open Codex and run `/hooks`.
 Reload Cursor after installing its hook and inspect **Output > Hooks** after a
@@ -394,22 +491,12 @@ conversation surface tested by the project does not invoke the configured
 CLI/TUI surface that records a hook event. AIWatcher does not claim silent
 interception where a host application provides no lifecycle API.
 
-For that gap, the wrapper is a shell-level fallback rather than a native hook:
-it installs a shell function (in your shell rc file) that intercepts `codex`
-invocations at the command line and preflights them through AIWatcher before
-the real binary runs:
+For that gap, the [shell wrapper](#prompt-preflight-hook) is a shell-level
+fallback rather than a native hook: it intercepts `codex` invocations at the
+command line and preflights them through AIWatcher before the real binary runs.
 
-```sh
-python -m aiwatcher_cli install-codex-wrapper --write
-```
-
-If a Codex prompt appears to bypass AIWatcher, run:
-
-```sh
-python -m aiwatcher_cli hook-status
-```
-
-If no recent event appears, that Codex surface did not invoke the
+If a Codex prompt appears to bypass AIWatcher, run `aiwatcher hook-status`. If
+no recent event appears, that Codex surface did not invoke the
 `UserPromptSubmit` hook. If an event appears, AIWatcher ran and the event shows
 whether prompt text was found and what risk score was computed.
 
@@ -431,21 +518,10 @@ text. The experimental `browser-extension/` adapter currently supports
 `claude.ai`; `vscode-extension/` provides manual editor, clipboard, and input
 commands. Neither is described as universal editor-chat interception.
 
-`POST /api/preflight` contract (loopback-only, same-machine callers):
-
-```jsonc
-// Request
-{"prompt": "...", "tool": "agent", "cwd": "/path/to/project"}  // tool/cwd optional
-
-// Response
-{
-  "risk": "low|medium|high", "score": 0,
-  "findings": ["..."], "suggestions": ["..."],
-  "suggested_prompt": "...",       // the scoped execution brief
-  "impact_label": "...",           // human-readable estimated pressure, honesty-gated
-  "privacy": "..."                 // what is/isn't persisted, for display next to the result
-}
-```
+Building your own integration? `POST /api/preflight` is a supported endpoint
+for same-machine callers, alongside `POST /api/outcome`. Request and response
+shapes, the origin and size limits, and which endpoints are internal and may
+change are in the [HTTP API reference](docs/HTTP-API.md).
 
 ## What It Reads
 
@@ -484,14 +560,6 @@ audit evidence, SSO/RBAC, and production app governance. Learn more at
 <https://www.getaiwatcher.com>.
 
 Enterprise features are additive. AIWatcher Local is never gated behind signup.
-
-## After PyPI Release
-
-```sh
-pipx install aiwatcher-cli
-aiwatcher today
-aiwatcher ui
-```
 
 ## Contributing
 
