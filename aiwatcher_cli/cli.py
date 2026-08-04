@@ -114,6 +114,26 @@ RISK_REVIEW_CMD_ENV = "AIWATCHER_RISK_REVIEW_CMD"
 RISK_REVIEW_TIMEOUT_ENV = "AIWATCHER_RISK_REVIEW_TIMEOUT_SECONDS"
 RISK_REVIEW_ALLOW_LOWERING_ENV = "AIWATCHER_RISK_REVIEW_ALLOW_LOWERING"
 
+# Surface status marker — symbol + optional ANSI color when stdout is a TTY,
+# plain ASCII when piped/redirected (respects NO_COLOR env var too).
+def _surface_marker(status: str) -> str:
+    use_color = (
+        sys.stdout.isatty()
+        and not os.environ.get("NO_COLOR")
+        and os.environ.get("TERM", "dumb") != "dumb"
+    )
+    _G = "\033[32m" if use_color else ""   # green
+    _Y = "\033[33m" if use_color else ""   # yellow
+    _B = "\033[2m"  if use_color else ""   # dim
+    _R = "\033[0m"  if use_color else ""   # reset
+    if status == "automatic":
+        return f"{_G}✓{_R}"
+    if status == "limited":
+        return f"{_Y}◑{_R}"
+    if status in {"companion", "unverified"}:
+        return f"{_B}○{_R}"
+    return f"{_B}✗{_R}"
+
 
 class LocalThreadingHTTPServer(ThreadingHTTPServer):
     """Loopback server that avoids HTTPServer's unnecessary FQDN lookup."""
@@ -2379,7 +2399,7 @@ def command_start(_args: argparse.Namespace) -> int:
     print("Read-only scan. No data leaves this machine.\n")
     print("Surface coverage:")
     for row in surface_coverage(sessions):
-        marker = "[OK]" if row.status == "automatic" else "[..]" if row.status in {"limited", "companion", "unverified"} else "[--]"
+        marker = _surface_marker(row.status)
         print(f"  {marker} {row.label:26} {row.status_label}")
     print(f"\nCollected {len(sessions)} sessions from the last 24 hours.")
     print("Run `aiwatcher today` or `python -m aiwatcher_cli today` to see your usage.")
@@ -2452,7 +2472,7 @@ def command_setup(_args: argparse.Namespace) -> int:
     print("Private, local-first control loop. No prompt, source, or telemetry upload by default.\n")
     print("Surface coverage")
     for row in surface_coverage(sessions):
-        marker = "[OK]" if row.status == "automatic" else "[..]" if row.status in {"limited", "companion", "unverified"} else "[--]"
+        marker = _surface_marker(row.status)
         print(f"  {marker} {row.label:26} {row.status_label}")
     print("\nFirst-value checklist")
     for index, step in enumerate(setup_checklist(), 1):
@@ -2468,7 +2488,7 @@ def command_status(_args: argparse.Namespace) -> int:
     sessions = scan_all()
     print("AIWatcher Local status\n")
     for row in surface_coverage(sessions):
-        marker = "[OK]" if row.status == "automatic" else "[..]" if row.status in {"limited", "companion", "unverified"} else "[--]"
+        marker = _surface_marker(row.status)
         print(f"{marker} {row.label:26} {row.status_label:28} {row.session_count:>5} sessions")
     print("\nMode: local-only")
     print("Network: disabled unless hosted sync is configured separately")
@@ -5395,7 +5415,7 @@ def command_doctor(_args: argparse.Namespace) -> int:
     print(f"Local state: {state_path()}")
     print("\nSurface coverage")
     for row in surface_coverage(scan_all()):
-        marker = "[OK]" if row.status == "automatic" else "[..]" if row.status in {"limited", "companion", "unverified"} else "[--]"
+        marker = _surface_marker(row.status)
         print(f"- {marker} {row.label}: {row.status_label}. {row.action}")
     print("\nPrivacy: local-only; AIWatcher Local does not upload prompts, source, or telemetry.")
     if os.name == "nt":
