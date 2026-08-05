@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import __version__
 from .cli import (
+    usable_survival_summary,
     _loop_signal,
     _velocity_signal,
     analyze_prompt,
@@ -528,8 +529,12 @@ def _recommend_weekly_improvement(
             f"{len(velocity_candidates)} session(s) ran well above their tool's typical pace -- "
             "check for a runaway loop before it burns more budget."
         )
-    if survival.get("available") and int(survival.get("churned_count") or 0) > int(survival.get("surviving_count") or 0):
-        return "More sessions churned than survived recently -- review the highest-cost churned sessions before repeating that approach."
+    survival_pct = survival.get("survival_pct")
+    if survival.get("available") and isinstance(survival_pct, (int, float)) and survival_pct < 50:
+        return (
+            f"Only {survival_pct:.0f}% of the lines you paid for are still in the code -- "
+            "review the costliest recent changes before repeating that approach."
+        )
     if inferred_churned > 0:
         plural = "s" if inferred_churned != 1 else ""
         return f"{inferred_churned} session{plural} looked useful but the commit didn't survive -- review before trusting similar work."
@@ -604,7 +609,7 @@ def build_weekly_digest(days: int = 7) -> dict[str, object]:
     prompts_modified = [row for row in prompt_interventions if row.get("decision") in PROMPT_MODIFIED_DECISIONS]
 
     try:
-        survival = _cost_per_surviving_change(all_rows)
+        survival = _survival_summary()
     except OSError:
         survival = {"available": False, "sample_count": 0, "required_samples": MIN_SURVIVAL_SAMPLES}
 
@@ -1033,6 +1038,33 @@ def _cost_per_surviving_change(all_rows: list[LocalSession]) -> dict[str, object
     }
 
 
+def _survival_summary() -> dict[str, object]:
+    """Cost per surviving line, read from cache.
+
+    Never computed here. Measuring survival runs a git blame pass per file --
+    ~23s for a month of history -- so it is refreshed off the hot path by
+    cli.get_or_refresh_survival() and only read on a request.
+
+    Replaces the reachability-based survived/churned split, which asked whether
+    a commit was still in git history. That stays true after a revert or a full
+    rewrite, so it reported 16 of 16 changes surviving locally and its "cost per
+    surviving change" was cost-per-change with a different name.
+    """
+    cached = usable_survival_summary()
+    if not cached or not cached.get("available"):
+        return {
+            "available": False,
+            "reason": (cached or {}).get("reason")
+            or "Not measured yet. Run `aiwatcher today` or reopen the dashboard to compute it.",
+        }
+    summary = dict(cached)
+    summary["cost_per_surviving_line_label"] = money(float(summary.get("usd_per_surviving_line") or 0))
+    summary["cost_per_line_label"] = money(float(summary.get("usd_per_line") or 0))
+    summary["measured_cost_label"] = money(float(summary.get("cost_usd") or 0))
+    summary["too_recent_label"] = money(float(summary.get("too_recent_usd") or 0))
+    return summary
+
+
 def _handoff_decision_rows(limit: int = 10) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for row in recent_handoff_decisions(limit=limit):
@@ -1327,7 +1359,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
         needs_review=needs_review,
         churned=churned,
     )
-    survival_summary = _cost_per_surviving_change(all_rows)
+    survival_summary = _survival_summary()
     interventions = recent_interventions(limit=200, days=days)
     receipt_events = all_events if interventions else []
     receipts = _build_intervention_receipts(interventions, all_rows, outcomes_for_sessions(), receipt_events)
@@ -1819,7 +1851,7 @@ HTML = r"""<!doctype html>
     </section>
 
     <section class="grid kpis">
-      <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub">Value per useful change: <span id="costPerUseful">-</span></div><div class="sub" id="costPerSurvivingRow" hidden>Cost per surviving change: <span id="costPerSurviving">-</span></div></div>
+      <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub">Value per useful change: <span id="costPerUseful">-</span></div><div class="sub" id="costPerSurvivingRow" hidden>Cost per surviving line: <span id="costPerSurviving">-</span></div></div>
       <div class="card metric-card metric-amber"><div class="label">Preflight decisions</div><div class="value" id="preflightDecisions">-</div><div class="sub"><span id="windowLabel">-</span></div></div>
       <div class="card metric-card metric-blue"><div class="label">Sessions observed</div><div class="value" id="sessions">-</div><div class="sub">This machine only</div></div>
       <div class="card metric-card metric-red"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div></div>
@@ -2689,7 +2721,7 @@ function renderTodayDigest(digest) {
     o.abandoned ? `${o.abandoned} abandoned` : '',
   ].filter(Boolean).join(', ');
   const survival = digest.survival && digest.survival.available
-    ? `<span class="pill">${esc(digest.survival.cost_per_surviving_change)} per surviving change</span>`
+    ? `<span class="pill">${esc(digest.survival.cost_per_surviving_line_label)} per surviving line &middot; ${esc(digest.survival.survival_pct)}% still standing</span>`
     : '';
   return `<div class="insight"><strong>${esc(digest.recommendation)}</strong></div>
     <div class="pill-row">
@@ -2761,13 +2793,17 @@ function renderReport(report) {
   if (digest.survival && digest.survival.available) {
     const s = digest.survival;
     sections.push(`<div class="detail-section">
-      <h2>Cost per surviving change</h2>
+      <h2>Cost per surviving line</h2>
       <div class="mini-grid">
-        <div class="mini"><span class="label">Survived</span><strong>${esc(s.surviving_count)}</strong></div>
-        <div class="mini"><span class="label">Churned</span><strong>${esc(s.churned_count)}</strong></div>
-        <div class="mini"><span class="label">$/surviving change</span><strong>${esc(s.cost_per_surviving_change)}</strong></div>
-        <div class="mini"><span class="label">$/churned change</span><strong>${esc(s.cost_per_churned_change)}</strong></div>
+        <div class="mini"><span class="label">Still standing</span><strong>${esc(s.survival_pct)}%</strong></div>
+        <div class="mini"><span class="label">$/line written</span><strong>${esc(s.cost_per_line_label)}</strong></div>
+        <div class="mini"><span class="label">$/surviving line</span><strong>${esc(s.cost_per_surviving_line_label)}</strong></div>
+        <div class="mini"><span class="label">Changes measured</span><strong>${esc(s.changes_measured)}</strong></div>
       </div>
+      <p class="receipt-note">${esc(s.lines_intact)} of ${esc(s.lines_touched)} lines still in the code, across
+        ${esc(s.cost_coverage_pct)}% of spend in the last ${esc(s.window_days)} days.
+        ${s.changes_too_recent ? `${esc(s.changes_too_recent)} newer change(s) worth ${esc(s.too_recent_label)} are not old enough to judge yet.` : ''}
+        A floor, not a verdict: reformatting and refactoring move attribution away from the original change.</p>
     </div>`);
   }
   return `<div class="verdict-card"><h3>${esc(digest.recommendation)}</h3></div>
@@ -2876,7 +2912,7 @@ async function load(resetDetail = true) {
   if (survival.available) {
     survivalRow.hidden = false;
     document.getElementById('costPerSurviving').textContent =
-      `${survival.cost_per_surviving_change} vs ${survival.cost_per_churned_change} churned (${survival.surviving_count} survived / ${survival.churned_count} churned)`;
+      `${survival.cost_per_surviving_line_label} per surviving line (${survival.survival_pct}% of ${survival.lines_touched} lines still standing)`;
   } else {
     survivalRow.hidden = true;
   }

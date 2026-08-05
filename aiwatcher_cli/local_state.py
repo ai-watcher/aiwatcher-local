@@ -162,6 +162,7 @@ def _empty_state() -> dict[str, Any]:
         "evidence_snapshots": [],
         "decisions": [],
         "baselines": {},
+        "survival_summary": {},
         "command_decisions": [],
         "command_gate_allowlist": [],
         "brief_tokens": [],
@@ -225,6 +226,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("evidence_snapshots", [])
     data.setdefault("decisions", [])
     data.setdefault("baselines", {})
+    data.setdefault("survival_summary", {})
     data.setdefault("command_decisions", [])
     data.setdefault("command_gate_allowlist", [])
     data.setdefault("brief_tokens", [])
@@ -850,6 +852,30 @@ def save_baselines(baselines: dict[str, Any]) -> None:
     with _locked_state():
         data = _load()
         data["baselines"] = baselines
+        _save(data)
+
+
+def get_survival_summary() -> dict[str, Any]:
+    """Read-only cache lookup for cost-per-surviving-line.
+
+    Same contract as get_baselines: never computes. Measuring survival costs a
+    blame pass per file -- about 23s for a month of history here -- so it can
+    never run on a request path. cli.get_or_refresh_survival() does the work
+    off the hot path and stores the result here.
+    """
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return {}
+    summary = data.get("survival_summary")
+    return summary if isinstance(summary, dict) else {}
+
+
+def save_survival_summary(summary: dict[str, Any]) -> None:
+    with _locked_state():
+        data = _load()
+        data["survival_summary"] = summary
         _save(data)
 
 

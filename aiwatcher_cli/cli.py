@@ -58,10 +58,13 @@ from .local_state import (
     record_watch_notification,
     recent_watch_notifications,
     redact_command_for_storage,
+    get_survival_summary,
     save_baselines,
+    save_survival_summary,
     state_path,
 )
 from .handoff import TARGET_LABELS, build_handoff_capsule, render_handoff_capsule
+from .ledger import build_ledger, cost_per_surviving_line
 from .outcome_evidence import (
     VALID_EVIDENCE_OUTCOMES,
     build_outcome_evidence,
@@ -653,6 +656,64 @@ BASELINE_TOOLS = ("claude-code", "codex-cli")
 # order-of-magnitude-wrong savings estimates until something else happens to
 # trigger a recompute.
 BASELINE_ACCOUNTING_VERSION = 2
+
+
+SURVIVAL_ACCOUNTING_VERSION = 1
+SURVIVAL_WINDOW_DAYS = 30
+SURVIVAL_MAX_AGE_HOURS = 24
+
+
+def usable_survival_summary() -> dict[str, object]:
+    """Cached cost-per-surviving-line, or {} if it predates the current accounting.
+
+    Same reasoning as usable_baselines: a stored figure computed under different
+    token/cost semantics is confidently wrong, and every caller already has a
+    "not enough history" path to fall into.
+    """
+    cached = get_survival_summary()
+    if not isinstance(cached, dict):
+        return {}
+    if cached.get("accounting_version") != SURVIVAL_ACCOUNTING_VERSION:
+        return {}
+    if cached.get("cost_accounting_version") != BASELINE_ACCOUNTING_VERSION:
+        return {}
+    return cached
+
+
+def get_or_refresh_survival(max_age_hours: int = SURVIVAL_MAX_AGE_HOURS) -> dict[str, object]:
+    """Recompute cost-per-surviving-line if the cache is missing or stale.
+
+    Never call this from a hook or a request handler: it runs a git blame pass
+    per file across the costliest changes in the window, which takes ~23s for a
+    month of local history. It belongs in the same off-hot-path places
+    get_or_refresh_baselines already runs -- `today`, `report`, `ui` startup.
+    """
+    cached = usable_survival_summary()
+    computed_at = cached.get("computed_at") if isinstance(cached, dict) else None
+    stale = True
+    if computed_at:
+        try:
+            age = datetime.now(timezone.utc) - datetime.fromisoformat(str(computed_at))
+            stale = age > timedelta(hours=max_age_hours)
+        except ValueError:
+            stale = True
+    if cached and not stale:
+        return cached
+
+    try:
+        ledger = build_ledger(scan_all_events(), days=SURVIVAL_WINDOW_DAYS)
+        summary = dict(cost_per_surviving_line(ledger))
+    except OSError:
+        return cached or {}
+    summary["computed_at"] = datetime.now(timezone.utc).isoformat()
+    summary["accounting_version"] = SURVIVAL_ACCOUNTING_VERSION
+    summary["cost_accounting_version"] = BASELINE_ACCOUNTING_VERSION
+    summary["window_days"] = SURVIVAL_WINDOW_DAYS
+    try:
+        save_survival_summary(summary)
+    except OSError:
+        pass
+    return summary
 
 
 def usable_baselines() -> dict[str, object]:
@@ -2538,6 +2599,7 @@ def command_today(_args: argparse.Namespace) -> int:
         pass
     try:
         get_or_refresh_baselines()
+        get_or_refresh_survival()
     except OSError:
         pass
     try:
@@ -2670,6 +2732,7 @@ def command_report(args: argparse.Namespace) -> int:
     rows = sessions_since(days)
     try:
         get_or_refresh_baselines()
+        get_or_refresh_survival()
     except OSError:
         pass
     try:
@@ -3748,23 +3811,26 @@ def _check_outcome_review_signals(rows: Sequence[LocalSession]) -> None:
 
     # Cost-per-surviving-change: a one-time, project-agnostic nudge that this
     # honesty-gated local stat has enough history to be shown at all.
-    signal_key = "cost_per_surviving_change:available"
+    # Reads the cached line-level figure rather than recomputing: measuring
+    # survival is a blame pass per file, far too slow for a watch tick.
+    signal_key = "cost_per_surviving_line:available"
     cost_signal_already_sent = has_sent_notification(signal_key)
     if notifications_sent < MAX_OUTCOME_NOTIFICATIONS_PER_PASS and not cost_signal_already_sent:
-        from .ui import _cost_per_surviving_change  # deferred: ui.py imports from cli.py, so import here to dodge a cycle
-
         try:
-            survival_stat = _cost_per_surviving_change(list(all_rows_by_id.values()))
+            survival_stat = usable_survival_summary()
         except OSError:
-            survival_stat = {"available": False}
+            survival_stat = {}
         if survival_stat.get("available"):
             _fire_outcome_notification(
                 signal_key=signal_key,
-                signal_type="cost_per_surviving_change",
+                signal_type="cost_per_surviving_line",
                 session_id="",
                 tool="local",
-                title="AIWatcher: cost-per-surviving-change available",
-                reason="Cost per surviving change is now available for your local history.",
+                title="AIWatcher: cost-per-surviving-line available",
+                reason=(
+                    "Cost per surviving line is now available for your local history -- "
+                    "measured from how much of each change is still in the code."
+                ),
                 url=_outcome_dashboard_url(),
             )
             notifications_sent += 1
@@ -5816,6 +5882,7 @@ def command_ui(args: argparse.Namespace) -> int:
 
     try:
         get_or_refresh_baselines()
+        get_or_refresh_survival()
     except OSError:
         pass
     try:
