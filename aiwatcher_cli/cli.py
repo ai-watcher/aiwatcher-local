@@ -117,8 +117,11 @@ RISK_REVIEW_ALLOW_LOWERING_ENV = "AIWATCHER_RISK_REVIEW_ALLOW_LOWERING"
 # Surface status marker — symbol + optional ANSI color when stdout is a TTY,
 # plain ASCII when piped/redirected (respects NO_COLOR env var too).
 def _surface_marker(status: str) -> str:
+    enc = getattr(sys.stdout, "encoding", "") or ""
+    _unicode_ok = "utf" in enc.lower() or enc.lower() == "cp65001"
     use_color = (
-        sys.stdout.isatty()
+        _unicode_ok
+        and sys.stdout.isatty()
         and not os.environ.get("NO_COLOR")
         and os.environ.get("TERM", "dumb") != "dumb"
     )
@@ -127,12 +130,12 @@ def _surface_marker(status: str) -> str:
     _B = "\033[2m"  if use_color else ""   # dim
     _R = "\033[0m"  if use_color else ""   # reset
     if status == "automatic":
-        return f"{_G}✓{_R}"
+        return f"{_G}{'✓' if _unicode_ok else '[OK]'}{_R}"
     if status == "limited":
-        return f"{_Y}◑{_R}"
+        return f"{_Y}{'◑' if _unicode_ok else '[~]'}{_R}"
     if status in {"companion", "unverified"}:
-        return f"{_B}○{_R}"
-    return f"{_B}✗{_R}"
+        return f"{_B}{'○' if _unicode_ok else '[o]'}{_R}"
+    return f"{_B}{'✗' if _unicode_ok else '[x]'}{_R}"
 
 
 class LocalThreadingHTTPServer(ThreadingHTTPServer):
