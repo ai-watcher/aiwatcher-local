@@ -7,7 +7,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from aiwatcher_cli.ledger import build_ledger, commits_since
+from aiwatcher_cli.ledger import build_ledger, commits_since, cost_per_surviving_line
 from aiwatcher_cli.scanner import LocalEvent
 
 
@@ -231,3 +231,109 @@ class LedgerAttributionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CostPerSurvivingLineTests(unittest.TestCase):
+    """Replaces the survived/churned split that was built on git reachability.
+    Survival is continuous here, so a change 60% still standing counts as 60%
+    rather than as a coin flip against a threshold."""
+
+    def _ledger(self, repo, events, *, now, days=30):
+        return build_ledger(events, days=days, now=now)
+
+    def test_unavailable_until_enough_changes_are_old_enough(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            commit(repo, "a.py", "x\n", "recent", when=now - timedelta(hours=2))
+            led = build_ledger([event(repo, cost=5.0, when=now - timedelta(hours=3))],
+                               days=30, now=now)
+            result = cost_per_surviving_line(led, now=now)
+
+        self.assertFalse(result["available"])
+        self.assertIn("old enough", result["reason"])
+
+    def test_recent_changes_are_held_back_not_scored(self) -> None:
+        # Including them would flatter the figure: nothing has had time to be
+        # rewritten, so they would all score near 100%.
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            commit(repo, "a.py", "x\n", "yesterday", when=now - timedelta(days=1))
+            led = build_ledger([event(repo, cost=9.0, when=now - timedelta(days=1, hours=1))],
+                               days=30, now=now)
+            result = cost_per_surviving_line(led, now=now)
+
+        self.assertEqual(result["changes_too_recent"], 1)
+        self.assertEqual(result["changes_measured"], 0)
+
+    def test_measures_aged_changes_and_reports_coverage(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            events = []
+            for i in range(4):
+                when = now - timedelta(days=20 - i)
+                commit(repo, f"f{i}.py", "a\nb\nc\n", f"change {i}", when=when)
+                events.append(event(repo, cost=10.0, when=when - timedelta(hours=1),
+                                    session=f"s{i}"))
+            led = build_ledger(events, days=30, now=now)
+            result = cost_per_surviving_line(led, now=now)
+
+        self.assertTrue(result["available"])
+        self.assertGreaterEqual(result["changes_measured"], 3)
+        self.assertEqual(result["survival_pct"], 100.0)
+        self.assertIsNotNone(result["cost_coverage_pct"])
+
+    def test_surviving_line_costs_more_than_a_touched_line_when_work_churns(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            events = []
+            for i in range(4):
+                when = now - timedelta(days=20 - i)
+                commit(repo, f"f{i}.py", "a\nb\nc\nd\n", f"change {i}", when=when)
+                events.append(event(repo, cost=10.0, when=when - timedelta(hours=1),
+                                    session=f"s{i}"))
+            # Rewrite half of one change's lines well after the fact.
+            commit(repo, "f0.py", "a\nb\nZ\nY\n", "rewrite half of change 0",
+                   when=now - timedelta(days=9))
+            led = build_ledger(events, days=30, now=now)
+            result = cost_per_surviving_line(led, now=now)
+
+        self.assertLess(result["survival_pct"], 100.0)
+        self.assertGreater(result["usd_per_surviving_line"], result["usd_per_line"])
+
+    def test_free_changes_are_not_counted_as_measured_spend(self) -> None:
+        # A commit made without AI has no cost to divide, so it must not dilute
+        # the ratio or consume the coverage budget.
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            events = []
+            for i in range(3):
+                when = now - timedelta(days=20 - i)
+                commit(repo, f"paid{i}.py", "a\nb\n", f"paid {i}", when=when)
+                events.append(event(repo, cost=10.0, when=when - timedelta(hours=1),
+                                    session=f"s{i}"))
+            commit(repo, "free.py", "x\n" * 50, "no AI involved", when=now - timedelta(days=15))
+            led = build_ledger(events, days=30, now=now)
+            result = cost_per_surviving_line(led, now=now)
+
+        self.assertEqual(result["changes_considered"], 3)
+        self.assertAlmostEqual(result["cost_usd"], 30.0, places=6)
+
+    def test_reports_itself_as_a_floor(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            events = []
+            for i in range(3):
+                when = now - timedelta(days=20 - i)
+                commit(repo, f"f{i}.py", "a\n", f"change {i}", when=when)
+                events.append(event(repo, cost=1.0, when=when - timedelta(hours=1),
+                                    session=f"s{i}"))
+            led = build_ledger(events, days=30, now=now)
+            result = cost_per_surviving_line(led, now=now)
+
+        self.assertTrue(result["is_floor"])
