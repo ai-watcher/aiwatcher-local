@@ -82,6 +82,7 @@ from .processes import (
 )
 from .scanner import (
     LocalEvent,
+    clip_sessions_to_window,
     LocalSession,
     discover_tools,
     display_model_name,
@@ -191,8 +192,18 @@ def in_window(session: LocalSession, since: datetime) -> bool:
 
 
 def sessions_since(days: int) -> list[LocalSession]:
+    """Sessions clipped to the window.
+
+    The old rule counted a session's whole lifetime cost if it was touched at
+    all inside the window, so a long-running session inflated every total it
+    appeared in. See scanner.clip_sessions_to_window.
+    """
     since = datetime.now().astimezone() - timedelta(days=days)
-    return [session for session in scan_all() if in_window(session, since)]
+    try:
+        events = scan_all_events()
+    except OSError:
+        events = []
+    return clip_sessions_to_window(scan_all(), events, since)
 
 
 def summarize(sessions: Iterable[LocalSession]) -> dict[str, float | int]:
@@ -583,8 +594,12 @@ def budget_check_text(
     today_start = local_midnight(now.date())
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     rows = scan_all()
-    today_rows = [row for row in rows if in_window(row, today_start)]
-    month_rows = [row for row in rows if in_window(row, month_start)]
+    try:
+        events = scan_all_events()
+    except OSError:
+        events = []
+    today_rows = clip_sessions_to_window(rows, events, today_start)
+    month_rows = clip_sessions_to_window(rows, events, month_start)
     today_cost = float(summarize(today_rows)["cost_usd"])
     month_cost = float(summarize(month_rows)["cost_usd"])
     today_pct = (today_cost / daily_budget_usd * 100) if daily_budget_usd > 0 else 0
@@ -2529,9 +2544,13 @@ def command_today(_args: argparse.Namespace) -> int:
         recheck_evidence_survival()
     except OSError:
         pass
-    today = [row for row in all_sessions if in_window(row, today_start)]
-    week = [row for row in all_sessions if in_window(row, week_start)]
-    month = [row for row in all_sessions if in_window(row, month_start)]
+    try:
+        window_events = scan_all_events()
+    except OSError:
+        window_events = []
+    today = clip_sessions_to_window(all_sessions, window_events, today_start)
+    week = clip_sessions_to_window(all_sessions, window_events, week_start)
+    month = clip_sessions_to_window(all_sessions, window_events, month_start)
 
     print(f"Today - {format_full_date(now)}")
     by_tool: dict[str, list[LocalSession]] = defaultdict(list)
@@ -5782,7 +5801,11 @@ def command_export(args: argparse.Namespace) -> int:
         ]
         print(json.dumps({"schema": "aiwatcher.local_events.v0", "events": rows}, indent=2))
     else:
-        rows = [row.to_json() for row in scan_all() if in_window(row, since)]
+        try:
+            export_events = scan_all_events()
+        except OSError:
+            export_events = []
+        rows = [row.to_json() for row in clip_sessions_to_window(scan_all(), export_events, since)]
         print(json.dumps({"schema": "aiwatcher.local_sessions.v0", "sessions": rows}, indent=2))
     print("Tip: Cloud can schedule exports and evidence packs for teams.", file=sys.stderr)
     return 0

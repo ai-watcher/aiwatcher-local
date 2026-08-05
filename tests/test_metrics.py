@@ -8,7 +8,7 @@ from aiwatcher_cli.metrics import (
     pace_vs_baseline,
     replayed_context_cost,
 )
-from aiwatcher_cli.scanner import LocalSession
+from aiwatcher_cli.scanner import LocalEvent, LocalSession
 
 
 def session(
@@ -96,18 +96,28 @@ class ModelCostComparisonTests(unittest.TestCase):
         self.assertEqual(result["models_eligible"], 1)
 
 
+def pace_event(name: str, *, cost: float, days_ago: float) -> LocalEvent:
+    return LocalEvent(
+        event_id=name, session_id=name, tool="claude-code", event_type="assistant",
+        timestamp=datetime.now().astimezone() - timedelta(days=days_ago),
+        project_path="/repo", model="claude-sonnet-5", cost_usd=cost,
+    )
+
+
 class PaceVsBaselineTests(unittest.TestCase):
     def test_needs_prior_windows_with_activity(self) -> None:
-        rows = [session(f"s{i}", days_ago=1) for i in range(5)]
-        result = pace_vs_baseline(rows)
+        events = [pace_event(f"e{i}", cost=1.0, days_ago=1) for i in range(5)]
+        result = pace_vs_baseline(events)
         self.assertFalse(result["available"])
         self.assertEqual(result["baseline_windows"], 0)
 
     def test_reports_ratio_against_prior_windows(self) -> None:
-        rows = [session("now", cost=20.0, days_ago=1)]
-        rows += [session("w1", cost=10.0, days_ago=9)]
-        rows += [session("w2", cost=10.0, days_ago=16)]
-        result = pace_vs_baseline(rows)
+        events = [
+            pace_event("now", cost=20.0, days_ago=1),
+            pace_event("w1", cost=10.0, days_ago=9),
+            pace_event("w2", cost=10.0, days_ago=16),
+        ]
+        result = pace_vs_baseline(events)
 
         self.assertTrue(result["available"])
         self.assertAlmostEqual(result["current_usd"], 20.0, places=6)
@@ -118,14 +128,41 @@ class PaceVsBaselineTests(unittest.TestCase):
     def test_idle_windows_are_dropped_not_counted_as_zero(self) -> None:
         # A fortnight away from the keyboard must not halve the baseline and
         # make the return week look like a spike.
-        rows = [session("now", cost=10.0, days_ago=1)]
-        rows += [session("w1", cost=10.0, days_ago=9)]
-        rows += [session("w4", cost=10.0, days_ago=25)]
-        result = pace_vs_baseline(rows)
+        events = [
+            pace_event("now", cost=10.0, days_ago=1),
+            pace_event("w1", cost=10.0, days_ago=9),
+            pace_event("w4", cost=10.0, days_ago=25),
+        ]
+        result = pace_vs_baseline(events)
 
         self.assertEqual(result["baseline_windows"], 2)
         self.assertAlmostEqual(result["baseline_usd"], 10.0, places=6)
         self.assertAlmostEqual(result["ratio"], 1.0, places=2)
+
+    def test_spend_counts_in_the_window_it_happened_in(self) -> None:
+        # The bug this replaced: bucketing a whole session by its last-touch
+        # time credited the current window with spend from earlier ones, so the
+        # reported "excess" could exceed the window's entire spend.
+        events = [
+            pace_event("recent-turn", cost=5.0, days_ago=1),
+            pace_event("older-turn", cost=10.0, days_ago=9),
+            pace_event("oldest-turn-same-session", cost=95.0, days_ago=20),
+        ]
+        result = pace_vs_baseline(events)
+
+        self.assertTrue(result["available"])
+        self.assertAlmostEqual(result["current_usd"], 5.0, places=6)
+        # The $95 sits in its own prior window, not in the current one.
+        self.assertAlmostEqual(result["baseline_usd"], 52.5, places=6)
+
+    def test_zero_cost_events_are_ignored(self) -> None:
+        events = [
+            pace_event("now", cost=10.0, days_ago=1),
+            pace_event("meta", cost=0.0, days_ago=1),
+            pace_event("w1", cost=5.0, days_ago=9),
+            pace_event("w2", cost=5.0, days_ago=16),
+        ]
+        self.assertAlmostEqual(pace_vs_baseline(events)["current_usd"], 10.0, places=6)
 
 
 class ReplayedContextCostTests(unittest.TestCase):

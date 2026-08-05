@@ -1024,7 +1024,7 @@ class InsightFeedRankingTests(unittest.TestCase):
             )
             for i in range(3)
         ]
-        feed = ui._insight_feed(rows, rows, days=7, inferred_useful=1, needs_review=0, churned=0)
+        feed = ui._insight_feed(rows, rows, [], days=7, inferred_useful=1, needs_review=0, churned=0)
         impacts = [c["impact_usd"] for c in feed if c["impact_usd"] is not None]
 
         self.assertEqual(impacts, sorted(impacts, reverse=True))
@@ -1040,7 +1040,7 @@ class InsightFeedRankingTests(unittest.TestCase):
             started_at=now, updated_at=now, model="claude-sonnet-5",
             tokens_in=5_000_000, tokens_out=1_000, cache_read_tokens=4_900_000, cost_usd=20.0,
         )]
-        feed = ui._insight_feed(rows, rows, days=7, inferred_useful=0, needs_review=0, churned=0)
+        feed = ui._insight_feed(rows, rows, [], days=7, inferred_useful=0, needs_review=0, churned=0)
         joined = " ".join(f"{c['title']} {c['body']}" for c in feed).lower()
         for tool in ("cursor", "cline", "windsurf"):
             self.assertNotIn(tool, joined)
@@ -1052,7 +1052,7 @@ class InsightFeedRankingTests(unittest.TestCase):
             started_at=now, updated_at=now, model="claude-sonnet-5",
             tokens_in=5_000_000, tokens_out=1_000, cache_read_tokens=4_900_000, cost_usd=20.0,
         )]
-        feed = ui._insight_feed(rows, rows, days=7, inferred_useful=2, needs_review=1, churned=1)
+        feed = ui._insight_feed(rows, rows, [], days=7, inferred_useful=2, needs_review=1, churned=1)
         ids = [c["id"] for c in feed]
         self.assertTrue(all(ids))
         self.assertEqual(len(ids), len(set(ids)))

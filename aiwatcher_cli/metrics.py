@@ -24,7 +24,7 @@ from statistics import median
 from typing import Any, Sequence
 
 from .pricing import CACHE_READ_MULTIPLIER, is_subscription_model, lookup
-from .scanner import LocalSession, display_model_name
+from .scanner import LocalEvent, LocalSession, display_model_name
 
 # A ratio needs both arms to be real. Below this, the "comparison" is one
 # outlier session divided by another.
@@ -44,10 +44,6 @@ def _has_cumulative_totals(session: LocalSession) -> bool:
     module, so importing back would cycle.
     """
     return any("cumulative" in note.lower() for note in session.notes)
-
-
-def _stamp(session: LocalSession) -> datetime | None:
-    return session.updated_at or session.started_at
 
 
 def model_cost_comparison(
@@ -167,7 +163,7 @@ def model_cost_comparison(
 
 
 def pace_vs_baseline(
-    all_rows: Sequence[LocalSession],
+    events: Sequence[LocalEvent],
     *,
     days: int = 7,
     baseline_weeks: int = 4,
@@ -179,7 +175,12 @@ def pace_vs_baseline(
     honest "are you running hot" has to be self-referential -- and a personal
     baseline is what makes a raw dollar figure mean anything.
 
-    Weeks with no recorded activity are dropped rather than counted as zero:
+    Buckets *events*, not sessions. Bucketing whole sessions by their last-touch
+    time credits every window with spend that happened in earlier ones, which
+    overstates the current window and understates the baseline -- enough that
+    the reported "excess" could exceed the window's entire spend.
+
+    Windows with no recorded activity are dropped rather than counted as zero:
     a fortnight away from the keyboard would otherwise halve the baseline and
     make the return week look like a spike.
     """
@@ -189,17 +190,16 @@ def pace_vs_baseline(
 
     current = 0.0
     buckets: dict[int, float] = {}
-    for row in all_rows:
-        stamp = _stamp(row)
-        if not stamp:
+    for event in events:
+        if event.cost_usd <= 0 or not event.timestamp:
             continue
-        stamp = stamp.astimezone()
+        stamp = event.timestamp.astimezone()
         if stamp >= current_start:
-            current += row.cost_usd
+            current += event.cost_usd
             continue
         index = int((current_start - stamp) / window)
         if index < baseline_weeks:
-            buckets[index] = buckets.get(index, 0.0) + row.cost_usd
+            buckets[index] = buckets.get(index, 0.0) + event.cost_usd
 
     active = [value for value in buckets.values() if value > 0]
     if len(active) < min_weeks:

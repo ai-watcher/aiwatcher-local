@@ -46,6 +46,7 @@ from .outcome_evidence import VALID_EVIDENCE_OUTCOMES, build_outcome_evidence, e
 from .pricing import is_subscription_model
 from .session_health import ContextHealth, analyze_all_sessions, gate_health_warning
 from .scanner import (
+    clip_sessions_to_window,
     LocalEvent,
     LocalSession,
     discover_tools,
@@ -184,8 +185,14 @@ def group_by_model_breakdown(rows: list[LocalSession]) -> list[dict[str, object]
 
 
 def rows_for_window(days: int) -> list[LocalSession]:
+    """Sessions clipped to the window -- see clip_sessions_to_window for why the
+    old `updated_at`-only rule overstated every total."""
     since = datetime.now().astimezone() - timedelta(days=days)
-    return [row for row in scan_all() if in_window(row, since)]
+    try:
+        events = scan_all_events()
+    except OSError:
+        events = []
+    return clip_sessions_to_window(scan_all(), events, since)
 
 
 def _session_row_json(
@@ -1062,6 +1069,7 @@ def _recent_handoff_decision_session_ids(rows: list[dict[str, object]]) -> set[s
 def _insight_feed(
     rows: list[LocalSession],
     all_rows: list[LocalSession],
+    all_events: list[LocalEvent],
     *,
     days: int,
     inferred_useful: int,
@@ -1105,7 +1113,7 @@ def _insight_feed(
             "severity": "high" if share >= 40 else "medium",
         })
 
-    pace = pace_vs_baseline(all_rows, days=days)
+    pace = pace_vs_baseline(all_events, days=days)
     if pace["available"] and pace["ratio"] >= 1.25:
         excess = max(0.0, pace["current_usd"] - pace["baseline_usd"])
         cards.append({
@@ -1198,8 +1206,16 @@ def build_summary(days: int = 7) -> dict[str, object]:
         link_recent_interventions_to_sessions(all_rows)
     except OSError:
         pass
-    rows = [row for row in all_rows if in_window(row, since)]
-    month_rows = [row for row in all_rows if in_window(row, month_start)]
+    # Events are loaded up front because the windows are clipped by them: a
+    # session merely *touched* inside a window used to contribute every dollar
+    # it had ever cost, which on long-running sessions roughly doubled the
+    # reported total.
+    try:
+        all_events = scan_all_events()
+    except OSError:
+        all_events = []
+    rows = clip_sessions_to_window(all_rows, all_events, since)
+    month_rows = clip_sessions_to_window(all_rows, all_events, month_start)
 
     stats = summarize(rows)
     month_stats = summarize(month_rows)
@@ -1214,10 +1230,6 @@ def build_summary(days: int = 7) -> dict[str, object]:
     recent = sorted(rows, key=lambda row: row.updated_at or row.started_at or MIN_DT, reverse=True)[:12]
     detected = discover_tools()
     notes = sorted({note for row in rows for note in row.notes})
-    try:
-        all_events = scan_all_events()
-    except OSError:
-        all_events = []
     context_health = _context_health_cards(rows, all_events)
     handoff_decisions = _handoff_decision_rows(limit=10)
     suppressed_handoff_sessions = _recent_handoff_decision_session_ids(handoff_decisions)
@@ -1309,6 +1321,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
     insights = _insight_feed(
         rows,
         all_rows,
+        all_events,
         days=days,
         inferred_useful=inferred_useful,
         needs_review=needs_review,

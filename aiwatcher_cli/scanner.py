@@ -10,10 +10,10 @@ import re
 import sqlite3
 import subprocess
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 from .pricing import estimate_cost
 
@@ -428,6 +428,107 @@ def _choose_project_path(
 
     normalized_fallback = _normalize_project_path(fallback_path)
     return normalized_fallback or fallback_path
+
+
+CLIP_FALLBACK_NOTE = "Windowed whole-session: this tool reports no per-turn events to clip by."
+
+
+def session_in_window(session: LocalSession, since: datetime, until: datetime | None = None) -> bool:
+    stamp = session.updated_at or session.started_at
+    if not stamp:
+        return False
+    stamp = stamp.astimezone()
+    if stamp < since.astimezone():
+        return False
+    return until is None or stamp <= until.astimezone()
+
+
+def clip_sessions_to_window(
+    rows: Sequence[LocalSession],
+    events: Sequence[LocalEvent],
+    since: datetime,
+    *,
+    until: datetime | None = None,
+) -> list[LocalSession]:
+    """Reduce each session to the spend that actually happened inside the window.
+
+    The original rule was all-or-nothing on `updated_at`: a session touched once
+    this week contributed every dollar it had ever cost, including turns from
+    weeks earlier. With long-running sessions that badly overstates a window --
+    on this repo's own history roughly half of a "last 7 days" total had
+    happened before those 7 days ($372 of $766).
+
+    Clipping is exact rather than apportioned: each event carries its own
+    timestamp and cost, and event costs sum to session costs, so the in-window
+    subset is simply summed.
+
+    Sessions whose scanner emits no per-turn events -- Cursor, and the Codex
+    sqlite path -- cannot be clipped. They keep the old whole-session rule and
+    carry CLIP_FALLBACK_NOTE, so the imprecision stays visible instead of
+    either vanishing from the window or being silently overstated.
+    """
+    by_session: dict[str, list[LocalEvent]] = defaultdict(list)
+    for event in events:
+        by_session[event.session_id].append(event)
+
+    since_local = since.astimezone()
+    until_local = until.astimezone() if until else None
+    clipped: list[LocalSession] = []
+
+    for row in rows:
+        row_events = by_session.get(row.session_id)
+        if not row_events:
+            if session_in_window(row, since, until):
+                fallback = replace(row, notes=[*row.notes, CLIP_FALLBACK_NOTE])
+                clipped.append(fallback)
+            continue
+
+        in_window_events = []
+        for event in row_events:
+            if not event.timestamp:
+                continue
+            stamp = event.timestamp.astimezone()
+            if stamp < since_local:
+                continue
+            if until_local is not None and stamp > until_local:
+                continue
+            in_window_events.append(event)
+        if not in_window_events:
+            continue
+
+        model_totals: dict[str, dict[str, float]] = defaultdict(
+            lambda: {"tokens_in": 0.0, "tokens_out": 0.0, "cost_usd": 0.0, "agent_calls": 0.0, "tool_calls": 0.0}
+        )
+        agent_calls = tool_calls = 0
+        for event in in_window_events:
+            # Mirrors how scan_claude_code classifies a turn, so a clipped
+            # session's call counts stay comparable with an unclipped one.
+            is_agent_call = event.event_type.startswith("assistant") or bool(event.model)
+            is_tool_call = event.event_type == "tool_result"
+            agent_calls += int(is_agent_call)
+            tool_calls += int(is_tool_call)
+            key = event.model or row.model
+            if key:
+                bucket = model_totals[key]
+                bucket["tokens_in"] += event.tokens_in
+                bucket["tokens_out"] += event.tokens_out
+                bucket["cost_usd"] += event.cost_usd
+                bucket["agent_calls"] += int(is_agent_call)
+                bucket["tool_calls"] += int(is_tool_call)
+
+        clipped.append(replace(
+            row,
+            tokens_in=sum(event.tokens_in for event in in_window_events),
+            tokens_out=sum(event.tokens_out for event in in_window_events),
+            cache_read_tokens=sum(event.cache_read_tokens for event in in_window_events),
+            cache_write_tokens=sum(event.cache_write_tokens for event in in_window_events),
+            cost_usd=sum(event.cost_usd for event in in_window_events),
+            agent_calls=agent_calls,
+            tool_calls=tool_calls,
+            model_breakdown={key: dict(value) for key, value in model_totals.items()},
+        ))
+
+    return clipped
 
 
 def _usage_int(value: Any) -> int:
