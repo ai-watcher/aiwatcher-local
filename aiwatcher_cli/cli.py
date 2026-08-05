@@ -133,6 +133,11 @@ def money(value: float) -> str:
 
 
 def compact_int(value: int) -> str:
+    # Billions became reachable once replayed cache tokens were counted: a long
+    # session re-sends its whole context every turn, so totals run far past the
+    # millions this used to top out at ("1332.1M" instead of "1.3B").
+    if value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.1f}B"
     if value >= 1_000_000:
         return f"{value / 1_000_000:.1f}M"
     if value >= 1_000:

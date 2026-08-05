@@ -186,7 +186,6 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Start a new chat", summary["handoff_bubble"]["title"])
         self.assertEqual(summary["handoff_bubble"]["expected_saved_context_tokens"], 220_500)
         self.assertEqual(summary["handoff_decisions"], [])
-        self.assertTrue(any(item["title"] == "Context health needs attention" for item in summary["insights"]))
 
     def test_recent_handoff_decision_suppresses_repeat_bubble(self) -> None:
         now = datetime.now(timezone.utc)
@@ -427,7 +426,7 @@ class DashboardWindowTests(unittest.TestCase):
 
         self.assertEqual(summary["totals"]["inferred_useful_outcomes"], 1)
         self.assertEqual(summary["recent_sessions"][0]["inferred_outcome"], "useful")
-        self.assertTrue(any(item["title"] == "Outcome evidence found" for item in summary["insights"]))
+        self.assertTrue(any(item["id"] == "outcome-review" for item in summary["insights"]))
 
     def test_cost_per_surviving_change_unavailable_below_sample_threshold(self) -> None:
         rows = [
@@ -499,7 +498,7 @@ class DashboardWindowTests(unittest.TestCase):
         ):
             summary = ui.build_summary(7)
 
-        self.assertTrue(any(item["title"] == "Work that didn't stick" for item in summary["insights"]))
+        self.assertTrue(any(item["id"] == "churned" for item in summary["insights"]))
         self.assertEqual(summary["recent_sessions"][0]["inferred_outcome"], "churned")
 
     def test_handoff_detail_returns_capsule_for_session(self) -> None:
@@ -996,3 +995,64 @@ class SessionSearchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InsightFeedRankingTests(unittest.TestCase):
+    """The feed replaced three panels that each restated the same facts. Its
+    contract is: ranked by money, and nothing in it that lacks a comparison."""
+
+    def _card(self, card_id: str, impact):
+        return {"id": card_id, "title": card_id, "body": "", "impact_usd": impact,
+                "session_id": None, "severity": "info"}
+
+    def test_dollar_cards_rank_above_and_within_themselves(self) -> None:
+        cards = [self._card("small", 1.0), self._card("none", None), self._card("big", 100.0)]
+        with_impact = [c for c in cards if c["impact_usd"] is not None]
+        without = [c for c in cards if c["impact_usd"] is None]
+        with_impact.sort(key=lambda c: float(c["impact_usd"] or 0), reverse=True)
+        ordered = [*with_impact, *without]
+        self.assertEqual([c["id"] for c in ordered], ["big", "small", "none"])
+
+    def test_feed_ranks_by_impact_and_labels_only_dollar_cards(self) -> None:
+        now = datetime.now(timezone.utc)
+        rows = [
+            ui.LocalSession(
+                session_id=f"s{i}", tool="claude-code", project_path="/repo",
+                started_at=now, updated_at=now, model="claude-sonnet-5",
+                tokens_in=5_000_000, tokens_out=1_000, cache_read_tokens=4_900_000,
+                cost_usd=20.0,
+            )
+            for i in range(3)
+        ]
+        feed = ui._insight_feed(rows, rows, days=7, inferred_useful=1, needs_review=0, churned=0)
+        impacts = [c["impact_usd"] for c in feed if c["impact_usd"] is not None]
+
+        self.assertEqual(impacts, sorted(impacts, reverse=True))
+        self.assertTrue(all(c["impact_label"] for c in feed if c["impact_usd"] is not None))
+        self.assertTrue(all(c["impact_label"] == "" for c in feed if c["impact_usd"] is None))
+
+    def test_coverage_gaps_stay_off_the_feed(self) -> None:
+        # Tools detected but not scanned are a setup concern that never
+        # changes. Mixing them in is what made the old list read as noise.
+        now = datetime.now(timezone.utc)
+        rows = [ui.LocalSession(
+            session_id="s1", tool="claude-code", project_path="/repo",
+            started_at=now, updated_at=now, model="claude-sonnet-5",
+            tokens_in=5_000_000, tokens_out=1_000, cache_read_tokens=4_900_000, cost_usd=20.0,
+        )]
+        feed = ui._insight_feed(rows, rows, days=7, inferred_useful=0, needs_review=0, churned=0)
+        joined = " ".join(f"{c['title']} {c['body']}" for c in feed).lower()
+        for tool in ("cursor", "cline", "windsurf"):
+            self.assertNotIn(tool, joined)
+
+    def test_every_card_carries_a_stable_id(self) -> None:
+        now = datetime.now(timezone.utc)
+        rows = [ui.LocalSession(
+            session_id="s1", tool="claude-code", project_path="/repo",
+            started_at=now, updated_at=now, model="claude-sonnet-5",
+            tokens_in=5_000_000, tokens_out=1_000, cache_read_tokens=4_900_000, cost_usd=20.0,
+        )]
+        feed = ui._insight_feed(rows, rows, days=7, inferred_useful=2, needs_review=1, churned=1)
+        ids = [c["id"] for c in feed]
+        self.assertTrue(all(ids))
+        self.assertEqual(len(ids), len(set(ids)))

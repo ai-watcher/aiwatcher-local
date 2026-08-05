@@ -24,6 +24,7 @@ from .cli import (
 )
 from .correlate import link_recent_interventions_to_sessions
 from .handoff import build_handoff_capsule
+from .metrics import model_cost_comparison, pace_vs_baseline, replayed_context_cost
 from .local_state import (
     COMMAND_GATE_BLOCKED_DECISIONS,
     MAX_COMMAND_DECISIONS_STORED,
@@ -72,6 +73,11 @@ def money(value: float) -> str:
 
 
 def compact_int(value: int) -> str:
+    # Billions became reachable once replayed cache tokens were counted: a long
+    # session re-sends its whole context every turn, so totals run far past the
+    # millions this used to top out at ("1332.1M" instead of "1.3B").
+    if value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.1f}B"
     if value >= 1_000_000:
         return f"{value / 1_000_000:.1f}M"
     if value >= 1_000:
@@ -1053,6 +1059,134 @@ def _recent_handoff_decision_session_ids(rows: list[dict[str, object]]) -> set[s
                 pass
         session_ids.add(session_id)
     return session_ids
+def _insight_feed(
+    rows: list[LocalSession],
+    all_rows: list[LocalSession],
+    *,
+    days: int,
+    inferred_useful: int,
+    needs_review: int,
+    churned: int,
+) -> list[dict[str, object]]:
+    """One ranked list, ordered by how much money each finding is about.
+
+    Replaces three panels that were all built from the same handful of max()
+    calls -- Weekly Digest, Local Insights and Daily Journal each restated the
+    same top project, costliest session and loop count.
+
+    Two rules decide what earns a place here:
+      1. Every card names a comparison. "1.1M tokens in one session" gives the
+         reader nothing to do; "97% of it was replayed history, costing $196"
+         does. A number with no "versus" is a metric and belongs in a table.
+      2. Cards are ranked by dollars, not insertion order, so the biggest
+         finding is the one the eye lands on.
+
+    Coverage gaps (tools detected but not scanned) deliberately do NOT appear
+    here -- they are a setup concern, they never change, and mixing them in is
+    what made the old list read as noise. They live on the Coverage tab.
+    """
+    cards: list[dict[str, object]] = []
+
+    replay = replayed_context_cost(rows)
+    if replay["available"] and replay["sessions"]:
+        top = replay["sessions"][0]
+        window_cost = sum(row.cost_usd for row in rows)
+        share = (replay["total_replayed_usd"] / window_cost * 100) if window_cost > 0 else 0
+        cards.append({
+            "id": "replayed-context",
+            "title": f"{share:.0f}% of your spend went on re-sending conversation history",
+            "body": (
+                f"{money(replay['total_replayed_usd'])} of {money(window_cost)} this window. The worst session replayed "
+                f"{top['replayed_pct']:.0f}% of its context, {money(top['replayed_usd'])} of its "
+                f"{money(top['session_usd'])}. Compacting or starting fresh earlier is what this buys back."
+            ),
+            "impact_usd": replay["total_replayed_usd"],
+            "session_id": top["session_id"],
+            "severity": "high" if share >= 40 else "medium",
+        })
+
+    pace = pace_vs_baseline(all_rows, days=days)
+    if pace["available"] and pace["ratio"] >= 1.25:
+        excess = max(0.0, pace["current_usd"] - pace["baseline_usd"])
+        cards.append({
+            "id": "pace",
+            "title": f"You are {pace['ratio']:.1f}x your usual pace",
+            "body": (
+                f"{money(pace['current_usd'])} in the last {days} days against a "
+                f"{money(pace['baseline_usd'])} average over your previous "
+                f"{pace['baseline_windows']} windows. Local logs cannot see your plan's quota, so this "
+                f"compares you to yourself rather than to a limit."
+            ),
+            "impact_usd": excess,
+            "session_id": None,
+            "severity": "medium" if pace["ratio"] < 2 else "high",
+        })
+
+    models = model_cost_comparison(all_rows)
+    if models["available"]:
+        dear = models["by_session"]["dearest"]
+        cheap = models["by_session"]["cheapest"]
+        if models["driver"] == "volume":
+            body = (
+                f"{dear['label']} sessions cost {models['by_session']['ratio']:.1f}x a {cheap['label']} "
+                f"session, but they run {models['volume_factor']:.0f}x more tokens -- per token it is "
+                f"{models['rate_factor']:.2f}x the rate. The gap is how you use it, not what it charges."
+            )
+        elif models["driver"] == "rate":
+            body = (
+                f"{dear['label']} costs {models['rate_factor']:.1f}x more per token than {cheap['label']} "
+                f"on comparably sized sessions. Worth checking which tasks genuinely need it."
+            )
+        else:
+            body = (
+                f"{dear['label']} sessions cost {models['by_session']['ratio']:.1f}x a {cheap['label']} "
+                f"session -- {models['volume_factor']:.1f}x from size and {models['rate_factor']:.2f}x "
+                f"from rate."
+            )
+        cards.append({
+            "id": "model-mix",
+            "title": f"{dear['label']} is {models['by_session']['ratio']:.1f}x your {cheap['label']} sessions",
+            "body": body,
+            # No dollar figure: the models are not interchangeable for every
+            # task, so quoting a "saving" would promise something untestable.
+            "impact_usd": None,
+            "session_id": None,
+            "severity": "info",
+        })
+
+    if churned:
+        cards.append({
+            "id": "churned",
+            "title": f"{churned} session{'s' if churned != 1 else ''} looked useful but did not stick",
+            "body": "The commit was later reverted or rewritten. Worth a look before repeating the approach.",
+            "impact_usd": None,
+            "session_id": None,
+            "severity": "medium",
+        })
+    if inferred_useful or needs_review:
+        total = inferred_useful + needs_review
+        cards.append({
+            "id": "outcome-review",
+            "title": f"{total} session{'s' if total != 1 else ''} still need an outcome",
+            "body": (
+                f"{inferred_useful} have a nearby commit or test; {needs_review} changed files without one. "
+                "Confirming them sharpens every cost-per-outcome number on this page."
+            ),
+            "impact_usd": None,
+            "session_id": None,
+            "severity": "info",
+        })
+
+    # Dollar-weighted findings first, biggest first; everything else after, in
+    # the order it was added.
+    with_impact = [card for card in cards if card["impact_usd"] is not None]
+    without_impact = [card for card in cards if card["impact_usd"] is None]
+    with_impact.sort(key=lambda card: float(card["impact_usd"] or 0), reverse=True)
+    for card in with_impact:
+        card["impact_label"] = money(float(card["impact_usd"] or 0))
+    for card in without_impact:
+        card["impact_label"] = ""
+    return [*with_impact, *without_impact]
 
 
 def build_summary(days: int = 7) -> dict[str, object]:
@@ -1171,21 +1305,15 @@ def build_summary(days: int = 7) -> dict[str, object]:
         if session_id not in window_outcomes and evidence.inferred_outcome == "needs_review"
     )
     churned = sum(1 for evidence in evidence_by_session.values() if evidence.inferred_outcome == "churned")
-    if inferred_useful:
-        insights.append({
-            "title": "Outcome evidence found",
-            "body": f"{inferred_useful} unmarked session{'s' if inferred_useful != 1 else ''} have nearby commit or test evidence. Review and confirm the outcome.",
-        })
-    if needs_review:
-        insights.append({
-            "title": "Work needs outcome review",
-            "body": f"{needs_review} unmarked session{'s' if needs_review != 1 else ''} changed files without a confirmed useful outcome.",
-        })
-    if churned:
-        insights.append({
-            "title": "Work that didn't stick",
-            "body": f"{churned} session{'s' if churned != 1 else ''} looked useful at the time, but the commit was later reverted or rewritten.",
-        })
+    replayed_tokens = sum(row.cache_read_tokens for row in rows)
+    insights = _insight_feed(
+        rows,
+        all_rows,
+        days=days,
+        inferred_useful=inferred_useful,
+        needs_review=needs_review,
+        churned=churned,
+    )
     survival_summary = _cost_per_surviving_change(all_rows)
     interventions = recent_interventions(limit=200, days=days)
     receipt_events = all_events if interventions else []
@@ -1212,6 +1340,16 @@ def build_summary(days: int = 7) -> dict[str, object]:
             "api_value_label": money(float(stats["api_value_usd"])),
             "projected_month_label": money(projected_month),
             "tokens_label": compact_int(int(stats["tokens"])),
+            # A single token total is misleading once cache reads are counted:
+            # replayed history is the same content billed again on every turn,
+            # so the combined figure runs into the billions and says nothing
+            # about how much was actually written. Split it.
+            "new_tokens_label": compact_int(max(0, int(stats["tokens"]) - replayed_tokens)),
+            "replayed_tokens_label": compact_int(replayed_tokens),
+            "replayed_share_pct": (
+                round(100.0 * replayed_tokens / int(stats["tokens"]), 1)
+                if int(stats["tokens"]) > 0 else 0.0
+            ),
             "api_priced_tokens_label": compact_int(split["api_priced"]),
             "plan_limited_tokens_label": compact_int(split["plan_limited"]),
             "calls": stats["calls"],
@@ -1417,6 +1555,20 @@ HTML = r"""<!doctype html>
     .bar { height: 100%; background: var(--blue); border-radius: 99px; min-width: 2px; }
     .amount { text-align: right; color: #dce6f6; font-variant-numeric: tabular-nums; }
     .insight { border-left: 3px solid var(--amber); padding: 8px 0 8px 13px; margin: 12px 0; }
+    .headline { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 4px 0 16px; }
+    .headline-figure { font-size: 30px; font-weight: 600; letter-spacing: -.5px; }
+    .headline-sub { color: var(--muted); font-size: 14px; }
+    .feed-row { display: flex; align-items: flex-start; gap: 14px; padding: 14px 0; border-top: 1px solid var(--line); }
+    .feed-row:first-child { border-top: none; }
+    .feed-row.clickable { cursor: pointer; }
+    .feed-row.clickable:hover { background: var(--surface-hover); }
+    .feed-main { flex: 1; min-width: 0; border-left: 3px solid var(--line-strong); padding-left: 13px; }
+    .feed-row.high .feed-main { border-left-color: var(--red); }
+    .feed-row.medium .feed-main { border-left-color: var(--amber); }
+    .feed-row.info .feed-main { border-left-color: var(--line-strong); }
+    .feed-main strong { display: block; color: white; margin-bottom: 4px; }
+    .feed-main p { margin: 0; color: var(--muted); line-height: 1.5; }
+    .feed-impact { font-size: 16px; white-space: nowrap; padding-top: 1px; }
     .insight strong { display: block; margin-bottom: 3px; color: white; }
     .pill-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
     .pill { border: 1px solid var(--line); background: #0b1118; border-radius: 999px; padding: 5px 9px; color: #bdc9d9; font-size: 11px; }
@@ -1798,38 +1950,22 @@ HTML = r"""<!doctype html>
   <section id="view-insights" class="view" hidden>
     <section class="card" style="margin-bottom:14px">
       <div class="section-title">
-        <div><h2>Weekly Digest</h2><p>What your AI work cost this week, what stuck, and what to change next.</p></div>
-        <span class="pill">Local logs, inferred outcomes</span>
+        <div><h2>What your week cost</h2><p>Ranked by how much money each finding is about.</p></div>
+        <span class="pill">Local logs only</span>
+      </div>
+      <div id="insightHeadline"></div>
+      <div id="insightFeed"></div>
+    </section>
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title">
+        <div><h2>Outcomes and guardrails</h2><p>What stuck, and what was caught before it ran.</p></div>
       </div>
       <div id="report"></div>
     </section>
-    <section class="grid two">
-      <div class="card">
-        <div class="section-title"><div><h2>Local Insights</h2><p>Suggestions to reduce waste without uploading prompts.</p></div></div>
-        <div id="insightRows"></div>
-      </div>
-      <div class="card">
-        <h2>Daily Journal</h2>
-        <div id="journal"></div>
-      </div>
-    </section>
-    <section class="grid two" style="margin-top:14px">
-      <div class="card">
-        <h2>Privacy Contract</h2>
-        <p>AIWatcher Local is read-only and local-first. Summaries avoid source and prompt content by default.</p>
-        <div class="pill-row" id="privacyLarge"></div>
-      </div>
-      <div class="card">
-        <h2>Enterprise handoff</h2>
-        <p>Enterprise adds team history, policy controls, HITL approvals, evidence packs, and integrations.</p>
-        <div class="pill-row">
-          <span class="pill">Team visibility</span>
-          <span class="pill">Budget guardrails</span>
-          <span class="pill">Audit evidence</span>
-          <span class="pill">SSO/RBAC</span>
-        </div>
-      </div>
-    </section>
+    <p class="receipt-note" style="margin-top:4px">
+      Read-only local scan &middot; no LLM calls &middot; no source or prompt content in summaries &middot;
+      nothing leaves this machine unless you connect Cloud.
+    </p>
   </section>
 
   <section id="view-coverage" class="view" hidden>
@@ -2626,11 +2762,28 @@ function renderReport(report) {
     ${sections.join('')}
     <p class="receipt-note">API-equivalent value, not invoice spend. Outcomes are inferred from local signals, not guaranteed truth. Based on local logs only, not live provider quota.</p>`;
 }
-function renderJournal(journal) {
-  return `<p>${esc(journal.title)}</p>
-    <div class="pill-row"><span class="pill">${esc(journal.summary)}</span></div>
-    ${journal.items.map(item => `<div class="insight"><strong>${esc(item)}</strong></div>`).join('')}
-    <p><strong>One thing to change next time:</strong> ${esc(journal.improvement)}</p>`;
+function renderInsightHeadline(totals) {
+  const split = totals.replayed_tokens_label && totals.replayed_share_pct
+    ? `<span class="pill">${esc(totals.new_tokens_label)} new &middot; ${esc(totals.replayed_tokens_label)} replayed (${esc(totals.replayed_share_pct)}%)</span>`
+    : `<span class="pill">${esc(totals.tokens_label)} tokens</span>`;
+  return `<div class="headline">
+    <span class="headline-figure">${esc(totals.api_value_label)}</span>
+    <span class="headline-sub">${esc(totals.window_label)} &middot; ${esc(totals.sessions)} sessions</span>
+    ${split}
+  </div>`;
+}
+function renderInsightFeed(insights) {
+  if (!insights || !insights.length) {
+    return '<div class="empty">No notable local signals yet. Keep using AI tools and check back after a few sessions.</div>';
+  }
+  return insights.map(card => `<div class="feed-row ${esc(card.severity || 'info')}${card.session_id ? ' clickable' : ''}"
+      ${card.session_id ? `onclick="selectSession('${esc(card.session_id)}')"` : ''}>
+      <div class="feed-main">
+        <strong>${esc(card.title)}</strong>
+        <p>${esc(card.body)}</p>
+      </div>
+      ${card.impact_label ? `<span class="feed-impact mono">${esc(card.impact_label)}</span>` : ''}
+    </div>`).join('');
 }
 function showView(view) {
   document.querySelectorAll('.view').forEach(node => {
@@ -2688,14 +2841,15 @@ async function loadSessions() {
 }
 async function load(resetDetail = true) {
   const days = document.getElementById('days').value;
-  const [summaryRes, reportRes, journalRes] = await Promise.all([
+  // /api/journal is still served for the CLI's `aiwatcher journal`, but the
+  // dashboard no longer renders it: every line it produced was a restatement
+  // of something already in the insight feed.
+  const [summaryRes, reportRes] = await Promise.all([
     fetch(`/api/summary?days=${days}`),
-    fetch(`/api/report?days=${days}`),
-    fetch(`/api/journal?days=${Math.min(Number(days), 30)}`)
+    fetch(`/api/report?days=${days}`)
   ]);
   const data = await summaryRes.json();
   const report = await reportRes.json();
-  const journal = await journalRes.json();
   renderHandoffBubble(data.handoff_bubble || null);
   document.getElementById('todayDigest').innerHTML = renderTodayDigest(report.digest);
   const totals = data.totals;
@@ -2739,11 +2893,7 @@ async function load(resetDetail = true) {
   document.getElementById('insights').innerHTML = data.insights.length
     ? data.insights.map(i => `<div class="insight"><strong>${esc(i.title)}</strong><p>${esc(i.body)}</p></div>`).join('')
     : '<div class="empty">No notable local signals yet.</div>';
-  document.getElementById('insightRows').innerHTML = data.insights.length
-    ? data.insights.map(i => `<div class="insight"><strong>${esc(i.title)}</strong><p>${esc(i.body)}</p></div>`).join('')
-    : '<div class="empty">No notable local signals yet. Keep using AI tools and check back after a few sessions.</div>';
   document.getElementById('privacy').innerHTML = data.privacy.map(p => `<div class="privacy-item"><span class="privacy-check">&#10003;</span><span>${esc(p)}</span></div>`).join('');
-  document.getElementById('privacyLarge').innerHTML = data.privacy.map(p => `<span class="pill">${esc(p)}</span>`).join('');
   document.getElementById('recent').innerHTML = data.recent_sessions.slice(0, 6).map(s => `<tr class="clickable" onclick="selectSession('${s.session_id}')">
     <td>${esc(s.tool)}</td><td>${esc(s.project)}<br>${outcomeEvidencePill(s)}</td><td>${esc(s.tokens)}</td><td><button class="row-action">Review</button></td>
   </tr>`).join('');
@@ -2759,7 +2909,8 @@ async function load(resetDetail = true) {
     : '<tr><td colspan="5"><div class="empty">No local project usage found for this window.</div></td></tr>';
   loadSessions();
   document.getElementById('report').innerHTML = renderReport(report);
-  document.getElementById('journal').innerHTML = renderJournal(journal);
+  document.getElementById('insightHeadline').innerHTML = renderInsightHeadline(data.totals);
+  document.getElementById('insightFeed').innerHTML = renderInsightFeed(data.insights);
   if (resetDetail && document.getElementById('detailDrawer').classList.contains('open')) closeDrawer();
 }
 document.addEventListener('keydown', event => { if (event.key === 'Escape') closeDrawer(); });
