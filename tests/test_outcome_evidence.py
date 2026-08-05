@@ -11,6 +11,7 @@ from aiwatcher_cli.outcome_evidence import (
     annotate_same_file_reprompt,
     build_outcome_evidence,
     check_commit_survival,
+    check_commit_undone,
     evidence_for_sessions,
 )
 from aiwatcher_cli.scanner import LocalSession
@@ -147,6 +148,82 @@ class CommitSurvivalTests(unittest.TestCase):
 
     def test_nonexistent_repo_is_unknown(self) -> None:
         self.assertEqual(check_commit_survival("/no/such/repo/path", "abc123"), "unknown")
+
+
+class CommitUndoneTests(unittest.TestCase):
+    """The cases check_commit_survival scores "survived" but a developer would
+    call churn. Each test asserts both, so the gap stays visible."""
+
+    def test_reverted_commit_is_undone_but_still_reachable(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_repo(temp_dir)
+            commit_file(temp_dir, "app.py", "v1\n", "first", when=now)
+            sha = commit_file(temp_dir, "feature.py", "feature\n", "add feature", when=now + timedelta(minutes=1))
+            run(["git", "revert", "--no-edit", sha], temp_dir)
+
+            self.assertEqual(check_commit_survival(temp_dir, sha), "survived")
+            result = check_commit_undone(temp_dir, sha)
+
+        self.assertTrue(result["undone"])
+        self.assertEqual(len(result["reverted_by"]), 1)
+
+    def test_commit_whose_files_were_all_deleted_is_undone(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_repo(temp_dir)
+            commit_file(temp_dir, "app.py", "v1\n", "first", when=now)
+            sha = commit_file(temp_dir, "scratch.py", "temp\n", "add scratch", when=now + timedelta(minutes=1))
+            run(["git", "rm", "scratch.py"], temp_dir)
+            run(["git", "commit", "-m", "drop scratch"], temp_dir)
+
+            self.assertEqual(check_commit_survival(temp_dir, sha), "survived")
+            result = check_commit_undone(temp_dir, sha)
+
+        self.assertTrue(result["undone"])
+        self.assertEqual(result["files_missing"], 1)
+        self.assertEqual(result["files_total"], 1)
+
+    def test_live_commit_is_not_undone(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_repo(temp_dir)
+            sha = commit_file(temp_dir, "app.py", "v1\n", "first", when=now)
+            commit_file(temp_dir, "other.py", "x\n", "unrelated", when=now + timedelta(minutes=1))
+            result = check_commit_undone(temp_dir, sha)
+
+        self.assertFalse(result["undone"])
+        self.assertEqual(result["reverted_by"], [])
+        self.assertEqual(result["files_missing"], 0)
+
+    def test_partial_file_loss_is_reported_but_not_called_undone(self) -> None:
+        # A rewrite that removes some of a commit's files is a signal, not
+        # proof -- renames look identical from here. Line-level survival is
+        # what resolves this; until then it must not flip the verdict.
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_repo(temp_dir)
+            (Path(temp_dir) / "kept.py").write_text("keep\n", encoding="utf-8")
+            (Path(temp_dir) / "dropped.py").write_text("drop\n", encoding="utf-8")
+            stamp = now.strftime("%Y-%m-%dT%H:%M:%S%z")
+            env = {**os.environ, "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp}
+            run(["git", "add", "kept.py", "dropped.py"], temp_dir, env=env)
+            run(["git", "commit", "-m", "add two"], temp_dir, env=env)
+            sha = run_out(["git", "rev-parse", "HEAD"], temp_dir)
+            run(["git", "rm", "dropped.py"], temp_dir)
+            run(["git", "commit", "-m", "drop one"], temp_dir)
+
+            result = check_commit_undone(temp_dir, sha)
+
+        self.assertFalse(result["undone"])
+        self.assertEqual(result["files_missing"], 1)
+        self.assertEqual(result["files_total"], 2)
+        self.assertTrue(result["reasons"])
+
+    def test_nonexistent_repo_reports_nothing(self) -> None:
+        result = check_commit_undone("/no/such/repo/path", "abc123")
+        self.assertFalse(result["undone"])
+        self.assertEqual(result["files_total"], 0)
 
 
 class ChurnDowngradesInferredOutcomeTests(unittest.TestCase):
