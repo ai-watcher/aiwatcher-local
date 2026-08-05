@@ -259,6 +259,43 @@ class LocalStateTests(unittest.TestCase):
         with patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")):
             self.assertEqual(local_state.recent_watch_notifications(), [])
 
+    def test_watcher_heartbeat_round_trips_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                before = local_state.get_watcher_status()
+                local_state.record_watcher_heartbeat(
+                    pid=12345,
+                    mode="watch",
+                    interval_seconds=60,
+                    notify=True,
+                    overlay=True,
+                )
+                after = local_state.get_watcher_status()
+
+        self.assertFalse(before["running"])
+        self.assertEqual(before["status"], "stopped")
+        self.assertTrue(after["running"])
+        self.assertEqual(after["pid"], 12345)
+        self.assertTrue(after["notify"])
+        self.assertTrue(after["overlay"])
+
+    def test_get_watcher_status_fails_soft_when_state_lock_is_unavailable(self) -> None:
+        with patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")):
+            status = local_state.get_watcher_status()
+        self.assertFalse(status["running"])
+        self.assertEqual(status["status"], "unknown")
+
+    def test_recent_decisions_and_outcome_fail_soft_when_state_lock_is_unavailable(self) -> None:
+        with patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")):
+            self.assertEqual(local_state.recent_decisions("sess-1"), [])
+            self.assertIsNone(local_state.get_outcome("sess-1"))
+
+    def test_issue_brief_token_degrades_when_state_lock_is_unavailable(self) -> None:
+        with patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")):
+            token = local_state.issue_brief_token("handoff_capsule")
+        self.assertTrue(token.startswith("unverified-"))
+
     def test_outcome_notification_dedup_round_trips(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")

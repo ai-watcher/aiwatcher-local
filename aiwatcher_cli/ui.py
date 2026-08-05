@@ -6,9 +6,12 @@ import json
 import os
 import socket
 import subprocess
+import threading
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
@@ -34,6 +37,7 @@ from .local_state import (
     VALID_OUTCOMES,
     evidence_snapshots_for_sessions,
     get_outcome,
+    get_watcher_status,
     outcome_counts,
     outcomes_for_sessions,
     recent_command_decisions,
@@ -43,6 +47,7 @@ from .local_state import (
     record_evidence_snapshot,
     record_outcome,
     record_ui_server,
+    state_path,
 )
 from .outcome_evidence import VALID_EVIDENCE_OUTCOMES, build_outcome_evidence, evidence_for_sessions
 from .ledger import Ledger, build_ledger, unbanked_summary
@@ -66,6 +71,16 @@ from .scanner import (
 MAX_REQUEST_BYTES = 64 * 1024
 
 MIN_DT = datetime.min.replace(tzinfo=timezone.utc)
+SUMMARY_MEMORY_TTL_SECONDS = 45
+SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
+SUMMARY_BACKGROUND_COOLDOWN_SECONDS = 8
+ACTIVE_SESSION_MINUTES = 30
+RECENT_SESSION_HOURS = 4
+
+_SUMMARY_CACHE: dict[int, tuple[float, dict[str, object]]] = {}
+_SUMMARY_REFRESHING: set[int] = set()
+_SUMMARY_REFRESHED_AT: dict[int, float] = {}
+_SUMMARY_CACHE_LOCK = threading.RLock()
 
 
 def money(value: float) -> str:
@@ -150,6 +165,157 @@ def group_rows(rows: list[LocalSession], key_fn) -> list[dict[str, object]]:
         })
     result.sort(key=lambda item: (float(item["api_value_usd"]), int(item["tokens"])), reverse=True)
     return result
+
+
+def _project_health(items: list[LocalSession]) -> dict[str, object]:
+    stats = summarize(items)
+    tokens = int(stats["tokens"])
+    calls = int(stats["calls"])
+    tool_calls = int(stats["tool_calls"])
+    api_value = float(stats["api_value_usd"])
+    plan_limited = token_split(items)["plan_limited"]
+    sessions = int(stats["sessions"])
+    if sessions <= 0:
+        return {
+            "status": "limited",
+            "label": "Limited data",
+            "tone": "limited",
+            "reason": "No recent local sessions were found.",
+            "action_label": "Review",
+        }
+    if tool_calls >= 1_000 or calls >= 1_000 or tokens >= 50_000_000:
+        return {
+            "status": "critical",
+            "label": "Critical",
+            "tone": "critical",
+            "reason": "Heavy context or tool-call pressure. Review before continuing broad work.",
+            "action_label": "Review",
+        }
+    if api_value >= 10 or tool_calls >= 250 or calls >= 250 or tokens >= 1_000_000:
+        return {
+            "status": "review",
+            "label": "Review",
+            "tone": "warning",
+            "reason": "High usage for this window. Check whether the latest sessions produced useful outcomes.",
+            "action_label": "Review",
+        }
+    if plan_limited >= 1_000_000:
+        return {
+            "status": "review",
+            "label": "Review",
+            "tone": "warning",
+            "reason": "Plan-limited tokens are accumulating. Watch for quota pressure even when API value is low.",
+            "action_label": "Review",
+        }
+    return {
+        "status": "healthy",
+        "label": "Healthy",
+        "tone": "healthy",
+        "reason": "No unusual local cost or context pressure in this window.",
+        "action_label": "Review",
+    }
+
+
+def group_projects(rows: list[LocalSession]) -> list[dict[str, object]]:
+    grouped: dict[str, list[LocalSession]] = defaultdict(list)
+    for row in rows:
+        grouped[row.project_path or "unknown"].append(row)
+    result = []
+    for key, items in grouped.items():
+        stats = summarize(items)
+        result.append({
+            "name": key,
+            "id": key,
+            "short_name": short_path(key),
+            "sessions": stats["sessions"],
+            "tokens": stats["tokens"],
+            "tokens_label": compact_int(int(stats["tokens"])),
+            "api_value_usd": round(float(stats["api_value_usd"]), 6),
+            "api_value_label": money(float(stats["api_value_usd"])),
+            "calls": stats["calls"],
+            "tool_calls": stats["tool_calls"],
+            "health": _project_health(items),
+        })
+    result.sort(key=lambda item: (float(item["api_value_usd"]), int(item["tokens"])), reverse=True)
+    return result
+
+
+def session_state(row: LocalSession, *, now: datetime | None = None) -> dict[str, object]:
+    now = now or datetime.now(timezone.utc)
+    stamp = row.updated_at or row.started_at
+    if not stamp:
+        return {
+            "status": "unknown",
+            "label": "Unknown",
+            "tone": "limited",
+            "reason": "This tool did not expose a reliable session timestamp.",
+        }
+    stamp = stamp.astimezone(timezone.utc)
+    age_seconds = max(0.0, (now - stamp).total_seconds())
+    if age_seconds <= ACTIVE_SESSION_MINUTES * 60:
+        return {
+            "status": "active",
+            "label": "Active",
+            "tone": "healthy",
+            "reason": "Recently updated. Actions can help the current flow.",
+            "age_seconds": round(age_seconds, 1),
+        }
+    if age_seconds <= RECENT_SESSION_HOURS * 3600:
+        return {
+            "status": "recent",
+            "label": "Recent",
+            "tone": "warning",
+            "reason": "Likely still resumable, but not confirmed live.",
+            "age_seconds": round(age_seconds, 1),
+        }
+    if age_seconds >= 7 * 24 * 3600:
+        return {
+            "status": "stale",
+            "label": "Stale",
+            "tone": "limited",
+            "reason": "Old local session. Use it for evidence or handoff, not live control.",
+            "age_seconds": round(age_seconds, 1),
+        }
+    return {
+        "status": "ended",
+        "label": "Ended",
+        "tone": "limited",
+        "reason": "No live tool connection is available for this session.",
+        "age_seconds": round(age_seconds, 1),
+    }
+
+
+def session_actions(row: LocalSession, *, outcome: dict[str, object] | None = None) -> list[dict[str, object]]:
+    actions: list[dict[str, object]] = []
+    if not outcome:
+        actions.append({
+            "id": "review_outcome",
+            "label": "Review outcome",
+            "primary": True,
+            "reason": "Mark whether this work was useful so AIWatcher can measure value.",
+        })
+    tokens = row.tokens_in + row.tokens_out
+    if tokens >= 500_000 or row.agent_calls >= 250 or row.tool_calls >= 250:
+        actions.append({
+            "id": "handoff",
+            "label": "Copy handoff",
+            "primary": bool(outcome),
+            "reason": "Start fresh with repo, file, and guardrail context instead of replaying a bloated session.",
+        })
+    actions.append({
+        "id": "optimize_next_prompt",
+        "label": "Optimize next prompt",
+        "primary": False,
+        "reason": "Use this session's pressure signals to tighten the next ask.",
+    })
+    actions.append({
+        "id": "open_tool",
+        "label": "Open in tool",
+        "primary": False,
+        "available": False,
+        "reason": "Claude/Codex/Cursor do not expose a stable deep link for this local session yet.",
+    })
+    return actions
 
 
 def _tool_surface_key(row: LocalSession) -> str:
@@ -308,6 +474,8 @@ def session_json(row: LocalSession) -> dict[str, object]:
         "outcome": outcome["outcome"] if outcome else None,
         "outcome_note": outcome.get("note") if outcome else None,
         "evidence": evidence.to_json(),
+        "state": session_state(row),
+        "actions": session_actions(row, outcome=outcome),
     }
 
 
@@ -326,6 +494,13 @@ def event_json(row: LocalEvent) -> dict[str, object]:
     }
 
 
+def _safe_window_outcomes(session_ids: set[str]) -> tuple[dict[str, dict[str, object]], dict[str, int]]:
+    try:
+        return outcomes_for_sessions(session_ids), outcome_counts(session_ids)
+    except OSError:
+        return {}, {"useful": 0, "rework": 0, "abandoned": 0}
+
+
 def build_project_detail(project: str, days: int = 7) -> dict[str, object]:
     rows = [row for row in rows_for_window(days) if (row.project_path or "unknown") == project]
     stats = summarize(rows)
@@ -333,6 +508,7 @@ def build_project_detail(project: str, days: int = 7) -> dict[str, object]:
     return {
         "project": project,
         "project_short": short_path(project, 72),
+        "health": _project_health(rows),
         "totals": {
             "sessions": stats["sessions"],
             "api_value": money(float(stats["api_value_usd"])),
@@ -468,7 +644,7 @@ def build_handoff_detail(
 def build_report(days: int = 7) -> dict[str, object]:
     rows = rows_for_window(days)
     stats = summarize(rows)
-    projects = group_rows(rows, lambda row: row.project_path or "unknown")
+    projects = group_projects(rows)
     tools = group_rows(rows, _tool_surface_key)
     models = group_by_model_breakdown(rows)
     return {
@@ -1435,10 +1611,16 @@ def build_summary(days: int = 7) -> dict[str, object]:
             })
 
     window_session_ids = {row.session_id for row in rows}
-    window_outcomes = outcomes_for_sessions(window_session_ids)
-    outcomes = outcome_counts(window_session_ids)
+    window_outcomes, outcomes = _safe_window_outcomes(window_session_ids)
     sample_rows = rows[:30]
-    evidence_by_session = evidence_for_sessions(sample_rows, survival_by_session=survival_by_session(sample_rows))
+    try:
+        survival_map = survival_by_session(sample_rows)
+    except OSError:
+        survival_map = {}
+    try:
+        evidence_by_session = evidence_for_sessions(sample_rows, survival_by_session=survival_map)
+    except OSError:
+        evidence_by_session = {}
     try:
         record_missing_evidence_snapshots_from_evidence(sample_rows, evidence_by_session)
     except OSError:
@@ -1479,9 +1661,16 @@ def build_summary(days: int = 7) -> dict[str, object]:
         "foreign_changes": window_ledger.foreign_changes if window_ledger else 0,
         "repos": len(window_ledger.repos) if window_ledger else 0,
     }
-    interventions = recent_interventions(limit=200, days=days)
+    try:
+        interventions = recent_interventions(limit=200, days=days)
+    except OSError:
+        interventions = []
     receipt_events = all_events if interventions else []
-    receipts = _build_intervention_receipts(interventions, all_rows, outcomes_for_sessions(), receipt_events)
+    try:
+        receipt_outcomes = outcomes_for_sessions()
+    except OSError:
+        receipt_outcomes = {}
+    receipts = _build_intervention_receipts(interventions, all_rows, receipt_outcomes, receipt_events)
     useful_rows = [
         row for row in rows
         if (window_outcomes.get(row.session_id) or {}).get("outcome") == "useful"
@@ -1537,6 +1726,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
         "notes": notes[:5],
         "coverage": [row.to_json() for row in surface_coverage(all_rows)],
         "setup": setup_checklist(),
+        "watcher": get_watcher_status(),
         "context_health": context_health,
         "handoff_bubble": handoff_bubble,
         "handoff_decisions": handoff_decisions,
@@ -1554,11 +1744,236 @@ def build_summary(days: int = 7) -> dict[str, object]:
                 "evidence_captured": row.session_id in evidence_snapshots,
                 "evidence_recorded_at": (evidence_snapshots.get(row.session_id) or {}).get("recorded_at"),
                 "updated_at": (row.updated_at or row.started_at).isoformat() if (row.updated_at or row.started_at) else None,
+                "state": session_state(row),
+                "actions": session_actions(row, outcome=window_outcomes.get(row.session_id)),
             }
             for row in recent
         ],
         "intervention_receipts": receipts[:30],
     }
+
+
+def _summary_cache_dir() -> Path:
+    return state_path().parent / "cache"
+
+
+def _summary_cache_path(days: int) -> Path:
+    return _summary_cache_dir() / f"ui-summary-{days}.json"
+
+
+def _mark_summary_cache(summary: dict[str, object], *, status: str, source: str, refreshing: bool) -> dict[str, object]:
+    copy = dict(summary)
+    generated_at = copy.get("generated_at") if isinstance(copy.get("generated_at"), str) else None
+    copy["cache"] = {
+        "status": status,
+        "source": source,
+        "refreshing": refreshing,
+        "generated_at": generated_at,
+    }
+    return copy
+
+
+def _read_summary_disk_cache(days: int, *, max_age_seconds: int = SUMMARY_DISK_TTL_SECONDS) -> dict[str, object] | None:
+    path = _summary_cache_path(days)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    generated_at = raw.get("generated_at")
+    try:
+        generated = datetime.fromisoformat(str(generated_at)).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+    if (datetime.now(timezone.utc) - generated).total_seconds() > max_age_seconds:
+        return None
+    return raw
+
+
+def _write_summary_disk_cache(days: int, summary: dict[str, object]) -> None:
+    try:
+        path = _summary_cache_path(days)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(summary), encoding="utf-8")
+        os.replace(tmp_path, path)
+    except OSError:
+        pass
+
+
+def _store_summary_cache(days: int, summary: dict[str, object], *, mark_refreshed: bool = True) -> None:
+    with _SUMMARY_CACHE_LOCK:
+        _SUMMARY_CACHE[days] = (time.monotonic(), summary)
+        if mark_refreshed:
+            _SUMMARY_REFRESHED_AT[days] = time.monotonic()
+    _write_summary_disk_cache(days, summary)
+
+
+def _build_summary_shell(days: int = 7) -> dict[str, object]:
+    """Build the dashboard's fast first-paint data without event/evidence scans."""
+    now = datetime.now().astimezone()
+    since = now - timedelta(days=days)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    all_rows = scan_all()
+    try:
+        link_recent_interventions_to_sessions(all_rows)
+    except OSError:
+        pass
+    rows = [row for row in all_rows if in_window(row, since)]
+    month_rows = [row for row in all_rows if in_window(row, month_start)]
+    stats = summarize(rows)
+    month_stats = summarize(month_rows)
+    split = token_split(rows)
+    projected_month = float(month_stats["api_value_usd"]) / max(1, now.day) * 30
+    projects = group_projects(rows)
+    tools = group_rows(rows, _tool_surface_key)
+    models = group_by_model_breakdown(rows)
+    recent = sorted(rows, key=lambda row: row.updated_at or row.started_at or MIN_DT, reverse=True)[:12]
+    window_session_ids = {row.session_id for row in rows}
+    window_outcomes, outcomes = _safe_window_outcomes(window_session_ids)
+    try:
+        interventions = recent_interventions(limit=200, days=days)
+    except OSError:
+        interventions = []
+    insights = []
+    if projects:
+        top = projects[0]
+        insights.append({
+            "title": "Top project",
+            "body": f"{top['short_name']} accounts for {top['api_value_label']} API-equivalent value.",
+        })
+        health = top.get("health") if isinstance(top.get("health"), dict) else None
+        if health and health.get("status") in {"review", "critical"}:
+            insights.append({
+                "title": f"{health['label']} project",
+                "body": f"{top['short_name']}: {health['reason']}",
+            })
+    if split["plan_limited"] > 0:
+        insights.append({
+            "title": "Subscription/limited usage detected",
+            "body": f"{compact_int(split['plan_limited'])} tokens came from plan-based or limited-cost sources. Treat them as observed usage, not invoice spend.",
+        })
+    useful_rows = [
+        row for row in rows
+        if (window_outcomes.get(row.session_id) or {}).get("outcome") == "useful"
+    ]
+    useful_cost = sum(row.cost_usd for row in useful_rows)
+    cost_per_useful = useful_cost / len(useful_rows) if useful_rows else None
+    return {
+        "generated_at": now.isoformat(),
+        "days": days,
+        "privacy": [
+            "Read-only local scan",
+            "No LLM calls",
+            "No source or prompt content in summaries",
+            "No cloud upload unless you connect Cloud",
+        ],
+        "totals": {
+            "window_label": "Last 24 hours" if days == 1 else f"Last {days} days",
+            "sessions": stats["sessions"],
+            "api_value_usd": round(float(stats["api_value_usd"]), 6),
+            "api_value_label": money(float(stats["api_value_usd"])),
+            "projected_month_label": money(projected_month),
+            "tokens_label": compact_int(int(stats["tokens"])),
+            "api_priced_tokens_label": compact_int(split["api_priced"]),
+            "plan_limited_tokens_label": compact_int(split["plan_limited"]),
+            "calls": stats["calls"],
+            "tool_calls": stats["tool_calls"],
+            "useful_outcomes": outcomes["useful"],
+            "inferred_useful_outcomes": 0,
+            "needs_review_outcomes": 0,
+            "rework_outcomes": outcomes["rework"],
+            "abandoned_outcomes": outcomes["abandoned"],
+            "preflight_decisions": len(interventions),
+            "cost_per_useful_change": money(cost_per_useful) if cost_per_useful is not None else "—",
+        },
+        "survival": {"available": False, "reason": "Background evidence refresh pending."},
+        "projects": projects[:10],
+        "tools": tools,
+        "models": models[:10],
+        "insights": insights,
+        "notes": sorted({note for row in rows for note in row.notes})[:5],
+        "coverage": [row.to_json() for row in surface_coverage(all_rows)],
+        "setup": setup_checklist(),
+        "watcher": get_watcher_status(),
+        "context_health": [],
+        "handoff_bubble": None,
+        "handoff_decisions": _handoff_decision_rows(limit=10),
+        "recent_sessions": [
+            {
+                "tool": row.tool,
+                "session_id": row.session_id,
+                "project": short_path(row.project_path),
+                "project_full": row.project_path or "unknown",
+                "model": display_model_name(row.model),
+                "tokens": compact_int(row.tokens_in + row.tokens_out),
+                "api_value": money(row.cost_usd),
+                "outcome": (window_outcomes.get(row.session_id) or {}).get("outcome"),
+                "inferred_outcome": None,
+                "updated_at": (row.updated_at or row.started_at).isoformat() if (row.updated_at or row.started_at) else None,
+                "state": session_state(row),
+                "actions": session_actions(row, outcome=window_outcomes.get(row.session_id)),
+            }
+            for row in recent
+        ],
+        "intervention_receipts": [],
+    }
+
+
+def _refresh_summary_cache(days: int) -> None:
+    with _SUMMARY_CACHE_LOCK:
+        if days in _SUMMARY_REFRESHING:
+            return
+        _SUMMARY_REFRESHING.add(days)
+    try:
+        summary = build_summary(days)
+        _store_summary_cache(days, summary, mark_refreshed=True)
+    finally:
+        with _SUMMARY_CACHE_LOCK:
+            _SUMMARY_REFRESHING.discard(days)
+
+
+def _maybe_refresh_summary_cache(days: int) -> bool:
+    now = time.monotonic()
+    with _SUMMARY_CACHE_LOCK:
+        if days in _SUMMARY_REFRESHING:
+            return True
+        if now - _SUMMARY_REFRESHED_AT.get(days, 0) < SUMMARY_BACKGROUND_COOLDOWN_SECONDS:
+            return False
+        _SUMMARY_REFRESHING.add(days)
+
+    def run() -> None:
+        try:
+            summary = build_summary(days)
+            _store_summary_cache(days, summary, mark_refreshed=True)
+        finally:
+            with _SUMMARY_CACHE_LOCK:
+                _SUMMARY_REFRESHING.discard(days)
+
+    thread = threading.Thread(target=run, name=f"aiwatcher-summary-refresh-{days}", daemon=True)
+    thread.start()
+    return True
+
+
+def build_summary_cached(days: int = 7, *, force: bool = False) -> dict[str, object]:
+    if force:
+        _maybe_refresh_summary_cache(days)
+        shell = _build_summary_shell(days)
+        return _mark_summary_cache(shell, status="refreshing", source="computed", refreshing=True)
+    with _SUMMARY_CACHE_LOCK:
+        cached = _SUMMARY_CACHE.get(days)
+        refreshing = days in _SUMMARY_REFRESHING
+        if cached and time.monotonic() - cached[0] <= SUMMARY_MEMORY_TTL_SECONDS:
+            return _mark_summary_cache(cached[1], status="fresh", source="memory", refreshing=refreshing)
+    disk = _read_summary_disk_cache(days)
+    if disk:
+        refreshing = _maybe_refresh_summary_cache(days)
+        return _mark_summary_cache(disk, status="stale", source="disk", refreshing=refreshing)
+    shell = _build_summary_shell(days)
+    _store_summary_cache(days, shell, mark_refreshed=False)
+    refreshing = _maybe_refresh_summary_cache(days)
+    return _mark_summary_cache(shell, status="building", source="computed", refreshing=refreshing)
 
 
 def _build_compact_prompt(health: object) -> str:
@@ -1647,6 +2062,23 @@ HTML = r"""<!doctype html>
       border-radius: 999px; padding: 5px 9px; font-size: 11px; font-weight: 700;
     }
     .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+    .runtime-strip {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      border: 1px solid var(--line); border-radius: 8px; background: #0c1118;
+      padding: 10px 12px; margin: -4px 0 18px;
+    }
+    .runtime-copy { display: flex; align-items: center; gap: 9px; min-width: 0; }
+    .runtime-copy strong { white-space: nowrap; }
+    .runtime-copy span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cache-pill, .health-pill, .session-state {
+      display: inline-flex; align-items: center; gap: 6px; border-radius: 999px;
+      border: 1px solid var(--line); padding: 4px 8px; font-size: 11px; font-weight: 800;
+      white-space: nowrap;
+    }
+    .cache-pill.refreshing, .health-pill.review, .health-pill.warning, .session-state.recent { color: #ffe2a4; border-color: rgba(246,189,96,.45); background: var(--amber-soft); }
+    .cache-pill.fresh, .health-pill.healthy, .session-state.active { color: #bff5df; border-color: rgba(53,211,153,.45); background: var(--green-soft); }
+    .cache-pill.building, .cache-pill.stale, .health-pill.limited, .session-state.ended, .session-state.stale, .session-state.unknown { color: #dceaff; border-color: rgba(112,167,255,.45); background: var(--blue-soft); }
+    .health-pill.critical { color: #ffc4ce; border-color: rgba(242,125,143,.45); background: var(--red-soft); }
     button, select {
       border: 1px solid var(--line-strong);
       background: var(--surface-raised);
@@ -1789,6 +2221,7 @@ HTML = r"""<!doctype html>
     }
     .session-filters input[type="text"]:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
     .row-action { min-height: 30px; padding: 5px 9px; color: #ddecff; background: var(--blue-soft); border-color: #3d6594; font-size: 12px; }
+    .action-stack { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
     .empty { color: var(--muted); padding: 16px; border: 1px dashed var(--line); border-radius: 8px; }
     .digest-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
     .digest-row:last-child { border-bottom: 0; }
@@ -1946,10 +2379,18 @@ HTML = r"""<!doctype html>
         <option value="7" selected>Last 7 days</option>
         <option value="30">Last 30 days</option>
       </select>
-      <button class="btn-quiet" onclick="load()">Refresh data</button>
+      <button id="refreshButton" class="btn-quiet" onclick="load(false, true)">Refresh data</button>
       <a class="link-button" href="https://www.getaiwatcher.com" target="_blank" rel="noreferrer">Enterprise</a>
     </div>
   </header>
+
+  <section class="runtime-strip" aria-live="polite">
+    <div class="runtime-copy">
+      <span id="watcherPill" class="cache-pill building">Watcher unknown</span>
+      <span id="cacheStatus">Loading local index...</span>
+    </div>
+    <button id="watcherCommandButton" class="btn-quiet" onclick="copyWatcherCommand()" hidden>Copy watcher command</button>
+  </section>
 
   <nav class="product-nav" aria-label="AIWatcher Local sections">
     <button class="nav-tab active" data-view="today" onclick="showView('today')">Today</button>
@@ -2076,7 +2517,7 @@ HTML = r"""<!doctype html>
         <span class="pill" id="projectWindow">-</span>
       </div>
       <div class="table-wrap"><table>
-        <thead><tr><th>Project</th><th>Sessions</th><th>Tokens</th><th>Model calls</th><th>API value</th></tr></thead>
+        <thead><tr><th>Project</th><th>Status</th><th>Sessions</th><th>Tokens</th><th>Model calls</th><th>API value</th></tr></thead>
         <tbody id="projectRows"></tbody>
       </table></div>
     </div>
@@ -2413,6 +2854,43 @@ function outcomeEvidencePill(session) {
   if (session.inferred_outcome === 'needs_review') return '<span class="pill outcome-pill rework">Evidence: review changes</span>';
   if (session.evidence_captured) return '<span class="pill outcome-pill evidence">Evidence captured</span>';
   return '';
+}
+function healthPill(health) {
+  if (!health) return '<span class="health-pill limited">Limited data</span>';
+  return `<span class="health-pill ${esc(health.tone || health.status || 'limited')}">${esc(health.label || 'Review')}</span>`;
+}
+function sessionStatePill(state) {
+  if (!state) return '';
+  return `<span class="session-state ${esc(state.status || 'unknown')}">${esc(state.label || state.status || 'unknown')}</span>`;
+}
+let watcherCommand = 'aiwatcher watch --notify --overlay --interval 60';
+function renderWatcher(watcher) {
+  const pill = document.getElementById('watcherPill');
+  const button = document.getElementById('watcherCommandButton');
+  watcherCommand = (watcher && watcher.command) || watcherCommand;
+  if (watcher && watcher.running) {
+    pill.className = 'cache-pill fresh';
+    pill.textContent = 'Watcher running';
+    button.hidden = true;
+  } else {
+    pill.className = 'cache-pill stale';
+    pill.textContent = watcher && watcher.status === 'stale' ? 'Watcher stale' : 'Watcher stopped';
+    button.hidden = false;
+  }
+}
+function renderCacheStatus(cache) {
+  const status = document.getElementById('cacheStatus');
+  if (!cache) {
+    status.textContent = 'Local data loaded';
+    return;
+  }
+  const source = cache.source === 'disk' ? 'cached local index' : cache.source === 'memory' ? 'memory cache' : 'local scan';
+  status.textContent = cache.refreshing
+    ? `Showing ${source}; updating evidence in background...`
+    : `Showing ${source}`;
+}
+function copyWatcherCommand() {
+  copyText(watcherCommand, 'Watcher command copied — paste it in a terminal to enable ambient nudges');
 }
 function survivalLabel(survival) {
   // evidence.survival is {bucket: "survived"|"churned"|"unknown"} -- already
@@ -2761,7 +3239,7 @@ function bars(rows, valueKey = "api_value_label", kind = "project") {
     const id = encodeURIComponent(row.id || row.name);
     const click = kind === "project" ? `onclick="selectProject(decodeURIComponent(this.dataset.id))" data-id="${id}"` : "";
     return `<div class="bar-row ${kind === "project" ? "clickable" : ""}" title="${esc(row.name)}" ${click}>
-      <div class="bar-label">${esc(row.short_name || row.name)}</div>
+      <div class="bar-label">${esc(row.short_name || row.name)}${kind === "project" && row.health ? ` ${healthPill(row.health)}` : ''}</div>
       <div class="bar-shell"><div class="bar" style="width:${width}%"></div></div>
       <div class="amount">${esc(row[valueKey])}</div>
     </div>`;
@@ -2784,15 +3262,31 @@ async function selectProject(project) {
   document.getElementById('drawerTitle').textContent = data.project_short || 'Project detail';
   document.getElementById('detailContent').innerHTML = `<section class="detail-section"><h2>${esc(data.project_short)}</h2>
     ${miniStats(data.totals)}
+    <div class="verdict-card ${data.health && data.health.status === 'critical' ? 'high' : ''}">
+      <h3>${healthPill(data.health)} ${esc(data.health ? data.health.reason : 'Review recent local sessions before optimizing.')}</h3>
+      <p>The right next action is to review the sessions driving this project, then mark outcomes or create a handoff before continuing broad work.</p>
+    </div>
     </section><section class="detail-section"><h3>Models used</h3>
     ${bars(data.models, "api_value_label", "model")}
     </section><section class="detail-section"><h3>Tools used</h3>
     ${bars(data.tools, "api_value_label", "tool")}
     </section><section class="detail-section"><h3>Recent sessions</h3>
-    <div class="table-wrap"><table><thead><tr><th>Tool</th><th>Model</th><th>Tokens</th><th></th></tr></thead>
+    <div class="table-wrap"><table><thead><tr><th>Tool</th><th>Model</th><th>Status</th><th>Tokens</th><th></th></tr></thead>
       <tbody>${data.sessions.map(s => `<tr class="clickable" onclick="selectSession('${s.session_id}')">
-        <td>${esc(s.tool)}</td><td>${esc(s.model)}</td><td>${esc(s.tokens_label)}</td><td><button class="row-action">Review</button></td>
+        <td>${esc(s.tool)}</td><td>${esc(s.model)}</td><td>${sessionStatePill(s.state)} ${outcomeEvidencePill(s)}</td><td>${esc(s.tokens_label)}</td><td><button class="row-action">Review</button></td>
       </tr>`).join('')}</tbody></table></div></section>`;
+}
+function renderSessionActions(s) {
+  const actions = s.actions || [];
+  const hasHandoff = actions.some(action => action.id === 'handoff');
+  return `<section class="detail-section"><h3>Take action</h3>
+    <p>${esc((s.state && s.state.reason) || 'Use the next action that matches this session.')}</p>
+    <div class="copy-row">
+      ${hasHandoff ? `<button class="btn-primary" onclick="openHandoff('${esc(s.session_id)}')">Copy handoff</button>` : ''}
+      <button class="btn-quiet" onclick="showView('prompt'); closeDrawer(); document.getElementById('promptInput').focus(); showToast('Paste the next prompt here to optimize it before sending')">Optimize next prompt</button>
+      <button class="btn-quiet" disabled title="Claude/Codex/Cursor do not expose stable session deep links yet">Open in tool unavailable</button>
+    </div>
+  </section>`;
 }
 async function selectSession(sessionId) {
   openDrawer('Session review');
@@ -2904,10 +3398,11 @@ async function selectSession(sessionId) {
     <h2 class="session-title">${esc(s.project_short)}</h2>
     <p class="session-meta">${esc(s.tool)} · ${esc(s.model)}</p>
     ${miniStats({ sessions: 1, api_value: s.api_value, tokens: s.tokens_label, tool_calls: s.tool_calls })}
-    ${outcomePill(s.outcome)}
+    <div class="pill-row">${sessionStatePill(s.state)}${outcomePill(s.outcome)}</div>
     ${renderVerdict(s)}
     ${outcomeActions}
     </section>
+    ${renderSessionActions(s)}
     ${promptReview}
     ${renderEvidence(s.outcome_evidence)}
     ${insights}
@@ -3121,19 +3616,29 @@ async function loadSessions() {
         ? 'No sessions match those filters. Try clearing the search or a different outcome/evidence filter.'
         : 'No local sessions found for this window.'}</div></td></tr>`;
 }
-async function load(resetDetail = true) {
+async function load(resetDetail = true, forceRefresh = false) {
   const days = document.getElementById('days').value;
-  // /api/journal is still served for the CLI's `aiwatcher journal`, but the
-  // dashboard no longer renders it: every line it produced was a restatement
-  // of something already in the insight feed.
-  const [summaryRes, reportRes] = await Promise.all([
-    fetch(`/api/summary?days=${days}`),
-    fetch(`/api/report?days=${days}`)
-  ]);
-  const data = await summaryRes.json();
-  const report = await reportRes.json();
+  const refreshButton = document.getElementById('refreshButton');
+  const previousRefreshText = refreshButton ? refreshButton.textContent : '';
+  if (refreshButton) {
+    refreshButton.disabled = true;
+    refreshButton.textContent = forceRefresh ? 'Refreshing...' : 'Updating...';
+  }
+  let data;
+  try {
+    const summaryRes = await fetch(`/api/summary?days=${days}${forceRefresh ? '&refresh=1' : ''}`);
+    data = await summaryRes.json();
+  } catch (error) {
+    showToast('Could not load local AIWatcher data.', 'error');
+    if (refreshButton) {
+      refreshButton.disabled = false;
+      refreshButton.textContent = previousRefreshText || 'Refresh data';
+    }
+    return;
+  }
+  renderWatcher(data.watcher || null);
+  renderCacheStatus(data.cache || null);
   renderHandoffBubble(data.handoff_bubble || null);
-  document.getElementById('todayDigest').innerHTML = renderTodayDigest(report.digest);
   const totals = data.totals;
   document.getElementById('apiValue').textContent = totals.api_value_label;
   document.getElementById('windowLabel').textContent = totals.window_label;
@@ -3182,23 +3687,42 @@ async function load(resetDetail = true) {
     : '<div class="empty">No notable local signals yet.</div>';
   document.getElementById('privacy').innerHTML = data.privacy.map(p => `<div class="privacy-item"><span class="privacy-check">&#10003;</span><span>${esc(p)}</span></div>`).join('');
   document.getElementById('recent').innerHTML = data.recent_sessions.slice(0, 6).map(s => `<tr class="clickable" onclick="selectSession('${s.session_id}')">
-    <td>${esc(s.tool)}</td><td>${esc(s.project)}<br>${outcomeEvidencePill(s)}</td><td>${esc(s.tokens)}</td><td><button class="row-action">Review</button></td>
+    <td>${esc(s.tool)}</td><td>${esc(s.project)}<br>${sessionStatePill(s.state)} ${outcomeEvidencePill(s)}</td><td>${esc(s.tokens)}</td><td><button class="row-action">Review</button></td>
   </tr>`).join('');
   document.getElementById('projectWindow').textContent = totals.window_label;
   document.getElementById('projectRows').innerHTML = data.projects.length
     ? data.projects.map(p => `<tr class="clickable" onclick="selectProject(decodeURIComponent(this.dataset.id))" data-id="${encodeURIComponent(p.id)}">
         <td>${esc(p.short_name || p.name)}</td>
+        <td>${healthPill(p.health)}</td>
         <td class="mono">${esc(p.sessions)}</td>
         <td class="mono">${esc(p.tokens_label)}</td>
         <td class="mono">${esc(p.calls)}</td>
         <td class="mono">${esc(p.api_value_label)}</td>
       </tr>`).join('')
-    : '<tr><td colspan="5"><div class="empty">No local project usage found for this window.</div></td></tr>';
+    : '<tr><td colspan="6"><div class="empty">No local project usage found for this window.</div></td></tr>';
   loadSessions();
-  document.getElementById('report').innerHTML = renderReport(report);
-  document.getElementById('insightHeadline').innerHTML = renderInsightHeadline(data.totals);
-  document.getElementById('insightFeed').innerHTML = renderInsightFeed(data.insights);
+  try {
+    // /api/journal is still served for the CLI's `aiwatcher journal`, but the
+    // dashboard no longer renders it: every line it produced was a restatement
+    // of something already in the insight feed.
+    const reportRes = await fetch(`/api/report?days=${days}`);
+    const report = await reportRes.json();
+    document.getElementById('todayDigest').innerHTML = renderTodayDigest(report.digest);
+    document.getElementById('report').innerHTML = renderReport(report);
+    document.getElementById('insightHeadline').innerHTML = renderInsightHeadline(data.totals);
+    document.getElementById('insightFeed').innerHTML = renderInsightFeed(data.insights);
+  } catch (error) {
+    document.getElementById('todayDigest').innerHTML = '<div class="empty">Digest is still building. Refresh again in a moment.</div>';
+  } finally {
+    if (refreshButton) {
+      refreshButton.disabled = false;
+      refreshButton.textContent = previousRefreshText || 'Refresh data';
+    }
+  }
   if (resetDetail && document.getElementById('detailDrawer').classList.contains('open')) closeDrawer();
+  if (data.cache && data.cache.refreshing && !forceRefresh) {
+    window.setTimeout(() => load(false, false), 1800);
+  }
 }
 document.addEventListener('keydown', event => { if (event.key === 'Escape') closeDrawer(); });
 (async () => {
@@ -3512,7 +4036,8 @@ class UIHandler(BaseHTTPRequestHandler):
                 days = max(1, min(90, int(params.get("days", ["7"])[0])))
             except ValueError:
                 days = 7
-            self._send(200, json.dumps(build_summary(days)), "application/json; charset=utf-8")
+            force = params.get("refresh", ["0"])[0] == "1"
+            self._send(200, json.dumps(build_summary_cached(days, force=force)), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/sessions":
             params = parse_qs(parsed.query)

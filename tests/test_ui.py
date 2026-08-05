@@ -363,6 +363,82 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(seven_days["totals"]["sessions"], 1)
         self.assertEqual(thirty_days["totals"]["sessions"], 2)
 
+    def test_cached_summary_shell_skips_heavy_event_scan_for_first_paint(self) -> None:
+        now = datetime.now(timezone.utc)
+        rows = [
+            LocalSession(
+                session_id="recent",
+                tool="claude-code",
+                project_path="/repo/recent",
+                started_at=now - timedelta(hours=2),
+                updated_at=now - timedelta(hours=1),
+                tokens_in=100,
+                tokens_out=50,
+                cost_usd=0.1,
+            )
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all", return_value=rows),
+                patch.object(ui, "scan_all_events", side_effect=AssertionError("event scan should be background-only")),
+                patch.object(ui, "discover_tools", return_value={}),
+                patch.object(ui, "surface_coverage", return_value=[]),
+                patch.object(ui, "_maybe_refresh_summary_cache", return_value=False),
+            ):
+                ui._SUMMARY_CACHE.clear()
+                summary = ui.build_summary_cached(7)
+
+        self.assertEqual(summary["totals"]["sessions"], 1)
+        self.assertEqual(summary["cache"]["status"], "building")
+        self.assertIn("watcher", summary)
+
+    def test_project_health_flags_heavy_usage_as_actionable_review(self) -> None:
+        now = datetime.now(timezone.utc)
+        rows = [
+            LocalSession(
+                session_id="heavy",
+                tool="codex-cli",
+                project_path="/repo/heavy",
+                started_at=now - timedelta(hours=3),
+                updated_at=now - timedelta(hours=1),
+                tokens_in=1_500_000,
+                tokens_out=50_000,
+                agent_calls=300,
+                tool_calls=320,
+                cost_usd=12.0,
+            )
+        ]
+
+        projects = ui.group_projects(rows)
+
+        self.assertEqual(projects[0]["health"]["status"], "review")
+        self.assertEqual(projects[0]["health"]["action_label"], "Review")
+
+    def test_session_state_and_actions_do_not_overclaim_tool_deeplinks(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="active-heavy",
+            tool="codex-cli",
+            project_path="/repo",
+            started_at=now - timedelta(minutes=20),
+            updated_at=now - timedelta(minutes=2),
+            tokens_in=600_000,
+            tokens_out=20_000,
+            agent_calls=260,
+            tool_calls=10,
+        )
+
+        state = ui.session_state(row, now=now)
+        actions = ui.session_actions(row, outcome=None)
+
+        self.assertEqual(state["status"], "active")
+        self.assertTrue(any(action["id"] == "review_outcome" for action in actions))
+        self.assertTrue(any(action["id"] == "handoff" for action in actions))
+        open_tool = next(action for action in actions if action["id"] == "open_tool")
+        self.assertFalse(open_tool["available"])
+
     def test_today_reports_window_scoped_useful_outcomes(self) -> None:
         now = datetime.now(timezone.utc)
         rows = [

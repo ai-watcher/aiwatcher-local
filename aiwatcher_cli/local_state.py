@@ -170,6 +170,7 @@ def _empty_state() -> dict[str, Any]:
         "handoff_decisions": [],
         "sent_notification_keys": [],
         "ui_server": None,
+        "watcher_heartbeat": None,
     }
 
 
@@ -234,6 +235,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("handoff_decisions", [])
     data.setdefault("sent_notification_keys", [])
     data.setdefault("ui_server", None)
+    data.setdefault("watcher_heartbeat", None)
     return data
 
 
@@ -400,16 +402,19 @@ def issue_brief_token(kind: str) -> str:
     required by consume_brief_token() cannot be guessed from the source alone.
     """
     token = uuid.uuid4().hex
-    with _locked_state():
-        data = _load()
-        _prune_brief_tokens(data)
-        data["brief_tokens"].append({
-            "token": token,
-            "kind": kind,
-            "issued_at": datetime.now(timezone.utc).isoformat(),
-        })
-        data["brief_tokens"] = data["brief_tokens"][-200:]
-        _save(data)
+    try:
+        with _locked_state():
+            data = _load()
+            _prune_brief_tokens(data)
+            data["brief_tokens"].append({
+                "token": token,
+                "kind": kind,
+                "issued_at": datetime.now(timezone.utc).isoformat(),
+            })
+            data["brief_tokens"] = data["brief_tokens"][-200:]
+            _save(data)
+    except OSError:
+        return f"unverified-{token}"
     return token
 
 
@@ -501,6 +506,77 @@ def get_ui_server() -> dict[str, Any] | None:
         return None
     server = data.get("ui_server")
     return server if isinstance(server, dict) and server.get("port") else None
+
+
+def record_watcher_heartbeat(*, pid: int, mode: str, interval_seconds: int, notify: bool, overlay: bool) -> None:
+    """Record that `aiwatcher watch` is alive.
+
+    This is intentionally just a heartbeat, not a daemon supervisor. The UI can
+    use it to show whether ambient Watch is running without starting processes
+    behind the user's back.
+    """
+    try:
+        with _locked_state():
+            data = _load()
+            data["watcher_heartbeat"] = {
+                "pid": int(pid),
+                "mode": mode,
+                "interval_seconds": int(interval_seconds),
+                "notify": bool(notify),
+                "overlay": bool(overlay),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            _save(data)
+    except OSError:
+        pass
+
+
+def get_watcher_status(max_age_seconds: int = 120) -> dict[str, Any]:
+    """Return a quiet, honest status for the ambient watch loop."""
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return {
+            "running": False,
+            "status": "unknown",
+            "label": "Watcher status unavailable",
+            "detail": "AIWatcher could not read local state.",
+        }
+    heartbeat = data.get("watcher_heartbeat")
+    command = "aiwatcher watch --notify --overlay --interval 60"
+    if not isinstance(heartbeat, dict):
+        return {
+            "running": False,
+            "status": "stopped",
+            "label": "Watcher stopped",
+            "detail": "Start ambient Watch to surface handoff and outcome nudges while you work.",
+            "command": command,
+        }
+    updated_at = heartbeat.get("updated_at")
+    try:
+        updated = datetime.fromisoformat(str(updated_at)).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        updated = None
+    age_seconds = (datetime.now(timezone.utc) - updated).total_seconds() if updated else None
+    running = age_seconds is not None and age_seconds <= max_age_seconds
+    return {
+        "running": running,
+        "status": "running" if running else "stale",
+        "label": "Watcher running" if running else "Watcher not recently seen",
+        "detail": (
+            "Ambient Watch is checking local sessions for context pressure and handoff opportunities."
+            if running
+            else "The last watcher heartbeat is stale. Restart ambient Watch to catch new session pressure."
+        ),
+        "command": command,
+        "updated_at": updated.isoformat() if updated else None,
+        "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
+        "pid": heartbeat.get("pid"),
+        "notify": bool(heartbeat.get("notify")),
+        "overlay": bool(heartbeat.get("overlay")),
+        "interval_seconds": heartbeat.get("interval_seconds"),
+    }
 
 
 def recent_watch_notifications(limit: int = 10) -> list[dict[str, Any]]:
@@ -775,15 +851,21 @@ def record_decision(
 
 
 def recent_decisions(session_id: str, limit: int = 5) -> list[dict[str, Any]]:
-    with _locked_state():
-        rows = list(_load()["decisions"])
+    try:
+        with _locked_state():
+            rows = list(_load()["decisions"])
+    except OSError:
+        return []
     matching = [row for row in rows if row.get("session_id") == session_id]
     return list(reversed(matching))[:limit]
 
 
 def get_outcome(session_id: str) -> dict[str, Any] | None:
-    with _locked_state():
-        data = _load()
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return None
     return next(
         (row for row in reversed(data["outcomes"]) if row.get("session_id") == session_id),
         None,

@@ -56,6 +56,7 @@ from .local_state import (
     record_notification_sent,
     record_outcome,
     record_survival_check,
+    record_watcher_heartbeat,
     record_watch_notification,
     recent_watch_notifications,
     redact_command_for_storage,
@@ -4385,6 +4386,13 @@ def command_watch(args: argparse.Namespace) -> int:
     last_outcome_signal_check: datetime | None = None
     try:
         while True:
+            record_watcher_heartbeat(
+                pid=os.getpid(),
+                mode="watch",
+                interval_seconds=max(2, int(args.interval)),
+                notify=bool(getattr(args, "notify", False)),
+                overlay=bool(getattr(args, "overlay", False)),
+            )
             rows = sorted(sessions_since(args.days), key=session_sort_key, reverse=True)
             try:
                 record_missing_evidence_snapshots(rows)
