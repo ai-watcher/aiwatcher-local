@@ -1693,7 +1693,10 @@ HTML = r"""<!doctype html>
     <section class="grid two" style="margin-top:14px">
       <div class="card">
         <h2>Models and Tools</h2>
+        <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 4px">By model</h3>
         <div id="models"></div>
+        <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:14px 0 4px">By tool</h3>
+        <div id="tools"></div>
       </div>
       <div class="card">
         <div class="section-title"><div><h2>Privacy at a glance</h2><p>Your local trust boundary stays visible.</p></div></div>
@@ -2375,6 +2378,8 @@ async function selectProject(project) {
     ${miniStats(data.totals)}
     </section><section class="detail-section"><h3>Models used</h3>
     ${bars(data.models, "api_value_label", "model")}
+    </section><section class="detail-section"><h3>Tools used</h3>
+    ${bars(data.tools, "api_value_label", "tool")}
     </section><section class="detail-section"><h3>Recent sessions</h3>
     <div class="table-wrap"><table><thead><tr><th>Tool</th><th>Model</th><th>Tokens</th><th></th></tr></thead>
       <tbody>${data.sessions.map(s => `<tr class="clickable" onclick="selectSession('${s.session_id}')">
@@ -2737,6 +2742,7 @@ async function load(resetDetail = true) {
     : '<div class="empty">Nothing unusual yet. Keep the next task scoped and define a stop condition.</div>';
   document.getElementById('projects').innerHTML = bars(data.projects, "api_value_label", "project");
   document.getElementById('models').innerHTML = bars(data.models, "api_value_label", "model");
+  document.getElementById('tools').innerHTML = bars(data.tools, "api_value_label", "tool");
   document.getElementById('insights').innerHTML = data.insights.length
     ? data.insights.map(i => `<div class="insight"><strong>${esc(i.title)}</strong><p>${esc(i.body)}</p></div>`).join('')
     : '<div class="empty">No notable local signals yet.</div>';
