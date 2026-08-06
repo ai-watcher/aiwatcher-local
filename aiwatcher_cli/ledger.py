@@ -164,6 +164,10 @@ def _git(repo: str, args: list[str]) -> subprocess.CompletedProcess[str] | None:
             check=False,
             capture_output=True,
             text=True,
+            # git emits UTF-8; without this, text=True decodes with the locale
+            # codec (cp1252 on Windows) and any non-ASCII commit subject comes
+            # back mangled -- an em dash renders as "â€”".
+            encoding="utf-8",
             errors="replace",
             timeout=GIT_TIMEOUT_SECONDS,
         )
@@ -489,6 +493,11 @@ def cost_per_surviving_line(
     cost = 0.0
     touched = 0
     intact = 0
+    # Keyed by sha so a request-time ledger over a different window can join
+    # against it. The blame pass runs here either way; discarding the per-change
+    # results only meant the change table had to say "unknown" for work this
+    # function had already measured.
+    by_change: dict[str, dict[str, Any]] = {}
 
     for change in capped:
         result = measure_change_survival(
@@ -496,11 +505,25 @@ def cost_per_surviving_line(
         )
         if not result.measurable:
             unmeasurable += 1
+            by_change[change.sha] = {"measurable": False, "reason": result.reason}
             continue
         measured += 1
         cost += change.cost_usd
         touched += result.lines_touched
         intact += result.lines_intact
+        by_change[change.sha] = {
+            "measurable": True,
+            "reason": None,
+            "lines_touched": result.lines_touched,
+            "lines_intact": result.lines_intact,
+            "survival_pct": (
+                round(100.0 * result.lines_intact / result.lines_touched, 1)
+                if result.lines_touched else None
+            ),
+            "usd_per_surviving_line": (
+                round(change.cost_usd / result.lines_intact, 6) if result.lines_intact else None
+            ),
+        }
 
     if measured < min_changes:
         return {
@@ -512,6 +535,7 @@ def cost_per_surviving_line(
             "changes_measured": measured,
             "changes_too_recent": too_recent,
             "changes_unmeasurable": unmeasurable,
+            "by_change": by_change,
         }
 
     survival_pct = 100.0 * intact / touched if touched else None
@@ -521,6 +545,7 @@ def cost_per_surviving_line(
         "changes_measured": measured,
         "changes_too_recent": too_recent,
         "changes_unmeasurable": unmeasurable,
+        "by_change": by_change,
         "changes_considered": len(judgeable),
         "changes_skipped": max(0, len(judgeable) - len(capped)),
         "too_recent_usd": round(sum(c.cost_usd for c in too_recent_changes), 6),

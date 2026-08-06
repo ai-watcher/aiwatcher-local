@@ -44,7 +44,7 @@ from .local_state import (
     record_ui_server,
 )
 from .outcome_evidence import VALID_EVIDENCE_OUTCOMES, build_outcome_evidence, evidence_for_sessions
-from .ledger import build_ledger, unbanked_summary
+from .ledger import Ledger, build_ledger, unbanked_summary
 from .pricing import is_subscription_model
 from .session_health import ContextHealth, analyze_all_sessions, gate_health_warning
 from .scanner import (
@@ -1072,18 +1072,28 @@ def _survival_summary() -> dict[str, object]:
     return summary
 
 
-def _unbanked_card(events: list[LocalEvent], days: int) -> dict[str, object]:
-    """Spend in this window with no commit behind it.
+def _window_ledger(events: list[LocalEvent], days: int) -> Ledger | None:
+    """The change ledger for this window, or None if git could not be read.
 
     Computed on the request rather than cached, unlike survival: this is one
     `git log --numstat` per repo that had spend (~0.3s for a week locally),
     where survival is a blame pass per file (~23s). Caching it would also pin
     it to one window, and the whole point is that it moves with the day
     selector alongside every other number on the page.
+
+    Built once per request and shared: the unbanked card and the change table
+    are two views of the same ledger, and running git twice for them would
+    double the only real cost on this path.
     """
     try:
-        ledger = build_ledger(events, days=days)
+        return build_ledger(events, days=days)
     except OSError:
+        return None
+
+
+def _unbanked_card(ledger: Ledger | None) -> dict[str, object]:
+    """Spend in this window with no commit behind it."""
+    if ledger is None:
         return {"available": False, "reason": "Could not read git history for the active repos."}
 
     card = dict(unbanked_summary(ledger))
@@ -1099,7 +1109,7 @@ def _unbanked_card(events: list[LocalEvent], days: int) -> dict[str, object]:
     if card.get("available"):
         share = float(card.get("unbanked_pct") or 0)
         card["headline"] = (
-            f"{card['unbanked_label']} of the last {days} days "
+            f"{card['unbanked_label']} of the last {card.get('window_days')} days "
             f"({share:.0f}%) has no commit behind it"
         )
         # Says what it is and what it is not. Uncommitted work in progress looks
@@ -1110,6 +1120,70 @@ def _unbanked_card(events: list[LocalEvent], days: int) -> dict[str, object]:
             "went nowhere or work still uncommitted — this cannot tell them apart."
         )
     return card
+
+
+def _change_rows(
+    ledger: Ledger | None,
+    survival: dict[str, object],
+    *,
+    limit: int = 50,
+) -> list[dict[str, object]]:
+    """One row per commit: what it cost, how much it wrote, and $/line.
+
+    The aggregate was all that reached the screen -- "$X per surviving line"
+    with no way to see which commits drove it. Ranked by cost, because the
+    question this answers is "where did the money go", not "what happened
+    recently".
+
+    Survival is joined in from the cached summary where it exists. It covers
+    only the changes that pass survival's own age gate and cost-coverage walk,
+    so most rows have none, and a missing entry means "not measured", never
+    "did not survive". Nothing here triggers a blame pass.
+    """
+    if ledger is None:
+        return []
+    by_change = survival.get("by_change") if isinstance(survival, dict) else None
+    by_change = by_change if isinstance(by_change, dict) else {}
+
+    rows: list[dict[str, object]] = []
+    for change in ledger.changes[:limit]:
+        measured = by_change.get(change.sha)
+        measured = measured if isinstance(measured, dict) else {}
+        survived = measured.get("survival_pct") if measured.get("measurable") else None
+        rows.append({
+            "sha": change.sha,
+            "short_sha": change.sha[:8],
+            "repo": change.repo,
+            "project": short_path(change.repo),
+            "subject": change.subject,
+            "committed_at": change.committed_at.isoformat(),
+            "cost_usd": round(change.cost_usd, 6),
+            "cost_label": money(change.cost_usd),
+            "lines_added": change.lines_added,
+            "lines_removed": change.lines_removed,
+            "lines_changed": change.lines_changed,
+            "files_changed": change.files_changed,
+            "event_count": change.event_count,
+            "tools": change.tools,
+            "models": [display_model_name(model) for model in change.models],
+            "usd_per_line": (
+                round(change.usd_per_line, 6) if change.usd_per_line is not None else None
+            ),
+            "usd_per_line_label": (
+                money(change.usd_per_line) if change.usd_per_line is not None else "—"
+            ),
+            "survival_pct": survived,
+            "survival_label": f"{survived:.0f}%" if survived is not None else "—",
+            "usd_per_surviving_line_label": (
+                money(float(measured["usd_per_surviving_line"]))
+                if measured.get("usd_per_surviving_line") is not None else "—"
+            ),
+            # A commit with no spend behind it is not free work -- it is work
+            # AIWatcher did not observe (hand-written, or from an untracked
+            # surface). Saying "$0.00" would read as the opposite.
+            "unattributed": change.cost_usd <= 0,
+        })
+    return rows
 
 
 def _handoff_decision_rows(limit: int = 10) -> list[dict[str, object]]:
@@ -1407,7 +1481,9 @@ def build_summary(days: int = 7) -> dict[str, object]:
         churned=churned,
     )
     survival_summary = _survival_summary()
-    unbanked = _unbanked_card(all_events, days)
+    window_ledger = _window_ledger(all_events, days)
+    unbanked = _unbanked_card(window_ledger)
+    changes = _change_rows(window_ledger, survival_summary)
     interventions = recent_interventions(limit=200, days=days)
     receipt_events = all_events if interventions else []
     receipts = _build_intervention_receipts(interventions, all_rows, outcomes_for_sessions(), receipt_events)
@@ -1457,6 +1533,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
         },
         "survival": survival_summary,
         "unbanked": unbanked,
+        "changes": changes,
         "projects": projects[:10],
         "tools": tools,
         "models": models[:10],
@@ -1645,6 +1722,8 @@ HTML = r"""<!doctype html>
     .risk-chip.low { color: #bff5df; border-color: rgba(53,211,153,.45); background: var(--green-soft); }
     .risk-arrow { color: var(--muted); font-weight: 800; }
     .receipt-note { color: var(--muted); font-size: 12px; margin-top: 10px; }
+    td.num, th.num { text-align: right; white-space: nowrap; }
+    .muted { color: var(--muted); }
     .bar-row { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(120px, 1.5fr) 88px; gap: 12px; align-items: center; margin: 11px 0; padding: 5px 0; }
     .bar-row.clickable, tr.clickable { cursor: pointer; }
     .bar-row.clickable { border-radius: 6px; }
@@ -1877,6 +1956,7 @@ HTML = r"""<!doctype html>
     <button class="nav-tab" data-view="prompt" onclick="showView('prompt')">Prompt</button>
     <button class="nav-tab" data-view="projects" onclick="showView('projects')">Projects</button>
     <button class="nav-tab" data-view="sessions" onclick="showView('sessions')">Sessions</button>
+    <button class="nav-tab" data-view="changes" onclick="showView('changes')">Changes</button>
     <button class="nav-tab" data-view="receipts" onclick="showView('receipts')">Receipts</button>
     <button class="nav-tab" data-view="insights" onclick="showView('insights')">Insights</button>
     <button class="nav-tab" data-view="coverage" onclick="showView('coverage')">Coverage</button>
@@ -2026,6 +2106,27 @@ HTML = r"""<!doctype html>
         <thead><tr><th>Tool</th><th>Project</th><th>Model</th><th>Tokens</th><th></th></tr></thead>
         <tbody id="sessionRows"></tbody>
       </table></div>
+    </div>
+  </section>
+
+  <section id="view-changes" class="view" hidden>
+    <div class="card">
+      <div class="section-title">
+        <div><h2>Cost per change</h2><p>What each commit cost in AI spend, and what that works out to per line.</p></div>
+        <span class="pill">Ranked by cost</span>
+      </div>
+      <div id="changeTotals"></div>
+      <div class="table-wrap"><table>
+        <thead><tr>
+          <th>Commit</th><th>Project</th><th class="num">Cost</th><th class="num">Lines</th>
+          <th class="num">$/line</th><th class="num">Still standing</th><th class="num">$/surviving line</th>
+        </tr></thead>
+        <tbody id="changeRows"></tbody>
+      </table></div>
+      <p class="receipt-note">A change's cost is the AI spend in that repo since the previous change, attributed per
+        model call rather than per session, and capped at a 12h lookback. Survival is only measured for changes old
+        enough to judge and costly enough to reach the sampling budget — a blank means not measured, not "did not
+        survive". It is a floor either way: reformatting moves attribution away from the original change.</p>
     </div>
   </section>
 
@@ -2523,6 +2624,38 @@ function dateLabel(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
+function renderChangeRows(rows) {
+  if (!rows.length) {
+    return `<tr><td colspan="7" class="empty">No commits in this window, or git history could not be read.</td></tr>`;
+  }
+  return rows.map(row => `<tr>
+    <td><code>${esc(row.short_sha)}</code> ${esc(row.subject)}
+      <div class="session-meta">${esc(dateLabel(row.committed_at))}${row.tools.length ? ' &middot; ' + esc(row.tools.join(', ')) : ''}${row.event_count ? ' &middot; ' + esc(row.event_count) + ' model calls' : ''}</div></td>
+    <td>${esc(row.project)}</td>
+    <td class="num">${row.unattributed ? '<span class="muted">no spend observed</span>' : esc(row.cost_label)}</td>
+    <td class="num">+${esc(row.lines_added)} / -${esc(row.lines_removed)}
+      <div class="session-meta">${esc(row.files_changed)} file(s)</div></td>
+    <td class="num">${row.unattributed ? '—' : esc(row.usd_per_line_label)}</td>
+    <td class="num">${esc(row.survival_label)}</td>
+    <td class="num">${esc(row.usd_per_surviving_line_label)}</td>
+  </tr>`).join('');
+}
+function renderChangeTotals(rows) {
+  if (!rows.length) return '';
+  const attributed = rows.filter(row => !row.unattributed);
+  const cost = attributed.reduce((sum, row) => sum + row.cost_usd, 0);
+  const lines = attributed.reduce((sum, row) => sum + row.lines_changed, 0);
+  const measured = rows.filter(row => row.survival_pct !== null).length;
+  return `<div class="mini-grid" style="margin-bottom:12px">
+    <div class="mini"><span class="label">Commits</span><strong>${esc(rows.length)}</strong></div>
+    <div class="mini"><span class="label">Attributed spend</span><strong>${esc(fmtMoney(cost))}</strong></div>
+    <div class="mini"><span class="label">Lines changed</span><strong>${esc(lines.toLocaleString())}</strong></div>
+    <div class="mini"><span class="label">Survival measured</span><strong>${esc(measured)} of ${esc(rows.length)}</strong></div>
+  </div>`;
+}
+function fmtMoney(value) {
+  return '$' + (Math.round(value * 100) / 100).toFixed(2);
+}
 function renderUnbanked(card) {
   if (!card || !card.available) {
     return `<div class="empty">${esc((card && card.reason) || 'Not measured for this window.')}</div>`;
@@ -3014,6 +3147,9 @@ async function load(resetDetail = true) {
   document.getElementById('handoffDecisionRows').innerHTML = renderHandoffDecisionRows(handoffDecisions);
   document.getElementById('contextHealth').innerHTML = renderContextHealth(data.context_health || []);
   document.getElementById('unbanked').innerHTML = renderUnbanked(data.unbanked);
+  const changeRows = data.changes || [];
+  document.getElementById('changeRows').innerHTML = renderChangeRows(changeRows);
+  document.getElementById('changeTotals').innerHTML = renderChangeTotals(changeRows);
   document.getElementById('coverageRows').innerHTML = renderCoverage(data.coverage || []);
   document.getElementById('setupRows').innerHTML = renderSetup(data.setup || []);
   const latest = data.recent_sessions[0];

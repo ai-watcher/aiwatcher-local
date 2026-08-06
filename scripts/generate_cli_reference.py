@@ -44,7 +44,7 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
     (
         "Daily loop",
         "What ran today, what it cost, and whether it was worth it.",
-        ["today", "last", "timeline", "journal", "sessions", "outcome", "report", "tools", "projects"],
+        ["today", "last", "timeline", "journal", "sessions", "changes", "outcome", "report", "tools", "projects"],
     ),
     (
         "Prompt review and launch",
@@ -98,6 +98,10 @@ EXAMPLES: dict[str, list[str]] = {
     # Zero-argument commands get no example: it would be identical to the usage
     # line directly above it. Same for status, doctor, hook-status, tools, and
     # projects, which are already absent.
+    "changes": [
+        "aiwatcher changes --days 7",
+        "aiwatcher changes --days 30 --repo my-service --limit 40",
+    ],
     "sessions": [
         "aiwatcher sessions --days 7",
         "aiwatcher sessions --search <your-project> --days 30",

@@ -335,6 +335,77 @@ class UnresolvedSpendTests(unittest.TestCase):
         self.assertAlmostEqual(led.total_usd, 100.0, places=6)
 
 
+class PerChangeFieldTests(unittest.TestCase):
+    """The per-change view needs cost and $/line per commit, plus survival
+    joined in from the cached summary. These pin the fields it reads.
+    """
+
+    def test_usd_per_line_divides_cost_by_lines_touched(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            commit(repo, "a.py", "1\n2\n3\n4\n", "four lines", when=now - timedelta(hours=1))
+            led = build_ledger([event(repo, cost=8.0, when=now - timedelta(hours=2))],
+                               days=7, now=now)
+
+        change = led.changes[0]
+        self.assertEqual(change.lines_changed, 4)
+        self.assertAlmostEqual(change.usd_per_line, 2.0, places=6)
+
+    def test_commit_with_no_observed_spend_has_no_rate(self) -> None:
+        # None, not 0.0: nobody spent $0/line, we just did not see the spend.
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            commit(repo, "a.py", "x\n", "hand written", when=now - timedelta(hours=1))
+            led = build_ledger([], days=7, now=now)
+
+        self.assertEqual(led.changes, [])
+
+    def test_zero_line_commit_has_no_rate_instead_of_dividing_by_zero(self) -> None:
+        change = ledger_module.Change(
+            sha="abc", repo="/r", subject="empty",
+            committed_at=datetime.now(timezone.utc), cost_usd=5.0,
+        )
+        self.assertIsNone(change.usd_per_line)
+
+    def test_survival_records_per_change_results(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            for index in range(3):
+                commit(repo, f"f{index}.py", "a\nb\n", f"change {index}",
+                       when=now - timedelta(days=20, hours=index))
+            events = [
+                event(repo, cost=3.0, when=now - timedelta(days=20, hours=index, minutes=30))
+                for index in range(3)
+            ]
+            led = build_ledger(events, days=60, now=now)
+            result = cost_per_surviving_line(led, now=now)
+
+        by_change = result.get("by_change") or {}
+        self.assertTrue(by_change, "per-change survival must be recorded, not discarded")
+        for entry in by_change.values():
+            self.assertIn("measurable", entry)
+            if entry["measurable"]:
+                self.assertIn("survival_pct", entry)
+
+
+class GitOutputEncodingTests(unittest.TestCase):
+    def test_non_ascii_commit_subject_survives_decoding(self) -> None:
+        # text=True without an explicit encoding decodes with the locale codec,
+        # which is cp1252 on Windows. git emits UTF-8, so an em dash came back
+        # as "a€"" in the change table.
+        now = datetime.now(timezone.utc)
+        subject = "feat: surface unbanked spend — money with no commit"
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            commit(repo, "a.py", "x\n", subject, when=now - timedelta(hours=1))
+            changes = commits_since(repo, now - timedelta(days=1))
+
+        self.assertEqual(changes[0].subject, subject)
+
+
 class UnbankedSummaryTests(unittest.TestCase):
     def test_reports_share_repos_and_reasons(self) -> None:
         now = datetime.now(timezone.utc)

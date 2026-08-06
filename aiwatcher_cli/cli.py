@@ -2615,6 +2615,61 @@ def print_unbanked_line(events: Sequence[LocalEvent], *, days: int = 7) -> None:
     print("  Exploration that went nowhere, or work still uncommitted — this cannot tell them apart.")
 
 
+def command_changes(args: argparse.Namespace) -> int:
+    """Per-commit cost and $/line — the ledger behind the aggregate figures."""
+    try:
+        events = scan_all_events()
+    except OSError:
+        events = []
+    try:
+        ledger = build_ledger(events, days=args.days)
+    except OSError:
+        print("Could not read git history for the active repos.")
+        return 1
+
+    rows = ledger.changes
+    if args.repo:
+        needle = args.repo.lower()
+        rows = [change for change in rows if needle in change.repo.lower()]
+    if not rows:
+        print(f"No commits in the last {args.days} days" + (" matching that repo." if args.repo else "."))
+        return 0
+
+    # Survival where it is already cached. Never computed here: a blame pass per
+    # file would turn a listing into a 25s command.
+    by_change = usable_survival_summary().get("by_change")
+    by_change = by_change if isinstance(by_change, dict) else {}
+
+    print(f"Cost per change - last {args.days} days, ranked by spend\n")
+    print(f"{'Commit':10} {'Cost':>9} {'Lines':>12} {'$/line':>9} {'Alive':>6}  Subject")
+    print("-" * 88)
+    for change in rows[:args.limit]:
+        measured = by_change.get(change.sha)
+        measured = measured if isinstance(measured, dict) else {}
+        pct = measured.get("survival_pct") if measured.get("measurable") else None
+        cost = money(change.cost_usd) if change.cost_usd > 0 else "-"
+        per_line = money(change.usd_per_line) if change.usd_per_line is not None else "-"
+        print(
+            f"{change.sha[:10]:10} {cost:>9} "
+            f"{f'+{change.lines_added}/-{change.lines_removed}':>12} "
+            f"{per_line:>9} {(f'{pct:.0f}%' if pct is not None else '-'):>6}  "
+            f"{change.subject[:40]}"
+        )
+
+    attributed = [change for change in rows if change.cost_usd > 0]
+    if len(attributed) < len(rows):
+        print(
+            f"\n{len(rows) - len(attributed)} of {len(rows)} commits have no observed AI spend "
+            "(hand-written, or from a surface AIWatcher does not scan)."
+        )
+    if not by_change:
+        print("Survival not measured yet. Run `aiwatcher today` to compute it.")
+    else:
+        print("Blank survival means not measured, not 'did not survive'. It is a floor either way.")
+    print_unbanked_line(events, days=args.days)
+    return 0
+
+
 def command_today(_args: argparse.Namespace) -> int:
     now = datetime.now().astimezone()
     today_start = local_midnight(now.date())
@@ -5984,6 +6039,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sessions.add_argument("--team", action="store_true", help="Explain team session visibility in AIWatcher Cloud")
     sessions.set_defaults(func=command_sessions)
+
+    changes = sub.add_parser("changes", help="Show what each commit cost in AI spend, and $/line")
+    changes.add_argument("--days", type=int, default=7, help="How many days of commits to include")
+    changes.add_argument("--limit", type=int, default=20, help="Maximum number of commits to list")
+    changes.add_argument(
+        "--repo",
+        help="Only show commits in repos whose path contains this substring",
+    )
+    changes.set_defaults(func=command_changes)
 
     last = sub.add_parser("last", help="Inspect the latest local AI session")
     last.add_argument("--days", type=int, default=30, help="How many days back to search for the session")

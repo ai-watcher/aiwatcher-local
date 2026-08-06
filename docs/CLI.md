@@ -18,7 +18,7 @@ anywhere. See [Privacy](../README.md#privacy) for the full contract.
 ## Contents
 
 - [Getting started](#getting-started) -- `start`, `setup`, `status`, `doctor`
-- [Daily loop](#daily-loop) -- `today`, `last`, `timeline`, `journal`, `sessions`, `outcome`, `report`, `tools`, `projects`
+- [Daily loop](#daily-loop) -- `today`, `last`, `timeline`, `journal`, `sessions`, `changes`, `outcome`, `report`, `tools`, `projects`
 - [Prompt review and launch](#prompt-review-and-launch) -- `preflight`, `codex`, `claude`
 - [Continuity](#continuity) -- `handoff`, `resume`, `log-decision`
 - [Monitoring](#monitoring) -- `watch`, `processes`, `run`
@@ -168,6 +168,27 @@ aiwatcher sessions --evidence churned --days 14
 | `--outcome` | `abandoned`, `rework`, `useful` |  | Filter by recorded outcome |
 | `--evidence` | `churned`, `needs_review`, `useful` |  | Filter by inferred outcome evidence, for sessions never manually marked |
 | `--team` | flag |  | Explain team session visibility in AIWatcher Cloud |
+
+### `aiwatcher changes`
+
+Show what each commit cost in AI spend, and $/line
+
+```sh
+aiwatcher changes [--days DAYS] [--limit LIMIT] [--repo REPO]
+```
+
+Examples:
+
+```sh
+aiwatcher changes --days 7
+aiwatcher changes --days 30 --repo my-service --limit 40
+```
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--days` | integer | `7` | How many days of commits to include |
+| `--limit` | integer | `20` | Maximum number of commits to list |
+| `--repo` | text |  | Only show commits in repos whose path contains this substring |
 
 ### `aiwatcher outcome`
 
