@@ -4,7 +4,16 @@ Context growth and session health analysis.
 Detects the pattern behind 325M-token sessions: a long-lived agentic session
 that never restarts, so each turn resends the entire conversation history.
 The per-turn token count climbs linearly; the "bloat ratio" measures what
-fraction of input tokens were replayed history rather than new work.
+share of the session's bill went on replaying that history rather than on new
+work.
+
+Bloat is measured in dollars, not tokens, and deliberately so. As a share of
+*tokens*, replayed history is 78-99% of billed input for every non-trivial
+session -- that is simply how prompt caching works, and a metric that reads
+"96%" for everything ranks nothing. Cached reads are also billed at a tenth of
+the input rate, so a high replayed-token share is the cheap case, not the
+expensive one. As a share of *cost* the same sessions spread across 16-83%,
+which is both discriminating and directly actionable.
 """
 
 from __future__ import annotations
@@ -15,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
+from .pricing import cache_read_cost
 from .scanner import LocalEvent, LocalSession
 
 
@@ -23,8 +33,10 @@ PRESSURE_TOKENS_PER_TURN: int = 150_000   # yellow: worth watching
 CRITICAL_TOKENS_PER_TURN: int = 200_000   # red: action needed
 STALE_WARN_HOURS: float       = 24.0      # yellow: session older than 1 day
 CRITICAL_STALE_DAYS: float    = 7.0       # red: session older than 1 week
-HIGH_BLOAT_RATIO: float       = 0.90      # 90% of input was replayed history
-EXTREME_BLOAT_RATIO: float    = 0.97      # like the 325M session (~0.6% efficiency)
+# Tuned against the observed spread of replayed-context cost share (16-83%,
+# median 47%): HIGH is roughly the top quartile, EXTREME the tail.
+HIGH_BLOAT_RATIO: float       = 0.60      # 60% of the session's spend was replay
+EXTREME_BLOAT_RATIO: float    = 0.75      # replay dominates; a restart pays for itself
 MIN_EVENTS_FOR_CONTEXT_ANALYSIS: int = 3  # need enough turns to detect meaningful growth
 MIN_TOKENS_FOR_CONTEXT_ANALYSIS: int = 5_000  # ignore sessions with trivial token counts
 ACTIVE_SESSION_DAYS: int = 30             # only surface sessions active in last 30 days
@@ -47,9 +59,16 @@ class ContextHealth:
     avg_turn_tokens: float        # mean tokens_in per event
     growth_rate: float            # average Δtokens_in per turn (positive = growing)
 
-    # Bloat
-    bloat_ratio: float            # (total_input - total_output) / total_input  ≈ % replayed
-    efficiency_pct: float         # total_output / total_input * 100
+    # Bloat — measured in dollars; see the module docstring for why not tokens.
+    bloat_ratio: float            # replayed_cost_usd / analyzed_cost_usd
+    efficiency_pct: float         # share of spend that bought new work: (1 - bloat) * 100
+    # False when the source reports no cache buckets, or the model is priced at
+    # zero (subscription plans). Then bloat_ratio is 0.0 because it is unknown,
+    # not because the session replayed nothing — callers must not render it.
+    bloat_measurable: bool
+    replayed_cost_usd: float      # spend attributable to re-sent history
+    analyzed_cost_usd: float      # spend across the events analyzed here
+    latest_turn_replayed_tokens: int  # cache reads on the most recent turn
 
     # Flags
     is_stale: bool
@@ -109,11 +128,22 @@ def analyze_session_health(
     ]
     growth_rate = statistics.mean(deltas) if deltas else 0.0
 
-    # Bloat ratio: what fraction of input was replayed history
-    # output tokens ≈ new content; input - output ≈ replayed history
-    bloat_ratio   = (total_in - total_out) / total_in if total_in > 0 else 0.0
-    bloat_ratio   = max(0.0, min(1.0, bloat_ratio))
-    efficiency    = (total_out / total_in * 100) if total_in > 0 else 100.0
+    # Bloat ratio: what share of this session's bill was re-sent history.
+    # cache_read_tokens is the replayed portion as the provider counted it, and
+    # it is billed at the discounted cache rate, so price it that way.
+    replayed_usd  = sum(cache_read_cost(e.model, e.cache_read_tokens) for e in relevant)
+    analyzed_usd  = sum(e.cost_usd for e in relevant)
+    # A source that reports cache buckets at all will show writes even when a
+    # session gets no read hits; all-zero across both means "not reported".
+    reports_cache = any(e.cache_read_tokens or e.cache_write_tokens for e in relevant)
+    measurable    = reports_cache and analyzed_usd > 0
+
+    if measurable:
+        bloat_ratio = max(0.0, min(1.0, replayed_usd / analyzed_usd))
+        efficiency  = (1.0 - bloat_ratio) * 100
+    else:
+        bloat_ratio = 0.0
+        efficiency  = 0.0
 
     age_hours     = _age_hours(session)
     age_days      = age_hours / 24.0
@@ -122,8 +152,8 @@ def analyze_session_health(
     is_critical_stale  = age_days  > CRITICAL_STALE_DAYS
     is_pressure        = latest > PRESSURE_TOKENS_PER_TURN or peak > PRESSURE_TOKENS_PER_TURN
     is_critical        = latest > CRITICAL_TOKENS_PER_TURN or peak > CRITICAL_TOKENS_PER_TURN
-    is_high_bloat      = bloat_ratio > HIGH_BLOAT_RATIO
-    is_extreme_bloat   = bloat_ratio > EXTREME_BLOAT_RATIO
+    is_high_bloat      = measurable and bloat_ratio > HIGH_BLOAT_RATIO
+    is_extreme_bloat   = measurable and bloat_ratio > EXTREME_BLOAT_RATIO
 
     # Severity — stale alone is a warning, not critical; context pressure or extreme bloat = critical
     if is_critical or is_extreme_bloat or (is_critical_stale and (is_pressure or is_high_bloat)):
@@ -152,14 +182,14 @@ def analyze_session_health(
         )
     if is_extreme_bloat:
         recs.append(
-            f"Efficiency is {efficiency:.1f}% — {bloat_ratio * 100:.0f}% of every turn "
-            "is replayed history. A fresh session would use ~{:.0f}% less capacity.".format(
-                bloat_ratio * 100
-            )
+            f"{bloat_ratio * 100:.0f}% of this session's ${analyzed_usd:.2f} went on "
+            f"re-sending history it had already sent (${replayed_usd:.2f}). "
+            f"Only {efficiency:.0f}c in the dollar bought new work — restart or /compact."
         )
     elif is_high_bloat:
         recs.append(
-            f"Context is {bloat_ratio * 100:.0f}% replayed history. "
+            f"${replayed_usd:.2f} of this session's ${analyzed_usd:.2f} "
+            f"({bloat_ratio * 100:.0f}%) was replayed history. "
             "Use /compact to compress older turns before they compound further."
         )
     if not recs:
@@ -180,6 +210,10 @@ def analyze_session_health(
         growth_rate=growth_rate,
         bloat_ratio=bloat_ratio,
         efficiency_pct=efficiency,
+        bloat_measurable=measurable,
+        replayed_cost_usd=replayed_usd,
+        analyzed_cost_usd=analyzed_usd,
+        latest_turn_replayed_tokens=relevant[-1].cache_read_tokens,
         is_stale=is_stale,
         is_critical_stale=is_critical_stale,
         is_context_pressure=is_pressure,
@@ -237,7 +271,7 @@ def format_health_row(h: ContextHealth) -> str:
     project = _short_project(h.project_path)
     age = f"{h.age_days:.0f}d" if h.age_days >= 1 else f"{h.age_hours:.0f}h"
     ctx = f"{_compact_tokens(h.latest_turn_tokens)}/turn"
-    eff = f"{h.efficiency_pct:.0f}% eff"
+    eff = f"{h.efficiency_pct:.0f}% new work" if h.bloat_measurable else "replay n/a"
     return f"{icon} {project:<32} {h.tool:<12} age={age:<5} ctx={ctx:<10} {eff}"
 
 
@@ -258,8 +292,13 @@ def format_health_block(h: ContextHealth) -> str:
                  f"(peak {_compact_tokens(h.peak_turn_tokens)},  "
                  f"healthy: <{_compact_tokens(PRESSURE_TOKENS_PER_TURN)})")
     lines.append(f"  Total   : {_compact_tokens(h.total_input_tokens)} input  /  "
-                 f"{_compact_tokens(h.total_output_tokens)} output  "
-                 f"({h.efficiency_pct:.1f}% efficiency)")
+                 f"{_compact_tokens(h.total_output_tokens)} output")
+    if h.bloat_measurable:
+        lines.append(f"  Replay  : ${h.replayed_cost_usd:.2f} of ${h.analyzed_cost_usd:.2f}  "
+                     f"({h.bloat_ratio * 100:.0f}% of spend re-sent history,  "
+                     f"healthy: <{HIGH_BLOAT_RATIO * 100:.0f}%)")
+    else:
+        lines.append("  Replay  : not measurable (source reports no cache buckets)")
     if h.growth_rate > 1000:
         lines.append(f"  Growth  : +{_compact_tokens(int(h.growth_rate))}/turn  (context accumulating)")
     lines.append(f"  Events  : {h.event_count} model calls analyzed")
@@ -327,8 +366,9 @@ def gate_health_warning(
     if h.is_context_critical:
         lines.append(
             f"⚠ Context pressure: active {tool} session has "
-            f"{_compact_tokens(h.latest_turn_tokens)} tokens/turn context "
-            f"({h.efficiency_pct:.0f}% efficiency)."
+            f"{_compact_tokens(h.latest_turn_tokens)} tokens/turn context"
+            + (f" ({h.efficiency_pct:.0f}% of spend on new work)."
+               if h.bloat_measurable else ".")
         )
     elif h.is_context_pressure:
         lines.append(
@@ -342,8 +382,8 @@ def gate_health_warning(
         )
     if h.is_extreme_bloat or h.is_high_bloat:
         lines.append(
-            f"  Running this task at current context costs ~"
-            f"{int(h.bloat_ratio * 100)}% more capacity than a fresh session."
+            f"  {int(h.bloat_ratio * 100)}% of this session's spend so far "
+            f"(${h.replayed_cost_usd:.2f}) went on re-sending history."
         )
         lines.append("  Recommendation: /compact or restart before proceeding.")
     return "\n".join(lines) if lines else None

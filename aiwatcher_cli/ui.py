@@ -749,10 +749,15 @@ def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) ->
             "severity": health.severity,
             "latest_turn_tokens": compact_int(health.latest_turn_tokens),
             "peak_turn_tokens": compact_int(health.peak_turn_tokens),
-            "estimated_replayed_context_tokens": int(health.latest_turn_tokens * health.bloat_ratio),
-            "estimated_replayed_context_label": compact_int(int(health.latest_turn_tokens * health.bloat_ratio)),
-            "efficiency_label": f"{health.efficiency_pct:.0f}%",
-            "bloat_label": f"{health.bloat_ratio * 100:.0f}%",
+            # Measured cache reads on the latest turn, not a ratio applied to
+            # the turn size — the provider counts the replayed portion for us.
+            "estimated_replayed_context_tokens": health.latest_turn_replayed_tokens,
+            "estimated_replayed_context_label": compact_int(health.latest_turn_replayed_tokens),
+            "bloat_measurable": health.bloat_measurable,
+            "efficiency_label": f"{health.efficiency_pct:.0f}%" if health.bloat_measurable else "n/a",
+            "bloat_label": f"{health.bloat_ratio * 100:.0f}%" if health.bloat_measurable else "n/a",
+            "replayed_cost_label": f"${health.replayed_cost_usd:.2f}" if health.bloat_measurable else "n/a",
+            "analyzed_cost_label": f"${health.analyzed_cost_usd:.2f}" if health.bloat_measurable else "n/a",
             "age_label": f"{health.age_days:.1f}d" if health.age_days >= 1 else f"{health.age_hours:.0f}h",
             "recommendation": health.recommendations[0] if health.recommendations else "Context is healthy.",
             "action": action,
@@ -807,9 +812,10 @@ def _handoff_bubble(context_health: list[dict[str, object]]) -> dict[str, object
         "expected_saved_context_tokens": candidate.get("estimated_replayed_context_tokens"),
         "tags": [
             f"{candidate.get('latest_turn_tokens')} tokens/turn",
-            f"{candidate.get('efficiency_label')} efficiency",
-            f"{candidate.get('bloat_label')} replayed context",
-        ],
+        ] + ([
+            f"{candidate.get('bloat_label')} of spend replayed",
+            f"{candidate.get('replayed_cost_label')} on replayed context",
+        ] if candidate.get("bloat_measurable") else []),
     }
 
 
@@ -1441,11 +1447,17 @@ def _build_compact_prompt(health: object) -> str:
     """Generate a /compact-style smart compaction prompt for a session."""
     if not isinstance(health, ContextHealth):
         return "/compact"
-    eff = health.efficiency_pct
-    bloat = int(health.bloat_ratio * 100)
     ctx_k = round(health.latest_turn_tokens / 1000)
+    if health.bloat_measurable:
+        headline = (
+            f"This session is at {ctx_k}K tokens/turn, and "
+            f"{int(health.bloat_ratio * 100)}% of its ${health.analyzed_cost_usd:.2f} "
+            "so far went on re-sending history."
+        )
+    else:
+        headline = f"This session is at {ctx_k}K tokens/turn."
     lines = [
-        f"This session is at {ctx_k}K tokens/turn ({eff:.0f}% efficient — {bloat}% replayed history).",
+        headline,
         "",
         "Please compact this conversation by producing a structured summary that preserves:",
         "1. Active task: what we are building right now and why",
@@ -2473,8 +2485,8 @@ function renderContextHealth(rows) {
     <div class="mini-grid">
       <div class="mini"><span class="label">Latest turn</span><strong>${esc(row.latest_turn_tokens)}</strong></div>
       <div class="mini"><span class="label">Peak turn</span><strong>${esc(row.peak_turn_tokens)}</strong></div>
-      <div class="mini"><span class="label">Efficiency</span><strong>${esc(row.efficiency_label)}</strong></div>
-      <div class="mini"><span class="label">Replayed</span><strong>${esc(row.bloat_label)}</strong></div>
+      <div class="mini"><span class="label">Spend on replay</span><strong>${esc(row.bloat_label)}</strong></div>
+      <div class="mini"><span class="label">Replay cost</span><strong>${esc(row.replayed_cost_label)}</strong></div>
     </div>
     <p>${esc(row.recommendation)}</p>
     <div class="health-actions">
@@ -3158,7 +3170,7 @@ async function load() {
   if (wanted && (!bubble || bubble.session_id !== wanted)) {
     const health = (data.context_health || []).find(row => row.session_id === wanted);
     if (health) {
-      const saved = health.estimated_replayed_context_label || health.bloat_label || 'context';
+      const saved = health.estimated_replayed_context_label || 'context';
       bubble = {
         session_id: health.session_id,
         project: health.project,
@@ -3168,7 +3180,8 @@ async function load() {
         body: health.recommendation || 'This session is getting heavy. Use a handoff brief before continuing.',
         reason: health.recommendation || 'Context pressure is elevated.',
         expected_saved_context_tokens: health.estimated_replayed_context_tokens || null,
-        tags: [`${health.latest_turn_tokens} tokens/turn`, `${health.efficiency_label} efficiency`, `${saved} replayed`],
+        tags: [`${health.latest_turn_tokens} tokens/turn`, `${saved} replayed`].concat(
+          health.bloat_measurable ? [`${health.bloat_label} of spend replayed`] : []),
       };
     }
   }
@@ -3363,6 +3376,9 @@ class UIHandler(BaseHTTPRequestHandler):
                         "peak_turn_tokens": match.peak_turn_tokens,
                         "efficiency_pct": match.efficiency_pct,
                         "bloat_ratio": match.bloat_ratio,
+                        "bloat_measurable": match.bloat_measurable,
+                        "replayed_cost_usd": round(match.replayed_cost_usd, 6),
+                        "analyzed_cost_usd": round(match.analyzed_cost_usd, 6),
                         "growth_rate": match.growth_rate,
                         "is_context_critical": match.is_context_critical,
                         "is_context_pressure": match.is_context_pressure,

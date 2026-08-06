@@ -141,8 +141,12 @@ class DashboardWindowTests(unittest.TestCase):
             peak_turn_tokens=225_000,
             avg_turn_tokens=125_000,
             growth_rate=20_000,
-            bloat_ratio=0.98,
-            efficiency_pct=2.0,
+            bloat_ratio=0.82,
+            efficiency_pct=18.0,
+            bloat_measurable=True,
+            replayed_cost_usd=1.64,
+            analyzed_cost_usd=2.0,
+            latest_turn_replayed_tokens=220_000,
             is_stale=False,
             is_critical_stale=False,
             is_context_pressure=True,
@@ -184,7 +188,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(summary["context_health"][0]["action"]["label"], "Start fresh")
         self.assertEqual(summary["handoff_bubble"]["session_id"], "bloated")
         self.assertIn("Start a new chat", summary["handoff_bubble"]["title"])
-        self.assertEqual(summary["handoff_bubble"]["expected_saved_context_tokens"], 220_500)
+        # Measured cache reads on the latest turn, not latest_turn_tokens * bloat_ratio.
+        self.assertEqual(summary["handoff_bubble"]["expected_saved_context_tokens"], 220_000)
         self.assertEqual(summary["handoff_decisions"], [])
 
     def test_recent_handoff_decision_suppresses_repeat_bubble(self) -> None:
@@ -212,8 +217,12 @@ class DashboardWindowTests(unittest.TestCase):
             peak_turn_tokens=225_000,
             avg_turn_tokens=125_000,
             growth_rate=20_000,
-            bloat_ratio=0.98,
-            efficiency_pct=2.0,
+            bloat_ratio=0.82,
+            efficiency_pct=18.0,
+            bloat_measurable=True,
+            replayed_cost_usd=1.64,
+            analyzed_cost_usd=2.0,
+            latest_turn_replayed_tokens=220_000,
             is_stale=False,
             is_critical_stale=False,
             is_context_pressure=True,

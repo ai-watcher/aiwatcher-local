@@ -3506,9 +3506,13 @@ def _print_watch_status_card(
         f"{session.agent_calls} model calls, {session.tool_calls} tool calls"
     )
     if health is not None:
+        replay = (
+            f", {health.bloat_ratio * 100:.0f}% of spend on replayed history"
+            if health.bloat_measurable else ""
+        )
         print(
             f"  Context    : {health.severity} "
-            f"({compact_int(health.latest_turn_tokens)} tokens/turn, {health.efficiency_pct:.0f}% efficiency)"
+            f"({compact_int(health.latest_turn_tokens)} tokens/turn{replay})"
         )
     else:
         print("  Context    : not enough per-turn token data locally to assess")
@@ -3932,7 +3936,11 @@ def command_watch(args: argparse.Namespace) -> int:
                         print(f"[{when}] {row.tool} | {short_path(row.project_path)} | {money(row.cost_usd)} | {compact_int(row.tokens_in + row.tokens_out)} tokens")
                         health = analyze_session_health(row, all_events.get(row.session_id, []))
                         if health is not None and health.severity in {"warning", "critical"}:
-                            print(f"  - Context {health.severity}: {compact_int(health.latest_turn_tokens)} tokens/turn, {health.efficiency_pct:.0f}% efficiency")
+                            replay = (
+                                f", {health.bloat_ratio * 100:.0f}% of spend replayed"
+                                if health.bloat_measurable else ""
+                            )
+                            print(f"  - Context {health.severity}: {compact_int(health.latest_turn_tokens)} tokens/turn{replay}")
                         for insight in session_insights(
                             row,
                             cost_threshold=args.cost_threshold,

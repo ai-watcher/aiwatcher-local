@@ -91,5 +91,19 @@ def estimate_cost(
     ) / 1_000_000
 
 
+def cache_read_cost(model: str | None, cache_read: int) -> float:
+    """What the replayed portion of a turn cost, at the discounted cache rate.
+
+    Split out of `estimate_cost` so callers that need to say "this much of the
+    bill was re-sent history" price it the same way the bill itself was priced.
+    Returns 0.0 for subscription or unknown models, where there is no dollar
+    figure to attribute.
+    """
+    pricing = lookup(model)
+    if not pricing or pricing.get("subscription"):
+        return 0.0
+    return cache_read * float(pricing["in"]) * CACHE_READ_MULTIPLIER / 1_000_000
+
+
 def is_subscription_model(model: str | None) -> bool:
     return bool(lookup(model) and lookup(model).get("subscription"))
