@@ -208,6 +208,90 @@ class PromptCacheAccountingTests(unittest.TestCase):
         self.assertEqual(sessions[0].tokens_in, 16_225)
 
 
+class PerRequestUsageTests(unittest.TestCase):
+    """Claude Code writes one transcript line per *content block*, each
+    repeating the same message-level usage. Usage is reported per API request,
+    so summing per line counted one request's tokens once per block -- locally
+    that inflated a single session from $71.57 to $127.19, and was what made
+    AIWatcher disagree with Claude Code's own `/cost`.
+    """
+
+    USAGE = {
+        "input_tokens": 10,
+        "cache_creation_input_tokens": 1_000,
+        "cache_read_input_tokens": 100_000,
+        "output_tokens": 500,
+        "cache_creation": {"ephemeral_1h_input_tokens": 1_000, "ephemeral_5m_input_tokens": 0},
+    }
+
+    def _write(self, project: Path, lines: list[dict]) -> None:
+        (project / "sess.jsonl").write_text(
+            "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
+        )
+
+    def _scan(self, lines: list[dict]):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            projects = Path(temp_dir) / "projects"
+            project = projects / "-tmp-demo"
+            project.mkdir(parents=True)
+            self._write(project, lines)
+            with patch.object(scanner, "CLAUDE_PROJECTS_DIRS", [projects]):
+                return scanner.scan_claude_code()[0], scanner.scan_claude_code_events()
+
+    def _line(self, *, request_id=None, message_id=None, block="text"):
+        message = {"model": "claude-sonnet-5", "usage": self.USAGE,
+                   "content": [{"type": block, "text": "x"}]}
+        if message_id is not None:
+            message["id"] = message_id
+        line = {"type": "assistant", "timestamp": "2026-06-24T10:00:00Z", "message": message}
+        if request_id is not None:
+            line["requestId"] = request_id
+        return line
+
+    def test_one_request_across_four_lines_is_billed_once(self) -> None:
+        four = [self._line(request_id="req_1", message_id="msg_1") for _ in range(4)]
+        session, events = self._scan(four)
+
+        self.assertEqual(session.tokens_in, 10 + 1_000 + 100_000)
+        self.assertEqual(session.tokens_out, 500)
+        self.assertEqual(session.cache_read_tokens, 100_000)
+        # Every line is still a real content block, so every line is an event --
+        # only the duplicated bill is dropped.
+        self.assertEqual(len(events), 4)
+        self.assertEqual(sum(e.tokens_in for e in events), 10 + 1_000 + 100_000)
+        self.assertAlmostEqual(sum(e.cost_usd for e in events), session.cost_usd, places=9)
+
+    def test_distinct_requests_are_billed_separately(self) -> None:
+        session, _ = self._scan([
+            self._line(request_id="req_1", message_id="msg_1"),
+            self._line(request_id="req_2", message_id="msg_2"),
+        ])
+        self.assertEqual(session.tokens_in, 2 * (10 + 1_000 + 100_000))
+        self.assertEqual(session.tokens_out, 2 * 500)
+
+    def test_message_id_is_the_fallback_when_request_id_is_absent(self) -> None:
+        # Older transcripts predate requestId.
+        session, _ = self._scan([self._line(message_id="msg_1") for _ in range(3)])
+        self.assertEqual(session.tokens_in, 10 + 1_000 + 100_000)
+
+    def test_lines_with_no_identifier_are_each_counted(self) -> None:
+        # Safe direction: a missed dedup over-counts by one, while merging on a
+        # bad key would silently discard a real request.
+        session, _ = self._scan([self._line() for _ in range(2)])
+        self.assertEqual(session.tokens_in, 2 * (10 + 1_000 + 100_000))
+
+    def test_sessions_and_events_agree_on_the_same_transcript(self) -> None:
+        lines = [
+            self._line(request_id="req_1", message_id="msg_1"),
+            self._line(request_id="req_1", message_id="msg_1", block="tool_use"),
+            self._line(request_id="req_2", message_id="msg_2"),
+        ]
+        session, events = self._scan(lines)
+        self.assertEqual(sum(e.tokens_in for e in events), session.tokens_in)
+        self.assertEqual(sum(e.tokens_out for e in events), session.tokens_out)
+        self.assertAlmostEqual(sum(e.cost_usd for e in events), session.cost_usd, places=9)
+
+
 class ScanDateTests(unittest.TestCase):
     def test_updated_at_uses_mtime_when_tail_events_lack_timestamps(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

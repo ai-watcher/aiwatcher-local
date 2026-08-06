@@ -473,6 +473,34 @@ def _anthropic_usage(usage: Any) -> dict[str, int]:
     }
 
 
+def _usage_receipt_key(obj: Any, message: Any) -> str | None:
+    """Identify the API request a transcript line's usage block belongs to.
+
+    Claude Code writes one line per *content block*, not per API call: a reply
+    containing text plus three tool_use blocks becomes four lines, milliseconds
+    apart, each carrying an identical copy of the message-level `usage`. Usage
+    is reported per request, so summing it per line counts one request's tokens
+    once per block.
+
+    Locally that inflated a single session from $71.57 to $127.19 -- 180 of 427
+    requests over-counted, some four times over -- which is why the figure
+    disagreed with Claude Code's own `/cost`.
+
+    `requestId` is the primary key because it is exactly what it claims to be;
+    `message.id` is the fallback for older transcripts that predate it. A line
+    with neither returns None and is counted on its own, which is the safe
+    direction: a missed dedup over-counts by one, while a bad key merge would
+    silently discard a real request.
+    """
+    request_id = obj.get("requestId") if isinstance(obj, dict) else None
+    if isinstance(request_id, str) and request_id:
+        return request_id
+    message_id = message.get("id") if isinstance(message, dict) else None
+    if isinstance(message_id, str) and message_id:
+        return message_id
+    return None
+
+
 def _billed_input(usage: dict[str, int]) -> int:
     """Every input token the provider charged for, cached or not."""
     return usage["input"] + usage["cache_write_5m"] + usage["cache_write_1h"] + usage["cache_read"]
@@ -671,6 +699,9 @@ def scan_claude_code() -> list[LocalSession]:
             for fpath_raw in glob.glob(str(project_dir / "*.jsonl")):
                 fpath = Path(fpath_raw)
                 session_id = fpath.stem
+                # One usage block per API request, however many transcript
+                # lines that request produced. See _usage_receipt_key.
+                counted_requests: set[str] = set()
                 events_seen = 0
                 agent_calls = 0
                 tool_calls = 0
@@ -718,6 +749,14 @@ def scan_claude_code() -> list[LocalSession]:
                             message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
                             msg_type = obj.get("type") or message.get("role")
                             tokens = _anthropic_usage(message.get("usage") or obj.get("usage") or {})
+                            # See scan_claude_code_events: a multi-block reply
+                            # repeats one request's usage on every line.
+                            receipt = _usage_receipt_key(obj, message)
+                            if receipt is not None:
+                                if receipt in counted_requests:
+                                    tokens = _anthropic_usage({})
+                                else:
+                                    counted_requests.add(receipt)
                             input_tokens = _billed_input(tokens)
                             output_tokens = tokens["output"]
                             event_model = message.get("model") or obj.get("model")
@@ -814,6 +853,9 @@ def scan_claude_code_events() -> list[LocalEvent]:
                 fpath = Path(fpath_raw)
                 session_id = fpath.stem
                 turn = 0
+                # One usage block per API request, however many transcript
+                # lines that request produced. See _usage_receipt_key.
+                counted_requests: set[str] = set()
                 try:
                     with fpath.open(errors="replace") as handle:
                         for index, line in enumerate(handle):
@@ -834,6 +876,16 @@ def scan_claude_code_events() -> list[LocalEvent]:
                             msg_type = obj.get("type") or "unknown"
                             model = message.get("model") or obj.get("model")
                             tokens = _anthropic_usage(message.get("usage") or obj.get("usage") or {})
+                            # Every line of a multi-block reply repeats the same
+                            # usage; charge it to the first line only. The later
+                            # lines still become events -- they are real content
+                            # blocks -- they just carry no second copy of the bill.
+                            receipt = _usage_receipt_key(obj, message)
+                            if receipt is not None:
+                                if receipt in counted_requests:
+                                    tokens = _anthropic_usage({})
+                                else:
+                                    counted_requests.add(receipt)
                             input_tokens = _billed_input(tokens)
                             output_tokens = tokens["output"]
                             event_cost = estimate_cost(
