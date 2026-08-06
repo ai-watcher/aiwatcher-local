@@ -44,7 +44,8 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
     (
         "Daily loop",
         "What ran today, what it cost, and whether it was worth it.",
-        ["today", "last", "timeline", "journal", "sessions", "changes", "outcome", "report", "tools", "projects"],
+        ["today", "last", "timeline", "journal", "sessions", "changes", "commit-receipt",
+         "outcome", "report", "tools", "projects"],
     ),
     (
         "Prompt review and launch",
@@ -81,6 +82,8 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
             "uninstall-cursor-hook",
             "install-codex-wrapper",
             "uninstall-codex-wrapper",
+            "install-commit-hook",
+            "uninstall-commit-hook",
             "hook-status",
         ],
     ),
@@ -101,6 +104,14 @@ EXAMPLES: dict[str, list[str]] = {
     "changes": [
         "aiwatcher changes --days 7",
         "aiwatcher changes --days 30 --repo my-service --limit 40",
+    ],
+    "commit-receipt": [
+        "aiwatcher commit-receipt --sha HEAD~1",
+        "aiwatcher commit-receipt --repo ../my-service --json",
+    ],
+    "install-commit-hook": [
+        "aiwatcher install-commit-hook --write",
+        "aiwatcher install-commit-hook --repo ../my-service --write",
     ],
     "sessions": [
         "aiwatcher sessions --days 7",

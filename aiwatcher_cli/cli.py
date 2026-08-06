@@ -58,13 +58,23 @@ from .local_state import (
     record_watch_notification,
     recent_watch_notifications,
     redact_command_for_storage,
+    get_receipt_baseline,
     get_survival_summary,
     save_baselines,
+    save_receipt_baseline,
     save_survival_summary,
     state_path,
 )
 from .handoff import TARGET_LABELS, build_handoff_capsule, render_handoff_capsule
 from .ledger import build_ledger, cost_per_surviving_line, unbanked_summary
+from .receipt import (
+    RECEIPT_DAYS,
+    build_commit_receipt,
+    compute_repo_baselines,
+    format_receipt,
+    rewrite_in_progress,
+    survival_note,
+)
 from .outcome_evidence import (
     VALID_EVIDENCE_OUTCOMES,
     build_outcome_evidence,
@@ -714,6 +724,63 @@ def get_or_refresh_survival(max_age_hours: int = SURVIVAL_MAX_AGE_HOURS) -> dict
     except OSError:
         pass
     return summary
+
+
+RECEIPT_BASELINE_MAX_AGE_HOURS = 24
+
+
+def usable_receipt_baseline() -> dict[str, object]:
+    """Cached per-repo $/line medians, or {} if they predate the current accounting.
+
+    Same reasoning as usable_baselines: a median computed under different cost
+    semantics would make every receipt's "1.9x cheaper than usual" confidently
+    wrong, and the receipt already has a path that just omits the comparison.
+    """
+    cached = get_receipt_baseline()
+    if not isinstance(cached, dict):
+        return {}
+    if cached.get("cost_accounting_version") != BASELINE_ACCOUNTING_VERSION:
+        return {}
+    repos = cached.get("repos")
+    return repos if isinstance(repos, dict) else {}
+
+
+def get_or_refresh_receipt_baseline(
+    max_age_hours: int = RECEIPT_BASELINE_MAX_AGE_HOURS,
+) -> dict[str, object]:
+    """Recompute the receipt's comparison baseline if missing or stale.
+
+    Never call this from the post-commit hook: it walks a month of ledger
+    history across every repo with spend, which is most of a second. It belongs
+    where get_or_refresh_baselines already runs -- `today`, `report`, `ui`
+    startup -- and once at install time so the first receipt has a baseline.
+    """
+    cached = get_receipt_baseline()
+    computed_at = cached.get("computed_at") if isinstance(cached, dict) else None
+    stale = True
+    if computed_at:
+        try:
+            age = datetime.now(timezone.utc) - datetime.fromisoformat(str(computed_at))
+            stale = age > timedelta(hours=max_age_hours)
+        except ValueError:
+            stale = True
+    if cached and not stale and cached.get("cost_accounting_version") == BASELINE_ACCOUNTING_VERSION:
+        return cached
+
+    try:
+        repos = compute_repo_baselines(scan_all_events())
+    except OSError:
+        return cached or {}
+    payload = {
+        "repos": repos,
+        "computed_at": datetime.now(timezone.utc).isoformat(),
+        "cost_accounting_version": BASELINE_ACCOUNTING_VERSION,
+    }
+    try:
+        save_receipt_baseline(payload)
+    except OSError:
+        pass
+    return payload
 
 
 def usable_baselines() -> dict[str, object]:
@@ -2615,6 +2682,163 @@ def print_unbanked_line(events: Sequence[LocalEvent], *, days: int = 7) -> None:
     print("  Exploration that went nowhere, or work still uncommitted — this cannot tell them apart.")
 
 
+COMMIT_HOOK_MARKER = "# >>> aiwatcher commit receipt >>>"
+COMMIT_HOOK_END = "# <<< aiwatcher commit receipt <<<"
+
+
+def _commit_hook_body(command: str) -> str:
+    # `|| true` is belt and braces: post-commit's exit code is already ignored
+    # by git, but a non-zero status here would still show up in some wrappers,
+    # and nothing about a receipt is worth making a commit look failed.
+    return (
+        f"{COMMIT_HOOK_MARKER}\n"
+        f"{command} commit-receipt --quiet-if-empty || true\n"
+        f"{COMMIT_HOOK_END}\n"
+    )
+
+
+def _post_commit_hook_path(repo: str) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", repo, "rev-parse", "--git-dir"],
+        check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    if result.returncode != 0:
+        return None
+    git_dir = result.stdout.strip()
+    if not os.path.isabs(git_dir):
+        git_dir = os.path.join(repo, git_dir)
+    return os.path.join(git_dir, "hooks", "post-commit")
+
+
+def command_commit_receipt(args: argparse.Namespace) -> int:
+    """Print the receipt for one commit. Safe to run from a git hook.
+
+    Never fails loudly: this runs after a commit that already succeeded, and a
+    traceback under a successful commit would read as if the commit broke.
+    """
+    repo = os.path.abspath(args.repo or os.getcwd())
+    try:
+        if rewrite_in_progress(repo):
+            # A rebase replays every commit; reporting each one would print a
+            # receipt per commit for work already reported when it was written.
+            return 0
+        sha = args.sha
+        if not sha:
+            result = subprocess.run(
+                ["git", "-C", repo, "rev-parse", "HEAD"],
+                check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            )
+            if result.returncode != 0:
+                if not args.quiet_if_empty:
+                    print("Not a git repository, or it has no commits yet.")
+                return 0
+            sha = result.stdout.strip()
+
+        # Only the window the commit's own cost needs. The month-long baseline
+        # is read from cache; recomputing it here would put a second of ledger
+        # history into every commit, which is how a hook gets uninstalled.
+        since = datetime.now(timezone.utc) - timedelta(days=RECEIPT_DAYS)
+        receipt = build_commit_receipt(
+            repo, sha, scan_all_events(since=since),
+            baselines=usable_receipt_baseline(),
+        )
+        if not receipt.get("available"):
+            if not args.quiet_if_empty:
+                print(receipt.get("reason") or "No receipt available for this commit.")
+            return 0
+        if args.json:
+            print(json.dumps(receipt, indent=2))
+            return 0
+        note = survival_note(receipt, usable_survival_summary())
+        text = format_receipt(receipt, note=note)
+        if text:
+            print(text)
+    except Exception as error:  # noqa: BLE001 - a receipt must never break a commit
+        if not args.quiet_if_empty:
+            print(f"Could not build a commit receipt: {error}")
+    return 0
+
+
+def command_install_commit_hook(args: argparse.Namespace) -> int:
+    repo = os.path.abspath(args.repo or os.getcwd())
+    command = args.command or _cli_command_for_current_file()
+    body = _commit_hook_body(command)
+    if not args.write:
+        print("Add this to your repo's .git/hooks/post-commit:")
+        print(body)
+        print(f"Target: {_post_commit_hook_path(repo) or '(not a git repository)'}")
+        print("Re-run with --write to install it there directly.")
+        return 0
+
+    path = _post_commit_hook_path(repo)
+    if not path:
+        print(f"{repo} is not a git repository.")
+        return 1
+
+    existing = ""
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as handle:
+            existing = handle.read()
+    if COMMIT_HOOK_MARKER in existing:
+        print(f"AIWatcher commit receipt is already installed at {path}.")
+        return 0
+
+    if existing.strip():
+        # Someone else's hook is already here. Appending inside our own markers
+        # keeps their hook working and keeps ours removable, which is better
+        # than refusing and better than overwriting.
+        updated = existing.rstrip("\n") + "\n\n" + body
+        note = "Appended to the existing post-commit hook; the previous contents still run first."
+    else:
+        updated = "#!/bin/sh\n\n" + body
+        note = "Created a new post-commit hook."
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(updated)
+    try:
+        os.chmod(path, os.stat(path).st_mode | 0o111)
+    except OSError:
+        # Windows has no execute bit and git for Windows does not need one.
+        pass
+    print(f"Installed AIWatcher commit receipt at {path}")
+    print(note)
+    # Built now so the very first receipt has something to compare against,
+    # rather than saying "not computed yet" on the commit that made the user
+    # install this in the first place.
+    try:
+        get_or_refresh_receipt_baseline()
+    except OSError:
+        pass
+    print("This is local to this clone: git hooks are not committed, so collaborators are unaffected.")
+    return 0
+
+
+def command_uninstall_commit_hook(args: argparse.Namespace) -> int:
+    repo = os.path.abspath(args.repo or os.getcwd())
+    path = _post_commit_hook_path(repo)
+    if not path or not os.path.exists(path):
+        print(f"No post-commit hook found for {repo}.")
+        return 0
+    with open(path, "r", encoding="utf-8") as handle:
+        existing = handle.read()
+    if COMMIT_HOOK_MARKER not in existing:
+        print(f"No AIWatcher commit receipt found in {path}.")
+        return 0
+
+    before, _, rest = existing.partition(COMMIT_HOOK_MARKER)
+    _, _, after = rest.partition(COMMIT_HOOK_END)
+    updated = (before.rstrip("\n") + "\n" + after.lstrip("\n")).strip()
+    if updated in ("", "#!/bin/sh"):
+        os.remove(path)
+        print(f"Removed {path} (it contained nothing else).")
+        return 0
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(updated + "\n")
+    print(f"Removed AIWatcher commit receipt from {path}")
+    return 0
+
+
 def command_changes(args: argparse.Namespace) -> int:
     """Per-commit cost and $/line — the ledger behind the aggregate figures."""
     try:
@@ -2694,6 +2918,7 @@ def command_today(_args: argparse.Namespace) -> int:
     try:
         get_or_refresh_baselines()
         get_or_refresh_survival()
+        get_or_refresh_receipt_baseline()
     except OSError:
         pass
     try:
@@ -2828,6 +3053,7 @@ def command_report(args: argparse.Namespace) -> int:
     try:
         get_or_refresh_baselines()
         get_or_refresh_survival()
+        get_or_refresh_receipt_baseline()
     except OSError:
         pass
     try:
@@ -5986,6 +6212,7 @@ def command_ui(args: argparse.Namespace) -> int:
     try:
         get_or_refresh_baselines()
         get_or_refresh_survival()
+        get_or_refresh_receipt_baseline()
     except OSError:
         pass
     try:
@@ -6059,6 +6286,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only show commits in repos whose path contains this substring",
     )
     changes.set_defaults(func=command_changes)
+
+    receipt = sub.add_parser("commit-receipt", help="Print what the latest commit cost in AI spend")
+    receipt.add_argument("--sha", help="Report on this commit instead of HEAD")
+    receipt.add_argument("--repo", help="Repository to report on; defaults to the working directory")
+    receipt.add_argument("--json", action="store_true", help="Emit the receipt as JSON")
+    receipt.add_argument(
+        "--quiet-if-empty", action="store_true",
+        help="Print nothing when there is no receipt to show; used by the git hook",
+    )
+    receipt.set_defaults(func=command_commit_receipt)
+
+    install_receipt = sub.add_parser(
+        "install-commit-hook",
+        help="Install a post-commit git hook that prints a receipt after each commit",
+    )
+    install_receipt.add_argument("--repo", help="Repository to install into; defaults to the working directory")
+    install_receipt.add_argument("--command", help="Command the hook should invoke")
+    install_receipt.add_argument("--write", action="store_true", help="Write the hook instead of printing it")
+    install_receipt.set_defaults(func=command_install_commit_hook)
+
+    uninstall_receipt = sub.add_parser(
+        "uninstall-commit-hook", help="Remove the AIWatcher post-commit receipt hook",
+    )
+    uninstall_receipt.add_argument("--repo", help="Repository to remove it from; defaults to the working directory")
+    uninstall_receipt.set_defaults(func=command_uninstall_commit_hook)
 
     last = sub.add_parser("last", help="Inspect the latest local AI session")
     last.add_argument("--days", type=int, default=30, help="How many days back to search for the session")

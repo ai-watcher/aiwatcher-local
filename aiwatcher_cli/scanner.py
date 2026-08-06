@@ -11,7 +11,7 @@ import sqlite3
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -939,7 +939,7 @@ def scan_claude_code() -> list[LocalSession]:
     return sessions
 
 
-def scan_claude_code_events() -> list[LocalEvent]:
+def scan_claude_code_events(since: datetime | None = None) -> list[LocalEvent]:
     events: list[LocalEvent] = []
     projects_dirs = [path for path in CLAUDE_PROJECTS_DIRS if path.exists()]
     if not projects_dirs:
@@ -952,6 +952,8 @@ def scan_claude_code_events() -> list[LocalEvent]:
             fallback_project_path = _decode_claude_project_path(project_dir.name)
             for fpath_raw in glob.glob(str(project_dir / "*.jsonl")):
                 fpath = Path(fpath_raw)
+                if _too_old_to_matter(fpath, since):
+                    continue
                 session_id = fpath.stem
                 turn = 0
                 # One usage block per API request, however many transcript
@@ -1112,7 +1114,7 @@ def scan_codex_cli() -> list[LocalSession]:
     )
 
 
-def scan_codex_rollouts() -> tuple[list[LocalSession], list[LocalEvent]]:
+def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSession], list[LocalEvent]]:
     global CODEX_ROLLOUT_CACHE
     sessions: list[LocalSession] = []
     events: list[LocalEvent] = []
@@ -1120,7 +1122,10 @@ def scan_codex_rollouts() -> tuple[list[LocalSession], list[LocalEvent]]:
     for root in CODEX_SESSIONS_DIRS:
         if not root.exists():
             continue
-        paths.extend(root.rglob("*.jsonl"))
+        paths.extend(
+            path for path in root.rglob("*.jsonl")
+            if not _too_old_to_matter(path, since)
+        )
     signature_rows: list[tuple[str, int, int]] = []
     for path in paths:
         try:
@@ -1338,6 +1343,36 @@ def scan_all() -> list[LocalSession]:
     return [*scan_claude_code(), *scan_codex_cli(), *scan_cursor_limited()]
 
 
-def scan_all_events() -> list[LocalEvent]:
-    _, codex_events = scan_codex_rollouts()
-    return [*scan_claude_code_events(), *codex_events]
+# How far before a caller's `since` a transcript file may have been last
+# written and still be worth reading. Generous on purpose: mtime is the only
+# cheap signal available, and a copied or restored file can carry a stale one.
+# Reading a file needlessly costs milliseconds; skipping one loses events.
+MTIME_SAFETY_MARGIN = timedelta(days=2)
+
+
+def _too_old_to_matter(path: Path | str, since: datetime | None) -> bool:
+    """True when a transcript cannot hold events at or after `since`.
+
+    Transcripts are append-only, so a file untouched since before the window
+    has nothing in it for that window. This is what lets the post-commit
+    receipt read two days of history instead of every session ever recorded.
+    """
+    if since is None:
+        return False
+    try:
+        mtime = datetime.fromtimestamp(Path(path).stat().st_mtime, timezone.utc)
+    except OSError:
+        return False
+    return mtime < since - MTIME_SAFETY_MARGIN
+
+
+def scan_all_events(since: datetime | None = None) -> list[LocalEvent]:
+    """Every model-usage event, optionally only those a window could contain.
+
+    `since` is a read optimisation, not a filter: it skips transcript files
+    whose last write predates the window, and callers still window the events
+    themselves. Passing it never adds events, and on a machine with a long
+    history it turns a ~1s scan into a fraction of that.
+    """
+    _, codex_events = scan_codex_rollouts(since=since)
+    return [*scan_claude_code_events(since=since), *codex_events]

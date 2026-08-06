@@ -18,11 +18,11 @@ anywhere. See [Privacy](../README.md#privacy) for the full contract.
 ## Contents
 
 - [Getting started](#getting-started) -- `start`, `setup`, `status`, `doctor`
-- [Daily loop](#daily-loop) -- `today`, `last`, `timeline`, `journal`, `sessions`, `changes`, `outcome`, `report`, `tools`, `projects`
+- [Daily loop](#daily-loop) -- `today`, `last`, `timeline`, `journal`, `sessions`, `changes`, `commit-receipt`, `outcome`, `report`, `tools`, `projects`
 - [Prompt review and launch](#prompt-review-and-launch) -- `preflight`, `codex`, `claude`
 - [Continuity](#continuity) -- `handoff`, `resume`, `log-decision`
 - [Monitoring](#monitoring) -- `watch`, `processes`, `run`
-- [Hooks and wrappers](#hooks-and-wrappers) -- `install-claude-hook`, `uninstall-claude-hook`, `install-claude-command-gate`, `uninstall-claude-command-gate`, `install-claude-decision-log`, `uninstall-claude-decision-log`, `install-codex-hook`, `uninstall-codex-hook`, `install-cursor-hook`, `uninstall-cursor-hook`, `install-codex-wrapper`, `uninstall-codex-wrapper`, `hook-status`
+- [Hooks and wrappers](#hooks-and-wrappers) -- `install-claude-hook`, `uninstall-claude-hook`, `install-claude-command-gate`, `uninstall-claude-command-gate`, `install-claude-decision-log`, `uninstall-claude-decision-log`, `install-codex-hook`, `uninstall-codex-hook`, `install-cursor-hook`, `uninstall-cursor-hook`, `install-codex-wrapper`, `uninstall-codex-wrapper`, `install-commit-hook`, `uninstall-commit-hook`, `hook-status`
 - [Data and integrations](#data-and-integrations) -- `export`, `mcp`, `ui`
 - [Internal hook commands](#internal-hook-commands)
 
@@ -189,6 +189,29 @@ aiwatcher changes --days 30 --repo my-service --limit 40
 | `--days` | integer | `7` | How many days of commits to include |
 | `--limit` | integer | `20` | Maximum number of commits to list |
 | `--repo` | text |  | Only show commits in repos whose path contains this substring |
+
+### `aiwatcher commit-receipt`
+
+Print what the latest commit cost in AI spend
+
+```sh
+aiwatcher commit-receipt [--sha SHA] [--repo REPO] [--json]
+                         [--quiet-if-empty]
+```
+
+Examples:
+
+```sh
+aiwatcher commit-receipt --sha HEAD~1
+aiwatcher commit-receipt --repo ../my-service --json
+```
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--sha` | text |  | Report on this commit instead of HEAD |
+| `--repo` | text |  | Repository to report on; defaults to the working directory |
+| `--json` | flag |  | Emit the receipt as JSON |
+| `--quiet-if-empty` | flag |  | Print nothing when there is no receipt to show; used by the git hook |
 
 ### `aiwatcher outcome`
 
@@ -808,6 +831,40 @@ aiwatcher uninstall-codex-wrapper --shell-rc ~/.bashrc
 | Option | Accepts | Default | Description |
 | --- | --- | --- | --- |
 | `--shell-rc` | text | `~/.zshrc` | Shell rc file to remove the wrapper from |
+
+### `aiwatcher install-commit-hook`
+
+Install a post-commit git hook that prints a receipt after each commit
+
+```sh
+aiwatcher install-commit-hook [--repo REPO] [--command COMMAND]
+                              [--write]
+```
+
+Examples:
+
+```sh
+aiwatcher install-commit-hook --write
+aiwatcher install-commit-hook --repo ../my-service --write
+```
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--repo` | text |  | Repository to install into; defaults to the working directory |
+| `--command` | text |  | Command the hook should invoke |
+| `--write` | flag |  | Write the hook instead of printing it |
+
+### `aiwatcher uninstall-commit-hook`
+
+Remove the AIWatcher post-commit receipt hook
+
+```sh
+aiwatcher uninstall-commit-hook [--repo REPO]
+```
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--repo` | text |  | Repository to remove it from; defaults to the working directory |
 
 ### `aiwatcher hook-status`
 

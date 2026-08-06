@@ -879,6 +879,30 @@ def save_survival_summary(summary: dict[str, Any]) -> None:
         _save(data)
 
 
+def get_receipt_baseline() -> dict[str, Any]:
+    """Read-only cache of per-repo $/line medians for the commit receipt.
+
+    Same contract as get_baselines: never computes. The receipt runs inside a
+    post-commit hook, where a month of ledger history would add most of a
+    second to every commit -- the exact cost that gets a hook uninstalled.
+    cli.get_or_refresh_receipt_baseline() fills this in off the hot path.
+    """
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return {}
+    baseline = data.get("receipt_baseline")
+    return baseline if isinstance(baseline, dict) else {}
+
+
+def save_receipt_baseline(baseline: dict[str, Any]) -> None:
+    with _locked_state():
+        data = _load()
+        data["receipt_baseline"] = baseline
+        _save(data)
+
+
 MAX_COMMAND_DECISIONS_STORED = 500
 COMMAND_GATE_BLOCKED_DECISIONS = frozenset({"block", "auto_block_headless", "gate_timeout_blocked"})
 
