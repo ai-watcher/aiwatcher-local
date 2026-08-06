@@ -2690,9 +2690,17 @@ def _commit_hook_body(command: str) -> str:
     # `|| true` is belt and braces: post-commit's exit code is already ignored
     # by git, but a non-zero status here would still show up in some wrappers,
     # and nothing about a receipt is worth making a commit look failed.
+    #
+    # `2>/dev/null` because the hook outlives any single checkout. Installed
+    # once, it fires on every branch -- including ones whose aiwatcher predates
+    # `commit-receipt`, where argparse writes a usage dump to stderr before any
+    # of our code runs and `--quiet-if-empty` never gets a say. The tradeoff is
+    # accepted deliberately: a genuinely broken install goes quiet too, which is
+    # the right call for something that prints under every commit. Run
+    # `aiwatcher commit-receipt` directly to see what it would have said.
     return (
         f"{COMMIT_HOOK_MARKER}\n"
-        f"{command} commit-receipt --quiet-if-empty || true\n"
+        f"{command} commit-receipt --quiet-if-empty 2>/dev/null || true\n"
         f"{COMMIT_HOOK_END}\n"
     )
 
@@ -2780,7 +2788,19 @@ def command_install_commit_hook(args: argparse.Namespace) -> int:
         with open(path, "r", encoding="utf-8") as handle:
             existing = handle.read()
     if COMMIT_HOOK_MARKER in existing:
-        print(f"AIWatcher commit receipt is already installed at {path}.")
+        # Ours is already here, but possibly an older version of it. Rewrite the
+        # block in place when it has drifted -- without this, a fix to the hook
+        # line only ever reaches people who have never installed it, which is
+        # exactly the wrong half of the userbase.
+        before, _, rest = existing.partition(COMMIT_HOOK_MARKER)
+        current, _, after = rest.partition(COMMIT_HOOK_END)
+        if (COMMIT_HOOK_MARKER + current + COMMIT_HOOK_END + "\n") == body:
+            print(f"AIWatcher commit receipt is already installed at {path}.")
+            return 0
+        updated = before + body.rstrip("\n") + after
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(updated if updated.endswith("\n") else updated + "\n")
+        print(f"Updated the AIWatcher commit receipt at {path} to the current version.")
         return 0
 
     if existing.strip():

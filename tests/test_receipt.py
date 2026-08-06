@@ -266,6 +266,91 @@ class RewriteSuppressionTests(unittest.TestCase):
             self.assertFalse(rewrite_in_progress(plain))
 
 
+class CommitHookInstallTests(unittest.TestCase):
+    """The hook outlives any single checkout: installed once, it fires on every
+    branch, including ones whose aiwatcher predates `commit-receipt`."""
+
+    def _install(self, repo: str, **kw):
+        from argparse import Namespace
+        from aiwatcher_cli import cli
+        args = Namespace(repo=repo, command="aiwatcher", write=True, **kw)
+        return cli.command_install_commit_hook(args)
+
+    def _hook(self, repo: str) -> str:
+        return Path(repo, ".git", "hooks", "post-commit").read_text(encoding="utf-8")
+
+    def test_hook_silences_stderr(self) -> None:
+        # An older aiwatcher on another branch has argparse dump a usage error
+        # before our code runs, so --quiet-if-empty never gets a say.
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            commit(repo, "a.py", "x\n", "base", when=now - timedelta(hours=1))
+            self._install(repo)
+            body = self._hook(repo)
+
+        self.assertIn("2>/dev/null", body)
+        self.assertIn("|| true", body)
+
+    def test_reinstall_upgrades_an_outdated_hook_in_place(self) -> None:
+        # Without this, a fix to the hook line only reaches people who have
+        # never installed it.
+        from aiwatcher_cli import cli
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            commit(repo, "a.py", "x\n", "base", when=now - timedelta(hours=1))
+            path = Path(repo, ".git", "hooks", "post-commit")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            stale = (
+                "#!/bin/sh\n\n"
+                f"{cli.COMMIT_HOOK_MARKER}\n"
+                "aiwatcher commit-receipt --quiet-if-empty || true\n"
+                f"{cli.COMMIT_HOOK_END}\n"
+            )
+            path.write_text(stale, encoding="utf-8")
+            self._install(repo)
+            body = self._hook(repo)
+
+        self.assertIn("2>/dev/null", body)
+        self.assertEqual(body.count(cli.COMMIT_HOOK_MARKER), 1)
+
+    def test_reinstalling_a_current_hook_changes_nothing(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            commit(repo, "a.py", "x\n", "base", when=now - timedelta(hours=1))
+            self._install(repo)
+            first = self._hook(repo)
+            self._install(repo)
+            second = self._hook(repo)
+
+        self.assertEqual(first, second)
+
+    def test_upgrade_preserves_someone_elses_hook(self) -> None:
+        from aiwatcher_cli import cli
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            commit(repo, "a.py", "x\n", "base", when=now - timedelta(hours=1))
+            path = Path(repo, ".git", "hooks", "post-commit")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                "#!/bin/sh\necho theirs\n\n"
+                f"{cli.COMMIT_HOOK_MARKER}\n"
+                "aiwatcher commit-receipt --quiet-if-empty || true\n"
+                f"{cli.COMMIT_HOOK_END}\n"
+                "echo also-theirs\n",
+                encoding="utf-8",
+            )
+            self._install(repo)
+            body = self._hook(repo)
+
+        self.assertIn("echo theirs", body)
+        self.assertIn("echo also-theirs", body)
+        self.assertIn("2>/dev/null", body)
+
+
 class SurvivalNoteTests(unittest.TestCase):
     def test_reports_earlier_work_not_the_commit_just_made(self) -> None:
         receipt = {"available": True}
