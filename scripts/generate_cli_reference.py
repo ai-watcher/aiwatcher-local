@@ -60,7 +60,7 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
     (
         "Monitoring",
         "Catch expensive or looping work, and keep runtimes tidy.",
-        ["watch", "processes", "run"],
+        ["watch", "statusline", "processes", "run"],
     ),
     (
         "Hooks and wrappers",
@@ -84,6 +84,8 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
             "uninstall-codex-wrapper",
             "install-commit-hook",
             "uninstall-commit-hook",
+            "install-statusline",
+            "uninstall-statusline",
             "hook-status",
         ],
     ),
@@ -108,6 +110,10 @@ EXAMPLES: dict[str, list[str]] = {
     "commit-receipt": [
         "aiwatcher commit-receipt --sha HEAD~1",
         "aiwatcher commit-receipt --repo ../my-service --json",
+    ],
+    "install-statusline": [
+        "aiwatcher install-statusline --write",
+        "aiwatcher install-statusline --scope project --write",
     ],
     "install-commit-hook": [
         "aiwatcher install-commit-hook --write",

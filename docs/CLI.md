@@ -21,8 +21,8 @@ anywhere. See [Privacy](../README.md#privacy) for the full contract.
 - [Daily loop](#daily-loop) -- `today`, `last`, `timeline`, `journal`, `sessions`, `changes`, `commit-receipt`, `outcome`, `report`, `tools`, `projects`
 - [Prompt review and launch](#prompt-review-and-launch) -- `preflight`, `codex`, `claude`
 - [Continuity](#continuity) -- `handoff`, `resume`, `log-decision`
-- [Monitoring](#monitoring) -- `watch`, `processes`, `run`
-- [Hooks and wrappers](#hooks-and-wrappers) -- `install-claude-hook`, `uninstall-claude-hook`, `install-claude-command-gate`, `uninstall-claude-command-gate`, `install-claude-decision-log`, `uninstall-claude-decision-log`, `install-codex-hook`, `uninstall-codex-hook`, `install-cursor-hook`, `uninstall-cursor-hook`, `install-codex-wrapper`, `uninstall-codex-wrapper`, `install-commit-hook`, `uninstall-commit-hook`, `hook-status`
+- [Monitoring](#monitoring) -- `watch`, `statusline`, `processes`, `run`
+- [Hooks and wrappers](#hooks-and-wrappers) -- `install-claude-hook`, `uninstall-claude-hook`, `install-claude-command-gate`, `uninstall-claude-command-gate`, `install-claude-decision-log`, `uninstall-claude-decision-log`, `install-codex-hook`, `uninstall-codex-hook`, `install-cursor-hook`, `uninstall-cursor-hook`, `install-codex-wrapper`, `uninstall-codex-wrapper`, `install-commit-hook`, `uninstall-commit-hook`, `install-statusline`, `uninstall-statusline`, `hook-status`
 - [Data and integrations](#data-and-integrations) -- `export`, `mcp`, `ui`
 - [Internal hook commands](#internal-hook-commands)
 
@@ -502,6 +502,18 @@ aiwatcher watch --interval 30 --notify
 | `--overlay` | flag |  | Open a local AIWatcher companion overlay when watch recommends a handoff or other action |
 | `--target` | `claude`, `codex`, `cursor`, `generic`, `vscode` | `generic` | Format the auto-generated CRITICAL-context handoff capsule for this AI tool |
 
+### `aiwatcher statusline`
+
+Render the Claude Code status line; reads its payload on stdin
+
+```sh
+aiwatcher statusline [--demo]
+```
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--demo` | flag |  | Render against the most recent local transcript when stdin is empty |
+
 ### `aiwatcher processes`
 
 List local AI runtimes and likely stale/orphaned processes
@@ -865,6 +877,44 @@ aiwatcher uninstall-commit-hook [--repo REPO]
 | Option | Accepts | Default | Description |
 | --- | --- | --- | --- |
 | `--repo` | text |  | Repository to remove it from; defaults to the working directory |
+
+### `aiwatcher install-statusline`
+
+Show live cost and uncommitted spend in Claude Code's status line
+
+```sh
+aiwatcher install-statusline [--scope {user,project}]
+                             [--project-dir PROJECT_DIR]
+                             [--command COMMAND] [--write]
+```
+
+Examples:
+
+```sh
+aiwatcher install-statusline --write
+aiwatcher install-statusline --scope project --write
+```
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--scope` | `user`, `project` | `user` | Write to ~/.claude/settings.json (user) or .claude/settings.local.json (project) |
+| `--project-dir` | text |  | Project directory for --scope project |
+| `--command` | text |  | Command the status line should invoke |
+| `--write` | flag |  | Write the settings instead of printing them |
+
+### `aiwatcher uninstall-statusline`
+
+Remove the AIWatcher Claude Code status line
+
+```sh
+aiwatcher uninstall-statusline [--scope {user,project}]
+                               [--project-dir PROJECT_DIR]
+```
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--scope` | `user`, `project` | `user` | Remove from ~/.claude/settings.json (user) or .claude/settings.local.json (project) |
+| `--project-dir` | text |  | Project directory for --scope project |
 
 ### `aiwatcher hook-status`
 

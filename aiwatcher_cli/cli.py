@@ -67,6 +67,7 @@ from .local_state import (
 )
 from .handoff import TARGET_LABELS, build_handoff_capsule, render_handoff_capsule
 from .ledger import build_ledger, cost_per_surviving_line, unbanked_summary
+from .statusline import statusline_from_stdin, statusline_settings_snippet
 from .receipt import (
     RECEIPT_DAYS,
     build_commit_receipt,
@@ -94,6 +95,7 @@ from .processes import (
     seconds_label,
 )
 from .scanner import (
+    CLAUDE_PROJECTS_DIRS,
     LocalEvent,
     clip_sessions_to_window,
     LocalSession,
@@ -2680,6 +2682,111 @@ def print_unbanked_line(events: Sequence[LocalEvent], *, days: int = 7) -> None:
             f"{len(card.get('unresolved_repos') or [])} repo(s).)"
         )
     print("  Exploration that went nowhere, or work still uncommitted — this cannot tell them apart.")
+
+
+def command_statusline(args: argparse.Namespace) -> int:
+    """Render the Claude Code status line. Reads its payload on stdin.
+
+    Never fails loudly and never blocks: this runs on every prompt render, so
+    an error message here would replace the status line with a traceback and a
+    slow path would be felt on every keystroke.
+    """
+    try:
+        raw = sys.stdin.read() if not sys.stdin.isatty() else ""
+    except (OSError, UnicodeDecodeError):
+        raw = ""
+    if not raw.strip() and args.demo:
+        # Nothing on stdin and the user asked to see it: render against the
+        # most recent local transcript so `--demo` shows something real.
+        raw = json.dumps(_demo_statusline_payload())
+    line = statusline_from_stdin(raw)
+    if line:
+        print(line)
+    return 0
+
+
+def _demo_statusline_payload() -> dict[str, object]:
+    """A payload shaped like Claude Code's, built from the newest transcript."""
+    newest: tuple[float, str] | None = None
+    for projects_dir in CLAUDE_PROJECTS_DIRS:
+        if not projects_dir.exists():
+            continue
+        for path in projects_dir.glob("*/*.jsonl"):
+            try:
+                stamp = path.stat().st_mtime
+            except OSError:
+                continue
+            if newest is None or stamp > newest[0]:
+                newest = (stamp, str(path))
+    return {
+        "transcript_path": newest[1] if newest else "",
+        "workspace": {"current_dir": os.getcwd()},
+        "cwd": os.getcwd(),
+    }
+
+
+def command_install_statusline(args: argparse.Namespace) -> int:
+    command = args.command or _cli_command_for_current_file()
+    snippet = statusline_settings_snippet(command)
+    if not args.write:
+        print("Add this to your Claude Code settings JSON:")
+        print(json.dumps(snippet, indent=2))
+        print("\nProject-local path: .claude/settings.local.json")
+        print("User-global path: ~/.claude/settings.json")
+        print("Re-run with --write to install it there directly.")
+        return 0
+
+    settings_path = _claude_settings_path(args.scope, args.project_dir)
+    os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+    existing: dict[str, object] = {}
+    if os.path.exists(settings_path):
+        with open(settings_path, "r", encoding="utf-8") as handle:
+            try:
+                existing = json.load(handle)
+            except json.JSONDecodeError:
+                backup = settings_path + ".aiwatcher.bak"
+                shutil.copyfile(settings_path, backup)
+                print(f"Existing settings were not valid JSON. Backed up to {backup}.")
+
+    current = existing.get("statusLine")
+    if isinstance(current, dict) and current.get("command") and "aiwatcher" not in str(current.get("command")):
+        # Somebody else's status line is configured. Only one can be shown, so
+        # this is the user's call to make, not ours.
+        print(f"A different status line is already configured at {settings_path}:")
+        print(f"  {current.get('command')}")
+        print("Remove it first, or merge the two commands yourself. Nothing was changed.")
+        return 1
+
+    existing.update(snippet)
+    with open(settings_path, "w", encoding="utf-8") as handle:
+        json.dump(existing, handle, indent=2)
+        handle.write("\n")
+    print(f"Installed AIWatcher status line at {settings_path}")
+    print("It shows uncommitted spend, session cost, and context per turn. Restart Claude Code to pick it up.")
+    return 0
+
+
+def command_uninstall_statusline(args: argparse.Namespace) -> int:
+    settings_path = _claude_settings_path(args.scope, args.project_dir)
+    if not os.path.exists(settings_path):
+        print(f"No Claude settings file found at {settings_path}.")
+        return 0
+    try:
+        with open(settings_path, "r", encoding="utf-8") as handle:
+            settings = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Could not read Claude settings at {settings_path}: {exc}", file=sys.stderr)
+        return 2
+    current = settings.get("statusLine")
+    if not isinstance(current, dict) or "aiwatcher" not in str(current.get("command", "")):
+        print(f"No AIWatcher status line found in {settings_path}.")
+        return 0
+    settings.pop("statusLine", None)
+    with open(settings_path, "w", encoding="utf-8") as handle:
+        json.dump(settings, handle, indent=2)
+        handle.write("\n")
+    print(f"Removed AIWatcher status line from {settings_path}")
+    return 0
 
 
 COMMIT_HOOK_MARKER = "# >>> aiwatcher commit receipt >>>"
@@ -6306,6 +6413,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only show commits in repos whose path contains this substring",
     )
     changes.set_defaults(func=command_changes)
+
+    statusline = sub.add_parser(
+        "statusline",
+        help="Render the Claude Code status line; reads its payload on stdin",
+    )
+    statusline.add_argument(
+        "--demo", action="store_true",
+        help="Render against the most recent local transcript when stdin is empty",
+    )
+    statusline.set_defaults(func=command_statusline)
+
+    install_statusline = sub.add_parser(
+        "install-statusline", help="Show live cost and uncommitted spend in Claude Code's status line",
+    )
+    install_statusline.add_argument(
+        "--scope", choices=["user", "project"], default="user",
+        help="Write to ~/.claude/settings.json (user) or .claude/settings.local.json (project)",
+    )
+    install_statusline.add_argument("--project-dir", help="Project directory for --scope project")
+    install_statusline.add_argument("--command", help="Command the status line should invoke")
+    install_statusline.add_argument("--write", action="store_true", help="Write the settings instead of printing them")
+    install_statusline.set_defaults(func=command_install_statusline)
+
+    uninstall_statusline = sub.add_parser(
+        "uninstall-statusline", help="Remove the AIWatcher Claude Code status line",
+    )
+    uninstall_statusline.add_argument(
+        "--scope", choices=["user", "project"], default="user",
+        help="Remove from ~/.claude/settings.json (user) or .claude/settings.local.json (project)",
+    )
+    uninstall_statusline.add_argument("--project-dir", help="Project directory for --scope project")
+    uninstall_statusline.set_defaults(func=command_uninstall_statusline)
 
     receipt = sub.add_parser("commit-receipt", help="Print what the latest commit cost in AI spend")
     receipt.add_argument("--sha", help="Report on this commit instead of HEAD")
