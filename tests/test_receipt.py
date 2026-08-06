@@ -133,6 +133,32 @@ class CommitReceiptTests(unittest.TestCase):
         self.assertIn("no AI spend observed", format_receipt(receipt))
 
 
+class OutputEncodingTests(unittest.TestCase):
+    def test_receipt_is_ascii_so_a_git_hook_cannot_mangle_it(self) -> None:
+        # Caught live: the hook printed "$8.29 ? +195/-18" because a middle dot
+        # and an em dash do not survive a cp1252 stdout, which is exactly the
+        # console this runs in on Windows.
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            sha = commit(repo, "a.py", lines(40), "a change", when=now - timedelta(hours=1))
+            from aiwatcher_cli.ledger import repo_identity
+            receipt = build_commit_receipt(
+                repo, sha, [event(repo, cost=4.0, when=now - timedelta(hours=2))],
+                now=now,
+                baselines={repo_identity(repo): {
+                    "median_usd_per_line": 0.5, "median_cost_usd": 6.0,
+                    "changes": 9, "window_days": 30,
+                }},
+            )
+            text = format_receipt(receipt, note="Earlier work: 72% still standing.")
+
+        self.assertTrue(text)
+        self.assertIn("cheaper than usual", text)
+        text.encode("cp1252")  # must not raise
+        self.assertTrue(text.isascii(), text)
+
+
 class BaselineComparisonTests(unittest.TestCase):
     """Every figure names a comparison; a dollar amount with no baseline does
     not tell you whether to care."""

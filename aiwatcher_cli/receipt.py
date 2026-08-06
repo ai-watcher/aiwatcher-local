@@ -234,7 +234,13 @@ def _money(value: float) -> str:
 
 
 def format_receipt(receipt: dict[str, Any], *, note: str | None = None) -> str:
-    """The terminal form. Narrow enough to sit under a commit without shouting."""
+    """The terminal form. Narrow enough to sit under a commit without shouting.
+
+    ASCII only, and deliberately. This is printed from a git hook, by a
+    short-lived process whose stdout encoding is whatever the host terminal
+    reports -- a middle dot or an em dash raises UnicodeEncodeError under
+    cp1252 and mangles the receipt in exactly the place it is meant to be read.
+    """
     if not receipt.get("available"):
         return ""
 
@@ -244,16 +250,16 @@ def format_receipt(receipt: dict[str, Any], *, note: str | None = None) -> str:
     churn = f"+{receipt['lines_added']}/-{receipt['lines_removed']}"
     cost = _money(float(receipt["cost_usd"]))
     if receipt["cost_usd"] <= 0:
-        lines.append(f"  This change    no AI spend observed  ·  {churn} lines")
+        lines.append(f"  This change    no AI spend observed  |  {churn} lines")
     else:
-        detail = f"  This change    {cost}  ·  {churn} lines"
+        detail = f"  This change    {cost}  |  {churn} lines"
         if receipt["usd_per_line"] is not None:
-            detail += f"  ·  {_money(float(receipt['usd_per_line']))}/line"
+            detail += f"  |  {_money(float(receipt['usd_per_line']))}/line"
         lines.append(detail)
         if receipt["event_count"]:
             lines.append(
                 f"                 {receipt['event_count']} model calls"
-                + (f"  ·  {', '.join(receipt['tools'])}" if receipt["tools"] else "")
+                + (f"  |  {', '.join(receipt['tools'])}" if receipt["tools"] else "")
             )
 
     ratio = receipt.get("rate_ratio")
@@ -267,7 +273,7 @@ def format_receipt(receipt: dict[str, Any], *, note: str | None = None) -> str:
             verdict = "about your usual"
         lines.append(
             f"  vs baseline    {median}/line median over {receipt['baseline_days']} days "
-            f"({receipt['baseline_changes']} changes) — this one is {verdict}"
+            f"({receipt['baseline_changes']} changes) -- this one is {verdict}"
         )
     elif receipt["cost_usd"] > 0 and receipt["lines_changed"] < MIN_LINES_FOR_RATE:
         lines.append(
@@ -276,7 +282,7 @@ def format_receipt(receipt: dict[str, Any], *, note: str | None = None) -> str:
         )
     elif receipt["cost_usd"] > 0 and not receipt.get("baseline_cached"):
         lines.append(
-            "  vs baseline    not computed yet — run `aiwatcher today` to build one"
+            "  vs baseline    not computed yet -- run `aiwatcher today` to build one"
         )
 
     unbanked = float(receipt.get("unbanked_usd") or 0)
