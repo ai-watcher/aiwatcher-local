@@ -2660,7 +2660,12 @@ def command_changes(args: argparse.Namespace) -> int:
     if len(attributed) < len(rows):
         print(
             f"\n{len(rows) - len(attributed)} of {len(rows)} commits have no observed AI spend "
-            "(hand-written, or from a surface AIWatcher does not scan)."
+            "(hand-written, or work whose commit was rebased away from it)."
+        )
+    if ledger.foreign_changes:
+        print(
+            f"{ledger.foreign_changes} commit(s) written by someone else were excluded: "
+            "they arrived by fetch, so no spend on this machine belongs to them."
         )
     if not by_change:
         print("Survival not measured yet. Run `aiwatcher today` to compute it.")

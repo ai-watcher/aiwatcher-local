@@ -1484,6 +1484,13 @@ def build_summary(days: int = 7) -> dict[str, object]:
     window_ledger = _window_ledger(all_events, days)
     unbanked = _unbanked_card(window_ledger)
     changes = _change_rows(window_ledger, survival_summary)
+    changes_meta = {
+        # Named rather than silently dropped: a window can legitimately hold a
+        # teammate's commits, and a table that just omitted them would look
+        # like it had lost work.
+        "foreign_changes": window_ledger.foreign_changes if window_ledger else 0,
+        "repos": len(window_ledger.repos) if window_ledger else 0,
+    }
     interventions = recent_interventions(limit=200, days=days)
     receipt_events = all_events if interventions else []
     receipts = _build_intervention_receipts(interventions, all_rows, outcomes_for_sessions(), receipt_events)
@@ -1534,6 +1541,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
         "survival": survival_summary,
         "unbanked": unbanked,
         "changes": changes,
+        "changes_meta": changes_meta,
         "projects": projects[:10],
         "tools": tools,
         "models": models[:10],
@@ -2640,8 +2648,12 @@ function renderChangeRows(rows) {
     <td class="num">${esc(row.usd_per_surviving_line_label)}</td>
   </tr>`).join('');
 }
-function renderChangeTotals(rows) {
+function renderChangeTotals(rows, meta) {
   if (!rows.length) return '';
+  const foreign = (meta && meta.foreign_changes) || 0;
+  const note = foreign
+    ? `<p class="receipt-note" style="margin-top:0">${esc(foreign)} commit(s) in this window were written by someone else and
+       arrived by fetch — excluded, because no spend on this machine can belong to them.</p>` : '';
   const attributed = rows.filter(row => !row.unattributed);
   const cost = attributed.reduce((sum, row) => sum + row.cost_usd, 0);
   const lines = attributed.reduce((sum, row) => sum + row.lines_changed, 0);
@@ -2651,7 +2663,7 @@ function renderChangeTotals(rows) {
     <div class="mini"><span class="label">Attributed spend</span><strong>${esc(fmtMoney(cost))}</strong></div>
     <div class="mini"><span class="label">Lines changed</span><strong>${esc(lines.toLocaleString())}</strong></div>
     <div class="mini"><span class="label">Survival measured</span><strong>${esc(measured)} of ${esc(rows.length)}</strong></div>
-  </div>`;
+  </div>${note}`;
 }
 function fmtMoney(value) {
   return '$' + (Math.round(value * 100) / 100).toFixed(2);
@@ -3149,7 +3161,7 @@ async function load(resetDetail = true) {
   document.getElementById('unbanked').innerHTML = renderUnbanked(data.unbanked);
   const changeRows = data.changes || [];
   document.getElementById('changeRows').innerHTML = renderChangeRows(changeRows);
-  document.getElementById('changeTotals').innerHTML = renderChangeTotals(changeRows);
+  document.getElementById('changeTotals').innerHTML = renderChangeTotals(changeRows, data.changes_meta);
   document.getElementById('coverageRows').innerHTML = renderCoverage(data.coverage || []);
   document.getElementById('setupRows').innerHTML = renderSetup(data.setup || []);
   const latest = data.recent_sessions[0];

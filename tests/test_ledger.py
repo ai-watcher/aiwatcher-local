@@ -16,6 +16,8 @@ from aiwatcher_cli.ledger import (
     build_ledger,
     commits_since,
     cost_per_surviving_line,
+    local_author_emails,
+    repo_identity,
     unbanked_summary,
 )
 from aiwatcher_cli.scanner import LocalEvent
@@ -404,6 +406,117 @@ class GitOutputEncodingTests(unittest.TestCase):
             changes = commits_since(repo, now - timedelta(days=1))
 
         self.assertEqual(changes[0].subject, subject)
+
+
+def commit_as(repo: str, path: str, body: str, subject: str, *, when, name: str, email: str) -> None:
+    """Commit under a specific author identity, to stand in for work that
+    arrived by fetch from another developer's machine."""
+    Path(repo, path).write_text(body, encoding="utf-8")
+    run(["git", "-C", repo, "add", path], repo)
+    stamp = when.strftime("%Y-%m-%dT%H:%M:%S%z")
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp,
+        "GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email,
+        "GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": email,
+    }
+    run(["git", "-C", repo, "commit", "-m", subject], repo, env=env)
+
+
+class CloneDeduplicationTests(unittest.TestCase):
+    """Two checkouts of one repository are one repository.
+
+    Repos were keyed by filesystem path, so a second clone counted every commit
+    a second time -- 93 phantom changes out of 259 locally, all showing "no
+    spend observed" because the first copy had already claimed the money.
+    """
+
+    def test_clones_share_a_repo_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as origin, tempfile.TemporaryDirectory() as parent:
+            init_repo(origin)
+            commit(origin, "a.py", "x\n", "root", when=datetime.now(timezone.utc) - timedelta(hours=2))
+            clone = str(Path(parent, "copy"))
+            run(["git", "clone", "-q", origin, clone], parent)
+            self.assertEqual(repo_identity(origin), repo_identity(clone))
+
+    def test_unrelated_repos_do_not_share_an_identity(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as one, tempfile.TemporaryDirectory() as two:
+            init_repo(one)
+            init_repo(two)
+            commit(one, "a.py", "x\n", "one", when=now - timedelta(hours=2))
+            commit(two, "a.py", "x\n", "two", when=now - timedelta(hours=2))
+            self.assertNotEqual(repo_identity(one), repo_identity(two))
+
+    def test_a_commit_present_in_two_clones_appears_once(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as origin, tempfile.TemporaryDirectory() as parent:
+            init_repo(origin)
+            commit(origin, "a.py", "x\n", "shared work", when=now - timedelta(hours=2))
+            clone = str(Path(parent, "copy"))
+            run(["git", "clone", "-q", origin, clone], parent)
+            led = build_ledger([
+                event(origin, cost=4.0, when=now - timedelta(hours=3)),
+                event(clone, cost=1.0, when=now - timedelta(hours=3)),
+            ], days=7, now=now)
+
+        self.assertEqual(len(led.changes), 1, "the same commit must not appear once per clone")
+        # Spend from both checkouts lands on the one commit they share.
+        self.assertAlmostEqual(led.changes[0].cost_usd, 5.0, places=6)
+
+
+class ForeignCommitTests(unittest.TestCase):
+    """Commits that arrived by fetch were made on another machine.
+
+    Counting them made 53 of 166 unattributed commits locally look like missing
+    coverage. Worse, the attribution rule (spend before a commit belongs to it)
+    let a teammate's fetched commit absorb the local session that preceded it --
+    10 commits were showing another developer's dollars.
+    """
+
+    def test_someone_elses_commit_is_excluded(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            commit(repo, "mine.py", "x\n", "my work", when=now - timedelta(hours=2))
+            commit_as(repo, "theirs.py", "y\n", "their work", when=now - timedelta(hours=1),
+                      name="Someone Else", email="someone@example.com")
+            led = build_ledger([event(repo, cost=5.0, when=now - timedelta(hours=3))],
+                               days=7, now=now)
+
+        self.assertEqual([c.subject for c in led.changes], ["my work"])
+        self.assertEqual(led.foreign_changes, 1)
+
+    def test_a_fetched_commit_does_not_absorb_local_spend(self) -> None:
+        # The teammate's commit lands between the local session and the local
+        # commit. Before the filter it took the money.
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            commit_as(repo, "theirs.py", "y\n", "their work", when=now - timedelta(hours=3),
+                      name="Someone Else", email="someone@example.com")
+            commit(repo, "mine.py", "x\n", "my work", when=now - timedelta(hours=2))
+            led = build_ledger([event(repo, cost=9.0, when=now - timedelta(hours=4))],
+                               days=7, now=now)
+
+        self.assertEqual(len(led.changes), 1)
+        self.assertEqual(led.changes[0].subject, "my work")
+        self.assertAlmostEqual(led.changes[0].cost_usd, 9.0, places=6)
+
+    def test_no_configured_identity_counts_every_commit(self) -> None:
+        # Dropping every commit because git has no user.email would be worse
+        # than the problem being fixed.
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            commit_as(repo, "a.py", "y\n", "somebody", when=now - timedelta(hours=1),
+                      name="Someone Else", email="someone@example.com")
+            with patch.object(ledger_module, "local_author_emails", return_value=set()):
+                led = build_ledger([event(repo, cost=3.0, when=now - timedelta(hours=2))],
+                                   days=7, now=now)
+
+        self.assertEqual(len(led.changes), 1)
+        self.assertEqual(led.foreign_changes, 0)
 
 
 class UnbankedSummaryTests(unittest.TestCase):

@@ -52,6 +52,7 @@ class Change:
     repo: str
     subject: str
     committed_at: datetime
+    author_email: str = ""
     cost_usd: float = 0.0
     lines_added: int = 0
     lines_removed: int = 0
@@ -110,6 +111,10 @@ class Ledger:
     unresolved_usd: float = 0.0
     unresolved_events: int = 0
     unresolved_repos: list[str] = field(default_factory=list)
+    # Commits dropped because someone else authored them. Reported so the
+    # change table can say the window held other people's work rather than
+    # looking like it silently lost commits.
+    foreign_changes: int = 0
     repos: list[str] = field(default_factory=list)
     window_days: int = 7
     max_lookback_hours: float = DEFAULT_MAX_LOOKBACK_HOURS
@@ -149,6 +154,7 @@ class Ledger:
             "unresolved_usd": round(self.unresolved_usd, 6),
             "unresolved_events": self.unresolved_events,
             "unresolved_repos": self.unresolved_repos,
+            "foreign_changes": self.foreign_changes,
             "classified_usd": round(self.classified_usd, 6),
             "total_usd": round(self.total_usd, 6),
             "repos": self.repos,
@@ -193,7 +199,7 @@ def commits_since(repo: str, since: datetime) -> list[Change] | None:
     result = _git(repo, [
         "log", "--no-merges", "--numstat",
         f"--since={since.astimezone(timezone.utc).isoformat()}",
-        "--pretty=format:\x1e%H\x1f%ct\x1f%s",
+        "--pretty=format:\x1e%H\x1f%ct\x1f%ae\x1f%s",
     ])
     if not result or result.returncode != 0:
         # `git log` also fails on a valid repo whose HEAD is unborn -- a fresh
@@ -210,10 +216,10 @@ def commits_since(repo: str, since: datetime) -> list[Change] | None:
         if not record.strip():
             continue
         header, _, body = record.partition("\n")
-        parts = header.split("\x1f", 2)
-        if len(parts) != 3:
+        parts = header.split("\x1f", 3)
+        if len(parts) != 4:
             continue
-        sha, stamp, subject = parts
+        sha, stamp, author_email, subject = parts
         try:
             committed_at = datetime.fromtimestamp(int(stamp), timezone.utc)
         except (TypeError, ValueError):
@@ -223,6 +229,7 @@ def commits_since(repo: str, since: datetime) -> list[Change] | None:
             repo=repo,
             subject=subject.strip(),
             committed_at=committed_at,
+            author_email=author_email.strip().lower(),
         )
         for line in body.splitlines():
             cells = line.split("\t")
@@ -239,6 +246,70 @@ def commits_since(repo: str, since: datetime) -> list[Change] | None:
 
     changes.sort(key=lambda item: item.committed_at)
     return changes
+
+
+# A repo's root commit cannot change, so this is cached for the life of the
+# process. The global git identity is cached too -- it is one value shared by
+# every repo, and looking it up once per path was most of the added git calls.
+# Per-repo `user.email` is deliberately NOT cached: it is the value most likely
+# to be edited while a dashboard is running.
+_IDENTITY_CACHE: dict[str, str] = {}
+_GLOBAL_EMAIL: list[str | None] = [None]
+
+
+def repo_identity(repo: str) -> str:
+    """A key that is the same for every clone of one repository.
+
+    Repos were keyed by filesystem path, so a second checkout of the same
+    project counted as a separate repo and every one of its commits appeared
+    again as a distinct change -- 93 phantom rows out of 259 locally, all of
+    them showing "no spend observed" because the first copy had already
+    claimed the money.
+
+    The root commit's sha is the identity: it is stable across clones, remotes
+    and renames, and needs no network. A repo with several roots (history
+    grafted from another project) sorts them so the key stays deterministic.
+    Falls back to the path when git cannot answer, which keeps the old
+    behaviour rather than merging two repos that might be unrelated.
+    """
+    if repo in _IDENTITY_CACHE:
+        return _IDENTITY_CACHE[repo]
+    result = _git(repo, ["rev-list", "--max-parents=0", "HEAD"])
+    if not result or result.returncode != 0:
+        # Not cached: an unreadable repo may just be an unmounted drive, and
+        # pinning it to its path for the process lifetime would outlive that.
+        return repo
+    roots = sorted(line.strip() for line in result.stdout.split() if line.strip())
+    identity = roots[0][:16] if roots else repo
+    _IDENTITY_CACHE[repo] = identity
+    return identity
+
+
+def local_author_emails(repo: str) -> set[str]:
+    """Emails that count as "work done on this machine" for this repo.
+
+    Fetching brings teammates' commits into the local repo, and the ledger was
+    counting them: 53 of 166 unattributed commits locally were authored by
+    someone else. Worse, the attribution rule (spend before a commit belongs to
+    it) meant a teammate's commit arriving just after a local session absorbed
+    that session's spend -- 10 commits were showing another developer's dollars.
+
+    Returns an empty set when git has no configured identity, and callers treat
+    that as "cannot tell, count everything" rather than silently dropping every
+    commit.
+    """
+    emails: set[str] = set()
+    result = _git(repo, ["config", "user.email"])
+    if result and result.returncode == 0 and result.stdout.strip():
+        emails.add(result.stdout.strip().lower())
+    if _GLOBAL_EMAIL[0] is None:
+        result = _git(repo, ["config", "--global", "user.email"])
+        _GLOBAL_EMAIL[0] = (
+            result.stdout.strip().lower() if result and result.returncode == 0 else ""
+        )
+    if _GLOBAL_EMAIL[0]:
+        emails.add(_GLOBAL_EMAIL[0])
+    return emails
 
 
 def _event_repo(event: LocalEvent, cache: dict[str, str | None]) -> str | None:
@@ -270,6 +341,12 @@ def build_ledger(
     Events with no cost are ignored entirely rather than counted as free work:
     they are metadata (titles, mode switches) and would inflate event counts
     without moving a dollar.
+
+    Two things are deliberately NOT in scope. Clones of one repository are
+    merged, so the same commit cannot appear twice under two paths. And
+    commits authored by someone else are dropped, because they arrived by
+    fetch: this machine can have no spend for them, and leaving them in let
+    them absorb spend that belonged to the local commit behind them.
     """
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     since = now - timedelta(days=days)
@@ -300,17 +377,57 @@ def build_ledger(
             continue
         by_repo[repo].append(event)
 
+    # Collapse clones of one repository into a single unit of attribution. Both
+    # paths are still scanned for commits, because two checkouts can sit on
+    # different branches and scanning only one would lose the other's work; the
+    # commits they share are deduplicated by sha afterwards.
+    clones: dict[str, list[str]] = defaultdict(list)
+    for repo in by_repo:
+        clones[repo_identity(repo)].append(repo)
+
     all_changes: list[Change] = []
-    for repo, repo_events in by_repo.items():
+    foreign_changes = 0
+    for paths in clones.values():
+        paths.sort()
+        primary = paths[0]
+        repo_events = [event for path in paths for event in by_repo[path]]
+
         # Look back a little before the window so an event early in it can bank
         # against a commit that the window itself would have excluded.
-        changes = commits_since(repo, since - cutoff)
-        if changes is None:
+        gathered: dict[str, Change] = {}
+        readable = False
+        for path in paths:
+            found = commits_since(path, since - cutoff)
+            if found is None:
+                continue
+            readable = True
+            for change in found:
+                gathered.setdefault(change.sha, change)
+
+        if not readable:
             # git could not answer. Say so rather than calling it waste.
             unresolved_usd += sum(event.cost_usd for event in repo_events)
             unresolved_events += len(repo_events)
-            unresolved_repos.append(repo)
+            unresolved_repos.append(primary)
             continue
+
+        # Commits that arrived by fetch were made on another machine, so no
+        # local spend can belong to them. With no configured identity there is
+        # nothing to compare against, and dropping everything would be worse
+        # than counting everything.
+        mine: set[str] = set()
+        for path in paths:
+            mine |= local_author_emails(path)
+        if mine:
+            before = len(gathered)
+            gathered = {
+                sha: change for sha, change in gathered.items()
+                if not change.author_email or change.author_email in mine
+            }
+            foreign_changes += before - len(gathered)
+
+        changes = sorted(gathered.values(), key=lambda item: item.committed_at)
+        repo = primary
         if not changes:
             spend = sum(event.cost_usd for event in repo_events)
             unbanked_usd += spend
@@ -360,6 +477,7 @@ def build_ledger(
         unresolved_usd=unresolved_usd,
         unresolved_events=unresolved_events,
         unresolved_repos=sorted(unresolved_repos),
+        foreign_changes=foreign_changes,
         repos=sorted(by_repo),
         window_days=days,
         max_lookback_hours=max_lookback_hours,
