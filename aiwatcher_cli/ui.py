@@ -44,6 +44,7 @@ from .local_state import (
     record_ui_server,
 )
 from .outcome_evidence import VALID_EVIDENCE_OUTCOMES, build_outcome_evidence, evidence_for_sessions
+from .ledger import build_ledger, unbanked_summary
 from .pricing import is_subscription_model
 from .session_health import ContextHealth, analyze_all_sessions, gate_health_warning
 from .scanner import (
@@ -1071,6 +1072,46 @@ def _survival_summary() -> dict[str, object]:
     return summary
 
 
+def _unbanked_card(events: list[LocalEvent], days: int) -> dict[str, object]:
+    """Spend in this window with no commit behind it.
+
+    Computed on the request rather than cached, unlike survival: this is one
+    `git log --numstat` per repo that had spend (~0.3s for a week locally),
+    where survival is a blame pass per file (~23s). Caching it would also pin
+    it to one window, and the whole point is that it moves with the day
+    selector alongside every other number on the page.
+    """
+    try:
+        ledger = build_ledger(events, days=days)
+    except OSError:
+        return {"available": False, "reason": "Could not read git history for the active repos."}
+
+    card = dict(unbanked_summary(ledger))
+    card["unbanked_label"] = money(float(card.get("unbanked_usd") or 0))
+    card["banked_label"] = money(float(card.get("banked_usd") or 0))
+    card["unresolved_label"] = money(float(card.get("unresolved_usd") or 0))
+    card["outside_repo_label"] = money(float(card.get("outside_repo_usd") or 0))
+    card["top_repos"] = [
+        {**entry, "short_name": short_path(str(entry.get("repo"))),
+         "unbanked_label": money(float(entry.get("unbanked_usd") or 0))}
+        for entry in (card.get("top_repos") or [])
+    ]
+    if card.get("available"):
+        share = float(card.get("unbanked_pct") or 0)
+        card["headline"] = (
+            f"{card['unbanked_label']} of the last {days} days "
+            f"({share:.0f}%) has no commit behind it"
+        )
+        # Says what it is and what it is not. Uncommitted work in progress looks
+        # exactly like exploration that went nowhere, and the card must not
+        # claim to tell them apart.
+        card["caption"] = (
+            f"{card['banked_label']} reached a commit. The rest is exploration that "
+            "went nowhere or work still uncommitted — this cannot tell them apart."
+        )
+    return card
+
+
 def _handoff_decision_rows(limit: int = 10) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for row in recent_handoff_decisions(limit=limit):
@@ -1366,6 +1407,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
         churned=churned,
     )
     survival_summary = _survival_summary()
+    unbanked = _unbanked_card(all_events, days)
     interventions = recent_interventions(limit=200, days=days)
     receipt_events = all_events if interventions else []
     receipts = _build_intervention_receipts(interventions, all_rows, outcomes_for_sessions(), receipt_events)
@@ -1414,6 +1456,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
             "cost_per_useful_change": money(cost_per_useful) if cost_per_useful is not None else "—",
         },
         "survival": survival_summary,
+        "unbanked": unbanked,
         "projects": projects[:10],
         "tools": tools,
         "models": models[:10],
@@ -1867,6 +1910,11 @@ HTML = r"""<!doctype html>
       <div class="card metric-card metric-amber"><div class="label">Preflight decisions</div><div class="value" id="preflightDecisions">-</div><div class="sub"><span id="windowLabel">-</span></div></div>
       <div class="card metric-card metric-blue"><div class="label">Sessions observed</div><div class="value" id="sessions">-</div><div class="sub">This machine only</div></div>
       <div class="card metric-card metric-red"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div></div>
+    </section>
+
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title"><div><h2>Unbanked spend</h2><p>AI spend in this window with no commit behind it.</p></div></div>
+      <div id="unbanked"></div>
     </section>
 
     <section class="card" style="margin-bottom:14px">
@@ -2475,6 +2523,35 @@ function dateLabel(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
+function renderUnbanked(card) {
+  if (!card || !card.available) {
+    return `<div class="empty">${esc((card && card.reason) || 'Not measured for this window.')}</div>`;
+  }
+  const repos = (card.top_repos || []).map(entry =>
+    `<li>${esc(entry.short_name)} &middot; <strong>${esc(entry.unbanked_label)}</strong></li>`).join('');
+  const outside = card.outside_repo_usd > 0
+    ? `<span class="pill">${esc(card.outside_repo_label)} outside any repo</span>` : '';
+  // Surfaced, not hidden: spend git could not answer for is excluded from the
+  // headline, so the headline would otherwise silently shrink without saying why.
+  const unresolved = card.unresolved_usd > 0
+    ? `<span class="pill">${esc(card.unresolved_label)} unresolved (git could not read ${esc((card.unresolved_repos || []).length)} repo(s))</span>` : '';
+  return `<div class="headline">
+      <span class="headline-figure">${esc(card.unbanked_label)}</span>
+      <span class="headline-sub">${esc(card.unbanked_pct)}% of the last ${esc(card.window_days)} days had no commit behind it</span>
+    </div>
+    <div class="mini-grid" style="margin-top:12px">
+      <div class="mini"><span class="label">Reached a commit</span><strong>${esc(card.banked_label)}</strong></div>
+      <div class="mini"><span class="label">Never did</span><strong>${esc(card.unbanked_label)}</strong></div>
+      <div class="mini"><span class="label">Commits in window</span><strong>${esc(card.changes)}</strong></div>
+      <div class="mini"><span class="label">Model calls unbanked</span><strong>${esc(card.unbanked_events)}</strong></div>
+    </div>
+    ${repos ? `<p class="receipt-note" style="margin-bottom:4px">Where it went:</p>
+      <ul style="margin:0 0 10px 18px;padding:0">${repos}</ul>` : ''}
+    <div class="pill-row">${outside}${unresolved}</div>
+    <p class="receipt-note">${esc(card.caption)}
+      Spend banks against the next commit in the same repo within
+      ${esc(card.max_lookback_hours)}h; anything older stays unbanked rather than being misattributed.</p>`;
+}
 function renderContextHealth(rows) {
   if (!rows.length) return '<div class="empty">No active context-health warnings. AIWatcher will surface bloat, stale sessions, and handoff opportunities here.</div>';
   return `<div class="coverage-grid">${rows.map(row => `<div class="health-card">
@@ -2936,6 +3013,7 @@ async function load(resetDetail = true) {
   document.getElementById('receiptRows').innerHTML = renderReceiptRows(receiptCache);
   document.getElementById('handoffDecisionRows').innerHTML = renderHandoffDecisionRows(handoffDecisions);
   document.getElementById('contextHealth').innerHTML = renderContextHealth(data.context_health || []);
+  document.getElementById('unbanked').innerHTML = renderUnbanked(data.unbanked);
   document.getElementById('coverageRows').innerHTML = renderCoverage(data.coverage || []);
   document.getElementById('setupRows').innerHTML = renderSetup(data.setup || []);
   const latest = data.recent_sessions[0];

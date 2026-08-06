@@ -88,23 +88,48 @@ class Change:
         }
 
 
+# Why a dollar never reached a commit. Kept apart because they call for
+# different responses: work outside a repo may simply belong somewhere git
+# cannot see, while spend in a repo that never committed is the real signal.
+UNBANKED_OUTSIDE_REPO = "outside_repo"
+UNBANKED_NO_COMMIT = "no_commit_followed"
+
+
 @dataclass
 class Ledger:
     changes: list[Change] = field(default_factory=list)
     banked_usd: float = 0.0
     unbanked_usd: float = 0.0
     unbanked_events: int = 0
+    unbanked_by_reason: dict[str, float] = field(default_factory=dict)
+    unbanked_by_repo: dict[str, float] = field(default_factory=dict)
+    # Spend git could not answer for -- an unreadable repo, or a `git log` that
+    # timed out. Held apart from unbanked deliberately: treating a git failure
+    # as "money with nothing to show for it" would inflate the one number this
+    # module exists to report, and it would do so silently.
+    unresolved_usd: float = 0.0
+    unresolved_events: int = 0
+    unresolved_repos: list[str] = field(default_factory=list)
     repos: list[str] = field(default_factory=list)
     window_days: int = 7
     max_lookback_hours: float = DEFAULT_MAX_LOOKBACK_HOURS
 
     @property
     def total_usd(self) -> float:
+        return self.banked_usd + self.unbanked_usd + self.unresolved_usd
+
+    @property
+    def classified_usd(self) -> float:
+        """Spend the ledger could actually place — banked or provably unbanked."""
         return self.banked_usd + self.unbanked_usd
 
     @property
     def unbanked_pct(self) -> float:
-        return 100.0 * self.unbanked_usd / self.total_usd if self.total_usd > 0 else 0.0
+        # Share of what could be classified, not of everything: spend git could
+        # not answer for is neither banked nor unbanked, and folding it into the
+        # denominator would quietly understate the rate.
+        base = self.classified_usd
+        return 100.0 * self.unbanked_usd / base if base > 0 else 0.0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -113,6 +138,18 @@ class Ledger:
             "unbanked_usd": round(self.unbanked_usd, 6),
             "unbanked_events": self.unbanked_events,
             "unbanked_pct": round(self.unbanked_pct, 1),
+            "unbanked_by_reason": {
+                key: round(value, 6) for key, value in sorted(self.unbanked_by_reason.items())
+            },
+            "unbanked_by_repo": {
+                key: round(value, 6) for key, value in sorted(
+                    self.unbanked_by_repo.items(), key=lambda item: item[1], reverse=True
+                )
+            },
+            "unresolved_usd": round(self.unresolved_usd, 6),
+            "unresolved_events": self.unresolved_events,
+            "unresolved_repos": self.unresolved_repos,
+            "classified_usd": round(self.classified_usd, 6),
             "total_usd": round(self.total_usd, 6),
             "repos": self.repos,
             "window_days": self.window_days,
@@ -134,7 +171,7 @@ def _git(repo: str, args: list[str]) -> subprocess.CompletedProcess[str] | None:
         return None
 
 
-def commits_since(repo: str, since: datetime) -> list[Change]:
+def commits_since(repo: str, since: datetime) -> list[Change] | None:
     """Commits on the current branch since `since`, oldest first, with line counts.
 
     One `git log` call carries both the commit headers and the per-file numstat
@@ -142,6 +179,12 @@ def commits_since(repo: str, since: datetime) -> list[Change]:
     Merge commits are skipped (`--no-merges`): their diff is the union of work
     already counted on the commits they merge, so including them would
     double-count every line.
+
+    Returns None when git could not answer at all -- an unreadable path, or a
+    call that timed out. That is distinct from an empty list, which means the
+    repo genuinely has no commits in the window. Callers must not conflate the
+    two: an empty list makes every dollar in that repo unbanked, and a git
+    failure would otherwise fake exactly that result.
     """
     result = _git(repo, [
         "log", "--no-merges", "--numstat",
@@ -149,7 +192,14 @@ def commits_since(repo: str, since: datetime) -> list[Change]:
         "--pretty=format:\x1e%H\x1f%ct\x1f%s",
     ])
     if not result or result.returncode != 0:
-        return []
+        # `git log` also fails on a valid repo whose HEAD is unborn -- a fresh
+        # `git init` with nothing committed yet. That repo genuinely has no
+        # commits, so its spend really is unbanked; only an unreadable repo is
+        # unresolved. One extra call, and only ever on the failure path.
+        probe = _git(repo, ["rev-parse", "--git-dir"])
+        if probe and probe.returncode == 0:
+            return []
+        return None
 
     changes: list[Change] = []
     for record in result.stdout.split("\x1e"):
@@ -225,6 +275,11 @@ def build_ledger(
     by_repo: dict[str, list[LocalEvent]] = defaultdict(list)
     unbanked_usd = 0.0
     unbanked_events = 0
+    unbanked_by_reason: dict[str, float] = defaultdict(float)
+    unbanked_by_repo: dict[str, float] = defaultdict(float)
+    unresolved_usd = 0.0
+    unresolved_events = 0
+    unresolved_repos: list[str] = []
 
     for event in events:
         if event.cost_usd <= 0 or not event.timestamp:
@@ -237,6 +292,7 @@ def build_ledger(
             # Spend outside any git repo can never be banked against a change.
             unbanked_usd += event.cost_usd
             unbanked_events += 1
+            unbanked_by_reason[UNBANKED_OUTSIDE_REPO] += event.cost_usd
             continue
         by_repo[repo].append(event)
 
@@ -245,9 +301,18 @@ def build_ledger(
         # Look back a little before the window so an event early in it can bank
         # against a commit that the window itself would have excluded.
         changes = commits_since(repo, since - cutoff)
+        if changes is None:
+            # git could not answer. Say so rather than calling it waste.
+            unresolved_usd += sum(event.cost_usd for event in repo_events)
+            unresolved_events += len(repo_events)
+            unresolved_repos.append(repo)
+            continue
         if not changes:
-            unbanked_usd += sum(event.cost_usd for event in repo_events)
+            spend = sum(event.cost_usd for event in repo_events)
+            unbanked_usd += spend
             unbanked_events += len(repo_events)
+            unbanked_by_reason[UNBANKED_NO_COMMIT] += spend
+            unbanked_by_repo[repo] += spend
             continue
 
         seen_sessions: dict[str, set[str]] = defaultdict(set)
@@ -260,6 +325,8 @@ def build_ledger(
             if target is None or target.committed_at - stamp > cutoff:
                 unbanked_usd += event.cost_usd
                 unbanked_events += 1
+                unbanked_by_reason[UNBANKED_NO_COMMIT] += event.cost_usd
+                unbanked_by_repo[repo] += event.cost_usd
                 continue
             target.cost_usd += event.cost_usd
             target.event_count += 1
@@ -284,10 +351,72 @@ def build_ledger(
         banked_usd=sum(change.cost_usd for change in all_changes),
         unbanked_usd=unbanked_usd,
         unbanked_events=unbanked_events,
+        unbanked_by_reason=dict(unbanked_by_reason),
+        unbanked_by_repo=dict(unbanked_by_repo),
+        unresolved_usd=unresolved_usd,
+        unresolved_events=unresolved_events,
+        unresolved_repos=sorted(unresolved_repos),
         repos=sorted(by_repo),
         window_days=days,
         max_lookback_hours=max_lookback_hours,
     )
+
+
+# Under this there is no story to tell -- a window with $0.40 unbanked is
+# rounding, not waste, and a card claiming otherwise trains people to ignore it.
+MIN_UNBANKED_USD = 1.0
+
+
+def unbanked_summary(ledger: Ledger, *, top_repos: int = 3) -> dict[str, Any]:
+    """Spend in the window that never reached a commit.
+
+    The most direct measure of waste the product has: it needs no outcome
+    inference, no survival pass and no matching heuristic -- just the absence of
+    a commit behind the money. It is not all waste, though, and the wording must
+    not pretend otherwise: work still uncommitted on disk looks identical to
+    exploration that went nowhere until it lands.
+    """
+    if ledger.classified_usd <= 0:
+        return _unbanked_unavailable("No costed AI spend in this window to attribute.", ledger)
+    if ledger.unbanked_usd < MIN_UNBANKED_USD:
+        return _unbanked_unavailable(
+            f"Under ${MIN_UNBANKED_USD:.0f} of spend went unbanked in this window.", ledger
+        )
+
+    repos = sorted(ledger.unbanked_by_repo.items(), key=lambda item: item[1], reverse=True)
+    outside = ledger.unbanked_by_reason.get(UNBANKED_OUTSIDE_REPO, 0.0)
+    no_commit = ledger.unbanked_by_reason.get(UNBANKED_NO_COMMIT, 0.0)
+    return {
+        "available": True,
+        "reason": None,
+        "unbanked_usd": round(ledger.unbanked_usd, 6),
+        "banked_usd": round(ledger.banked_usd, 6),
+        "classified_usd": round(ledger.classified_usd, 6),
+        "unbanked_pct": round(ledger.unbanked_pct, 1),
+        "unbanked_events": ledger.unbanked_events,
+        "changes": len(ledger.changes),
+        "outside_repo_usd": round(outside, 6),
+        "no_commit_usd": round(no_commit, 6),
+        "top_repos": [
+            {"repo": repo, "unbanked_usd": round(spend, 6)}
+            for repo, spend in repos[:top_repos]
+        ],
+        "unresolved_usd": round(ledger.unresolved_usd, 6),
+        "unresolved_repos": ledger.unresolved_repos,
+        "window_days": ledger.window_days,
+        "max_lookback_hours": ledger.max_lookback_hours,
+    }
+
+
+def _unbanked_unavailable(reason: str, ledger: Ledger) -> dict[str, Any]:
+    return {
+        "available": False,
+        "reason": reason,
+        "unbanked_usd": round(ledger.unbanked_usd, 6),
+        "banked_usd": round(ledger.banked_usd, 6),
+        "unresolved_usd": round(ledger.unresolved_usd, 6),
+        "window_days": ledger.window_days,
+    }
 
 
 MIN_MEASURED_CHANGES = 3

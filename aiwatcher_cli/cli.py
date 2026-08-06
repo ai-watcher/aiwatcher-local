@@ -64,7 +64,7 @@ from .local_state import (
     state_path,
 )
 from .handoff import TARGET_LABELS, build_handoff_capsule, render_handoff_capsule
-from .ledger import build_ledger, cost_per_surviving_line
+from .ledger import build_ledger, cost_per_surviving_line, unbanked_summary
 from .outcome_evidence import (
     VALID_EVIDENCE_OUTCOMES,
     build_outcome_evidence,
@@ -2587,6 +2587,34 @@ def command_status(_args: argparse.Namespace) -> int:
     return 0
 
 
+def print_unbanked_line(events: Sequence[LocalEvent], *, days: int = 7) -> None:
+    """Report spend in the window that never reached a commit.
+
+    One `git log` per repo with spend, so it is cheap enough to run inline --
+    unlike survival, which needs a blame pass per file and stays cached.
+    Prints nothing when there is no story: silence beats a card saying $0.
+    """
+    try:
+        card = unbanked_summary(build_ledger(list(events), days=days))
+    except OSError:
+        return
+    if not card.get("available"):
+        return
+    print(
+        f"\nUnbanked: {money(float(card['unbanked_usd']))} of the last {days} days "
+        f"({card['unbanked_pct']:.0f}%) has no commit behind it "
+        f"({money(float(card['banked_usd']))} reached one)."
+    )
+    for entry in card.get("top_repos", [])[:3]:
+        print(f"  {short_path(str(entry['repo'])):50} {money(float(entry['unbanked_usd'])):>10}")
+    if float(card.get("unresolved_usd") or 0) > 0:
+        print(
+            f"  ({money(float(card['unresolved_usd']))} excluded — git could not read "
+            f"{len(card.get('unresolved_repos') or [])} repo(s).)"
+        )
+    print("  Exploration that went nowhere, or work still uncommitted — this cannot tell them apart.")
+
+
 def command_today(_args: argparse.Namespace) -> int:
     now = datetime.now().astimezone()
     today_start = local_midnight(now.date())
@@ -2687,6 +2715,7 @@ def command_today(_args: argparse.Namespace) -> int:
 
     print(f"\nThis week: {money(float(week_stats['cost_usd']))}")
     print(f"This month: {money(float(month_stats['cost_usd']))}")
+    print_unbanked_line(window_events, days=7)
     hygiene = process_hygiene_summary()
     if hygiene:
         print(f"\n{hygiene}")

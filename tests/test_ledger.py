@@ -7,7 +7,17 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from aiwatcher_cli.ledger import build_ledger, commits_since, cost_per_surviving_line
+from unittest.mock import patch
+
+from aiwatcher_cli import ledger as ledger_module
+from aiwatcher_cli.ledger import (
+    UNBANKED_NO_COMMIT,
+    UNBANKED_OUTSIDE_REPO,
+    build_ledger,
+    commits_since,
+    cost_per_surviving_line,
+    unbanked_summary,
+)
 from aiwatcher_cli.scanner import LocalEvent
 
 
@@ -86,8 +96,26 @@ class CommitsSinceTests(unittest.TestCase):
 
         self.assertNotIn("merge side", [c.subject for c in changes])
 
-    def test_unreadable_repo_returns_nothing(self) -> None:
-        self.assertEqual(commits_since("/no/such/repo/path", datetime.now(timezone.utc)), [])
+    def test_unreadable_repo_returns_none_not_empty(self) -> None:
+        # None and [] must stay distinguishable: [] means the repo genuinely
+        # committed nothing, which makes every dollar in it unbanked. A git
+        # failure returning [] would fake that result and inflate the one
+        # number the ledger exists to report.
+        self.assertIsNone(commits_since("/no/such/repo/path", datetime.now(timezone.utc)))
+
+    def test_repo_with_no_commits_in_window_returns_empty(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            commit(repo, "a.py", "old\n", "ancient", when=now - timedelta(days=90))
+            self.assertEqual(commits_since(repo, now - timedelta(days=1)), [])
+
+
+def repo_key(path: str) -> str:
+    """The ledger keys repos by `git rev-parse --show-toplevel`, which returns
+    forward slashes on Windows. Tests must compare against that, not the raw
+    tempdir path."""
+    return ledger_module._repo_root(path) or path
 
 
 def _default_branch(repo: str) -> str:
@@ -227,6 +255,118 @@ class LedgerAttributionTests(unittest.TestCase):
             led = build_ledger(events, days=7, now=now)
 
         self.assertAlmostEqual(led.total_usd, 0.0, places=6)
+
+
+class UnbankedReasonTests(unittest.TestCase):
+    def test_outside_repo_and_no_commit_are_counted_separately(self) -> None:
+        # They call for different responses, so the card must not merge them.
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as loose:
+            init_repo(repo)
+            commit(repo, "a.py", "x\n", "earlier", when=now - timedelta(hours=5))
+            led = build_ledger([
+                event(repo, cost=7.0, when=now - timedelta(hours=1)),
+                event(loose, cost=2.0, when=now - timedelta(hours=1)),
+            ], days=7, now=now)
+
+        self.assertAlmostEqual(led.unbanked_by_reason[UNBANKED_NO_COMMIT], 7.0, places=6)
+        self.assertAlmostEqual(led.unbanked_by_reason[UNBANKED_OUTSIDE_REPO], 2.0, places=6)
+        self.assertAlmostEqual(led.unbanked_usd, 9.0, places=6)
+
+    def test_unbanked_is_attributed_to_the_repo_it_happened_in(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            commit(repo, "a.py", "x\n", "earlier", when=now - timedelta(hours=5))
+            led = build_ledger([event(repo, cost=4.0, when=now - timedelta(hours=1))],
+                               days=7, now=now)
+            key = repo_key(repo)
+
+        self.assertAlmostEqual(led.unbanked_by_repo[key], 4.0, places=6)
+
+
+class UnresolvedSpendTests(unittest.TestCase):
+    """A git failure must not masquerade as waste.
+
+    build_ledger treats a repo with no commits as fully unbanked. If a failed
+    `git log` also returned "no commits", every dollar in an unreadable repo
+    would be reported as money with nothing to show for it -- inflating the
+    headline silently, in the one direction that makes the product look most
+    alarming.
+    """
+
+    def test_unreadable_repo_is_unresolved_not_unbanked(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            events = [event(repo, cost=6.0, when=now - timedelta(hours=1))]
+            with patch.object(ledger_module, "commits_since", return_value=None):
+                led = build_ledger(events, days=7, now=now)
+            key = repo_key(repo)
+
+        self.assertAlmostEqual(led.unresolved_usd, 6.0, places=6)
+        self.assertEqual(led.unresolved_events, 1)
+        self.assertEqual(led.unresolved_repos, [key])
+        self.assertAlmostEqual(led.unbanked_usd, 0.0, places=6)
+
+    def test_unresolved_spend_is_excluded_from_the_unbanked_rate(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as good, tempfile.TemporaryDirectory() as bad:
+            init_repo(good)
+            init_repo(bad)
+            commit(good, "a.py", "x\n", "landed", when=now - timedelta(hours=1))
+            real = ledger_module.commits_since
+            bad_key = repo_key(bad)
+
+            def flaky(repo: str, since: datetime):
+                return None if repo == bad_key else real(repo, since)
+
+            events = [
+                event(good, cost=3.0, when=now - timedelta(hours=2)),
+                event(bad, cost=97.0, when=now - timedelta(hours=2)),
+            ]
+            with patch.object(ledger_module, "commits_since", side_effect=flaky):
+                led = build_ledger(events, days=7, now=now)
+
+        # $97 is unknown, not wasted: the rate is 0% of the $3 we could classify.
+        self.assertAlmostEqual(led.unresolved_usd, 97.0, places=6)
+        self.assertAlmostEqual(led.classified_usd, 3.0, places=6)
+        self.assertAlmostEqual(led.unbanked_pct, 0.0, places=6)
+        self.assertAlmostEqual(led.total_usd, 100.0, places=6)
+
+
+class UnbankedSummaryTests(unittest.TestCase):
+    def test_reports_share_repos_and_reasons(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            commit(repo, "a.py", "x\n", "landed", when=now - timedelta(hours=3))
+            led = build_ledger([
+                event(repo, cost=10.0, when=now - timedelta(hours=4)),
+                event(repo, cost=30.0, when=now - timedelta(minutes=30)),
+            ], days=7, now=now)
+            key = repo_key(repo)
+        card = unbanked_summary(led)
+
+        self.assertTrue(card["available"])
+        self.assertAlmostEqual(card["unbanked_usd"], 30.0, places=6)
+        self.assertAlmostEqual(card["banked_usd"], 10.0, places=6)
+        self.assertEqual(card["unbanked_pct"], 75.0)
+        self.assertEqual(card["top_repos"][0]["repo"], key)
+
+    def test_trivial_unbanked_spend_reports_nothing(self) -> None:
+        # A card claiming $0.40 of waste trains people to ignore the card.
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            commit(repo, "a.py", "x\n", "earlier", when=now - timedelta(hours=5))
+            led = build_ledger([event(repo, cost=0.4, when=now - timedelta(hours=1))],
+                               days=7, now=now)
+
+        self.assertFalse(unbanked_summary(led)["available"])
+
+    def test_no_spend_at_all_reports_nothing(self) -> None:
+        self.assertFalse(unbanked_summary(build_ledger([], days=7))["available"])
 
 
 if __name__ == "__main__":
