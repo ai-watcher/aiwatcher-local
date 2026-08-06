@@ -2641,7 +2641,7 @@ def command_changes(args: argparse.Namespace) -> int:
     by_change = by_change if isinstance(by_change, dict) else {}
 
     print(f"Cost per change - last {args.days} days, ranked by spend\n")
-    print(f"{'Commit':10} {'Cost':>9} {'Lines':>12} {'$/line':>9} {'Alive':>6}  Subject")
+    print(f"{'Commit':10} {'Cost':>9} {'Lines':>12} {'$/line':>9} {'Alive':>6}    Subject")
     print("-" * 88)
     for change in rows[:args.limit]:
         measured = by_change.get(change.sha)
@@ -2649,10 +2649,11 @@ def command_changes(args: argparse.Namespace) -> int:
         pct = measured.get("survival_pct") if measured.get("measurable") else None
         cost = money(change.cost_usd) if change.cost_usd > 0 else "-"
         per_line = money(change.usd_per_line) if change.usd_per_line is not None else "-"
+        mark = "~" if change.was_rewritten else " "
         print(
             f"{change.sha[:10]:10} {cost:>9} "
             f"{f'+{change.lines_added}/-{change.lines_removed}':>12} "
-            f"{per_line:>9} {(f'{pct:.0f}%' if pct is not None else '-'):>6}  "
+            f"{per_line:>9} {(f'{pct:.0f}%' if pct is not None else '-'):>6} {mark} "
             f"{change.subject[:40]}"
         )
 
@@ -2660,12 +2661,17 @@ def command_changes(args: argparse.Namespace) -> int:
     if len(attributed) < len(rows):
         print(
             f"\n{len(rows) - len(attributed)} of {len(rows)} commits have no observed AI spend "
-            "(hand-written, or work whose commit was rebased away from it)."
+            "(hand-written, or committed more than 12h after the work)."
         )
     if ledger.foreign_changes:
         print(
             f"{ledger.foreign_changes} commit(s) written by someone else were excluded: "
             "they arrived by fetch, so no spend on this machine belongs to them."
+        )
+    if any(change.was_rewritten for change in rows[:args.limit]):
+        print(
+            "~ marks a commit that was rebased or amended. Cost is attributed by when the "
+            "work was authored, not when git restamped it."
         )
     if not by_change:
         print("Survival not measured yet. Run `aiwatcher today` to compute it.")

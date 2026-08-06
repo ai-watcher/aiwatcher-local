@@ -46,12 +46,22 @@ GIT_TIMEOUT_SECONDS = 20
 DEFAULT_MAX_LOOKBACK_HOURS = 12.0
 
 
+# A commit whose committer date runs this far ahead of its author date was
+# rewritten -- rebased, cherry-picked, or amended long after the fact. Used only
+# to label the row; attribution keys off the author date either way.
+REWRITE_SKEW = timedelta(hours=1)
+
+
 @dataclass
 class Change:
     sha: str
     repo: str
     subject: str
     committed_at: datetime
+    # When the work was actually done. `git rebase` rewrites committed_at to
+    # the moment of the rebase but leaves this alone, which is why attribution
+    # keys off it -- see `landed_at`.
+    authored_at: datetime | None = None
     author_email: str = ""
     cost_usd: float = 0.0
     lines_added: int = 0
@@ -61,6 +71,29 @@ class Change:
     session_ids: list[str] = field(default_factory=list)
     tools: list[str] = field(default_factory=list)
     models: list[str] = field(default_factory=list)
+
+    @property
+    def landed_at(self) -> datetime:
+        """The timestamp attribution uses: when this work was committed.
+
+        Author date, not committer date. Rebasing rewrites the committer date
+        to the rebase moment, which pushed the original work outside the 12h
+        lookback and stranded its spend -- 30 of 32 rewritten commits locally
+        read as free while $537 read as waste, when both records were correct
+        and simply could not find each other.
+
+        Clamped to the committer date for the pathological case where a clock
+        skew or an explicit `--date` puts the author date in the future.
+        """
+        if self.authored_at is None:
+            return self.committed_at
+        return min(self.authored_at, self.committed_at)
+
+    @property
+    def was_rewritten(self) -> bool:
+        if self.authored_at is None:
+            return False
+        return self.committed_at - self.authored_at > REWRITE_SKEW
 
     @property
     def lines_changed(self) -> int:
@@ -76,6 +109,9 @@ class Change:
             "repo": self.repo,
             "subject": self.subject,
             "committed_at": self.committed_at.isoformat(),
+            "authored_at": self.authored_at.isoformat() if self.authored_at else None,
+            "landed_at": self.landed_at.isoformat(),
+            "was_rewritten": self.was_rewritten,
             "cost_usd": round(self.cost_usd, 6),
             "lines_added": self.lines_added,
             "lines_removed": self.lines_removed,
@@ -198,8 +234,12 @@ def commits_since(repo: str, since: datetime) -> list[Change] | None:
     """
     result = _git(repo, [
         "log", "--no-merges", "--numstat",
+        # --since filters on committer date, so it is deliberately left wider
+        # than the caller's window: a commit authored inside the window but
+        # rebased later still has a committer date inside it, and one authored
+        # before the window is dropped by the landed_at check below.
         f"--since={since.astimezone(timezone.utc).isoformat()}",
-        "--pretty=format:\x1e%H\x1f%ct\x1f%ae\x1f%s",
+        "--pretty=format:\x1e%H\x1f%ct\x1f%at\x1f%ae\x1f%s",
     ])
     if not result or result.returncode != 0:
         # `git log` also fails on a valid repo whose HEAD is unborn -- a fresh
@@ -216,19 +256,24 @@ def commits_since(repo: str, since: datetime) -> list[Change] | None:
         if not record.strip():
             continue
         header, _, body = record.partition("\n")
-        parts = header.split("\x1f", 3)
-        if len(parts) != 4:
+        parts = header.split("\x1f", 4)
+        if len(parts) != 5:
             continue
-        sha, stamp, author_email, subject = parts
+        sha, stamp, author_stamp, author_email, subject = parts
         try:
             committed_at = datetime.fromtimestamp(int(stamp), timezone.utc)
         except (TypeError, ValueError):
             continue
+        try:
+            authored_at = datetime.fromtimestamp(int(author_stamp), timezone.utc)
+        except (TypeError, ValueError):
+            authored_at = None
         change = Change(
             sha=sha[:12],
             repo=repo,
             subject=subject.strip(),
             committed_at=committed_at,
+            authored_at=authored_at,
             author_email=author_email.strip().lower(),
         )
         for line in body.splitlines():
@@ -244,7 +289,7 @@ def commits_since(repo: str, since: datetime) -> list[Change] | None:
             change.files_changed += 1
         changes.append(change)
 
-    changes.sort(key=lambda item: item.committed_at)
+    changes.sort(key=lambda item: item.landed_at)
     return changes
 
 
@@ -426,7 +471,7 @@ def build_ledger(
             }
             foreign_changes += before - len(gathered)
 
-        changes = sorted(gathered.values(), key=lambda item: item.committed_at)
+        changes = sorted(gathered.values(), key=lambda item: item.landed_at)
         repo = primary
         if not changes:
             spend = sum(event.cost_usd for event in repo_events)
@@ -443,7 +488,7 @@ def build_ledger(
         for event in repo_events:
             stamp = event.timestamp.astimezone(timezone.utc)
             target = _first_commit_at_or_after(changes, stamp)
-            if target is None or target.committed_at - stamp > cutoff:
+            if target is None or target.landed_at - stamp > cutoff:
                 unbanked_usd += event.cost_usd
                 unbanked_events += 1
                 unbanked_by_reason[UNBANKED_NO_COMMIT] += event.cost_usd
@@ -458,8 +503,11 @@ def build_ledger(
                 seen_models[target.sha].add(event.model)
 
         for change in changes:
-            if change.committed_at < since:
+            if change.landed_at < since:
                 # Only in range to catch spillover; not part of this window.
+                # Keyed off landed_at so a commit and the spend that produced
+                # it fall inside or outside the window together -- a rebase
+                # must not drag old work into a recent window.
                 continue
             change.session_ids = sorted(seen_sessions.get(change.sha, ()))
             change.tools = sorted(seen_tools.get(change.sha, ()))
@@ -586,6 +634,13 @@ def cost_per_surviving_line(
     # already carries. Selecting first and dropping recent changes afterwards
     # let them consume the budget while contributing nothing -- aiming at 80%
     # coverage actually landed at 52%.
+    #
+    # This deliberately uses committed_at where attribution uses landed_at (the
+    # author date). The two questions are different: attribution asks when the
+    # work was done, survival asks how long the lines have been exposed to
+    # being rewritten, and a commit rebased onto this branch yesterday has been
+    # exposed for a day no matter how long ago it was authored. survival.py's
+    # own age check reads %ct for the same reason.
     paid = [change for change in ledger.changes if change.cost_usd > 0]
     too_recent_changes = [change for change in paid if change.committed_at > cutoff]
     judgeable = sorted(
@@ -684,12 +739,12 @@ def cost_per_surviving_line(
 
 
 def _first_commit_at_or_after(changes: Sequence[Change], stamp: datetime) -> Change | None:
-    """Earliest commit not before `stamp`.
+    """Earliest commit not before `stamp`, by the time the work was committed.
 
     Linear rather than bisecting: the commit list for a window is small, and a
     plain scan keeps the "which change did this turn feed into" rule obvious.
     """
     for change in changes:
-        if change.committed_at >= stamp:
+        if change.landed_at >= stamp:
             return change
     return None

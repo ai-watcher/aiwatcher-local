@@ -1156,7 +1156,11 @@ def _change_rows(
             "repo": change.repo,
             "project": short_path(change.repo),
             "subject": change.subject,
-            "committed_at": change.committed_at.isoformat(),
+            # landed_at is the author date, which is what attribution keys off
+            # and the honest answer to "when was this work done".
+            "committed_at": change.landed_at.isoformat(),
+            "rewritten_at": change.committed_at.isoformat() if change.was_rewritten else None,
+            "was_rewritten": change.was_rewritten,
             "cost_usd": round(change.cost_usd, 6),
             "cost_label": money(change.cost_usd),
             "lines_added": change.lines_added,
@@ -2132,9 +2136,10 @@ HTML = r"""<!doctype html>
         <tbody id="changeRows"></tbody>
       </table></div>
       <p class="receipt-note">A change's cost is the AI spend in that repo since the previous change, attributed per
-        model call rather than per session, and capped at a 12h lookback. Survival is only measured for changes old
-        enough to judge and costly enough to reach the sampling budget — a blank means not measured, not "did not
-        survive". It is a floor either way: reformatting moves attribution away from the original change.</p>
+        model call rather than per session, and capped at a 12h lookback from when the work was <em>authored</em> —
+        rebasing rewrites a commit's date, and keying off that stranded the spend behind it. Survival is only measured
+        for changes old enough to judge and costly enough to reach the sampling budget — a blank means not measured,
+        not "did not survive". It is a floor either way: reformatting moves attribution away from the original change.</p>
     </div>
   </section>
 
@@ -2638,7 +2643,7 @@ function renderChangeRows(rows) {
   }
   return rows.map(row => `<tr>
     <td><code>${esc(row.short_sha)}</code> ${esc(row.subject)}
-      <div class="session-meta">${esc(dateLabel(row.committed_at))}${row.tools.length ? ' &middot; ' + esc(row.tools.join(', ')) : ''}${row.event_count ? ' &middot; ' + esc(row.event_count) + ' model calls' : ''}</div></td>
+      <div class="session-meta">${esc(dateLabel(row.committed_at))}${row.tools.length ? ' &middot; ' + esc(row.tools.join(', ')) : ''}${row.event_count ? ' &middot; ' + esc(row.event_count) + ' model calls' : ''}${row.was_rewritten ? ' &middot; <span class="muted" title="Rebased or amended on ' + esc(dateLabel(row.rewritten_at)) + '. Cost is attributed by when the work was authored, not when it was rewritten.">rewritten</span>' : ''}</div></td>
     <td>${esc(row.project)}</td>
     <td class="num">${row.unattributed ? '<span class="muted">no spend observed</span>' : esc(row.cost_label)}</td>
     <td class="num">+${esc(row.lines_added)} / -${esc(row.lines_removed)}

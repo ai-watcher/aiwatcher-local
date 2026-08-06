@@ -519,6 +519,117 @@ class ForeignCommitTests(unittest.TestCase):
         self.assertEqual(led.foreign_changes, 0)
 
 
+def commit_rewritten(repo: str, path: str, body: str, subject: str, *, authored, committed) -> None:
+    """Commit with an author date behind its committer date — what a rebase,
+    cherry-pick, or late amend leaves behind."""
+    Path(repo, path).write_text(body, encoding="utf-8")
+    run(["git", "-C", repo, "add", path], repo)
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_DATE": authored.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "GIT_COMMITTER_DATE": committed.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    run(["git", "-C", repo, "commit", "-m", subject], repo, env=env)
+
+
+class RebaseAttributionTests(unittest.TestCase):
+    """`git rebase` restamps the committer date to the moment of the rebase.
+
+    Keying attribution off that pushed the original work outside the 12h
+    lookback: 30 of 32 rewritten commits locally read as free while the money
+    behind them read as waste. Both records were correct and simply could not
+    find each other. Attribution keys off the author date instead.
+    """
+
+    def test_rebased_commit_keeps_the_spend_that_produced_it(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            # Worked and committed 5 days ago, rebased 10 minutes ago.
+            commit_rewritten(repo, "a.py", "x\n", "the work",
+                             authored=now - timedelta(days=5),
+                             committed=now - timedelta(minutes=10))
+            led = build_ledger([event(repo, cost=6.0, when=now - timedelta(days=5, hours=1))],
+                               days=30, now=now)
+
+        self.assertEqual(len(led.changes), 1)
+        self.assertTrue(led.changes[0].was_rewritten)
+        self.assertAlmostEqual(led.changes[0].cost_usd, 6.0, places=6)
+        self.assertAlmostEqual(led.unbanked_usd, 0.0, places=6)
+
+    def test_rebasing_does_not_drag_old_work_into_a_recent_window(self) -> None:
+        # The mirror risk: a commit authored 40 days ago but rebased today must
+        # not enter a 7-day window, or it would appear with no spend beside it.
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            commit_rewritten(repo, "a.py", "x\n", "ancient work",
+                             authored=now - timedelta(days=40),
+                             committed=now - timedelta(minutes=5))
+            led = build_ledger([event(repo, cost=2.0, when=now - timedelta(hours=1))],
+                               days=7, now=now)
+
+        self.assertEqual(led.changes, [])
+        self.assertAlmostEqual(led.unbanked_usd, 2.0, places=6)
+
+    def test_an_unrewritten_commit_is_unaffected(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            commit(repo, "a.py", "x\n", "normal", when=now - timedelta(hours=1))
+            led = build_ledger([event(repo, cost=4.0, when=now - timedelta(hours=2))],
+                               days=7, now=now)
+
+        self.assertFalse(led.changes[0].was_rewritten)
+        self.assertAlmostEqual(led.changes[0].cost_usd, 4.0, places=6)
+
+    def test_author_date_in_the_future_falls_back_to_the_committer_date(self) -> None:
+        # An explicit --date or a skewed clock must not put a commit's
+        # attribution window ahead of the commit itself.
+        now = datetime.now(timezone.utc)
+        change = ledger_module.Change(
+            sha="abc", repo="/r", subject="skewed",
+            committed_at=now - timedelta(hours=1),
+            authored_at=now + timedelta(days=3),
+        )
+        self.assertEqual(change.landed_at, now - timedelta(hours=1))
+        self.assertFalse(change.was_rewritten)
+
+    def test_commits_order_by_when_the_work_happened(self) -> None:
+        # A rebase can restamp several commits to the same second. Ordering by
+        # committer date would make that order arbitrary; author dates keep the
+        # sequence the work was actually done in.
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            stamp = now - timedelta(minutes=5)
+            commit_rewritten(repo, "a.py", "1\n", "first work",
+                             authored=now - timedelta(days=3), committed=stamp)
+            commit_rewritten(repo, "b.py", "2\n", "second work",
+                             authored=now - timedelta(days=2), committed=stamp)
+            changes = commits_since(repo, now - timedelta(days=30))
+
+        self.assertEqual([c.subject for c in changes], ["first work", "second work"])
+
+    def test_spend_banks_to_the_sibling_it_preceded_after_a_rebase(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            stamp = now - timedelta(minutes=5)
+            commit_rewritten(repo, "a.py", "1\n", "day three",
+                             authored=now - timedelta(days=3), committed=stamp)
+            commit_rewritten(repo, "b.py", "2\n", "day two",
+                             authored=now - timedelta(days=2), committed=stamp)
+            led = build_ledger([
+                event(repo, cost=3.0, when=now - timedelta(days=3, hours=1)),
+                event(repo, cost=7.0, when=now - timedelta(days=2, hours=1)),
+            ], days=30, now=now)
+
+        by_subject = {c.subject: c.cost_usd for c in led.changes}
+        self.assertAlmostEqual(by_subject["day three"], 3.0, places=6)
+        self.assertAlmostEqual(by_subject["day two"], 7.0, places=6)
+
+
 class UnbankedSummaryTests(unittest.TestCase):
     def test_reports_share_repos_and_reasons(self) -> None:
         now = datetime.now(timezone.utc)
