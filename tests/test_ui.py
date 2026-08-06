@@ -1051,6 +1051,8 @@ class SessionSearchTests(unittest.TestCase):
 
         self.assertEqual(result["sessions"][0]["session_id"], "s1")
         self.assertIn("api_value", result["sessions"][0])
+        self.assertEqual(result["sessions"][0]["state"]["status"], "recent")
+        self.assertTrue(result["sessions"][0]["actions"])
 
     def test_session_search_skips_evidence_lookup_without_evidence_filter(self) -> None:
         # evidence_for_sessions() shells out to git per session with no cache --

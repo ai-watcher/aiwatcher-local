@@ -379,6 +379,8 @@ def _session_row_json(
         "api_value": money(row.cost_usd),
         "outcome": (window_outcomes.get(row.session_id) or {}).get("outcome"),
         "inferred_outcome": evidence_by_session.get(row.session_id).inferred_outcome if evidence_by_session.get(row.session_id) else None,
+        "state": session_state(row),
+        "actions": session_actions(row, outcome=window_outcomes.get(row.session_id)),
         "updated_at": (row.updated_at or row.started_at).isoformat() if (row.updated_at or row.started_at) else None,
     }
 
@@ -3607,7 +3609,7 @@ async function loadSessions() {
   document.getElementById('sessionRows').innerHTML = data.sessions.length
     ? data.sessions.map(s => `<tr class="clickable" onclick="selectSession('${esc(s.session_id)}')">
         <td>${esc(s.tool)}</td>
-        <td>${esc(s.project)}<br>${s.outcome ? outcomePill(s.outcome) : outcomeEvidencePill(s)}</td>
+        <td>${esc(s.project)}<br>${sessionStatePill(s.state)} ${s.outcome ? outcomePill(s.outcome) : outcomeEvidencePill(s)}</td>
         <td>${esc(s.model)}</td>
         <td class="mono">${esc(s.tokens)}</td>
         <td><button class="row-action">Review</button></td>
@@ -3672,7 +3674,7 @@ async function load(resetDetail = true, forceRefresh = false) {
   document.getElementById('latestSession').innerHTML = latest
     ? `<div class="session-summary"><div class="session-title">${esc(latest.project)}</div>
        <div class="session-meta">${esc(latest.tool)} · ${esc(latest.model)} · ${esc(latest.tokens)} tokens · ${esc(latest.api_value)}</div>
-       <div class="session-actions">${outcomePill(latest.outcome)}${outcomeEvidencePill(latest)}
+       <div class="session-actions">${sessionStatePill(latest.state)}${outcomePill(latest.outcome)}${outcomeEvidencePill(latest)}
        <button data-testid="review-latest" class="btn-primary" onclick="selectSession('${esc(latest.session_id)}')">Review outcome</button></div></div>`
     : '<div class="empty">No local AI session detected yet.</div>';
   const recommendation = data.insights[0];
