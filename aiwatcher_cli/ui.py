@@ -2094,7 +2094,7 @@ HTML = r"""<!doctype html>
     button { cursor: pointer; transition: background .15s ease, border-color .15s ease, color .15s ease; }
     button:hover { background: var(--surface-hover); border-color: #53647a; }
     button:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
-    button:disabled { cursor: wait; opacity: .62; }
+    button:disabled { cursor: not-allowed; opacity: .62; }
     .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
     .btn-primary { background: #2f6fbd; border-color: #5594df; color: white; }
     .btn-primary:hover { background: #397dce; border-color: #76adf0; }
@@ -2146,6 +2146,14 @@ HTML = r"""<!doctype html>
     .session-title { font-size: 18px; color: white; font-weight: 720; overflow-wrap: anywhere; }
     .session-meta { margin-top: 5px; color: var(--muted); }
     .session-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
+    .recommended-action {
+      border-color: rgba(86,157,231,.5);
+      background: linear-gradient(135deg, rgba(47,111,189,.2), rgba(14,20,29,.82));
+    }
+    .recommended-action h3 { font-size: 21px; margin-bottom: 6px; }
+    .recommended-action p { color: #b9c6d8; }
+    .action-kicker { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+    .tool-link-note { margin-top: 10px; font-size: 12px; color: #94a3b8; }
     .receipt-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: center; }
     .risk-flow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
     .risk-chip { border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; font-size: 12px; font-weight: 750; text-transform: capitalize; }
@@ -2970,7 +2978,7 @@ function sessionVerdict(s) {
 function renderVerdict(s) {
   const verdict = sessionVerdict(s);
   const subtitle = s.outcome
-    ? 'Saved locally. Pick a different button below anytime to change it.'
+    ? 'Saved locally. Use the recommended action above if you are continuing from this session.'
     : 'Confirm the outcome, then use the expensive asks below to improve the next run.';
   return `<div class="verdict-card ${esc(verdict.tone)}"><h3>${esc(verdict.title)}</h3>
     <p>${esc(subtitle)}</p>
@@ -3281,13 +3289,32 @@ async function selectProject(project) {
 function renderSessionActions(s) {
   const actions = s.actions || [];
   const hasHandoff = actions.some(action => action.id === 'handoff');
-  return `<section class="detail-section"><h3>Take action</h3>
-    <p>${esc((s.state && s.state.reason) || 'Use the next action that matches this session.')}</p>
+  const needsOutcome = actions.some(action => action.id === 'review_outcome');
+  const stateStatus = s.state && s.state.status ? s.state.status : 'unknown';
+  const liveish = stateStatus === 'active' || stateStatus === 'recent';
+  const title = hasHandoff
+    ? 'Recommended: continue in a fresh session'
+    : needsOutcome
+      ? 'Recommended: mark the outcome'
+      : 'Recommended: tighten the next prompt';
+  const body = hasHandoff
+    ? 'This session has enough context, model calls, or tool calls that a handoff brief is safer than replaying the whole history.'
+    : needsOutcome
+      ? 'Mark whether this worked so AIWatcher can measure value per useful change instead of only tokens.'
+      : 'Use this session as evidence, then preflight the next prompt before sending it.';
+  const openToolNote = liveish
+    ? 'AIWatcher can identify this as recently updated from local logs, but Claude, Codex, and Cursor do not expose stable desktop deep links to reopen the exact chat yet.'
+    : 'This session is no longer fresh enough for live control. Use it for evidence, prompt optimization, or a handoff brief.';
+  return `<section class="detail-section recommended-action"><div class="action-kicker">${sessionStatePill(s.state)}${outcomePill(s.outcome)}</div>
+    <h3>${esc(title)}</h3>
+    <p>${esc(body)}</p>
     <div class="copy-row">
-      ${hasHandoff ? `<button class="btn-primary" onclick="openHandoff('${esc(s.session_id)}')">Copy handoff</button>` : ''}
+      ${hasHandoff ? `<button class="btn-primary" onclick="openHandoff('${esc(s.session_id)}')">Create handoff capsule</button>` : ''}
+      ${needsOutcome ? `<button class="btn-primary" onclick="document.getElementById('outcomePanel').scrollIntoView({ behavior: 'smooth', block: 'center' })">Mark outcome</button>` : ''}
       <button class="btn-quiet" onclick="showView('prompt'); closeDrawer(); document.getElementById('promptInput').focus(); showToast('Paste the next prompt here to optimize it before sending')">Optimize next prompt</button>
-      <button class="btn-quiet" disabled title="Claude/Codex/Cursor do not expose stable session deep links yet">Open in tool unavailable</button>
+      <button class="btn-quiet" disabled title="${esc(openToolNote)}">Open in current tool unavailable</button>
     </div>
+    <p class="tool-link-note">${esc(openToolNote)}</p>
   </section>`;
 }
 async function selectSession(sessionId) {
@@ -3341,21 +3368,20 @@ async function selectSession(sessionId) {
           </tr>`).join('')}</tbody></table></div>
       </div></details></section>`
     : `<section class="detail-section"><details class="aiw-details"><summary>Advanced timeline</summary><div class="details-body"><p>No meaningful token/cost events are available for this tool yet.</p>${hiddenMetadata ? `<p>${esc(hiddenMetadata)} zero-value metadata events hidden.</p>` : ''}</div></details></section>`;
-  const outcomeActions = `<div class="outcome-control"><h3>Was this work useful?</h3>
-    <p>Mark the result so AIWatcher can measure value instead of tokens alone.</p>
-    <div class="outcome-options">
+  const outcomeButtons = `<div class="outcome-options">
       <button data-testid="outcome-useful" class="outcome-button useful ${s.outcome === 'useful' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','useful')">${s.outcome === 'useful' ? '✓ ' : ''}Useful</button>
       <button data-testid="outcome-rework" class="outcome-button rework ${s.outcome === 'rework' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','rework')">${s.outcome === 'rework' ? '✓ ' : ''}Needs rework</button>
       <button data-testid="outcome-abandoned" class="outcome-button abandoned ${s.outcome === 'abandoned' ? 'selected' : ''}" onclick="markOutcome('${esc(s.session_id)}','abandoned')">${s.outcome === 'abandoned' ? '✓ ' : ''}Abandoned</button>
-    </div>
-    <div class="handoff-cta">
-      <div>
-        <h4>Continue in a fresh session</h4>
-        <p>Create a paste-ready brief with local evidence, recent commits, and guardrails for Claude, Codex, Cursor, or VS Code.</p>
-      </div>
-      <button class="btn-primary" onclick="openHandoff('${esc(s.session_id)}')">Create handoff capsule</button>
-    </div>
     </div>`;
+  const outcomeActions = s.outcome
+    ? `<details id="outcomePanel" class="aiw-details outcome-control"><summary>Outcome marked: ${esc(s.outcome)} · change if needed</summary><div class="details-body">
+        <p>Changing this updates local value metrics and future cost-per-useful-change calculations.</p>
+        ${outcomeButtons}
+      </div></details>`
+    : `<div id="outcomePanel" class="outcome-control"><h3>Was this work useful?</h3>
+        <p>Mark the result so AIWatcher can measure value instead of tokens alone.</p>
+        ${outcomeButtons}
+      </div>`;
   const insights = s.insights && s.insights.length
     ? `<section class="detail-section"><h3>What to check next</h3>
         <ul class="insight-list">${s.insights.map(i => `<li>${esc(i)}</li>`).join('')}</ul>
@@ -3401,10 +3427,10 @@ async function selectSession(sessionId) {
     <p class="session-meta">${esc(s.tool)} · ${esc(s.model)}</p>
     ${miniStats({ sessions: 1, api_value: s.api_value, tokens: s.tokens_label, tool_calls: s.tool_calls })}
     <div class="pill-row">${sessionStatePill(s.state)}${outcomePill(s.outcome)}</div>
-    ${renderVerdict(s)}
-    ${outcomeActions}
     </section>
     ${renderSessionActions(s)}
+    ${outcomeActions}
+    ${renderVerdict(s)}
     ${promptReview}
     ${renderEvidence(s.outcome_evidence)}
     ${insights}
