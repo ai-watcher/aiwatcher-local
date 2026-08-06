@@ -892,8 +892,13 @@ class PromptPreflightTests(unittest.TestCase):
         )
         output = io.StringIO()
 
+        # get_ui_server() must be pinned: it reads the last dashboard recorded
+        # in local state, so without this the assertion silently depends on
+        # whether the developer happens to have `aiwatcher ui` running, and on
+        # which port. None exercises the DEFAULT_UI_PORT fallback deliberately.
         with (
             patch.object(cli, "get_baselines", return_value={}),
+            patch.object(cli, "get_ui_server", return_value=None),
             patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
             patch("sys.stdout", output),
         ):
@@ -986,6 +991,27 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertEqual(detail, "startfile")
         startfile.assert_called_once_with("http://127.0.0.1:8765/overlay?session=session-1")
         browser_open.assert_not_called()
+    def test_watch_notify_rewrites_wildcard_bind_to_loopback(self) -> None:
+        # A dashboard bound to 0.0.0.0 is recorded as such, but that address is
+        # not browsable -- the deep link has to name a host the user can click.
+        # The recorded-port case is covered by the test below; this one is only
+        # about the host rewrite.
+        row = session(1, project="/repo/orcha")
+        row.agent_calls = 300
+        args = SimpleNamespace(
+            days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250,
+            tokens_threshold=500_000, target="generic", notify=True,
+        )
+        with (
+            patch.object(cli, "get_baselines", return_value={}),
+            patch.object(cli, "get_ui_server", return_value={"host": "0.0.0.0", "port": 9123}),
+            patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
+            patch("sys.stdout", io.StringIO()),
+        ):
+            cli._print_watch_status_card(row, [row], args, [], {}, {})
+
+        _, kwargs = notify.call_args
+        self.assertEqual(kwargs.get("url"), f"http://127.0.0.1:9123/?session={row.session_id}")
 
     def test_watch_notify_deep_link_follows_actual_running_dashboard_port(self) -> None:
         """Regression guard: found while manually testing issue #31 -- `aiwatcher
