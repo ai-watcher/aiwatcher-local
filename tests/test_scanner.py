@@ -122,6 +122,187 @@ class ProjectPathTests(unittest.TestCase):
         self.assertNotIn("cumulative", " ".join(sessions[0].notes).lower())
 
 
+class PromptCacheAccountingTests(unittest.TestCase):
+    """Anthropic reports `input_tokens` as the *uncached remainder*. Reading it
+    alone ignored the cached bulk of every prompt and understated real cost by
+    roughly 11x across this machine's own history."""
+
+    def _scan_one(self, usage: dict) -> scanner.LocalSession:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            projects = Path(temp_dir) / "projects"
+            project = projects / "-tmp-demo"
+            project.mkdir(parents=True)
+            (project / "sess.jsonl").write_text(
+                json.dumps({
+                    "type": "assistant",
+                    "timestamp": "2026-06-24T10:00:00Z",
+                    "message": {"model": "claude-sonnet-5", "usage": usage},
+                }) + "\n",
+                encoding="utf-8",
+            )
+            with patch.object(scanner, "CLAUDE_PROJECTS_DIRS", [projects]):
+                sessions = scanner.scan_claude_code()
+        self.assertEqual(len(sessions), 1)
+        return sessions[0]
+
+    def test_cached_tokens_are_counted_and_billed(self) -> None:
+        # Verbatim usage shape from a real local log.
+        session = self._scan_one({
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 13_099,
+            "cache_read_input_tokens": 33_775,
+            "output_tokens": 339,
+            "cache_creation": {"ephemeral_1h_input_tokens": 13_099, "ephemeral_5m_input_tokens": 0},
+        })
+        self.assertEqual(session.tokens_in, 2 + 13_099 + 33_775)
+        self.assertEqual(session.cache_read_tokens, 33_775)
+        self.assertEqual(session.cache_write_tokens, 13_099)
+        self.assertAlmostEqual(session.cost_usd, 0.0938175, places=6)
+
+    def test_cache_counters_are_a_subset_of_tokens_in_not_an_addition(self) -> None:
+        session = self._scan_one({
+            "input_tokens": 100,
+            "cache_read_input_tokens": 900,
+            "output_tokens": 10,
+            "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 0},
+        })
+        self.assertEqual(session.tokens_in, 1_000)
+        self.assertLessEqual(session.cache_read_tokens + session.cache_write_tokens, session.tokens_in)
+
+    def test_missing_ttl_breakdown_falls_back_to_the_cheaper_5m_rate(self) -> None:
+        # Older logs report only the combined creation total. Attributing it to
+        # the 1h bucket would overstate cost, so it lands in 5m instead.
+        session = self._scan_one({
+            "input_tokens": 0,
+            "cache_creation_input_tokens": 1_000_000,
+            "output_tokens": 0,
+        })
+        self.assertEqual(session.cache_write_tokens, 1_000_000)
+        self.assertAlmostEqual(session.cost_usd, 3.00 * 1.25, places=6)
+
+    def test_uncached_session_is_unchanged(self) -> None:
+        session = self._scan_one({"input_tokens": 1_000, "output_tokens": 500})
+        self.assertEqual(session.tokens_in, 1_000)
+        self.assertEqual(session.cache_read_tokens, 0)
+        self.assertEqual(session.cache_write_tokens, 0)
+        self.assertAlmostEqual(session.cost_usd, (1_000 * 3.00 + 500 * 15.00) / 1_000_000, places=9)
+
+    def test_codex_cached_tokens_are_not_double_counted(self) -> None:
+        # Codex uses the opposite convention: its `input_tokens` already
+        # INCLUDES `cached_input_tokens`, so the Anthropic fix must not also
+        # add them there or the same tokens get counted twice.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "sessions"
+            root.mkdir()
+            rows = [
+                {"timestamp": "2026-07-01T10:00:00Z", "type": "session_meta",
+                 "payload": {"id": "session-1", "cwd": temp_dir}},
+                {"timestamp": "2026-07-01T10:00:01Z", "type": "turn_context",
+                 "payload": {"model": "gpt-5.2-codex", "cwd": temp_dir}},
+                {"timestamp": "2026-07-01T10:00:02Z", "type": "event_msg", "payload": {
+                    "type": "token_count", "info": {
+                        "total_token_usage": {"input_tokens": 16_225, "cached_input_tokens": 11_008,
+                                              "output_tokens": 165, "total_tokens": 16_390},
+                        "last_token_usage": {"input_tokens": 16_225, "cached_input_tokens": 11_008,
+                                             "output_tokens": 165, "total_tokens": 16_390},
+                    }}},
+            ]
+            (root / "rollout-session-1.jsonl").write_text(
+                "\n".join(json.dumps(row) for row in rows), encoding="utf-8"
+            )
+            with patch.object(scanner, "CODEX_SESSIONS_DIRS", [root]):
+                scanner.CODEX_ROLLOUT_CACHE = None
+                sessions, _events = scanner.scan_codex_rollouts()
+                scanner.CODEX_ROLLOUT_CACHE = None
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].tokens_in, 16_225)
+
+
+class PerRequestUsageTests(unittest.TestCase):
+    """Claude Code writes one transcript line per *content block*, each
+    repeating the same message-level usage. Usage is reported per API request,
+    so summing per line counted one request's tokens once per block -- locally
+    that inflated a single session from $71.57 to $127.19, and was what made
+    AIWatcher disagree with Claude Code's own `/cost`.
+    """
+
+    USAGE = {
+        "input_tokens": 10,
+        "cache_creation_input_tokens": 1_000,
+        "cache_read_input_tokens": 100_000,
+        "output_tokens": 500,
+        "cache_creation": {"ephemeral_1h_input_tokens": 1_000, "ephemeral_5m_input_tokens": 0},
+    }
+
+    def _write(self, project: Path, lines: list[dict]) -> None:
+        (project / "sess.jsonl").write_text(
+            "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
+        )
+
+    def _scan(self, lines: list[dict]):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            projects = Path(temp_dir) / "projects"
+            project = projects / "-tmp-demo"
+            project.mkdir(parents=True)
+            self._write(project, lines)
+            with patch.object(scanner, "CLAUDE_PROJECTS_DIRS", [projects]):
+                return scanner.scan_claude_code()[0], scanner.scan_claude_code_events()
+
+    def _line(self, *, request_id=None, message_id=None, block="text"):
+        message = {"model": "claude-sonnet-5", "usage": self.USAGE,
+                   "content": [{"type": block, "text": "x"}]}
+        if message_id is not None:
+            message["id"] = message_id
+        line = {"type": "assistant", "timestamp": "2026-06-24T10:00:00Z", "message": message}
+        if request_id is not None:
+            line["requestId"] = request_id
+        return line
+
+    def test_one_request_across_four_lines_is_billed_once(self) -> None:
+        four = [self._line(request_id="req_1", message_id="msg_1") for _ in range(4)]
+        session, events = self._scan(four)
+
+        self.assertEqual(session.tokens_in, 10 + 1_000 + 100_000)
+        self.assertEqual(session.tokens_out, 500)
+        self.assertEqual(session.cache_read_tokens, 100_000)
+        # Every line is still a real content block, so every line is an event --
+        # only the duplicated bill is dropped.
+        self.assertEqual(len(events), 4)
+        self.assertEqual(sum(e.tokens_in for e in events), 10 + 1_000 + 100_000)
+        self.assertAlmostEqual(sum(e.cost_usd for e in events), session.cost_usd, places=9)
+
+    def test_distinct_requests_are_billed_separately(self) -> None:
+        session, _ = self._scan([
+            self._line(request_id="req_1", message_id="msg_1"),
+            self._line(request_id="req_2", message_id="msg_2"),
+        ])
+        self.assertEqual(session.tokens_in, 2 * (10 + 1_000 + 100_000))
+        self.assertEqual(session.tokens_out, 2 * 500)
+
+    def test_message_id_is_the_fallback_when_request_id_is_absent(self) -> None:
+        # Older transcripts predate requestId.
+        session, _ = self._scan([self._line(message_id="msg_1") for _ in range(3)])
+        self.assertEqual(session.tokens_in, 10 + 1_000 + 100_000)
+
+    def test_lines_with_no_identifier_are_each_counted(self) -> None:
+        # Safe direction: a missed dedup over-counts by one, while merging on a
+        # bad key would silently discard a real request.
+        session, _ = self._scan([self._line() for _ in range(2)])
+        self.assertEqual(session.tokens_in, 2 * (10 + 1_000 + 100_000))
+
+    def test_sessions_and_events_agree_on_the_same_transcript(self) -> None:
+        lines = [
+            self._line(request_id="req_1", message_id="msg_1"),
+            self._line(request_id="req_1", message_id="msg_1", block="tool_use"),
+            self._line(request_id="req_2", message_id="msg_2"),
+        ]
+        session, events = self._scan(lines)
+        self.assertEqual(sum(e.tokens_in for e in events), session.tokens_in)
+        self.assertEqual(sum(e.tokens_out for e in events), session.tokens_out)
+        self.assertAlmostEqual(sum(e.cost_usd for e in events), session.cost_usd, places=9)
+
+
 class ScanDateTests(unittest.TestCase):
     def test_updated_at_uses_mtime_when_tail_events_lack_timestamps(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

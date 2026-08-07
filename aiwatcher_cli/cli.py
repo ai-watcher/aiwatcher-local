@@ -644,6 +644,35 @@ def _quantile(values: list[float], q: float) -> float:
 BASELINE_HISTORY_DAYS = 30
 BASELINE_TOOLS = ("claude-code", "codex-cli")
 
+# Bump whenever the *meaning* of a session's tokens/cost changes, so baselines
+# computed under the old accounting are discarded instead of being compared
+# against sessions measured under the new one.
+#   v2: prompt-cache tokens are counted and priced. Before this, cached input
+#       was ignored entirely, so both p75_tokens and p75_api_value came out
+#       roughly an order of magnitude low.
+# The 24h staleness window would eventually wash a change like this out on its
+# own, but "eventually" is not good enough here: the hook hot path reads the
+# cache without refreshing it, so a stale baseline keeps producing confident,
+# order-of-magnitude-wrong savings estimates until something else happens to
+# trigger a recompute.
+BASELINE_ACCOUNTING_VERSION = 2
+
+
+def usable_baselines() -> dict[str, object]:
+    """Cached baselines, or {} if they predate the current accounting.
+
+    Returning {} is deliberate: every caller already has a "not enough local
+    history yet" path, and falling into it is honest. Handing back a baseline
+    that is an order of magnitude low would instead make every comparison
+    against it confidently wrong, which is worse than saying nothing.
+    """
+    cached = get_baselines()
+    if not isinstance(cached, dict):
+        return {}
+    if cached.get("accounting_version") != BASELINE_ACCOUNTING_VERSION:
+        return {}
+    return cached
+
 
 def _normalize_tool_for_baseline(tool: str) -> str | None:
     if tool in {"claude", "claude-code"}:
@@ -710,6 +739,7 @@ def _compute_baselines() -> dict[str, object]:
     return {
         "computed_at": datetime.now(timezone.utc).isoformat(),
         "history_days": BASELINE_HISTORY_DAYS,
+        "accounting_version": BASELINE_ACCOUNTING_VERSION,
         "per_tool": per_tool,
     }
 
@@ -717,12 +747,13 @@ def _compute_baselines() -> dict[str, object]:
 def get_or_refresh_baselines(max_age_hours: int = 24) -> dict[str, object]:
     """Return cached prompt-savings baselines, recomputing if missing/stale.
 
-    Callers on the hook hot path must use local_state.get_baselines()
-    directly instead -- that never scans, it only reads whatever is
-    already cached. This refreshing version belongs only in places that
-    aren't latency-sensitive: `today`, `report`, and `ui` startup.
+    Callers on the hook hot path must use usable_baselines() instead --
+    that never scans, it only reads whatever is already cached (and drops
+    it if it predates the current accounting). This refreshing version
+    belongs only in places that aren't latency-sensitive: `today`,
+    `report`, and `ui` startup.
     """
-    cached = get_baselines()
+    cached = usable_baselines()
     computed_at = cached.get("computed_at") if isinstance(cached, dict) else None
     stale = True
     if computed_at:
@@ -850,7 +881,7 @@ def estimate_prompt_savings(prompt: str, *, risk_score: int, tool: str, cwd: str
     # hot-path fix is worth -- see the P0-3 tradeoff discussion.
     del cwd
     tool_key = _normalize_tool_for_baseline(tool)
-    baselines = get_baselines()
+    baselines = usable_baselines()
     per_tool = baselines.get("per_tool") if isinstance(baselines, dict) else None
     stats = per_tool.get(tool_key) if isinstance(per_tool, dict) and tool_key else None
 
@@ -3181,7 +3212,7 @@ def _runway_pressure(tool: str, sessions: Sequence[LocalSession]) -> dict[str, o
     baseline_tool = _normalize_tool_for_baseline(tool)
     if not baseline_tool:
         return None
-    baselines = get_baselines()
+    baselines = usable_baselines()
     per_tool = baselines.get("per_tool") if isinstance(baselines, dict) else None
     stats = per_tool.get(baseline_tool) if isinstance(per_tool, dict) else None
     if not isinstance(stats, dict):
@@ -3272,7 +3303,7 @@ def _velocity_signal(tool: str, events: Sequence[LocalEvent]) -> dict[str, objec
     baseline_tool = _normalize_tool_for_baseline(tool)
     if not baseline_tool or not events:
         return None
-    baselines = get_baselines()
+    baselines = usable_baselines()
     per_tool = baselines.get("per_tool") if isinstance(baselines, dict) else None
     stats = per_tool.get(baseline_tool) if isinstance(per_tool, dict) else None
     if not isinstance(stats, dict):

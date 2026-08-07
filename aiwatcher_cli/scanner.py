@@ -88,8 +88,14 @@ class LocalSession:
     started_at: datetime | None = None
     updated_at: datetime | None = None
     model: str | None = None
+    # tokens_in counts EVERY input token the provider billed for, including the
+    # cached ones. cache_read_tokens/cache_write_tokens break out how much of it
+    # was replayed conversation history rather than new content -- the two are a
+    # subset of tokens_in, not an addition to it, so don't sum all three.
     tokens_in: int = 0
     tokens_out: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     cost_usd: float = 0.0
     agent_calls: int = 0
     tool_calls: int = 0
@@ -119,6 +125,8 @@ class LocalSession:
             "model": self.model,
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
             "cost_usd": round(self.cost_usd, 6),
             "agent_calls": self.agent_calls,
             "tool_calls": self.tool_calls,
@@ -138,8 +146,12 @@ class LocalEvent:
     timestamp: datetime | None = None
     project_path: str | None = None
     model: str | None = None
+    # Same convention as LocalSession: tokens_in is all billed input, and the
+    # two cache counters are a subset of it.
     tokens_in: int = 0
     tokens_out: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     cost_usd: float = 0.0
     content_hash: str | None = None
     source_path: str | None = None
@@ -157,6 +169,8 @@ class LocalEvent:
             "model": self.model,
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
             "cost_usd": round(self.cost_usd, 6),
             "content_hash": self.content_hash,
             "source_path": self.source_path,
@@ -271,12 +285,17 @@ def segment_session_by_prompt(source_path: str | None, *, max_chars: int = 2000)
                         continue
                 if current is None:
                     continue
-                usage = message.get("usage") or obj.get("usage") or {}
-                input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
-                output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+                tokens = _anthropic_usage(message.get("usage") or obj.get("usage") or {})
                 model = message.get("model") or obj.get("model")
-                current["cost_usd"] = float(current["cost_usd"]) + estimate_cost(model, input_tokens, output_tokens)
-                current["tokens"] = int(current["tokens"]) + input_tokens + output_tokens
+                current["cost_usd"] = float(current["cost_usd"]) + estimate_cost(
+                    model,
+                    tokens["input"],
+                    tokens["output"],
+                    cache_write_5m=tokens["cache_write_5m"],
+                    cache_write_1h=tokens["cache_write_1h"],
+                    cache_read=tokens["cache_read"],
+                )
+                current["tokens"] = int(current["tokens"]) + _billed_input(tokens) + tokens["output"]
                 current["events"] = int(current["events"]) + 1
                 content = message.get("content")
                 if isinstance(content, list):
@@ -410,6 +429,82 @@ def _choose_project_path(
 
     normalized_fallback = _normalize_project_path(fallback_path)
     return normalized_fallback or fallback_path
+
+
+def _usage_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _anthropic_usage(usage: Any) -> dict[str, int]:
+    """Split an Anthropic usage block into its separately-billed token buckets.
+
+    With prompt caching on, `input_tokens` is only the *uncached remainder* --
+    routinely single digits on a long session, while the prompt that was
+    actually processed sits in `cache_creation_input_tokens` and
+    `cache_read_input_tokens`. Reading `input_tokens` alone (which this scanner
+    did until these buckets were added) understated observed cost by roughly
+    11x across this repo's own history: every turn re-sends the whole
+    conversation, and cached input is discounted but never free.
+
+    Anthropic-shaped only. Codex uses the opposite convention -- its
+    `input_tokens` already *includes* `cached_input_tokens` -- so passing a
+    Codex usage block through here would double-count the cached portion.
+    """
+    if not isinstance(usage, dict):
+        return {"input": 0, "output": 0, "cache_write_5m": 0, "cache_write_1h": 0, "cache_read": 0}
+    creation = usage.get("cache_creation")
+    if isinstance(creation, dict):
+        write_5m = _usage_int(creation.get("ephemeral_5m_input_tokens"))
+        write_1h = _usage_int(creation.get("ephemeral_1h_input_tokens"))
+    else:
+        # Older logs report only the combined total with no TTL breakdown.
+        # Anthropic's default TTL is 5m, so attribute it to that bucket rather
+        # than to the pricier 1h one -- this under-estimates rather than over.
+        write_5m = _usage_int(usage.get("cache_creation_input_tokens"))
+        write_1h = 0
+    return {
+        "input": _usage_int(usage.get("input_tokens") or usage.get("prompt_tokens")),
+        "output": _usage_int(usage.get("output_tokens") or usage.get("completion_tokens")),
+        "cache_write_5m": write_5m,
+        "cache_write_1h": write_1h,
+        "cache_read": _usage_int(usage.get("cache_read_input_tokens")),
+    }
+
+
+def _usage_receipt_key(obj: Any, message: Any) -> str | None:
+    """Identify the API request a transcript line's usage block belongs to.
+
+    Claude Code writes one line per *content block*, not per API call: a reply
+    containing text plus three tool_use blocks becomes four lines, milliseconds
+    apart, each carrying an identical copy of the message-level `usage`. Usage
+    is reported per request, so summing it per line counts one request's tokens
+    once per block.
+
+    Locally that inflated a single session from $71.57 to $127.19 -- 180 of 427
+    requests over-counted, some four times over -- which is why the figure
+    disagreed with Claude Code's own `/cost`.
+
+    `requestId` is the primary key because it is exactly what it claims to be;
+    `message.id` is the fallback for older transcripts that predate it. A line
+    with neither returns None and is counted on its own, which is the safe
+    direction: a missed dedup over-counts by one, while a bad key merge would
+    silently discard a real request.
+    """
+    request_id = obj.get("requestId") if isinstance(obj, dict) else None
+    if isinstance(request_id, str) and request_id:
+        return request_id
+    message_id = message.get("id") if isinstance(message, dict) else None
+    if isinstance(message_id, str) and message_id:
+        return message_id
+    return None
+
+
+def _billed_input(usage: dict[str, int]) -> int:
+    """Every input token the provider charged for, cached or not."""
+    return usage["input"] + usage["cache_write_5m"] + usage["cache_write_1h"] + usage["cache_read"]
 
 
 def _parse_ts(value: Any) -> datetime | None:
@@ -640,11 +735,16 @@ def scan_claude_code() -> list[LocalSession]:
             for fpath_raw in glob.glob(str(project_dir / "*.jsonl")):
                 fpath = Path(fpath_raw)
                 session_id = fpath.stem
+                # One usage block per API request, however many transcript
+                # lines that request produced. See _usage_receipt_key.
+                counted_requests: set[str] = set()
                 events_seen = 0
                 agent_calls = 0
                 tool_calls = 0
                 tokens_in = 0
                 tokens_out = 0
+                cache_read_tokens = 0
+                cache_write_tokens = 0
                 cost = 0.0
                 model: str | None = None
                 surface: str | None = None
@@ -684,15 +784,32 @@ def scan_claude_code() -> list[LocalSession]:
 
                             message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
                             msg_type = obj.get("type") or message.get("role")
-                            usage = message.get("usage") or obj.get("usage") or {}
-                            input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
-                            output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+                            tokens = _anthropic_usage(message.get("usage") or obj.get("usage") or {})
+                            # See scan_claude_code_events: a multi-block reply
+                            # repeats one request's usage on every line.
+                            receipt = _usage_receipt_key(obj, message)
+                            if receipt is not None:
+                                if receipt in counted_requests:
+                                    tokens = _anthropic_usage({})
+                                else:
+                                    counted_requests.add(receipt)
+                            input_tokens = _billed_input(tokens)
+                            output_tokens = tokens["output"]
                             event_model = message.get("model") or obj.get("model")
-                            event_cost = estimate_cost(event_model, input_tokens, output_tokens)
+                            event_cost = estimate_cost(
+                                event_model,
+                                tokens["input"],
+                                output_tokens,
+                                cache_write_5m=tokens["cache_write_5m"],
+                                cache_write_1h=tokens["cache_write_1h"],
+                                cache_read=tokens["cache_read"],
+                            )
                             if isinstance(cwd, str) and cwd:
                                 cwd_costs[cwd] += event_cost
                             tokens_in += input_tokens
                             tokens_out += output_tokens
+                            cache_read_tokens += tokens["cache_read"]
+                            cache_write_tokens += tokens["cache_write_5m"] + tokens["cache_write_1h"]
                             cost += event_cost
                             if event_model:
                                 model = event_model
@@ -741,6 +858,8 @@ def scan_claude_code() -> list[LocalSession]:
                     model=primary_model,
                     tokens_in=tokens_in,
                     tokens_out=tokens_out,
+                    cache_read_tokens=cache_read_tokens,
+                    cache_write_tokens=cache_write_tokens,
                     cost_usd=cost,
                     agent_calls=agent_calls,
                     tool_calls=tool_calls,
@@ -770,6 +889,9 @@ def scan_claude_code_events() -> list[LocalEvent]:
                 fpath = Path(fpath_raw)
                 session_id = fpath.stem
                 turn = 0
+                # One usage block per API request, however many transcript
+                # lines that request produced. See _usage_receipt_key.
+                counted_requests: set[str] = set()
                 try:
                     with fpath.open(errors="replace") as handle:
                         for index, line in enumerate(handle):
@@ -789,10 +911,27 @@ def scan_claude_code_events() -> list[LocalEvent]:
                             message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
                             msg_type = obj.get("type") or "unknown"
                             model = message.get("model") or obj.get("model")
-                            usage = message.get("usage") or obj.get("usage") or {}
-                            input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
-                            output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
-                            event_cost = estimate_cost(model, input_tokens, output_tokens)
+                            tokens = _anthropic_usage(message.get("usage") or obj.get("usage") or {})
+                            # Every line of a multi-block reply repeats the same
+                            # usage; charge it to the first line only. The later
+                            # lines still become events -- they are real content
+                            # blocks -- they just carry no second copy of the bill.
+                            receipt = _usage_receipt_key(obj, message)
+                            if receipt is not None:
+                                if receipt in counted_requests:
+                                    tokens = _anthropic_usage({})
+                                else:
+                                    counted_requests.add(receipt)
+                            input_tokens = _billed_input(tokens)
+                            output_tokens = tokens["output"]
+                            event_cost = estimate_cost(
+                                model,
+                                tokens["input"],
+                                output_tokens,
+                                cache_write_5m=tokens["cache_write_5m"],
+                                cache_write_1h=tokens["cache_write_1h"],
+                                cache_read=tokens["cache_read"],
+                            )
 
                             content_hash = None
                             content = message.get("content")
@@ -827,6 +966,8 @@ def scan_claude_code_events() -> list[LocalEvent]:
                                 model=model,
                                 tokens_in=input_tokens,
                                 tokens_out=output_tokens,
+                                cache_read_tokens=tokens["cache_read"],
+                                cache_write_tokens=tokens["cache_write_5m"] + tokens["cache_write_1h"],
                                 cost_usd=event_cost,
                                 content_hash=content_hash,
                                 source_path=str(fpath),

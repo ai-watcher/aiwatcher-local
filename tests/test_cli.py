@@ -124,6 +124,7 @@ class PromptSavingsBaselineTests(unittest.TestCase):
         fresh = {
             "computed_at": datetime.now(timezone.utc).isoformat(),
             "history_days": 30,
+            "accounting_version": cli.BASELINE_ACCOUNTING_VERSION,
             "per_tool": {"claude-code": {
                 "p75_tokens": 100_000, "p75_calls": 50, "p75_tool_calls": 20,
                 "p75_api_value": 1.0, "session_count": 12, "history_span_days": 20,
@@ -157,6 +158,68 @@ class PromptSavingsBaselineTests(unittest.TestCase):
         sessions_since.assert_called()
         save.assert_called_once()
         self.assertNotEqual(result["computed_at"], stale["computed_at"])
+
+    def test_baseline_from_older_accounting_is_recomputed_even_when_recent(self) -> None:
+        # The 24h staleness window is not enough on its own: prompt-cache
+        # tokens went uncounted before v2, so a baseline computed minutes ago
+        # under the old accounting is still an order of magnitude low.
+        outdated = {
+            "computed_at": datetime.now(timezone.utc).isoformat(),
+            "history_days": 30,
+            "accounting_version": cli.BASELINE_ACCOUNTING_VERSION - 1,
+            "per_tool": {"claude-code": {
+                "p75_tokens": 100_000, "p75_calls": 50, "p75_tool_calls": 20,
+                "p75_api_value": 1.0, "session_count": 12, "history_span_days": 20,
+                "excluded_cumulative": 0,
+            }},
+        }
+        with (
+            patch.object(cli, "get_baselines", return_value=outdated),
+            patch.object(cli, "sessions_since", return_value=[]) as sessions_since,
+            patch.object(cli, "save_baselines") as save,
+        ):
+            result = cli.get_or_refresh_baselines()
+
+        sessions_since.assert_called()
+        save.assert_called_once()
+        self.assertEqual(result["accounting_version"], cli.BASELINE_ACCOUNTING_VERSION)
+
+    def test_unversioned_baseline_is_treated_as_unusable(self) -> None:
+        # Baselines written before the stamp existed carry no version at all.
+        legacy = {"computed_at": datetime.now(timezone.utc).isoformat(), "per_tool": {"claude-code": {}}}
+        with patch.object(cli, "get_baselines", return_value=legacy):
+            self.assertEqual(cli.usable_baselines(), {})
+
+    def test_current_baseline_passes_through_unchanged(self) -> None:
+        current = {
+            "computed_at": datetime.now(timezone.utc).isoformat(),
+            "accounting_version": cli.BASELINE_ACCOUNTING_VERSION,
+            "per_tool": {},
+        }
+        with patch.object(cli, "get_baselines", return_value=current):
+            self.assertEqual(cli.usable_baselines(), current)
+
+    def test_outdated_baseline_yields_no_estimate_rather_than_a_wrong_one(self) -> None:
+        # The hook hot path reads the cache without refreshing it, so a
+        # rejected baseline must degrade to "not enough history" -- never to a
+        # confident number computed against the old accounting.
+        outdated = {
+            "computed_at": datetime.now(timezone.utc).isoformat(),
+            "accounting_version": cli.BASELINE_ACCOUNTING_VERSION - 1,
+            "per_tool": {"claude-code": {
+                "p75_tokens": 100_000, "p75_calls": 50, "p75_tool_calls": 20,
+                "p75_api_value": 1.0, "session_count": 12, "history_span_days": 20,
+                "excluded_cumulative": 0,
+            }},
+        }
+        with (
+            patch.object(cli, "get_baselines", return_value=outdated),
+            patch.object(cli, "sessions_since") as sessions_since,
+        ):
+            result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
+
+        sessions_since.assert_not_called()
+        self.assertFalse(result["estimated_impact"]["available"])
 
     def test_cold_hook_path_never_scans_history(self) -> None:
         # No cache at all (e.g. a brand new install) must still return
