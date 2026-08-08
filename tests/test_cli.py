@@ -282,6 +282,58 @@ class PromptSavingsBaselineTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
 
+    def _run_report(self, survival: dict[str, object]) -> str:
+        with (
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "get_or_refresh_baselines", return_value={}),
+            patch.object(cli, "get_or_refresh_survival", return_value={}),
+            patch.object(cli, "get_or_refresh_receipt_baseline", return_value={}),
+            patch.object(cli, "recheck_evidence_survival", return_value=0),
+            patch.object(ui, "_survival_summary", return_value=survival),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            self.assertEqual(cli.command_report(SimpleNamespace(days=7)), 0)
+        return stdout.getvalue()
+
+    def test_report_renders_line_survival_when_available(self) -> None:
+        # Regression: the renderer read the pre-line-survival keys and raised
+        # KeyError the moment survival became available, so the command failed
+        # exactly when it had something to say. No test covered the available
+        # branch -- the only survival tests exercised a function nothing called.
+        output = self._run_report({
+            "available": True,
+            "cost_per_surviving_line_label": "$0.42",
+            "cost_per_line_label": "$0.19",
+            "survival_pct": 73.0,
+            "changes_measured": 28,
+            "cost_coverage_pct": 81.0,
+        })
+
+        self.assertIn("Cost per surviving line: $0.42", output)
+        self.assertIn("$0.19 per line written", output)
+        self.assertIn("73.0% of lines still standing across 28 changes", output)
+        self.assertIn("81.0% of the window's banked spend", output)
+        # The retired per-change label must not come back with the old schema.
+        self.assertNotIn("Cost per surviving change", output)
+
+    def test_report_survives_a_survival_payload_missing_optional_fields(self) -> None:
+        # The bug was indexing, not the schema. A payload with only the headline
+        # figure should cost the detail line, not the whole command.
+        output = self._run_report({"available": True, "cost_per_surviving_line_label": "$0.42"})
+
+        self.assertIn("Cost per surviving line: $0.42", output)
+        self.assertNotIn("still standing", output)
+
+    def test_report_states_why_survival_is_unmeasured(self) -> None:
+        # Blank is not zero: an unmeasured figure has to say so rather than
+        # silently print nothing and read as "nothing survived".
+        output = self._run_report({
+            "available": False,
+            "reason": "Only 2 changes old enough to judge; need 3.",
+        })
+
+        self.assertIn("Only 2 changes old enough to judge", output)
+
     def test_ui_startup_continues_when_baseline_cache_is_unreadable(self) -> None:
         with (
             patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")),

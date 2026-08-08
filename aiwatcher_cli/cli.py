@@ -3263,10 +3263,27 @@ def command_report(args: argparse.Namespace) -> int:
 
     survival = digest["survival"]
     if survival.get("available"):
-        print(
-            f"\nCost per surviving change: {survival['cost_per_surviving_change']} "
-            f"(vs {survival['cost_per_churned_change']} churned, {survival['sample_count']} samples)"
-        )
+        # .get() throughout, not indexing: this renderer read the pre-line-survival
+        # keys long after the digest started returning the new schema, and every
+        # `aiwatcher report` run crashed with a KeyError the moment survival became
+        # available. A missing key should cost a field, not the command.
+        line = f"\nCost per surviving line: {survival.get('cost_per_surviving_line_label', '-')}"
+        per_line = survival.get("cost_per_line_label")
+        if per_line:
+            line += f" (vs {per_line} per line written)"
+        print(line)
+        pct = survival.get("survival_pct")
+        measured = survival.get("changes_measured")
+        if pct is not None and measured:
+            detail = f"  {pct}% of lines still standing across {measured} change{'s' if measured != 1 else ''}"
+            coverage = survival.get("cost_coverage_pct")
+            if coverage is not None:
+                detail += f", {coverage}% of the window's banked spend"
+            print(detail + ". A floor: blame moves on reformats.")
+    elif survival.get("reason"):
+        # Blank is not zero. Saying why it is unmeasured beats printing nothing
+        # and letting the reader assume nothing survived.
+        print(f"\nCost per surviving line: {survival['reason']}")
 
     print(f"\nRecommended: {digest['recommendation']}")
 

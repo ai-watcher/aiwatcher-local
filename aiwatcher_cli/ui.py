@@ -612,7 +612,9 @@ def build_weekly_digest(days: int = 7) -> dict[str, object]:
     try:
         survival = _survival_summary()
     except OSError:
-        survival = {"available": False, "sample_count": 0, "required_samples": MIN_SURVIVAL_SAMPLES}
+        # Same shape _survival_summary() returns when it has nothing, so every
+        # consumer has one schema to read rather than two.
+        survival = {"available": False, "reason": "Survival cache could not be read."}
 
     recommendation = _recommend_weekly_improvement(
         commands_blocked=len(blocked),
@@ -999,50 +1001,6 @@ def _build_intervention_receipts(
             "outcome": outcome.get("outcome") if outcome else None,
         })
     return receipts
-
-
-MIN_SURVIVAL_SAMPLES = 5
-
-
-def _cost_per_surviving_change(all_rows: list[LocalSession]) -> dict[str, object]:
-    """S-23: cost of sessions whose commit survived vs. churned, at the earliest checked bucket.
-
-    Deliberately scans the whole local history (all_rows), not just the
-    current days-window: survival needs >=7 days of age by definition, so a
-    short display window would almost always show zero samples even once
-    survival data exists. Honesty-gated the same way baselines are --
-    "available: False" until there's enough history to say anything real.
-    """
-    snapshots = evidence_snapshots_for_sessions()
-    rows_by_id = {row.session_id: row for row in all_rows}
-    survived_costs: list[float] = []
-    churned_costs: list[float] = []
-    for session_id, snapshot in snapshots.items():
-        survival = snapshot.get("survival") if isinstance(snapshot.get("survival"), dict) else {}
-        status = None
-        for bucket in ("7", "14", "30"):
-            entry = survival.get(bucket)
-            if isinstance(entry, dict) and entry.get("status") in {"survived", "churned"}:
-                status = entry["status"]
-                break
-        if status is None:
-            continue
-        row = rows_by_id.get(session_id)
-        if row is None:
-            continue
-        (survived_costs if status == "survived" else churned_costs).append(row.cost_usd)
-
-    sample_count = len(survived_costs) + len(churned_costs)
-    if sample_count < MIN_SURVIVAL_SAMPLES:
-        return {"available": False, "sample_count": sample_count, "required_samples": MIN_SURVIVAL_SAMPLES}
-    return {
-        "available": True,
-        "sample_count": sample_count,
-        "surviving_count": len(survived_costs),
-        "churned_count": len(churned_costs),
-        "cost_per_surviving_change": money(sum(survived_costs) / len(survived_costs)) if survived_costs else "—",
-        "cost_per_churned_change": money(sum(churned_costs) / len(churned_costs)) if churned_costs else "—",
-    }
 
 
 def _survival_summary() -> dict[str, object]:
