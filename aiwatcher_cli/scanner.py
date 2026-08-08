@@ -412,11 +412,109 @@ def _normalize_project_path(path: str | None) -> str | None:
     return PROJECT_PATH_CACHE[path]
 
 
+_ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![\w.-])("
+    r"(?:~|/[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)+)"
+    r"|(?:[A-Za-z]:[\\/][^\\/:*?\"<>|\r\n]+)"
+    r")"
+)
+
+
+def _normalize_project_hint(path: str | None) -> str | None:
+    """Normalize an explicit path mentioned by the user into a project root.
+
+    This is intentionally conservative: the path must be absolute-ish and
+    resolve to something on this machine, either directly or through an
+    existing parent directory. It lets a prompt like "work in /repo/aiwatcher"
+    override a stale/wrong tool cwd, without trying to infer projects from
+    fuzzy topic words.
+    """
+    if not path:
+        return None
+    cleaned = path.strip().strip("`'\"()[]{}<>,.;:")
+    if not cleaned:
+        return None
+    candidate = Path(cleaned).expanduser()
+    if not candidate.is_absolute():
+        return None
+
+    probe = candidate
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    if not probe.exists():
+        return None
+    if probe.is_file():
+        probe = probe.parent
+
+    return _normalize_project_path(str(probe))
+
+
+def _project_hints_from_text(text: str | None) -> list[str]:
+    if not text:
+        return []
+    hints: list[str] = []
+    seen: set[str] = set()
+    for match in _ABSOLUTE_PATH_RE.finditer(text):
+        normalized = _normalize_project_hint(match.group(1))
+        if normalized and normalized not in seen:
+            hints.append(normalized)
+            seen.add(normalized)
+    return hints
+
+
+def _codex_user_prompt_text(row_type: str | None, payload: dict[str, Any]) -> str | None:
+    """Best-effort extraction of real user prompt text from Codex rollout rows.
+
+    Codex rollout schemas have changed over time, so this accepts the common
+    message/user_input shapes while avoiding assistant/tool payloads.
+    """
+    role = str(payload.get("role") or "").lower()
+    payload_type = str(payload.get("type") or "").lower()
+    if row_type in {"user_message", "user_prompt"}:
+        candidates = [payload.get("text"), payload.get("message"), payload.get("prompt")]
+    elif row_type == "event_msg" and payload_type in {"user_message", "user_prompt", "user_input"}:
+        candidates = [payload.get("text"), payload.get("message"), payload.get("prompt")]
+    elif row_type == "response_item" and role == "user":
+        candidates = [payload.get("content"), payload.get("text")]
+    else:
+        return None
+
+    parts: list[str] = []
+    for candidate in candidates:
+        if isinstance(candidate, str):
+            parts.append(candidate)
+        elif isinstance(candidate, list):
+            for item in candidate:
+                if isinstance(item, dict):
+                    text = item.get("text") or item.get("input_text")
+                    if isinstance(text, str):
+                        parts.append(text)
+                elif isinstance(item, str):
+                    parts.append(item)
+    text = "\n".join(part.strip() for part in parts if part and part.strip()).strip()
+    return text or None
+
+
 def _choose_project_path(
     fallback_path: str,
     cwd_counts: dict[str, int],
     cwd_costs: dict[str, float],
+    hint_counts: dict[str, int] | None = None,
+    hint_costs: dict[str, float] | None = None,
 ) -> str:
+    hint_candidates: dict[str, tuple[int, float]] = {}
+    for hint, count in (hint_counts or {}).items():
+        normalized = _normalize_project_path(hint)
+        if not normalized:
+            continue
+        existing_count, existing_cost = hint_candidates.get(normalized, (0, 0.0))
+        hint_candidates[normalized] = (
+            existing_count + count,
+            existing_cost + (hint_costs or {}).get(hint, 0.0),
+        )
+    if hint_candidates:
+        return max(hint_candidates, key=lambda path: (hint_candidates[path][0], hint_candidates[path][1]))
+
     candidates: dict[str, tuple[float, int]] = {}
     for cwd, count in cwd_counts.items():
         normalized = _normalize_project_path(cwd)
@@ -858,6 +956,8 @@ def scan_claude_code() -> list[LocalSession]:
                 trailing_untimestamped = False
                 cwd_counts: dict[str, int] = defaultdict(int)
                 cwd_costs: dict[str, float] = defaultdict(float)
+                hint_counts: dict[str, int] = defaultdict(int)
+                hint_costs: dict[str, float] = defaultdict(float)
                 try:
                     with fpath.open(errors="replace") as handle:
                         for line in handle:
@@ -916,6 +1016,10 @@ def scan_claude_code() -> list[LocalSession]:
                             cost += event_cost
                             if event_model:
                                 model = event_model
+                            prompt_text = _user_prompt_text(message.get("content")) if msg_type == "user" and not obj.get("isMeta") else None
+                            for hint in _project_hints_from_text(prompt_text):
+                                hint_counts[hint] += 1
+                                hint_costs[hint] += event_cost
                             is_agent_call = bool(msg_type == "assistant" or event_model)
                             is_tool_call = bool(
                                 obj.get("toolUseResult") is not None or obj.get("toolUseID") or msg_type == "tool_result"
@@ -972,7 +1076,7 @@ def scan_claude_code() -> list[LocalSession]:
                 ))
 
                 session = sessions[-1]
-                session.project_path = _choose_project_path(fallback_project_path, cwd_counts, cwd_costs)
+                session.project_path = _choose_project_path(fallback_project_path, cwd_counts, cwd_costs, hint_counts, hint_costs)
 
     return sessions
 
@@ -997,6 +1101,7 @@ def scan_claude_code_events(since: datetime | None = None) -> list[LocalEvent]:
                 # One usage block per API request, however many transcript
                 # lines that request produced. See _usage_receipt_key.
                 counted_requests: set[str] = set()
+                hinted_project_path: str | None = None
                 try:
                     with fpath.open(errors="replace") as handle:
                         for index, line in enumerate(handle):
@@ -1015,6 +1120,13 @@ def scan_claude_code_events(since: datetime | None = None) -> list[LocalEvent]:
 
                             message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
                             msg_type = obj.get("type") or "unknown"
+                            content = message.get("content")
+                            prompt_text = _user_prompt_text(content) if msg_type == "user" and not obj.get("isMeta") else None
+                            hints = _project_hints_from_text(prompt_text)
+                            if hints:
+                                hinted_project_path = hints[0]
+                            if hinted_project_path:
+                                project_path = hinted_project_path
                             model = message.get("model") or obj.get("model")
                             tokens = _anthropic_usage(message.get("usage") or obj.get("usage") or {})
                             # Every line of a multi-block reply repeats the same
@@ -1040,7 +1152,6 @@ def scan_claude_code_events(since: datetime | None = None) -> list[LocalEvent]:
                             )
 
                             content_hash = None
-                            content = message.get("content")
                             if msg_type in {"user", "assistant"}:
                                 content_hash = _hash_text(content)
                             elif obj.get("toolUseID") or obj.get("toolUseResult") is not None:
@@ -1059,7 +1170,7 @@ def scan_claude_code_events(since: datetime | None = None) -> list[LocalEvent]:
 
                             # A real user prompt opens a new turn; every following event belongs to it.
                             # Same boundary test as segment_session_by_prompt() so turn numbers align.
-                            if msg_type == "user" and not obj.get("isMeta") and _user_prompt_text(content):
+                            if msg_type == "user" and not obj.get("isMeta") and prompt_text:
                                 turn += 1
 
                             events.append(LocalEvent(
@@ -1188,6 +1299,8 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
         agent_calls = 0
         tool_calls = 0
         previous_total = -1
+        hint_counts: dict[str, int] = defaultdict(int)
+        hint_costs: dict[str, float] = defaultdict(float)
         model_totals: dict[str, dict[str, float]] = defaultdict(
             lambda: {"tokens_in": 0.0, "tokens_out": 0.0, "cost_usd": 0.0, "agent_calls": 0.0, "tool_calls": 0.0}
         )
@@ -1223,6 +1336,12 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
                         tool_calls += 1
                         if model:
                             model_totals[model]["tool_calls"] += 1
+                    prompt_text = _codex_user_prompt_text(row_type, payload)
+                    for hint in _project_hints_from_text(prompt_text):
+                        hint_counts[hint] += 1
+                        hint_costs[hint] += estimate_cost(model, 0, 0)
+                    if hint_counts:
+                        project_path = _choose_project_path(project_path or "", {}, {}, hint_counts, hint_costs)
                     if row_type != "event_msg" or payload.get("type") != "token_count":
                         continue
                     info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
@@ -1266,6 +1385,8 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
             continue
         if not final_input and not final_output:
             continue
+        if hint_counts:
+            project_path = _choose_project_path(project_path or "", {}, {}, hint_counts, hint_costs)
         sessions.append(LocalSession(
             session_id=session_id,
             tool="codex-cli",

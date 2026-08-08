@@ -99,6 +99,33 @@ class ProjectPathTests(unittest.TestCase):
             )
         self.assertEqual(selected, "/repo/b")
 
+    def test_choose_project_prefers_explicit_user_path_hint_over_stale_cwd(self) -> None:
+        normalized = {
+            "/repo/right": "/repo/right",
+            "/repo/wrong": "/repo/wrong",
+        }
+        with patch.object(scanner, "_normalize_project_path", side_effect=lambda value: normalized.get(value)):
+            selected = scanner._choose_project_path(
+                "/repo/wrong",
+                {"/repo/wrong": 25},
+                {"/repo/wrong": 10.0},
+                {"/repo/right": 1},
+                {"/repo/right": 0.0},
+            )
+
+        self.assertEqual(selected, "/repo/right")
+
+    def test_project_hints_require_real_absolute_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "right-repo"
+            project.mkdir()
+            readme = project / "README.md"
+            readme.write_text("demo", encoding="utf-8")
+
+            hints = scanner._project_hints_from_text(f"Please work in `{readme}` before editing.")
+
+        self.assertEqual(hints, [str(project.resolve())])
+
     def test_codex_rollout_uses_measured_token_events(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "sessions"
@@ -126,6 +153,102 @@ class ProjectPathTests(unittest.TestCase):
         self.assertEqual(sessions[0].agent_calls, 2)
         self.assertEqual(len(events), 2)
         self.assertNotIn("cumulative", " ".join(sessions[0].notes).lower())
+
+    def test_claude_user_path_hint_overrides_stale_session_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            wrong_repo = Path(temp_dir) / "wrong-repo"
+            right_repo = Path(temp_dir) / "right-repo"
+            wrong_repo.mkdir()
+            right_repo.mkdir()
+            projects = Path(temp_dir) / "projects"
+            if os.name == "nt":
+                encoded_wrong = str(wrong_repo).replace(":", "-").replace("\\", "-")
+            else:
+                encoded_wrong = "-" + str(wrong_repo).lstrip("/").replace("/", "-")
+            project_dir = projects / encoded_wrong
+            project_dir.mkdir(parents=True)
+            session_file = project_dir / "sess.jsonl"
+            rows = [
+                {
+                    "type": "user",
+                    "timestamp": "2026-07-12T10:00:00Z",
+                    "cwd": str(wrong_repo),
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": f"Fix the attribution in {right_repo}."}],
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-07-12T10:00:01Z",
+                    "cwd": str(wrong_repo),
+                    "message": {
+                        "model": "claude-sonnet-4-6",
+                        "usage": {"input_tokens": 100, "output_tokens": 20},
+                    },
+                },
+            ]
+            session_file.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+            with patch.object(scanner, "CLAUDE_PROJECTS_DIRS", [projects]):
+                sessions = scanner.scan_claude_code()
+                events = scanner.scan_claude_code_events()
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].project_path, str(right_repo.resolve()))
+        self.assertTrue(events)
+        self.assertTrue(all(event.project_path == str(right_repo.resolve()) for event in events))
+
+    def test_codex_user_path_hint_overrides_stale_rollout_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            wrong_repo = Path(temp_dir) / "wrong-repo"
+            right_repo = Path(temp_dir) / "right-repo"
+            wrong_repo.mkdir()
+            right_repo.mkdir()
+            root = Path(temp_dir) / "sessions"
+            root.mkdir()
+            rollout = root / "rollout-session-1.jsonl"
+            rows = [
+                {
+                    "timestamp": "2026-07-01T10:00:00Z",
+                    "type": "session_meta",
+                    "payload": {"id": "session-1", "cwd": str(wrong_repo), "originator": "codex-tui"},
+                },
+                {
+                    "timestamp": "2026-07-01T10:00:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": f"Continue the AIWatcher UI work in {right_repo}."}],
+                    },
+                },
+                {
+                    "timestamp": "2026-07-01T10:00:02Z",
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5.5", "cwd": str(wrong_repo)},
+                },
+                {
+                    "timestamp": "2026-07-01T10:00:03Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {"input_tokens": 1000, "output_tokens": 100, "total_tokens": 1100},
+                            "last_token_usage": {"input_tokens": 1000, "output_tokens": 100, "total_tokens": 1100},
+                        },
+                    },
+                },
+            ]
+            rollout.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+            with patch.object(scanner, "CODEX_SESSIONS_DIRS", [root]):
+                scanner.CODEX_ROLLOUT_CACHE = None
+                sessions, events = scanner.scan_codex_rollouts()
+
+        scanner.CODEX_ROLLOUT_CACHE = None
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].project_path, str(right_repo.resolve()))
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].project_path, str(right_repo.resolve()))
 
 
 class PromptCacheAccountingTests(unittest.TestCase):
