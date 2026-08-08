@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from .local_state import recent_hook_events
 from .pricing import estimate_cost
 
 
@@ -679,6 +680,11 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
     codex_desktop_sessions = count("codex-cli", "desktop")
     cursor_sessions = count("cursor")
 
+    hook_events = recent_hook_events(limit=50)
+    hooked_tools = {str(e.get("tool", "")) for e in hook_events if isinstance(e, dict)}
+    claude_hook_seen = "claude" in hooked_tools
+    codex_hook_seen = "codex" in hooked_tools
+
     return [
         SurfaceCoverage(
             surface_id="claude-code-cli",
@@ -695,13 +701,23 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
         SurfaceCoverage(
             surface_id="claude-desktop-code",
             label="Claude Desktop Code tab",
-            status="limited" if detected.get("claude-code") else "unknown",
-            status_label="Hook-capable, verify locally",
+            status=(
+                "automatic" if (claude_desktop_sessions and detected.get("claude-code") and claude_hook_seen)
+                else "limited" if detected.get("claude-code")
+                else "unknown"
+            ),
+            status_label=(
+                "Auto gate + history" if (claude_desktop_sessions and detected.get("claude-code") and claude_hook_seen)
+                else "Hook-capable, verify locally"
+            ),
             detected=bool(detected.get("claude-code") or claude_desktop_sessions),
-            automatic_gate="Works only when the Desktop Code tab invokes Claude Code hooks",
+            automatic_gate="UserPromptSubmit hook fires from both Claude Code CLI and the Desktop Code tab",
             history="Visible when the host writes Claude Code JSONL",
-            action="Submit a test prompt, then run `aiwatcher hook-status`.",
-            detail="Do not assume every Claude Desktop surface behaves the same.",
+            action=(
+                "Verify with `aiwatcher hook-status`." if (claude_desktop_sessions and claude_hook_seen)
+                else "Submit a test prompt, then run `aiwatcher hook-status`."
+            ),
+            detail="The user-level hook covers both Claude Code CLI and the Desktop Code tab.",
             session_count=claude_desktop_sessions,
         ),
         SurfaceCoverage(
@@ -741,13 +757,33 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
         SurfaceCoverage(
             surface_id="codex-desktop",
             label="Codex Desktop",
-            status="unverified" if codex_desktop_sessions else "companion",
-            status_label="Unverified automatic gate",
+            status=(
+                "limited" if (codex_desktop_sessions and detected.get("codex-cli") and codex_hook_seen)
+                else "unverified" if codex_desktop_sessions
+                else "companion"
+            ),
+            status_label=(
+                "Hook active + history" if (codex_desktop_sessions and detected.get("codex-cli") and codex_hook_seen)
+                else "Unverified automatic gate" if codex_desktop_sessions
+                else "Companion only"
+            ),
             detected=bool(codex_desktop_sessions),
-            automatic_gate="Do not assume Desktop conversation prompts invoke hooks",
+            automatic_gate=(
+                "Hook fires; Desktop conversation surface may share CLI hook invocation"
+                if (codex_desktop_sessions and codex_hook_seen)
+                else "Do not assume Desktop conversation prompts invoke hooks"
+            ),
             history="Visible only when Codex writes readable local sessions",
-            action="Use Prompt Companion unless `hook-status` proves the hook fired.",
-            detail="This surface needs real-device verification before stronger claims.",
+            action=(
+                "Verify with `aiwatcher hook-status` after a Desktop prompt."
+                if (codex_desktop_sessions and codex_hook_seen)
+                else "Use Prompt Companion unless `hook-status` proves the hook fired."
+            ),
+            detail=(
+                "Hook events seen for Codex; Desktop coverage verified by `hook-status`."
+                if (codex_desktop_sessions and codex_hook_seen)
+                else "This surface needs real-device verification before stronger claims."
+            ),
             session_count=codex_desktop_sessions,
         ),
         SurfaceCoverage(

@@ -139,6 +139,15 @@ def _recent_commits(repo: str, session: LocalSession) -> list[dict[str, Any]]:
     return commits[:10]
 
 
+def _files_in_commit(repo: str, sha: str) -> list[str]:
+    """Paths touched by one commit. Empty for a merge commit, which
+    `git show --name-only` reports no files for."""
+    result = _run_git(repo, ["show", "--name-only", "--format=", sha])
+    if not result or result.returncode != 0:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
 def _files_touched(repo: str, commits: list[dict[str, Any]]) -> list[str]:
     """Union of file paths touched by this session's own commits (not uncommitted status).
 
@@ -153,11 +162,7 @@ def _files_touched(repo: str, commits: list[dict[str, Any]]) -> list[str]:
         sha = str(commit.get("sha") or "")
         if not sha:
             continue
-        result = _run_git(repo, ["show", "--name-only", "--format=", sha])
-        if not result or result.returncode != 0:
-            continue
-        for line in result.stdout.splitlines():
-            path = line.strip()
+        for path in _files_in_commit(repo, sha):
             if path and path not in seen:
                 seen.add(path)
                 touched.append(path)
@@ -190,6 +195,75 @@ def check_commit_survival(repo: str, sha: str) -> str:
     if result.returncode == 1:
         return "churned"
     return "unknown"  # sha not found / repo error -- e.g. shallow clone, gc'd object
+
+
+def _tracked_paths_at_head(repo: str) -> set[str] | None:
+    """Every path tracked at HEAD, or None if the repo can't be read.
+
+    One git call per repo so a sweep across many sessions doesn't shell out
+    once per file.
+    """
+    result = _run_git(repo, ["ls-tree", "-r", "HEAD", "--name-only"])
+    if not result or result.returncode != 0:
+        return None
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
+def find_reverts_of(repo: str, sha: str) -> list[str]:
+    """SHAs of later commits reachable from HEAD whose message cites `sha`.
+
+    `git revert` records "This reverts commit <sha>." in the body and leaves
+    the original commit exactly where it was, so matching on the sha text is
+    the only way to see it. `--fixed-strings` because --grep is a regex by
+    default; a hex sha is harmless either way, but this stops a malformed
+    stored value from being interpreted as a pattern.
+    """
+    result = _run_git(
+        repo,
+        ["log", f"{sha}..HEAD", "--fixed-strings", f"--grep={sha}", "--pretty=format:%H"],
+    )
+    if not result or result.returncode != 0:
+        return []
+    return [line.strip()[:12] for line in result.stdout.splitlines() if line.strip()]
+
+
+def check_commit_undone(repo: str, sha: str, *, tracked_paths: set[str] | None = None) -> dict[str, Any]:
+    """Explicit-undo signals for a commit that is still reachable from HEAD.
+
+    check_commit_survival only reports "churned" once a commit becomes
+    unreachable -- rebased, reset, or amended away. The two most common ways
+    work actually stops being used leave the original commit untouched:
+    `git revert` adds a *new* commit, and deleting the files a commit created
+    changes nothing about the commit itself. Both score "survived" today.
+
+    Deliberately reports signals rather than a verdict. A missing file may
+    have been renamed rather than deleted, so `files_missing` is evidence, not
+    proof, and only a full revert or a total wipe of the commit's files sets
+    `undone`. Partial rewrites are what line-level survival is for; this is
+    the cheap version that answers whether churn exists at all.
+
+    `tracked_paths` lets a caller sweeping many sessions in one repo pay for
+    the `git ls-tree` once instead of per commit.
+    """
+    reverted_by = find_reverts_of(repo, sha)
+    files = _files_in_commit(repo, sha)
+    if tracked_paths is None:
+        tracked_paths = _tracked_paths_at_head(repo)
+    missing = [path for path in files if path not in tracked_paths] if tracked_paths is not None else []
+    reasons: list[str] = []
+    if reverted_by:
+        reasons.append(f"Later commit(s) {', '.join(reverted_by[:3])} revert this change.")
+    if files and len(missing) == len(files):
+        reasons.append(f"All {len(files)} file(s) this commit touched are gone from HEAD.")
+    elif missing:
+        reasons.append(f"{len(missing)} of {len(files)} file(s) this commit touched are gone from HEAD.")
+    return {
+        "undone": bool(reverted_by) or bool(files and len(missing) == len(files)),
+        "reverted_by": reverted_by,
+        "files_total": len(files),
+        "files_missing": len(missing),
+        "reasons": reasons,
+    }
 
 
 def _changed_files(repo: str) -> list[str]:

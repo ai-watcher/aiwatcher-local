@@ -24,6 +24,7 @@ from .cli import (
     timeline_analysis,
 )
 from .correlate import link_recent_interventions_to_sessions
+from .evidence_capture import record_missing_evidence_snapshots_from_evidence
 from .handoff import build_handoff_capsule
 from .metrics import model_cost_comparison, pace_vs_baseline, replayed_context_cost
 from .local_state import (
@@ -1438,6 +1439,14 @@ def build_summary(days: int = 7) -> dict[str, object]:
     outcomes = outcome_counts(window_session_ids)
     sample_rows = rows[:30]
     evidence_by_session = evidence_for_sessions(sample_rows, survival_by_session=survival_by_session(sample_rows))
+    try:
+        record_missing_evidence_snapshots_from_evidence(sample_rows, evidence_by_session)
+    except OSError:
+        pass
+    try:
+        evidence_snapshots = evidence_snapshots_for_sessions({row.session_id for row in recent})
+    except OSError:
+        evidence_snapshots = {}
     inferred_useful = sum(
         1
         for session_id, evidence in evidence_by_session.items()
@@ -1542,6 +1551,8 @@ def build_summary(days: int = 7) -> dict[str, object]:
                 "api_value": money(row.cost_usd),
                 "outcome": (window_outcomes.get(row.session_id) or {}).get("outcome"),
                 "inferred_outcome": evidence_by_session.get(row.session_id).inferred_outcome if evidence_by_session.get(row.session_id) else None,
+                "evidence_captured": row.session_id in evidence_snapshots,
+                "evidence_recorded_at": (evidence_snapshots.get(row.session_id) or {}).get("recorded_at"),
                 "updated_at": (row.updated_at or row.started_at).isoformat() if (row.updated_at or row.started_at) else None,
             }
             for row in recent
@@ -1743,7 +1754,8 @@ HTML = r"""<!doctype html>
     .coverage-head, .health-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
     .coverage-status, .health-severity { border-radius: 999px; border: 1px solid var(--line); padding: 4px 8px; font-size: 11px; font-weight: 800; white-space: nowrap; }
     .coverage-status.automatic, .health-severity.healthy { color: #bff5df; border-color: rgba(53,211,153,.45); background: var(--green-soft); }
-    .coverage-status.limited, .coverage-status.unverified, .health-severity.warning { color: #ffe2a4; border-color: rgba(246,189,96,.45); background: var(--amber-soft); }
+    .coverage-status.limited { color: #b8f0e0; border-color: rgba(53,211,153,.3); background: rgba(53,211,153,.1); }
+    .coverage-status.unverified, .health-severity.warning { color: #ffe2a4; border-color: rgba(246,189,96,.45); background: var(--amber-soft); }
     .coverage-status.companion { color: #dceaff; border-color: rgba(112,167,255,.45); background: var(--blue-soft); }
     .coverage-status.unsupported, .coverage-status.not_detected, .health-severity.critical { color: #ffc4ce; border-color: rgba(242,125,143,.45); background: var(--red-soft); }
     .coverage-detail, .health-detail { display: grid; gap: 6px; color: var(--muted); font-size: 12px; line-height: 1.45; }
@@ -1764,6 +1776,7 @@ HTML = r"""<!doctype html>
     .outcome-pill.useful { color: #bff5df; border-color: rgba(53,211,153,.38); background: var(--green-soft); }
     .outcome-pill.rework { color: #ffe2a4; border-color: rgba(246,189,96,.38); background: var(--amber-soft); }
     .outcome-pill.abandoned { color: #ffc4ce; border-color: rgba(242,125,143,.38); background: var(--red-soft); }
+    .outcome-pill.evidence { color: #d4e7ff; border-color: rgba(135,168,255,.36); background: rgba(135,168,255,.12); }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th, td { border-bottom: 1px solid var(--line); padding: 11px 8px; text-align: left; }
     th { color: var(--muted); font-weight: 600; }
@@ -2016,7 +2029,10 @@ HTML = r"""<!doctype html>
     <section class="grid two" style="margin-top:14px">
       <div class="card">
         <h2>Models and Tools</h2>
+        <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 4px">By model</h3>
         <div id="models"></div>
+        <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:14px 0 4px">By tool</h3>
+        <div id="tools"></div>
       </div>
       <div class="card">
         <div class="section-title"><div><h2>Privacy at a glance</h2><p>Your local trust boundary stays visible.</p></div></div>
@@ -2395,6 +2411,7 @@ function outcomeEvidencePill(session) {
   if (session.inferred_outcome === 'churned') return '<span class="pill outcome-pill rework">Evidence: reverted/rewritten</span>';
   if (session.inferred_outcome === 'useful') return '<span class="pill outcome-pill useful">Evidence: likely useful</span>';
   if (session.inferred_outcome === 'needs_review') return '<span class="pill outcome-pill rework">Evidence: review changes</span>';
+  if (session.evidence_captured) return '<span class="pill outcome-pill evidence">Evidence captured</span>';
   return '';
 }
 function survivalLabel(survival) {
@@ -2769,6 +2786,8 @@ async function selectProject(project) {
     ${miniStats(data.totals)}
     </section><section class="detail-section"><h3>Models used</h3>
     ${bars(data.models, "api_value_label", "model")}
+    </section><section class="detail-section"><h3>Tools used</h3>
+    ${bars(data.tools, "api_value_label", "tool")}
     </section><section class="detail-section"><h3>Recent sessions</h3>
     <div class="table-wrap"><table><thead><tr><th>Tool</th><th>Model</th><th>Tokens</th><th></th></tr></thead>
       <tbody>${data.sessions.map(s => `<tr class="clickable" onclick="selectSession('${s.session_id}')">
@@ -3157,6 +3176,7 @@ async function load(resetDetail = true) {
     : '<div class="empty">Nothing unusual yet. Keep the next task scoped and define a stop condition.</div>';
   document.getElementById('projects').innerHTML = bars(data.projects, "api_value_label", "project");
   document.getElementById('models').innerHTML = bars(data.models, "api_value_label", "model");
+  document.getElementById('tools').innerHTML = bars(data.tools, "api_value_label", "tool");
   document.getElementById('insights').innerHTML = data.insights.length
     ? data.insights.map(i => `<div class="insight"><strong>${esc(i.title)}</strong><p>${esc(i.body)}</p></div>`).join('')
     : '<div class="empty">No notable local signals yet.</div>';

@@ -38,6 +38,13 @@ class DashboardServeTests(unittest.TestCase):
 
 
 class DashboardWindowTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._state_dir.cleanup)
+        env = patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(self._state_dir.name, "state.json")})
+        env.start()
+        self.addCleanup(env.stop)
+
     def test_dashboard_script_is_valid_javascript(self) -> None:
         # A single unquoted/malformed token anywhere in this one large inline
         # <script> block breaks the entire dashboard silently -- every tab
@@ -90,6 +97,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Handoff copied. Start a fresh chat now.", ui.HTML)
         self.assertIn("decision receipt saved", ui.HTML)
         self.assertIn("Include prompt excerpt", ui.HTML)
+        self.assertIn("Evidence captured", ui.HTML)
         self.assertNotIn("window.alert", ui.HTML)
 
     def test_overlay_page_is_a_local_handoff_companion(self) -> None:
@@ -436,6 +444,46 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(summary["totals"]["inferred_useful_outcomes"], 1)
         self.assertEqual(summary["recent_sessions"][0]["inferred_outcome"], "useful")
         self.assertTrue(any(item["id"] == "outcome-review" for item in summary["insights"]))
+
+    def test_summary_marks_passively_captured_evidence(self) -> None:
+        now = datetime.now(timezone.utc)
+        rows = [
+            LocalSession(
+                session_id="recent",
+                tool="claude-code",
+                project_path="/repo",
+                started_at=now - timedelta(hours=5),
+                updated_at=now - timedelta(hours=4),
+                tokens_in=100,
+                tokens_out=50,
+                cost_usd=0.4,
+            )
+        ]
+
+        class Evidence:
+            inferred_outcome = None
+
+            def to_json(self):
+                return {
+                    "inferred_outcome": None,
+                    "confidence": "low",
+                    "commits": [],
+                    "changed_files": [],
+                    "tests": [],
+                    "reasons": [],
+                }
+
+        with (
+            patch.object(ui, "scan_all", return_value=rows),
+            patch.object(ui, "scan_all_events", return_value=[]),
+            patch.object(ui, "discover_tools", return_value={}),
+            patch.object(ui, "evidence_for_sessions", return_value={"recent": Evidence()}),
+            patch.object(ui, "survival_by_session", return_value={}),
+        ):
+            summary = ui.build_summary(7)
+
+        self.assertTrue(summary["recent_sessions"][0]["evidence_captured"])
+        self.assertIsNotNone(summary["recent_sessions"][0]["evidence_recorded_at"])
 
     # The three _cost_per_surviving_change tests that stood here were deleted with
     # the function. They kept passing after the reachability metric was replaced by

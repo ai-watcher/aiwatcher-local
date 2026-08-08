@@ -46,23 +46,34 @@ class ProjectPathTests(unittest.TestCase):
                 tokens_in=10,
             )
         ]
-        with patch.object(
-            scanner,
-            "discover_tools",
-            return_value={
-                "claude-code": True,
-                "codex-cli": False,
-                "cursor": False,
-                "cline": False,
-                "windsurf": False,
-            },
+        tools = {
+            "claude-code": True,
+            "codex-cli": False,
+            "cursor": False,
+            "cline": False,
+            "windsurf": False,
+        }
+        # Without hook events: Desktop Code tab stays "limited" ([..])
+        with (
+            patch.object(scanner, "discover_tools", return_value=tools),
+            patch.object(scanner, "recent_hook_events", return_value=[]),
         ):
-            coverage = {row.surface_id: row for row in scanner.surface_coverage(rows)}
+            coverage_no_hooks = {row.surface_id: row for row in scanner.surface_coverage(rows)}
 
-        self.assertEqual(coverage["claude-desktop-code"].status, "limited")
-        self.assertEqual(coverage["claude-desktop-code"].session_count, 1)
-        self.assertEqual(coverage["claude-desktop-chat"].status, "companion")
-        self.assertIn("No verified local hook", coverage["claude-desktop-chat"].automatic_gate)
+        self.assertEqual(coverage_no_hooks["claude-desktop-code"].status, "limited")
+        self.assertEqual(coverage_no_hooks["claude-desktop-code"].session_count, 1)
+        self.assertEqual(coverage_no_hooks["claude-desktop-chat"].status, "companion")
+        self.assertIn("No verified local hook", coverage_no_hooks["claude-desktop-chat"].automatic_gate)
+
+        # With hook events for "claude": Desktop Code tab upgrades to "automatic" ([OK])
+        with (
+            patch.object(scanner, "discover_tools", return_value=tools),
+            patch.object(scanner, "recent_hook_events", return_value=[{"tool": "claude", "event": "received"}]),
+        ):
+            coverage_with_hooks = {row.surface_id: row for row in scanner.surface_coverage(rows)}
+
+        self.assertEqual(coverage_with_hooks["claude-desktop-code"].status, "automatic")
+        self.assertEqual(coverage_with_hooks["claude-desktop-code"].status_label, "Auto gate + history")
 
     def test_decode_claude_path_preserves_hyphenated_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
