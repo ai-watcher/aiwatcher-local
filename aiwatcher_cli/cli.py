@@ -66,7 +66,7 @@ from .local_state import (
     state_path,
 )
 from .handoff import TARGET_LABELS, build_handoff_capsule, render_handoff_capsule
-from .ledger import build_ledger, cost_per_surviving_line, unbanked_summary
+from .ledger import Ledger, build_ledger, cost_per_surviving_line, repos_matching, unbanked_summary
 from .statusline import statusline_from_stdin, statusline_settings_snippet
 from .receipt import (
     RECEIPT_DAYS,
@@ -2656,15 +2656,21 @@ def command_status(_args: argparse.Namespace) -> int:
     return 0
 
 
-def print_unbanked_line(events: Sequence[LocalEvent], *, days: int = 7) -> None:
+def print_unbanked_line(
+    events: Sequence[LocalEvent], *, days: int = 7, ledger: Ledger | None = None
+) -> None:
     """Report spend in the window that never reached a commit.
 
     One `git log` per repo with spend, so it is cheap enough to run inline --
     unlike survival, which needs a blame pass per file and stays cached.
     Prints nothing when there is no story: silence beats a card saying $0.
+
+    `ledger` lets a caller that already built one hand it over. That saves a
+    second git pass, but the reason it exists is correctness: a caller scoped
+    to one repo must not print an unbanked total computed across all of them.
     """
     try:
-        card = unbanked_summary(build_ledger(list(events), days=days))
+        card = unbanked_summary(ledger if ledger is not None else build_ledger(list(events), days=days))
     except OSError:
         return
     if not card.get("available"):
@@ -2678,10 +2684,10 @@ def print_unbanked_line(events: Sequence[LocalEvent], *, days: int = 7) -> None:
         print(f"  {short_path(str(entry['repo'])):50} {money(float(entry['unbanked_usd'])):>10}")
     if float(card.get("unresolved_usd") or 0) > 0:
         print(
-            f"  ({money(float(card['unresolved_usd']))} excluded — git could not read "
+            f"  ({money(float(card['unresolved_usd']))} excluded -- git could not read "
             f"{len(card.get('unresolved_repos') or [])} repo(s).)"
         )
-    print("  Exploration that went nowhere, or work still uncommitted — this cannot tell them apart.")
+    print("  Exploration that went nowhere, or work still uncommitted -- this cannot tell them apart.")
 
 
 def command_statusline(args: argparse.Namespace) -> int:
@@ -2967,23 +2973,37 @@ def command_uninstall_commit_hook(args: argparse.Namespace) -> int:
 
 
 def command_changes(args: argparse.Namespace) -> int:
-    """Per-commit cost and $/line — the ledger behind the aggregate figures."""
+    """Per-commit cost and $/line -- the ledger behind the aggregate figures."""
     try:
         events = scan_all_events()
     except OSError:
         events = []
+    # Scope the ledger itself rather than filtering its rows: every figure
+    # printed below (unbanked spend, foreign commits) comes off the ledger, and
+    # a filtered table under machine-wide totals is the kind of mismatch that
+    # makes the whole page untrustworthy.
+    only_repo: str | None = None
+    if args.repo:
+        matches = repos_matching(events, args.repo)
+        if not matches:
+            print(f"No repo with AI spend in the last {args.days} days matches {args.repo!r}.")
+            return 0
+        if len(matches) > 1:
+            print(f"{args.repo!r} matches {len(matches)} repositories. Narrow it to one of:")
+            for path in matches:
+                print(f"  {short_path(path)}")
+            return 1
+        only_repo = matches[0]
+
     try:
-        ledger = build_ledger(events, days=args.days)
+        ledger = build_ledger(events, days=args.days, only_repo=only_repo)
     except OSError:
         print("Could not read git history for the active repos.")
         return 1
 
     rows = ledger.changes
-    if args.repo:
-        needle = args.repo.lower()
-        rows = [change for change in rows if needle in change.repo.lower()]
     if not rows:
-        print(f"No commits in the last {args.days} days" + (" matching that repo." if args.repo else "."))
+        print(f"No commits in the last {args.days} days" + (" in that repo." if args.repo else "."))
         return 0
 
     # Survival where it is already cached. Never computed here: a blame pass per
@@ -3028,7 +3048,7 @@ def command_changes(args: argparse.Namespace) -> int:
         print("Survival not measured yet. Run `aiwatcher today` to compute it.")
     else:
         print("Blank survival means not measured, not 'did not survive'. It is a floor either way.")
-    print_unbanked_line(events, days=args.days)
+    print_unbanked_line(events, days=args.days, ledger=ledger)
     return 0
 
 

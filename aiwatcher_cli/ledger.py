@@ -369,6 +369,35 @@ def _event_repo(event: LocalEvent, cache: dict[str, str | None]) -> str | None:
     return cache[path]
 
 
+def repos_matching(events: Sequence[LocalEvent], needle: str) -> list[str]:
+    """Repo roots with spend whose path contains `needle`, one entry per repository.
+
+    `aiwatcher changes --repo` takes a substring because typing a full path is
+    miserable, but `build_ledger(only_repo=...)` needs a path it can resolve to
+    a repo identity. Resolving up front is what keeps a drill-down internally
+    consistent: filtering the change rows after the ledger was built left the
+    unbanked total and the foreign-commit count still describing every repo on
+    the machine, so a scoped table sat under machine-wide totals.
+
+    Clones of one repository collapse to a single entry -- two checkouts of the
+    same project are one repo to the ledger, so matching both is not ambiguous.
+    Only repos with costed events are considered, matching what `build_ledger`
+    itself will walk: a repo with no spend in the window has no ledger row to
+    scope to either way.
+    """
+    wanted = needle.lower()
+    cache: dict[str, str | None] = {}
+    by_identity: dict[str, str] = {}
+    for event in events:
+        if event.cost_usd <= 0:
+            continue
+        repo = _event_repo(event, cache)
+        if not repo or wanted not in repo.lower():
+            continue
+        by_identity.setdefault(repo_identity(repo), repo)
+    return sorted(by_identity.values())
+
+
 def build_ledger(
     events: Sequence[LocalEvent],
     *,

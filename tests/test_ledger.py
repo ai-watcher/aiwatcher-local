@@ -18,6 +18,7 @@ from aiwatcher_cli.ledger import (
     cost_per_surviving_line,
     local_author_emails,
     repo_identity,
+    repos_matching,
     unbanked_summary,
 )
 from aiwatcher_cli.scanner import LocalEvent
@@ -55,6 +56,92 @@ def event(repo: str, *, cost: float, when: datetime, session: str = "s1",
         model=model,
         cost_usd=cost,
     )
+
+
+class ReposMatchingTests(unittest.TestCase):
+    """`changes --repo` takes a substring; the ledger needs a path. These cover
+    the resolution step that keeps a scoped drill-down scoped end to end."""
+
+    def test_matches_a_repo_by_path_substring(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            commit(repo, "a.py", "one\n", "first", when=now - timedelta(hours=2))
+            matches = repos_matching([event(repo, cost=1.0, when=now - timedelta(hours=3))],
+                                     Path(repo).name)
+
+        self.assertEqual(len(matches), 1)
+
+    def test_reports_every_repo_when_the_substring_is_ambiguous(self) -> None:
+        # The caller must be told rather than shown one arbitrary repo: the old
+        # substring filter silently blended both into a single table.
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as parent:
+            first, second = Path(parent) / "proj-alpha", Path(parent) / "proj-beta"
+            events = []
+            for path in (first, second):
+                path.mkdir()
+                init_repo(str(path))
+                commit(str(path), "a.py", f"{path.name}\n", "first", when=now - timedelta(hours=2))
+                events.append(event(str(path), cost=1.0, when=now - timedelta(hours=3)))
+            matches = repos_matching(events, "proj-")
+
+        self.assertEqual(len(matches), 2)
+
+    def test_clones_of_one_repo_are_not_ambiguous(self) -> None:
+        # Two checkouts share a root commit, so they are one repository to the
+        # ledger and must not read as an ambiguous match.
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as parent:
+            origin = Path(parent) / "origin-repo"
+            origin.mkdir()
+            init_repo(str(origin))
+            commit(str(origin), "a.py", "one\n", "first", when=now - timedelta(hours=2))
+            clone = Path(parent) / "clone-repo"
+            run(["git", "clone", str(origin), str(clone)], parent)
+            events = [
+                event(str(origin), cost=1.0, when=now - timedelta(hours=3)),
+                event(str(clone), cost=1.0, when=now - timedelta(hours=3), session="s2"),
+            ]
+            matches = repos_matching(events, "-repo")
+
+        self.assertEqual(len(matches), 1)
+
+    def test_ignores_events_with_no_cost(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as repo:
+            init_repo(repo)
+            commit(repo, "a.py", "one\n", "first", when=now - timedelta(hours=2))
+            matches = repos_matching([event(repo, cost=0.0, when=now - timedelta(hours=3))],
+                                     Path(repo).name)
+
+        self.assertEqual(matches, [])
+
+
+class ScopedLedgerTests(unittest.TestCase):
+    def test_only_repo_scopes_unbanked_spend_not_just_the_change_rows(self) -> None:
+        """The bug behind `changes --repo`: rows were filtered after the fact, so
+        the unbanked total and foreign-commit count still covered every repo."""
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as parent:
+            wanted, other = Path(parent) / "wanted", Path(parent) / "other"
+            for path in (wanted, other):
+                path.mkdir()
+                init_repo(str(path))
+            # `wanted` commits, so its spend banks. `other` never commits, so all
+            # of its spend is unbanked -- and must not appear in a scoped ledger.
+            commit(str(wanted), "a.py", "one\n", "first", when=now - timedelta(hours=2))
+            events = [
+                event(str(wanted), cost=3.0, when=now - timedelta(hours=3)),
+                event(str(other), cost=99.0, when=now - timedelta(hours=3), session="s2"),
+            ]
+
+            scoped = build_ledger(events, days=7, now=now, only_repo=str(wanted))
+            everything = build_ledger(events, days=7, now=now)
+
+        self.assertAlmostEqual(scoped.banked_usd, 3.0, places=6)
+        self.assertAlmostEqual(scoped.unbanked_usd, 0.0, places=6)
+        self.assertAlmostEqual(everything.unbanked_usd, 99.0, places=6)
 
 
 class CommitsSinceTests(unittest.TestCase):
