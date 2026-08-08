@@ -38,6 +38,7 @@ from .local_state import (
     get_baselines,
     get_outcome,
     get_ui_server,
+    get_watcher_status,
     has_sent_notification,
     is_command_pattern_always_allowed,
     issue_brief_token,
@@ -953,6 +954,7 @@ OUTCOME_SIGNAL_SAMPLE_CAP = 10  # bounds subprocess spawns per pass, same reason
 # Capping per pass spreads the backlog across subsequent OUTCOME_SIGNAL_INTERVAL_SECONDS
 # passes instead -- a few every 5 minutes rather than dozens all at once.
 MAX_OUTCOME_NOTIFICATIONS_PER_PASS = 3
+OVERLAY_REMINDER_SCOPE = "overlay"
 
 
 def recheck_evidence_survival(cap: int = SURVIVAL_RECHECK_CAP) -> int:
@@ -3593,7 +3595,14 @@ def _watch_ui_base_url() -> str:
     return f"http://{ui_host}:{ui_port}"
 
 
-def _open_native_handoff_overlay(url: str, *, title: str, body: str, severity: str) -> tuple[bool, str]:
+def _open_native_handoff_overlay(
+    url: str,
+    *,
+    title: str,
+    body: str,
+    severity: str,
+    brief_file: str | None = None,
+) -> tuple[bool, str]:
     """Launch the small always-on-top desktop companion when available."""
     mode = os.environ.get("AIWATCHER_OVERLAY_MODE", "native").strip().lower()
     if mode in {"browser", "web"}:
@@ -3624,6 +3633,11 @@ def _open_native_handoff_overlay(url: str, *, title: str, body: str, severity: s
                 body,
                 "--severity",
                 severity,
+                *(
+                    ["--brief-file", brief_file]
+                    if brief_file
+                    else []
+                ),
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -3640,11 +3654,26 @@ def _open_handoff_overlay(
     title: str = "AIWatcher handoff recommended",
     body: str = "",
     severity: str = "warning",
+    brief_text: str | None = None,
 ) -> tuple[bool, str]:
     """Best-effort local companion overlay outside the AI tool UI."""
     if os.environ.get("AIWATCHER_DISABLE_OVERLAY", "").strip().lower() in {"1", "true", "yes", "on"}:
         return False, "disabled by AIWATCHER_DISABLE_OVERLAY"
-    native_ok, native_detail = _open_native_handoff_overlay(url, title=title, body=body, severity=severity)
+    brief_file = None
+    if brief_text:
+        try:
+            fd, brief_file = tempfile.mkstemp(prefix="aiwatcher-handoff-", suffix=".txt")
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(brief_text)
+        except OSError:
+            brief_file = None
+    native_ok, native_detail = _open_native_handoff_overlay(
+        url,
+        title=title,
+        body=body,
+        severity=severity,
+        brief_file=brief_file,
+    )
     if native_ok:
         return True, native_detail
     if os.environ.get("AIWATCHER_OVERLAY_MODE", "").strip().lower() in {"native", "desktop", "native-only"}:
@@ -4082,17 +4111,39 @@ def _print_watch_status_card(
             overlay_ok = False
             overlay_detail = "not requested"
             if getattr(args, "overlay", False):
-                overlay_title = "AIWatcher: start a fresh chat"
-                overlay_body = f"{short_path(session.project_path)} — {status['reason']}"
-                overlay_severity = health.severity if health is not None else "warning"
-                overlay_ok, overlay_detail = _open_handoff_overlay(
-                    overlay_url,
-                    title=overlay_title,
-                    body=overlay_body,
-                    severity=str(overlay_severity),
-                )
+                overlay_signal_key = f"{OVERLAY_REMINDER_SCOPE}:{session.session_id}:{status['action']}"
+                if has_sent_notification(overlay_signal_key):
+                    overlay_detail = "already shown for this session/action"
+                else:
+                    overlay_title = "AIWatcher: start a fresh chat"
+                    overlay_body = f"{short_path(session.project_path)} — {status['reason']}"
+                    overlay_severity = health.severity if health is not None else "warning"
+                    overlay_brief = None
+                    try:
+                        outcome = get_outcome(session.session_id)
+                    except OSError:
+                        outcome = None
+                    try:
+                        capsule = build_handoff_capsule(
+                            session,
+                            events,
+                            outcome=outcome.get("outcome") if outcome else None,
+                            target=args.target,
+                        )
+                        overlay_brief = str(capsule.get("next_brief") or "")
+                    except OSError:
+                        overlay_brief = None
+                    overlay_ok, overlay_detail = _open_handoff_overlay(
+                        overlay_url,
+                        title=overlay_title,
+                        body=overlay_body,
+                        severity=str(overlay_severity),
+                        brief_text=overlay_brief,
+                    )
+                    if overlay_ok:
+                        _record_notification_sent_safely(overlay_signal_key)
                 print(f"  Overlay: {'opened' if overlay_ok else 'not opened'} ({overlay_detail})")
-            record_notification_sent(persist_key)
+            _record_notification_sent_safely(persist_key)
             try:
                 record_watch_notification(
                     session_id=session.session_id,
@@ -4156,11 +4207,18 @@ def _outcome_dashboard_url(session_id: str | None = None) -> str:
     return f"{base}?session={quote(session_id, safe='')}" if session_id else base
 
 
+def _record_notification_sent_safely(signal_key: str) -> None:
+    try:
+        record_notification_sent(signal_key)
+    except OSError:
+        pass
+
+
 def _fire_outcome_notification(
     *, signal_key: str, signal_type: str, session_id: str, tool: str, title: str, reason: str, url: str
 ) -> None:
     ok, detail = _send_local_notification(title, f"{reason} Review: {url}", url=url)
-    record_notification_sent(signal_key)
+    _record_notification_sent_safely(signal_key)
     try:
         record_watch_notification(
             session_id=session_id,
@@ -4261,7 +4319,7 @@ def _check_outcome_review_signals(rows: Sequence[LocalSession]) -> None:
                 # discoverable at all (its source log aged out locally) -- there
                 # is nothing left to review, so mark it handled without ever
                 # popping a notification for a dead dashboard link.
-                record_notification_sent(signal_key)
+                _record_notification_sent_safely(signal_key)
                 already_reviewed += 1
                 continue
             if status == "survived":
@@ -4276,7 +4334,7 @@ def _check_outcome_review_signals(rows: Sequence[LocalSession]) -> None:
                 except OSError:
                     already_marked = False
                 if already_marked:
-                    record_notification_sent(signal_key)
+                    _record_notification_sent_safely(signal_key)
                     already_reviewed += 1
                     continue
             project_label = short_path(session.project_path)
@@ -4316,7 +4374,7 @@ def _check_outcome_review_signals(rows: Sequence[LocalSession]) -> None:
         except OSError:
             already_marked = False
         if already_marked:
-            record_notification_sent(signal_key)
+            _record_notification_sent_safely(signal_key)
             already_reviewed += 1
             continue
         _fire_outcome_notification(
@@ -6430,6 +6488,40 @@ def command_ui(args: argparse.Namespace) -> int:
     except OSError:
         pass
 
+    def start_ambient_watch(_: str, __: int) -> subprocess.Popen[bytes] | None:
+        if getattr(args, "no_watch", False):
+            print("Ambient Watch not started (--no-watch).")
+            return None
+        watcher = get_watcher_status()
+        if watcher.get("running"):
+            print("Ambient Watch already running.")
+            return None
+        interval = max(15, int(getattr(args, "watch_interval", 60)))
+        command = [
+            sys.executable,
+            "-m",
+            "aiwatcher_cli",
+            "watch",
+            "--notify",
+            "--overlay",
+            "--interval",
+            str(interval),
+        ]
+        try:
+            proc = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            print(f"Ambient Watch started while the dashboard is open (interval {interval}s).")
+            return proc
+        except OSError as exc:
+            print(f"Ambient Watch could not start automatically: {exc}", file=sys.stderr)
+            print("Run `aiwatcher watch --notify --overlay --interval 60` manually if you want ambient nudges.", file=sys.stderr)
+            return None
+
     try:
         serve(
             host=args.host,
@@ -6437,6 +6529,7 @@ def command_ui(args: argparse.Namespace) -> int:
             auto_port=not args.no_port_fallback,
             port_attempts=args.port_attempts,
             restart=args.restart,
+            on_started=start_ambient_watch,
         )
     except OSError as exc:
         print(f"Could not start AIWatcher Local UI: {exc}", file=sys.stderr)
@@ -6803,6 +6896,8 @@ def build_parser() -> argparse.ArgumentParser:
     ui.add_argument("--port-attempts", type=int, default=20, help="How many sequential ports to try when the requested port is busy")
     ui.add_argument("--no-port-fallback", action="store_true", help="Fail instead of trying the next available port")
     ui.add_argument("--restart", action="store_true", help="Stop an existing local process on the requested port before starting")
+    ui.add_argument("--no-watch", action="store_true", help="Do not start Ambient Watch alongside the dashboard")
+    ui.add_argument("--watch-interval", type=int, default=60, help="Seconds between Ambient Watch scans when started with the UI")
     ui.set_defaults(func=command_ui)
 
     return parser

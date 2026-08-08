@@ -356,6 +356,64 @@ class PromptSavingsBaselineTests(unittest.TestCase):
         self.assertEqual(result, 0)
         serve.assert_called_once()
 
+    def test_ui_startup_starts_ambient_watch_by_default(self) -> None:
+        started: dict[str, object] = {}
+        proc = Mock()
+
+        def fake_serve(*_: object, **kwargs: object) -> None:
+            on_started = kwargs["on_started"]
+            started["resource"] = on_started("127.0.0.1", 8766)  # type: ignore[operator]
+
+        with (
+            patch.object(cli, "get_or_refresh_baselines", return_value={}),
+            patch.object(cli, "recheck_evidence_survival"),
+            patch.object(cli, "get_watcher_status", return_value={"running": False}),
+            patch.object(cli.subprocess, "Popen", return_value=proc) as popen,
+            patch("aiwatcher_cli.ui.serve", side_effect=fake_serve),
+        ):
+            result = cli.command_ui(SimpleNamespace(
+                host="127.0.0.1",
+                port=8765,
+                no_port_fallback=True,
+                port_attempts=1,
+                restart=False,
+                no_watch=False,
+                watch_interval=5,
+            ))
+
+        self.assertEqual(result, 0)
+        self.assertIs(started["resource"], proc)
+        command = popen.call_args.args[0]
+        self.assertEqual(command[:4], [sys.executable, "-m", "aiwatcher_cli", "watch"])
+        self.assertIn("--notify", command)
+        self.assertIn("--overlay", command)
+        self.assertEqual(command[-2:], ["--interval", "15"])
+
+    def test_ui_startup_can_skip_ambient_watch(self) -> None:
+        def fake_serve(*_: object, **kwargs: object) -> None:
+            on_started = kwargs["on_started"]
+            self.assertIsNone(on_started("127.0.0.1", 8766))  # type: ignore[operator]
+
+        with (
+            patch.object(cli, "get_or_refresh_baselines", return_value={}),
+            patch.object(cli, "recheck_evidence_survival"),
+            patch.object(cli.subprocess, "Popen") as popen,
+            patch("aiwatcher_cli.ui.serve", side_effect=fake_serve),
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            result = cli.command_ui(SimpleNamespace(
+                host="127.0.0.1",
+                port=8765,
+                no_port_fallback=True,
+                port_attempts=1,
+                restart=False,
+                no_watch=True,
+                watch_interval=60,
+            ))
+
+        self.assertEqual(result, 0)
+        popen.assert_not_called()
+
     def test_today_refreshes_a_missing_cache(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]
         with (
@@ -1080,6 +1138,36 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertIn("Overlay: opened", stdout.getvalue())
         self.assertEqual(notifications[0]["detail"], "overlay test-overlay")
 
+    def test_watch_overlay_dedupes_across_session_state_updates(self) -> None:
+        row = session(1, project="/repo/orcha")
+        row.agent_calls = 300
+        args = SimpleNamespace(
+            days=1,
+            interval=15,
+            once=True,
+            cost_threshold=5.0,
+            calls_threshold=250,
+            tokens_threshold=500_000,
+            target="generic",
+            notify=False,
+            overlay=True,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.object(cli, "get_baselines", return_value={}),
+                patch.object(cli, "_open_handoff_overlay", return_value=(True, "test-overlay")) as overlay,
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch("sys.stdout", io.StringIO()) as stdout,
+            ):
+                cli._print_watch_status_card(row, [row], args, [], {}, {})
+                row.updated_at = (row.updated_at or datetime.now(timezone.utc)) + timedelta(minutes=1)
+                row.agent_calls += 1
+                cli._print_watch_status_card(row, [row], args, [], {}, {})
+
+        overlay.assert_called_once()
+        self.assertIn("already shown for this session/action", stdout.getvalue())
+
     def test_open_handoff_overlay_prefers_native_companion(self) -> None:
         with (
             patch.object(cli, "_open_native_handoff_overlay", return_value=(True, "native desktop window")) as native,
@@ -1090,6 +1178,28 @@ class PromptPreflightTests(unittest.TestCase):
                 title="AIWatcher: start fresh",
                 body="/repo — context is critical",
                 severity="critical",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "native desktop window")
+        native.assert_called_once()
+        browser.open.assert_not_called()
+
+    def test_open_handoff_overlay_passes_local_brief_file_to_native_companion(self) -> None:
+        def fake_native(*_: object, **kwargs: object) -> tuple[bool, str]:
+            brief_file = kwargs.get("brief_file")
+            self.assertIsInstance(brief_file, str)
+            with open(str(brief_file), encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "paste-ready handoff")
+            return True, "native desktop window"
+
+        with (
+            patch.object(cli, "_open_native_handoff_overlay", side_effect=fake_native) as native,
+            patch.object(cli, "webbrowser") as browser,
+        ):
+            ok, detail = cli._open_handoff_overlay(
+                "http://127.0.0.1:8765/overlay?session=session-1",
+                brief_text="paste-ready handoff",
             )
 
         self.assertTrue(ok)

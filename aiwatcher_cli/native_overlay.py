@@ -29,6 +29,7 @@ let urlString = args.count > 1 ? args[1] : ""
 let titleText = args.count > 2 ? args[2] : "AIWatcher handoff recommended"
 let bodyText = args.count > 3 ? args[3] : "AIWatcher found context pressure."
 let severityText = args.count > 4 ? args[4] : "warning"
+let briefFile = args.count > 5 ? args[5] : ""
 
 func apiBase(_ value: String) -> String {
     guard let url = URL(string: value) else { return "" }
@@ -56,6 +57,11 @@ func postDecision(_ decision: String) {
 }
 
 func fetchHandoffBrief() -> String? {
+    if !briefFile.isEmpty,
+       let value = try? String(contentsOfFile: briefFile, encoding: .utf8),
+       !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        return value
+    }
     guard let encoded = sid.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
           let url = URL(string: "\(baseURL)/api/handoff?id=\(encoded)&target=generic&prompt=0") else { return nil }
     let sem = DispatchSemaphore(value: 0)
@@ -82,8 +88,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
-        let width: CGFloat = 760
-        let height: CGFloat = 230
+        let width: CGFloat = 680
+        let height: CGFloat = 210
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
         let frame = NSRect(x: screen.maxX - width - 28, y: screen.minY + 28, width: width, height: height)
         window = NSPanel(contentRect: frame, styleMask: [.titled, .closable], backing: .buffered, defer: false)
@@ -99,41 +105,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.contentView = view
 
         let title = NSTextField(labelWithString: titleText)
-        title.frame = NSRect(x: 24, y: 164, width: 560, height: 34)
-        title.font = NSFont.boldSystemFont(ofSize: 22)
+        title.frame = NSRect(x: 22, y: 150, width: 500, height: 30)
+        title.font = NSFont.boldSystemFont(ofSize: 20)
         title.textColor = NSColor(calibratedRed: 0.08, green: 0.32, blue: 0.65, alpha: 1)
         view.addSubview(title)
 
         let badge = NSTextField(labelWithString: severityText)
-        badge.frame = NSRect(x: 620, y: 166, width: 110, height: 28)
+        badge.frame = NSRect(x: 550, y: 151, width: 92, height: 24)
         badge.alignment = .center
         badge.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         badge.textColor = NSColor(calibratedRed: 0.30, green: 0.36, blue: 0.48, alpha: 1)
         view.addSubview(badge)
 
         let body = NSTextField(wrappingLabelWithString: bodyText)
-        body.frame = NSRect(x: 24, y: 104, width: 700, height: 52)
+        body.frame = NSRect(x: 22, y: 92, width: 626, height: 48)
         body.font = NSFont.systemFont(ofSize: 15)
         body.textColor = NSColor(calibratedRed: 0.22, green: 0.28, blue: 0.40, alpha: 1)
         view.addSubview(body)
 
         let buttons: [(String, Selector)] = [
-            ("New chat", #selector(newChat)),
+            ("New chat + copy brief", #selector(newChat)),
             ("Copy handoff", #selector(copyHandoff)),
             ("Continue here", #selector(continueHere)),
             ("Inspect", #selector(inspectSession))
         ]
-        var x: CGFloat = 24
+        var x: CGFloat = 22
         for item in buttons {
             let button = NSButton(title: item.0, target: self, action: item.1)
-            button.frame = NSRect(x: x, y: 54, width: item.0 == "Continue here" ? 140 : 125, height: 34)
+            let buttonWidth: CGFloat = item.0 == "New chat + copy brief" ? 178 : item.0 == "Continue here" ? 118 : 112
+            button.frame = NSRect(x: x, y: 50, width: buttonWidth, height: 32)
             button.bezelStyle = .rounded
             view.addSubview(button)
-            x += button.frame.width + 12
+            x += button.frame.width + 10
         }
 
         statusLabel = NSTextField(labelWithString: "Local-only. Prompt/source content is not stored in this decision.")
-        statusLabel.frame = NSRect(x: 24, y: 20, width: 700, height: 22)
+        statusLabel.frame = NSRect(x: 22, y: 18, width: 626, height: 20)
         statusLabel.font = NSFont.systemFont(ofSize: 13)
         statusLabel.textColor = NSColor(calibratedRed: 0.36, green: 0.43, blue: 0.55, alpha: 1)
         view.addSubview(statusLabel)
@@ -235,7 +242,18 @@ def _set_window_position(root: object, width: int, height: int) -> None:
     root.geometry(f"{width}x{height}+{x}+{y}")  # type: ignore[attr-defined]
 
 
-def _run_macos_swift_overlay(url: str, title: str, body: str, severity: str) -> int:
+def _read_brief_file(brief_file: str | None) -> str | None:
+    if not brief_file:
+        return None
+    try:
+        with open(brief_file, encoding="utf-8") as handle:
+            value = handle.read().strip()
+    except OSError:
+        return None
+    return value or None
+
+
+def _run_macos_swift_overlay(url: str, title: str, body: str, severity: str, brief_file: str | None = None) -> int:
     swift = shutil.which("swift")
     if sys.platform != "darwin" or not swift:
         return 2
@@ -244,7 +262,7 @@ def _run_macos_swift_overlay(url: str, title: str, body: str, severity: str) -> 
         with open(script_path, "w", encoding="utf-8") as handle:
             handle.write(MACOS_SWIFT_OVERLAY)
         subprocess.Popen(
-            [swift, script_path, url, title, body, severity],
+            [swift, script_path, url, title, body, severity, brief_file or ""],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -255,19 +273,20 @@ def _run_macos_swift_overlay(url: str, title: str, body: str, severity: str) -> 
         return 2
 
 
-def run_native_overlay(url: str, title: str, body: str, severity: str) -> int:
+def run_native_overlay(url: str, title: str, body: str, severity: str, brief_file: str | None = None) -> int:
     try:
         import tkinter as tk
         from tkinter import ttk
     except Exception as exc:  # pragma: no cover - depends on host Python build
         if sys.platform == "darwin":
-            return _run_macos_swift_overlay(url, title, body, severity)
+            return _run_macos_swift_overlay(url, title, body, severity, brief_file)
         print(f"AIWatcher native overlay unavailable: {exc}", file=sys.stderr)
         return 2
 
     base = _api_base(url)
     session_id = _session_id(url)
     reason = body
+    local_brief = _read_brief_file(brief_file)
 
     root = tk.Tk()
     root.title("AIWatcher Handoff")
@@ -278,8 +297,8 @@ def run_native_overlay(url: str, title: str, body: str, severity: str) -> int:
     except tk.TclError:
         pass
 
-    width = 760
-    height = 245
+    width = 680
+    height = 220
     _set_window_position(root, width, height)
 
     style = ttk.Style(root)
@@ -318,8 +337,11 @@ def run_native_overlay(url: str, title: str, body: str, severity: str) -> int:
     def copy_handoff(decision: str) -> None:
         _record_decision(base, session_id, decision, reason)
         try:
-            capsule = _request_json(f"{base}/api/handoff?id={urllib.parse.quote(session_id)}&target=generic&prompt=0")
-            brief = str(capsule.get("next_brief") or "")
+            if local_brief:
+                brief = local_brief
+            else:
+                capsule = _request_json(f"{base}/api/handoff?id={urllib.parse.quote(session_id)}&target=generic&prompt=0")
+                brief = str(capsule.get("next_brief") or "")
             root.clipboard_clear()
             root.clipboard_append(brief)
             root.update()
@@ -331,7 +353,7 @@ def run_native_overlay(url: str, title: str, body: str, severity: str) -> int:
         _record_decision(base, session_id, "continue_here", reason)
         show_saved("Decision saved: continue here.")
 
-    ttk.Button(button_row, text="New chat", style="AIW.TButton", command=lambda: copy_handoff("new_chat")).pack(
+    ttk.Button(button_row, text="New chat + copy brief", style="AIW.TButton", command=lambda: copy_handoff("new_chat")).pack(
         side="left", padx=(0, 10)
     )
     ttk.Button(button_row, text="Copy handoff", style="AIW.TButton", command=lambda: copy_handoff("copy_handoff")).pack(
@@ -355,8 +377,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--title", default="Start a fresh AI session")
     parser.add_argument("--body", default="")
     parser.add_argument("--severity", default="warning")
+    parser.add_argument("--brief-file")
     args = parser.parse_args(argv)
-    return run_native_overlay(args.url, args.title, args.body, args.severity)
+    return run_native_overlay(args.url, args.title, args.body, args.severity, args.brief_file)
 
 
 if __name__ == "__main__":  # pragma: no cover

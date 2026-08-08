@@ -992,7 +992,7 @@ Run the local-only AIWatcher dashboard
 ```sh
 aiwatcher ui [--host HOST] [--port PORT]
              [--port-attempts PORT_ATTEMPTS] [--no-port-fallback]
-             [--restart]
+             [--restart] [--no-watch] [--watch-interval WATCH_INTERVAL]
 ```
 
 Example:
@@ -1008,6 +1008,8 @@ aiwatcher ui --port 9000 --restart
 | `--port-attempts` | integer | `20` | How many sequential ports to try when the requested port is busy |
 | `--no-port-fallback` | flag |  | Fail instead of trying the next available port |
 | `--restart` | flag |  | Stop an existing local process on the requested port before starting |
+| `--no-watch` | flag |  | Do not start Ambient Watch alongside the dashboard |
+| `--watch-interval` | integer | `60` | Seconds between Ambient Watch scans when started with the UI |
 
 ## Internal hook commands
 

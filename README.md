@@ -394,22 +394,29 @@ prompt or source text. Recent handoff decisions appear in Today, Receipts, and
 `aiwatcher hook-status`. After you copy a handoff, the bubble changes into a
 next-step confirmation instead of continuing to nag the same session.
 
-For a lower-friction desktop flow, run ambient watch with the local companion
-overlay:
+For a lower-friction desktop flow, start the local dashboard. It now starts
+Ambient Watch while the dashboard is open, so warnings can appear without a
+second command:
 
 ```bash
 python -m aiwatcher_cli ui
+```
+
+When context gets heavy, AIWatcher opens a small local handoff companion
+outside Claude, Codex, Cursor, or your editor. It first tries a native
+always-on-top desktop bubble and falls back to the browser companion if native
+UI is not available. From there you can copy a fresh-session brief, continue
+here, or inspect the session without first navigating to the dashboard.
+AIWatcher does not inject UI into third-party apps.
+
+You can still run Ambient Watch standalone:
+
+```bash
 python -m aiwatcher_cli watch --notify --overlay
 ```
 
-Keep `watch --notify --overlay` running while you work. When context gets
-heavy, AIWatcher opens a small local handoff companion outside Claude, Codex,
-Cursor, or your editor. It first tries a native always-on-top desktop bubble
-and falls back to the browser companion if native UI is not available. From
-there you can copy a fresh-session brief, continue here, or inspect the session
-without first navigating to the dashboard. AIWatcher does not inject UI into
-third-party apps. Use `watch --once --overlay` only as a one-shot smoke test,
-and set `AIWATCHER_OVERLAY_MODE=browser` if you prefer the browser companion.
+Use `watch --once --overlay` as a one-shot smoke test, and set
+`AIWATCHER_OVERLAY_MODE=browser` if you prefer the browser companion.
 
 Targets: `generic`, `claude`, `codex`, `cursor`, and `vscode`. The brief lists
 recent commit subjects/bodies and changed files for context, any decisions

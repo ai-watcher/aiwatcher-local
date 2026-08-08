@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
@@ -2645,7 +2646,7 @@ HTML = r"""<!doctype html>
         <div><h2>Setup Checklist</h2><p>Get to first value without overclaiming which surfaces are protected.</p></div>
         <span class="pill">Local only</span>
       </div>
-      <p class="receipt-note">For ambient warnings while you work, run <code>aiwatcher watch --notify --interval 60</code>.</p>
+      <p class="receipt-note">Ambient Watch starts with the dashboard by default. For standalone mode, run <code>aiwatcher watch --notify --overlay --interval 60</code>.</p>
       <div id="setupRows" class="coverage-grid"></div>
     </div>
   </section>
@@ -4332,6 +4333,7 @@ def serve(
     auto_port: bool = True,
     port_attempts: int = 20,
     restart: bool = False,
+    on_started: Callable[[str, int], Any] | None = None,
 ) -> None:
     if restart:
         stopped = restart_local_server(port)
@@ -4348,9 +4350,17 @@ def serve(
     record_ui_server(host, selected_port)
     print(f"AIWatcher Local UI running at http://{host}:{selected_port}")
     print("Local-only. No data leaves this machine. Press Ctrl+C to stop.")
+    started_resource = None
+    if on_started:
+        started_resource = on_started(host, selected_port)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nStopped AIWatcher Local UI.")
     finally:
+        if started_resource is not None and hasattr(started_resource, "terminate"):
+            try:
+                started_resource.terminate()
+            except OSError:
+                pass
         server.server_close()

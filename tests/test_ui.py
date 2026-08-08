@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import os
 import re
 import shutil
@@ -8,7 +9,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from aiwatcher_cli import ui
 from aiwatcher_cli.local_state import (
@@ -440,6 +441,26 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertTrue(any(action["id"] == "handoff" for action in actions))
         open_tool = next(action for action in actions if action["id"] == "open_tool")
         self.assertFalse(open_tool["available"])
+
+    def test_serve_terminates_started_ambient_resource_on_stop(self) -> None:
+        resource = Mock()
+        server = Mock()
+        server.serve_forever.side_effect = KeyboardInterrupt()
+
+        with (
+            patch.object(ui, "ThreadingHTTPServer", return_value=server),
+            patch.object(ui, "record_ui_server"),
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            ui.serve(
+                host="127.0.0.1",
+                port=8765,
+                auto_port=False,
+                on_started=lambda _host, _port: resource,
+            )
+
+        resource.terminate.assert_called_once()
+        server.server_close.assert_called_once()
 
     def test_today_reports_window_scoped_useful_outcomes(self) -> None:
         now = datetime.now(timezone.utc)
