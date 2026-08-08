@@ -3250,7 +3250,7 @@ def command_report(args: argparse.Namespace) -> int:
     if digest_outcomes["inferred_useful"] or digest_outcomes["inferred_churned"]:
         print(
             f"  Inferred (unmarked): {digest_outcomes['inferred_useful']} likely useful, "
-            f"{digest_outcomes['inferred_churned']} churned"
+            f"{digest_outcomes['inferred_churned']} whose commit left the branch"
         )
 
     highest_cost_useful = digest["highest_cost_useful_session"]

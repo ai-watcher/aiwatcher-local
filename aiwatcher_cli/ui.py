@@ -538,7 +538,16 @@ def _recommend_weekly_improvement(
         )
     if inferred_churned > 0:
         plural = "s" if inferred_churned != 1 else ""
-        return f"{inferred_churned} session{plural} looked useful but the commit didn't survive -- review before trusting similar work."
+        # Says only what reachability can see. `merge-base --is-ancestor` answers
+        # "is this commit still on the branch" -- so it catches a rebase, reset or
+        # amend, and provably cannot catch a revert (which adds a new commit and
+        # leaves the original exactly where it was) or a delete of everything the
+        # commit wrote. Line survival is the metric that judges whether the work
+        # lasted; this one reports what happened to the commit.
+        return (
+            f"{inferred_churned} session{plural} looked useful but its commit is no longer on the branch "
+            "-- rebased, reset or amended away. Worth a look before trusting similar work."
+        )
     if outcomes["abandoned"] > outcomes["useful"]:
         return "More sessions were marked abandoned than useful this window -- review scoping before the next batch."
     return "No urgent signal this window -- local usage looks healthy."
@@ -1280,8 +1289,16 @@ def _insight_feed(
     if churned:
         cards.append({
             "id": "churned",
-            "title": f"{churned} session{'s' if churned != 1 else ''} looked useful but did not stick",
-            "body": "The commit was later reverted or rewritten. Worth a look before repeating the approach.",
+            # "reverted" was the one outcome this signal is structurally blind to:
+            # `git revert` adds a new commit and leaves the original reachable, so
+            # a reverted commit scores as surviving. What reachability actually
+            # detects is history being rewritten out from under the commit.
+            "title": f"{churned} session{'s' if churned != 1 else ''} produced a commit that is no longer on the branch",
+            "body": (
+                "Rebased, reset or amended away. This does not mean the work was undone -- "
+                "a revert leaves the original commit in place and would not show up here. "
+                "Cost per surviving line is the measure of whether the work lasted."
+            ),
             "impact_usd": None,
             "session_id": None,
             "severity": "medium",
@@ -2439,12 +2456,12 @@ function sessionVerdict(s) {
   const highCost = cost >= 5 || tokens >= 500000 || toolCalls >= 250;
   let title = 'Review this AI work';
   if (s.outcome) title = `Marked ${s.outcome}`;
-  else if (churned) title = "Looked useful, but didn't stick";
+  else if (churned) title = 'Looked useful, but its commit left the branch';
   else if (likelyUseful && highCost) title = 'Likely useful, but expensive';
   else if (likelyUseful) title = 'Likely useful, needs confirmation';
   else if (highCost) title = 'High-cost session, needs review';
   const bullets = [];
-  if (churned) bullets.push('The commit this session produced was later reverted or rewritten -- it did not survive on the current branch.');
+  if (churned) bullets.push('The commit this session produced is no longer reachable from HEAD -- rebased, reset or amended away. That is not the same as the work being undone: a revert would leave the commit in place and not show here.');
   if (likelyUseful) bullets.push('A nearby commit or test signal suggests this produced useful work.');
   if (evidence.same_file_reprompt) bullets.push('A later session touched the same file(s) again soon after -- this attempt may not have fully resolved the task.');
   if (cost >= 5) bullets.push(`${s.api_value} API-equivalent value is high for one local session.`);
