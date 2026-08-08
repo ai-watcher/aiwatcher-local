@@ -9,6 +9,7 @@ anything.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Literal, Sequence
 
 from .local_state import issue_brief_token, recent_decisions
@@ -62,6 +63,25 @@ def _stamp(session: LocalSession) -> str:
     if stamp.tzinfo is None:
         stamp = stamp.replace(tzinfo=timezone.utc)
     return stamp.astimezone().isoformat(timespec="minutes")
+
+
+def _safe_project_path(path: str | None) -> tuple[str, bool]:
+    """Return a project label that is safe to put into a handoff prompt.
+
+    A bare filesystem root is a scanner attribution failure, not a project. If
+    we paste "/" into a fresh agent prompt, the next agent may inspect the
+    whole machine. Use an explicit unknown marker instead and make the brief
+    ask for project confirmation before editing.
+    """
+    if not path:
+        return "unknown project", False
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except OSError:
+        resolved = Path(path).expanduser()
+    if resolved.parent == resolved:
+        return "unknown project", False
+    return str(resolved), True
 
 
 HandoffTarget = Literal["generic", "claude", "codex", "cursor", "vscode"]
@@ -154,6 +174,7 @@ def build_handoff_capsule(
 
     target = target if target in TARGET_LABELS else "generic"
     target_guidance = _target_guidance(target)
+    project_label, project_reliable = _safe_project_path(session.project_path)
 
     evidence_lines = [
         f"- Nearby commits: {len(evidence.commits)}",
@@ -181,6 +202,10 @@ def build_handoff_capsule(
     if not evidence.commits and evidence.changed_files:
         evidence_lines.append(
             "- No nearby commit evidence was found; treat this as in-progress work and avoid overwriting local edits."
+        )
+    if not project_reliable:
+        evidence_lines.append(
+            "- Project path was not reliable; confirm the intended repository before reading or editing files."
         )
 
     commit_message_lines: list[str] = []
@@ -223,30 +248,73 @@ def build_handoff_capsule(
         ]
 
     warning_lines = [f"- {item}" for item in warnings[:5]]
+    done_lines: list[str] = []
+    if evidence.commits:
+        latest_subject = str(evidence.commits[0].get("subject") or "").strip()
+        if latest_subject:
+            done_lines.append(f"- Recent commit evidence suggests work landed: {latest_subject}.")
+        else:
+            done_lines.append("- Recent commit evidence exists; inspect git log before continuing.")
+    if evidence.changed_files:
+        done_lines.append(
+            f"- There are {len(evidence.changed_files)} changed file(s) on disk; treat them as in-progress work."
+        )
+    if decisions:
+        done_lines.append("- Local decision notes exist; review them before changing direction.")
+    if not done_lines:
+        done_lines.append("- No commit, changed-file, or test evidence was found; reconstruct the state carefully.")
+
+    uncertainty_lines = [
+        "- The previous chat is intentionally not available in this fresh session.",
+    ]
+    if not project_reliable:
+        uncertainty_lines.append("- AIWatcher could not confidently identify the project path.")
+    if not include_prompt_excerpt:
+        uncertainty_lines.append("- Prompt text was not included; infer the task from repository state and local evidence.")
+    if not evidence.tests:
+        uncertainty_lines.append("- No nearby test artifact was detected; choose a narrow verification step after inspection.")
+
+    checkpoint_lines = [
+        "- Run `git status --short` and inspect only the files listed in Local evidence first.",
+        "- Summarize what appears done, what remains uncertain, and propose one smallest next checkpoint.",
+        "- Continue only after that checkpoint is clear; do not replay broad exploration from the old session.",
+    ]
+    if not project_reliable:
+        checkpoint_lines.insert(0, "- Ask the user to confirm the repository/path before editing.")
 
     next_brief = "\n".join([
         "AIWatcher fresh-session handoff",
         "",
         "You are starting a fresh AI coding session. Do not assume access to the previous chat.",
-        "Continue from the repository state on disk, not from hidden conversation history.",
+        "Continue from repository state and local evidence, not from hidden conversation history.",
         f"Target tool: {TARGET_LABELS[target]}.",
         "",
-        "Objective",
-        "- Reconstruct the current state of the work from git status, recent commits, and the files listed below.",
-        "- Identify the smallest safe next checkpoint.",
-        "- Continue only that checkpoint after summarizing your plan.",
+        "Goal",
+        "- Preserve momentum from the previous session without replaying its bloated context.",
+        "- Reconstruct the work from disk, recent commits, changed files, decisions, and the evidence below.",
+        "- Pick one smallest safe next checkpoint and continue only that checkpoint.",
         "",
-        "Project",
-        session.project_path or "unknown",
+        "Workspace",
+        f"- Project: {project_label}",
+        f"- Project confidence: {'reliable' if project_reliable else 'unconfirmed'}",
         "",
-        "Previous session",
+        "What appears done",
+        *done_lines,
+        "",
+        "What remains uncertain",
+        *uncertainty_lines,
+        "",
+        "Recommended next checkpoint",
+        *checkpoint_lines,
+        "",
+        "Previous session signals",
         f"- Previous tool/model: {session.tool} / {session.model or 'unknown'}",
-        f"- Usage observed: {_compact_int(session.tokens_in + session.tokens_out)} tokens, "
+        f"- Usage pressure: {_compact_int(session.tokens_in + session.tokens_out)} tokens, "
         f"{session.agent_calls} model calls, {session.tool_calls} tool calls, "
         f"{_money(session.cost_usd)} API-equivalent value",
         f"- Outcome status: {outcome or evidence.inferred_outcome or 'not confirmed'}",
         "",
-        "Why hand off now",
+        "Why AIWatcher suggested handoff",
         *warning_lines,
         "",
         "Local evidence to inspect",
@@ -269,7 +337,8 @@ def build_handoff_capsule(
 
     return {
         "session_id": session.session_id,
-        "project": session.project_path or "unknown",
+        "project": project_label,
+        "project_reliable": project_reliable,
         "tool": session.tool,
         "model": session.model or "unknown",
         "target": target,

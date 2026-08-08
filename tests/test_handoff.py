@@ -48,7 +48,33 @@ class HandoffTests(unittest.TestCase):
         self.assertIn("Do not assume access to the previous chat", capsule["next_brief"])
         self.assertIn("git status --short", capsule["next_brief"])
         self.assertIn("smallest next checkpoint", capsule["next_brief"])
+        self.assertIn("What appears done", capsule["next_brief"])
+        self.assertIn("What remains uncertain", capsule["next_brief"])
+        self.assertIn("Recommended next checkpoint", capsule["next_brief"])
+        self.assertIn("Usage pressure", capsule["next_brief"])
         self.assertNotIn("source diff", rendered.lower())
+
+    def test_handoff_never_uses_filesystem_root_as_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                session = LocalSession(
+                    session_id="root-project",
+                    tool="claude-code",
+                    project_path="/",
+                    updated_at=datetime.now(timezone.utc),
+                    model="claude-sonnet",
+                    agent_calls=300,
+                )
+
+                capsule = build_handoff_capsule(session, [], outcome=None)
+
+        self.assertEqual(capsule["project"], "unknown project")
+        self.assertFalse(capsule["project_reliable"])
+        self.assertIn("- Project: unknown project", capsule["next_brief"])
+        self.assertIn("- Project confidence: unconfirmed", capsule["next_brief"])
+        self.assertIn("Ask the user to confirm the repository/path before editing.", capsule["next_brief"])
+        self.assertIn("Project path was not reliable", capsule["next_brief"])
 
     def test_handoff_capsule_formats_for_target_tool(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
