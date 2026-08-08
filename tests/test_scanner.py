@@ -115,6 +115,35 @@ class ProjectPathTests(unittest.TestCase):
 
         self.assertEqual(selected, "/repo/right")
 
+    def test_project_root_is_not_treated_as_project(self) -> None:
+        scanner.PROJECT_PATH_CACHE.clear()
+        self.assertIsNone(scanner._normalize_project_path(str(Path("/").resolve())))
+        self.assertEqual(scanner._choose_project_path(str(Path("/").resolve()), {}, {}), "unknown")
+
+    def test_tool_storage_path_is_not_treated_as_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_root = Path(temp_dir) / ".claude" / "projects"
+            log_project = storage_root / "-Users-chandrakala"
+            log_project.mkdir(parents=True)
+            scanner.PROJECT_PATH_CACHE.clear()
+            with patch.object(scanner, "CLAUDE_PROJECTS_DIRS", [storage_root]):
+                self.assertIsNone(scanner._normalize_project_path(str(log_project)))
+                self.assertEqual(scanner._choose_project_path(str(log_project), {str(log_project): 2}, {str(log_project): 9.0}), "unknown")
+
+    def test_claude_task_temp_path_is_not_treated_as_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            task_path = Path(temp_dir) / "claude-501" / "-Users-chandrakala" / "session-id" / "tasks"
+            task_path.mkdir(parents=True)
+            scanner.PROJECT_PATH_CACHE.clear()
+            self.assertIsNone(scanner._normalize_project_path(str(task_path)))
+            self.assertEqual(scanner._choose_project_path(str(task_path), {str(task_path): 2}, {str(task_path): 9.0}), "unknown")
+
+    def test_common_user_folders_are_not_treated_as_projects(self) -> None:
+        scanner.PROJECT_PATH_CACHE.clear()
+        self.assertIsNone(scanner._normalize_project_path(str(Path.home() / "Downloads")))
+        child_project = Path.home() / "Documents" / "example-project"
+        self.assertEqual(scanner._normalize_project_path(str(child_project)), str(child_project))
+
     def test_project_hints_require_real_absolute_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir) / "right-repo"

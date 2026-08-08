@@ -24,6 +24,7 @@ import time as time_module
 import webbrowser
 from collections import Counter, defaultdict
 from datetime import date, datetime, time, timedelta, timezone
+from pathlib import Path
 from typing import Callable, Iterable, Sequence
 from urllib.parse import quote
 
@@ -215,6 +216,38 @@ def short_path(path: str | None, max_len: int = 46) -> str:
     return "..." + path[-(max_len - 3):]
 
 
+UNATTRIBUTED_PROJECT = "__unattributed__"
+UNATTRIBUTED_PROJECT_LABEL = "Unattributed sessions"
+
+
+def is_reliable_project_path(path: str | None) -> bool:
+    if not path or path == "unknown" or path == UNATTRIBUTED_PROJECT:
+        return False
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except OSError:
+        resolved = Path(path).expanduser()
+    common_non_projects = {Path.home() / "Desktop", Path.home() / "Documents", Path.home() / "Downloads"}
+    if resolved in common_non_projects:
+        return False
+    parts = set(resolved.parts)
+    if ".claude" in parts or ".codex" in parts or ".cursor" in parts:
+        return False
+    if "tasks" in parts and any(part.startswith("claude-") for part in resolved.parts):
+        return False
+    return resolved.parent != resolved
+
+
+def project_key(path: str | None) -> str:
+    return path if is_reliable_project_path(path) else UNATTRIBUTED_PROJECT
+
+
+def project_label(path: str | None, max_len: int = 46) -> str:
+    if not is_reliable_project_path(path):
+        return UNATTRIBUTED_PROJECT_LABEL
+    return short_path(path, max_len)
+
+
 def local_midnight(day: date) -> datetime:
     return datetime.combine(day, time.min).astimezone()
 
@@ -279,12 +312,16 @@ def top_project(sessions: Iterable[LocalSession]) -> tuple[str, float, int] | No
     totals: dict[str, float] = defaultdict(float)
     counts: dict[str, int] = defaultdict(int)
     for session in sessions:
-        label = session.project_path or "unknown"
+        label = project_key(session.project_path)
         totals[label] += session.cost_usd
         counts[label] += 1
     if not totals:
         return None
-    best = max(totals, key=lambda key: (totals[key], counts[key]))
+    best = min(totals, key=lambda key: (
+        0 if key != UNATTRIBUTED_PROJECT else 1,
+        -totals[key],
+        -counts[key],
+    ))
     return best, totals[best], counts[best]
 
 
@@ -581,7 +618,7 @@ def render_today(days: int = 1) -> str:
     for row in rows:
         tool_key = f"{row.tool} ({row.surface})" if row.surface else row.tool
         by_tool[tool_key].append(row)
-        by_project[row.project_path or "unknown"].append(row)
+        by_project[project_key(row.project_path)].append(row)
     model_totals = model_usage_totals(rows)
 
     lines = [
@@ -593,9 +630,12 @@ def render_today(days: int = 1) -> str:
         f"Tool calls: {stats['tool_calls']}",
     ]
     if by_project:
-        project, project_rows = max(by_project.items(), key=lambda item: summarize(item[1])["cost_usd"])
+        project, project_rows = min(by_project.items(), key=lambda item: (
+            0 if item[0] != UNATTRIBUTED_PROJECT else 1,
+            -summarize(item[1])["cost_usd"],
+        ))
         project_stats = summarize(project_rows)
-        lines.append(f"Top project: {short_path(project)} ({money(float(project_stats['cost_usd']))})")
+        lines.append(f"Top project: {project_label(project)} ({money(float(project_stats['cost_usd']))})")
     if by_tool:
         tool, tool_rows = max(by_tool.items(), key=lambda item: summarize(item[1])["cost_usd"])
         lines.append(f"Top tool: {tool} ({summarize(tool_rows)['sessions']} sessions)")
@@ -608,18 +648,21 @@ def render_today(days: int = 1) -> str:
 def project_summary_text(days: int = 7, project: str | None = None) -> str:
     rows = sessions_since(days)
     if project:
-        rows = [row for row in rows if (row.project_path or "unknown") == project]
+        rows = [row for row in rows if project_key(row.project_path) == project]
     by_project: dict[str, list[LocalSession]] = defaultdict(list)
     for row in rows:
-        by_project[row.project_path or "unknown"].append(row)
+        by_project[project_key(row.project_path)].append(row)
     if not by_project:
         return f"No local AI project activity found in the last {days} days."
     lines = [f"AIWatcher project summary - last {days} days"]
-    ranked = sorted(by_project.items(), key=lambda item: summarize(item[1])["cost_usd"], reverse=True)
+    ranked = sorted(by_project.items(), key=lambda item: (
+        0 if item[0] != UNATTRIBUTED_PROJECT else 1,
+        -summarize(item[1])["cost_usd"],
+    ))
     for label, project_rows in ranked[:8]:
         stats = summarize(project_rows)
         lines.append(
-            f"- {short_path(label, 72)}: {stats['sessions']} sessions, "
+            f"- {project_label(label, 72)}: {stats['sessions']} sessions, "
             f"{compact_int(int(stats['tokens_in']) + int(stats['tokens_out']))} tokens, "
             f"{money(float(stats['cost_usd']))} API-equivalent value"
         )
@@ -2653,8 +2696,11 @@ def render_journal(days: int = 1) -> str:
     stats = summarize(rows)
     by_project: dict[str, list[LocalSession]] = defaultdict(list)
     for row in rows:
-        by_project[row.project_path or "unknown"].append(row)
-    top = max(by_project.items(), key=lambda item: summarize(item[1])["cost_usd"])
+        by_project[project_key(row.project_path)].append(row)
+    top = min(by_project.items(), key=lambda item: (
+        0 if item[0] != UNATTRIBUTED_PROJECT else 1,
+        -summarize(item[1])["cost_usd"],
+    ))
     top_project_stats = summarize(top[1])
     costliest = max(rows, key=lambda row: (row.cost_usd, row.tokens_in + row.tokens_out))
     pressure_rows = [row for row in rows if not has_cumulative_totals(row)]
@@ -2671,15 +2717,15 @@ def render_journal(days: int = 1) -> str:
     return "\n".join([
         f"AIWatcher daily journal - last {days} day{'s' if days != 1 else ''}",
         f"Sessions: {stats['sessions']} | {money(float(stats['cost_usd']))} API-equivalent | {token_summary_label(rows)}",
-        f"Top project: {short_path(top[0], 72)} ({money(float(top_project_stats['cost_usd']))})",
-        f"Most expensive session: {short_path(costliest.project_path)} | {costliest.tool} | {money(costliest.cost_usd)} | {compact_int(costliest.tokens_in + costliest.tokens_out)} tokens",
+        f"Top project: {project_label(top[0], 72)} ({money(float(top_project_stats['cost_usd']))})",
+        f"Most expensive session: {project_label(costliest.project_path)} | {costliest.tool} | {money(costliest.cost_usd)} | {compact_int(costliest.tokens_in + costliest.tokens_out)} tokens",
         (
-            f"Largest reliable context session: {short_path(largest_context.project_path)} | "
+            f"Largest reliable context session: {project_label(largest_context.project_path)} | "
             f"{compact_int(largest_context.tokens_in + largest_context.tokens_out)} tokens"
             if largest_context else "Largest reliable context session: unavailable from local logs"
         ),
         (
-            f"Loop signal: {loop_candidate.agent_calls} model calls in {short_path(loop_candidate.project_path)}"
+            f"Loop signal: {loop_candidate.agent_calls} model calls in {project_label(loop_candidate.project_path)}"
             if loop_candidate else "Loop signal: unavailable from local logs"
         ),
         "",
@@ -3273,13 +3319,13 @@ def command_today(_args: argparse.Namespace) -> int:
             share_base = float(today_stats["cost_usd"]) or float(today_stats["sessions"]) or 1
             share_value = spend if float(today_stats["cost_usd"]) else session_count
             share = round(share_value / share_base * 100)
-            print(f"\nTop project: {short_path(label)} ({share}% of today's {'API-equivalent value' if float(today_stats['cost_usd']) else 'sessions'})")
+            print(f"\nTop project: {project_label(label)} ({share}% of today's {'API-equivalent value' if float(today_stats['cost_usd']) else 'sessions'})")
 
         longest = longest_session(today, today_start)
         if longest:
             print(
                 f"Longest session: {compact_duration(reliable_session_seconds(longest, today_start))} "
-                f"in {short_path(longest.project_path)} "
+                f"in {project_label(longest.project_path)} "
                 f"({longest.tool}, {money(longest.cost_usd)})"
             )
         else:
@@ -3320,13 +3366,16 @@ def command_projects(args: argparse.Namespace) -> int:
     sessions = sessions_since(args.days)
     by_project: dict[str, list[LocalSession]] = defaultdict(list)
     for session in sessions:
-        by_project[session.project_path or "unknown"].append(session)
+        by_project[project_key(session.project_path)].append(session)
     print(f"AI usage by project - last {args.days} days")
     print("Cost is shown as API-equivalent value; subscription plans may differ.\n")
-    ranked = sorted(by_project.items(), key=lambda item: summarize(item[1])["cost_usd"], reverse=True)
+    ranked = sorted(by_project.items(), key=lambda item: (
+        0 if item[0] != UNATTRIBUTED_PROJECT else 1,
+        -summarize(item[1])["cost_usd"],
+    ))
     for project, rows in ranked[: args.limit]:
         stats = summarize(rows)
-        print(f"{money(float(stats['cost_usd'])):>10}  {stats['sessions']:>4} sessions  {compact_int(int(stats['tokens_in']) + int(stats['tokens_out'])):>8} tokens  {project}")
+        print(f"{money(float(stats['cost_usd'])):>10}  {stats['sessions']:>4} sessions  {compact_int(int(stats['tokens_in']) + int(stats['tokens_out'])):>8} tokens  {project_label(project, 80)}")
     if args.days > 30:
         print_cloud_hint("Need org-wide project attribution? Cloud maps spend by user, team, and repo.")
     return 0
@@ -3349,12 +3398,15 @@ def command_report(args: argparse.Namespace) -> int:
     projects: dict[str, list[LocalSession]] = defaultdict(list)
     tools: dict[str, list[LocalSession]] = defaultdict(list)
     for row in rows:
-        projects[row.project_path or "unknown"].append(row)
+        projects[project_key(row.project_path)].append(row)
         tool_key = f"{row.tool} ({row.surface})" if row.surface else row.tool
         tools[tool_key].append(row)
     model_totals = model_usage_totals(rows)
 
-    ranked_projects = sorted(projects.items(), key=lambda item: summarize(item[1])["cost_usd"], reverse=True)
+    ranked_projects = sorted(projects.items(), key=lambda item: (
+        0 if item[0] != UNATTRIBUTED_PROJECT else 1,
+        -summarize(item[1])["cost_usd"],
+    ))
     ranked_tools = sorted(tools.items(), key=lambda item: summarize(item[1])["cost_usd"], reverse=True)
     ranked_models = sorted(model_totals.items(), key=lambda item: item[1]["cost_usd"], reverse=True)
 
@@ -3368,7 +3420,7 @@ def command_report(args: argparse.Namespace) -> int:
     if ranked_projects:
         project, project_rows = ranked_projects[0]
         project_stats = summarize(project_rows)
-        print(f"Top project: {short_path(project)} ({money(float(project_stats['cost_usd']))})")
+        print(f"Top project: {project_label(project)} ({money(float(project_stats['cost_usd']))})")
     if ranked_tools:
         tool, tool_rows = ranked_tools[0]
         tool_stats = summarize(tool_rows)
@@ -4149,7 +4201,7 @@ def _print_watch_status_card(
 
     print(f"Latest observed session ({when}, local logs only -- not a live feed)")
     print(f"  Tool/model : {session.tool} / {session.model or 'unknown'}")
-    print(f"  Project    : {short_path(session.project_path)}")
+    print(f"  Project    : {project_label(session.project_path)}")
     print(
         f"  Usage      : {money(session.cost_usd)} API-equivalent, "
         f"{compact_int(session.tokens_in + session.tokens_out)} tokens, "
@@ -4205,7 +4257,7 @@ def _print_watch_status_card(
             if getattr(args, "notify", False):
                 ok, detail = _send_local_notification(
                     f"AIWatcher: {status['action']}",
-                    f"{short_path(session.project_path)} - {status['reason']} - Review: {dashboard_url}",
+                    f"{project_label(session.project_path)} - {status['reason']} - Review: {dashboard_url}",
                     url=dashboard_url,
                 )
                 print(f"  Notification: {'sent' if ok else 'not sent'} ({detail})")
@@ -4217,7 +4269,7 @@ def _print_watch_status_card(
                     overlay_detail = "already shown for this session/action"
                 else:
                     overlay_title = "AIWatcher: start a fresh chat"
-                    overlay_body = f"{short_path(session.project_path)} — {status['reason']}"
+                    overlay_body = f"{project_label(session.project_path)} — {status['reason']}"
                     overlay_severity = health.severity if health is not None else "warning"
                     overlay_brief = None
                     try:
@@ -4438,13 +4490,13 @@ def _check_outcome_review_signals(rows: Sequence[LocalSession]) -> None:
                     _record_notification_sent_safely(signal_key)
                     already_reviewed += 1
                     continue
-            project_label = short_path(session.project_path)
+            project_name = project_label(session.project_path)
             if status == "survived":
                 title = "AIWatcher: change survived"
-                reason = f"{project_label} - This session's change survived {bucket} days. Mark it useful?"
+                reason = f"{project_name} - This session's change survived {bucket} days. Mark it useful?"
             else:
                 title = "AIWatcher: change churned"
-                reason = f"{project_label} - This session looked useful, but the commit no longer exists on the branch."
+                reason = f"{project_name} - This session looked useful, but the commit no longer exists on the branch."
             _fire_outcome_notification(
                 signal_key=signal_key,
                 signal_type=f"survival_{bucket}",
@@ -4485,7 +4537,7 @@ def _check_outcome_review_signals(rows: Sequence[LocalSession]) -> None:
             tool=session.tool,
             title="AIWatcher: possible rework",
             reason=(
-                f"{short_path(session.project_path)} - A later session touched the same file(s) again. "
+                f"{project_label(session.project_path)} - A later session touched the same file(s) again. "
                 "Was the earlier session rework?"
             ),
             url=_outcome_dashboard_url(session.session_id),
@@ -4623,7 +4675,7 @@ def command_watch(args: argparse.Namespace) -> int:
                     for row in interesting[:5]:
                         stamp = session_sort_key(row)
                         when = format_short_datetime(stamp.astimezone()) if stamp != MIN_DT else "unknown"
-                        print(f"[{when}] {row.tool} | {short_path(row.project_path)} | {money(row.cost_usd)} | {compact_int(row.tokens_in + row.tokens_out)} tokens")
+                        print(f"[{when}] {row.tool} | {project_label(row.project_path)} | {money(row.cost_usd)} | {compact_int(row.tokens_in + row.tokens_out)} tokens")
                         health = analyze_session_health(row, all_events.get(row.session_id, []))
                         if health is not None and health.severity in {"warning", "critical"}:
                             replay = (

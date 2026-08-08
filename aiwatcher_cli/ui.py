@@ -74,9 +74,12 @@ MAX_REQUEST_BYTES = 64 * 1024
 MIN_DT = datetime.min.replace(tzinfo=timezone.utc)
 SUMMARY_MEMORY_TTL_SECONDS = 45
 SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
+SUMMARY_CACHE_SCHEMA_VERSION = 2
 SUMMARY_BACKGROUND_COOLDOWN_SECONDS = 8
 ACTIVE_SESSION_MINUTES = 30
 RECENT_SESSION_HOURS = 4
+UNATTRIBUTED_PROJECT = "__unattributed__"
+UNATTRIBUTED_PROJECT_LABEL = "Unattributed sessions"
 
 _SUMMARY_CACHE: dict[int, tuple[float, dict[str, object]]] = {}
 _SUMMARY_REFRESHING: set[int] = set()
@@ -111,6 +114,34 @@ def short_path(path: str | None, max_len: int = 54) -> str:
     if len(path) <= max_len:
         return path
     return "..." + path[-(max_len - 3):]
+
+
+def is_reliable_project_path(path: str | None) -> bool:
+    if not path or path == "unknown" or path == UNATTRIBUTED_PROJECT:
+        return False
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except OSError:
+        resolved = Path(path).expanduser()
+    common_non_projects = {Path.home() / "Desktop", Path.home() / "Documents", Path.home() / "Downloads"}
+    if resolved in common_non_projects:
+        return False
+    parts = set(resolved.parts)
+    if ".claude" in parts or ".codex" in parts or ".cursor" in parts:
+        return False
+    if "tasks" in parts and any(part.startswith("claude-") for part in resolved.parts):
+        return False
+    return resolved.parent != resolved
+
+
+def project_key(path: str | None) -> str:
+    return path if is_reliable_project_path(path) else UNATTRIBUTED_PROJECT
+
+
+def project_label(path: str | None, max_len: int = 54) -> str:
+    if not is_reliable_project_path(path):
+        return UNATTRIBUTED_PROJECT_LABEL
+    return short_path(path, max_len)
 
 
 def in_window(session: LocalSession, since: datetime) -> bool:
@@ -220,14 +251,17 @@ def _project_health(items: list[LocalSession]) -> dict[str, object]:
 def group_projects(rows: list[LocalSession]) -> list[dict[str, object]]:
     grouped: dict[str, list[LocalSession]] = defaultdict(list)
     for row in rows:
-        grouped[row.project_path or "unknown"].append(row)
+        grouped[project_key(row.project_path)].append(row)
     result = []
     for key, items in grouped.items():
         stats = summarize(items)
+        attributed = key != UNATTRIBUTED_PROJECT
+        name = key if attributed else UNATTRIBUTED_PROJECT_LABEL
         result.append({
-            "name": key,
+            "name": name,
             "id": key,
-            "short_name": short_path(key),
+            "short_name": project_label(key),
+            "attributed": attributed,
             "sessions": stats["sessions"],
             "tokens": stats["tokens"],
             "tokens_label": compact_int(int(stats["tokens"])),
@@ -237,7 +271,11 @@ def group_projects(rows: list[LocalSession]) -> list[dict[str, object]]:
             "tool_calls": stats["tool_calls"],
             "health": _project_health(items),
         })
-    result.sort(key=lambda item: (float(item["api_value_usd"]), int(item["tokens"])), reverse=True)
+    result.sort(key=lambda item: (
+        0 if item.get("attributed") else 1,
+        -float(item["api_value_usd"]),
+        -int(item["tokens"]),
+    ))
     return result
 
 
@@ -373,8 +411,8 @@ def _session_row_json(
     return {
         "tool": row.tool,
         "session_id": row.session_id,
-        "project": short_path(row.project_path),
-        "project_full": row.project_path or "unknown",
+        "project": project_label(row.project_path),
+        "project_full": row.project_path if is_reliable_project_path(row.project_path) else "unknown",
         "model": display_model_name(row.model),
         "tokens": compact_int(row.tokens_in + row.tokens_out),
         "api_value": money(row.cost_usd),
@@ -459,8 +497,8 @@ def session_json(row: LocalSession) -> dict[str, object]:
     return {
         "session_id": row.session_id,
         "tool": row.tool,
-        "project": row.project_path or "unknown",
-        "project_short": short_path(row.project_path),
+        "project": row.project_path if is_reliable_project_path(row.project_path) else "unknown",
+        "project_short": project_label(row.project_path),
         "model": display_model_name(row.model),
         "tokens": row.tokens_in + row.tokens_out,
         "tokens_label": compact_int(row.tokens_in + row.tokens_out),
@@ -505,12 +543,13 @@ def _safe_window_outcomes(session_ids: set[str]) -> tuple[dict[str, dict[str, ob
 
 
 def build_project_detail(project: str, days: int = 7) -> dict[str, object]:
-    rows = [row for row in rows_for_window(days) if (row.project_path or "unknown") == project]
+    rows = [row for row in rows_for_window(days) if project_key(row.project_path) == project]
     stats = summarize(rows)
     sessions = sorted(rows, key=lambda row: row.updated_at or row.started_at or MIN_DT, reverse=True)
     return {
         "project": project,
-        "project_short": short_path(project, 72),
+        "project_short": UNATTRIBUTED_PROJECT_LABEL if project == UNATTRIBUTED_PROJECT else short_path(project, 72),
+        "attributed": project != UNATTRIBUTED_PROJECT,
         "health": _project_health(rows),
         "totals": {
             "sessions": stats["sessions"],
@@ -774,14 +813,14 @@ def build_weekly_digest(days: int = 7) -> dict[str, object]:
         loop = _loop_signal(events)
         if loop is not None:
             loop_candidates.append({
-                "project": short_path(row.project_path),
+                "project": project_label(row.project_path),
                 "tool": row.tool,
                 "diagnosis": loop["diagnosis"],
             })
         velocity = _velocity_signal(row.tool, events)
         if velocity is not None:
             velocity_candidates.append({
-                "project": short_path(row.project_path),
+                "project": project_label(row.project_path),
                 "tool": row.tool,
                 "ratio_label": f"{float(velocity['ratio']):.1f}x baseline pace",
             })
@@ -824,7 +863,7 @@ def build_weekly_digest(days: int = 7) -> dict[str, object]:
         },
         "highest_cost_useful_session": (
             {
-                "project": short_path(highest_cost_useful.project_path),
+                "project": project_label(highest_cost_useful.project_path),
                 "tool": highest_cost_useful.tool,
                 "model": highest_cost_useful.model or "unknown",
                 "api_value_label": money(highest_cost_useful.cost_usd),
@@ -835,7 +874,7 @@ def build_weekly_digest(days: int = 7) -> dict[str, object]:
         "top_sessions": [
             {
                 "session_id": row.session_id,
-                "project": short_path(row.project_path),
+                "project": project_label(row.project_path),
                 "tool": row.tool,
                 "model": row.model or "unknown",
                 "api_value_label": money(row.cost_usd),
@@ -869,7 +908,7 @@ def build_journal(days: int = 1) -> dict[str, object]:
         }
 
     stats = summarize(rows)
-    projects = group_rows(rows, lambda row: row.project_path or "unknown")
+    projects = group_projects(rows)
     costliest = max(rows, key=lambda row: (row.cost_usd, row.tokens_in + row.tokens_out))
     pressure_rows = [row for row in rows if not has_cumulative_totals(row)]
     largest_context = max(pressure_rows, key=lambda row: row.tokens_in + row.tokens_out, default=None)
@@ -887,14 +926,14 @@ def build_journal(days: int = 1) -> dict[str, object]:
         "summary": f"{stats['sessions']} sessions · {money(float(stats['api_value_usd']))} API-equivalent · {compact_int(int(stats['tokens']))} tokens",
         "items": [
             f"Top project: {projects[0]['short_name']} ({projects[0]['api_value_label']})" if projects else "No project attribution yet.",
-            f"Most expensive session: {short_path(costliest.project_path)} · {costliest.tool} · {money(costliest.cost_usd)}",
+            f"Most expensive session: {project_label(costliest.project_path)} · {costliest.tool} · {money(costliest.cost_usd)}",
             (
-                f"Largest reliable context: {short_path(largest_context.project_path)} · "
+                f"Largest reliable context: {project_label(largest_context.project_path)} · "
                 f"{compact_int(largest_context.tokens_in + largest_context.tokens_out)} tokens"
                 if largest_context else "Largest reliable context: unavailable from local logs"
             ),
             (
-                f"Loop signal: {loop_candidate.agent_calls} model calls in {short_path(loop_candidate.project_path)}"
+                f"Loop signal: {loop_candidate.agent_calls} model calls in {project_label(loop_candidate.project_path)}"
                 if loop_candidate else "Loop signal: unavailable from local logs"
             ),
         ],
@@ -937,7 +976,7 @@ def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) ->
         cards.append({
             "session_id": health.session_id,
             "tool": health.tool,
-            "project": short_path(health.project_path),
+            "project": project_label(health.project_path),
             "severity": health.severity,
             "latest_turn_tokens": compact_int(health.latest_turn_tokens),
             "peak_turn_tokens": compact_int(health.peak_turn_tokens),
@@ -1535,7 +1574,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
     day_of_month = max(1, now.day)
     projected_month = float(month_stats["api_value_usd"]) / day_of_month * 30
 
-    projects = group_rows(rows, lambda row: row.project_path or "unknown")
+    projects = group_projects(rows)
     tools = group_rows(rows, _tool_surface_key)
     models = group_by_model_breakdown(rows)
 
@@ -1566,7 +1605,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
     if costliest and costliest.cost_usd >= 1:
         insights.append({
             "title": "Session worth reviewing",
-            "body": f"{short_path(costliest.project_path)} used {money(costliest.cost_usd)} API-equivalent value on {costliest.model or costliest.tool}. Open the session before repeating similar work.",
+            "body": f"{project_label(costliest.project_path)} used {money(costliest.cost_usd)} API-equivalent value on {costliest.model or costliest.tool}. Open the session before repeating similar work.",
         })
     pressure_rows = [row for row in rows if not has_cumulative_totals(row)]
     highest_context = max(pressure_rows, key=lambda row: row.tokens_in + row.tokens_out, default=None)
@@ -1682,6 +1721,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
     cost_per_useful = useful_cost / len(useful_rows) if useful_rows else None
     return {
         "generated_at": now.isoformat(),
+        "cache_schema_version": SUMMARY_CACHE_SCHEMA_VERSION,
         "days": days,
         "privacy": [
             "Read-only local scan",
@@ -1737,8 +1777,8 @@ def build_summary(days: int = 7) -> dict[str, object]:
             {
                 "tool": row.tool,
                 "session_id": row.session_id,
-                "project": short_path(row.project_path),
-                "project_full": row.project_path or "unknown",
+                "project": project_label(row.project_path),
+                "project_full": row.project_path if is_reliable_project_path(row.project_path) else "unknown",
                 "model": display_model_name(row.model),
                 "tokens": compact_int(row.tokens_in + row.tokens_out),
                 "api_value": money(row.cost_usd),
@@ -1767,11 +1807,13 @@ def _summary_cache_path(days: int) -> Path:
 def _mark_summary_cache(summary: dict[str, object], *, status: str, source: str, refreshing: bool) -> dict[str, object]:
     copy = dict(summary)
     generated_at = copy.get("generated_at") if isinstance(copy.get("generated_at"), str) else None
+    copy["cache_schema_version"] = SUMMARY_CACHE_SCHEMA_VERSION
     copy["cache"] = {
         "status": status,
         "source": source,
         "refreshing": refreshing,
         "generated_at": generated_at,
+        "schema_version": SUMMARY_CACHE_SCHEMA_VERSION,
     }
     return copy
 
@@ -1783,6 +1825,8 @@ def _read_summary_disk_cache(days: int, *, max_age_seconds: int = SUMMARY_DISK_T
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(raw, dict):
+        return None
+    if raw.get("cache_schema_version") != SUMMARY_CACHE_SCHEMA_VERSION:
         return None
     generated_at = raw.get("generated_at")
     try:
@@ -1865,6 +1909,7 @@ def _build_summary_shell(days: int = 7) -> dict[str, object]:
     cost_per_useful = useful_cost / len(useful_rows) if useful_rows else None
     return {
         "generated_at": now.isoformat(),
+        "cache_schema_version": SUMMARY_CACHE_SCHEMA_VERSION,
         "days": days,
         "privacy": [
             "Read-only local scan",
@@ -1907,8 +1952,8 @@ def _build_summary_shell(days: int = 7) -> dict[str, object]:
             {
                 "tool": row.tool,
                 "session_id": row.session_id,
-                "project": short_path(row.project_path),
-                "project_full": row.project_path or "unknown",
+                "project": project_label(row.project_path),
+                "project_full": row.project_path if is_reliable_project_path(row.project_path) else "unknown",
                 "model": display_model_name(row.model),
                 "tokens": compact_int(row.tokens_in + row.tokens_out),
                 "api_value": money(row.cost_usd),

@@ -117,6 +117,27 @@ class SurfaceCoverageCliTests(unittest.TestCase):
         self.assertNotIn("Watching:", output)
 
 
+class ProjectAttributionCliTests(unittest.TestCase):
+    def test_projects_command_does_not_rank_filesystem_root_as_real_project(self) -> None:
+        rows = [
+            session(1, project="/"),
+            session(2, project="/repo/real"),
+        ]
+        rows[0].cost_usd = 100.0
+        rows[1].cost_usd = 1.0
+        with (
+            patch.object(cli, "sessions_since", return_value=rows),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_projects(SimpleNamespace(days=7, limit=10))
+
+        self.assertEqual(result, 0)
+        lines = [line for line in stdout.getvalue().splitlines() if line.strip().startswith("$")]
+        self.assertIn("/repo/real", lines[0])
+        self.assertIn("Unattributed sessions", lines[1])
+        self.assertNotIn("  /", lines[1])
+
+
 class PromptSavingsBaselineTests(unittest.TestCase):
     """P0-3: prompt gate must read cached baselines, never rescan history live."""
 

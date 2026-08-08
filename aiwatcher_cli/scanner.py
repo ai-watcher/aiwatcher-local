@@ -20,6 +20,11 @@ from .pricing import estimate_cost
 
 
 HOME_DIR = Path.home().resolve()
+COMMON_NON_PROJECT_DIRS = {
+    HOME_DIR / "Desktop",
+    HOME_DIR / "Documents",
+    HOME_DIR / "Downloads",
+}
 
 
 def _env_path(name: str, *parts: str) -> Path | None:
@@ -78,6 +83,30 @@ CODEX_ROLLOUT_CACHE: tuple[
 
 def _first_existing(paths: list[Path]) -> Path | None:
     return next((path for path in paths if path.exists()), None)
+
+
+def _is_inside(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_tool_storage_path(path: Path) -> bool:
+    parts = set(path.parts)
+    if "tasks" in parts and any(part.startswith("claude-") for part in path.parts):
+        return True
+    storage_roots = [
+        *CLAUDE_PROJECTS_DIRS,
+        *CURSOR_LOGS_DIRS,
+        *CURSOR_STATE_DIRS,
+        *CODEX_DIRS,
+        *CODEX_SESSIONS_DIRS,
+        *CLINE_DIRS,
+        *WINDSURF_DIRS,
+    ]
+    return any(_is_inside(path, root.resolve()) for root in storage_roots if root.exists())
 
 
 @dataclass
@@ -403,7 +432,7 @@ def _normalize_project_path(path: str | None) -> str | None:
     except OSError:
         resolved = candidate
 
-    if resolved == HOME_DIR:
+    if resolved == HOME_DIR or resolved in COMMON_NON_PROJECT_DIRS or resolved.parent == resolved or _is_tool_storage_path(resolved):
         PROJECT_PATH_CACHE[path] = None
         return None
 
@@ -527,7 +556,7 @@ def _choose_project_path(
         return max(candidates, key=lambda path: (candidates[path][0], candidates[path][1]))
 
     normalized_fallback = _normalize_project_path(fallback_path)
-    return normalized_fallback or fallback_path
+    return normalized_fallback or "unknown"
 
 
 CLIP_FALLBACK_NOTE = "Windowed whole-session: this tool reports no per-turn events to clip by."

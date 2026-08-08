@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
 import shutil
@@ -397,6 +398,18 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(summary["cache"]["status"], "building")
         self.assertIn("watcher", summary)
 
+    def test_stale_summary_disk_cache_without_schema_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            cache_dir = os.path.join(temp_dir, "cache")
+            os.makedirs(cache_dir)
+            cache_path = os.path.join(cache_dir, "ui-summary-7.json")
+            with open(cache_path, "w", encoding="utf-8") as handle:
+                json.dump({"generated_at": datetime.now(timezone.utc).isoformat(), "projects": [{"id": "/"}]}, handle)
+
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                self.assertIsNone(ui._read_summary_disk_cache(7))
+
     def test_project_health_flags_heavy_usage_as_actionable_review(self) -> None:
         now = datetime.now(timezone.utc)
         rows = [
@@ -418,6 +431,37 @@ class DashboardWindowTests(unittest.TestCase):
 
         self.assertEqual(projects[0]["health"]["status"], "review")
         self.assertEqual(projects[0]["health"]["action_label"], "Review")
+
+    def test_root_project_is_labeled_unattributed_and_sorted_after_real_projects(self) -> None:
+        now = datetime.now(timezone.utc)
+        rows = [
+            LocalSession(
+                session_id="root",
+                tool="claude-code",
+                project_path="/",
+                started_at=now - timedelta(hours=2),
+                updated_at=now - timedelta(hours=1),
+                tokens_in=10_000_000,
+                cost_usd=92.0,
+            ),
+            LocalSession(
+                session_id="real",
+                tool="claude-code",
+                project_path="/repo/real",
+                started_at=now - timedelta(hours=2),
+                updated_at=now - timedelta(hours=1),
+                tokens_in=10,
+                cost_usd=1.0,
+            ),
+        ]
+
+        projects = ui.group_projects(rows)
+
+        self.assertEqual(projects[0]["id"], "/repo/real")
+        self.assertTrue(projects[0]["attributed"])
+        self.assertEqual(projects[1]["id"], ui.UNATTRIBUTED_PROJECT)
+        self.assertEqual(projects[1]["short_name"], ui.UNATTRIBUTED_PROJECT_LABEL)
+        self.assertFalse(projects[1]["attributed"])
 
     def test_session_state_and_actions_do_not_overclaim_tool_deeplinks(self) -> None:
         now = datetime.now(timezone.utc)
