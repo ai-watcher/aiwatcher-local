@@ -317,6 +317,22 @@ class PromptSavingsBaselineTests(unittest.TestCase):
         saved = save.call_args.args[0]
         self.assertEqual(saved["per_tool"]["claude-code"]["session_count"], 10)
 
+    def test_today_passively_captures_missing_evidence_snapshots(self) -> None:
+        rows = [session(1), session(2)]
+        with (
+            patch.object(cli, "scan_all", return_value=rows),
+            patch.object(cli, "link_recent_interventions_to_sessions"),
+            patch.object(cli, "get_or_refresh_baselines"),
+            patch.object(cli, "recheck_evidence_survival"),
+            patch.object(cli, "record_missing_evidence_snapshots") as recorder,
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            result = cli.command_today(SimpleNamespace())
+
+        self.assertEqual(result, 0)
+        recorder.assert_called_once()
+        self.assertEqual({row.session_id for row in recorder.call_args.args[0]}, {"session-1", "session-2"})
+
     def test_fixed_fixture_matches_locked_estimate(self) -> None:
         # Regression lock: a known, fixed set of sessions must always produce
         # this exact estimate. Guards against the cache-based rewrite quietly
@@ -1910,6 +1926,23 @@ class OutcomeReviewSignalTests(unittest.TestCase):
         ):
             cli.command_watch(args)
         outcome_check.assert_called_once_with([row])
+
+    def test_command_watch_passively_captures_missing_evidence_snapshots(self) -> None:
+        row = session(1, project="/repo/orcha")
+        args = SimpleNamespace(
+            days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250,
+            tokens_threshold=500_000, target="generic",
+        )
+        output = io.StringIO()
+        with (
+            patch.object(cli, "sessions_since", return_value=[row]),
+            patch.object(cli, "scan_all_events", return_value=[]),
+            patch.object(cli, "get_baselines", return_value={}),
+            patch.object(cli, "record_missing_evidence_snapshots") as recorder,
+            patch("sys.stdout", output),
+        ):
+            cli.command_watch(args)
+        recorder.assert_called_once_with([row])
 
     def test_command_watch_skips_outcome_signal_check_without_notify(self) -> None:
         row = session(1, project="/repo/orcha")

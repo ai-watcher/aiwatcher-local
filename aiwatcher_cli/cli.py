@@ -28,6 +28,7 @@ from typing import Callable, Iterable, Sequence
 from urllib.parse import quote
 
 from .correlate import link_recent_interventions_to_sessions
+from .evidence_capture import record_missing_evidence_snapshots
 from .local_state import (
     COMMAND_GATE_BLOCKED_DECISIONS,
     VALID_OUTCOMES,
@@ -2540,6 +2541,10 @@ def command_today(_args: argparse.Namespace) -> int:
     except OSError:
         pass
     try:
+        record_missing_evidence_snapshots(sorted(all_sessions, key=session_sort_key, reverse=True))
+    except OSError:
+        pass
+    try:
         get_or_refresh_baselines()
     except OSError:
         pass
@@ -3796,6 +3801,10 @@ def command_watch(args: argparse.Namespace) -> int:
     try:
         while True:
             rows = sorted(sessions_since(args.days), key=session_sort_key, reverse=True)
+            try:
+                record_missing_evidence_snapshots(rows)
+            except OSError:
+                pass
 
             if getattr(args, "notify", False):
                 now = datetime.now(timezone.utc)
