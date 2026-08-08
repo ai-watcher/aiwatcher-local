@@ -293,6 +293,7 @@ def segment_session_by_prompt(source_path: str | None, *, max_chars: int = 2000)
                     cache_write_5m=tokens["cache_write_5m"],
                     cache_write_1h=tokens["cache_write_1h"],
                     cache_read=tokens["cache_read"],
+                    when=_parse_ts(obj.get("timestamp") or obj.get("createdAt")),
                 )
                 current["tokens"] = int(current["tokens"]) + _billed_input(tokens) + tokens["output"]
                 current["events"] = int(current["events"]) + 1
@@ -868,6 +869,7 @@ def scan_claude_code() -> list[LocalSession]:
                                 cache_write_5m=tokens["cache_write_5m"],
                                 cache_write_1h=tokens["cache_write_1h"],
                                 cache_read=tokens["cache_read"],
+                                when=ts,
                             )
                             if isinstance(cwd, str) and cwd:
                                 cwd_costs[cwd] += event_cost
@@ -998,6 +1000,7 @@ def scan_claude_code_events(since: datetime | None = None) -> list[LocalEvent]:
                                 cache_write_5m=tokens["cache_write_5m"],
                                 cache_write_1h=tokens["cache_write_1h"],
                                 cache_read=tokens["cache_read"],
+                                when=ts,
                             )
 
                             content_hash = None
@@ -1198,7 +1201,7 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
                     agent_calls += 1
                     event_input = int(last.get("input_tokens") or 0)
                     event_output = int(last.get("output_tokens") or 0)
-                    event_cost = estimate_cost(model, event_input, event_output)
+                    event_cost = estimate_cost(model, event_input, event_output, when=timestamp)
                     # Attribute each incremental turn's tokens/cost to whichever model
                     # was active for that turn — total_token_usage is cumulative and
                     # priced with only the final model, but these per-turn deltas let
@@ -1236,7 +1239,10 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
             model=model or "codex",
             tokens_in=final_input,
             tokens_out=final_output,
-            cost_usd=estimate_cost(model, final_input, final_output),
+            # Session-level total, so it is dated by the session's last turn:
+            # a rollup has no single moment, and the newest turn is the closest
+            # honest answer for which rate card applied.
+            cost_usd=estimate_cost(model, final_input, final_output, when=updated_at),
             agent_calls=agent_calls,
             tool_calls=tool_calls,
             source_path=str(path),

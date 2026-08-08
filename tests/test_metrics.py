@@ -8,6 +8,7 @@ from aiwatcher_cli.metrics import (
     pace_vs_baseline,
     replayed_context_cost,
 )
+from aiwatcher_cli.pricing import CACHE_READ_MULTIPLIER, cache_read_cost
 from aiwatcher_cli.scanner import LocalEvent, LocalSession
 
 
@@ -171,17 +172,28 @@ class ReplayedContextCostTests(unittest.TestCase):
         self.assertFalse(replayed_context_cost(rows)["available"])
 
     def test_prices_replay_at_the_cache_rate_not_the_full_input_rate(self) -> None:
-        # 1M replayed tokens on Sonnet 5: $3.00/Mtok base, discounted to 0.1x.
-        rows = [session("s1", model="claude-sonnet-5", cache_read=1_000_000,
-                        tokens_in=1_000_000, tokens_out=0, cost=1.0)]
-        result = replayed_context_cost(rows)
+        # The claim is the discount, not a dollar figure: replay is priced at
+        # 0.1x the model's input rate *as it stood when the session ran*, so the
+        # expectation is read from the same table rather than written in here.
+        row = session("s1", model="claude-sonnet-5", cache_read=1_000_000,
+                      tokens_in=1_000_000, tokens_out=0, cost=1.0)
+        result = replayed_context_cost([row])
+        expected = cache_read_cost("claude-sonnet-5", 1_000_000, row.updated_at)
 
         self.assertTrue(result["available"])
-        self.assertAlmostEqual(result["sessions"][0]["replayed_usd"], 0.30, places=6)
+        self.assertAlmostEqual(result["sessions"][0]["replayed_usd"], expected, places=6)
+        # Full input rate would be 10x this; that gap is the whole point.
+        full_rate = expected / CACHE_READ_MULTIPLIER
+        self.assertLess(result["sessions"][0]["replayed_usd"], full_rate)
 
     def test_reports_replay_as_a_share_of_the_session(self) -> None:
+        # Session cost is set to exactly twice the replayed cost so the expected
+        # share is 50% at whatever rate is in effect.
+        probe = session("s1", model="claude-sonnet-5", cache_read=1_000_000,
+                        tokens_in=1_000_000, tokens_out=0, cost=1.0)
+        replayed = cache_read_cost("claude-sonnet-5", 1_000_000, probe.updated_at)
         rows = [session("s1", model="claude-sonnet-5", cache_read=1_000_000,
-                        tokens_in=1_000_000, tokens_out=0, cost=0.60)]
+                        tokens_in=1_000_000, tokens_out=0, cost=replayed * 2)]
         row = replayed_context_cost(rows)["sessions"][0]
 
         self.assertEqual(row["replayed_pct"], 100.0)

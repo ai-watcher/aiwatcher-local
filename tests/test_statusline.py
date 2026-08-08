@@ -8,6 +8,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from aiwatcher_cli.pricing import estimate_cost
 from aiwatcher_cli.statusline import (
     CRITICAL_TOKENS,
     UNCOMMITTED_ALARM_USD,
@@ -18,6 +19,8 @@ from aiwatcher_cli.statusline import (
     statusline_settings_snippet,
 )
 
+MODEL = "claude-sonnet-5"
+
 
 def turn(
     *,
@@ -26,7 +29,7 @@ def turn(
     cache_write: int = 0,
     plain_in: int = 10,
     out: int = 200,
-    model: str = "claude-sonnet-5",
+    model: str = MODEL,
 ) -> str:
     return json.dumps({
         "type": "assistant",
@@ -77,9 +80,12 @@ class TranscriptReadingTests(unittest.TestCase):
             write_transcript(path, [turn(when=now, cache_read=1_000_000, plain_in=10, out=0)])
             stats = read_transcript(str(path))
 
-        # 1M cache reads at $3.00/Mtok x 0.1 = $0.30, plus a negligible 10
-        # uncached tokens. Reading input_tokens alone would give ~$0.00003.
-        self.assertGreater(stats["total_usd"], 0.25)
+        # The defect this guards is an order-of-magnitude one: reading
+        # input_tokens alone prices 10 tokens instead of 1,000,010, so the bill
+        # comes out around $0.00003. Comparing against the rate table rather
+        # than a fixed figure keeps that claim true at any rate.
+        input_only = estimate_cost(MODEL, 10, 0, when=now)
+        self.assertGreater(stats["total_usd"], input_only * 1_000)
         self.assertEqual(stats["latest_context"], 1_000_010)
 
     def test_context_reports_the_latest_turn_and_the_peak(self) -> None:

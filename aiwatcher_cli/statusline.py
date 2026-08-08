@@ -110,11 +110,13 @@ def read_transcript(path: str, *, since: datetime | None = None) -> dict[str, An
             if isinstance(turn_model, str) and turn_model:
                 model = turn_model
 
+            stamp = _parse_stamp(obj.get("timestamp") or obj.get("createdAt"))
             cost = estimate_cost(
                 model, tokens["input"], tokens["output"],
                 cache_write_5m=tokens["cache_write_5m"],
                 cache_write_1h=tokens["cache_write_1h"],
                 cache_read=tokens["cache_read"],
+                when=stamp,
             )
             total_usd += cost
             turns += 1
@@ -122,7 +124,6 @@ def read_transcript(path: str, *, since: datetime | None = None) -> dict[str, An
             peak_context = max(peak_context, billed_in)
 
             if since is not None:
-                stamp = _parse_stamp(obj.get("timestamp") or obj.get("createdAt"))
                 if stamp is not None and stamp >= since:
                     since_usd += cost
 

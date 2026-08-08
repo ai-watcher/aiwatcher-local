@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from aiwatcher_cli.pricing import cache_read_cost
+from aiwatcher_cli.pricing import CACHE_WRITE_5M_MULTIPLIER, cache_read_cost, lookup
 from aiwatcher_cli.scanner import LocalEvent, LocalSession
 from aiwatcher_cli.session_health import (
     EXTREME_BLOAT_RATIO,
@@ -11,7 +11,11 @@ from aiwatcher_cli.session_health import (
     analyze_session_health,
 )
 
-MODEL = "claude-sonnet-5"  # $3.00/Mtok in, $15.00/Mtok out
+# Rates are read from the table at the event's own timestamp rather than written
+# in here as numbers. A promotional rate would otherwise make these fixtures
+# disagree with the code they exercise while the promotion runs, and agree again
+# the day it lapses -- a test that passes on a calendar rather than on behaviour.
+MODEL = "claude-sonnet-5"
 
 
 def _session(session_id: str = "s1", *, tool: str = "claude-code") -> LocalSession:
@@ -42,19 +46,21 @@ def _event(
     tokens_in is all billed input and the cache buckets are a subset of it, so
     cost is built from the uncached remainder plus the discounted cache reads.
     """
-    pricing_in = 3.00
+    when = datetime.now(timezone.utc) - timedelta(minutes=10 - index)
+    rates = lookup(model, when) or {"in": 0.0, "out": 0.0}
+    pricing_in, pricing_out = float(rates["in"]), float(rates["out"])
     uncached = max(0, tokens_in - cache_read - cache_write)
     cost = (
         uncached * pricing_in
-        + cache_write * pricing_in * 1.25
-        + tokens_out * 15.00
-    ) / 1_000_000 + cache_read_cost(model, cache_read)
+        + cache_write * pricing_in * CACHE_WRITE_5M_MULTIPLIER
+        + tokens_out * pricing_out
+    ) / 1_000_000 + cache_read_cost(model, cache_read, when)
     return LocalEvent(
         event_id=f"e{index}",
         session_id=session_id,
         tool=tool,
         event_type="model_usage",
-        timestamp=datetime.now(timezone.utc) - timedelta(minutes=10 - index),
+        timestamp=when,
         project_path="/repo",
         model=model,
         tokens_in=tokens_in,
@@ -127,8 +133,11 @@ class BloatIsMeasuredInDollarsTests(unittest.TestCase):
         health = analyze_session_health(_session(), events)
 
         assert health is not None
-        # 4 events x 50k cache reads x $3.00/Mtok x 0.1
-        self.assertAlmostEqual(health.replayed_cost_usd, 4 * 50_000 * 3.00 * 0.1 / 1e6, places=9)
+        # Each event's 50k cache reads at that event's own rate x the read
+        # discount -- the relationship under test, not a fixed dollar figure.
+        expected = sum(cache_read_cost(MODEL, 50_000, e.timestamp) for e in events)
+        self.assertAlmostEqual(health.replayed_cost_usd, expected, places=9)
+        self.assertGreater(expected, 0.0)
 
     def test_latest_turn_replayed_tokens_is_measured_not_derived(self) -> None:
         events = [_event(i, cache_read=10_000) for i in range(3)]

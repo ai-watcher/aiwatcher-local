@@ -9,6 +9,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from aiwatcher_cli import scanner
+from aiwatcher_cli.pricing import (
+    CACHE_READ_MULTIPLIER,
+    CACHE_WRITE_1H_MULTIPLIER,
+    CACHE_WRITE_5M_MULTIPLIER,
+    lookup,
+)
 
 
 class ProjectPathTests(unittest.TestCase):
@@ -116,6 +122,18 @@ class PromptCacheAccountingTests(unittest.TestCase):
     alone ignored the cached bulk of every prompt and understated real cost by
     roughly 11x across this machine's own history."""
 
+    # The fixture line below is stamped with this date, and spend is priced at
+    # the rate in effect when it happened -- so the expected figures are derived
+    # from the table at that date rather than written in as dollars. Otherwise
+    # these assertions would encode whichever rate happened to be current when
+    # they were written and quietly go wrong when one lapses.
+    SCANNED_AT = datetime(2026, 6, 24, 10, 0, tzinfo=timezone.utc)
+
+    def _rates(self) -> tuple[float, float]:
+        pricing = lookup("claude-sonnet-5", self.SCANNED_AT)
+        assert pricing is not None
+        return float(pricing["in"]), float(pricing["out"])
+
     def _scan_one(self, usage: dict) -> scanner.LocalSession:
         with tempfile.TemporaryDirectory() as temp_dir:
             projects = Path(temp_dir) / "projects"
@@ -146,7 +164,16 @@ class PromptCacheAccountingTests(unittest.TestCase):
         self.assertEqual(session.tokens_in, 2 + 13_099 + 33_775)
         self.assertEqual(session.cache_read_tokens, 33_775)
         self.assertEqual(session.cache_write_tokens, 13_099)
-        self.assertAlmostEqual(session.cost_usd, 0.0938175, places=6)
+        price_in, price_out = self._rates()
+        expected = (
+            2 * price_in
+            + 13_099 * price_in * CACHE_WRITE_1H_MULTIPLIER
+            + 33_775 * price_in * CACHE_READ_MULTIPLIER
+            + 339 * price_out
+        ) / 1_000_000
+        self.assertAlmostEqual(session.cost_usd, expected, places=9)
+        # The defect: reading input_tokens alone would price 2 tokens, not 46,876.
+        self.assertGreater(session.cost_usd, 2 * price_in / 1_000_000 * 1_000)
 
     def test_cache_counters_are_a_subset_of_tokens_in_not_an_addition(self) -> None:
         session = self._scan_one({
@@ -167,14 +194,20 @@ class PromptCacheAccountingTests(unittest.TestCase):
             "output_tokens": 0,
         })
         self.assertEqual(session.cache_write_tokens, 1_000_000)
-        self.assertAlmostEqual(session.cost_usd, 3.00 * 1.25, places=6)
+        price_in, _ = self._rates()
+        self.assertAlmostEqual(session.cost_usd, price_in * CACHE_WRITE_5M_MULTIPLIER, places=9)
+        # The point of the fallback: the 1h bucket would have cost more.
+        self.assertLess(session.cost_usd, price_in * CACHE_WRITE_1H_MULTIPLIER)
 
     def test_uncached_session_is_unchanged(self) -> None:
         session = self._scan_one({"input_tokens": 1_000, "output_tokens": 500})
         self.assertEqual(session.tokens_in, 1_000)
         self.assertEqual(session.cache_read_tokens, 0)
         self.assertEqual(session.cache_write_tokens, 0)
-        self.assertAlmostEqual(session.cost_usd, (1_000 * 3.00 + 500 * 15.00) / 1_000_000, places=9)
+        price_in, price_out = self._rates()
+        self.assertAlmostEqual(
+            session.cost_usd, (1_000 * price_in + 500 * price_out) / 1_000_000, places=9
+        )
 
     def test_codex_cached_tokens_are_not_double_counted(self) -> None:
         # Codex uses the opposite convention: its `input_tokens` already

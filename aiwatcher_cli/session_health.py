@@ -131,7 +131,10 @@ def analyze_session_health(
     # Bloat ratio: what share of this session's bill was re-sent history.
     # cache_read_tokens is the replayed portion as the provider counted it, and
     # it is billed at the discounted cache rate, so price it that way.
-    replayed_usd  = sum(cache_read_cost(e.model, e.cache_read_tokens) for e in relevant)
+    # Dated per event, like the costs in the denominator: pricing the numerator
+    # at today's rate while the denominator kept the rate it was billed at would
+    # make the ratio drift with the calendar instead of with the session.
+    replayed_usd  = sum(cache_read_cost(e.model, e.cache_read_tokens, e.timestamp) for e in relevant)
     analyzed_usd  = sum(e.cost_usd for e in relevant)
     # A source that reports cache buckets at all will show writes even when a
     # session gets no read hits; all-zero across both means "not reported".

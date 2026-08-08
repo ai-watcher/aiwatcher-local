@@ -1,16 +1,93 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from aiwatcher_cli.pricing import (
     CACHE_READ_MULTIPLIER,
     CACHE_WRITE_1H_MULTIPLIER,
     CACHE_WRITE_5M_MULTIPLIER,
+    INTRO_PRICING,
     MODEL_PRICING,
+    cache_read_cost,
     estimate_cost,
     is_subscription_model,
     lookup,
 )
+
+
+class DatedPricingTests(unittest.TestCase):
+    """Spend is priced by when it happened, so a promotional rate applies to the
+    history billed under it and lapses on its own date without a code change."""
+
+    SONNET_INTRO_ENDS = INTRO_PRICING["claude-sonnet-5"]["until"]
+
+    def test_spend_inside_the_promotion_uses_the_promotional_rate(self) -> None:
+        during = self.SONNET_INTRO_ENDS - timedelta(days=30)
+        self.assertEqual(
+            estimate_cost("claude-sonnet-5", 1_000_000, 1_000_000, when=during),
+            2.00 + 10.00,
+        )
+
+    def test_spend_after_the_promotion_uses_the_standard_rate(self) -> None:
+        after = self.SONNET_INTRO_ENDS + timedelta(days=1)
+        self.assertEqual(
+            estimate_cost("claude-sonnet-5", 1_000_000, 1_000_000, when=after),
+            3.00 + 15.00,
+        )
+
+    def test_the_rate_flips_on_the_boundary_without_a_code_change(self) -> None:
+        # The whole point of dating the rate: nothing has to run on the day.
+        last_moment = self.SONNET_INTRO_ENDS - timedelta(microseconds=1)
+        first_moment = self.SONNET_INTRO_ENDS
+
+        self.assertEqual(lookup("claude-sonnet-5", last_moment)["in"], 2.00)
+        self.assertEqual(lookup("claude-sonnet-5", first_moment)["in"], 3.00)
+
+    def test_undated_lookups_get_the_standard_rate(self) -> None:
+        # A question with no date attached ("is this subscription-only?") must
+        # not silently pick up a promotional rate.
+        self.assertEqual(lookup("claude-sonnet-5")["in"], 3.00)
+        self.assertEqual(estimate_cost("claude-sonnet-5", 1_000_000, 0), 3.00)
+
+    def test_naive_timestamps_are_read_as_utc_rather_than_crashing(self) -> None:
+        during = (self.SONNET_INTRO_ENDS - timedelta(days=30)).replace(tzinfo=None)
+        self.assertEqual(lookup("claude-sonnet-5", during)["in"], 2.00)
+
+    def test_cache_rates_follow_the_dated_input_price(self) -> None:
+        # Cache costs are multiples of the base input price, so they have to move
+        # with the promotion or a cached session prices its replay at a rate its
+        # own input tokens were never billed at.
+        during = self.SONNET_INTRO_ENDS - timedelta(days=30)
+        self.assertAlmostEqual(
+            cache_read_cost("claude-sonnet-5", 1_000_000, during),
+            2.00 * CACHE_READ_MULTIPLIER,
+            places=9,
+        )
+        self.assertAlmostEqual(
+            estimate_cost("claude-sonnet-5", 0, 0, cache_read=1_000_000, when=during),
+            2.00 * CACHE_READ_MULTIPLIER,
+            places=9,
+        )
+
+    def test_a_model_with_no_promotion_is_unaffected_by_the_date(self) -> None:
+        during = self.SONNET_INTRO_ENDS - timedelta(days=30)
+        self.assertEqual(estimate_cost("claude-opus-5", 1_000_000, 0, when=during), 5.00)
+
+    def test_prefix_matched_models_still_resolve_their_promotion(self) -> None:
+        # lookup() falls back to prefix matching for dated model ids; the
+        # promotion is keyed to the table entry, not the string it was asked for.
+        during = self.SONNET_INTRO_ENDS - timedelta(days=30)
+        self.assertEqual(lookup("claude-sonnet-5-20260101", during)["in"], 2.00)
+
+    def test_every_promotion_undercuts_the_standard_rate_it_replaces(self) -> None:
+        # A promotion that costs more than the standard rate is a typo, and it
+        # would quietly overstate a whole window of history.
+        for model, intro in INTRO_PRICING.items():
+            standard = MODEL_PRICING[model]
+            self.assertLess(intro["in"], standard["in"], model)
+            self.assertLess(intro["out"], standard["out"], model)
+            self.assertEqual(intro["until"].tzinfo, timezone.utc, model)
 
 
 class CurrentGenerationModelPricingTests(unittest.TestCase):

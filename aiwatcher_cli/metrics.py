@@ -249,7 +249,7 @@ def replayed_context_cost(
         replayed = session.cache_read_tokens
         if replayed < min_tokens or session.tokens_in <= 0:
             continue
-        pricing = lookup(session.model)
+        pricing = lookup(session.model, session.updated_at)
         if not pricing or pricing.get("subscription"):
             continue
         cost = replayed * float(pricing["in"]) * CACHE_READ_MULTIPLIER / 1_000_000

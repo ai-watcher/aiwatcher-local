@@ -662,12 +662,18 @@ BASELINE_TOOLS = ("claude-code", "codex-cli")
 #   v2: prompt-cache tokens are counted and priced. Before this, cached input
 #       was ignored entirely, so both p75_tokens and p75_api_value came out
 #       roughly an order of magnitude low.
+#   v3: spend is priced at the rate in effect when it happened, so a model's
+#       promotional rate applies to the history billed under it. Baselines from
+#       v2 priced every model at its standard rate, which read ~30% high over a
+#       month here. This one also has to be bumped by hand whenever a rate is
+#       added to pricing.INTRO_PRICING: the stored figure changes even though no
+#       code path did.
 # The 24h staleness window would eventually wash a change like this out on its
 # own, but "eventually" is not good enough here: the hook hot path reads the
 # cache without refreshing it, so a stale baseline keeps producing confident,
 # order-of-magnitude-wrong savings estimates until something else happens to
 # trigger a recompute.
-BASELINE_ACCOUNTING_VERSION = 2
+BASELINE_ACCOUNTING_VERSION = 3
 
 
 SURVIVAL_ACCOUNTING_VERSION = 1
