@@ -54,6 +54,12 @@ from .local_state import (
 from .outcome_evidence import VALID_EVIDENCE_OUTCOMES, build_outcome_evidence, evidence_for_sessions
 from .ledger import Ledger, build_ledger, unbanked_summary
 from .pricing import is_subscription_model
+from .runtime_attachment import (
+    RuntimeAttachment,
+    perform_runtime_return,
+    runtime_attachment_for_session,
+    safe_runtime_processes,
+)
 from .session_health import ContextHealth, analyze_all_sessions, gate_health_warning
 from .scanner import (
     clip_sessions_to_window,
@@ -343,7 +349,12 @@ def session_state(row: LocalSession, *, now: datetime | None = None) -> dict[str
     }
 
 
-def session_actions(row: LocalSession, *, outcome: dict[str, object] | None = None) -> list[dict[str, object]]:
+def session_actions(
+    row: LocalSession,
+    *,
+    outcome: dict[str, object] | None = None,
+    attachment: RuntimeAttachment | None = None,
+) -> list[dict[str, object]]:
     actions: list[dict[str, object]] = []
     if not outcome:
         actions.append({
@@ -366,12 +377,16 @@ def session_actions(row: LocalSession, *, outcome: dict[str, object] | None = No
         "primary": False,
         "reason": "Use this session's pressure signals to tighten the next ask.",
     })
+    runtime = attachment or runtime_attachment_for_session(row, state=session_state(row), processes=[])
     actions.append({
         "id": "open_tool",
-        "label": "Open in tool",
+        "label": runtime.action_label,
         "primary": False,
-        "available": False,
-        "reason": "Claude/Codex/Cursor do not expose a stable deep link for this local session yet.",
+        "available": runtime.available,
+        "reason": runtime.reason,
+        "mode": runtime.mode,
+        "level": runtime.level,
+        "confidence": runtime.confidence,
     })
     return actions
 
@@ -427,6 +442,8 @@ def _session_row_json(
     window_outcomes: dict[str, dict[str, object]],
     evidence_by_session: dict[str, object],
 ) -> dict[str, object]:
+    state = session_state(row)
+    attachment = runtime_attachment_for_session(row, state=state, processes=[])
     return {
         "tool": row.tool,
         "session_id": row.session_id,
@@ -437,8 +454,9 @@ def _session_row_json(
         "api_value": money(row.cost_usd),
         "outcome": (window_outcomes.get(row.session_id) or {}).get("outcome"),
         "inferred_outcome": evidence_by_session.get(row.session_id).inferred_outcome if evidence_by_session.get(row.session_id) else None,
-        "state": session_state(row),
-        "actions": session_actions(row, outcome=window_outcomes.get(row.session_id)),
+        "state": state,
+        "runtime_attachment": attachment.to_json(),
+        "actions": session_actions(row, outcome=window_outcomes.get(row.session_id), attachment=attachment),
         "updated_at": (row.updated_at or row.started_at).isoformat() if (row.updated_at or row.started_at) else None,
     }
 
@@ -480,7 +498,10 @@ def build_session_search(
 def _survival_for_session(session_id: str) -> dict[str, str] | None:
     """Flatten a stored evidence_snapshot's survival history to {bucket: status}
     for build_outcome_evidence(), which only needs the status, not checked_at."""
-    row = evidence_snapshots_for_sessions({session_id}).get(session_id)
+    try:
+        row = evidence_snapshots_for_sessions({session_id}).get(session_id)
+    except OSError:
+        return None
     survival = row.get("survival") if row and isinstance(row.get("survival"), dict) else None
     if not survival:
         return None
@@ -511,8 +532,13 @@ def survival_by_session(sessions: list[LocalSession]) -> dict[str, dict[str, str
 def session_json(row: LocalSession) -> dict[str, object]:
     started = row.started_at.isoformat() if row.started_at else None
     updated = row.updated_at.isoformat() if row.updated_at else None
-    outcome = get_outcome(row.session_id)
+    try:
+        outcome = get_outcome(row.session_id)
+    except OSError:
+        outcome = None
     evidence = build_outcome_evidence(row, survival=_survival_for_session(row.session_id))
+    state = session_state(row)
+    attachment = runtime_attachment_for_session(row, state=state, processes=safe_runtime_processes())
     return {
         "session_id": row.session_id,
         "tool": row.tool,
@@ -534,8 +560,35 @@ def session_json(row: LocalSession) -> dict[str, object]:
         "outcome": outcome["outcome"] if outcome else None,
         "outcome_note": outcome.get("note") if outcome else None,
         "evidence": evidence.to_json(),
-        "state": session_state(row),
-        "actions": session_actions(row, outcome=outcome),
+        "state": state,
+        "runtime_attachment": attachment.to_json(),
+        "actions": session_actions(row, outcome=outcome, attachment=attachment),
+    }
+
+
+def recent_session_json(
+    row: LocalSession,
+    *,
+    window_outcomes: dict[str, dict[str, object]],
+    evidence_by_session: dict[str, object] | None = None,
+) -> dict[str, object]:
+    evidence_by_session = evidence_by_session or {}
+    state = session_state(row)
+    attachment = runtime_attachment_for_session(row, state=state, processes=[])
+    return {
+        "tool": row.tool,
+        "session_id": row.session_id,
+        "project": project_label(row.project_path),
+        "project_full": row.project_path if is_reliable_project_path(row.project_path) else "unknown",
+        "model": display_model_name(row.model),
+        "tokens": compact_int(row.tokens_in + row.tokens_out),
+        "api_value": money(row.cost_usd),
+        "outcome": (window_outcomes.get(row.session_id) or {}).get("outcome"),
+        "inferred_outcome": evidence_by_session.get(row.session_id).inferred_outcome if evidence_by_session.get(row.session_id) else None,
+        "updated_at": (row.updated_at or row.started_at).isoformat() if (row.updated_at or row.started_at) else None,
+        "state": state,
+        "runtime_attachment": attachment.to_json(),
+        "actions": session_actions(row, outcome=window_outcomes.get(row.session_id), attachment=attachment),
     }
 
 
@@ -676,6 +729,16 @@ def build_session_detail(session_id: str, days: int = 30) -> dict[str, object]:
         },
         "events": [event_json(event) for event in events[:EVENT_DISPLAY_LIMIT]],
     }
+
+
+def build_runtime_return(session_id: str, days: int = 30) -> dict[str, object]:
+    rows = [row for row in rows_for_window(days) if row.session_id == session_id]
+    if not rows:
+        return {"ok": False, "error": "session not found"}
+    row = rows[0]
+    state = session_state(row)
+    attachment = runtime_attachment_for_session(row, state=state, processes=safe_runtime_processes())
+    return perform_runtime_return(attachment)
 
 
 def build_handoff_detail(
@@ -1794,20 +1857,9 @@ def build_summary(days: int = 7) -> dict[str, object]:
         "handoff_decisions": handoff_decisions,
         "recent_sessions": [
             {
-                "tool": row.tool,
-                "session_id": row.session_id,
-                "project": project_label(row.project_path),
-                "project_full": row.project_path if is_reliable_project_path(row.project_path) else "unknown",
-                "model": display_model_name(row.model),
-                "tokens": compact_int(row.tokens_in + row.tokens_out),
-                "api_value": money(row.cost_usd),
-                "outcome": (window_outcomes.get(row.session_id) or {}).get("outcome"),
-                "inferred_outcome": evidence_by_session.get(row.session_id).inferred_outcome if evidence_by_session.get(row.session_id) else None,
+                **recent_session_json(row, window_outcomes=window_outcomes, evidence_by_session=evidence_by_session),
                 "evidence_captured": row.session_id in evidence_snapshots,
                 "evidence_recorded_at": (evidence_snapshots.get(row.session_id) or {}).get("recorded_at"),
-                "updated_at": (row.updated_at or row.started_at).isoformat() if (row.updated_at or row.started_at) else None,
-                "state": session_state(row),
-                "actions": session_actions(row, outcome=window_outcomes.get(row.session_id)),
             }
             for row in recent
         ],
@@ -1968,20 +2020,7 @@ def _build_summary_shell(days: int = 7) -> dict[str, object]:
         "handoff_bubble": None,
         "handoff_decisions": _handoff_decision_rows(limit=10),
         "recent_sessions": [
-            {
-                "tool": row.tool,
-                "session_id": row.session_id,
-                "project": project_label(row.project_path),
-                "project_full": row.project_path if is_reliable_project_path(row.project_path) else "unknown",
-                "model": display_model_name(row.model),
-                "tokens": compact_int(row.tokens_in + row.tokens_out),
-                "api_value": money(row.cost_usd),
-                "outcome": (window_outcomes.get(row.session_id) or {}).get("outcome"),
-                "inferred_outcome": None,
-                "updated_at": (row.updated_at or row.started_at).isoformat() if (row.updated_at or row.started_at) else None,
-                "state": session_state(row),
-                "actions": session_actions(row, outcome=window_outcomes.get(row.session_id)),
-            }
+            recent_session_json(row, window_outcomes=window_outcomes)
             for row in recent
         ],
         "intervention_receipts": [],
@@ -2904,6 +2943,19 @@ function showToast(message, kind = 'success') {
   window.clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => { toast.className = 'toast'; }, 3200);
 }
+async function returnToRuntime(sessionId) {
+  try {
+    const res = await fetch(`/api/runtime-return?id=${encodeURIComponent(sessionId)}`);
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      showToast(data.error || 'Could not find this local session.', 'error');
+      return;
+    }
+    showToast(data.message || 'Return action requested.', data.ok ? 'success' : 'error');
+  } catch (error) {
+    showToast('Could not reach the local AIWatcher server.', 'error');
+  }
+}
 function openDrawer(title) {
   document.getElementById('drawerTitle').textContent = title;
   document.getElementById('drawerBackdrop').classList.add('open');
@@ -3355,8 +3407,8 @@ function renderSessionActions(s) {
   const actions = s.actions || [];
   const hasHandoff = actions.some(action => action.id === 'handoff');
   const needsOutcome = actions.some(action => action.id === 'review_outcome');
-  const stateStatus = s.state && s.state.status ? s.state.status : 'unknown';
-  const liveish = stateStatus === 'active' || stateStatus === 'recent';
+  const runtime = s.runtime_attachment || actions.find(action => action.id === 'open_tool') || {};
+  const openAction = actions.find(action => action.id === 'open_tool') || {};
   const title = hasHandoff
     ? 'Recommended: continue in a fresh session'
     : needsOutcome
@@ -3367,9 +3419,10 @@ function renderSessionActions(s) {
     : needsOutcome
       ? 'Mark whether this worked so AIWatcher can measure value per useful change instead of only tokens.'
       : 'Use this session as evidence, then preflight the next prompt before sending it.';
-  const openToolNote = liveish
-    ? 'AIWatcher can identify this as recently updated from local logs, but Claude, Codex, and Cursor do not expose stable desktop deep links to reopen the exact chat yet.'
-    : 'This session is no longer fresh enough for live control. Use it for evidence, prompt optimization, or a handoff brief.';
+  const openToolNote = runtime.reason || openAction.reason || 'No safe return target is available for this session yet.';
+  const openButton = openAction.available
+    ? `<button class="btn-quiet" onclick="returnToRuntime('${esc(s.session_id)}')" title="${esc(openToolNote)}">${esc(openAction.label || runtime.action_label || 'Open workspace')}</button>`
+    : `<button class="btn-quiet" disabled title="${esc(openToolNote)}">${esc(openAction.label || runtime.action_label || 'Copy handoff')}</button>`;
   return `<section class="detail-section recommended-action"><div class="action-kicker">${sessionStatePill(s.state)}${outcomePill(s.outcome)}</div>
     <h3>${esc(title)}</h3>
     <p>${esc(body)}</p>
@@ -3377,7 +3430,7 @@ function renderSessionActions(s) {
       ${hasHandoff ? `<button class="btn-primary" onclick="openHandoff('${esc(s.session_id)}')">Create handoff capsule</button>` : ''}
       ${needsOutcome ? `<button class="btn-primary" onclick="document.getElementById('outcomePanel').scrollIntoView({ behavior: 'smooth', block: 'center' })">Mark outcome</button>` : ''}
       <button class="btn-quiet" onclick="showView('prompt'); closeDrawer(); document.getElementById('promptInput').focus(); showToast('Paste the next prompt here to optimize it before sending')">Optimize next prompt</button>
-      <button class="btn-quiet" disabled title="${esc(openToolNote)}">Open in current tool unavailable</button>
+      ${openButton}
     </div>
     <p class="tool-link-note">${esc(openToolNote)}</p>
   </section>`;
@@ -4164,6 +4217,16 @@ class UIHandler(BaseHTTPRequestHandler):
             params = parse_qs(parsed.query)
             session_id = params.get("id", [""])[0]
             self._send(200, json.dumps(build_session_detail(session_id)), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/runtime-return":
+            params = parse_qs(parsed.query)
+            session_id = params.get("id", [""])[0]
+            try:
+                days = max(1, min(90, int(params.get("days", ["30"])[0])))
+            except ValueError:
+                days = 30
+            payload = build_runtime_return(session_id, days)
+            self._send(200 if payload.get("ok") or payload.get("error") != "session not found" else 404, json.dumps(payload), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/handoff":
             params = parse_qs(parsed.query)

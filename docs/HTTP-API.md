@@ -117,7 +117,12 @@ change without a deprecation period.
 
 `GET` — `/api/health`, `/api/summary`, `/api/sessions`, `/api/session`,
 `/api/project`, `/api/report`, `/api/journal`, `/api/handoff`,
-`/api/context-health`
+`/api/context-health`, `/api/runtime-return`
+
+`/api/runtime-return` is dashboard-only. It asks AIWatcher to open the safest
+available return target for a local session: exact process attachment when a
+host exposes enough metadata, otherwise app/workspace return, otherwise a
+handoff fallback. It must not be treated as a stable deep-link API.
 
 `POST` — `/api/handoff-decision`, which records which action you took on a
 handoff bubble. It is called by the dashboard and the native overlay only.

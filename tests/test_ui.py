@@ -89,8 +89,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn('class="detail-section recommended-action"', ui.HTML)
         self.assertIn("Recommended: continue in a fresh session", ui.HTML)
         self.assertIn("Create handoff capsule", ui.HTML)
-        self.assertIn("Open in current tool unavailable", ui.HTML)
-        self.assertIn("do not expose stable desktop deep links", ui.HTML)
+        self.assertIn("returnToRuntime", ui.HTML)
+        self.assertIn("/api/runtime-return", ui.HTML)
         self.assertIn('class="btn-primary" onclick="openHandoff', ui.HTML)
         self.assertIn("watch --notify", ui.HTML)
         self.assertIn("/api/handoff", ui.HTML)
@@ -484,7 +484,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertTrue(any(action["id"] == "review_outcome" for action in actions))
         self.assertTrue(any(action["id"] == "handoff" for action in actions))
         open_tool = next(action for action in actions if action["id"] == "open_tool")
-        self.assertFalse(open_tool["available"])
+        self.assertNotEqual(open_tool["level"], "exact_session")
+        self.assertIn(open_tool["level"], {"workspace", "unavailable"})
 
     def test_serve_terminates_started_ambient_resource_on_stop(self) -> None:
         resource = Mock()
@@ -713,6 +714,30 @@ class DashboardWindowTests(unittest.TestCase):
 
         self.assertFalse(default_capsule["include_prompt_excerpt"])
         self.assertTrue(opted_in_capsule["include_prompt_excerpt"])
+
+    def test_session_detail_degrades_when_state_snapshot_read_fails(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="recent",
+            tool="claude-code",
+            project_path="/repo",
+            started_at=now - timedelta(hours=2),
+            updated_at=now - timedelta(hours=1),
+            tokens_in=100,
+            tokens_out=50,
+            cost_usd=0.4,
+        )
+        with (
+            patch.object(ui, "rows_for_window", return_value=[row]),
+            patch.object(ui, "scan_all_events", return_value=[]),
+            patch.object(ui, "evidence_snapshots_for_sessions", side_effect=OSError("locked")),
+            patch.object(ui, "get_outcome", side_effect=OSError("locked")),
+        ):
+            detail = ui.build_session_detail("recent", days=7)
+
+        self.assertEqual(detail["session_id"], "recent")
+        self.assertEqual(detail["project"], "/repo")
+        self.assertIsNone(detail["outcome"])
 
     def test_receipt_combines_prediction_observation_and_outcome(self) -> None:
         now = datetime.now(timezone.utc)
