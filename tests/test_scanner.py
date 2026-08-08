@@ -138,6 +138,11 @@ class ProjectPathTests(unittest.TestCase):
             self.assertIsNone(scanner._normalize_project_path(str(task_path)))
             self.assertEqual(scanner._choose_project_path(str(task_path), {str(task_path): 2}, {str(task_path): 9.0}), "unknown")
 
+    def test_tmp_root_and_claude_tmp_root_are_not_treated_as_projects(self) -> None:
+        scanner.PROJECT_PATH_CACHE.clear()
+        self.assertIsNone(scanner._normalize_project_path("/private/tmp"))
+        self.assertIsNone(scanner._normalize_project_path("/private/tmp/claude-501"))
+
     def test_common_user_folders_are_not_treated_as_projects(self) -> None:
         scanner.PROJECT_PATH_CACHE.clear()
         self.assertIsNone(scanner._normalize_project_path(str(Path.home() / "Downloads")))

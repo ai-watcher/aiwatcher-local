@@ -6,6 +6,7 @@ import json
 import os
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 from collections import defaultdict
@@ -116,6 +117,14 @@ def short_path(path: str | None, max_len: int = 54) -> str:
     return "..." + path[-(max_len - 3):]
 
 
+def _is_inside_path(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
 def is_reliable_project_path(path: str | None) -> bool:
     if not path or path == "unknown" or path == UNATTRIBUTED_PROJECT:
         return False
@@ -123,13 +132,23 @@ def is_reliable_project_path(path: str | None) -> bool:
         resolved = Path(path).expanduser().resolve()
     except OSError:
         resolved = Path(path).expanduser()
-    common_non_projects = {Path.home() / "Desktop", Path.home() / "Documents", Path.home() / "Downloads"}
+    temp_dirs = {
+        Path("/tmp").resolve(),
+        Path("/private/tmp").resolve(),
+        Path(tempfile.gettempdir()).resolve(),
+    }
+    common_non_projects = {
+        Path.home() / "Desktop",
+        Path.home() / "Documents",
+        Path.home() / "Downloads",
+        *temp_dirs,
+    }
     if resolved in common_non_projects:
         return False
     parts = set(resolved.parts)
     if ".claude" in parts or ".codex" in parts or ".cursor" in parts:
         return False
-    if "tasks" in parts and any(part.startswith("claude-") for part in resolved.parts):
+    if any(part.startswith("claude-") for part in resolved.parts) and any(_is_inside_path(resolved, temp_dir) for temp_dir in temp_dirs):
         return False
     return resolved.parent != resolved
 

@@ -9,6 +9,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import tempfile
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -20,10 +21,16 @@ from .pricing import estimate_cost
 
 
 HOME_DIR = Path.home().resolve()
+TEMP_DIRS = {
+    Path("/tmp").resolve(),
+    Path("/private/tmp").resolve(),
+    Path(tempfile.gettempdir()).resolve(),
+}
 COMMON_NON_PROJECT_DIRS = {
     HOME_DIR / "Desktop",
     HOME_DIR / "Documents",
     HOME_DIR / "Downloads",
+    *TEMP_DIRS,
 }
 
 
@@ -94,8 +101,7 @@ def _is_inside(path: Path, parent: Path) -> bool:
 
 
 def _is_tool_storage_path(path: Path) -> bool:
-    parts = set(path.parts)
-    if "tasks" in parts and any(part.startswith("claude-") for part in path.parts):
+    if any(part.startswith("claude-") for part in path.parts) and any(_is_inside(path, temp_dir) for temp_dir in TEMP_DIRS):
         return True
     storage_roots = [
         *CLAUDE_PROJECTS_DIRS,
