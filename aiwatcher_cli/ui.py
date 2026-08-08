@@ -23,6 +23,7 @@ from .cli import (
     timeline_analysis,
 )
 from .correlate import link_recent_interventions_to_sessions
+from .evidence_capture import record_missing_evidence_snapshots_from_evidence
 from .handoff import build_handoff_capsule
 from .local_state import (
     COMMAND_GATE_BLOCKED_DECISIONS,
@@ -1160,6 +1161,14 @@ def build_summary(days: int = 7) -> dict[str, object]:
     outcomes = outcome_counts(window_session_ids)
     sample_rows = rows[:30]
     evidence_by_session = evidence_for_sessions(sample_rows, survival_by_session=survival_by_session(sample_rows))
+    try:
+        record_missing_evidence_snapshots_from_evidence(sample_rows, evidence_by_session)
+    except OSError:
+        pass
+    try:
+        evidence_snapshots = evidence_snapshots_for_sessions({row.session_id for row in recent})
+    except OSError:
+        evidence_snapshots = {}
     inferred_useful = sum(
         1
         for session_id, evidence in evidence_by_session.items()
@@ -1246,6 +1255,8 @@ def build_summary(days: int = 7) -> dict[str, object]:
                 "api_value": money(row.cost_usd),
                 "outcome": (window_outcomes.get(row.session_id) or {}).get("outcome"),
                 "inferred_outcome": evidence_by_session.get(row.session_id).inferred_outcome if evidence_by_session.get(row.session_id) else None,
+                "evidence_captured": row.session_id in evidence_snapshots,
+                "evidence_recorded_at": (evidence_snapshots.get(row.session_id) or {}).get("recorded_at"),
                 "updated_at": (row.updated_at or row.started_at).isoformat() if (row.updated_at or row.started_at) else None,
             }
             for row in recent
@@ -1447,6 +1458,7 @@ HTML = r"""<!doctype html>
     .outcome-pill.useful { color: #bff5df; border-color: rgba(53,211,153,.38); background: var(--green-soft); }
     .outcome-pill.rework { color: #ffe2a4; border-color: rgba(246,189,96,.38); background: var(--amber-soft); }
     .outcome-pill.abandoned { color: #ffc4ce; border-color: rgba(242,125,143,.38); background: var(--red-soft); }
+    .outcome-pill.evidence { color: #d4e7ff; border-color: rgba(135,168,255,.36); background: rgba(135,168,255,.12); }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th, td { border-bottom: 1px solid var(--line); padding: 11px 8px; text-align: left; }
     th { color: var(--muted); font-weight: 600; }
@@ -2069,6 +2081,7 @@ function outcomeEvidencePill(session) {
   if (session.inferred_outcome === 'churned') return '<span class="pill outcome-pill rework">Evidence: reverted/rewritten</span>';
   if (session.inferred_outcome === 'useful') return '<span class="pill outcome-pill useful">Evidence: likely useful</span>';
   if (session.inferred_outcome === 'needs_review') return '<span class="pill outcome-pill rework">Evidence: review changes</span>';
+  if (session.evidence_captured) return '<span class="pill outcome-pill evidence">Evidence captured</span>';
   return '';
 }
 function survivalLabel(survival) {
