@@ -2880,6 +2880,73 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         self.assertIn("/repo/payments", brief)
         self.assertNotIn("Original task:", brief)
 
+    def test_execution_brief_omits_root_working_directory(self) -> None:
+        brief = cli.build_execution_brief(
+            "Delete old generated files after confirming the target directory",
+            cwd="/",
+            broad_scope=False,
+            needs_checkpoint=True,
+            sensitive_or_destructive=True,
+            vague_scope=False,
+            multiple_tasks=False,
+        )
+
+        self.assertNotIn("Working directory\n/", brief)
+        self.assertIn("Task\nDelete old generated files", brief)
+        self.assertIn("Ask for confirmation before deleting", brief)
+
+    def test_execution_brief_makes_aiwatcher_handoff_task_first(self) -> None:
+        handoff = """AIWatcher fresh-session handoff
+
+You are starting a fresh AI coding session. Do not assume access to the previous chat.
+
+Objective
+- Reconstruct the current state of the work from git status, recent commits, and the files listed below.
+- Identify the smallest safe next checkpoint.
+- Continue only that checkpoint after summarizing your plan.
+
+Project
+/
+
+Previous session
+- Previous tool/model: codex-cli / gpt-5.5
+- Usage observed: 679.2M tokens, 4472 model calls, 6370 tool calls, $0.00 API-equivalent value
+
+Why hand off now
+- Context health is critical: latest turn used 163.6k input tokens with 0% efficiency.
+- 4472 model calls were observed; continue with a smaller checkpoint.
+
+Local evidence to inspect
+- Nearby commits: 0
+- Changed files: 0
+- Suggested check: git status --short
+- Suggested check: git diff --stat
+
+Fresh-session instructions
+- Treat this as a fresh AI coding session with no prior chat context.
+"""
+        brief = cli.build_execution_brief(
+            handoff,
+            cwd="/",
+            broad_scope=True,
+            needs_checkpoint=True,
+            sensitive_or_destructive=False,
+            vague_scope=False,
+            multiple_tasks=False,
+        )
+
+        self.assertTrue(
+            brief.startswith(
+                "Task\nContinue the AIWatcher fresh-session handoff from repository state on disk."
+            )
+        )
+        self.assertIn("Requested outcome\n- Reconstruct the current state", brief)
+        self.assertIn("Project\nunknown - inspect git status", brief)
+        self.assertIn("Local evidence to inspect\n- Nearby commits: 0", brief)
+        self.assertIn("Supporting pressure context\n- Context health is critical", brief)
+        self.assertNotIn("Working directory\n/", brief)
+        self.assertLess(brief.index("Requested outcome"), brief.index("Supporting pressure context"))
+
     def test_cumulative_codex_totals_do_not_trigger_session_pressure_alerts(self) -> None:
         row = session(1, tool="codex-cli")
         row.tokens_in = 500_000_000

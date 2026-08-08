@@ -671,6 +671,109 @@ def _number_range_label(low: int, high: int) -> str:
     return f"{compact_int(low)}-{compact_int(high)}"
 
 
+def _brief_working_directory(cwd: str | None) -> str | None:
+    """Return a cwd only when it is specific enough to help the next agent.
+
+    A missing scanner attribution can collapse to "/" on POSIX. Including that
+    in a prompt is worse than omitting it: it nudges the next agent toward the
+    whole filesystem instead of a repo. Keep synthetic/fake test paths like
+    /repo/auth usable, but never present a root directory as a reliable project.
+    """
+    if not cwd:
+        return None
+    value = os.path.expanduser(str(cwd).strip())
+    if not value:
+        return None
+    normalized = os.path.abspath(value)
+    drive, tail = os.path.splitdrive(normalized)
+    if normalized == os.path.abspath(os.sep):
+        return None
+    if drive and tail in {"", os.sep, "\\"}:
+        return None
+    return normalized
+
+
+_HANDOFF_SECTION_HEADERS = {
+    "Objective",
+    "Project",
+    "Previous session",
+    "Why hand off now",
+    "Local evidence to inspect",
+    "Fresh-session instructions",
+    "When finished",
+}
+
+
+def _structured_section_lines(text: str, header: str, *, max_lines: int = 6) -> list[str]:
+    lines = text.splitlines()
+    captured: list[str] = []
+    in_section = False
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        if line.strip() == header:
+            in_section = True
+            continue
+        if in_section and line.strip() in _HANDOFF_SECTION_HEADERS:
+            break
+        if in_section:
+            if not line.strip():
+                continue
+            captured.append(line)
+            if len(captured) >= max_lines:
+                break
+    return captured
+
+
+def _normalize_handoff_project(lines: Sequence[str]) -> str | None:
+    for line in lines:
+        value = line.strip().strip("-").strip()
+        reliable = _brief_working_directory(value)
+        if reliable:
+            return reliable
+    return None
+
+
+def _brief_task_sections(prompt: str, *, cwd: str | None) -> list[str]:
+    """Build the task section of an execution brief.
+
+    For normal prompts, preserve the user's request exactly. For AIWatcher
+    handoff prompts, keep the output task-first by extracting the useful
+    structured sections instead of pasting the whole handoff blob under Task.
+    """
+    text = prompt.strip()
+    if "AIWatcher fresh-session handoff" not in text:
+        return [text]
+
+    sections: list[str] = [
+        "Continue the AIWatcher fresh-session handoff from repository state on disk."
+    ]
+    objective = _structured_section_lines(text, "Objective", max_lines=5)
+    if objective:
+        sections.extend(["", "Requested outcome", *objective])
+
+    project = _normalize_handoff_project(_structured_section_lines(text, "Project", max_lines=2))
+    if not project:
+        project = _brief_working_directory(cwd)
+    if project:
+        sections.extend(["", "Project", project])
+    else:
+        sections.extend([
+            "",
+            "Project",
+            "unknown - inspect git status and current workspace before editing.",
+        ])
+
+    evidence = _structured_section_lines(text, "Local evidence to inspect", max_lines=8)
+    if evidence:
+        sections.extend(["", "Local evidence to inspect", *evidence])
+
+    handoff_reason = _structured_section_lines(text, "Why hand off now", max_lines=3)
+    if handoff_reason:
+        sections.extend(["", "Supporting pressure context", *handoff_reason])
+
+    return sections
+
+
 def _quantile(values: list[float], q: float) -> float:
     if not values:
         return 0.0
@@ -1142,12 +1245,9 @@ def build_execution_brief(
     multiple_tasks: bool,
 ) -> str:
     """Preserve the requested outcome while adding only relevant controls."""
-    lines = [
-        "Task",
-        prompt.strip(),
-        "",
-        "Execution approach",
-    ]
+    lines = ["Task"]
+    lines.extend(_brief_task_sections(prompt, cwd=cwd))
+    lines.extend(["", "Execution approach"])
     if broad_scope:
         lines.append(
             "- Inspect the repository structure, identify the smallest relevant subsystem, and propose a phased plan before editing."
@@ -1172,8 +1272,9 @@ def build_execution_brief(
         "- Run the narrowest relevant verification after implementation.",
         "- Stop when the requested outcome is verified; do not expand into unrelated cleanup.",
     ])
-    if cwd:
-        lines.extend(["", "Working directory", cwd])
+    reliable_cwd = _brief_working_directory(cwd)
+    if reliable_cwd:
+        lines.extend(["", "Working directory", reliable_cwd])
     lines.extend([
         "",
         "Completion report",
