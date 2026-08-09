@@ -108,8 +108,13 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("AIWatcher Handoff", ui.OVERLAY_HTML)
         self.assertIn("/api/summary?days=7", ui.OVERLAY_HTML)
         self.assertIn("/api/handoff-decision", ui.OVERLAY_HTML)
-        self.assertIn("Copy handoff", ui.OVERLAY_HTML)
-        self.assertIn("Continue here", ui.OVERLAY_HTML)
+        self.assertIn("/api/ambient-intervention-action", ui.OVERLAY_HTML)
+        self.assertIn("/api/ambient-intervention?id=", ui.OVERLAY_HTML)
+        self.assertIn("Copy fresh-session brief", ui.OVERLAY_HTML)
+        self.assertIn("Copy focused next step", ui.OVERLAY_HTML)
+        self.assertIn("Inspect and stop", ui.OVERLAY_HTML)
+        self.assertIn("Snooze 15 min", ui.OVERLAY_HTML)
+        self.assertIn("Dismiss", ui.OVERLAY_HTML)
         self.assertIn("Prompt/source content is not stored", ui.OVERLAY_HTML)
 
     def test_overlay_script_is_valid_javascript(self) -> None:

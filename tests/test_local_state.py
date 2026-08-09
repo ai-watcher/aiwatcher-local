@@ -7,6 +7,7 @@ import os
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from aiwatcher_cli import local_state
@@ -258,6 +259,69 @@ class LocalStateTests(unittest.TestCase):
     def test_recent_watch_notifications_fails_soft_when_state_lock_is_unavailable(self) -> None:
         with patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")):
             self.assertEqual(local_state.recent_watch_notifications(), [])
+
+    def test_ambient_intervention_is_shared_across_delivery_channels(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                record = local_state.upsert_ambient_intervention(
+                    session_id="sess-1",
+                    signal_kind="critical_context",
+                    action="start fresh",
+                    severity="critical",
+                    session_stamp="2026-08-08T20:00:00+00:00",
+                    reason="Context is critical.",
+                    urls={"dashboard": "http://127.0.0.1:8765/?session=sess-1"},
+                    expected_savings={"context_tokens": 180_000, "confidence": "measured"},
+                )
+                self.assertTrue(local_state.ambient_intervention_delivery_allowed(record["fingerprint"], channel="overlay"))
+                local_state.record_ambient_intervention_action(
+                    record["fingerprint"], state="displayed", channel="overlay"
+                )
+                self.assertFalse(local_state.ambient_intervention_delivery_allowed(record["fingerprint"], channel="overlay"))
+                self.assertTrue(local_state.ambient_intervention_delivery_allowed(record["fingerprint"], channel="notification"))
+                rows = local_state.recent_ambient_interventions()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], record["id"])
+        self.assertEqual(rows[0]["expected_savings"]["context_tokens"], 180_000)
+
+    def test_ambient_action_stays_quiet_until_severity_worsens(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                record = local_state.upsert_ambient_intervention(
+                    session_id="sess-1", signal_kind="velocity", action="narrow scope",
+                    severity="warning", session_stamp="stamp-1", reason="Fast activity.",
+                )
+                local_state.record_ambient_intervention_action(record["fingerprint"], state="acted", detail="Focused brief copied")
+                self.assertFalse(local_state.ambient_intervention_delivery_allowed(record["fingerprint"], channel="overlay"))
+                refreshed = local_state.upsert_ambient_intervention(
+                    session_id="sess-1", signal_kind="velocity", action="narrow scope",
+                    severity="warning", session_stamp="stamp-2", reason="Fast activity continued.",
+                )
+                self.assertEqual(refreshed["id"], record["id"])
+                self.assertFalse(local_state.ambient_intervention_delivery_allowed(record["fingerprint"], channel="overlay"))
+                local_state.upsert_ambient_intervention(
+                    session_id="sess-1", signal_kind="velocity", action="narrow scope",
+                    severity="critical", session_stamp="stamp-3", reason="Fast activity became critical.",
+                )
+                self.assertTrue(local_state.ambient_intervention_delivery_allowed(record["fingerprint"], channel="overlay"))
+
+    def test_ambient_snooze_expires_without_new_session_activity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                record = local_state.upsert_ambient_intervention(
+                    session_id="sess-1", signal_kind="loop", action="stop and inspect",
+                    severity="warning", session_stamp="stamp-1", reason="Repeated action.",
+                )
+                future = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
+                local_state.record_ambient_intervention_action(record["fingerprint"], state="snoozed", snoozed_until=future)
+                self.assertFalse(local_state.ambient_intervention_delivery_allowed(record["fingerprint"], channel="overlay"))
+                past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+                local_state.record_ambient_intervention_action(record["fingerprint"], state="snoozed", snoozed_until=past)
+                self.assertTrue(local_state.ambient_intervention_delivery_allowed(record["fingerprint"], channel="overlay"))
 
     def test_watcher_heartbeat_round_trips_status(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

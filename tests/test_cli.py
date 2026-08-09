@@ -1097,7 +1097,7 @@ class PromptPreflightTests(unittest.TestCase):
         notify.assert_called_once()
         rendered = output.getvalue()
         self.assertIn("Notification: sent", rendered)
-        self.assertIn("Notification: already sent", rendered)
+        self.assertIn("Notification: already handled for this signal", rendered)
 
     def test_watch_notify_passes_dashboard_deep_link_url(self) -> None:
         """Issue #31 (S-32): the notification should carry a deep link back
@@ -1157,10 +1157,13 @@ class PromptPreflightTests(unittest.TestCase):
 
         notify.assert_not_called()
         overlay.assert_called_once()
-        self.assertEqual(
-            overlay.call_args.args[0],
-            f"http://127.0.0.1:{cli.DEFAULT_UI_PORT}/overlay?session={row.session_id}",
+        overlay_url = overlay.call_args.args[0]
+        self.assertTrue(
+            overlay_url.startswith(
+                f"http://127.0.0.1:{cli.DEFAULT_UI_PORT}/overlay?session={row.session_id}"
+            )
         )
+        self.assertIn("&intervention=", overlay_url)
         self.assertIn("Overlay: opened", stdout.getvalue())
         self.assertEqual(notifications[0]["detail"], "overlay test-overlay")
 
@@ -1192,7 +1195,7 @@ class PromptPreflightTests(unittest.TestCase):
                 cli._print_watch_status_card(row, [row], args, [], {}, {})
 
         overlay.assert_called_once()
-        self.assertIn("already shown for this session/action", stdout.getvalue())
+        self.assertIn("already handled for this signal", stdout.getvalue())
 
     def test_open_handoff_overlay_prefers_native_companion(self) -> None:
         with (
@@ -1365,12 +1368,11 @@ class PromptPreflightTests(unittest.TestCase):
                     cli._print_watch_status_card(row, [row], args, [], {}, {})
 
         notify.assert_called_once()
-        self.assertIn("already sent for this session state", output.getvalue())
+        self.assertIn("already handled for this signal", output.getvalue())
 
-    def test_watch_notify_fires_again_once_session_state_actually_changes(self) -> None:
-        """The persisted dedup key includes the session's stamp, so new local
-        activity (a later updated_at) must still be treated as a fresh,
-        notification-worthy state -- not suppressed forever."""
+    def test_watch_notify_stays_quiet_when_only_session_activity_changes(self) -> None:
+        """A changing log timestamp is not a new intervention. Continuous
+        sessions should not reopen the same warning on every watcher poll."""
         row = session(1, project="/repo/orcha")
         row.agent_calls = 300
         args = SimpleNamespace(
@@ -1389,7 +1391,7 @@ class PromptPreflightTests(unittest.TestCase):
                 row.updated_at = row.updated_at + timedelta(minutes=5)
                 cli._print_watch_status_card(row, [row], args, [], {}, {})
 
-        self.assertEqual(notify.call_count, 2)
+        self.assertEqual(notify.call_count, 1)
 
     def test_send_local_notification_terminal_notifier_opens_url_on_click(self) -> None:
         """Issue #31 (S-32): on macOS, terminal-notifier's `-open` flag makes
@@ -1421,6 +1423,29 @@ class PromptPreflightTests(unittest.TestCase):
 
         command = run_mock.call_args.args[0]
         self.assertNotIn("-open", command)
+
+    def test_send_local_notification_does_not_use_osascript_fallback(self) -> None:
+        """macOS attributes AppleScript notifications to Script Editor and
+        clicking Show cannot open AIWatcher, so fail quietly and let the
+        actionable companion overlay own the intervention instead."""
+        with (
+            patch.object(cli.sys, "platform", "darwin"),
+            patch.object(
+                cli.shutil,
+                "which",
+                side_effect=lambda name: "/usr/bin/osascript" if name == "osascript" else None,
+            ),
+            patch.object(cli.subprocess, "run") as run_mock,
+        ):
+            ok, detail = cli._send_local_notification(
+                "Context pressure",
+                "Session is at 92% context",
+                url="http://127.0.0.1:8765/?session=abc",
+            )
+
+        self.assertFalse(ok)
+        self.assertIn("companion overlay", detail)
+        run_mock.assert_not_called()
 
     def test_send_local_notification_powershell_messagebox_offers_yesno_when_url_given(self) -> None:
         """Issue #31 (S-32): with a dashboard URL available, the Windows
@@ -2238,16 +2263,35 @@ class VelocitySignalTests(unittest.TestCase):
         now = datetime.now(timezone.utc)
         rows = [session(index, tool="claude-code", age_days=index * 2, now=now) for index in range(10)]
         baselines = _baselines_from_sessions(rows)
-        # Baseline sessions run 15 real minutes each (see session()); burn the
-        # same order of tokens in under a minute here to force a clear multiple.
+        # Baseline sessions run 15 real minutes each (see session()); sustain
+        # materially high activity for several minutes to force a clear,
+        # actionable multiple rather than a one-turn spike.
         events = [
-            _event("s1", content_hash=f"c{i}", tokens_in=5000, tokens_out=1000, timestamp=now - timedelta(seconds=i * 5))
+            _event("s1", content_hash=f"c{i}", tokens_in=10000, tokens_out=2000, timestamp=now - timedelta(minutes=i))
             for i in range(6)
         ]
         with patch.object(cli, "get_baselines", return_value=baselines):
             velocity = cli._velocity_signal("claude-code", events)
         self.assertIsNotNone(velocity)
         self.assertGreaterEqual(velocity["ratio"], cli.VELOCITY_RATIO)
+
+    def test_suppresses_large_ratio_when_absolute_velocity_is_small(self) -> None:
+        now = datetime.now(timezone.utc)
+        baselines = {
+            "per_tool": {
+                "claude-code": {
+                    "session_count": cli.MIN_SAVINGS_SESSIONS,
+                    "history_span_days": cli.MIN_SAVINGS_HISTORY_DAYS,
+                    "p75_tokens_per_minute": 40.0,
+                }
+            }
+        }
+        events = [
+            _event("s1", content_hash=f"slow-{i}", tokens_in=4000, tokens_out=200, timestamp=now - timedelta(minutes=i))
+            for i in range(6)
+        ]
+        with patch.object(cli, "get_baselines", return_value=baselines):
+            self.assertIsNone(cli._velocity_signal("claude-code", events))
 
     def test_none_without_enough_baseline_history(self) -> None:
         baselines = _baselines_from_sessions([session(1, tool="claude-code")])
@@ -2265,6 +2309,31 @@ class VelocitySignalTests(unittest.TestCase):
         baselines = _baselines_from_sessions(rows)
         with patch.object(cli, "get_baselines", return_value=baselines):
             self.assertIsNone(cli._velocity_signal("claude-code", [_event("s1", timestamp=now)]))
+
+    def test_velocity_presentation_focuses_current_run_instead_of_forcing_handoff(self) -> None:
+        presentation = cli._watch_intervention_presentation({
+            "signal_kind": "velocity",
+            "reason": "Velocity is materially above the local baseline.",
+        })
+        self.assertEqual(presentation["action_mode"], "continue_focused")
+        self.assertIn("narrow", presentation["title"].lower())
+        self.assertNotIn("fresh", presentation["title"].lower())
+
+    def test_critical_context_presentation_is_a_truthful_copy_action(self) -> None:
+        presentation = cli._watch_intervention_presentation({
+            "signal_kind": "critical_context",
+            "reason": "Context is critical.",
+        })
+        self.assertEqual(presentation["action_mode"], "fresh_chat")
+        self.assertEqual(presentation["primary_label"], "Copy fresh-chat brief")
+
+    def test_loop_presentation_inspects_instead_of_promising_a_copy(self) -> None:
+        presentation = cli._watch_intervention_presentation({
+            "signal_kind": "loop",
+            "reason": "The same tool action repeated five times.",
+        })
+        self.assertEqual(presentation["action_mode"], "recover_loop")
+        self.assertEqual(presentation["primary_label"], "Inspect and stop")
 
 
 class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):

@@ -33,6 +33,7 @@ from .evidence_capture import record_missing_evidence_snapshots
 from .local_state import (
     COMMAND_GATE_BLOCKED_DECISIONS,
     VALID_OUTCOMES,
+    ambient_intervention_delivery_allowed,
     command_hash,
     consume_brief_token,
     evidence_snapshots_for_sessions,
@@ -50,6 +51,7 @@ from .local_state import (
     recent_hook_events,
     recent_interventions,
     record_always_allow_command_pattern,
+    record_ambient_intervention_action,
     record_command_decision,
     record_decision,
     record_evidence_snapshot,
@@ -68,6 +70,7 @@ from .local_state import (
     save_receipt_baseline,
     save_survival_summary,
     state_path,
+    upsert_ambient_intervention,
 )
 from .handoff import TARGET_LABELS, build_handoff_capsule, render_handoff_capsule
 from .ledger import Ledger, build_ledger, cost_per_surviving_line, repos_matching, unbanked_summary
@@ -80,6 +83,7 @@ from .receipt import (
     rewrite_in_progress,
     survival_note,
 )
+from .runtime_attachment import runtime_attachment_for_session
 from .outcome_evidence import (
     VALID_EVIDENCE_OUTCOMES,
     build_outcome_evidence,
@@ -3671,18 +3675,15 @@ def _send_local_notification(title: str, body: str, *, url: str | None = None) -
             )
             return True, "terminal-notifier"
         if sys.platform == "darwin" and shutil.which("osascript"):
-            script = (
-                f"display notification {json.dumps(clean_body)} "
-                f"with title {json.dumps(clean_title)}"
-            )
-            subprocess.run(
-                ["osascript", "-l", "AppleScript", "-e", script],
-                check=True,
-                timeout=3,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return True, "osascript"
+            # AppleScript notifications are owned by the Script Editor/
+            # osascript host. macOS therefore sends the user to Script Editor
+            # when they click "Show", and AppleScript's `display notification`
+            # cannot attach our dashboard URL. That is worse than a quiet
+            # failure because it looks like a broken AIWatcher action. The
+            # actionable native companion is the supported no-dependency
+            # fallback; a future signed menu-bar app can own Notification
+            # Center alerts under the AIWatcher identity.
+            return False, "macOS action notification unavailable; use the AIWatcher companion overlay"
         if shutil.which("notify-send"):
             subprocess.run(
                 ["notify-send", clean_title, clean_body],
@@ -3773,6 +3774,11 @@ def _open_native_handoff_overlay(
     body: str,
     severity: str,
     brief_file: str | None = None,
+    intervention_fingerprint: str = "",
+    signal_kind: str = "generic",
+    primary_label: str | None = None,
+    primary_mode: str | None = None,
+    runtime_action_available: bool = False,
 ) -> tuple[bool, str]:
     """Launch the small always-on-top desktop companion when available."""
     mode = os.environ.get("AIWATCHER_OVERLAY_MODE", "native").strip().lower()
@@ -3809,6 +3815,12 @@ def _open_native_handoff_overlay(
                     if brief_file
                     else []
                 ),
+                *(["--intervention-fingerprint", intervention_fingerprint] if intervention_fingerprint else []),
+                "--signal-kind",
+                signal_kind,
+                *(["--primary-label", primary_label] if primary_label else []),
+                *(["--primary-mode", primary_mode] if primary_mode else []),
+                *(["--runtime-action-available"] if runtime_action_available else []),
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -3826,6 +3838,11 @@ def _open_handoff_overlay(
     body: str = "",
     severity: str = "warning",
     brief_text: str | None = None,
+    intervention_fingerprint: str = "",
+    signal_kind: str = "generic",
+    primary_label: str | None = None,
+    primary_mode: str | None = None,
+    runtime_action_available: bool = False,
 ) -> tuple[bool, str]:
     """Best-effort local companion overlay outside the AI tool UI."""
     if os.environ.get("AIWATCHER_DISABLE_OVERLAY", "").strip().lower() in {"1", "true", "yes", "on"}:
@@ -3844,6 +3861,11 @@ def _open_handoff_overlay(
         body=body,
         severity=severity,
         brief_file=brief_file,
+        intervention_fingerprint=intervention_fingerprint,
+        signal_kind=signal_kind,
+        primary_label=primary_label,
+        primary_mode=primary_mode,
+        runtime_action_available=runtime_action_available,
     )
     if native_ok:
         return True, native_detail
@@ -4037,6 +4059,9 @@ LOOP_FLAG_REPEAT = 3     # a single action repeated this many times (or more) is
 LOOP_CAPSULE_REPEAT = 5  # this many repeats -- stop and get a rescoped brief, not just "narrow scope"
 VELOCITY_WINDOW_MINUTES = 10.0  # look at the most recent N minutes of a session's own events
 VELOCITY_RATIO = 2.0            # tokens/minute at or above this multiple of the tool's baseline = runaway
+VELOCITY_MIN_TOKENS_PER_MINUTE = 5_000.0
+VELOCITY_MIN_WINDOW_TOKENS = 50_000
+VELOCITY_MIN_SPAN_MINUTES = 3.0
 
 
 def _loop_signal(events: Sequence[LocalEvent]) -> dict[str, object] | None:
@@ -4107,13 +4132,16 @@ def _velocity_signal(tool: str, events: Sequence[LocalEvent]) -> dict[str, objec
     latest = max(e.timestamp for e in timestamped)
     window_start = latest - timedelta(minutes=VELOCITY_WINDOW_MINUTES)
     window_events = [e for e in timestamped if e.timestamp >= window_start]
-    if len(window_events) < 2:
+    if len(window_events) < 3:
         return None
     window_tokens = sum(e.tokens_in + e.tokens_out for e in window_events)
-    span_minutes = max(1.0, (latest - min(e.timestamp for e in window_events)).total_seconds() / 60.0)
+    observed_span_minutes = (latest - min(e.timestamp for e in window_events)).total_seconds() / 60.0
+    if observed_span_minutes < VELOCITY_MIN_SPAN_MINUTES or window_tokens < VELOCITY_MIN_WINDOW_TOKENS:
+        return None
+    span_minutes = max(1.0, observed_span_minutes)
     tokens_per_minute = window_tokens / span_minutes
     ratio = tokens_per_minute / baseline_tokens_per_minute
-    if ratio < VELOCITY_RATIO:
+    if ratio < VELOCITY_RATIO or tokens_per_minute < VELOCITY_MIN_TOKENS_PER_MINUTE:
         return None
     return {
         "tool": baseline_tool,
@@ -4149,15 +4177,19 @@ def _watch_status(
     )
 
     action = "continue"
+    signal_kind = "healthy"
     reason = "No urgent local signal detected."
     if health is not None and health.severity == "critical":
         action = "create handoff capsule now"
+        signal_kind = "critical_context"
         reason = health.recommendations[0] if health.recommendations else "Context health is critical."
     elif loop is not None and loop["max_repeat"] >= LOOP_CAPSULE_REPEAT:
         action = "create handoff capsule now"
+        signal_kind = "loop"
         reason = str(loop["diagnosis"])
     elif velocity is not None:
         action = "narrow scope"
+        signal_kind = "velocity"
         reason = (
             f"Velocity is {velocity['ratio']:.1f}x your typical {velocity['tool']} pace "
             f"({compact_int(int(velocity['tokens_per_minute']))} tokens/min over the last "
@@ -4165,6 +4197,7 @@ def _watch_status(
         )
     elif runway is not None and float(runway["pressure_ratio"]) >= RUNWAY_PRESSURE_RATIO:
         action = "switch tool or lane"
+        signal_kind = "runway"
         suggested_target = _alternate_target_for_tool(str(runway["tool"]))
         reason = (
             f"Estimated usage in the last {RUNWAY_WINDOW_HOURS:.0f}h is "
@@ -4175,12 +4208,15 @@ def _watch_status(
         )
     elif health is not None and health.severity == "warning":
         action = "start fresh" if health.is_critical_stale else "narrow scope"
+        signal_kind = "warning_context"
         reason = health.recommendations[0] if health.recommendations else "Context pressure is elevated."
     elif loop is not None:
         action = "narrow scope"
+        signal_kind = "loop"
         reason = str(loop["diagnosis"])
     elif insights:
         action = "narrow scope"
+        signal_kind = "usage_pressure"
         reason = insights[0]
 
     return {
@@ -4190,8 +4226,83 @@ def _watch_status(
         "runway": runway,
         "insights": insights,
         "action": action,
+        "signal_kind": signal_kind,
         "reason": reason,
     }
+
+
+def _watch_intervention_presentation(status: dict[str, object]) -> dict[str, str]:
+    """Translate a watch signal into one calm, truthful next action.
+
+    Detection and presentation are deliberately separate. A velocity spike is
+    a reason to focus the current run; it is not automatically a reason to
+    abandon the chat. Keeping this mapping centralized prevents the dashboard,
+    native companion, and OS notification from giving contradictory advice.
+    """
+    signal_kind = str(status.get("signal_kind") or "usage_pressure")
+    reason = str(status.get("reason") or "AIWatcher found local execution pressure.")
+    presentations = {
+        "critical_context": {
+            "title": "AIWatcher: start fresh before the next turn",
+            "primary_label": "Copy fresh-chat brief",
+            "action_mode": "fresh_chat",
+        },
+        "loop": {
+            "title": "AIWatcher: stop the repeated work",
+            "primary_label": "Inspect and stop",
+            "action_mode": "recover_loop",
+        },
+        "velocity": {
+            "title": "AIWatcher: narrow this run",
+            "primary_label": "Copy focused next step",
+            "action_mode": "continue_focused",
+        },
+        "runway": {
+            "title": "AIWatcher: switch lanes before usage pressure grows",
+            "primary_label": "Copy cross-tool handoff",
+            "action_mode": "switch_tool",
+        },
+        "warning_context": {
+            "title": "AIWatcher: reduce context before broad work",
+            "primary_label": "Copy compact next step",
+            "action_mode": "continue_focused",
+        },
+        "usage_pressure": {
+            "title": "AIWatcher: focus the next step",
+            "primary_label": "Copy focused next step",
+            "action_mode": "continue_focused",
+        },
+    }
+    selected = presentations.get(signal_kind, presentations["usage_pressure"])
+    return {
+        **selected,
+        "signal_kind": signal_kind,
+        "body": reason,
+    }
+
+
+def _focused_continuation_brief(session: LocalSession, status: dict[str, object]) -> str:
+    """Create a paste-ready checkpoint for a run that should continue, focused.
+
+    Unlike a handoff capsule this does not tell the host it is a fresh chat. It
+    is safe to paste into the current session after a velocity, warning-context,
+    or generic usage-pressure signal.
+    """
+    reason = str(status.get("reason") or "Execution pressure is elevated.")
+    return "\n".join([
+        "AIWatcher focused continuation",
+        "",
+        f"Workspace: {project_label(session.project_path, max_len=120)}",
+        f"Observed signal: {reason}",
+        "",
+        "Before using more tools:",
+        "- Restate the exact outcome for this checkpoint in one sentence.",
+        "- Summarize what is already known and avoid repeating broad discovery.",
+        "- Inspect only the smallest relevant files or commands.",
+        "- Stop and ask before destructive changes or unrelated cleanup.",
+        "",
+        "Continue only the smallest checkpoint, run the narrowest useful verification, and report what remains.",
+    ])
 
 
 def _print_watch_status_card(
@@ -4253,67 +4364,119 @@ def _print_watch_status_card(
 
     if (getattr(args, "notify", False) or getattr(args, "overlay", False)) and status["action"] != "continue":
         key = f"{session.session_id}:{status['action']}"
-        # persist_key includes the session's own stamp, so a later run against
-        # unchanged local activity recognizes "already told you about this
-        # exact state" even though notification_seen (in-memory) resets on
-        # every fresh `--once` process -- without this, repeated `--once`
-        # invocations re-fire the same recommendation forever.
         persist_key = f"{key}:{stamp.isoformat()}"
-        already_seen = (notification_seen is not None and notification_seen.get(key) == stamp) or has_sent_notification(
-            persist_key
+        presentation = _watch_intervention_presentation(status)
+        severity = (
+            str(health.severity)
+            if health is not None and health.severity in {"warning", "critical"}
+            else "critical"
+            if loop is not None and int(loop.get("max_repeat", 0)) >= LOOP_CAPSULE_REPEAT
+            else "warning"
         )
+        base_url = _watch_ui_base_url()
+        dashboard_url = f"{base_url}/?session={quote(session.session_id, safe='')}"
+        overlay_url = f"{base_url}/overlay?session={quote(session.session_id, safe='')}"
+        expected_savings = None
+        if health is not None and health.latest_turn_replayed_tokens > 0:
+            expected_savings = {
+                "context_tokens": health.latest_turn_replayed_tokens,
+                "confidence": "measured_local_cache",
+                "basis": "latest turn cache-read tokens",
+            }
+        intervention = upsert_ambient_intervention(
+            session_id=session.session_id,
+            signal_kind=str(presentation["signal_kind"]),
+            action=str(presentation["action_mode"]),
+            severity=severity,
+            session_stamp=stamp.isoformat(),
+            reason=str(status["reason"]),
+            urls={"dashboard": dashboard_url, "overlay": overlay_url},
+            expected_savings=expected_savings,
+        )
+        fingerprint = str(intervention.get("fingerprint") or "") if intervention else ""
+        if fingerprint:
+            overlay_url = f"{overlay_url}&intervention={quote(fingerprint, safe='')}"
+        channel = "overlay" if getattr(args, "overlay", False) else "notification"
+        already_seen = (
+            notification_seen is not None and notification_seen.get(key) == stamp
+        ) or (fingerprint and not ambient_intervention_delivery_allowed(fingerprint, channel=channel))
         if already_seen:
-            print("  Notification: already sent for this session state")
+            print(f"  {channel.title()}: already handled for this signal")
         else:
             if notification_seen is not None:
                 notification_seen[key] = stamp
-            base_url = _watch_ui_base_url()
-            dashboard_url = f"{base_url}/?session={quote(session.session_id, safe='')}"
-            overlay_url = f"{base_url}/overlay?session={quote(session.session_id, safe='')}"
             ok = False
             detail = "not requested"
-            if getattr(args, "notify", False):
+            overlay_ok = False
+            overlay_detail = "not requested"
+            if channel == "notification":
                 ok, detail = _send_local_notification(
-                    f"AIWatcher: {status['action']}",
+                    presentation["title"],
                     f"{project_label(session.project_path)} - {status['reason']} - Review: {dashboard_url}",
                     url=dashboard_url,
                 )
                 print(f"  Notification: {'sent' if ok else 'not sent'} ({detail})")
-            overlay_ok = False
-            overlay_detail = "not requested"
-            if getattr(args, "overlay", False):
-                overlay_signal_key = f"{OVERLAY_REMINDER_SCOPE}:{session.session_id}:{status['action']}"
-                if has_sent_notification(overlay_signal_key):
-                    overlay_detail = "already shown for this session/action"
-                else:
-                    overlay_title = "AIWatcher: start a fresh chat"
-                    overlay_body = f"{project_label(session.project_path)} — {status['reason']}"
-                    overlay_severity = health.severity if health is not None else "warning"
-                    overlay_brief = None
-                    try:
-                        outcome = get_outcome(session.session_id)
-                    except OSError:
-                        outcome = None
-                    try:
+                if fingerprint:
+                    record_ambient_intervention_action(
+                        fingerprint,
+                        state="delivered" if ok else "failed",
+                        channel="notification",
+                        detail=detail,
+                    )
+            else:
+                if getattr(args, "notify", False):
+                    print("  Notification: not duplicated (companion owns this intervention)")
+                try:
+                    outcome = get_outcome(session.session_id)
+                except OSError:
+                    outcome = None
+                try:
+                    if presentation["action_mode"] in {"continue_focused"}:
+                        overlay_brief = _focused_continuation_brief(session, status)
+                    else:
                         capsule = build_handoff_capsule(
                             session,
                             events,
                             outcome=outcome.get("outcome") if outcome else None,
                             target=args.target,
+                            extra_warnings=[str(loop["diagnosis"])] if loop is not None else None,
                         )
                         overlay_brief = str(capsule.get("next_brief") or "")
-                    except OSError:
-                        overlay_brief = None
-                    overlay_ok, overlay_detail = _open_handoff_overlay(
-                        overlay_url,
-                        title=overlay_title,
-                        body=overlay_body,
-                        severity=str(overlay_severity),
-                        brief_text=overlay_brief,
+                except OSError:
+                    overlay_brief = None
+                is_recent = stamp != MIN_DT and (datetime.now(timezone.utc) - stamp).total_seconds() <= 30 * 60
+                attachment = runtime_attachment_for_session(
+                    session,
+                    state={"status": "active" if is_recent else "historical"},
+                    processes=[],
+                )
+                if fingerprint:
+                    record_ambient_intervention_action(
+                        fingerprint,
+                        state="delivered",
+                        channel="overlay",
+                        detail="companion launch requested",
                     )
-                    if overlay_ok:
-                        _record_notification_sent_safely(overlay_signal_key)
+                overlay_ok, overlay_detail = _open_handoff_overlay(
+                    overlay_url,
+                    title=presentation["title"],
+                    body=f"{project_label(session.project_path)} — {status['reason']}",
+                    severity=severity,
+                    brief_text=overlay_brief,
+                    intervention_fingerprint=fingerprint,
+                    signal_kind=str(presentation["signal_kind"]),
+                    primary_label=presentation["primary_label"],
+                    primary_mode="inspect" if presentation["action_mode"] == "recover_loop" else "copy",
+                    runtime_action_available=attachment.available,
+                )
                 print(f"  Overlay: {'opened' if overlay_ok else 'not opened'} ({overlay_detail})")
+                if fingerprint and not overlay_ok:
+                    record_ambient_intervention_action(
+                        fingerprint,
+                        state="failed",
+                        channel="overlay",
+                        detail=overlay_detail,
+                    )
             _record_notification_sent_safely(persist_key)
             try:
                 record_watch_notification(
@@ -4322,14 +4485,7 @@ def _print_watch_status_card(
                     action=str(status["action"]),
                     reason=str(status["reason"]),
                     sent=ok or overlay_ok,
-                    detail=", ".join(
-                        part
-                        for part in [
-                            detail if detail != "not requested" else "",
-                            f"overlay {overlay_detail}" if overlay_detail != "not requested" else "",
-                        ]
-                        if part
-                    ),
+                    detail=detail if channel == "notification" else f"overlay {overlay_detail}",
                     url=dashboard_url,
                 )
             except OSError:
@@ -4602,6 +4758,20 @@ def _check_outcome_review_signals(rows: Sequence[LocalSession]) -> None:
 
 
 def command_watch(args: argparse.Namespace) -> int:
+    if not getattr(args, "once", False):
+        current = get_watcher_status(max_age_seconds=max(30, int(getattr(args, "interval", 60)) * 2))
+        current_pid = current.get("pid") if isinstance(current, dict) else None
+        if current.get("running") and isinstance(current_pid, int) and current_pid != os.getpid():
+            try:
+                os.kill(current_pid, 0)
+            except (OSError, ProcessLookupError):
+                pass
+            else:
+                print(
+                    f"AIWatcher ambient Watch is already running (PID {current_pid}). "
+                    "Use the existing companion or stop that process before starting another."
+                )
+                return 0
     print("AIWatcher Local watch")
     print(
         "Read-only local scan. No data leaves this machine. "

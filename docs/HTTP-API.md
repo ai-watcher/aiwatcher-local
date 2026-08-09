@@ -29,8 +29,9 @@ Specifics worth knowing before you build against it:
   hosts such as `http://127.0.0.1.evil.com` are rejected. The server never
   answers with `Access-Control-Allow-Origin: *`.
 - **Methods.** `POST` is accepted only on `/api/preflight`, `/api/outcome`, and
-  the internal `/api/handoff-decision`. Any other path returns `404` before the
-  request body is read.
+  the internal `/api/handoff-decision` and
+  `/api/ambient-intervention-action` routes. Any other path returns `404`
+  before the request body is read.
 - **Content type.** `POST` requires `Content-Type: application/json`, else `415`.
 - **Body size.** Requests larger than 64 KiB return `413`.
 
@@ -75,7 +76,8 @@ An empty or whitespace-only `prompt` returns `400` with
 
 ### `POST /api/outcome`
 
-Record how a session turned out. **This is the only endpoint that writes.**
+Record how a session turned out. This supported endpoint writes only to the
+private local AIWatcher state ledger.
 
 **Request**
 
@@ -117,15 +119,20 @@ change without a deprecation period.
 
 `GET` — `/api/health`, `/api/summary`, `/api/sessions`, `/api/session`,
 `/api/project`, `/api/report`, `/api/journal`, `/api/handoff`,
-`/api/context-health`, `/api/runtime-return`
+`/api/context-health`, `/api/runtime-return`, `/api/ambient-intervention`
 
 `/api/runtime-return` is dashboard-only. It asks AIWatcher to open the safest
 available return target for a local session: exact process attachment when a
 host exposes enough metadata, otherwise app/workspace return, otherwise a
 handoff fallback. It must not be treated as a stable deep-link API.
 
+`/api/ambient-intervention` returns the content-free local signal metadata
+needed to keep the browser fallback consistent with the native companion.
+
 `POST` — `/api/handoff-decision`, which records which action you took on a
-handoff bubble. It is called by the dashboard and the native overlay only.
+handoff bubble, and `/api/ambient-intervention-action`, which records the
+native companion lifecycle (`displayed`, `acted`, `snoozed`, `dismissed`, or
+`failed`). Both are called by the dashboard or native companion only.
 
 If you need one of these programmatically, prefer the equivalent CLI command
 with `--format json` where available, or

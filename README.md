@@ -387,12 +387,12 @@ $5+ in API-equivalent value — so you know whether it's worth acting on
 before reading further.
 
 The dashboard also surfaces this as a **handoff bubble** on Today when active
-local work reaches warning or critical context pressure: start a fresh chat,
-copy a handoff brief, continue here, or inspect the session. AIWatcher records
-only the local decision metadata and estimated replayed context avoided, not
-prompt or source text. Recent handoff decisions appear in Today, Receipts, and
-`aiwatcher hook-status`. After you copy a handoff, the bubble changes into a
-next-step confirmation instead of continuing to nag the same session.
+local work reaches warning or critical context pressure. AIWatcher gives the
+signal one primary action, plus **Inspect**, **Snooze**, and **Dismiss**. It
+records only local decision metadata and estimated replayed context avoided,
+not prompt or source text. Recent handoff decisions appear in Today, Receipts,
+and `aiwatcher hook-status`. After you act, snooze, or dismiss, the same signal
+stays quiet across the native and browser companions unless severity worsens.
 
 For a lower-friction desktop flow, start the local dashboard. It now starts
 Ambient Watch while the dashboard is open, so warnings can appear without a
@@ -402,12 +402,20 @@ second command:
 python -m aiwatcher_cli ui
 ```
 
-When context gets heavy, AIWatcher opens a small local handoff companion
+When AIWatcher finds an actionable signal, it opens one small local companion
 outside Claude, Codex, Cursor, or your editor. It first tries a native
-always-on-top desktop bubble and falls back to the browser companion if native
-UI is not available. From there you can copy a fresh-session brief, continue
-here, or inspect the session without first navigating to the dashboard.
+always-on-top bubble and falls back to the browser companion if native UI is
+not available. The primary action matches the signal: copy a fresh-session
+brief for critical context, inspect a possible loop, copy a focused checkpoint
+for unusual velocity, or review a lane switch under runway pressure. You can
+also inspect, snooze for 15 minutes, or dismiss the signal for that session.
 AIWatcher does not inject UI into third-party apps.
+
+On macOS, AIWatcher deliberately does not fall back to AppleScript
+Notification Center alerts. macOS attributes those alerts to Script Editor,
+so clicking **Show** opens Script Editor instead of AIWatcher. The actionable
+native companion is used instead; `terminal-notifier` remains supported for
+standalone `--notify` use because it can open the local dashboard correctly.
 
 You can still run Ambient Watch standalone:
 

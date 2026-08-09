@@ -8,6 +8,7 @@ without claiming to inject UI into those apps.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 import os
 import shutil
@@ -20,6 +21,106 @@ import urllib.request
 import webbrowser
 
 
+@dataclass(frozen=True)
+class OverlayConfig:
+    signal_kind: str
+    title: str
+    primary_label: str
+    primary_action: str
+    primary_mode: str
+    guidance: str
+
+
+_SIGNAL_ALIASES = {
+    "context": "critical_context",
+    "context_pressure": "critical_context",
+    "context_critical": "critical_context",
+    "critical": "critical_context",
+    "runaway": "loop",
+    "runaway_loop": "loop",
+    "high_velocity": "velocity",
+    "usage_velocity": "velocity",
+    "low_runway": "runway",
+    "quota": "runway",
+    "insight": "generic",
+}
+
+
+def _normalize_signal_kind(value: str | None) -> str:
+    normalized = (value or "generic").strip().lower().replace("-", "_").replace(" ", "_")
+    normalized = _SIGNAL_ALIASES.get(normalized, normalized)
+    return normalized if normalized in {"critical_context", "loop", "velocity", "runway", "generic"} else "generic"
+
+
+def overlay_config(
+    signal_kind: str | None,
+    *,
+    primary_label: str | None = None,
+    action_endpoint_available: bool = False,
+    runtime_action_available: bool = False,
+) -> OverlayConfig:
+    """Return truthful, signal-specific copy and behavior for the companion."""
+    kind = _normalize_signal_kind(signal_kind)
+    if kind == "critical_context":
+        action = "copy_brief_and_open_runtime" if action_endpoint_available and runtime_action_available else "copy_fresh_brief"
+        default_label = "Open tool + copy brief" if action == "copy_brief_and_open_runtime" else "Copy fresh-session brief"
+        config = OverlayConfig(
+            kind,
+            "Context is getting expensive",
+            default_label,
+            action,
+            "copy",
+            "Start a fresh session in the same workspace without replaying the full conversation.",
+        )
+    elif kind == "loop":
+        action = "stop_and_inspect" if action_endpoint_available else "inspect_loop"
+        config = OverlayConfig(
+            kind,
+            "Possible loop detected",
+            "Stop and inspect" if action_endpoint_available else "Inspect loop",
+            action,
+            "inspect",
+            "Pause repeated work and inspect the evidence before allowing more tool calls.",
+        )
+    elif kind == "velocity":
+        config = OverlayConfig(
+            kind,
+            "AI work is moving unusually fast",
+            "Copy focused brief",
+            "copy_focused_brief",
+            "copy",
+            "Narrow the current task to one checkpoint before more context and tool calls accumulate.",
+        )
+    elif kind == "runway":
+        config = OverlayConfig(
+            kind,
+            "Usage runway is getting low",
+            "Review switch options",
+            "review_switch_options",
+            "inspect",
+            "Review the current workload before switching tools or continuing under limited capacity.",
+        )
+    else:
+        config = OverlayConfig(
+            kind,
+            "AIWatcher found something to review",
+            "Review insight",
+            "review_insight",
+            "inspect",
+            "Inspect the evidence and choose whether the current work needs an intervention.",
+        )
+    if primary_label and primary_label.strip():
+        return OverlayConfig(
+            config.signal_kind,
+            config.title,
+            primary_label.strip(),
+            config.primary_action,
+            config.primary_mode,
+            config.guidance,
+        )
+    return config
+
+
 MACOS_SWIFT_OVERLAY = r'''
 import Cocoa
 import Foundation
@@ -30,6 +131,11 @@ let titleText = args.count > 2 ? args[2] : "AIWatcher handoff recommended"
 let bodyText = args.count > 3 ? args[3] : "AIWatcher found context pressure."
 let severityText = args.count > 4 ? args[4] : "warning"
 let briefFile = args.count > 5 ? args[5] : ""
+let interventionFingerprint = args.count > 6 ? args[6] : ""
+let signalKind = args.count > 7 ? args[7] : "generic"
+let primaryLabel = args.count > 8 ? args[8] : "Review insight"
+let primaryMode = args.count > 9 ? args[9] : "inspect"
+let runtimeActionAvailable = args.count > 10 ? args[10] == "1" : false
 
 func apiBase(_ value: String) -> String {
     guard let url = URL(string: value) else { return "" }
@@ -54,6 +160,34 @@ func postDecision(_ decision: String) {
     let sem = DispatchSemaphore(value: 0)
     URLSession.shared.dataTask(with: request) { _, _, _ in sem.signal() }.resume()
     _ = sem.wait(timeout: .now() + 2)
+}
+
+func postInterventionAction(_ action: String, snoozeMinutes: Int? = nil) {
+    guard !interventionFingerprint.isEmpty,
+          let url = URL(string: "\(baseURL)/api/ambient-intervention-action") else {
+        postDecision(action == "snooze" ? "continue_here" : action == "dismiss" ? "dismissed" : "copy_handoff")
+        return
+    }
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    var payload: [String: Any] = [
+        "fingerprint": interventionFingerprint,
+        "action": action,
+        "channel": "overlay"
+    ]
+    if let minutes = snoozeMinutes { payload["snooze_minutes"] = minutes }
+    request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+    let sem = DispatchSemaphore(value: 0)
+    URLSession.shared.dataTask(with: request) { _, _, _ in sem.signal() }.resume()
+    _ = sem.wait(timeout: .now() + 2)
+}
+
+func requestRuntimeReturn() {
+    guard runtimeActionAvailable,
+          let encoded = sid.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+          let url = URL(string: "\(baseURL)/api/runtime-return?id=\(encoded)") else { return }
+    URLSession.shared.dataTask(with: url).resume()
 }
 
 func fetchHandoffBrief() -> String? {
@@ -124,15 +258,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         view.addSubview(body)
 
         let buttons: [(String, Selector)] = [
-            ("New chat + copy brief", #selector(newChat)),
-            ("Copy handoff", #selector(copyHandoff)),
-            ("Continue here", #selector(continueHere)),
-            ("Inspect", #selector(inspectSession))
+            (primaryLabel, #selector(primaryAction)),
+            ("Inspect", #selector(inspectSession)),
+            ("Snooze 15 min", #selector(snooze)),
+            ("Dismiss for session", #selector(dismissSession))
         ]
         var x: CGFloat = 22
         for item in buttons {
             let button = NSButton(title: item.0, target: self, action: item.1)
-            let buttonWidth: CGFloat = item.0 == "New chat + copy brief" ? 178 : item.0 == "Continue here" ? 118 : 112
+            let buttonWidth: CGFloat = item.0 == primaryLabel ? 178 : item.0 == "Dismiss for session" ? 142 : 112
             button.frame = NSRect(x: x, y: 50, width: buttonWidth, height: 32)
             button.bezelStyle = .rounded
             view.addSubview(button)
@@ -148,6 +282,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
+        postInterventionAction("displayed")
     }
 
     func finish(_ message: String) {
@@ -157,33 +292,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc func newChat() {
-        postDecision("new_chat")
+    @objc func primaryAction() {
+        if primaryMode == "inspect" {
+            inspectSession()
+            finish("Opened the evidence. Review it before continuing the run.")
+            return
+        }
         if let brief = fetchHandoffBrief() {
             copyToClipboard(brief)
-            finish("Handoff copied. Paste it into a fresh Claude, Codex, or Cursor chat.")
+            postInterventionAction("acted")
+            requestRuntimeReturn()
+            let destination = runtimeActionAvailable ? "The return target was opened." : "Return to your AI tool."
+            finish("Brief copied. \(destination) Paste it to continue.")
         } else {
             finish("Could not copy. Open the dashboard to copy the handoff.")
         }
     }
 
-    @objc func copyHandoff() {
-        postDecision("copy_handoff")
-        if let brief = fetchHandoffBrief() {
-            copyToClipboard(brief)
-            finish("Handoff copied. Paste it into a fresh Claude, Codex, or Cursor chat.")
-        } else {
-            finish("Could not copy. Open the dashboard to copy the handoff.")
-        }
+    @objc func snooze() {
+        postInterventionAction("snooze", snoozeMinutes: 15)
+        finish("Snoozed for 15 minutes. AIWatcher will stay quiet unless severity worsens.")
     }
 
-    @objc func continueHere() {
-        postDecision("continue_here")
-        finish("Decision saved: continue here.")
+    @objc func dismissSession() {
+        postInterventionAction("dismiss")
+        finish("Dismissed for this session state.")
     }
 
     @objc func inspectSession() {
-        let inspect = urlString.replacingOccurrences(of: "/overlay", with: "/")
+        postInterventionAction("acted")
+        let encoded = sid.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let inspect = "\(baseURL)/?session=\(encoded)"
         if let url = URL(string: inspect) {
             NSWorkspace.shared.open(url)
         }
@@ -234,6 +373,38 @@ def _record_decision(base: str, session_id: str, decision: str, reason: str) -> 
         return
 
 
+def _record_intervention_action(
+    base: str,
+    fingerprint: str,
+    action: str,
+    *,
+    snooze_minutes: int | None = None,
+) -> None:
+    if not fingerprint:
+        return
+    payload: dict[str, object] = {
+        "fingerprint": fingerprint,
+        "action": action,
+        "channel": "overlay",
+    }
+    if snooze_minutes is not None:
+        payload["snooze_minutes"] = snooze_minutes
+    try:
+        _request_json(f"{base}/api/ambient-intervention-action", payload)
+    except (OSError, urllib.error.URLError, json.JSONDecodeError):
+        return
+
+
+def _request_runtime_return(base: str, session_id: str) -> bool:
+    if not session_id:
+        return False
+    try:
+        result = _request_json(f"{base}/api/runtime-return?id={urllib.parse.quote(session_id)}")
+    except (OSError, urllib.error.URLError, json.JSONDecodeError):
+        return False
+    return bool(result.get("ok"))
+
+
 def _set_window_position(root: object, width: int, height: int) -> None:
     screen_width = int(root.winfo_screenwidth())  # type: ignore[attr-defined]
     screen_height = int(root.winfo_screenheight())  # type: ignore[attr-defined]
@@ -253,7 +424,19 @@ def _read_brief_file(brief_file: str | None) -> str | None:
     return value or None
 
 
-def _run_macos_swift_overlay(url: str, title: str, body: str, severity: str, brief_file: str | None = None) -> int:
+def _run_macos_swift_overlay(
+    url: str,
+    title: str,
+    body: str,
+    severity: str,
+    brief_file: str | None = None,
+    *,
+    intervention_fingerprint: str = "",
+    signal_kind: str = "generic",
+    primary_label: str | None = None,
+    primary_mode: str | None = None,
+    runtime_action_available: bool = False,
+) -> int:
     swift = shutil.which("swift")
     if sys.platform != "darwin" or not swift:
         return 2
@@ -261,8 +444,22 @@ def _run_macos_swift_overlay(url: str, title: str, body: str, severity: str, bri
     try:
         with open(script_path, "w", encoding="utf-8") as handle:
             handle.write(MACOS_SWIFT_OVERLAY)
+        config = overlay_config(signal_kind, primary_label=primary_label)
         subprocess.Popen(
-            [swift, script_path, url, title, body, severity, brief_file or ""],
+            [
+                swift,
+                script_path,
+                url,
+                title or config.title,
+                body,
+                severity,
+                brief_file or "",
+                intervention_fingerprint,
+                config.signal_kind,
+                config.primary_label,
+                primary_mode or config.primary_mode,
+                "1" if runtime_action_available else "0",
+            ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -273,13 +470,39 @@ def _run_macos_swift_overlay(url: str, title: str, body: str, severity: str, bri
         return 2
 
 
-def run_native_overlay(url: str, title: str, body: str, severity: str, brief_file: str | None = None) -> int:
+def run_native_overlay(
+    url: str,
+    title: str,
+    body: str,
+    severity: str,
+    brief_file: str | None = None,
+    *,
+    intervention_fingerprint: str = "",
+    signal_kind: str = "generic",
+    primary_label: str | None = None,
+    primary_mode: str | None = None,
+    runtime_action_available: bool = False,
+) -> int:
+    config = overlay_config(signal_kind, primary_label=primary_label)
+    title = title or config.title
+    primary_mode = primary_mode or config.primary_mode
     try:
         import tkinter as tk
         from tkinter import ttk
     except Exception as exc:  # pragma: no cover - depends on host Python build
         if sys.platform == "darwin":
-            return _run_macos_swift_overlay(url, title, body, severity, brief_file)
+            return _run_macos_swift_overlay(
+                url,
+                title,
+                body,
+                severity,
+                brief_file,
+                intervention_fingerprint=intervention_fingerprint,
+                signal_kind=config.signal_kind,
+                primary_label=config.primary_label,
+                primary_mode=primary_mode,
+                runtime_action_available=runtime_action_available,
+            )
         print(f"AIWatcher native overlay unavailable: {exc}", file=sys.stderr)
         return 2
 
@@ -334,8 +557,15 @@ def run_native_overlay(url: str, title: str, body: str, severity: str, brief_fil
         status.set(message)
         root.after(2500, root.destroy)
 
-    def copy_handoff(decision: str) -> None:
-        _record_decision(base, session_id, decision, reason)
+    def inspect_session() -> None:
+        _record_intervention_action(base, intervention_fingerprint, "acted")
+        webbrowser.open(f"{base}/?session={urllib.parse.quote(session_id)}")
+        show_saved("Opened the evidence. Review it before continuing the run.")
+
+    def primary_action() -> None:
+        if primary_mode == "inspect":
+            inspect_session()
+            return
         try:
             if local_brief:
                 brief = local_brief
@@ -345,28 +575,39 @@ def run_native_overlay(url: str, title: str, body: str, severity: str, brief_fil
             root.clipboard_clear()
             root.clipboard_append(brief)
             root.update()
-            show_saved("Handoff copied. Paste it into a fresh Claude, Codex, or Cursor chat.")
+            _record_intervention_action(base, intervention_fingerprint, "acted")
+            opened = runtime_action_available and _request_runtime_return(base, session_id)
+            destination = "The return target was opened." if opened else "Return to your AI tool."
+            show_saved(f"Brief copied. {destination} Paste it to continue.")
         except (OSError, urllib.error.URLError, json.JSONDecodeError, tk.TclError):
             status.set("Could not copy. Open the dashboard to copy the handoff manually.")
 
-    def continue_here() -> None:
-        _record_decision(base, session_id, "continue_here", reason)
-        show_saved("Decision saved: continue here.")
+    def snooze() -> None:
+        _record_intervention_action(base, intervention_fingerprint, "snooze", snooze_minutes=15)
+        show_saved("Snoozed for 15 minutes. AIWatcher will stay quiet unless severity worsens.")
 
-    ttk.Button(button_row, text="New chat + copy brief", style="AIW.TButton", command=lambda: copy_handoff("new_chat")).pack(
+    def dismiss_session() -> None:
+        _record_intervention_action(base, intervention_fingerprint, "dismiss")
+        show_saved("Dismissed for this session state.")
+
+    ttk.Button(button_row, text=config.primary_label, style="AIW.TButton", command=primary_action).pack(
         side="left", padx=(0, 10)
     )
-    ttk.Button(button_row, text="Copy handoff", style="AIW.TButton", command=lambda: copy_handoff("copy_handoff")).pack(
+    ttk.Button(
+        button_row,
+        text="Inspect",
+        style="AIW.TButton",
+        command=inspect_session,
+    ).pack(
         side="left", padx=(0, 10)
     )
-    ttk.Button(button_row, text="Continue here", style="AIW.TButton", command=continue_here).pack(side="left", padx=(0, 10))
-    ttk.Button(button_row, text="Inspect", style="AIW.TButton", command=lambda: webbrowser.open(url.replace("/overlay", "/"))).pack(
-        side="left"
-    )
+    ttk.Button(button_row, text="Snooze 15 min", style="AIW.TButton", command=snooze).pack(side="left", padx=(0, 10))
+    ttk.Button(button_row, text="Dismiss", style="AIW.TButton", command=dismiss_session).pack(side="left")
 
     ttk.Label(frame, textvariable=status, style="AIWMuted.TLabel", wraplength=700).pack(fill="x", anchor="w")
 
     root.lift()
+    _record_intervention_action(base, intervention_fingerprint, "displayed")
     root.mainloop()
     return 0
 
@@ -378,8 +619,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--body", default="")
     parser.add_argument("--severity", default="warning")
     parser.add_argument("--brief-file")
+    parser.add_argument("--intervention-fingerprint", default="")
+    parser.add_argument("--signal-kind", default="generic")
+    parser.add_argument("--primary-label")
+    parser.add_argument("--primary-mode", choices=("copy", "inspect"))
+    parser.add_argument("--runtime-action-available", action="store_true")
     args = parser.parse_args(argv)
-    return run_native_overlay(args.url, args.title, args.body, args.severity, args.brief_file)
+    return run_native_overlay(
+        args.url,
+        args.title,
+        args.body,
+        args.severity,
+        args.brief_file,
+        intervention_fingerprint=args.intervention_fingerprint,
+        signal_kind=args.signal_kind,
+        primary_label=args.primary_label,
+        primary_mode=args.primary_mode,
+        runtime_action_available=args.runtime_action_available,
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover

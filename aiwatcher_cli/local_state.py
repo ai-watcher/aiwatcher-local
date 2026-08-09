@@ -168,6 +168,7 @@ def _empty_state() -> dict[str, Any]:
         "brief_tokens": [],
         "watch_notifications": [],
         "handoff_decisions": [],
+        "ambient_interventions": [],
         "sent_notification_keys": [],
         "ui_server": None,
         "watcher_heartbeat": None,
@@ -233,6 +234,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("brief_tokens", [])
     data.setdefault("watch_notifications", [])
     data.setdefault("handoff_decisions", [])
+    data.setdefault("ambient_interventions", [])
     data.setdefault("sent_notification_keys", [])
     data.setdefault("ui_server", None)
     data.setdefault("watcher_heartbeat", None)
@@ -640,6 +642,280 @@ def recent_handoff_decisions(limit: int = 10) -> list[dict[str, Any]]:
         return []
     rows = [row for row in data["handoff_decisions"] if isinstance(row, dict)]
     return list(reversed(rows[-max(1, limit):]))
+
+
+VALID_AMBIENT_INTERVENTION_STATES = {
+    "detected",
+    "delivered",
+    "displayed",
+    "acted",
+    "snoozed",
+    "dismissed",
+    "failed",
+}
+AMBIENT_SEVERITY_RANK = {"info": 0, "warning": 1, "critical": 2}
+MAX_AMBIENT_INTERVENTIONS_STORED = 500
+MAX_AMBIENT_INTERVENTION_EVENTS = 25
+
+
+def ambient_intervention_fingerprint(*, session_id: str, signal_kind: str, action: str) -> str:
+    """Return the stable identity shared by every presentation channel.
+
+    Session activity and severity intentionally are not part of the fingerprint:
+    those values change as one underlying intervention evolves. Delivery policy
+    compares them with the last presentation to decide whether a re-alert is
+    warranted.
+    """
+    identity = {
+        "session_id": session_id.strip(),
+        "signal_kind": signal_kind.strip().lower(),
+        "action": action.strip().lower(),
+    }
+    if not all(identity.values()):
+        raise ValueError("session_id, signal_kind, and action are required")
+    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _ambient_severity_rank(severity: str | None) -> int:
+    return AMBIENT_SEVERITY_RANK.get(str(severity or "").strip().lower(), -1)
+
+
+def _safe_ambient_urls(urls: dict[str, str] | None) -> dict[str, str]:
+    if not isinstance(urls, dict):
+        return {}
+    return {
+        str(key).strip()[:80]: value.strip()[:2000]
+        for key, value in urls.items()
+        if str(key).strip() and isinstance(value, str) and value.strip()
+    }
+
+
+def _safe_expected_savings(savings: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(savings, dict):
+        return None
+    allowed = {
+        "context_tokens",
+        "tokens",
+        "model_calls",
+        "tool_calls",
+        "api_value_usd",
+        "confidence",
+        "basis",
+    }
+    safe: dict[str, Any] = {}
+    for key, value in savings.items():
+        if key not in allowed:
+            continue
+        if isinstance(value, (int, float, bool)) or value is None:
+            safe[key] = value
+        elif isinstance(value, str):
+            safe[key] = value[:500]
+        elif isinstance(value, list) and all(isinstance(item, (int, float)) for item in value):
+            safe[key] = value[:2]
+    return safe or None
+
+
+def _ambient_event(state: str, *, channel: str | None = None, detail: str | None = None) -> dict[str, Any]:
+    event = {
+        "state": state,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if channel:
+        event["channel"] = channel.strip()[:80]
+    if detail and detail.strip():
+        event["detail"] = detail.strip()[:500]
+    return event
+
+
+def upsert_ambient_intervention(
+    *,
+    session_id: str,
+    signal_kind: str,
+    action: str,
+    severity: str,
+    session_stamp: str,
+    reason: str,
+    urls: dict[str, str] | None = None,
+    expected_savings: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Create or refresh the durable record shared by notification and overlay.
+
+    Prompt or source content does not belong here. The record contains only the
+    signal, recommended action, delivery metadata, and optional local URLs and
+    planning estimates.
+    """
+    normalized_severity = severity.strip().lower()
+    if normalized_severity not in AMBIENT_SEVERITY_RANK:
+        raise ValueError("severity must be one of: info, warning, critical")
+    fingerprint = ambient_intervention_fingerprint(
+        session_id=session_id,
+        signal_kind=signal_kind,
+        action=action,
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        with _locked_state():
+            data = _load()
+            rows = data.setdefault("ambient_interventions", [])
+            record = next(
+                (row for row in reversed(rows) if isinstance(row, dict) and row.get("fingerprint") == fingerprint),
+                None,
+            )
+            if record is None:
+                record = {
+                    "id": str(uuid.uuid4()),
+                    "fingerprint": fingerprint,
+                    "created_at": now,
+                    "state": "detected",
+                    "events": [_ambient_event("detected")],
+                    "channels": {},
+                }
+                rows.append(record)
+            else:
+                prior_stamp = record.get("session_stamp")
+                prior_severity = record.get("severity")
+                if prior_stamp != session_stamp or prior_severity != normalized_severity:
+                    events = record.setdefault("events", [])
+                    events.append(_ambient_event("detected", detail="Signal activity changed."))
+                    record["events"] = events[-MAX_AMBIENT_INTERVENTION_EVENTS:]
+
+            record.update({
+                "updated_at": now,
+                "session_id": session_id.strip(),
+                "signal_kind": signal_kind.strip().lower(),
+                "action": action.strip(),
+                "severity": normalized_severity,
+                "session_stamp": str(session_stamp).strip()[:200],
+                "reason": reason.strip()[:500],
+                "urls": _safe_ambient_urls(urls),
+                "expected_savings": _safe_expected_savings(expected_savings),
+            })
+            data["ambient_interventions"] = rows[-MAX_AMBIENT_INTERVENTIONS_STORED:]
+            _save(data)
+            return dict(record)
+    except OSError:
+        return None
+
+
+def get_ambient_intervention(fingerprint: str) -> dict[str, Any] | None:
+    try:
+        with _locked_state():
+            rows = list(_load().get("ambient_interventions", []))
+    except OSError:
+        return None
+    return next(
+        (dict(row) for row in reversed(rows) if isinstance(row, dict) and row.get("fingerprint") == fingerprint),
+        None,
+    )
+
+
+def recent_ambient_interventions(limit: int = 20) -> list[dict[str, Any]]:
+    try:
+        with _locked_state():
+            rows = list(_load().get("ambient_interventions", []))
+    except OSError:
+        return []
+    valid = [dict(row) for row in rows if isinstance(row, dict)]
+    return list(reversed(valid[-max(1, limit):]))
+
+
+def ambient_intervention_delivery_allowed(fingerprint: str, *, channel: str) -> bool:
+    """Return whether this channel may present the intervention now.
+
+    A user choice applies across notification and overlay. Delivery is calm by
+    default: new log activity alone does not reopen the same warning every poll.
+    Re-alert only after a snooze expires or the signal severity worsens.
+    """
+    record = get_ambient_intervention(fingerprint)
+    if not record:
+        return False
+    current_severity = record.get("severity")
+
+    decision_severity = record.get("decision_severity")
+    worsened_since_decision = (
+        decision_severity is not None
+        and _ambient_severity_rank(current_severity) > _ambient_severity_rank(str(decision_severity))
+    )
+    if record.get("state") in {"acted", "dismissed", "snoozed"}:
+        if not worsened_since_decision:
+            if record.get("state") != "snoozed":
+                return False
+            snoozed_until = record.get("snoozed_until")
+            try:
+                if snoozed_until and datetime.fromisoformat(str(snoozed_until)) > datetime.now(timezone.utc):
+                    return False
+                # Snooze is deliberately temporary. Once it expires, allow
+                # exactly one new presentation even if the session stamp has
+                # not changed; the subsequent channel receipt will dedupe it.
+                return True
+            except (TypeError, ValueError):
+                return False
+
+    channel_state = record.get("channels", {}).get(channel, {})
+    if not isinstance(channel_state, dict) or not channel_state:
+        return True
+    return _ambient_severity_rank(current_severity) > _ambient_severity_rank(channel_state.get("severity"))
+
+
+def record_ambient_intervention_action(
+    fingerprint: str,
+    *,
+    state: str,
+    channel: str | None = None,
+    snoozed_until: str | None = None,
+    detail: str | None = None,
+) -> dict[str, Any] | None:
+    """Advance an ambient intervention and append an auditable lifecycle event."""
+    if state not in VALID_AMBIENT_INTERVENTION_STATES:
+        raise ValueError(
+            f"state must be one of: {', '.join(sorted(VALID_AMBIENT_INTERVENTION_STATES))}"
+        )
+    if state == "snoozed":
+        try:
+            parsed_snooze = datetime.fromisoformat(str(snoozed_until))
+            if parsed_snooze.tzinfo is None:
+                parsed_snooze = parsed_snooze.replace(tzinfo=timezone.utc)
+            snoozed_until = parsed_snooze.astimezone(timezone.utc).isoformat()
+        except (TypeError, ValueError) as exc:
+            raise ValueError("snoozed_until must be an ISO-8601 timestamp") from exc
+
+    try:
+        with _locked_state():
+            data = _load()
+            record = next(
+                (
+                    row for row in reversed(data.get("ambient_interventions", []))
+                    if isinstance(row, dict) and row.get("fingerprint") == fingerprint
+                ),
+                None,
+            )
+            if record is None:
+                return None
+            now = datetime.now(timezone.utc).isoformat()
+            record["state"] = state
+            record["updated_at"] = now
+            if state in {"delivered", "displayed", "failed"} and channel:
+                record.setdefault("channels", {})[channel] = {
+                    "state": state,
+                    "updated_at": now,
+                    "session_stamp": record.get("session_stamp"),
+                    "severity": record.get("severity"),
+                }
+            if state in {"acted", "snoozed", "dismissed"}:
+                record["decision_session_stamp"] = record.get("session_stamp")
+                record["decision_severity"] = record.get("severity")
+            if state == "snoozed":
+                record["snoozed_until"] = snoozed_until
+            elif state in {"acted", "dismissed"}:
+                record.pop("snoozed_until", None)
+            events = record.setdefault("events", [])
+            events.append(_ambient_event(state, channel=channel, detail=detail))
+            record["events"] = events[-MAX_AMBIENT_INTERVENTION_EVENTS:]
+            _save(data)
+            return dict(record)
+    except OSError:
+        return None
 
 
 MAX_NOTIFICATION_KEYS_SENT = 500

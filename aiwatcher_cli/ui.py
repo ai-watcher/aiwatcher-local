@@ -45,6 +45,8 @@ from .local_state import (
     recent_command_decisions,
     recent_handoff_decisions,
     recent_interventions,
+    get_ambient_intervention,
+    record_ambient_intervention_action,
     record_handoff_decision,
     record_evidence_snapshot,
     record_outcome,
@@ -1251,20 +1253,23 @@ def _handoff_bubble(context_health: list[dict[str, object]]) -> dict[str, object
     severity = str(candidate.get("severity") or "warning")
     saved_label = str(candidate.get("estimated_replayed_context_label") or candidate.get("latest_turn_tokens") or "context")
     project = str(candidate.get("project") or "this session")
+    runtime = candidate.get("runtime_attachment") if isinstance(candidate.get("runtime_attachment"), dict) else {}
+    runtime_available = bool(runtime.get("available"))
+    runtime_action = str(runtime.get("action_label") or "Open workspace")
     if severity == "critical":
         title = f"Start a new chat to save ~{saved_label} tokens of context"
         body = (
             f"{project} is at critical context pressure. Create a fresh-session handoff brief so the next agent "
             "keeps the goal, repo, files, and guardrails without replaying the bloated history."
         )
-        primary_label = "New chat"
+        primary_label = f"Copy brief + {runtime_action}" if runtime_available else "Copy fresh-chat brief"
     else:
         title = f"This session is getting heavy: ~{saved_label} tokens are replayed context"
         body = (
             f"{project} is showing context pressure. Compact or start fresh before the next broad task so usage "
             "does not compound."
         )
-        primary_label = "Prepare handoff"
+        primary_label = f"Copy brief + {runtime_action}" if runtime_available else "Prepare handoff"
     reason = str(candidate.get("recommendation") or candidate.get("action", {}).get("reason") or body)
     return {
         "session_id": candidate.get("session_id"),
@@ -1275,7 +1280,7 @@ def _handoff_bubble(context_health: list[dict[str, object]]) -> dict[str, object
         "body": body,
         "reason": reason,
         "primary_label": primary_label,
-        "continue_label": "Continue here",
+        "continue_label": "Continue 15 min",
         "saved_context_label": saved_label,
         "expected_saved_context_tokens": candidate.get("estimated_replayed_context_tokens"),
         "runtime_attachment": candidate.get("runtime_attachment"),
@@ -3374,7 +3379,27 @@ async function recordHandoffDecision(bubble, decision) {
 }
 async function startFreshFromBubble(sessionId) {
   if (window.currentHandoffBubble) await recordHandoffDecision(window.currentHandoffBubble, 'new_chat');
-  await openHandoff(sessionId);
+  const res = await fetch(`/api/handoff?id=${encodeURIComponent(sessionId)}&target=generic&prompt=0`);
+  const capsule = await res.json();
+  if (capsule.error) {
+    showToast(capsule.error, 'error');
+    return;
+  }
+  const copied = await copyText(capsule.next_brief || '', 'Fresh-chat brief copied');
+  if (!copied) return;
+  const runtime = (window.currentHandoffBubble || {}).runtime_attachment || {};
+  if (runtime.available) {
+    try {
+      const returnRes = await fetch(`/api/runtime-return?id=${encodeURIComponent(sessionId)}`);
+      const returned = await returnRes.json();
+      showToast(returned.message || 'Brief copied and return target opened.', returned.ok ? 'success' : 'error');
+    } catch (error) {
+      showToast('Brief copied. Open a fresh chat in the same workspace and paste it.', 'success');
+    }
+  } else {
+    showToast('Brief copied. Open a fresh chat in the same workspace and paste it.', 'success');
+  }
+  renderHandoffCopied(window.currentHandoffBubble, sessionId);
 }
 async function continueFromBubble() {
   if (window.currentHandoffBubble) await recordHandoffDecision(window.currentHandoffBubble, 'continue_here');
@@ -4224,6 +4249,30 @@ async function recordDecision(decision, bubble) {
     });
   } catch (error) {}
 }
+async function recordAmbientAction(action, snoozeMinutes = null) {
+  const fingerprint = queryParam('intervention');
+  if (!fingerprint) return;
+  const payload = { fingerprint, action, channel: 'overlay' };
+  if (snoozeMinutes) payload.snooze_minutes = snoozeMinutes;
+  try {
+    await fetch('/api/ambient-intervention-action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {}
+}
+async function loadAmbientIntervention() {
+  const fingerprint = queryParam('intervention');
+  if (!fingerprint) return null;
+  try {
+    const res = await fetch(`/api/ambient-intervention?id=${encodeURIComponent(fingerprint)}`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (error) {
+    return null;
+  }
+}
 function renderSaved(message) {
   document.getElementById('bubble').innerHTML = `<div class="top"><div><h1>${esc(message)}</h1><p>You can close this AIWatcher companion and return to your AI tool.</p></div><span class="badge">saved</span></div>
     <div class="body"><div class="actions"><button class="primary" onclick="window.close()">Close</button><a href="/">Open dashboard</a></div></div>`;
@@ -4236,35 +4285,94 @@ async function copyHandoff(bubble, decision) {
     renderSaved(capsule.error);
     return;
   }
-  await copyText(capsule.next_brief || '', decision === 'new_chat' ? 'Fresh-session handoff copied' : 'Handoff brief copied');
+  await recordAmbientAction('acted');
+  await copyText(capsule.next_brief || '', 'Fresh-session brief copied');
 }
-async function continueHere(bubble) {
-  await recordDecision('continue_here', bubble);
-  renderSaved('Decision saved: continue here');
+async function copyFocusedBrief(bubble, intervention) {
+  const brief = `AIWatcher focused continuation
+
+Workspace: ${bubble.project || 'current workspace'}
+Observed signal: ${intervention.reason || bubble.reason || 'Execution pressure is elevated.'}
+
+Before using more tools:
+- Restate the exact outcome for this checkpoint in one sentence.
+- Summarize what is already known and avoid repeating broad discovery.
+- Inspect only the smallest relevant files or commands.
+- Stop and ask before destructive changes or unrelated cleanup.
+
+Continue only the smallest checkpoint, run the narrowest useful verification, and report what remains.`;
+  await recordAmbientAction('acted');
+  await copyText(brief, 'Focused next step copied');
 }
-function renderBubble(bubble) {
+async function inspectIntervention(bubble) {
+  await recordAmbientAction('acted');
+  window.location.href = `/?session=${encodeURIComponent(bubble.session_id || '')}`;
+}
+async function snoozeIntervention() {
+  await recordAmbientAction('snooze', 15);
+  renderSaved('Snoozed for 15 minutes');
+}
+async function dismissIntervention() {
+  await recordAmbientAction('dismiss');
+  renderSaved('Dismissed for this session state');
+}
+function interventionPresentation(bubble, intervention) {
+  if (!intervention) {
+    return {
+      title: bubble.title,
+      body: bubble.body,
+      severity: bubble.severity,
+      primaryLabel: 'Copy fresh-session brief',
+      primaryMode: 'fresh_chat',
+    };
+  }
+  const action = intervention.action || 'fresh_chat';
+  const options = {
+    fresh_chat: ['Context is getting expensive', 'Copy fresh-session brief', 'fresh_chat'],
+    recover_loop: ['Possible loop detected', 'Inspect and stop', 'inspect'],
+    continue_focused: ['Focus the next checkpoint', 'Copy focused next step', 'focused'],
+    switch_tool: ['Usage runway is getting low', 'Copy handoff brief', 'fresh_chat'],
+  };
+  const selected = options[action] || ['AIWatcher found something to review', 'Inspect', 'inspect'];
+  return {
+    title: selected[0],
+    body: intervention.reason || bubble.body,
+    severity: intervention.severity || bubble.severity,
+    primaryLabel: selected[1],
+    primaryMode: selected[2],
+  };
+}
+function renderBubble(bubble, intervention) {
+  const presentation = interventionPresentation(bubble, intervention);
   const tags = (bubble.tags || []).map(tag => `<span class="tag">${esc(tag)}</span>`).join('');
   document.getElementById('bubble').innerHTML = `<div class="top">
-    <div><h1>${esc(bubble.title || 'Start a fresh AI session')}</h1><p>${esc(bubble.body || 'AIWatcher found context pressure that may waste your next turns.')}</p></div>
-    <span class="badge">${esc(bubble.severity || 'warning')}</span>
+    <div><h1>${esc(presentation.title || 'AIWatcher found something to review')}</h1><p>${esc(presentation.body || 'Review the local evidence before continuing.')}</p></div>
+    <span class="badge">${esc(presentation.severity || 'warning')}</span>
   </div>
   <div class="body">
     <div class="tags">${tags}</div>
     <p>${esc(bubble.reason || 'Use a handoff brief to preserve the outcome without carrying the full chat history.')}</p>
     <div class="actions">
-      <button class="primary" id="newChat">New chat</button>
-      <button id="copyBrief">Copy handoff</button>
-      <button id="continueHere">Continue here</button>
-      <a href="/?session=${encodeURIComponent(bubble.session_id || '')}">Inspect</a>
+      <button class="primary" id="primaryAction">${esc(presentation.primaryLabel)}</button>
+      ${presentation.primaryMode === 'inspect' ? '' : '<button id="inspect">Inspect</button>'}
+      <button id="snooze">Snooze 15 min</button>
+      <button id="dismiss">Dismiss</button>
     </div>
   </div>
   <div class="foot">Local-only. Prompt/source content is not stored in this decision.</div>`;
-  document.getElementById('newChat').onclick = () => copyHandoff(bubble, 'new_chat');
-  document.getElementById('copyBrief').onclick = () => copyHandoff(bubble, 'copy_handoff');
-  document.getElementById('continueHere').onclick = () => continueHere(bubble);
+  document.getElementById('primaryAction').onclick = () => {
+    if (presentation.primaryMode === 'inspect') return inspectIntervention(bubble);
+    if (presentation.primaryMode === 'focused') return copyFocusedBrief(bubble, intervention || {});
+    return copyHandoff(bubble, 'copy_handoff');
+  };
+  const inspect = document.getElementById('inspect');
+  if (inspect) inspect.onclick = () => inspectIntervention(bubble);
+  document.getElementById('snooze').onclick = snoozeIntervention;
+  document.getElementById('dismiss').onclick = dismissIntervention;
 }
 async function load() {
   const wanted = queryParam('session');
+  const intervention = await loadAmbientIntervention();
   const res = await fetch('/api/summary?days=7');
   const data = await res.json();
   let bubble = data.handoff_bubble;
@@ -4291,7 +4399,8 @@ async function load() {
       <div class="body"><div class="actions"><a class="primary" href="/">Open dashboard</a><button onclick="window.close()">Close</button></div></div>`;
     return;
   }
-  renderBubble(bubble);
+  await recordAmbientAction('displayed');
+  renderBubble(bubble, intervention);
 }
 load();
 </script>
@@ -4380,6 +4489,28 @@ class UIHandler(BaseHTTPRequestHandler):
                 "version": __version__,
                 "capabilities": ["preflight"],
             }), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/ambient-intervention":
+            params = parse_qs(parsed.query)
+            fingerprint = params.get("id", [""])[0].strip()
+            record = get_ambient_intervention(fingerprint) if fingerprint else None
+            if record is None:
+                self._send(404, json.dumps({"error": "intervention not found"}), "application/json; charset=utf-8")
+                return
+            payload = {
+                key: record.get(key)
+                for key in (
+                    "fingerprint",
+                    "session_id",
+                    "signal_kind",
+                    "action",
+                    "severity",
+                    "reason",
+                    "state",
+                    "expected_savings",
+                )
+            }
+            self._send(200, json.dumps(payload), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/summary":
             params = parse_qs(parsed.query)
@@ -4512,7 +4643,12 @@ class UIHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path not in {"/api/outcome", "/api/preflight", "/api/handoff-decision"}:
+        if parsed.path not in {
+            "/api/outcome",
+            "/api/preflight",
+            "/api/handoff-decision",
+            "/api/ambient-intervention-action",
+        }:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
@@ -4535,6 +4671,41 @@ class UIHandler(BaseHTTPRequestHandler):
             response = build_prompt_preflight(prompt, tool=tool, cwd=cwd)
             status = 400 if response.get("error") else 200
             self._send(status, json.dumps(response), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/ambient-intervention-action":
+            fingerprint = str(payload.get("fingerprint", "")).strip()
+            action = str(payload.get("action", "")).strip().lower()
+            channel = str(payload.get("channel", "overlay")).strip().lower() or "overlay"
+            if not fingerprint:
+                self._send(400, json.dumps({"error": "fingerprint is required"}), "application/json; charset=utf-8")
+                return
+            if action not in {"acted", "snooze", "dismiss", "displayed", "failed"}:
+                self._send(400, json.dumps({"error": "unsupported intervention action"}), "application/json; charset=utf-8")
+                return
+            state = {"snooze": "snoozed", "dismiss": "dismissed"}.get(action, action)
+            snoozed_until = None
+            if state == "snoozed":
+                raw_minutes = payload.get("snooze_minutes", 15)
+                if not isinstance(raw_minutes, (int, float)) or isinstance(raw_minutes, bool):
+                    self._send(400, json.dumps({"error": "snooze_minutes must be a number"}), "application/json; charset=utf-8")
+                    return
+                minutes = max(1, min(1440, int(raw_minutes)))
+                snoozed_until = (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
+            try:
+                record = record_ambient_intervention_action(
+                    fingerprint,
+                    state=state,
+                    channel=channel,
+                    snoozed_until=snoozed_until,
+                    detail=str(payload.get("detail", "")).strip() or None,
+                )
+            except ValueError as exc:
+                self._send(400, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")
+                return
+            if record is None:
+                self._send(404, json.dumps({"error": "intervention not found"}), "application/json; charset=utf-8")
+                return
+            self._send(200, json.dumps(record), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/handoff-decision":
             session_id = str(payload.get("session_id", "")).strip()
