@@ -813,7 +813,10 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
     codex_desktop_sessions = count("codex-cli", "desktop")
     cursor_sessions = count("cursor")
 
-    hook_events = recent_hook_events(limit=50)
+    try:
+        hook_events = recent_hook_events(limit=50)
+    except OSError:
+        hook_events = []
     hooked_tools = {str(e.get("tool", "")) for e in hook_events if isinstance(e, dict)}
     claude_hook_seen = "claude" in hooked_tools
     codex_hook_seen = "codex" in hooked_tools

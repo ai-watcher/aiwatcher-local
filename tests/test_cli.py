@@ -364,6 +364,7 @@ class PromptSavingsBaselineTests(unittest.TestCase):
                 "per_tool": {},
             }),
             patch.object(cli, "get_or_refresh_survival", return_value={}),
+            patch.object(cli, "get_or_refresh_receipt_baseline", return_value={}),
             patch("aiwatcher_cli.ui.serve") as serve,
         ):
             result = cli.command_ui(SimpleNamespace(
@@ -387,6 +388,8 @@ class PromptSavingsBaselineTests(unittest.TestCase):
 
         with (
             patch.object(cli, "get_or_refresh_baselines", return_value={}),
+            patch.object(cli, "get_or_refresh_survival", return_value={}),
+            patch.object(cli, "get_or_refresh_receipt_baseline", return_value={}),
             patch.object(cli, "recheck_evidence_survival"),
             patch.object(cli, "get_watcher_status", return_value={"running": False}),
             patch.object(cli.subprocess, "Popen", return_value=proc) as popen,
@@ -417,6 +420,8 @@ class PromptSavingsBaselineTests(unittest.TestCase):
 
         with (
             patch.object(cli, "get_or_refresh_baselines", return_value={}),
+            patch.object(cli, "get_or_refresh_survival", return_value={}),
+            patch.object(cli, "get_or_refresh_receipt_baseline", return_value={}),
             patch.object(cli, "recheck_evidence_survival"),
             patch.object(cli.subprocess, "Popen") as popen,
             patch("aiwatcher_cli.ui.serve", side_effect=fake_serve),

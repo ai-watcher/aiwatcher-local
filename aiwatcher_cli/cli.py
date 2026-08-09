@@ -911,7 +911,7 @@ def get_or_refresh_survival(max_age_hours: int = SURVIVAL_MAX_AGE_HOURS) -> dict
     try:
         ledger = build_ledger(scan_all_events(), days=SURVIVAL_WINDOW_DAYS)
         summary = dict(cost_per_surviving_line(ledger))
-    except OSError:
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
         return cached or {}
     summary["computed_at"] = datetime.now(timezone.utc).isoformat()
     summary["accounting_version"] = SURVIVAL_ACCOUNTING_VERSION
@@ -967,7 +967,7 @@ def get_or_refresh_receipt_baseline(
 
     try:
         repos = compute_repo_baselines(scan_all_events())
-    except OSError:
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
         return cached or {}
     payload = {
         "repos": repos,
