@@ -259,6 +259,7 @@ class PromptSavingsBaselineTests(unittest.TestCase):
                 "history_days": 30,
                 "per_tool": {},
             }),
+            patch.object(cli, "get_or_refresh_survival", return_value={}),
             patch("sys.stdout", new_callable=io.StringIO),
         ):
             result = cli.command_today(SimpleNamespace())
@@ -274,11 +275,64 @@ class PromptSavingsBaselineTests(unittest.TestCase):
                 "history_days": 30,
                 "per_tool": {},
             }),
+            patch.object(cli, "get_or_refresh_survival", return_value={}),
             patch("sys.stdout", new_callable=io.StringIO),
         ):
             result = cli.command_report(SimpleNamespace(days=7))
 
         self.assertEqual(result, 0)
+
+    def _run_report(self, survival: dict[str, object]) -> str:
+        with (
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "get_or_refresh_baselines", return_value={}),
+            patch.object(cli, "get_or_refresh_survival", return_value={}),
+            patch.object(cli, "get_or_refresh_receipt_baseline", return_value={}),
+            patch.object(cli, "recheck_evidence_survival", return_value=0),
+            patch.object(ui, "_survival_summary", return_value=survival),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            self.assertEqual(cli.command_report(SimpleNamespace(days=7)), 0)
+        return stdout.getvalue()
+
+    def test_report_renders_line_survival_when_available(self) -> None:
+        # Regression: the renderer read the pre-line-survival keys and raised
+        # KeyError the moment survival became available, so the command failed
+        # exactly when it had something to say. No test covered the available
+        # branch -- the only survival tests exercised a function nothing called.
+        output = self._run_report({
+            "available": True,
+            "cost_per_surviving_line_label": "$0.42",
+            "cost_per_line_label": "$0.19",
+            "survival_pct": 73.0,
+            "changes_measured": 28,
+            "cost_coverage_pct": 81.0,
+        })
+
+        self.assertIn("Cost per surviving line: $0.42", output)
+        self.assertIn("$0.19 per line written", output)
+        self.assertIn("73.0% of lines still standing across 28 changes", output)
+        self.assertIn("81.0% of the window's banked spend", output)
+        # The retired per-change label must not come back with the old schema.
+        self.assertNotIn("Cost per surviving change", output)
+
+    def test_report_survives_a_survival_payload_missing_optional_fields(self) -> None:
+        # The bug was indexing, not the schema. A payload with only the headline
+        # figure should cost the detail line, not the whole command.
+        output = self._run_report({"available": True, "cost_per_surviving_line_label": "$0.42"})
+
+        self.assertIn("Cost per surviving line: $0.42", output)
+        self.assertNotIn("still standing", output)
+
+    def test_report_states_why_survival_is_unmeasured(self) -> None:
+        # Blank is not zero: an unmeasured figure has to say so rather than
+        # silently print nothing and read as "nothing survived".
+        output = self._run_report({
+            "available": False,
+            "reason": "Only 2 changes old enough to judge; need 3.",
+        })
+
+        self.assertIn("Only 2 changes old enough to judge", output)
 
     def test_ui_startup_continues_when_baseline_cache_is_unreadable(self) -> None:
         with (
@@ -288,6 +342,7 @@ class PromptSavingsBaselineTests(unittest.TestCase):
                 "history_days": 30,
                 "per_tool": {},
             }),
+            patch.object(cli, "get_or_refresh_survival", return_value={}),
             patch("aiwatcher_cli.ui.serve") as serve,
         ):
             result = cli.command_ui(SimpleNamespace(
@@ -1557,7 +1612,7 @@ def _only_cost_signal_already_sent(signal_key: str) -> bool:
     # local-state.json: without this, the deferred `_cost_per_surviving_change`
     # branch would read this developer's actual AIWatcher history instead of
     # the test's mocked-out one.
-    return signal_key == "cost_per_surviving_change:available"
+    return signal_key == "cost_per_surviving_line:available"
 
 
 class OutcomeReviewSignalTests(unittest.TestCase):
@@ -1568,6 +1623,7 @@ class OutcomeReviewSignalTests(unittest.TestCase):
         row = session(1, project="/repo/orcha")
         snapshot = _survival_snapshot(row.session_id, bucket="7", status="survived")
         with (
+            patch.object(cli, "usable_survival_summary", return_value={}),
             patch.object(cli, "evidence_for_sessions", return_value={}),
             patch.object(cli, "recheck_evidence_survival", return_value=0),
             patch.object(cli, "evidence_snapshots_for_sessions", return_value={row.session_id: snapshot}),
@@ -1601,6 +1657,7 @@ class OutcomeReviewSignalTests(unittest.TestCase):
         row = session(1, project="/repo/orcha")
         snapshot = _survival_snapshot(row.session_id, bucket="7", status="survived")
         with (
+            patch.object(cli, "usable_survival_summary", return_value={}),
             patch.object(cli, "evidence_for_sessions", return_value={}),
             patch.object(cli, "recheck_evidence_survival", return_value=0),
             patch.object(cli, "evidence_snapshots_for_sessions", return_value={row.session_id: snapshot}),
@@ -1623,6 +1680,7 @@ class OutcomeReviewSignalTests(unittest.TestCase):
         row = session(1, project="/repo/orcha")
         snapshot = _survival_snapshot(row.session_id, bucket="7", status="churned")
         with (
+            patch.object(cli, "usable_survival_summary", return_value={}),
             patch.object(cli, "evidence_for_sessions", return_value={}),
             patch.object(cli, "recheck_evidence_survival", return_value=0),
             patch.object(cli, "evidence_snapshots_for_sessions", return_value={row.session_id: snapshot}),
@@ -1643,6 +1701,7 @@ class OutcomeReviewSignalTests(unittest.TestCase):
         row = session(1, project="/repo/orcha")
         evidence = OutcomeEvidence(session_id=row.session_id, project_path=row.project_path, same_file_reprompt=True)
         with (
+            patch.object(cli, "usable_survival_summary", return_value={}),
             patch.object(cli, "evidence_for_sessions", return_value={row.session_id: evidence}),
             patch.object(cli, "record_evidence_snapshot"),
             patch.object(cli, "recheck_evidence_survival", return_value=0),
@@ -1661,6 +1720,7 @@ class OutcomeReviewSignalTests(unittest.TestCase):
         row = session(1, project="/repo/orcha")
         snapshot = _survival_snapshot(row.session_id, bucket="7", status="churned")
         with (
+            patch.object(cli, "usable_survival_summary", return_value={}),
             patch.object(cli, "evidence_for_sessions", return_value={}),
             patch.object(cli, "recheck_evidence_survival", return_value=0),
             patch.object(cli, "evidence_snapshots_for_sessions", return_value={row.session_id: snapshot}),
@@ -1685,6 +1745,7 @@ class OutcomeReviewSignalTests(unittest.TestCase):
         row = session(1, project="/repo/orcha")
         snapshot = _survival_snapshot(row.session_id, bucket="7", status="survived")
         with (
+            patch.object(cli, "usable_survival_summary", return_value={}),
             patch.object(cli, "evidence_for_sessions", return_value={}),
             patch.object(cli, "recheck_evidence_survival", return_value=0),
             patch.object(cli, "evidence_snapshots_for_sessions", return_value={row.session_id: snapshot}),
@@ -1702,6 +1763,7 @@ class OutcomeReviewSignalTests(unittest.TestCase):
         row = session(1, project="/repo/orcha")
         snapshot = _survival_snapshot(row.session_id, bucket="7", status="survived")
         with (
+            patch.object(cli, "usable_survival_summary", return_value={}),
             patch.object(cli, "evidence_for_sessions", return_value={}),
             patch.object(cli, "recheck_evidence_survival", return_value=0),
             patch.object(cli, "evidence_snapshots_for_sessions", return_value={row.session_id: snapshot}),
@@ -1715,6 +1777,7 @@ class OutcomeReviewSignalTests(unittest.TestCase):
         row = session(1, project="/repo/orcha")
         evidence = OutcomeEvidence(session_id=row.session_id, project_path=row.project_path, same_file_reprompt=True)
         with (
+            patch.object(cli, "usable_survival_summary", return_value={}),
             patch.object(cli, "evidence_for_sessions", return_value={row.session_id: evidence}),
             patch.object(cli, "record_evidence_snapshot"),
             patch.object(cli, "recheck_evidence_survival", return_value=0),
@@ -1739,6 +1802,7 @@ class OutcomeReviewSignalTests(unittest.TestCase):
         row = session(1, project="/repo/orcha")
         evidence = OutcomeEvidence(session_id=row.session_id, project_path=row.project_path, same_file_reprompt=False)
         with (
+            patch.object(cli, "usable_survival_summary", return_value={}),
             patch.object(cli, "evidence_for_sessions", return_value={row.session_id: evidence}),
             patch.object(cli, "record_evidence_snapshot"),
             patch.object(cli, "recheck_evidence_survival", return_value=0),
@@ -1758,7 +1822,7 @@ class OutcomeReviewSignalTests(unittest.TestCase):
             patch.object(cli, "has_sent_notification", return_value=False),
             patch.object(cli, "record_notification_sent") as record_sent,
             patch.object(cli, "record_watch_notification") as record_watch,
-            patch("aiwatcher_cli.ui._cost_per_surviving_change", return_value={"available": True}),
+            patch.object(cli, "usable_survival_summary", return_value={"available": True}),
             patch.object(cli, "scan_all", return_value=[row]),
             patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
         ):
@@ -1766,11 +1830,11 @@ class OutcomeReviewSignalTests(unittest.TestCase):
 
         notify.assert_called_once()
         body = notify.call_args.args[1]
-        self.assertIn("Cost per surviving change is now available", body)
-        record_sent.assert_called_once_with("cost_per_surviving_change:available")
+        self.assertIn("Cost per surviving line is now available", body)
+        record_sent.assert_called_once_with("cost_per_surviving_line:available")
         _, kwargs = record_watch.call_args
         self.assertEqual(kwargs["session_id"], "")
-        self.assertEqual(kwargs["action"], "outcome_review:cost_per_surviving_change")
+        self.assertEqual(kwargs["action"], "outcome_review:cost_per_surviving_line")
 
     def test_no_notification_when_cost_per_surviving_change_still_unavailable(self) -> None:
         row = session(1, project="/repo/orcha")
@@ -1779,7 +1843,7 @@ class OutcomeReviewSignalTests(unittest.TestCase):
             patch.object(cli, "recheck_evidence_survival", return_value=0),
             patch.object(cli, "evidence_snapshots_for_sessions", return_value={}),
             patch.object(cli, "has_sent_notification", return_value=False),
-            patch("aiwatcher_cli.ui._cost_per_surviving_change", return_value={"available": False}),
+            patch.object(cli, "usable_survival_summary", return_value={}),
             patch.object(cli, "scan_all", return_value=[row]),
             patch.object(cli, "_send_local_notification") as notify,
         ):
@@ -1800,6 +1864,7 @@ class OutcomeReviewSignalTests(unittest.TestCase):
             commits=[{"sha": "abc123", "subject": secret_commit_subject, "body": "", "committed_at": "x"}],
         )
         with (
+            patch.object(cli, "usable_survival_summary", return_value={}),
             patch.object(cli, "evidence_for_sessions", return_value={row.session_id: evidence}),
             patch.object(cli, "record_evidence_snapshot"),
             patch.object(cli, "recheck_evidence_survival", return_value=0),
@@ -1829,6 +1894,7 @@ class OutcomeReviewSignalTests(unittest.TestCase):
             row.session_id: _survival_snapshot(row.session_id, bucket="7", status="survived") for row in rows
         }
         with (
+            patch.object(cli, "usable_survival_summary", return_value={}),
             patch.object(cli, "evidence_for_sessions", return_value={}),
             patch.object(cli, "recheck_evidence_survival", return_value=0),
             patch.object(cli, "evidence_snapshots_for_sessions", return_value=snapshots),
@@ -1855,8 +1921,8 @@ class OutcomeReviewSignalTests(unittest.TestCase):
             patch.object(cli, "evidence_for_sessions", return_value={}),
             patch.object(cli, "recheck_evidence_survival", return_value=0),
             patch.object(cli, "evidence_snapshots_for_sessions", return_value={row.session_id: snapshot}),
-            patch.object(cli, "has_sent_notification", side_effect=lambda key: key != "cost_per_surviving_change:available"),
-            patch("aiwatcher_cli.ui._cost_per_surviving_change", return_value={"available": False}),
+            patch.object(cli, "has_sent_notification", side_effect=lambda key: key != "cost_per_surviving_line:available"),
+            patch.object(cli, "usable_survival_summary", return_value={}),
             patch.object(cli, "scan_all", return_value=[row]),
             patch.object(cli, "_send_local_notification") as notify,
             patch("sys.stdout", output),
@@ -1871,6 +1937,7 @@ class OutcomeReviewSignalTests(unittest.TestCase):
         snapshot = _survival_snapshot(row.session_id, bucket="7", status="survived")
         output = io.StringIO()
         with (
+            patch.object(cli, "usable_survival_summary", return_value={}),
             patch.object(cli, "evidence_for_sessions", return_value={}),
             patch.object(cli, "recheck_evidence_survival", return_value=0),
             patch.object(cli, "evidence_snapshots_for_sessions", return_value={row.session_id: snapshot}),
@@ -1895,7 +1962,7 @@ class OutcomeReviewSignalTests(unittest.TestCase):
             patch.object(cli, "recheck_evidence_survival", return_value=0),
             patch.object(cli, "evidence_snapshots_for_sessions", return_value={}),
             patch.object(cli, "has_sent_notification", return_value=False),
-            patch("aiwatcher_cli.ui._cost_per_surviving_change", return_value={"available": False}),
+            patch.object(cli, "usable_survival_summary", return_value={}),
             patch.object(cli, "scan_all", return_value=[row]),
             patch.object(cli, "_send_local_notification") as notify,
             patch("sys.stdout", output),
@@ -1918,6 +1985,7 @@ class OutcomeReviewSignalTests(unittest.TestCase):
         )
         output = io.StringIO()
         with (
+            patch.object(cli, "usable_survival_summary", return_value={}),
             patch.object(cli, "sessions_since", return_value=[row]),
             patch.object(cli, "scan_all_events", return_value=[]),
             patch.object(cli, "get_baselines", return_value={}),
@@ -1952,6 +2020,7 @@ class OutcomeReviewSignalTests(unittest.TestCase):
         )
         output = io.StringIO()
         with (
+            patch.object(cli, "usable_survival_summary", return_value={}),
             patch.object(cli, "sessions_since", return_value=[row]),
             patch.object(cli, "scan_all_events", return_value=[]),
             patch.object(cli, "get_baselines", return_value={}),

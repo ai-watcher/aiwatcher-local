@@ -44,7 +44,8 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
     (
         "Daily loop",
         "What ran today, what it cost, and whether it was worth it.",
-        ["today", "last", "timeline", "journal", "sessions", "outcome", "report", "tools", "projects"],
+        ["today", "last", "timeline", "journal", "sessions", "changes", "commit-receipt",
+         "outcome", "report", "tools", "projects"],
     ),
     (
         "Prompt review and launch",
@@ -59,7 +60,7 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
     (
         "Monitoring",
         "Catch expensive or looping work, and keep runtimes tidy.",
-        ["watch", "processes", "run"],
+        ["watch", "statusline", "processes", "run"],
     ),
     (
         "Hooks and wrappers",
@@ -81,6 +82,10 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
             "uninstall-cursor-hook",
             "install-codex-wrapper",
             "uninstall-codex-wrapper",
+            "install-commit-hook",
+            "uninstall-commit-hook",
+            "install-statusline",
+            "uninstall-statusline",
             "hook-status",
         ],
     ),
@@ -98,6 +103,22 @@ EXAMPLES: dict[str, list[str]] = {
     # Zero-argument commands get no example: it would be identical to the usage
     # line directly above it. Same for status, doctor, hook-status, tools, and
     # projects, which are already absent.
+    "changes": [
+        "aiwatcher changes --days 7",
+        "aiwatcher changes --days 30 --repo my-service --limit 40",
+    ],
+    "commit-receipt": [
+        "aiwatcher commit-receipt --sha HEAD~1",
+        "aiwatcher commit-receipt --repo ../my-service --json",
+    ],
+    "install-statusline": [
+        "aiwatcher install-statusline --write",
+        "aiwatcher install-statusline --scope project --write",
+    ],
+    "install-commit-hook": [
+        "aiwatcher install-commit-hook --write",
+        "aiwatcher install-commit-hook --repo ../my-service --write",
+    ],
     "sessions": [
         "aiwatcher sessions --days 7",
         "aiwatcher sessions --search <your-project> --days 30",

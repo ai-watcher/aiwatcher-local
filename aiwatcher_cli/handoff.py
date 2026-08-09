@@ -133,10 +133,13 @@ def build_handoff_capsule(
     warnings: list[str] = list(extra_warnings or [])
     if health:
         if health.severity != "healthy":
+            detail = (
+                f" — {health.bloat_ratio * 100:.0f}% of its spend went on replayed history"
+                if health.bloat_measurable else ""
+            )
             warnings.append(
                 f"Context health is {health.severity}: latest turn used "
-                f"{_compact_int(health.latest_turn_tokens)} input tokens with "
-                f"{health.efficiency_pct:.0f}% efficiency."
+                f"{_compact_int(health.latest_turn_tokens)} input tokens{detail}."
             )
         if health.recommendations:
             warnings.extend(health.recommendations[:2])

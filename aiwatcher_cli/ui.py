@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import __version__
 from .cli import (
+    usable_survival_summary,
     _loop_signal,
     _velocity_signal,
     analyze_prompt,
@@ -25,6 +26,7 @@ from .cli import (
 from .correlate import link_recent_interventions_to_sessions
 from .evidence_capture import record_missing_evidence_snapshots_from_evidence
 from .handoff import build_handoff_capsule
+from .metrics import model_cost_comparison, pace_vs_baseline, replayed_context_cost
 from .local_state import (
     COMMAND_GATE_BLOCKED_DECISIONS,
     MAX_COMMAND_DECISIONS_STORED,
@@ -43,9 +45,11 @@ from .local_state import (
     record_ui_server,
 )
 from .outcome_evidence import VALID_EVIDENCE_OUTCOMES, build_outcome_evidence, evidence_for_sessions
+from .ledger import Ledger, build_ledger, unbanked_summary
 from .pricing import is_subscription_model
 from .session_health import ContextHealth, analyze_all_sessions, gate_health_warning
 from .scanner import (
+    clip_sessions_to_window,
     LocalEvent,
     LocalSession,
     discover_tools,
@@ -73,6 +77,11 @@ def money(value: float) -> str:
 
 
 def compact_int(value: int) -> str:
+    # Billions became reachable once replayed cache tokens were counted: a long
+    # session re-sends its whole context every turn, so totals run far past the
+    # millions this used to top out at ("1332.1M" instead of "1.3B").
+    if value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.1f}B"
     if value >= 1_000_000:
         return f"{value / 1_000_000:.1f}M"
     if value >= 1_000:
@@ -179,8 +188,14 @@ def group_by_model_breakdown(rows: list[LocalSession]) -> list[dict[str, object]
 
 
 def rows_for_window(days: int) -> list[LocalSession]:
+    """Sessions clipped to the window -- see clip_sessions_to_window for why the
+    old `updated_at`-only rule overstated every total."""
     since = datetime.now().astimezone() - timedelta(days=days)
-    return [row for row in scan_all() if in_window(row, since)]
+    try:
+        events = scan_all_events()
+    except OSError:
+        events = []
+    return clip_sessions_to_window(scan_all(), events, since)
 
 
 def _session_row_json(
@@ -516,11 +531,24 @@ def _recommend_weekly_improvement(
             f"{len(velocity_candidates)} session(s) ran well above their tool's typical pace -- "
             "check for a runaway loop before it burns more budget."
         )
-    if survival.get("available") and int(survival.get("churned_count") or 0) > int(survival.get("surviving_count") or 0):
-        return "More sessions churned than survived recently -- review the highest-cost churned sessions before repeating that approach."
+    survival_pct = survival.get("survival_pct")
+    if survival.get("available") and isinstance(survival_pct, (int, float)) and survival_pct < 50:
+        return (
+            f"Only {survival_pct:.0f}% of the lines you paid for are still in the code -- "
+            "review the costliest recent changes before repeating that approach."
+        )
     if inferred_churned > 0:
         plural = "s" if inferred_churned != 1 else ""
-        return f"{inferred_churned} session{plural} looked useful but the commit didn't survive -- review before trusting similar work."
+        # Says only what reachability can see. `merge-base --is-ancestor` answers
+        # "is this commit still on the branch" -- so it catches a rebase, reset or
+        # amend, and provably cannot catch a revert (which adds a new commit and
+        # leaves the original exactly where it was) or a delete of everything the
+        # commit wrote. Line survival is the metric that judges whether the work
+        # lasted; this one reports what happened to the commit.
+        return (
+            f"{inferred_churned} session{plural} looked useful but its commit is no longer on the branch "
+            "-- rebased, reset or amended away. Worth a look before trusting similar work."
+        )
     if outcomes["abandoned"] > outcomes["useful"]:
         return "More sessions were marked abandoned than useful this window -- review scoping before the next batch."
     return "No urgent signal this window -- local usage looks healthy."
@@ -592,9 +620,11 @@ def build_weekly_digest(days: int = 7) -> dict[str, object]:
     prompts_modified = [row for row in prompt_interventions if row.get("decision") in PROMPT_MODIFIED_DECISIONS]
 
     try:
-        survival = _cost_per_surviving_change(all_rows)
+        survival = _survival_summary()
     except OSError:
-        survival = {"available": False, "sample_count": 0, "required_samples": MIN_SURVIVAL_SAMPLES}
+        # Same shape _survival_summary() returns when it has nothing, so every
+        # consumer has one schema to read rather than two.
+        survival = {"available": False, "reason": "Survival cache could not be read."}
 
     recommendation = _recommend_weekly_improvement(
         commands_blocked=len(blocked),
@@ -732,10 +762,15 @@ def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) ->
             "severity": health.severity,
             "latest_turn_tokens": compact_int(health.latest_turn_tokens),
             "peak_turn_tokens": compact_int(health.peak_turn_tokens),
-            "estimated_replayed_context_tokens": int(health.latest_turn_tokens * health.bloat_ratio),
-            "estimated_replayed_context_label": compact_int(int(health.latest_turn_tokens * health.bloat_ratio)),
-            "efficiency_label": f"{health.efficiency_pct:.0f}%",
-            "bloat_label": f"{health.bloat_ratio * 100:.0f}%",
+            # Measured cache reads on the latest turn, not a ratio applied to
+            # the turn size — the provider counts the replayed portion for us.
+            "estimated_replayed_context_tokens": health.latest_turn_replayed_tokens,
+            "estimated_replayed_context_label": compact_int(health.latest_turn_replayed_tokens),
+            "bloat_measurable": health.bloat_measurable,
+            "efficiency_label": f"{health.efficiency_pct:.0f}%" if health.bloat_measurable else "n/a",
+            "bloat_label": f"{health.bloat_ratio * 100:.0f}%" if health.bloat_measurable else "n/a",
+            "replayed_cost_label": f"${health.replayed_cost_usd:.2f}" if health.bloat_measurable else "n/a",
+            "analyzed_cost_label": f"${health.analyzed_cost_usd:.2f}" if health.bloat_measurable else "n/a",
             "age_label": f"{health.age_days:.1f}d" if health.age_days >= 1 else f"{health.age_hours:.0f}h",
             "recommendation": health.recommendations[0] if health.recommendations else "Context is healthy.",
             "action": action,
@@ -790,9 +825,10 @@ def _handoff_bubble(context_health: list[dict[str, object]]) -> dict[str, object
         "expected_saved_context_tokens": candidate.get("estimated_replayed_context_tokens"),
         "tags": [
             f"{candidate.get('latest_turn_tokens')} tokens/turn",
-            f"{candidate.get('efficiency_label')} efficiency",
-            f"{candidate.get('bloat_label')} replayed context",
-        ],
+        ] + ([
+            f"{candidate.get('bloat_label')} of spend replayed",
+            f"{candidate.get('replayed_cost_label')} on replayed context",
+        ] if candidate.get("bloat_measurable") else []),
     }
 
 
@@ -977,48 +1013,149 @@ def _build_intervention_receipts(
     return receipts
 
 
-MIN_SURVIVAL_SAMPLES = 5
+def _survival_summary() -> dict[str, object]:
+    """Cost per surviving line, read from cache.
 
+    Never computed here. Measuring survival runs a git blame pass per file --
+    ~23s for a month of history -- so it is refreshed off the hot path by
+    cli.get_or_refresh_survival() and only read on a request.
 
-def _cost_per_surviving_change(all_rows: list[LocalSession]) -> dict[str, object]:
-    """S-23: cost of sessions whose commit survived vs. churned, at the earliest checked bucket.
-
-    Deliberately scans the whole local history (all_rows), not just the
-    current days-window: survival needs >=7 days of age by definition, so a
-    short display window would almost always show zero samples even once
-    survival data exists. Honesty-gated the same way baselines are --
-    "available: False" until there's enough history to say anything real.
+    Replaces the reachability-based survived/churned split, which asked whether
+    a commit was still in git history. That stays true after a revert or a full
+    rewrite, so it reported 16 of 16 changes surviving locally and its "cost per
+    surviving change" was cost-per-change with a different name.
     """
-    snapshots = evidence_snapshots_for_sessions()
-    rows_by_id = {row.session_id: row for row in all_rows}
-    survived_costs: list[float] = []
-    churned_costs: list[float] = []
-    for session_id, snapshot in snapshots.items():
-        survival = snapshot.get("survival") if isinstance(snapshot.get("survival"), dict) else {}
-        status = None
-        for bucket in ("7", "14", "30"):
-            entry = survival.get(bucket)
-            if isinstance(entry, dict) and entry.get("status") in {"survived", "churned"}:
-                status = entry["status"]
-                break
-        if status is None:
-            continue
-        row = rows_by_id.get(session_id)
-        if row is None:
-            continue
-        (survived_costs if status == "survived" else churned_costs).append(row.cost_usd)
+    cached = usable_survival_summary()
+    if not cached or not cached.get("available"):
+        return {
+            "available": False,
+            "reason": (cached or {}).get("reason")
+            or "Not measured yet. Run `aiwatcher today` or reopen the dashboard to compute it.",
+        }
+    summary = dict(cached)
+    summary["cost_per_surviving_line_label"] = money(float(summary.get("usd_per_surviving_line") or 0))
+    summary["cost_per_line_label"] = money(float(summary.get("usd_per_line") or 0))
+    summary["measured_cost_label"] = money(float(summary.get("cost_usd") or 0))
+    summary["too_recent_label"] = money(float(summary.get("too_recent_usd") or 0))
+    return summary
 
-    sample_count = len(survived_costs) + len(churned_costs)
-    if sample_count < MIN_SURVIVAL_SAMPLES:
-        return {"available": False, "sample_count": sample_count, "required_samples": MIN_SURVIVAL_SAMPLES}
-    return {
-        "available": True,
-        "sample_count": sample_count,
-        "surviving_count": len(survived_costs),
-        "churned_count": len(churned_costs),
-        "cost_per_surviving_change": money(sum(survived_costs) / len(survived_costs)) if survived_costs else "—",
-        "cost_per_churned_change": money(sum(churned_costs) / len(churned_costs)) if churned_costs else "—",
-    }
+
+def _window_ledger(events: list[LocalEvent], days: int) -> Ledger | None:
+    """The change ledger for this window, or None if git could not be read.
+
+    Computed on the request rather than cached, unlike survival: this is one
+    `git log --numstat` per repo that had spend (~0.3s for a week locally),
+    where survival is a blame pass per file (~23s). Caching it would also pin
+    it to one window, and the whole point is that it moves with the day
+    selector alongside every other number on the page.
+
+    Built once per request and shared: the unbanked card and the change table
+    are two views of the same ledger, and running git twice for them would
+    double the only real cost on this path.
+    """
+    try:
+        return build_ledger(events, days=days)
+    except OSError:
+        return None
+
+
+def _unbanked_card(ledger: Ledger | None) -> dict[str, object]:
+    """Spend in this window with no commit behind it."""
+    if ledger is None:
+        return {"available": False, "reason": "Could not read git history for the active repos."}
+
+    card = dict(unbanked_summary(ledger))
+    card["unbanked_label"] = money(float(card.get("unbanked_usd") or 0))
+    card["banked_label"] = money(float(card.get("banked_usd") or 0))
+    card["unresolved_label"] = money(float(card.get("unresolved_usd") or 0))
+    card["outside_repo_label"] = money(float(card.get("outside_repo_usd") or 0))
+    card["top_repos"] = [
+        {**entry, "short_name": short_path(str(entry.get("repo"))),
+         "unbanked_label": money(float(entry.get("unbanked_usd") or 0))}
+        for entry in (card.get("top_repos") or [])
+    ]
+    if card.get("available"):
+        share = float(card.get("unbanked_pct") or 0)
+        card["headline"] = (
+            f"{card['unbanked_label']} of the last {card.get('window_days')} days "
+            f"({share:.0f}%) has no commit behind it"
+        )
+        # Says what it is and what it is not. Uncommitted work in progress looks
+        # exactly like exploration that went nowhere, and the card must not
+        # claim to tell them apart.
+        card["caption"] = (
+            f"{card['banked_label']} reached a commit. The rest is exploration that "
+            "went nowhere or work still uncommitted — this cannot tell them apart."
+        )
+    return card
+
+
+def _change_rows(
+    ledger: Ledger | None,
+    survival: dict[str, object],
+    *,
+    limit: int = 50,
+) -> list[dict[str, object]]:
+    """One row per commit: what it cost, how much it wrote, and $/line.
+
+    The aggregate was all that reached the screen -- "$X per surviving line"
+    with no way to see which commits drove it. Ranked by cost, because the
+    question this answers is "where did the money go", not "what happened
+    recently".
+
+    Survival is joined in from the cached summary where it exists. It covers
+    only the changes that pass survival's own age gate and cost-coverage walk,
+    so most rows have none, and a missing entry means "not measured", never
+    "did not survive". Nothing here triggers a blame pass.
+    """
+    if ledger is None:
+        return []
+    by_change = survival.get("by_change") if isinstance(survival, dict) else None
+    by_change = by_change if isinstance(by_change, dict) else {}
+
+    rows: list[dict[str, object]] = []
+    for change in ledger.changes[:limit]:
+        measured = by_change.get(change.sha)
+        measured = measured if isinstance(measured, dict) else {}
+        survived = measured.get("survival_pct") if measured.get("measurable") else None
+        rows.append({
+            "sha": change.sha,
+            "short_sha": change.sha[:8],
+            "repo": change.repo,
+            "project": short_path(change.repo),
+            "subject": change.subject,
+            # landed_at is the author date, which is what attribution keys off
+            # and the honest answer to "when was this work done".
+            "committed_at": change.landed_at.isoformat(),
+            "rewritten_at": change.committed_at.isoformat() if change.was_rewritten else None,
+            "was_rewritten": change.was_rewritten,
+            "cost_usd": round(change.cost_usd, 6),
+            "cost_label": money(change.cost_usd),
+            "lines_added": change.lines_added,
+            "lines_removed": change.lines_removed,
+            "lines_changed": change.lines_changed,
+            "files_changed": change.files_changed,
+            "event_count": change.event_count,
+            "tools": change.tools,
+            "models": [display_model_name(model) for model in change.models],
+            "usd_per_line": (
+                round(change.usd_per_line, 6) if change.usd_per_line is not None else None
+            ),
+            "usd_per_line_label": (
+                money(change.usd_per_line) if change.usd_per_line is not None else "—"
+            ),
+            "survival_pct": survived,
+            "survival_label": f"{survived:.0f}%" if survived is not None else "—",
+            "usd_per_surviving_line_label": (
+                money(float(measured["usd_per_surviving_line"]))
+                if measured.get("usd_per_surviving_line") is not None else "—"
+            ),
+            # A commit with no spend behind it is not free work -- it is work
+            # AIWatcher did not observe (hand-written, or from an untracked
+            # surface). Saying "$0.00" would read as the opposite.
+            "unattributed": change.cost_usd <= 0,
+        })
+    return rows
 
 
 def _handoff_decision_rows(limit: int = 10) -> list[dict[str, object]]:
@@ -1054,6 +1191,143 @@ def _recent_handoff_decision_session_ids(rows: list[dict[str, object]]) -> set[s
                 pass
         session_ids.add(session_id)
     return session_ids
+def _insight_feed(
+    rows: list[LocalSession],
+    all_rows: list[LocalSession],
+    all_events: list[LocalEvent],
+    *,
+    days: int,
+    inferred_useful: int,
+    needs_review: int,
+    churned: int,
+) -> list[dict[str, object]]:
+    """One ranked list, ordered by how much money each finding is about.
+
+    Replaces three panels that were all built from the same handful of max()
+    calls -- Weekly Digest, Local Insights and Daily Journal each restated the
+    same top project, costliest session and loop count.
+
+    Two rules decide what earns a place here:
+      1. Every card names a comparison. "1.1M tokens in one session" gives the
+         reader nothing to do; "97% of it was replayed history, costing $196"
+         does. A number with no "versus" is a metric and belongs in a table.
+      2. Cards are ranked by dollars, not insertion order, so the biggest
+         finding is the one the eye lands on.
+
+    Coverage gaps (tools detected but not scanned) deliberately do NOT appear
+    here -- they are a setup concern, they never change, and mixing them in is
+    what made the old list read as noise. They live on the Coverage tab.
+    """
+    cards: list[dict[str, object]] = []
+
+    replay = replayed_context_cost(rows)
+    if replay["available"] and replay["sessions"]:
+        top = replay["sessions"][0]
+        window_cost = sum(row.cost_usd for row in rows)
+        share = (replay["total_replayed_usd"] / window_cost * 100) if window_cost > 0 else 0
+        cards.append({
+            "id": "replayed-context",
+            "title": f"{share:.0f}% of your spend went on re-sending conversation history",
+            "body": (
+                f"{money(replay['total_replayed_usd'])} of {money(window_cost)} this window. The worst session replayed "
+                f"{top['replayed_pct']:.0f}% of its context, {money(top['replayed_usd'])} of its "
+                f"{money(top['session_usd'])}. Compacting or starting fresh earlier is what this buys back."
+            ),
+            "impact_usd": replay["total_replayed_usd"],
+            "session_id": top["session_id"],
+            "severity": "high" if share >= 40 else "medium",
+        })
+
+    pace = pace_vs_baseline(all_events, days=days)
+    if pace["available"] and pace["ratio"] >= 1.25:
+        excess = max(0.0, pace["current_usd"] - pace["baseline_usd"])
+        cards.append({
+            "id": "pace",
+            "title": f"You are {pace['ratio']:.1f}x your usual pace",
+            "body": (
+                f"{money(pace['current_usd'])} in the last {days} days against a "
+                f"{money(pace['baseline_usd'])} average over your previous "
+                f"{pace['baseline_windows']} windows. Local logs cannot see your plan's quota, so this "
+                f"compares you to yourself rather than to a limit."
+            ),
+            "impact_usd": excess,
+            "session_id": None,
+            "severity": "medium" if pace["ratio"] < 2 else "high",
+        })
+
+    models = model_cost_comparison(all_rows)
+    if models["available"]:
+        dear = models["by_session"]["dearest"]
+        cheap = models["by_session"]["cheapest"]
+        if models["driver"] == "volume":
+            body = (
+                f"{dear['label']} sessions cost {models['by_session']['ratio']:.1f}x a {cheap['label']} "
+                f"session, but they run {models['volume_factor']:.0f}x more tokens -- per token it is "
+                f"{models['rate_factor']:.2f}x the rate. The gap is how you use it, not what it charges."
+            )
+        elif models["driver"] == "rate":
+            body = (
+                f"{dear['label']} costs {models['rate_factor']:.1f}x more per token than {cheap['label']} "
+                f"on comparably sized sessions. Worth checking which tasks genuinely need it."
+            )
+        else:
+            body = (
+                f"{dear['label']} sessions cost {models['by_session']['ratio']:.1f}x a {cheap['label']} "
+                f"session -- {models['volume_factor']:.1f}x from size and {models['rate_factor']:.2f}x "
+                f"from rate."
+            )
+        cards.append({
+            "id": "model-mix",
+            "title": f"{dear['label']} is {models['by_session']['ratio']:.1f}x your {cheap['label']} sessions",
+            "body": body,
+            # No dollar figure: the models are not interchangeable for every
+            # task, so quoting a "saving" would promise something untestable.
+            "impact_usd": None,
+            "session_id": None,
+            "severity": "info",
+        })
+
+    if churned:
+        cards.append({
+            "id": "churned",
+            # "reverted" was the one outcome this signal is structurally blind to:
+            # `git revert` adds a new commit and leaves the original reachable, so
+            # a reverted commit scores as surviving. What reachability actually
+            # detects is history being rewritten out from under the commit.
+            "title": f"{churned} session{'s' if churned != 1 else ''} produced a commit that is no longer on the branch",
+            "body": (
+                "Rebased, reset or amended away. This does not mean the work was undone -- "
+                "a revert leaves the original commit in place and would not show up here. "
+                "Cost per surviving line is the measure of whether the work lasted."
+            ),
+            "impact_usd": None,
+            "session_id": None,
+            "severity": "medium",
+        })
+    if inferred_useful or needs_review:
+        total = inferred_useful + needs_review
+        cards.append({
+            "id": "outcome-review",
+            "title": f"{total} session{'s' if total != 1 else ''} still need an outcome",
+            "body": (
+                f"{inferred_useful} have a nearby commit or test; {needs_review} changed files without one. "
+                "Confirming them sharpens every cost-per-outcome number on this page."
+            ),
+            "impact_usd": None,
+            "session_id": None,
+            "severity": "info",
+        })
+
+    # Dollar-weighted findings first, biggest first; everything else after, in
+    # the order it was added.
+    with_impact = [card for card in cards if card["impact_usd"] is not None]
+    without_impact = [card for card in cards if card["impact_usd"] is None]
+    with_impact.sort(key=lambda card: float(card["impact_usd"] or 0), reverse=True)
+    for card in with_impact:
+        card["impact_label"] = money(float(card["impact_usd"] or 0))
+    for card in without_impact:
+        card["impact_label"] = ""
+    return [*with_impact, *without_impact]
 
 
 def build_summary(days: int = 7) -> dict[str, object]:
@@ -1065,8 +1339,16 @@ def build_summary(days: int = 7) -> dict[str, object]:
         link_recent_interventions_to_sessions(all_rows)
     except OSError:
         pass
-    rows = [row for row in all_rows if in_window(row, since)]
-    month_rows = [row for row in all_rows if in_window(row, month_start)]
+    # Events are loaded up front because the windows are clipped by them: a
+    # session merely *touched* inside a window used to contribute every dollar
+    # it had ever cost, which on long-running sessions roughly doubled the
+    # reported total.
+    try:
+        all_events = scan_all_events()
+    except OSError:
+        all_events = []
+    rows = clip_sessions_to_window(all_rows, all_events, since)
+    month_rows = clip_sessions_to_window(all_rows, all_events, month_start)
 
     stats = summarize(rows)
     month_stats = summarize(month_rows)
@@ -1081,10 +1363,6 @@ def build_summary(days: int = 7) -> dict[str, object]:
     recent = sorted(rows, key=lambda row: row.updated_at or row.started_at or MIN_DT, reverse=True)[:12]
     detected = discover_tools()
     notes = sorted({note for row in rows for note in row.notes})
-    try:
-        all_events = scan_all_events()
-    except OSError:
-        all_events = []
     context_health = _context_health_cards(rows, all_events)
     handoff_decisions = _handoff_decision_rows(limit=10)
     suppressed_handoff_sessions = _recent_handoff_decision_session_ids(handoff_decisions)
@@ -1180,22 +1458,27 @@ def build_summary(days: int = 7) -> dict[str, object]:
         if session_id not in window_outcomes and evidence.inferred_outcome == "needs_review"
     )
     churned = sum(1 for evidence in evidence_by_session.values() if evidence.inferred_outcome == "churned")
-    if inferred_useful:
-        insights.append({
-            "title": "Outcome evidence found",
-            "body": f"{inferred_useful} unmarked session{'s' if inferred_useful != 1 else ''} have nearby commit or test evidence. Review and confirm the outcome.",
-        })
-    if needs_review:
-        insights.append({
-            "title": "Work needs outcome review",
-            "body": f"{needs_review} unmarked session{'s' if needs_review != 1 else ''} changed files without a confirmed useful outcome.",
-        })
-    if churned:
-        insights.append({
-            "title": "Work that didn't stick",
-            "body": f"{churned} session{'s' if churned != 1 else ''} looked useful at the time, but the commit was later reverted or rewritten.",
-        })
-    survival_summary = _cost_per_surviving_change(all_rows)
+    replayed_tokens = sum(row.cache_read_tokens for row in rows)
+    insights = _insight_feed(
+        rows,
+        all_rows,
+        all_events,
+        days=days,
+        inferred_useful=inferred_useful,
+        needs_review=needs_review,
+        churned=churned,
+    )
+    survival_summary = _survival_summary()
+    window_ledger = _window_ledger(all_events, days)
+    unbanked = _unbanked_card(window_ledger)
+    changes = _change_rows(window_ledger, survival_summary)
+    changes_meta = {
+        # Named rather than silently dropped: a window can legitimately hold a
+        # teammate's commits, and a table that just omitted them would look
+        # like it had lost work.
+        "foreign_changes": window_ledger.foreign_changes if window_ledger else 0,
+        "repos": len(window_ledger.repos) if window_ledger else 0,
+    }
     interventions = recent_interventions(limit=200, days=days)
     receipt_events = all_events if interventions else []
     receipts = _build_intervention_receipts(interventions, all_rows, outcomes_for_sessions(), receipt_events)
@@ -1221,6 +1504,16 @@ def build_summary(days: int = 7) -> dict[str, object]:
             "api_value_label": money(float(stats["api_value_usd"])),
             "projected_month_label": money(projected_month),
             "tokens_label": compact_int(int(stats["tokens"])),
+            # A single token total is misleading once cache reads are counted:
+            # replayed history is the same content billed again on every turn,
+            # so the combined figure runs into the billions and says nothing
+            # about how much was actually written. Split it.
+            "new_tokens_label": compact_int(max(0, int(stats["tokens"]) - replayed_tokens)),
+            "replayed_tokens_label": compact_int(replayed_tokens),
+            "replayed_share_pct": (
+                round(100.0 * replayed_tokens / int(stats["tokens"]), 1)
+                if int(stats["tokens"]) > 0 else 0.0
+            ),
             "api_priced_tokens_label": compact_int(split["api_priced"]),
             "plan_limited_tokens_label": compact_int(split["plan_limited"]),
             "calls": stats["calls"],
@@ -1234,6 +1527,9 @@ def build_summary(days: int = 7) -> dict[str, object]:
             "cost_per_useful_change": money(cost_per_useful) if cost_per_useful is not None else "—",
         },
         "survival": survival_summary,
+        "unbanked": unbanked,
+        "changes": changes,
+        "changes_meta": changes_meta,
         "projects": projects[:10],
         "tools": tools,
         "models": models[:10],
@@ -1269,11 +1565,17 @@ def _build_compact_prompt(health: object) -> str:
     """Generate a /compact-style smart compaction prompt for a session."""
     if not isinstance(health, ContextHealth):
         return "/compact"
-    eff = health.efficiency_pct
-    bloat = int(health.bloat_ratio * 100)
     ctx_k = round(health.latest_turn_tokens / 1000)
+    if health.bloat_measurable:
+        headline = (
+            f"This session is at {ctx_k}K tokens/turn, and "
+            f"{int(health.bloat_ratio * 100)}% of its ${health.analyzed_cost_usd:.2f} "
+            "so far went on re-sending history."
+        )
+    else:
+        headline = f"This session is at {ctx_k}K tokens/turn."
     lines = [
-        f"This session is at {ctx_k}K tokens/turn ({eff:.0f}% efficient — {bloat}% replayed history).",
+        headline,
         "",
         "Please compact this conversation by producing a structured summary that preserves:",
         "1. Active task: what we are building right now and why",
@@ -1418,6 +1720,8 @@ HTML = r"""<!doctype html>
     .risk-chip.low { color: #bff5df; border-color: rgba(53,211,153,.45); background: var(--green-soft); }
     .risk-arrow { color: var(--muted); font-weight: 800; }
     .receipt-note { color: var(--muted); font-size: 12px; margin-top: 10px; }
+    td.num, th.num { text-align: right; white-space: nowrap; }
+    .muted { color: var(--muted); }
     .bar-row { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(120px, 1.5fr) 88px; gap: 12px; align-items: center; margin: 11px 0; padding: 5px 0; }
     .bar-row.clickable, tr.clickable { cursor: pointer; }
     .bar-row.clickable { border-radius: 6px; }
@@ -1428,6 +1732,20 @@ HTML = r"""<!doctype html>
     .bar { height: 100%; background: var(--blue); border-radius: 99px; min-width: 2px; }
     .amount { text-align: right; color: #dce6f6; font-variant-numeric: tabular-nums; }
     .insight { border-left: 3px solid var(--amber); padding: 8px 0 8px 13px; margin: 12px 0; }
+    .headline { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 4px 0 16px; }
+    .headline-figure { font-size: 30px; font-weight: 600; letter-spacing: -.5px; }
+    .headline-sub { color: var(--muted); font-size: 14px; }
+    .feed-row { display: flex; align-items: flex-start; gap: 14px; padding: 14px 0; border-top: 1px solid var(--line); }
+    .feed-row:first-child { border-top: none; }
+    .feed-row.clickable { cursor: pointer; }
+    .feed-row.clickable:hover { background: var(--surface-hover); }
+    .feed-main { flex: 1; min-width: 0; border-left: 3px solid var(--line-strong); padding-left: 13px; }
+    .feed-row.high .feed-main { border-left-color: var(--red); }
+    .feed-row.medium .feed-main { border-left-color: var(--amber); }
+    .feed-row.info .feed-main { border-left-color: var(--line-strong); }
+    .feed-main strong { display: block; color: white; margin-bottom: 4px; }
+    .feed-main p { margin: 0; color: var(--muted); line-height: 1.5; }
+    .feed-impact { font-size: 16px; white-space: nowrap; padding-top: 1px; }
     .insight strong { display: block; margin-bottom: 3px; color: white; }
     .pill-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
     .pill { border: 1px solid var(--line); background: #0b1118; border-radius: 999px; padding: 5px 9px; color: #bdc9d9; font-size: 11px; }
@@ -1638,6 +1956,7 @@ HTML = r"""<!doctype html>
     <button class="nav-tab" data-view="prompt" onclick="showView('prompt')">Prompt</button>
     <button class="nav-tab" data-view="projects" onclick="showView('projects')">Projects</button>
     <button class="nav-tab" data-view="sessions" onclick="showView('sessions')">Sessions</button>
+    <button class="nav-tab" data-view="changes" onclick="showView('changes')">Changes</button>
     <button class="nav-tab" data-view="receipts" onclick="showView('receipts')">Receipts</button>
     <button class="nav-tab" data-view="insights" onclick="showView('insights')">Insights</button>
     <button class="nav-tab" data-view="coverage" onclick="showView('coverage')">Coverage</button>
@@ -1667,10 +1986,15 @@ HTML = r"""<!doctype html>
     </section>
 
     <section class="grid kpis">
-      <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub">Value per useful change: <span id="costPerUseful">-</span></div><div class="sub" id="costPerSurvivingRow" hidden>Cost per surviving change: <span id="costPerSurviving">-</span></div></div>
+      <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub">Value per useful change: <span id="costPerUseful">-</span></div><div class="sub" id="costPerSurvivingRow" hidden>Cost per surviving line: <span id="costPerSurviving">-</span></div></div>
       <div class="card metric-card metric-amber"><div class="label">Preflight decisions</div><div class="value" id="preflightDecisions">-</div><div class="sub"><span id="windowLabel">-</span></div></div>
       <div class="card metric-card metric-blue"><div class="label">Sessions observed</div><div class="value" id="sessions">-</div><div class="sub">This machine only</div></div>
       <div class="card metric-card metric-red"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div></div>
+    </section>
+
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title"><div><h2>Unbanked spend</h2><p>AI spend in this window with no commit behind it.</p></div></div>
+      <div id="unbanked"></div>
     </section>
 
     <section class="card" style="margin-bottom:14px">
@@ -1788,6 +2112,28 @@ HTML = r"""<!doctype html>
     </div>
   </section>
 
+  <section id="view-changes" class="view" hidden>
+    <div class="card">
+      <div class="section-title">
+        <div><h2>Cost per change</h2><p>What each commit cost in AI spend, and what that works out to per line.</p></div>
+        <span class="pill">Ranked by cost</span>
+      </div>
+      <div id="changeTotals"></div>
+      <div class="table-wrap"><table>
+        <thead><tr>
+          <th>Commit</th><th>Project</th><th class="num">Cost</th><th class="num">Lines</th>
+          <th class="num">$/line</th><th class="num">Still standing</th><th class="num">$/surviving line</th>
+        </tr></thead>
+        <tbody id="changeRows"></tbody>
+      </table></div>
+      <p class="receipt-note">A change's cost is the AI spend in that repo since the previous change, attributed per
+        model call rather than per session, and capped at a 12h lookback from when the work was <em>authored</em> —
+        rebasing rewrites a commit's date, and keying off that stranded the spend behind it. Survival is only measured
+        for changes old enough to judge and costly enough to reach the sampling budget — a blank means not measured,
+        not "did not survive". It is a floor either way: reformatting moves attribution away from the original change.</p>
+    </div>
+  </section>
+
   <section id="view-receipts" class="view" hidden>
     <div class="card" style="margin-bottom:14px">
       <div class="section-title">
@@ -1814,38 +2160,22 @@ HTML = r"""<!doctype html>
   <section id="view-insights" class="view" hidden>
     <section class="card" style="margin-bottom:14px">
       <div class="section-title">
-        <div><h2>Weekly Digest</h2><p>What your AI work cost this week, what stuck, and what to change next.</p></div>
-        <span class="pill">Local logs, inferred outcomes</span>
+        <div><h2>What your week cost</h2><p>Ranked by how much money each finding is about.</p></div>
+        <span class="pill">Local logs only</span>
+      </div>
+      <div id="insightHeadline"></div>
+      <div id="insightFeed"></div>
+    </section>
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title">
+        <div><h2>Outcomes and guardrails</h2><p>What stuck, and what was caught before it ran.</p></div>
       </div>
       <div id="report"></div>
     </section>
-    <section class="grid two">
-      <div class="card">
-        <div class="section-title"><div><h2>Local Insights</h2><p>Suggestions to reduce waste without uploading prompts.</p></div></div>
-        <div id="insightRows"></div>
-      </div>
-      <div class="card">
-        <h2>Daily Journal</h2>
-        <div id="journal"></div>
-      </div>
-    </section>
-    <section class="grid two" style="margin-top:14px">
-      <div class="card">
-        <h2>Privacy Contract</h2>
-        <p>AIWatcher Local is read-only and local-first. Summaries avoid source and prompt content by default.</p>
-        <div class="pill-row" id="privacyLarge"></div>
-      </div>
-      <div class="card">
-        <h2>Enterprise handoff</h2>
-        <p>Enterprise adds team history, policy controls, HITL approvals, evidence packs, and integrations.</p>
-        <div class="pill-row">
-          <span class="pill">Team visibility</span>
-          <span class="pill">Budget guardrails</span>
-          <span class="pill">Audit evidence</span>
-          <span class="pill">SSO/RBAC</span>
-        </div>
-      </div>
-    </section>
+    <p class="receipt-note" style="margin-top:4px">
+      Read-only local scan &middot; no LLM calls &middot; no source or prompt content in summaries &middot;
+      nothing leaves this machine unless you connect Cloud.
+    </p>
   </section>
 
   <section id="view-coverage" class="view" hidden>
@@ -2143,12 +2473,12 @@ function sessionVerdict(s) {
   const highCost = cost >= 5 || tokens >= 500000 || toolCalls >= 250;
   let title = 'Review this AI work';
   if (s.outcome) title = `Marked ${s.outcome}`;
-  else if (churned) title = "Looked useful, but didn't stick";
+  else if (churned) title = 'Looked useful, but its commit left the branch';
   else if (likelyUseful && highCost) title = 'Likely useful, but expensive';
   else if (likelyUseful) title = 'Likely useful, needs confirmation';
   else if (highCost) title = 'High-cost session, needs review';
   const bullets = [];
-  if (churned) bullets.push('The commit this session produced was later reverted or rewritten -- it did not survive on the current branch.');
+  if (churned) bullets.push('The commit this session produced is no longer reachable from HEAD -- rebased, reset or amended away. That is not the same as the work being undone: a revert would leave the commit in place and not show here.');
   if (likelyUseful) bullets.push('A nearby commit or test signal suggests this produced useful work.');
   if (evidence.same_file_reprompt) bullets.push('A later session touched the same file(s) again soon after -- this attempt may not have fully resolved the task.');
   if (cost >= 5) bullets.push(`${s.api_value} API-equivalent value is high for one local session.`);
@@ -2299,6 +2629,71 @@ function dateLabel(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
+function renderChangeRows(rows) {
+  if (!rows.length) {
+    return `<tr><td colspan="7" class="empty">No commits in this window, or git history could not be read.</td></tr>`;
+  }
+  return rows.map(row => `<tr>
+    <td><code>${esc(row.short_sha)}</code> ${esc(row.subject)}
+      <div class="session-meta">${esc(dateLabel(row.committed_at))}${row.tools.length ? ' &middot; ' + esc(row.tools.join(', ')) : ''}${row.event_count ? ' &middot; ' + esc(row.event_count) + ' model calls' : ''}${row.was_rewritten ? ' &middot; <span class="muted" title="Rebased or amended on ' + esc(dateLabel(row.rewritten_at)) + '. Cost is attributed by when the work was authored, not when it was rewritten.">rewritten</span>' : ''}</div></td>
+    <td>${esc(row.project)}</td>
+    <td class="num">${row.unattributed ? '<span class="muted">no spend observed</span>' : esc(row.cost_label)}</td>
+    <td class="num">+${esc(row.lines_added)} / -${esc(row.lines_removed)}
+      <div class="session-meta">${esc(row.files_changed)} file(s)</div></td>
+    <td class="num">${row.unattributed ? '—' : esc(row.usd_per_line_label)}</td>
+    <td class="num">${esc(row.survival_label)}</td>
+    <td class="num">${esc(row.usd_per_surviving_line_label)}</td>
+  </tr>`).join('');
+}
+function renderChangeTotals(rows, meta) {
+  if (!rows.length) return '';
+  const foreign = (meta && meta.foreign_changes) || 0;
+  const note = foreign
+    ? `<p class="receipt-note" style="margin-top:0">${esc(foreign)} commit(s) in this window were written by someone else and
+       arrived by fetch — excluded, because no spend on this machine can belong to them.</p>` : '';
+  const attributed = rows.filter(row => !row.unattributed);
+  const cost = attributed.reduce((sum, row) => sum + row.cost_usd, 0);
+  const lines = attributed.reduce((sum, row) => sum + row.lines_changed, 0);
+  const measured = rows.filter(row => row.survival_pct !== null).length;
+  return `<div class="mini-grid" style="margin-bottom:12px">
+    <div class="mini"><span class="label">Commits</span><strong>${esc(rows.length)}</strong></div>
+    <div class="mini"><span class="label">Attributed spend</span><strong>${esc(fmtMoney(cost))}</strong></div>
+    <div class="mini"><span class="label">Lines changed</span><strong>${esc(lines.toLocaleString())}</strong></div>
+    <div class="mini"><span class="label">Survival measured</span><strong>${esc(measured)} of ${esc(rows.length)}</strong></div>
+  </div>${note}`;
+}
+function fmtMoney(value) {
+  return '$' + (Math.round(value * 100) / 100).toFixed(2);
+}
+function renderUnbanked(card) {
+  if (!card || !card.available) {
+    return `<div class="empty">${esc((card && card.reason) || 'Not measured for this window.')}</div>`;
+  }
+  const repos = (card.top_repos || []).map(entry =>
+    `<li>${esc(entry.short_name)} &middot; <strong>${esc(entry.unbanked_label)}</strong></li>`).join('');
+  const outside = card.outside_repo_usd > 0
+    ? `<span class="pill">${esc(card.outside_repo_label)} outside any repo</span>` : '';
+  // Surfaced, not hidden: spend git could not answer for is excluded from the
+  // headline, so the headline would otherwise silently shrink without saying why.
+  const unresolved = card.unresolved_usd > 0
+    ? `<span class="pill">${esc(card.unresolved_label)} unresolved (git could not read ${esc((card.unresolved_repos || []).length)} repo(s))</span>` : '';
+  return `<div class="headline">
+      <span class="headline-figure">${esc(card.unbanked_label)}</span>
+      <span class="headline-sub">${esc(card.unbanked_pct)}% of the last ${esc(card.window_days)} days had no commit behind it</span>
+    </div>
+    <div class="mini-grid" style="margin-top:12px">
+      <div class="mini"><span class="label">Reached a commit</span><strong>${esc(card.banked_label)}</strong></div>
+      <div class="mini"><span class="label">Never did</span><strong>${esc(card.unbanked_label)}</strong></div>
+      <div class="mini"><span class="label">Commits in window</span><strong>${esc(card.changes)}</strong></div>
+      <div class="mini"><span class="label">Model calls unbanked</span><strong>${esc(card.unbanked_events)}</strong></div>
+    </div>
+    ${repos ? `<p class="receipt-note" style="margin-bottom:4px">Where it went:</p>
+      <ul style="margin:0 0 10px 18px;padding:0">${repos}</ul>` : ''}
+    <div class="pill-row">${outside}${unresolved}</div>
+    <p class="receipt-note">${esc(card.caption)}
+      Spend banks against the next commit in the same repo within
+      ${esc(card.max_lookback_hours)}h; anything older stays unbanked rather than being misattributed.</p>`;
+}
 function renderContextHealth(rows) {
   if (!rows.length) return '<div class="empty">No active context-health warnings. AIWatcher will surface bloat, stale sessions, and handoff opportunities here.</div>';
   return `<div class="coverage-grid">${rows.map(row => `<div class="health-card">
@@ -2309,8 +2704,8 @@ function renderContextHealth(rows) {
     <div class="mini-grid">
       <div class="mini"><span class="label">Latest turn</span><strong>${esc(row.latest_turn_tokens)}</strong></div>
       <div class="mini"><span class="label">Peak turn</span><strong>${esc(row.peak_turn_tokens)}</strong></div>
-      <div class="mini"><span class="label">Efficiency</span><strong>${esc(row.efficiency_label)}</strong></div>
-      <div class="mini"><span class="label">Replayed</span><strong>${esc(row.bloat_label)}</strong></div>
+      <div class="mini"><span class="label">Spend on replay</span><strong>${esc(row.bloat_label)}</strong></div>
+      <div class="mini"><span class="label">Replay cost</span><strong>${esc(row.replayed_cost_label)}</strong></div>
     </div>
     <p>${esc(row.recommendation)}</p>
     <div class="health-actions">
@@ -2559,7 +2954,7 @@ function renderTodayDigest(digest) {
     o.abandoned ? `${o.abandoned} abandoned` : '',
   ].filter(Boolean).join(', ');
   const survival = digest.survival && digest.survival.available
-    ? `<span class="pill">${esc(digest.survival.cost_per_surviving_change)} per surviving change</span>`
+    ? `<span class="pill">${esc(digest.survival.cost_per_surviving_line_label)} per surviving line &middot; ${esc(digest.survival.survival_pct)}% still standing</span>`
     : '';
   return `<div class="insight"><strong>${esc(digest.recommendation)}</strong></div>
     <div class="pill-row">
@@ -2631,13 +3026,17 @@ function renderReport(report) {
   if (digest.survival && digest.survival.available) {
     const s = digest.survival;
     sections.push(`<div class="detail-section">
-      <h2>Cost per surviving change</h2>
+      <h2>Cost per surviving line</h2>
       <div class="mini-grid">
-        <div class="mini"><span class="label">Survived</span><strong>${esc(s.surviving_count)}</strong></div>
-        <div class="mini"><span class="label">Churned</span><strong>${esc(s.churned_count)}</strong></div>
-        <div class="mini"><span class="label">$/surviving change</span><strong>${esc(s.cost_per_surviving_change)}</strong></div>
-        <div class="mini"><span class="label">$/churned change</span><strong>${esc(s.cost_per_churned_change)}</strong></div>
+        <div class="mini"><span class="label">Still standing</span><strong>${esc(s.survival_pct)}%</strong></div>
+        <div class="mini"><span class="label">$/line written</span><strong>${esc(s.cost_per_line_label)}</strong></div>
+        <div class="mini"><span class="label">$/surviving line</span><strong>${esc(s.cost_per_surviving_line_label)}</strong></div>
+        <div class="mini"><span class="label">Changes measured</span><strong>${esc(s.changes_measured)}</strong></div>
       </div>
+      <p class="receipt-note">${esc(s.lines_intact)} of ${esc(s.lines_touched)} lines still in the code, across
+        ${esc(s.cost_coverage_pct)}% of spend in the last ${esc(s.window_days)} days.
+        ${s.changes_too_recent ? `${esc(s.changes_too_recent)} newer change(s) worth ${esc(s.too_recent_label)} are not old enough to judge yet.` : ''}
+        A floor, not a verdict: reformatting and refactoring move attribution away from the original change.</p>
     </div>`);
   }
   return `<div class="verdict-card"><h3>${esc(digest.recommendation)}</h3></div>
@@ -2645,11 +3044,28 @@ function renderReport(report) {
     ${sections.join('')}
     <p class="receipt-note">API-equivalent value, not invoice spend. Outcomes are inferred from local signals, not guaranteed truth. Based on local logs only, not live provider quota.</p>`;
 }
-function renderJournal(journal) {
-  return `<p>${esc(journal.title)}</p>
-    <div class="pill-row"><span class="pill">${esc(journal.summary)}</span></div>
-    ${journal.items.map(item => `<div class="insight"><strong>${esc(item)}</strong></div>`).join('')}
-    <p><strong>One thing to change next time:</strong> ${esc(journal.improvement)}</p>`;
+function renderInsightHeadline(totals) {
+  const split = totals.replayed_tokens_label && totals.replayed_share_pct
+    ? `<span class="pill">${esc(totals.new_tokens_label)} new &middot; ${esc(totals.replayed_tokens_label)} replayed (${esc(totals.replayed_share_pct)}%)</span>`
+    : `<span class="pill">${esc(totals.tokens_label)} tokens</span>`;
+  return `<div class="headline">
+    <span class="headline-figure">${esc(totals.api_value_label)}</span>
+    <span class="headline-sub">${esc(totals.window_label)} &middot; ${esc(totals.sessions)} sessions</span>
+    ${split}
+  </div>`;
+}
+function renderInsightFeed(insights) {
+  if (!insights || !insights.length) {
+    return '<div class="empty">No notable local signals yet. Keep using AI tools and check back after a few sessions.</div>';
+  }
+  return insights.map(card => `<div class="feed-row ${esc(card.severity || 'info')}${card.session_id ? ' clickable' : ''}"
+      ${card.session_id ? `onclick="selectSession('${esc(card.session_id)}')"` : ''}>
+      <div class="feed-main">
+        <strong>${esc(card.title)}</strong>
+        <p>${esc(card.body)}</p>
+      </div>
+      ${card.impact_label ? `<span class="feed-impact mono">${esc(card.impact_label)}</span>` : ''}
+    </div>`).join('');
 }
 function showView(view) {
   document.querySelectorAll('.view').forEach(node => {
@@ -2707,14 +3123,15 @@ async function loadSessions() {
 }
 async function load(resetDetail = true) {
   const days = document.getElementById('days').value;
-  const [summaryRes, reportRes, journalRes] = await Promise.all([
+  // /api/journal is still served for the CLI's `aiwatcher journal`, but the
+  // dashboard no longer renders it: every line it produced was a restatement
+  // of something already in the insight feed.
+  const [summaryRes, reportRes] = await Promise.all([
     fetch(`/api/summary?days=${days}`),
-    fetch(`/api/report?days=${days}`),
-    fetch(`/api/journal?days=${Math.min(Number(days), 30)}`)
+    fetch(`/api/report?days=${days}`)
   ]);
   const data = await summaryRes.json();
   const report = await reportRes.json();
-  const journal = await journalRes.json();
   renderHandoffBubble(data.handoff_bubble || null);
   document.getElementById('todayDigest').innerHTML = renderTodayDigest(report.digest);
   const totals = data.totals;
@@ -2728,7 +3145,7 @@ async function load(resetDetail = true) {
   if (survival.available) {
     survivalRow.hidden = false;
     document.getElementById('costPerSurviving').textContent =
-      `${survival.cost_per_surviving_change} vs ${survival.cost_per_churned_change} churned (${survival.surviving_count} survived / ${survival.churned_count} churned)`;
+      `${survival.cost_per_surviving_line_label} per surviving line (${survival.survival_pct}% of ${survival.lines_touched} lines still standing)`;
   } else {
     survivalRow.hidden = true;
   }
@@ -2740,6 +3157,10 @@ async function load(resetDetail = true) {
   document.getElementById('receiptRows').innerHTML = renderReceiptRows(receiptCache);
   document.getElementById('handoffDecisionRows').innerHTML = renderHandoffDecisionRows(handoffDecisions);
   document.getElementById('contextHealth').innerHTML = renderContextHealth(data.context_health || []);
+  document.getElementById('unbanked').innerHTML = renderUnbanked(data.unbanked);
+  const changeRows = data.changes || [];
+  document.getElementById('changeRows').innerHTML = renderChangeRows(changeRows);
+  document.getElementById('changeTotals').innerHTML = renderChangeTotals(changeRows, data.changes_meta);
   document.getElementById('coverageRows').innerHTML = renderCoverage(data.coverage || []);
   document.getElementById('setupRows').innerHTML = renderSetup(data.setup || []);
   const latest = data.recent_sessions[0];
@@ -2759,11 +3180,7 @@ async function load(resetDetail = true) {
   document.getElementById('insights').innerHTML = data.insights.length
     ? data.insights.map(i => `<div class="insight"><strong>${esc(i.title)}</strong><p>${esc(i.body)}</p></div>`).join('')
     : '<div class="empty">No notable local signals yet.</div>';
-  document.getElementById('insightRows').innerHTML = data.insights.length
-    ? data.insights.map(i => `<div class="insight"><strong>${esc(i.title)}</strong><p>${esc(i.body)}</p></div>`).join('')
-    : '<div class="empty">No notable local signals yet. Keep using AI tools and check back after a few sessions.</div>';
   document.getElementById('privacy').innerHTML = data.privacy.map(p => `<div class="privacy-item"><span class="privacy-check">&#10003;</span><span>${esc(p)}</span></div>`).join('');
-  document.getElementById('privacyLarge').innerHTML = data.privacy.map(p => `<span class="pill">${esc(p)}</span>`).join('');
   document.getElementById('recent').innerHTML = data.recent_sessions.slice(0, 6).map(s => `<tr class="clickable" onclick="selectSession('${s.session_id}')">
     <td>${esc(s.tool)}</td><td>${esc(s.project)}<br>${outcomeEvidencePill(s)}</td><td>${esc(s.tokens)}</td><td><button class="row-action">Review</button></td>
   </tr>`).join('');
@@ -2779,7 +3196,8 @@ async function load(resetDetail = true) {
     : '<tr><td colspan="5"><div class="empty">No local project usage found for this window.</div></td></tr>';
   loadSessions();
   document.getElementById('report').innerHTML = renderReport(report);
-  document.getElementById('journal').innerHTML = renderJournal(journal);
+  document.getElementById('insightHeadline').innerHTML = renderInsightHeadline(data.totals);
+  document.getElementById('insightFeed').innerHTML = renderInsightFeed(data.insights);
   if (resetDetail && document.getElementById('detailDrawer').classList.contains('open')) closeDrawer();
 }
 document.addEventListener('keydown', event => { if (event.key === 'Escape') closeDrawer(); });
@@ -2978,7 +3396,7 @@ async function load() {
   if (wanted && (!bubble || bubble.session_id !== wanted)) {
     const health = (data.context_health || []).find(row => row.session_id === wanted);
     if (health) {
-      const saved = health.estimated_replayed_context_label || health.bloat_label || 'context';
+      const saved = health.estimated_replayed_context_label || 'context';
       bubble = {
         session_id: health.session_id,
         project: health.project,
@@ -2988,7 +3406,8 @@ async function load() {
         body: health.recommendation || 'This session is getting heavy. Use a handoff brief before continuing.',
         reason: health.recommendation || 'Context pressure is elevated.',
         expected_saved_context_tokens: health.estimated_replayed_context_tokens || null,
-        tags: [`${health.latest_turn_tokens} tokens/turn`, `${health.efficiency_label} efficiency`, `${saved} replayed`],
+        tags: [`${health.latest_turn_tokens} tokens/turn`, `${saved} replayed`].concat(
+          health.bloat_measurable ? [`${health.bloat_label} of spend replayed`] : []),
       };
     }
   }
@@ -3183,6 +3602,9 @@ class UIHandler(BaseHTTPRequestHandler):
                         "peak_turn_tokens": match.peak_turn_tokens,
                         "efficiency_pct": match.efficiency_pct,
                         "bloat_ratio": match.bloat_ratio,
+                        "bloat_measurable": match.bloat_measurable,
+                        "replayed_cost_usd": round(match.replayed_cost_usd, 6),
+                        "analyzed_cost_usd": round(match.analyzed_cost_usd, 6),
                         "growth_rate": match.growth_rate,
                         "is_context_critical": match.is_context_critical,
                         "is_context_pressure": match.is_context_pressure,

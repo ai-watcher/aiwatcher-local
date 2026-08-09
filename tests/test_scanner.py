@@ -9,6 +9,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from aiwatcher_cli import scanner
+from aiwatcher_cli.pricing import (
+    CACHE_READ_MULTIPLIER,
+    CACHE_WRITE_1H_MULTIPLIER,
+    CACHE_WRITE_5M_MULTIPLIER,
+    lookup,
+)
 
 
 class ProjectPathTests(unittest.TestCase):
@@ -127,6 +133,18 @@ class PromptCacheAccountingTests(unittest.TestCase):
     alone ignored the cached bulk of every prompt and understated real cost by
     roughly 11x across this machine's own history."""
 
+    # The fixture line below is stamped with this date, and spend is priced at
+    # the rate in effect when it happened -- so the expected figures are derived
+    # from the table at that date rather than written in as dollars. Otherwise
+    # these assertions would encode whichever rate happened to be current when
+    # they were written and quietly go wrong when one lapses.
+    SCANNED_AT = datetime(2026, 6, 24, 10, 0, tzinfo=timezone.utc)
+
+    def _rates(self) -> tuple[float, float]:
+        pricing = lookup("claude-sonnet-5", self.SCANNED_AT)
+        assert pricing is not None
+        return float(pricing["in"]), float(pricing["out"])
+
     def _scan_one(self, usage: dict) -> scanner.LocalSession:
         with tempfile.TemporaryDirectory() as temp_dir:
             projects = Path(temp_dir) / "projects"
@@ -157,7 +175,16 @@ class PromptCacheAccountingTests(unittest.TestCase):
         self.assertEqual(session.tokens_in, 2 + 13_099 + 33_775)
         self.assertEqual(session.cache_read_tokens, 33_775)
         self.assertEqual(session.cache_write_tokens, 13_099)
-        self.assertAlmostEqual(session.cost_usd, 0.0938175, places=6)
+        price_in, price_out = self._rates()
+        expected = (
+            2 * price_in
+            + 13_099 * price_in * CACHE_WRITE_1H_MULTIPLIER
+            + 33_775 * price_in * CACHE_READ_MULTIPLIER
+            + 339 * price_out
+        ) / 1_000_000
+        self.assertAlmostEqual(session.cost_usd, expected, places=9)
+        # The defect: reading input_tokens alone would price 2 tokens, not 46,876.
+        self.assertGreater(session.cost_usd, 2 * price_in / 1_000_000 * 1_000)
 
     def test_cache_counters_are_a_subset_of_tokens_in_not_an_addition(self) -> None:
         session = self._scan_one({
@@ -178,14 +205,20 @@ class PromptCacheAccountingTests(unittest.TestCase):
             "output_tokens": 0,
         })
         self.assertEqual(session.cache_write_tokens, 1_000_000)
-        self.assertAlmostEqual(session.cost_usd, 3.00 * 1.25, places=6)
+        price_in, _ = self._rates()
+        self.assertAlmostEqual(session.cost_usd, price_in * CACHE_WRITE_5M_MULTIPLIER, places=9)
+        # The point of the fallback: the 1h bucket would have cost more.
+        self.assertLess(session.cost_usd, price_in * CACHE_WRITE_1H_MULTIPLIER)
 
     def test_uncached_session_is_unchanged(self) -> None:
         session = self._scan_one({"input_tokens": 1_000, "output_tokens": 500})
         self.assertEqual(session.tokens_in, 1_000)
         self.assertEqual(session.cache_read_tokens, 0)
         self.assertEqual(session.cache_write_tokens, 0)
-        self.assertAlmostEqual(session.cost_usd, (1_000 * 3.00 + 500 * 15.00) / 1_000_000, places=9)
+        price_in, price_out = self._rates()
+        self.assertAlmostEqual(
+            session.cost_usd, (1_000 * price_in + 500 * price_out) / 1_000_000, places=9
+        )
 
     def test_codex_cached_tokens_are_not_double_counted(self) -> None:
         # Codex uses the opposite convention: its `input_tokens` already
@@ -563,3 +596,106 @@ class CodexOriginatorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClipSessionsToWindowTests(unittest.TestCase):
+    """Windows used to be all-or-nothing on updated_at: a session touched once
+    inside a window contributed every dollar it had ever cost. On long-running
+    sessions that roughly doubled the reported total."""
+
+    def _session(self, sid="s1", tool="claude-code", **kw):
+        base = dict(
+            session_id=sid, tool=tool, project_path="/repo",
+            started_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 6, 30, tzinfo=timezone.utc),
+            model="claude-sonnet-5", tokens_in=1_000, tokens_out=100, cost_usd=10.0,
+        )
+        base.update(kw)
+        return scanner.LocalSession(**base)
+
+    def _event(self, when, *, sid="s1", cost=1.0, tokens_in=100, cache_read=0,
+               event_type="assistant", model="claude-sonnet-5"):
+        return scanner.LocalEvent(
+            event_id=f"{sid}-{when.isoformat()}", session_id=sid, tool="claude-code",
+            event_type=event_type, timestamp=when, project_path="/repo", model=model,
+            tokens_in=tokens_in, tokens_out=10, cache_read_tokens=cache_read, cost_usd=cost,
+        )
+
+    def test_only_in_window_spend_is_counted(self) -> None:
+        since = datetime(2026, 6, 20, tzinfo=timezone.utc)
+        events = [
+            self._event(datetime(2026, 6, 10, tzinfo=timezone.utc), cost=7.0),
+            self._event(datetime(2026, 6, 25, tzinfo=timezone.utc), cost=3.0),
+        ]
+        clipped = scanner.clip_sessions_to_window([self._session()], events, since)
+
+        self.assertEqual(len(clipped), 1)
+        self.assertAlmostEqual(clipped[0].cost_usd, 3.0, places=6)
+        self.assertEqual(clipped[0].tokens_in, 100)
+
+    def test_session_with_no_in_window_events_is_dropped(self) -> None:
+        # updated_at can come from file mtime, so a session can look recent
+        # while every costed turn predates the window.
+        since = datetime(2026, 6, 20, tzinfo=timezone.utc)
+        events = [self._event(datetime(2026, 6, 10, tzinfo=timezone.utc), cost=7.0)]
+        self.assertEqual(scanner.clip_sessions_to_window([self._session()], events, since), [])
+
+    def test_cache_counters_are_clipped_too(self) -> None:
+        since = datetime(2026, 6, 20, tzinfo=timezone.utc)
+        events = [
+            self._event(datetime(2026, 6, 10, tzinfo=timezone.utc), cache_read=9_000),
+            self._event(datetime(2026, 6, 25, tzinfo=timezone.utc), cache_read=500),
+        ]
+        clipped = scanner.clip_sessions_to_window([self._session(cache_read_tokens=9_500)], events, since)
+        self.assertEqual(clipped[0].cache_read_tokens, 500)
+
+    def test_model_breakdown_is_recomputed_from_in_window_events(self) -> None:
+        since = datetime(2026, 6, 20, tzinfo=timezone.utc)
+        events = [
+            self._event(datetime(2026, 6, 10, tzinfo=timezone.utc), cost=5.0, model="claude-opus-5"),
+            self._event(datetime(2026, 6, 25, tzinfo=timezone.utc), cost=2.0, model="claude-sonnet-5"),
+        ]
+        clipped = scanner.clip_sessions_to_window([self._session()], events, since)
+        breakdown = clipped[0].model_breakdown
+
+        self.assertEqual(set(breakdown), {"claude-sonnet-5"})
+        self.assertAlmostEqual(breakdown["claude-sonnet-5"]["cost_usd"], 2.0, places=6)
+
+    def test_tools_without_events_keep_whole_session_and_are_flagged(self) -> None:
+        # Cursor and the Codex sqlite path emit sessions but no per-turn events.
+        # Dropping them would erase a whole tool's contribution, so they keep
+        # the old rule and say so rather than being silently overstated.
+        since = datetime(2026, 6, 20, tzinfo=timezone.utc)
+        cursor = self._session(sid="c1", tool="cursor", cost_usd=4.0)
+        clipped = scanner.clip_sessions_to_window([cursor], [], since)
+
+        self.assertEqual(len(clipped), 1)
+        self.assertAlmostEqual(clipped[0].cost_usd, 4.0, places=6)
+        self.assertIn(scanner.CLIP_FALLBACK_NOTE, clipped[0].notes)
+
+    def test_eventless_session_outside_the_window_is_still_excluded(self) -> None:
+        since = datetime(2026, 7, 15, tzinfo=timezone.utc)
+        cursor = self._session(sid="c1", tool="cursor")
+        self.assertEqual(scanner.clip_sessions_to_window([cursor], [], since), [])
+
+    def test_clipping_does_not_mutate_the_input_session(self) -> None:
+        since = datetime(2026, 6, 20, tzinfo=timezone.utc)
+        original = self._session()
+        events = [self._event(datetime(2026, 6, 25, tzinfo=timezone.utc), cost=3.0)]
+        scanner.clip_sessions_to_window([original], events, since)
+
+        self.assertAlmostEqual(original.cost_usd, 10.0, places=6)
+        self.assertEqual(original.notes, [])
+
+    def test_clipped_total_equals_the_raw_in_window_event_sum(self) -> None:
+        since = datetime(2026, 6, 20, tzinfo=timezone.utc)
+        events = [
+            self._event(datetime(2026, 6, 21, tzinfo=timezone.utc), sid="a", cost=1.5),
+            self._event(datetime(2026, 6, 22, tzinfo=timezone.utc), sid="b", cost=2.5),
+            self._event(datetime(2026, 6, 1, tzinfo=timezone.utc), sid="b", cost=99.0),
+        ]
+        rows = [self._session(sid="a"), self._session(sid="b")]
+        clipped = scanner.clip_sessions_to_window(rows, events, since)
+        raw = sum(e.cost_usd for e in events if e.timestamp >= since)
+
+        self.assertAlmostEqual(sum(r.cost_usd for r in clipped), raw, places=6)

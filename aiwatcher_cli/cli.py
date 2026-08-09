@@ -59,10 +59,24 @@ from .local_state import (
     record_watch_notification,
     recent_watch_notifications,
     redact_command_for_storage,
+    get_receipt_baseline,
+    get_survival_summary,
     save_baselines,
+    save_receipt_baseline,
+    save_survival_summary,
     state_path,
 )
 from .handoff import TARGET_LABELS, build_handoff_capsule, render_handoff_capsule
+from .ledger import Ledger, build_ledger, cost_per_surviving_line, repos_matching, unbanked_summary
+from .statusline import statusline_from_stdin, statusline_settings_snippet
+from .receipt import (
+    RECEIPT_DAYS,
+    build_commit_receipt,
+    compute_repo_baselines,
+    format_receipt,
+    rewrite_in_progress,
+    survival_note,
+)
 from .outcome_evidence import (
     VALID_EVIDENCE_OUTCOMES,
     build_outcome_evidence,
@@ -82,7 +96,9 @@ from .processes import (
     seconds_label,
 )
 from .scanner import (
+    CLAUDE_PROJECTS_DIRS,
     LocalEvent,
+    clip_sessions_to_window,
     LocalSession,
     discover_tools,
     display_model_name,
@@ -157,6 +173,11 @@ def money(value: float) -> str:
 
 
 def compact_int(value: int) -> str:
+    # Billions became reachable once replayed cache tokens were counted: a long
+    # session re-sends its whole context every turn, so totals run far past the
+    # millions this used to top out at ("1332.1M" instead of "1.3B").
+    if value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.1f}B"
     if value >= 1_000_000:
         return f"{value / 1_000_000:.1f}M"
     if value >= 1_000:
@@ -210,8 +231,18 @@ def in_window(session: LocalSession, since: datetime) -> bool:
 
 
 def sessions_since(days: int) -> list[LocalSession]:
+    """Sessions clipped to the window.
+
+    The old rule counted a session's whole lifetime cost if it was touched at
+    all inside the window, so a long-running session inflated every total it
+    appeared in. See scanner.clip_sessions_to_window.
+    """
     since = datetime.now().astimezone() - timedelta(days=days)
-    return [session for session in scan_all() if in_window(session, since)]
+    try:
+        events = scan_all_events()
+    except OSError:
+        events = []
+    return clip_sessions_to_window(scan_all(), events, since)
 
 
 def summarize(sessions: Iterable[LocalSession]) -> dict[str, float | int]:
@@ -602,8 +633,12 @@ def budget_check_text(
     today_start = local_midnight(now.date())
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     rows = scan_all()
-    today_rows = [row for row in rows if in_window(row, today_start)]
-    month_rows = [row for row in rows if in_window(row, month_start)]
+    try:
+        events = scan_all_events()
+    except OSError:
+        events = []
+    today_rows = clip_sessions_to_window(rows, events, today_start)
+    month_rows = clip_sessions_to_window(rows, events, month_start)
     today_cost = float(summarize(today_rows)["cost_usd"])
     month_cost = float(summarize(month_rows)["cost_usd"])
     today_pct = (today_cost / daily_budget_usd * 100) if daily_budget_usd > 0 else 0
@@ -651,12 +686,133 @@ BASELINE_TOOLS = ("claude-code", "codex-cli")
 #   v2: prompt-cache tokens are counted and priced. Before this, cached input
 #       was ignored entirely, so both p75_tokens and p75_api_value came out
 #       roughly an order of magnitude low.
+#   v3: spend is priced at the rate in effect when it happened, so a model's
+#       promotional rate applies to the history billed under it. Baselines from
+#       v2 priced every model at its standard rate, which read ~30% high over a
+#       month here. This one also has to be bumped by hand whenever a rate is
+#       added to pricing.INTRO_PRICING: the stored figure changes even though no
+#       code path did.
 # The 24h staleness window would eventually wash a change like this out on its
 # own, but "eventually" is not good enough here: the hook hot path reads the
 # cache without refreshing it, so a stale baseline keeps producing confident,
 # order-of-magnitude-wrong savings estimates until something else happens to
 # trigger a recompute.
-BASELINE_ACCOUNTING_VERSION = 2
+BASELINE_ACCOUNTING_VERSION = 3
+
+
+SURVIVAL_ACCOUNTING_VERSION = 1
+SURVIVAL_WINDOW_DAYS = 30
+SURVIVAL_MAX_AGE_HOURS = 24
+
+
+def usable_survival_summary() -> dict[str, object]:
+    """Cached cost-per-surviving-line, or {} if it predates the current accounting.
+
+    Same reasoning as usable_baselines: a stored figure computed under different
+    token/cost semantics is confidently wrong, and every caller already has a
+    "not enough history" path to fall into.
+    """
+    cached = get_survival_summary()
+    if not isinstance(cached, dict):
+        return {}
+    if cached.get("accounting_version") != SURVIVAL_ACCOUNTING_VERSION:
+        return {}
+    if cached.get("cost_accounting_version") != BASELINE_ACCOUNTING_VERSION:
+        return {}
+    return cached
+
+
+def get_or_refresh_survival(max_age_hours: int = SURVIVAL_MAX_AGE_HOURS) -> dict[str, object]:
+    """Recompute cost-per-surviving-line if the cache is missing or stale.
+
+    Never call this from a hook or a request handler: it runs a git blame pass
+    per file across the costliest changes in the window, which takes ~23s for a
+    month of local history. It belongs in the same off-hot-path places
+    get_or_refresh_baselines already runs -- `today`, `report`, `ui` startup.
+    """
+    cached = usable_survival_summary()
+    computed_at = cached.get("computed_at") if isinstance(cached, dict) else None
+    stale = True
+    if computed_at:
+        try:
+            age = datetime.now(timezone.utc) - datetime.fromisoformat(str(computed_at))
+            stale = age > timedelta(hours=max_age_hours)
+        except ValueError:
+            stale = True
+    if cached and not stale:
+        return cached
+
+    try:
+        ledger = build_ledger(scan_all_events(), days=SURVIVAL_WINDOW_DAYS)
+        summary = dict(cost_per_surviving_line(ledger))
+    except OSError:
+        return cached or {}
+    summary["computed_at"] = datetime.now(timezone.utc).isoformat()
+    summary["accounting_version"] = SURVIVAL_ACCOUNTING_VERSION
+    summary["cost_accounting_version"] = BASELINE_ACCOUNTING_VERSION
+    summary["window_days"] = SURVIVAL_WINDOW_DAYS
+    try:
+        save_survival_summary(summary)
+    except OSError:
+        pass
+    return summary
+
+
+RECEIPT_BASELINE_MAX_AGE_HOURS = 24
+
+
+def usable_receipt_baseline() -> dict[str, object]:
+    """Cached per-repo $/line medians, or {} if they predate the current accounting.
+
+    Same reasoning as usable_baselines: a median computed under different cost
+    semantics would make every receipt's "1.9x cheaper than usual" confidently
+    wrong, and the receipt already has a path that just omits the comparison.
+    """
+    cached = get_receipt_baseline()
+    if not isinstance(cached, dict):
+        return {}
+    if cached.get("cost_accounting_version") != BASELINE_ACCOUNTING_VERSION:
+        return {}
+    repos = cached.get("repos")
+    return repos if isinstance(repos, dict) else {}
+
+
+def get_or_refresh_receipt_baseline(
+    max_age_hours: int = RECEIPT_BASELINE_MAX_AGE_HOURS,
+) -> dict[str, object]:
+    """Recompute the receipt's comparison baseline if missing or stale.
+
+    Never call this from the post-commit hook: it walks a month of ledger
+    history across every repo with spend, which is most of a second. It belongs
+    where get_or_refresh_baselines already runs -- `today`, `report`, `ui`
+    startup -- and once at install time so the first receipt has a baseline.
+    """
+    cached = get_receipt_baseline()
+    computed_at = cached.get("computed_at") if isinstance(cached, dict) else None
+    stale = True
+    if computed_at:
+        try:
+            age = datetime.now(timezone.utc) - datetime.fromisoformat(str(computed_at))
+            stale = age > timedelta(hours=max_age_hours)
+        except ValueError:
+            stale = True
+    if cached and not stale and cached.get("cost_accounting_version") == BASELINE_ACCOUNTING_VERSION:
+        return cached
+
+    try:
+        repos = compute_repo_baselines(scan_all_events())
+    except OSError:
+        return cached or {}
+    payload = {
+        "repos": repos,
+        "computed_at": datetime.now(timezone.utc).isoformat(),
+        "cost_accounting_version": BASELINE_ACCOUNTING_VERSION,
+    }
+    try:
+        save_receipt_baseline(payload)
+    except OSError:
+        pass
+    return payload
 
 
 def usable_baselines() -> dict[str, object]:
@@ -2530,6 +2686,402 @@ def command_status(_args: argparse.Namespace) -> int:
     return 0
 
 
+def print_unbanked_line(
+    events: Sequence[LocalEvent], *, days: int = 7, ledger: Ledger | None = None
+) -> None:
+    """Report spend in the window that never reached a commit.
+
+    One `git log` per repo with spend, so it is cheap enough to run inline --
+    unlike survival, which needs a blame pass per file and stays cached.
+    Prints nothing when there is no story: silence beats a card saying $0.
+
+    `ledger` lets a caller that already built one hand it over. That saves a
+    second git pass, but the reason it exists is correctness: a caller scoped
+    to one repo must not print an unbanked total computed across all of them.
+    """
+    try:
+        card = unbanked_summary(ledger if ledger is not None else build_ledger(list(events), days=days))
+    except OSError:
+        return
+    if not card.get("available"):
+        return
+    print(
+        f"\nUnbanked: {money(float(card['unbanked_usd']))} of the last {days} days "
+        f"({card['unbanked_pct']:.0f}%) has no commit behind it "
+        f"({money(float(card['banked_usd']))} reached one)."
+    )
+    for entry in card.get("top_repos", [])[:3]:
+        print(f"  {short_path(str(entry['repo'])):50} {money(float(entry['unbanked_usd'])):>10}")
+    if float(card.get("unresolved_usd") or 0) > 0:
+        print(
+            f"  ({money(float(card['unresolved_usd']))} excluded -- git could not read "
+            f"{len(card.get('unresolved_repos') or [])} repo(s).)"
+        )
+    print("  Exploration that went nowhere, or work still uncommitted -- this cannot tell them apart.")
+
+
+def command_statusline(args: argparse.Namespace) -> int:
+    """Render the Claude Code status line. Reads its payload on stdin.
+
+    Never fails loudly and never blocks: this runs on every prompt render, so
+    an error message here would replace the status line with a traceback and a
+    slow path would be felt on every keystroke.
+    """
+    try:
+        raw = sys.stdin.read() if not sys.stdin.isatty() else ""
+    except (OSError, UnicodeDecodeError):
+        raw = ""
+    if not raw.strip() and args.demo:
+        # Nothing on stdin and the user asked to see it: render against the
+        # most recent local transcript so `--demo` shows something real.
+        raw = json.dumps(_demo_statusline_payload())
+    line = statusline_from_stdin(raw)
+    if line:
+        print(line)
+    return 0
+
+
+def _demo_statusline_payload() -> dict[str, object]:
+    """A payload shaped like Claude Code's, built from the newest transcript."""
+    newest: tuple[float, str] | None = None
+    for projects_dir in CLAUDE_PROJECTS_DIRS:
+        if not projects_dir.exists():
+            continue
+        for path in projects_dir.glob("*/*.jsonl"):
+            try:
+                stamp = path.stat().st_mtime
+            except OSError:
+                continue
+            if newest is None or stamp > newest[0]:
+                newest = (stamp, str(path))
+    return {
+        "transcript_path": newest[1] if newest else "",
+        "workspace": {"current_dir": os.getcwd()},
+        "cwd": os.getcwd(),
+    }
+
+
+def command_install_statusline(args: argparse.Namespace) -> int:
+    command = args.command or _cli_command_for_current_file()
+    snippet = statusline_settings_snippet(command)
+    if not args.write:
+        print("Add this to your Claude Code settings JSON:")
+        print(json.dumps(snippet, indent=2))
+        print("\nProject-local path: .claude/settings.local.json")
+        print("User-global path: ~/.claude/settings.json")
+        print("Re-run with --write to install it there directly.")
+        return 0
+
+    settings_path = _claude_settings_path(args.scope, args.project_dir)
+    os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+    existing: dict[str, object] = {}
+    if os.path.exists(settings_path):
+        with open(settings_path, "r", encoding="utf-8") as handle:
+            try:
+                existing = json.load(handle)
+            except json.JSONDecodeError:
+                backup = settings_path + ".aiwatcher.bak"
+                shutil.copyfile(settings_path, backup)
+                print(f"Existing settings were not valid JSON. Backed up to {backup}.")
+
+    current = existing.get("statusLine")
+    if isinstance(current, dict) and current.get("command") and "aiwatcher" not in str(current.get("command")):
+        # Somebody else's status line is configured. Only one can be shown, so
+        # this is the user's call to make, not ours.
+        print(f"A different status line is already configured at {settings_path}:")
+        print(f"  {current.get('command')}")
+        print("Remove it first, or merge the two commands yourself. Nothing was changed.")
+        return 1
+
+    existing.update(snippet)
+    with open(settings_path, "w", encoding="utf-8") as handle:
+        json.dump(existing, handle, indent=2)
+        handle.write("\n")
+    print(f"Installed AIWatcher status line at {settings_path}")
+    print("It shows uncommitted spend, session cost, and context per turn. Restart Claude Code to pick it up.")
+    return 0
+
+
+def command_uninstall_statusline(args: argparse.Namespace) -> int:
+    settings_path = _claude_settings_path(args.scope, args.project_dir)
+    if not os.path.exists(settings_path):
+        print(f"No Claude settings file found at {settings_path}.")
+        return 0
+    try:
+        with open(settings_path, "r", encoding="utf-8") as handle:
+            settings = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Could not read Claude settings at {settings_path}: {exc}", file=sys.stderr)
+        return 2
+    current = settings.get("statusLine")
+    if not isinstance(current, dict) or "aiwatcher" not in str(current.get("command", "")):
+        print(f"No AIWatcher status line found in {settings_path}.")
+        return 0
+    settings.pop("statusLine", None)
+    with open(settings_path, "w", encoding="utf-8") as handle:
+        json.dump(settings, handle, indent=2)
+        handle.write("\n")
+    print(f"Removed AIWatcher status line from {settings_path}")
+    return 0
+
+
+COMMIT_HOOK_MARKER = "# >>> aiwatcher commit receipt >>>"
+COMMIT_HOOK_END = "# <<< aiwatcher commit receipt <<<"
+
+
+def _commit_hook_body(command: str) -> str:
+    # `|| true` is belt and braces: post-commit's exit code is already ignored
+    # by git, but a non-zero status here would still show up in some wrappers,
+    # and nothing about a receipt is worth making a commit look failed.
+    #
+    # `2>/dev/null` because the hook outlives any single checkout. Installed
+    # once, it fires on every branch -- including ones whose aiwatcher predates
+    # `commit-receipt`, where argparse writes a usage dump to stderr before any
+    # of our code runs and `--quiet-if-empty` never gets a say. The tradeoff is
+    # accepted deliberately: a genuinely broken install goes quiet too, which is
+    # the right call for something that prints under every commit. Run
+    # `aiwatcher commit-receipt` directly to see what it would have said.
+    return (
+        f"{COMMIT_HOOK_MARKER}\n"
+        f"{command} commit-receipt --quiet-if-empty 2>/dev/null || true\n"
+        f"{COMMIT_HOOK_END}\n"
+    )
+
+
+def _post_commit_hook_path(repo: str) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", repo, "rev-parse", "--git-dir"],
+        check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    if result.returncode != 0:
+        return None
+    git_dir = result.stdout.strip()
+    if not os.path.isabs(git_dir):
+        git_dir = os.path.join(repo, git_dir)
+    return os.path.join(git_dir, "hooks", "post-commit")
+
+
+def command_commit_receipt(args: argparse.Namespace) -> int:
+    """Print the receipt for one commit. Safe to run from a git hook.
+
+    Never fails loudly: this runs after a commit that already succeeded, and a
+    traceback under a successful commit would read as if the commit broke.
+    """
+    repo = os.path.abspath(args.repo or os.getcwd())
+    try:
+        if rewrite_in_progress(repo):
+            # A rebase replays every commit; reporting each one would print a
+            # receipt per commit for work already reported when it was written.
+            return 0
+        sha = args.sha
+        if not sha:
+            result = subprocess.run(
+                ["git", "-C", repo, "rev-parse", "HEAD"],
+                check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            )
+            if result.returncode != 0:
+                if not args.quiet_if_empty:
+                    print("Not a git repository, or it has no commits yet.")
+                return 0
+            sha = result.stdout.strip()
+
+        # Only the window the commit's own cost needs. The month-long baseline
+        # is read from cache; recomputing it here would put a second of ledger
+        # history into every commit, which is how a hook gets uninstalled.
+        since = datetime.now(timezone.utc) - timedelta(days=RECEIPT_DAYS)
+        receipt = build_commit_receipt(
+            repo, sha, scan_all_events(since=since),
+            baselines=usable_receipt_baseline(),
+        )
+        if not receipt.get("available"):
+            if not args.quiet_if_empty:
+                print(receipt.get("reason") or "No receipt available for this commit.")
+            return 0
+        if args.json:
+            print(json.dumps(receipt, indent=2))
+            return 0
+        note = survival_note(receipt, usable_survival_summary())
+        text = format_receipt(receipt, note=note)
+        if text:
+            print(text)
+    except Exception as error:  # noqa: BLE001 - a receipt must never break a commit
+        if not args.quiet_if_empty:
+            print(f"Could not build a commit receipt: {error}")
+    return 0
+
+
+def command_install_commit_hook(args: argparse.Namespace) -> int:
+    repo = os.path.abspath(args.repo or os.getcwd())
+    command = args.command or _cli_command_for_current_file()
+    body = _commit_hook_body(command)
+    if not args.write:
+        print("Add this to your repo's .git/hooks/post-commit:")
+        print(body)
+        print(f"Target: {_post_commit_hook_path(repo) or '(not a git repository)'}")
+        print("Re-run with --write to install it there directly.")
+        return 0
+
+    path = _post_commit_hook_path(repo)
+    if not path:
+        print(f"{repo} is not a git repository.")
+        return 1
+
+    existing = ""
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as handle:
+            existing = handle.read()
+    if COMMIT_HOOK_MARKER in existing:
+        # Ours is already here, but possibly an older version of it. Rewrite the
+        # block in place when it has drifted -- without this, a fix to the hook
+        # line only ever reaches people who have never installed it, which is
+        # exactly the wrong half of the userbase.
+        before, _, rest = existing.partition(COMMIT_HOOK_MARKER)
+        current, _, after = rest.partition(COMMIT_HOOK_END)
+        if (COMMIT_HOOK_MARKER + current + COMMIT_HOOK_END + "\n") == body:
+            print(f"AIWatcher commit receipt is already installed at {path}.")
+            return 0
+        updated = before + body.rstrip("\n") + after
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(updated if updated.endswith("\n") else updated + "\n")
+        print(f"Updated the AIWatcher commit receipt at {path} to the current version.")
+        return 0
+
+    if existing.strip():
+        # Someone else's hook is already here. Appending inside our own markers
+        # keeps their hook working and keeps ours removable, which is better
+        # than refusing and better than overwriting.
+        updated = existing.rstrip("\n") + "\n\n" + body
+        note = "Appended to the existing post-commit hook; the previous contents still run first."
+    else:
+        updated = "#!/bin/sh\n\n" + body
+        note = "Created a new post-commit hook."
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(updated)
+    try:
+        os.chmod(path, os.stat(path).st_mode | 0o111)
+    except OSError:
+        # Windows has no execute bit and git for Windows does not need one.
+        pass
+    print(f"Installed AIWatcher commit receipt at {path}")
+    print(note)
+    # Built now so the very first receipt has something to compare against,
+    # rather than saying "not computed yet" on the commit that made the user
+    # install this in the first place.
+    try:
+        get_or_refresh_receipt_baseline()
+    except OSError:
+        pass
+    print("This is local to this clone: git hooks are not committed, so collaborators are unaffected.")
+    return 0
+
+
+def command_uninstall_commit_hook(args: argparse.Namespace) -> int:
+    repo = os.path.abspath(args.repo or os.getcwd())
+    path = _post_commit_hook_path(repo)
+    if not path or not os.path.exists(path):
+        print(f"No post-commit hook found for {repo}.")
+        return 0
+    with open(path, "r", encoding="utf-8") as handle:
+        existing = handle.read()
+    if COMMIT_HOOK_MARKER not in existing:
+        print(f"No AIWatcher commit receipt found in {path}.")
+        return 0
+
+    before, _, rest = existing.partition(COMMIT_HOOK_MARKER)
+    _, _, after = rest.partition(COMMIT_HOOK_END)
+    updated = (before.rstrip("\n") + "\n" + after.lstrip("\n")).strip()
+    if updated in ("", "#!/bin/sh"):
+        os.remove(path)
+        print(f"Removed {path} (it contained nothing else).")
+        return 0
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(updated + "\n")
+    print(f"Removed AIWatcher commit receipt from {path}")
+    return 0
+
+
+def command_changes(args: argparse.Namespace) -> int:
+    """Per-commit cost and $/line -- the ledger behind the aggregate figures."""
+    try:
+        events = scan_all_events()
+    except OSError:
+        events = []
+    # Scope the ledger itself rather than filtering its rows: every figure
+    # printed below (unbanked spend, foreign commits) comes off the ledger, and
+    # a filtered table under machine-wide totals is the kind of mismatch that
+    # makes the whole page untrustworthy.
+    only_repo: str | None = None
+    if args.repo:
+        matches = repos_matching(events, args.repo)
+        if not matches:
+            print(f"No repo with AI spend in the last {args.days} days matches {args.repo!r}.")
+            return 0
+        if len(matches) > 1:
+            print(f"{args.repo!r} matches {len(matches)} repositories. Narrow it to one of:")
+            for path in matches:
+                print(f"  {short_path(path)}")
+            return 1
+        only_repo = matches[0]
+
+    try:
+        ledger = build_ledger(events, days=args.days, only_repo=only_repo)
+    except OSError:
+        print("Could not read git history for the active repos.")
+        return 1
+
+    rows = ledger.changes
+    if not rows:
+        print(f"No commits in the last {args.days} days" + (" in that repo." if args.repo else "."))
+        return 0
+
+    # Survival where it is already cached. Never computed here: a blame pass per
+    # file would turn a listing into a 25s command.
+    by_change = usable_survival_summary().get("by_change")
+    by_change = by_change if isinstance(by_change, dict) else {}
+
+    print(f"Cost per change - last {args.days} days, ranked by spend\n")
+    print(f"{'Commit':10} {'Cost':>9} {'Lines':>12} {'$/line':>9} {'Alive':>6}    Subject")
+    print("-" * 88)
+    for change in rows[:args.limit]:
+        measured = by_change.get(change.sha)
+        measured = measured if isinstance(measured, dict) else {}
+        pct = measured.get("survival_pct") if measured.get("measurable") else None
+        cost = money(change.cost_usd) if change.cost_usd > 0 else "-"
+        per_line = money(change.usd_per_line) if change.usd_per_line is not None else "-"
+        mark = "~" if change.was_rewritten else " "
+        print(
+            f"{change.sha[:10]:10} {cost:>9} "
+            f"{f'+{change.lines_added}/-{change.lines_removed}':>12} "
+            f"{per_line:>9} {(f'{pct:.0f}%' if pct is not None else '-'):>6} {mark} "
+            f"{change.subject[:40]}"
+        )
+
+    attributed = [change for change in rows if change.cost_usd > 0]
+    if len(attributed) < len(rows):
+        print(
+            f"\n{len(rows) - len(attributed)} of {len(rows)} commits have no observed AI spend "
+            "(hand-written, or committed more than 12h after the work)."
+        )
+    if ledger.foreign_changes:
+        print(
+            f"{ledger.foreign_changes} commit(s) written by someone else were excluded: "
+            "they arrived by fetch, so no spend on this machine belongs to them."
+        )
+    if any(change.was_rewritten for change in rows[:args.limit]):
+        print(
+            "~ marks a commit that was rebased or amended. Cost is attributed by when the "
+            "work was authored, not when git restamped it."
+        )
+    if not by_change:
+        print("Survival not measured yet. Run `aiwatcher today` to compute it.")
+    else:
+        print("Blank survival means not measured, not 'did not survive'. It is a floor either way.")
+    print_unbanked_line(events, days=args.days, ledger=ledger)
+    return 0
+
+
 def command_today(_args: argparse.Namespace) -> int:
     now = datetime.now().astimezone()
     today_start = local_midnight(now.date())
@@ -2546,15 +3098,21 @@ def command_today(_args: argparse.Namespace) -> int:
         pass
     try:
         get_or_refresh_baselines()
+        get_or_refresh_survival()
+        get_or_refresh_receipt_baseline()
     except OSError:
         pass
     try:
         recheck_evidence_survival()
     except OSError:
         pass
-    today = [row for row in all_sessions if in_window(row, today_start)]
-    week = [row for row in all_sessions if in_window(row, week_start)]
-    month = [row for row in all_sessions if in_window(row, month_start)]
+    try:
+        window_events = scan_all_events()
+    except OSError:
+        window_events = []
+    today = clip_sessions_to_window(all_sessions, window_events, today_start)
+    week = clip_sessions_to_window(all_sessions, window_events, week_start)
+    month = clip_sessions_to_window(all_sessions, window_events, month_start)
 
     print(f"Today - {format_full_date(now)}")
     by_tool: dict[str, list[LocalSession]] = defaultdict(list)
@@ -2629,6 +3187,7 @@ def command_today(_args: argparse.Namespace) -> int:
 
     print(f"\nThis week: {money(float(week_stats['cost_usd']))}")
     print(f"This month: {money(float(month_stats['cost_usd']))}")
+    print_unbanked_line(window_events, days=7)
     hygiene = process_hygiene_summary()
     if hygiene:
         print(f"\n{hygiene}")
@@ -2674,6 +3233,8 @@ def command_report(args: argparse.Namespace) -> int:
     rows = sessions_since(days)
     try:
         get_or_refresh_baselines()
+        get_or_refresh_survival()
+        get_or_refresh_receipt_baseline()
     except OSError:
         pass
     try:
@@ -2723,7 +3284,7 @@ def command_report(args: argparse.Namespace) -> int:
     if digest_outcomes["inferred_useful"] or digest_outcomes["inferred_churned"]:
         print(
             f"  Inferred (unmarked): {digest_outcomes['inferred_useful']} likely useful, "
-            f"{digest_outcomes['inferred_churned']} churned"
+            f"{digest_outcomes['inferred_churned']} whose commit left the branch"
         )
 
     highest_cost_useful = digest["highest_cost_useful_session"]
@@ -2756,10 +3317,27 @@ def command_report(args: argparse.Namespace) -> int:
 
     survival = digest["survival"]
     if survival.get("available"):
-        print(
-            f"\nCost per surviving change: {survival['cost_per_surviving_change']} "
-            f"(vs {survival['cost_per_churned_change']} churned, {survival['sample_count']} samples)"
-        )
+        # .get() throughout, not indexing: this renderer read the pre-line-survival
+        # keys long after the digest started returning the new schema, and every
+        # `aiwatcher report` run crashed with a KeyError the moment survival became
+        # available. A missing key should cost a field, not the command.
+        line = f"\nCost per surviving line: {survival.get('cost_per_surviving_line_label', '-')}"
+        per_line = survival.get("cost_per_line_label")
+        if per_line:
+            line += f" (vs {per_line} per line written)"
+        print(line)
+        pct = survival.get("survival_pct")
+        measured = survival.get("changes_measured")
+        if pct is not None and measured:
+            detail = f"  {pct}% of lines still standing across {measured} change{'s' if measured != 1 else ''}"
+            coverage = survival.get("cost_coverage_pct")
+            if coverage is not None:
+                detail += f", {coverage}% of the window's banked spend"
+            print(detail + ". A floor: blame moves on reformats.")
+    elif survival.get("reason"):
+        # Blank is not zero. Saying why it is unmeasured beats printing nothing
+        # and letting the reader assume nothing survived.
+        print(f"\nCost per surviving line: {survival['reason']}")
 
     print(f"\nRecommended: {digest['recommendation']}")
 
@@ -3447,9 +4025,13 @@ def _print_watch_status_card(
         f"{session.agent_calls} model calls, {session.tool_calls} tool calls"
     )
     if health is not None:
+        replay = (
+            f", {health.bloat_ratio * 100:.0f}% of spend on replayed history"
+            if health.bloat_measurable else ""
+        )
         print(
             f"  Context    : {health.severity} "
-            f"({compact_int(health.latest_turn_tokens)} tokens/turn, {health.efficiency_pct:.0f}% efficiency)"
+            f"({compact_int(health.latest_turn_tokens)} tokens/turn{replay})"
         )
     else:
         print("  Context    : not enough per-turn token data locally to assess")
@@ -3752,23 +4334,26 @@ def _check_outcome_review_signals(rows: Sequence[LocalSession]) -> None:
 
     # Cost-per-surviving-change: a one-time, project-agnostic nudge that this
     # honesty-gated local stat has enough history to be shown at all.
-    signal_key = "cost_per_surviving_change:available"
+    # Reads the cached line-level figure rather than recomputing: measuring
+    # survival is a blame pass per file, far too slow for a watch tick.
+    signal_key = "cost_per_surviving_line:available"
     cost_signal_already_sent = has_sent_notification(signal_key)
     if notifications_sent < MAX_OUTCOME_NOTIFICATIONS_PER_PASS and not cost_signal_already_sent:
-        from .ui import _cost_per_surviving_change  # deferred: ui.py imports from cli.py, so import here to dodge a cycle
-
         try:
-            survival_stat = _cost_per_surviving_change(list(all_rows_by_id.values()))
+            survival_stat = usable_survival_summary()
         except OSError:
-            survival_stat = {"available": False}
+            survival_stat = {}
         if survival_stat.get("available"):
             _fire_outcome_notification(
                 signal_key=signal_key,
-                signal_type="cost_per_surviving_change",
+                signal_type="cost_per_surviving_line",
                 session_id="",
                 tool="local",
-                title="AIWatcher: cost-per-surviving-change available",
-                reason="Cost per surviving change is now available for your local history.",
+                title="AIWatcher: cost-per-surviving-line available",
+                reason=(
+                    "Cost per surviving line is now available for your local history -- "
+                    "measured from how much of each change is still in the code."
+                ),
                 url=_outcome_dashboard_url(),
             )
             notifications_sent += 1
@@ -3874,7 +4459,11 @@ def command_watch(args: argparse.Namespace) -> int:
                         print(f"[{when}] {row.tool} | {short_path(row.project_path)} | {money(row.cost_usd)} | {compact_int(row.tokens_in + row.tokens_out)} tokens")
                         health = analyze_session_health(row, all_events.get(row.session_id, []))
                         if health is not None and health.severity in {"warning", "critical"}:
-                            print(f"  - Context {health.severity}: {compact_int(health.latest_turn_tokens)} tokens/turn, {health.efficiency_pct:.0f}% efficiency")
+                            replay = (
+                                f", {health.bloat_ratio * 100:.0f}% of spend replayed"
+                                if health.bloat_measurable else ""
+                            )
+                            print(f"  - Context {health.severity}: {compact_int(health.latest_turn_tokens)} tokens/turn{replay}")
                         for insight in session_insights(
                             row,
                             cost_threshold=args.cost_threshold,
@@ -5809,7 +6398,11 @@ def command_export(args: argparse.Namespace) -> int:
         ]
         print(json.dumps({"schema": "aiwatcher.local_events.v0", "events": rows}, indent=2))
     else:
-        rows = [row.to_json() for row in scan_all() if in_window(row, since)]
+        try:
+            export_events = scan_all_events()
+        except OSError:
+            export_events = []
+        rows = [row.to_json() for row in clip_sessions_to_window(scan_all(), export_events, since)]
         print(json.dumps({"schema": "aiwatcher.local_sessions.v0", "sessions": rows}, indent=2))
     print("Tip: Cloud can schedule exports and evidence packs for teams.", file=sys.stderr)
     return 0
@@ -5820,6 +6413,8 @@ def command_ui(args: argparse.Namespace) -> int:
 
     try:
         get_or_refresh_baselines()
+        get_or_refresh_survival()
+        get_or_refresh_receipt_baseline()
     except OSError:
         pass
     try:
@@ -5884,6 +6479,72 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sessions.add_argument("--team", action="store_true", help="Explain team session visibility in AIWatcher Cloud")
     sessions.set_defaults(func=command_sessions)
+
+    changes = sub.add_parser("changes", help="Show what each commit cost in AI spend, and $/line")
+    changes.add_argument("--days", type=int, default=7, help="How many days of commits to include")
+    changes.add_argument("--limit", type=int, default=20, help="Maximum number of commits to list")
+    changes.add_argument(
+        "--repo",
+        help="Only show commits in repos whose path contains this substring",
+    )
+    changes.set_defaults(func=command_changes)
+
+    statusline = sub.add_parser(
+        "statusline",
+        help="Render the Claude Code status line; reads its payload on stdin",
+    )
+    statusline.add_argument(
+        "--demo", action="store_true",
+        help="Render against the most recent local transcript when stdin is empty",
+    )
+    statusline.set_defaults(func=command_statusline)
+
+    install_statusline = sub.add_parser(
+        "install-statusline", help="Show live cost and uncommitted spend in Claude Code's status line",
+    )
+    install_statusline.add_argument(
+        "--scope", choices=["user", "project"], default="user",
+        help="Write to ~/.claude/settings.json (user) or .claude/settings.local.json (project)",
+    )
+    install_statusline.add_argument("--project-dir", help="Project directory for --scope project")
+    install_statusline.add_argument("--command", help="Command the status line should invoke")
+    install_statusline.add_argument("--write", action="store_true", help="Write the settings instead of printing them")
+    install_statusline.set_defaults(func=command_install_statusline)
+
+    uninstall_statusline = sub.add_parser(
+        "uninstall-statusline", help="Remove the AIWatcher Claude Code status line",
+    )
+    uninstall_statusline.add_argument(
+        "--scope", choices=["user", "project"], default="user",
+        help="Remove from ~/.claude/settings.json (user) or .claude/settings.local.json (project)",
+    )
+    uninstall_statusline.add_argument("--project-dir", help="Project directory for --scope project")
+    uninstall_statusline.set_defaults(func=command_uninstall_statusline)
+
+    receipt = sub.add_parser("commit-receipt", help="Print what the latest commit cost in AI spend")
+    receipt.add_argument("--sha", help="Report on this commit instead of HEAD")
+    receipt.add_argument("--repo", help="Repository to report on; defaults to the working directory")
+    receipt.add_argument("--json", action="store_true", help="Emit the receipt as JSON")
+    receipt.add_argument(
+        "--quiet-if-empty", action="store_true",
+        help="Print nothing when there is no receipt to show; used by the git hook",
+    )
+    receipt.set_defaults(func=command_commit_receipt)
+
+    install_receipt = sub.add_parser(
+        "install-commit-hook",
+        help="Install a post-commit git hook that prints a receipt after each commit",
+    )
+    install_receipt.add_argument("--repo", help="Repository to install into; defaults to the working directory")
+    install_receipt.add_argument("--command", help="Command the hook should invoke")
+    install_receipt.add_argument("--write", action="store_true", help="Write the hook instead of printing it")
+    install_receipt.set_defaults(func=command_install_commit_hook)
+
+    uninstall_receipt = sub.add_parser(
+        "uninstall-commit-hook", help="Remove the AIWatcher post-commit receipt hook",
+    )
+    uninstall_receipt.add_argument("--repo", help="Repository to remove it from; defaults to the working directory")
+    uninstall_receipt.set_defaults(func=command_uninstall_commit_hook)
 
     last = sub.add_parser("last", help="Inspect the latest local AI session")
     last.add_argument("--days", type=int, default=30, help="How many days back to search for the session")
