@@ -1086,13 +1086,16 @@ class PromptPreflightTests(unittest.TestCase):
         notification_seen: dict = {}
         output = io.StringIO()
 
-        with (
-            patch.object(cli, "get_baselines", return_value={}),
-            patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
-            patch("sys.stdout", output),
-        ):
-            cli._print_watch_status_card(row, [row], args, [], {}, notification_seen)
-            cli._print_watch_status_card(row, [row], args, [], {}, notification_seen)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(cli, "get_baselines", return_value={}),
+                patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
+                patch("sys.stdout", output),
+            ):
+                cli._print_watch_status_card(row, [row], args, [], {}, notification_seen)
+                cli._print_watch_status_card(row, [row], args, [], {}, notification_seen)
 
         notify.assert_called_once()
         rendered = output.getvalue()
@@ -1275,13 +1278,16 @@ class PromptPreflightTests(unittest.TestCase):
             days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250,
             tokens_threshold=500_000, target="generic", notify=True,
         )
-        with (
-            patch.object(cli, "get_baselines", return_value={}),
-            patch.object(cli, "get_ui_server", return_value={"host": "0.0.0.0", "port": 9123}),
-            patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
-            patch("sys.stdout", io.StringIO()),
-        ):
-            cli._print_watch_status_card(row, [row], args, [], {}, {})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(cli, "get_baselines", return_value={}),
+                patch.object(cli, "get_ui_server", return_value={"host": "0.0.0.0", "port": 9123}),
+                patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
+                patch("sys.stdout", io.StringIO()),
+            ):
+                cli._print_watch_status_card(row, [row], args, [], {}, {})
 
         _, kwargs = notify.call_args
         self.assertEqual(kwargs.get("url"), f"http://127.0.0.1:9123/?session={row.session_id}")
