@@ -81,7 +81,7 @@ MAX_REQUEST_BYTES = 64 * 1024
 MIN_DT = datetime.min.replace(tzinfo=timezone.utc)
 SUMMARY_MEMORY_TTL_SECONDS = 45
 SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
-SUMMARY_CACHE_SCHEMA_VERSION = 2
+SUMMARY_CACHE_SCHEMA_VERSION = 3
 SUMMARY_BACKGROUND_COOLDOWN_SECONDS = 8
 ACTIVE_SESSION_MINUTES = 30
 RECENT_SESSION_HOURS = 4
@@ -92,6 +92,7 @@ _SUMMARY_CACHE: dict[int, tuple[float, dict[str, object]]] = {}
 _SUMMARY_REFRESHING: set[int] = set()
 _SUMMARY_REFRESHED_AT: dict[int, float] = {}
 _SUMMARY_CACHE_LOCK = threading.RLock()
+_SESSION_INDEX: dict[str, LocalSession] = {}
 
 
 def money(value: float) -> str:
@@ -172,6 +173,89 @@ def project_label(path: str | None, max_len: int = 54) -> str:
 def in_window(session: LocalSession, since: datetime) -> bool:
     stamp = session.updated_at or session.started_at
     return bool(stamp and stamp.astimezone() >= since)
+
+
+def _parse_dt(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _session_from_json(raw: object) -> LocalSession | None:
+    if not isinstance(raw, dict):
+        return None
+    session_id = raw.get("session_id")
+    tool = raw.get("tool")
+    if not isinstance(session_id, str) or not session_id or not isinstance(tool, str) or not tool:
+        return None
+    notes = raw.get("notes")
+    model_breakdown = raw.get("model_breakdown")
+    return LocalSession(
+        session_id=session_id,
+        tool=tool,
+        project_path=raw.get("project_path") if isinstance(raw.get("project_path"), str) else None,
+        started_at=_parse_dt(raw.get("started_at")),
+        updated_at=_parse_dt(raw.get("updated_at")),
+        model=raw.get("model") if isinstance(raw.get("model"), str) else None,
+        tokens_in=int(raw.get("tokens_in") or 0),
+        tokens_out=int(raw.get("tokens_out") or 0),
+        cost_usd=float(raw.get("cost_usd") or 0.0),
+        agent_calls=int(raw.get("agent_calls") or 0),
+        tool_calls=int(raw.get("tool_calls") or 0),
+        source_path=raw.get("source_path") if isinstance(raw.get("source_path"), str) else None,
+        notes=[str(item) for item in notes] if isinstance(notes, list) else [],
+        surface=raw.get("surface") if isinstance(raw.get("surface"), str) else None,
+        model_breakdown=model_breakdown if isinstance(model_breakdown, dict) else {},
+    )
+
+
+def _index_sessions(rows: list[LocalSession]) -> None:
+    with _SUMMARY_CACHE_LOCK:
+        for row in rows:
+            _SESSION_INDEX[row.session_id] = row
+
+
+def _session_index_payload(rows: list[LocalSession]) -> list[dict[str, object]]:
+    return [row.to_json() for row in rows]
+
+
+def _index_sessions_from_summary(summary: dict[str, object]) -> None:
+    raw_rows = summary.get("_session_index")
+    if not isinstance(raw_rows, list):
+        return
+    rows = [row for raw in raw_rows if (row := _session_from_json(raw)) is not None]
+    if rows:
+        _index_sessions(rows)
+
+
+def _find_session_row(session_id: str, *, days: int = 30) -> LocalSession | None:
+    with _SUMMARY_CACHE_LOCK:
+        row = _SESSION_INDEX.get(session_id)
+        if row:
+            return row
+        summaries = [cached[1] for cached in _SUMMARY_CACHE.values()]
+    for summary in summaries:
+        _index_sessions_from_summary(summary)
+    with _SUMMARY_CACHE_LOCK:
+        row = _SESSION_INDEX.get(session_id)
+        if row:
+            return row
+    for candidate_days in (days, 1, 7, 30, 90):
+        disk = _read_summary_disk_cache(candidate_days, max_age_seconds=SUMMARY_DISK_TTL_SECONDS)
+        if disk:
+            _index_sessions_from_summary(disk)
+            with _SUMMARY_CACHE_LOCK:
+                row = _SESSION_INDEX.get(session_id)
+                if row:
+                    return row
+    for row in rows_for_window(days):
+        if row.session_id == session_id:
+            _index_sessions([row])
+            return row
+    return None
 
 
 def summarize(rows: list[LocalSession]) -> dict[str, float | int]:
@@ -694,10 +778,9 @@ EVENT_DISPLAY_LIMIT = 5000
 
 
 def build_session_detail(session_id: str, days: int = 30) -> dict[str, object]:
-    rows = [row for row in rows_for_window(days) if row.session_id == session_id]
-    if not rows:
+    row = _find_session_row(session_id, days=days)
+    if not row:
         return {"error": "session not found"}
-    row = rows[0]
     # A single-session view shows the whole session, not just the last `days` — otherwise
     # early turns of a long-running session are hidden. We only filter by session id here.
     events = sorted(
@@ -732,13 +815,33 @@ def build_session_detail(session_id: str, days: int = 30) -> dict[str, object]:
 
 
 def build_runtime_return(session_id: str, days: int = 30) -> dict[str, object]:
-    rows = [row for row in rows_for_window(days) if row.session_id == session_id]
-    if not rows:
+    row = _find_session_row(session_id, days=days)
+    if not row:
         return {"ok": False, "error": "session not found"}
-    row = rows[0]
     state = session_state(row)
     attachment = runtime_attachment_for_session(row, state=state, processes=safe_runtime_processes())
     return perform_runtime_return(attachment)
+
+
+def _related_active_workspaces(row: LocalSession, *, limit: int = 3) -> list[str]:
+    now = datetime.now(timezone.utc)
+    current = project_key(row.project_path)
+    with _SUMMARY_CACHE_LOCK:
+        candidates = list(_SESSION_INDEX.values())
+    workspaces: list[str] = []
+    seen: set[str] = set()
+    for candidate in sorted(candidates, key=lambda item: item.updated_at or item.started_at or MIN_DT, reverse=True):
+        state = session_state(candidate, now=now)
+        if state.get("status") not in {"active", "recent"}:
+            continue
+        key = project_key(candidate.project_path)
+        if key == UNATTRIBUTED_PROJECT or key == current or key in seen:
+            continue
+        seen.add(key)
+        workspaces.append(key)
+        if len(workspaces) >= limit:
+            break
+    return workspaces
 
 
 def build_handoff_detail(
@@ -747,22 +850,28 @@ def build_handoff_detail(
     target: str = "generic",
     include_prompt_excerpt: bool = False,
 ) -> dict[str, object]:
-    rows = [row for row in rows_for_window(days) if row.session_id == session_id]
-    if not rows:
+    row = _find_session_row(session_id, days=days)
+    if not row:
         return {"error": "session not found"}
-    row = rows[0]
     events = sorted(
         [event for event in scan_all_events() if event.session_id == session_id],
         key=lambda event: event.timestamp or MIN_DT,
     )
-    outcome = get_outcome(session_id)
-    return build_handoff_capsule(
+    try:
+        outcome = get_outcome(session_id)
+    except OSError:
+        outcome = None
+    capsule = build_handoff_capsule(
         row,
         events,
         outcome=outcome.get("outcome") if outcome else None,
         include_prompt_excerpt=include_prompt_excerpt,
         target=target if target in {"generic", "claude", "codex", "cursor", "vscode"} else "generic",
+        related_workspaces=_related_active_workspaces(row),
     )
+    attachment = runtime_attachment_for_session(row, state=session_state(row), processes=safe_runtime_processes())
+    capsule["runtime_attachment"] = attachment.to_json()
+    return capsule
 
 
 def build_report(days: int = 7) -> dict[str, object]:
@@ -1049,34 +1158,80 @@ def _context_action(health: ContextHealth) -> dict[str, str]:
     }
 
 
+def _context_health_card(health: ContextHealth, session: LocalSession | None, *, group: list[ContextHealth]) -> dict[str, object]:
+    action = _context_action(health)
+    critical_count = sum(1 for item in group if item.severity == "critical")
+    warning_count = sum(1 for item in group if item.severity == "warning")
+    replayed_tokens = sum(item.latest_turn_replayed_tokens for item in group)
+    replayed_cost = sum(item.replayed_cost_usd for item in group if item.bloat_measurable)
+    analyzed_cost = sum(item.analyzed_cost_usd for item in group if item.bloat_measurable)
+    bloat_measurable = any(item.bloat_measurable for item in group)
+    return {
+        "session_id": health.session_id,
+        "tool": health.tool,
+        "project": project_label(health.project_path),
+        "severity": health.severity,
+        "session_count": len(group),
+        "critical_sessions": critical_count,
+        "warning_sessions": warning_count,
+        "related_sessions": [
+            {
+                "session_id": item.session_id,
+                "tool": item.tool,
+                "severity": item.severity,
+                "latest_turn_tokens": compact_int(item.latest_turn_tokens),
+                "age_label": f"{item.age_days:.1f}d" if item.age_days >= 1 else f"{item.age_hours:.0f}h",
+            }
+            for item in group[:5]
+        ],
+        "latest_turn_tokens": compact_int(health.latest_turn_tokens),
+        "peak_turn_tokens": compact_int(max(item.peak_turn_tokens for item in group)),
+        "estimated_replayed_context_tokens": replayed_tokens,
+        "estimated_replayed_context_label": compact_int(replayed_tokens),
+        "bloat_measurable": bloat_measurable,
+        "efficiency_label": f"{health.efficiency_pct:.0f}%" if health.bloat_measurable else "n/a",
+        "bloat_label": f"{health.bloat_ratio * 100:.0f}%" if health.bloat_measurable else "n/a",
+        "replayed_cost_label": f"${replayed_cost:.2f}" if bloat_measurable else "n/a",
+        "analyzed_cost_label": f"${analyzed_cost:.2f}" if bloat_measurable else "n/a",
+        "age_label": f"{health.age_days:.1f}d" if health.age_days >= 1 else f"{health.age_hours:.0f}h",
+        "recommendation": health.recommendations[0] if health.recommendations else "Context is healthy.",
+        "action": action,
+        "runtime_attachment": (
+            runtime_attachment_for_session(session, state=session_state(session), processes=[]).to_json()
+            if session
+            else None
+        ),
+        "can_handoff": bool(session),
+        "compact_prompt": _build_compact_prompt(health),
+        "group_note": (
+            f"{len(group)} sessions need attention in this project."
+            if len(group) > 1
+            else "One session needs attention in this project."
+        ),
+    }
+
+
 def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) -> list[dict[str, object]]:
-    cards: list[dict[str, object]] = []
     sessions_by_id = {row.session_id: row for row in rows}
-    for health in analyze_all_sessions(rows, events)[:5]:
-        session = sessions_by_id.get(health.session_id)
-        action = _context_action(health)
-        cards.append({
-            "session_id": health.session_id,
-            "tool": health.tool,
-            "project": project_label(health.project_path),
-            "severity": health.severity,
-            "latest_turn_tokens": compact_int(health.latest_turn_tokens),
-            "peak_turn_tokens": compact_int(health.peak_turn_tokens),
-            # Measured cache reads on the latest turn, not a ratio applied to
-            # the turn size — the provider counts the replayed portion for us.
-            "estimated_replayed_context_tokens": health.latest_turn_replayed_tokens,
-            "estimated_replayed_context_label": compact_int(health.latest_turn_replayed_tokens),
-            "bloat_measurable": health.bloat_measurable,
-            "efficiency_label": f"{health.efficiency_pct:.0f}%" if health.bloat_measurable else "n/a",
-            "bloat_label": f"{health.bloat_ratio * 100:.0f}%" if health.bloat_measurable else "n/a",
-            "replayed_cost_label": f"${health.replayed_cost_usd:.2f}" if health.bloat_measurable else "n/a",
-            "analyzed_cost_label": f"${health.analyzed_cost_usd:.2f}" if health.bloat_measurable else "n/a",
-            "age_label": f"{health.age_days:.1f}d" if health.age_days >= 1 else f"{health.age_hours:.0f}h",
-            "recommendation": health.recommendations[0] if health.recommendations else "Context is healthy.",
-            "action": action,
-            "can_handoff": bool(session),
-            "compact_prompt": _build_compact_prompt(health),
-        })
+    grouped: dict[str, list[ContextHealth]] = defaultdict(list)
+    for health in analyze_all_sessions(rows, events):
+        grouped[project_key(health.project_path)].append(health)
+    severity_order = {"critical": 0, "warning": 1, "healthy": 2}
+    cards: list[dict[str, object]] = []
+    for group in grouped.values():
+        group.sort(key=lambda item: (
+            severity_order.get(item.severity, 9),
+            -int(item.latest_turn_tokens * item.bloat_ratio),
+            -item.total_input_tokens,
+        ))
+        representative = group[0]
+        cards.append(_context_health_card(representative, sessions_by_id.get(representative.session_id), group=group))
+    cards.sort(key=lambda item: (
+        severity_order.get(str(item.get("severity")), 9),
+        -int(item.get("estimated_replayed_context_tokens") or 0),
+        -int(item.get("session_count") or 0),
+    ))
+    cards = cards[:5]
     return cards
 
 
@@ -1123,6 +1278,7 @@ def _handoff_bubble(context_health: list[dict[str, object]]) -> dict[str, object
         "continue_label": "Continue here",
         "saved_context_label": saved_label,
         "expected_saved_context_tokens": candidate.get("estimated_replayed_context_tokens"),
+        "runtime_attachment": candidate.get("runtime_attachment"),
         "tags": [
             f"{candidate.get('latest_turn_tokens')} tokens/turn",
         ] + ([
@@ -1635,6 +1791,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
     since = now - timedelta(days=days)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     all_rows = scan_all()
+    _index_sessions(all_rows)
     try:
         link_recent_interventions_to_sessions(all_rows)
     except OSError:
@@ -1804,6 +1961,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
     return {
         "generated_at": now.isoformat(),
         "cache_schema_version": SUMMARY_CACHE_SCHEMA_VERSION,
+        "_session_index": _session_index_payload(all_rows),
         "days": days,
         "privacy": [
             "Read-only local scan",
@@ -1877,6 +2035,7 @@ def _summary_cache_path(days: int) -> Path:
 
 def _mark_summary_cache(summary: dict[str, object], *, status: str, source: str, refreshing: bool) -> dict[str, object]:
     copy = dict(summary)
+    copy.pop("_session_index", None)
     generated_at = copy.get("generated_at") if isinstance(copy.get("generated_at"), str) else None
     copy["cache_schema_version"] = SUMMARY_CACHE_SCHEMA_VERSION
     copy["cache"] = {
@@ -1921,6 +2080,7 @@ def _write_summary_disk_cache(days: int, summary: dict[str, object]) -> None:
 
 
 def _store_summary_cache(days: int, summary: dict[str, object], *, mark_refreshed: bool = True) -> None:
+    _index_sessions_from_summary(summary)
     with _SUMMARY_CACHE_LOCK:
         _SUMMARY_CACHE[days] = (time.monotonic(), summary)
         if mark_refreshed:
@@ -1934,6 +2094,7 @@ def _build_summary_shell(days: int = 7) -> dict[str, object]:
     since = now - timedelta(days=days)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     all_rows = scan_all()
+    _index_sessions(all_rows)
     try:
         link_recent_interventions_to_sessions(all_rows)
     except OSError:
@@ -1981,6 +2142,7 @@ def _build_summary_shell(days: int = 7) -> dict[str, object]:
     return {
         "generated_at": now.isoformat(),
         "cache_schema_version": SUMMARY_CACHE_SCHEMA_VERSION,
+        "_session_index": _session_index_payload(all_rows),
         "days": days,
         "privacy": [
             "Read-only local scan",
@@ -3106,8 +3268,12 @@ function renderHandoff(capsule) {
   const usage = capsule.usage || {};
   const evidence = capsule.evidence || {};
   const changedFiles = evidence.changed_files || [];
+  const runtime = capsule.runtime_attachment || {};
   const target = capsule.target || 'generic';
   const includePrompt = !!capsule.include_prompt_excerpt;
+  const runtimeButton = runtime.available
+    ? `<button class="btn-primary" onclick="returnToRuntime('${esc(capsule.session_id)}')" title="${esc(runtime.reason || '')}">${esc(runtime.action_label || 'Open workspace')}</button>`
+    : `<button class="btn-quiet" disabled title="${esc(runtime.reason || 'No safe return target is available yet.')}">${esc(runtime.action_label || 'Copy handoff')}</button>`;
   return `<section class="detail-section">
     <h2>Fresh-session handoff</h2>
     <p>Use this when a session gets expensive, stale, or hard to continue. It keeps the next ${esc(capsule.target_label || 'AI tool')} focused without carrying the whole chat history.</p>
@@ -3118,8 +3284,10 @@ function renderHandoff(capsule) {
       <div class="mini"><span class="label">Evidence</span><strong>${esc((evidence.commits || []).length)} commits</strong></div>
     </div>
     <div class="copy-row">
+      ${runtimeButton}
       ${['generic','claude','codex','cursor','vscode'].map(item => `<button class="${item === target ? 'btn-primary' : 'btn-quiet'}" onclick="openHandoff('${esc(capsule.session_id)}','${item}', ${includePrompt})">${esc(item === 'generic' ? 'Generic' : item)}</button>`).join('')}
     </div>
+    <p class="tool-link-note">${esc(runtime.reason || 'Use the handoff brief when the exact running chat cannot be reopened.')}</p>
     <label class="prompt-opt-in">
       <input type="checkbox" ${includePrompt ? 'checked' : ''} onchange="openHandoff('${esc(capsule.session_id)}','${target}', this.checked)">
       <span class="prompt-opt-in-label">Include prompt excerpt <span class="pill">Privacy opt-in</span></span>
@@ -3213,6 +3381,10 @@ function renderHandoffBubble(bubble) {
     node.innerHTML = '';
     return;
   }
+  const runtime = bubble.runtime_attachment || {};
+  const runtimeButton = runtime.available
+    ? `<button class="btn-quiet" data-session="${esc(bubble.session_id)}" onclick="returnToRuntime(this.dataset.session)" title="${esc(runtime.reason || '')}">${esc(runtime.action_label || 'Open workspace')}</button>`
+    : '';
   node.hidden = false;
   node.innerHTML = `<div class="section-title">
       <div>
@@ -3224,6 +3396,7 @@ function renderHandoffBubble(bubble) {
     <div class="pill-row">${(bubble.tags || []).map(tag => `<span class="pill">${esc(tag)}</span>`).join('')}</div>
     <div class="actions" style="margin-top:14px">
       <button class="btn-primary" data-session="${esc(bubble.session_id)}" onclick="startFreshFromBubble(this.dataset.session)">${esc(bubble.primary_label || 'New chat')}</button>
+      ${runtimeButton}
       <button class="btn-quiet" data-session="${esc(bubble.session_id)}" onclick="copyHandoffFromBubble(this.dataset.session)">Copy handoff</button>
       <button class="btn-quiet" onclick="continueFromBubble()">${esc(bubble.continue_label || 'Continue here')}</button>
       <button class="btn-quiet" data-session="${esc(bubble.session_id)}" onclick="selectSession(this.dataset.session)">Inspect session</button>
@@ -3303,7 +3476,7 @@ function renderContextHealth(rows) {
   if (!rows.length) return '<div class="empty">No active context-health warnings. AIWatcher will surface bloat, stale sessions, and handoff opportunities here.</div>';
   return `<div class="coverage-grid">${rows.map(row => `<div class="health-card">
     <div class="health-head">
-      <div><h3>${esc(row.project)}</h3><p>${esc(row.tool)} · ${esc(row.age_label)}</p></div>
+      <div><h3>${esc(row.project)}</h3><p>${esc(row.tool)} · ${esc(row.age_label)}${row.session_count > 1 ? ` · ${esc(row.session_count)} sessions` : ''}</p></div>
       <span class="health-severity ${esc(row.severity)}">${esc(row.severity)}</span>
     </div>
     <div class="mini-grid">
@@ -3312,6 +3485,7 @@ function renderContextHealth(rows) {
       <div class="mini"><span class="label">Spend on replay</span><strong>${esc(row.bloat_label)}</strong></div>
       <div class="mini"><span class="label">Replay cost</span><strong>${esc(row.replayed_cost_label)}</strong></div>
     </div>
+    ${row.session_count > 1 ? `<p class="receipt-note">${esc(row.group_note || `${row.session_count} related sessions need attention.`)} ${row.critical_sessions ? `${esc(row.critical_sessions)} critical.` : ''}</p>` : ''}
     <p>${esc(row.recommendation)}</p>
     <div class="health-actions">
       <button class="btn-primary" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.action.label)}</button>

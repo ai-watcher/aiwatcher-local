@@ -131,6 +131,7 @@ def build_handoff_capsule(
     include_prompt_excerpt: bool = False,
     target: HandoffTarget = "generic",
     extra_warnings: Sequence[str] | None = None,
+    related_workspaces: Sequence[str] | None = None,
 ) -> dict[str, object]:
     """Build a structured handoff capsule for UI/API rendering.
 
@@ -175,6 +176,11 @@ def build_handoff_capsule(
     target = target if target in TARGET_LABELS else "generic"
     target_guidance = _target_guidance(target)
     project_label, project_reliable = _safe_project_path(session.project_path)
+    related = [
+        item
+        for item in dict.fromkeys(str(path) for path in (related_workspaces or []) if path)
+        if item != project_label
+    ]
 
     evidence_lines = [
         f"- Nearby commits: {len(evidence.commits)}",
@@ -267,6 +273,10 @@ def build_handoff_capsule(
     uncertainty_lines = [
         "- The previous chat is intentionally not available in this fresh session.",
     ]
+    if related:
+        uncertainty_lines.append(
+            "- Other active AIWatcher sessions are in related workspaces; confirm which repo owns the next checkpoint."
+        )
     if not project_reliable:
         uncertainty_lines.append("- AIWatcher could not confidently identify the project path.")
     if not include_prompt_excerpt:
@@ -275,6 +285,7 @@ def build_handoff_capsule(
         uncertainty_lines.append("- No nearby test artifact was detected; choose a narrow verification step after inspection.")
 
     checkpoint_lines = [
+        "- Continue in the same workspace/repository unless the user explicitly asks for a duplicate checkout or new worktree.",
         "- Run `git status --short` and inspect only the files listed in Local evidence first.",
         "- Summarize what appears done, what remains uncertain, and propose one smallest next checkpoint.",
         "- Continue only after that checkpoint is clear; do not replay broad exploration from the old session.",
@@ -297,6 +308,7 @@ def build_handoff_capsule(
         "Workspace",
         f"- Project: {project_label}",
         f"- Project confidence: {'reliable' if project_reliable else 'unconfirmed'}",
+        *([f"- Related active workspace: {path}" for path in related[:3]] if related else []),
         "",
         "What appears done",
         *done_lines,
@@ -328,6 +340,7 @@ def build_handoff_capsule(
         "- First reply with what appears done, what remains uncertain, and the smallest next checkpoint.",
         "- State which files or commands you will inspect before editing.",
         "- Implement only the smallest checkpoint after the plan is clear.",
+        "- If continuing in Claude/Codex/Cursor, keep the same repository path active before editing.",
         "- Preserve unrelated changes and do not expose secrets.",
         "- Stop before destructive changes, broad refactors, secret exposure, or unrelated cleanup.",
         "",
@@ -360,6 +373,7 @@ def build_handoff_capsule(
         "include_prompt_excerpt": include_prompt_excerpt,
         "costliest_prompt": costliest_prompt,
         "decisions": decisions,
+        "related_workspaces": related[:3],
         "next_brief": next_brief,
     }
 

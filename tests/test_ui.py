@@ -715,6 +715,98 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertFalse(default_capsule["include_prompt_excerpt"])
         self.assertTrue(opted_in_capsule["include_prompt_excerpt"])
 
+    def test_handoff_and_session_detail_use_cached_session_index(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="cached-fast",
+            tool="codex-cli",
+            project_path="/repo/fast",
+            started_at=now - timedelta(hours=2),
+            updated_at=now - timedelta(minutes=5),
+            tokens_in=100_000,
+            tokens_out=1_000,
+            agent_calls=22,
+            tool_calls=9,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with ui._SUMMARY_CACHE_LOCK:
+                ui._SESSION_INDEX.clear()
+                ui._SUMMARY_CACHE.clear()
+            ui._index_sessions([row])
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "_read_summary_disk_cache", return_value=None),
+                patch.object(ui, "rows_for_window", side_effect=AssertionError("slow session scan should not run")),
+                patch.object(ui, "scan_all", side_effect=AssertionError("full scanner should not run")),
+                patch.object(ui, "scan_all_events", return_value=[]),
+                patch.object(ui, "safe_runtime_processes", return_value=[]),
+            ):
+                detail = ui.build_session_detail("cached-fast", days=7)
+                capsule = ui.build_handoff_detail("cached-fast", days=7, target="codex")
+
+        self.assertEqual(detail["session_id"], "cached-fast")
+        self.assertEqual(capsule["session_id"], "cached-fast")
+        self.assertIn("runtime_attachment", capsule)
+
+    def test_context_health_groups_duplicate_project_sessions(self) -> None:
+        now = datetime.now(timezone.utc)
+        rows = [
+            LocalSession(session_id="s1", tool="codex-cli", project_path="/repo/app", updated_at=now),
+            LocalSession(session_id="s2", tool="codex-cli", project_path="/repo/app", updated_at=now - timedelta(minutes=2)),
+            LocalSession(session_id="s3", tool="claude-code", project_path="/repo/docs", updated_at=now - timedelta(minutes=3)),
+        ]
+
+        def _health(
+            session_id: str,
+            project_path: str,
+            latest_tokens: int,
+            *,
+            tool: str = "codex-cli",
+            severity: str = "critical",
+            hours: float = 1.0,
+        ) -> ui.ContextHealth:
+            return ui.ContextHealth(
+                session_id=session_id,
+                tool=tool,
+                project_path=project_path,
+                age_hours=hours,
+                age_days=hours / 24,
+                event_count=4,
+                total_input_tokens=latest_tokens * 2,
+                total_output_tokens=1_000,
+                latest_turn_tokens=latest_tokens,
+                peak_turn_tokens=latest_tokens,
+                avg_turn_tokens=latest_tokens,
+                growth_rate=1_000,
+                bloat_ratio=0.98,
+                efficiency_pct=2.0,
+                is_stale=False,
+                is_critical_stale=False,
+                is_context_pressure=True,
+                is_context_critical=True,
+                is_high_bloat=True,
+                is_extreme_bloat=True,
+                severity=severity,
+                recommendations=["Start a fresh session before continuing."],
+            )
+
+        health_rows = [
+            _health("s1", "/repo/app", 200_000, hours=2),
+            _health("s2", "/repo/app", 150_000, hours=1),
+            _health("s3", "/repo/docs", 100_000, tool="claude-code", hours=1),
+        ]
+        with patch.object(ui, "analyze_all_sessions", return_value=health_rows):
+            cards = ui._context_health_cards(rows, [])
+
+        self.assertEqual(len(cards), 2)
+        app_card = next(card for card in cards if card["project"] == "/repo/app")
+        self.assertEqual(app_card["session_id"], "s1")
+        self.assertEqual(app_card["session_count"], 2)
+        self.assertEqual(app_card["critical_sessions"], 2)
+        self.assertIn("2 sessions need attention", app_card["group_note"])
+        self.assertEqual(len(app_card["related_sessions"]), 2)
+
     def test_session_detail_degrades_when_state_snapshot_read_fails(self) -> None:
         now = datetime.now(timezone.utc)
         row = LocalSession(

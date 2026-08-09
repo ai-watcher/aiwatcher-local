@@ -335,6 +335,37 @@ class HandoffTests(unittest.TestCase):
         self.assertNotIn("Decisions logged this session", capsule["next_brief"])
         self.assertEqual(capsule["decisions"], [])
 
+    def test_related_workspaces_are_context_not_duplicate_checkout_instruction(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                session = LocalSession(
+                    session_id="session-related",
+                    tool="codex-cli",
+                    project_path="/repo/main",
+                    updated_at=datetime.now(timezone.utc),
+                    model="gpt-5.5",
+                    tokens_in=300_000,
+                    agent_calls=500,
+                    tool_calls=200,
+                )
+
+                capsule = build_handoff_capsule(
+                    session,
+                    [],
+                    outcome="useful",
+                    related_workspaces=["/repo/docs", "/repo/main", "/repo/enterprise"],
+                )
+
+        brief = capsule["next_brief"]
+        self.assertEqual(capsule["related_workspaces"], ["/repo/docs", "/repo/enterprise"])
+        self.assertIn("- Related active workspace: /repo/docs", brief)
+        self.assertIn("- Related active workspace: /repo/enterprise", brief)
+        self.assertIn("confirm which repo owns the next checkpoint", brief)
+        self.assertIn("Continue in the same workspace/repository unless the user explicitly asks", brief)
+        self.assertIn("keep the same repository path active before editing", brief)
+        self.assertNotIn("clone the repository", brief.lower())
+
 
 if __name__ == "__main__":
     unittest.main()
