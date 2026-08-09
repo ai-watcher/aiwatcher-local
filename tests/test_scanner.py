@@ -160,6 +160,14 @@ class ProjectPathTests(unittest.TestCase):
 
         self.assertEqual(hints, [str(project.resolve())])
 
+    def test_absolute_path_pattern_keeps_full_windows_path(self) -> None:
+        match = scanner._ABSOLUTE_PATH_RE.search(
+            r"Please work in C:\Users\developer\projects\right-repo before editing."
+        )
+
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group("plain"), r"C:\Users\developer\projects\right-repo")
+
     def test_codex_rollout_uses_measured_token_events(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "sessions"

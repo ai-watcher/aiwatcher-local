@@ -2761,7 +2761,7 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         core, suffix = cli._split_brief_for_display(full)
         self.assertNotIn("Working directory", core)
         self.assertNotIn("Completion report", core)
-        self.assertIn("Working directory\n/repo/auth", suffix)
+        self.assertIn(f"Working directory\n{Path('/repo/auth').resolve()}", suffix)
         self.assertIn("Completion report", suffix)
         # The split must be reversible -- nothing in the static suffix may be
         # dropped from what actually gets sent when reassembled.
@@ -2978,7 +2978,7 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         brief = result["suggested_prompt"]
         self.assertTrue(brief.startswith(f"Task\n{original}"))
         self.assertIn("Do not reveal secret values", brief)
-        self.assertIn("/repo/payments", brief)
+        self.assertIn(str(Path("/repo/payments").resolve()), brief)
         self.assertNotIn("Original task:", brief)
 
     def test_execution_brief_omits_root_working_directory(self) -> None:

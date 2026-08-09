@@ -448,9 +448,10 @@ def _normalize_project_path(path: str | None) -> str | None:
 
 
 _ABSOLUTE_PATH_RE = re.compile(
-    r"(?<![\w.-])("
-    r"(?:~|/[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)+)"
-    r"|(?:[A-Za-z]:[\\/][^\\/:*?\"<>|\r\n]+)"
+    r"(?<![\w.-])(?:"
+    r"[`'\"](?P<quoted>(?:~|/|[A-Za-z]:[\\/])[^`'\"\r\n]+)[`'\"]"
+    r"|(?P<plain>(?:~|/[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)+)"
+    r"|(?:[A-Za-z]:[\\/][^\s:*?\"<>|`\r\n]+))"
     r")"
 )
 
@@ -490,7 +491,7 @@ def _project_hints_from_text(text: str | None) -> list[str]:
     hints: list[str] = []
     seen: set[str] = set()
     for match in _ABSOLUTE_PATH_RE.finditer(text):
-        normalized = _normalize_project_hint(match.group(1))
+        normalized = _normalize_project_hint(match.group("quoted") or match.group("plain"))
         if normalized and normalized not in seen:
             hints.append(normalized)
             seen.add(normalized)

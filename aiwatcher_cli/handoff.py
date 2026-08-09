@@ -179,7 +179,7 @@ def build_handoff_capsule(
     related = [
         item
         for item in dict.fromkeys(str(path) for path in (related_workspaces or []) if path)
-        if item != project_label
+        if item not in {project_label, session.project_path}
     ]
 
     evidence_lines = [
