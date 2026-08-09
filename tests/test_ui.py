@@ -749,6 +749,42 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(capsule["session_id"], "cached-fast")
         self.assertIn("runtime_attachment", capsule)
 
+    def test_recent_log_does_not_claim_live_chat_attachment(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="recent-log",
+            tool="codex-cli",
+            project_path="/repo/fast",
+            source_path="/Users/test/.codex/sessions/recent-log.jsonl",
+            started_at=now - timedelta(minutes=10),
+            updated_at=now - timedelta(minutes=2),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with ui._SUMMARY_CACHE_LOCK:
+                ui._SESSION_INDEX.clear()
+                ui._SUMMARY_CACHE.clear()
+            ui._index_sessions([row])
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "_read_summary_disk_cache", return_value=None),
+                patch.object(ui, "scan_all_events", return_value=[]),
+                patch.object(ui, "safe_runtime_processes", return_value=[]),
+                patch("aiwatcher_cli.runtime_attachment.sys.platform", "darwin"),
+                patch("aiwatcher_cli.runtime_attachment.shutil.which", return_value=None),
+            ):
+                detail = ui.build_session_detail("recent-log", days=7)
+                capsule = ui.build_handoff_detail("recent-log", days=7)
+
+        self.assertEqual(detail["state"]["label"], "Active log")
+        self.assertEqual(detail["runtime_attachment"]["action_label"], "Open workspace")
+        self.assertFalse(detail["runtime_attachment"]["exact_return_available"])
+        self.assertEqual(detail["runtime_attachment"]["exact_return_label"], "Workspace only")
+        self.assertIn("Exact AI chat return is not available", detail["runtime_attachment"]["reason"])
+        self.assertEqual(capsule["source_path"], "/Users/test/.codex/sessions/recent-log.jsonl")
+        self.assertEqual(capsule["runtime_attachment"]["exact_return_label"], "Workspace only")
+        self.assertNotIn("/Users/test/.codex/sessions/recent-log.jsonl", capsule["next_brief"])
+
     def test_context_health_groups_duplicate_project_sessions(self) -> None:
         now = datetime.now(timezone.utc)
         rows = [

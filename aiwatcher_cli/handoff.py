@@ -354,6 +354,7 @@ def build_handoff_capsule(
         "project_reliable": project_reliable,
         "tool": session.tool,
         "model": session.model or "unknown",
+        "source_path": session.source_path,
         "target": target,
         "target_label": TARGET_LABELS[target],
         "target_guidance": target_guidance,

@@ -32,6 +32,12 @@ class RuntimeAttachment:
     project_path: str | None = None
     pid: int | None = None
     app_name: str | None = None
+    exact_return_available: bool = False
+    exact_return_label: str = "Exact chat unavailable"
+    exact_return_reason: str = (
+        "Local history does not include a verified app window, terminal pane, or chat deep link for this exact session."
+    )
+    native_companion_required: bool = True
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -48,6 +54,10 @@ class RuntimeAttachment:
             "project_path": self.project_path,
             "pid": self.pid,
             "app_name": self.app_name,
+            "exact_return_available": self.exact_return_available,
+            "exact_return_label": self.exact_return_label,
+            "exact_return_reason": self.exact_return_reason,
+            "native_companion_required": self.native_companion_required,
         }
 
 
@@ -104,7 +114,7 @@ def runtime_attachment_for_session(
     if process:
         process_project = _project_path(process.cwd) or project_path
         mode, reason, available = _workspace_mode(session.tool, process_project)
-        action_label = "Open workspace" if available else "Copy handoff"
+        action_label = "Open workspace" if available else "No live return"
         return RuntimeAttachment(
             session_id=session.session_id,
             level="active_process",
@@ -122,6 +132,11 @@ def runtime_attachment_for_session(
             project_path=process_project,
             pid=process.pid,
             app_name=app_name,
+            exact_return_label="Needs native companion",
+            exact_return_reason=(
+                "AIWatcher matched a live process, but returning to the exact chat needs an opt-in native companion "
+                "that records a trusted window, terminal pane, or host deep link."
+            ),
         )
 
     if status not in {"active", "recent"}:
@@ -130,7 +145,7 @@ def runtime_attachment_for_session(
             level="historical",
             mode="none",
             label="Historical session",
-            action_label="Copy handoff",
+            action_label="No live return",
             available=False,
             confidence="low",
             reason="This session is not fresh enough for live return. Use it for evidence, prompt optimization, or a handoff brief.",
@@ -138,6 +153,7 @@ def runtime_attachment_for_session(
             surface=session.surface,
             project_path=project_path,
             app_name=app_name,
+            native_companion_required=False,
         )
 
     if session.surface == "desktop" and app_name:
@@ -157,6 +173,11 @@ def runtime_attachment_for_session(
             surface=session.surface,
             project_path=project_path,
             app_name=app_name,
+            exact_return_label="App focus only",
+            exact_return_reason=(
+                f"AIWatcher can bring {app_name} forward. Returning to the exact desktop chat needs a platform "
+                "API, extension, or explicit native companion with accessibility permission."
+            ),
         )
 
     mode, reason, available = _workspace_mode(session.tool, project_path)
@@ -165,7 +186,7 @@ def runtime_attachment_for_session(
         level="workspace" if available else "unavailable",
         mode=mode,
         label="Workspace return available" if available else "No live return target",
-        action_label="Open workspace" if available else "Copy handoff",
+        action_label="Open workspace" if available else "No live return",
         available=available,
         confidence="medium" if available else "low",
         reason=reason,
@@ -173,6 +194,14 @@ def runtime_attachment_for_session(
         surface=session.surface,
         project_path=project_path,
         app_name=app_name,
+        exact_return_label="Workspace only" if available else "Exact chat unavailable",
+        exact_return_reason=(
+            "AIWatcher can open the workspace, but exact chat return is unavailable without a live process/window "
+            "attachment or platform deep link."
+            if available
+            else "AIWatcher only found a local session log; no safe return target is available."
+        ),
+        native_companion_required=available,
     )
 
 
@@ -212,4 +241,3 @@ def perform_runtime_return(attachment: RuntimeAttachment) -> dict[str, object]:
         "message": "No supported return action is available on this platform yet.",
         "attachment": attachment.to_json(),
     }
-

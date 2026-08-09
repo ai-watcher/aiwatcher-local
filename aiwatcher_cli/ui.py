@@ -403,30 +403,30 @@ def session_state(row: LocalSession, *, now: datetime | None = None) -> dict[str
     if age_seconds <= ACTIVE_SESSION_MINUTES * 60:
         return {
             "status": "active",
-            "label": "Active",
+            "label": "Active log",
             "tone": "healthy",
-            "reason": "Recently updated. Actions can help the current flow.",
+            "reason": "This local session log was updated recently. Exact chat return still requires a live runtime attachment.",
             "age_seconds": round(age_seconds, 1),
         }
     if age_seconds <= RECENT_SESSION_HOURS * 3600:
         return {
             "status": "recent",
-            "label": "Recent",
+            "label": "Recent log",
             "tone": "warning",
-            "reason": "Likely still resumable, but not confirmed live.",
+            "reason": "Recently updated log. AIWatcher has not confirmed a live tool process or exact chat handle.",
             "age_seconds": round(age_seconds, 1),
         }
     if age_seconds >= 7 * 24 * 3600:
         return {
             "status": "stale",
-            "label": "Stale",
+            "label": "Stale log",
             "tone": "limited",
             "reason": "Old local session. Use it for evidence or handoff, not live control.",
             "age_seconds": round(age_seconds, 1),
         }
     return {
         "status": "ended",
-        "label": "Ended",
+        "label": "Ended log",
         "tone": "limited",
         "reason": "No live tool connection is available for this session.",
         "age_seconds": round(age_seconds, 1),
@@ -2338,6 +2338,11 @@ HTML = r"""<!doctype html>
     .runtime-copy { display: flex; align-items: center; gap: 9px; min-width: 0; }
     .runtime-copy strong { white-space: nowrap; }
     .runtime-copy span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .runtime-source {
+      display: grid; grid-template-columns: 110px 1fr; gap: 10px; align-items: start;
+      margin-top: 12px; color: var(--muted); font-size: 13px;
+    }
+    .runtime-source span { overflow-wrap: anywhere; font-family: var(--mono); color: var(--text); }
     .cache-pill, .health-pill, .session-state {
       display: inline-flex; align-items: center; gap: 6px; border-radius: 999px;
       border: 1px solid var(--line); padding: 4px 8px; font-size: 11px; font-weight: 800;
@@ -3152,6 +3157,30 @@ function sessionStatePill(state) {
   if (!state) return '';
   return `<span class="session-state ${esc(state.status || 'unknown')}">${esc(state.label || state.status || 'unknown')}</span>`;
 }
+function runtimeReturnPanel(runtime, sourcePath) {
+  runtime = runtime || {};
+  const available = !!runtime.available;
+  const level = runtime.level || 'unavailable';
+  const targetLabel = available
+    ? (level === 'app' ? 'App return available' : level === 'active_process' ? 'Workspace return available' : 'Workspace available')
+    : 'Log only';
+  const reason = runtime.reason || 'AIWatcher found a local session log, but no live process, window handle, or platform deep link for this exact chat.';
+  const exactLabel = runtime.exact_return_label || 'Exact chat unavailable';
+  const exactReason = runtime.exact_return_reason || 'Exact chat return needs a verified app window, terminal pane, or host deep link.';
+  const source = sourcePath || 'unknown';
+  const action = available
+    ? `<button class="btn-primary" data-session="${esc(runtime.session_id || '')}" onclick="returnToRuntime(this.dataset.session)">${esc(runtime.action_label || 'Open workspace')}</button>`
+    : `<button class="btn-quiet" disabled>No exact return</button>`;
+  return `<section class="detail-section runtime-return">
+    <div class="section-title">
+      <div><h3>Return target</h3><p>${esc(reason)}</p></div>
+      <span class="session-state ${available ? 'active' : 'ended'}">${esc(targetLabel)}</span>
+    </div>
+    <div class="copy-row">${action}<button class="btn-quiet" data-source="${esc(source)}" onclick="copyText(this.dataset.source, 'Session log path copied')">Copy log path</button></div>
+    <div class="runtime-source"><strong>Session log</strong><span>${esc(source)}</span></div>
+    <p class="tool-link-note"><strong>${esc(exactLabel)}:</strong> ${esc(exactReason)}</p>
+  </section>`;
+}
 let watcherCommand = 'aiwatcher watch --notify --overlay --interval 60';
 function renderWatcher(watcher) {
   const pill = document.getElementById('watcherPill');
@@ -3294,6 +3323,7 @@ function renderHandoff(capsule) {
       <span class="hint">Off by default: everything else in this brief is metadata (counts, hashes, file paths). This adds your actual prompt text from the costliest turn, so review it before pasting into another tool.</span>
     </label>
   </section>
+  ${runtimeReturnPanel(runtime, capsule.source_path)}
   <section class="detail-section"><h3>Why hand off now</h3>
     <ul class="insight-list">${(capsule.warnings || []).map(item => `<li>${esc(item)}</li>`).join('')}</ul>
   </section>
@@ -3720,6 +3750,7 @@ async function selectSession(sessionId) {
     ${miniStats({ sessions: 1, api_value: s.api_value, tokens: s.tokens_label, tool_calls: s.tool_calls })}
     <div class="pill-row">${sessionStatePill(s.state)}${outcomePill(s.outcome)}</div>
     </section>
+    ${runtimeReturnPanel(s.runtime_attachment, s.source_path)}
     ${renderSessionActions(s)}
     ${outcomeActions}
     ${renderVerdict(s)}

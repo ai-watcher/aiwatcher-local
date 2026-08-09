@@ -30,7 +30,10 @@ class RuntimeAttachmentTests(unittest.TestCase):
         self.assertEqual(attachment.mode, "app")
         self.assertEqual(attachment.action_label, "Open Codex")
         self.assertTrue(attachment.available)
+        self.assertFalse(attachment.exact_return_available)
+        self.assertEqual(attachment.exact_return_label, "App focus only")
         self.assertIn("does not expose a stable deep link", attachment.reason)
+        self.assertIn("exact desktop chat", attachment.exact_return_reason)
 
     def test_matching_process_records_active_attachment_without_overclaiming_focus(self) -> None:
         session = LocalSession(
@@ -59,6 +62,8 @@ class RuntimeAttachmentTests(unittest.TestCase):
 
         self.assertEqual(attachment.level, "active_process")
         self.assertEqual(attachment.pid, 123)
+        self.assertFalse(attachment.exact_return_available)
+        self.assertEqual(attachment.exact_return_label, "Needs native companion")
         self.assertIn("Exact terminal/chat focus needs", attachment.reason)
 
     def test_stale_session_uses_handoff_instead_of_live_return(self) -> None:
@@ -71,7 +76,8 @@ class RuntimeAttachmentTests(unittest.TestCase):
 
         self.assertFalse(attachment.available)
         self.assertEqual(attachment.level, "historical")
-        self.assertEqual(attachment.action_label, "Copy handoff")
+        self.assertEqual(attachment.action_label, "No live return")
+        self.assertFalse(attachment.native_companion_required)
 
     def test_perform_runtime_return_opens_macos_app(self) -> None:
         session = LocalSession(
