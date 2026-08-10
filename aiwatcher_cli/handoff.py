@@ -294,7 +294,7 @@ def build_handoff_capsule(
         checkpoint_lines.insert(0, "- Ask the user to confirm the repository/path before editing.")
 
     next_brief = "\n".join([
-        "AIWatcher fresh-session handoff",
+        "AIWatcher Fresh Start brief",
         "",
         "You are starting a fresh AI coding session. Do not assume access to the previous chat.",
         "Continue from repository state and local evidence, not from hidden conversation history.",
@@ -326,7 +326,7 @@ def build_handoff_capsule(
         f"{_money(session.cost_usd)} API-equivalent value",
         f"- Outcome status: {outcome or evidence.inferred_outcome or 'not confirmed'}",
         "",
-        "Why AIWatcher suggested handoff",
+        "Why AIWatcher suggested Fresh Start",
         *warning_lines,
         "",
         "Local evidence to inspect",
@@ -383,7 +383,7 @@ def render_handoff_capsule(capsule: dict[str, object]) -> str:
     usage = capsule.get("usage") if isinstance(capsule.get("usage"), dict) else {}
     evidence = capsule.get("evidence") if isinstance(capsule.get("evidence"), dict) else {}
     lines = [
-        "AIWatcher handoff capsule",
+        "AIWatcher Fresh Start capsule",
         "",
         f"Use this when moving work into a fresh {capsule.get('target_label') or 'Claude/Codex/Cursor'} session.",
         "",
@@ -403,7 +403,7 @@ def render_handoff_capsule(capsule: dict[str, object]) -> str:
             f"{len(evidence.get('tests') or [])} test artifact(s)"
         ),
         "",
-        "Why hand off now",
+        "Why start fresh now",
     ]
     lines.extend(f"- {item}" for item in capsule.get("warnings", []))
     lines.extend([

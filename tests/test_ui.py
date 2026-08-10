@@ -7,15 +7,20 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from urllib import error, request
 from unittest.mock import Mock, patch
 
 from aiwatcher_cli import ui
 from aiwatcher_cli.local_state import (
+    link_handoff_decision_next_session,
     recent_handoff_decisions,
     record_command_decision,
+    record_evidence_snapshot,
+    record_handoff_decision,
     record_intervention,
     record_outcome,
 )
@@ -23,6 +28,41 @@ from aiwatcher_cli.scanner import LocalEvent, LocalSession, SurfaceCoverage
 
 
 class DashboardServeTests(unittest.TestCase):
+    def _serve_one(self):
+        server = ui.ThreadingHTTPServer(("127.0.0.1", 0), ui.UIHandler)
+        thread = threading.Thread(target=server.handle_request)
+        thread.start()
+        return server, thread, f"http://127.0.0.1:{server.server_address[1]}"
+
+    def test_runtime_return_requires_post(self) -> None:
+        server, thread, base = self._serve_one()
+        with patch.object(ui, "build_runtime_return", return_value={"ok": True}) as build_runtime_return:
+            try:
+                with self.assertRaises(error.HTTPError) as raised:
+                    request.urlopen(f"{base}/api/runtime-return?id=sess-1", timeout=5)
+                self.assertEqual(raised.exception.code, 404)
+                build_runtime_return.assert_not_called()
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
+        server, thread, base = self._serve_one()
+        payload = json.dumps({"session_id": "sess-1"}).encode("utf-8")
+        http_request = request.Request(
+            f"{base}/api/runtime-return",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with patch.object(ui, "build_runtime_return", return_value={"ok": True}) as build_runtime_return:
+            try:
+                with request.urlopen(http_request, timeout=5) as response:
+                    self.assertEqual(response.status, 200)
+                build_runtime_return.assert_called_once_with("sess-1", 30)
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
     def test_serve_records_the_actually_bound_port(self) -> None:
         """Issue #31 (S-32): `watch --notify`'s dashboard deep link has to
         know where the dashboard actually landed after auto-port fallback,
@@ -88,31 +128,137 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Outcome evidence", ui.HTML)
         self.assertIn('class="detail-section recommended-action"', ui.HTML)
         self.assertIn("Recommended: continue in a fresh session", ui.HTML)
-        self.assertIn("Create handoff capsule", ui.HTML)
+        self.assertIn("Open Fresh Start", ui.HTML)
+        self.assertIn("Fresh Start", ui.HTML)
+        self.assertIn("renderIdentityStrip", ui.HTML)
+        self.assertIn("identity_label", ui.HTML)
+        self.assertIn("Copy it into a fresh chat only after the identity below matches", ui.HTML)
+        self.assertIn("copyFreshStartFromDrawer", ui.HTML)
+        self.assertIn("runtime.level !== 'app'", ui.HTML)
+        self.assertIn("runtime.available && runtime.level !== 'app'", ui.HTML)
+        self.assertIn("Fresh Start receipt saved", ui.HTML)
+        self.assertIn("Loading session details for", ui.HTML)
+        self.assertIn("/api/session-summary", ui.HTML)
+        self.assertIn("/api/handoff-basic", ui.HTML)
+        self.assertIn("renderSessionSummary", ui.HTML)
+        self.assertIn("Loading session identity for", ui.HTML)
+        self.assertIn("Building Fresh Start brief", ui.HTML)
+        self.assertIn("Still indexing this session. Retrying", ui.HTML)
         self.assertIn("returnToRuntime", ui.HTML)
+        self.assertIn("requestRuntimeReturn", ui.HTML)
         self.assertIn("/api/runtime-return", ui.HTML)
-        self.assertIn('class="btn-primary" onclick="openHandoff', ui.HTML)
+        self.assertIn("method: 'POST'", ui.HTML)
+        self.assertIn("JSON.stringify({session_id: sessionId})", ui.HTML)
+        self.assertIn("primaryId === 'handoff' ? 'btn-primary' : 'btn-quiet'", ui.HTML)
+        self.assertIn("onclick=\"openHandoff", ui.HTML)
         self.assertIn("watch --notify", ui.HTML)
         self.assertIn("/api/handoff", ui.HTML)
         self.assertIn("/api/handoff-decision", ui.HTML)
-        self.assertIn("copyHandoffFromBubble", ui.HTML)
-        self.assertIn("Copy handoff", ui.HTML)
         self.assertIn("renderHandoffCopied", ui.HTML)
-        self.assertIn("Handoff copied. Start a fresh chat now.", ui.HTML)
-        self.assertIn("decision receipt saved", ui.HTML)
+        self.assertIn("Fresh Start ready", ui.HTML)
+        self.assertIn("Fresh Start receipt saved", ui.HTML)
+        self.assertNotIn("Copy handoff", ui.HTML)
         self.assertIn("Include prompt excerpt", ui.HTML)
         self.assertIn("Evidence captured", ui.HTML)
         self.assertNotIn("window.alert", ui.HTML)
 
+    def test_fresh_start_receipt_rows_show_observed_next_session_proof(self) -> None:
+        now = datetime.now(timezone.utc)
+        source = LocalSession(
+            session_id="source",
+            tool="claude-code",
+            project_path="/repo/app",
+            started_at=now - timedelta(hours=2),
+            updated_at=now - timedelta(hours=1),
+            tokens_in=180_000,
+            tokens_out=12_000,
+            cost_usd=1.25,
+            agent_calls=10,
+            tool_calls=6,
+        )
+        next_session = LocalSession(
+            session_id="next",
+            tool="codex-cli",
+            project_path="/repo/app",
+            started_at=now + timedelta(minutes=5),
+            updated_at=now + timedelta(minutes=12),
+            tokens_in=14_000,
+            tokens_out=2_000,
+            cost_usd=0.08,
+            agent_calls=4,
+            tool_calls=2,
+        )
+        record = record_handoff_decision(
+            session_id="source",
+            decision="new_chat",
+            reason="Context pressure.",
+            expected_saved_context_tokens=166_000,
+        )
+        link_handoff_decision_next_session(
+            record["id"],
+            next_session_id="next",
+            correlation={"status": "linked", "confidence": "high", "reason": "same project after action"},
+        )
+        record_outcome("next", "useful")
+        record_evidence_snapshot(
+            "next",
+            {
+                "inferred_outcome": "useful",
+                "confidence": "observed",
+                "commits": [{"sha": "abc123"}],
+                "tests": [{"artifact": "pytest"}],
+            },
+        )
+
+        rows = ui._handoff_decision_rows(limit=5, sessions=[source, next_session])
+
+        self.assertEqual(rows[0]["proof_status"], "Next session observed")
+        self.assertEqual(rows[0]["source_session_id"], "source")
+        self.assertEqual(rows[0]["next_session_id"], "next")
+        self.assertEqual(rows[0]["next_usage"]["tokens_label"], "16.0k")
+        self.assertEqual(rows[0]["source_usage"]["api_value_label"], "$1.25")
+        self.assertEqual(rows[0]["next_usage"]["cost_per_model_call_label"], "$0.02")
+        self.assertEqual(rows[0]["outcome"], "useful")
+        self.assertEqual(rows[0]["inferred_outcome"], "useful")
+        self.assertEqual(rows[0]["proof_evidence"]["label"], "observed")
+        self.assertEqual(rows[0]["proof_evidence"]["commits"], 1)
+        self.assertEqual(rows[0]["proof_evidence"]["tests"], 1)
+        self.assertEqual(rows[0]["observed_followup"]["source_tokens_label"], "192.0k")
+        self.assertEqual(rows[0]["observed_followup"]["next_tokens_label"], "16.0k")
+        self.assertEqual(rows[0]["observed_followup"]["source_api_value_label"], "$1.25")
+        self.assertEqual(rows[0]["observed_followup"]["next_api_value_label"], "$0.08")
+        self.assertEqual(rows[0]["observed_followup"]["next_tokens_per_model_call_label"], "4.0k")
+        self.assertEqual(rows[0]["observed_followup"]["direction"], "smaller")
+        self.assertIn("not a final savings claim", rows[0]["observed_followup"]["basis"])
+
+    def test_fresh_start_receipt_rows_wait_before_follow_up_is_observed(self) -> None:
+        record_handoff_decision(
+            session_id="source",
+            decision="copy_handoff",
+            reason="Context pressure.",
+            expected_saved_context_tokens=42_000,
+        )
+
+        rows = ui._handoff_decision_rows(limit=5, sessions=[
+            LocalSession(session_id="source", tool="claude-code", project_path="/repo/app")
+        ])
+
+        self.assertEqual(rows[0]["proof_status"], "Waiting for next session")
+        self.assertIsNone(rows[0]["next_usage"])
+        self.assertIsNone(rows[0]["outcome"])
+
     def test_overlay_page_is_a_local_handoff_companion(self) -> None:
-        self.assertIn("AIWatcher Handoff", ui.OVERLAY_HTML)
+        self.assertIn("AIWatcher Fresh Start", ui.OVERLAY_HTML)
         self.assertIn("/api/summary?days=7", ui.OVERLAY_HTML)
         self.assertIn("/api/handoff-decision", ui.OVERLAY_HTML)
         self.assertIn("/api/ambient-intervention-action", ui.OVERLAY_HTML)
         self.assertIn("/api/ambient-intervention?id=", ui.OVERLAY_HTML)
-        self.assertIn("Copy fresh-session brief", ui.OVERLAY_HTML)
+        self.assertIn("Copy Fresh Start brief", ui.OVERLAY_HTML)
         self.assertIn("Copy focused next step", ui.OVERLAY_HTML)
         self.assertIn("Inspect and stop", ui.OVERLAY_HTML)
+        self.assertIn("Loading this session evidence", ui.OVERLAY_HTML)
+        self.assertIn("Local session", ui.OVERLAY_HTML)
+        self.assertIn("Last activity:", ui.OVERLAY_HTML)
         self.assertIn("Snooze 15 min", ui.OVERLAY_HTML)
         self.assertIn("Dismiss", ui.OVERLAY_HTML)
         self.assertIn("Prompt/source content is not stored", ui.OVERLAY_HTML)
@@ -204,10 +350,32 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(summary["context_health"][0]["severity"], "critical")
         self.assertEqual(summary["context_health"][0]["action"]["label"], "Start fresh")
         self.assertEqual(summary["handoff_bubble"]["session_id"], "bloated")
-        self.assertIn("Start a new chat", summary["handoff_bubble"]["title"])
+        self.assertIn("Fresh Start recommended", summary["handoff_bubble"]["title"])
         # Measured cache reads on the latest turn, not latest_turn_tokens * bloat_ratio.
         self.assertEqual(summary["handoff_bubble"]["expected_saved_context_tokens"], 220_000)
         self.assertEqual(summary["handoff_decisions"], [])
+
+    def test_handoff_bubble_does_not_auto_open_unverified_desktop_app(self) -> None:
+        bubble = ui._handoff_bubble([{
+            "session_id": "claude-desktop",
+            "project": "/repo/app",
+            "tool": "claude-code",
+            "severity": "critical",
+            "latest_turn_tokens": "165.0k",
+            "estimated_replayed_context_tokens": 120_000,
+            "estimated_replayed_context_label": "120.0k",
+            "can_handoff": True,
+            "recommendation": "Context is critical.",
+            "runtime_attachment": {
+                "available": True,
+                "level": "app",
+                "action_label": "Open Claude",
+            },
+        }])
+
+        self.assertIsNotNone(bubble)
+        self.assertEqual(bubble["primary_label"], "Copy Fresh Start brief")
+        self.assertNotIn("Open Claude", bubble["primary_label"])
 
     def test_recent_handoff_decision_suppresses_repeat_bubble(self) -> None:
         now = datetime.now(timezone.utc)
@@ -402,6 +570,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(summary["totals"]["sessions"], 1)
         self.assertEqual(summary["cache"]["status"], "building")
         self.assertIn("watcher", summary)
+        self.assertEqual(summary["context_health_status"], "pending")
 
     def test_stale_summary_disk_cache_without_schema_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -488,9 +657,31 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["status"], "active")
         self.assertTrue(any(action["id"] == "review_outcome" for action in actions))
         self.assertTrue(any(action["id"] == "handoff" for action in actions))
+        self.assertEqual(sum(1 for action in actions if action.get("primary")), 1)
+        handoff = next(action for action in actions if action["id"] == "handoff")
+        self.assertTrue(handoff["primary"])
+        self.assertEqual(handoff["label"], "Open Fresh Start")
         open_tool = next(action for action in actions if action["id"] == "open_tool")
         self.assertNotEqual(open_tool["level"], "exact_session")
         self.assertIn(open_tool["level"], {"workspace", "unavailable"})
+
+    def test_historical_heavy_session_prioritizes_inspection_over_handoff(self) -> None:
+        row = LocalSession(
+            session_id="old-heavy",
+            tool="codex-cli",
+            project_path="/repo",
+            updated_at=datetime.now(timezone.utc) - timedelta(days=8),
+            tokens_in=600_000,
+            tokens_out=20_000,
+            agent_calls=260,
+        )
+
+        actions = ui.session_actions(row, outcome=None)
+        handoff = next(action for action in actions if action["id"] == "handoff")
+
+        self.assertEqual(handoff["label"], "Inspect evidence")
+        self.assertFalse(handoff["primary"])
+        self.assertTrue(next(action for action in actions if action["id"] == "review_outcome")["primary"])
 
     def test_serve_terminates_started_ambient_resource_on_stop(self) -> None:
         resource = Mock()
@@ -754,6 +945,73 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(capsule["session_id"], "cached-fast")
         self.assertIn("runtime_attachment", capsule)
 
+    def test_basic_handoff_detail_is_copyable_without_event_scan(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="basic-fast",
+            tool="codex-cli",
+            project_path="/repo/fast",
+            started_at=now - timedelta(hours=2),
+            updated_at=now - timedelta(minutes=5),
+            tokens_in=120_000,
+            tokens_out=8_000,
+            cost_usd=0.42,
+            agent_calls=8,
+            tool_calls=3,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with ui._SUMMARY_CACHE_LOCK:
+                ui._SESSION_INDEX.clear()
+                ui._SUMMARY_CACHE.clear()
+            ui._index_sessions([row])
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all_events", side_effect=AssertionError("basic handoff should not scan events")),
+                patch.object(ui, "build_outcome_evidence", side_effect=AssertionError("basic handoff should not build git evidence")),
+                patch.object(ui, "safe_runtime_processes", return_value=[]),
+            ):
+                capsule = ui.build_basic_handoff_detail("basic-fast", days=7, target="codex")
+
+        self.assertTrue(capsule["basic"])
+        self.assertEqual(capsule["enrichment_status"], "loading")
+        self.assertEqual(capsule["usage"]["tokens_label"], "128.0k")
+        self.assertIn("AIWatcher Fresh Start brief", capsule["next_brief"])
+        self.assertIn("Detailed git, timeline, and prompt evidence is still loading", capsule["next_brief"])
+
+    def test_session_summary_uses_cached_index_without_event_scan(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="summary-fast",
+            tool="codex-cli",
+            project_path="/repo/fast",
+            started_at=now - timedelta(hours=1),
+            updated_at=now - timedelta(minutes=3),
+            tokens_in=60_000,
+            tokens_out=3_000,
+            agent_calls=12,
+            tool_calls=5,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with ui._SUMMARY_CACHE_LOCK:
+                ui._SESSION_INDEX.clear()
+                ui._SUMMARY_CACHE.clear()
+            ui._index_sessions([row])
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "_read_summary_disk_cache", return_value=None),
+                patch.object(ui, "rows_for_window", side_effect=AssertionError("slow session scan should not run")),
+                patch.object(ui, "scan_all_events", side_effect=AssertionError("event scan should not run")),
+                patch.object(ui, "safe_runtime_processes", return_value=[]),
+            ):
+                summary = ui.build_session_summary("summary-fast", days=7)
+
+        self.assertEqual(summary["session_id"], "summary-fast")
+        self.assertTrue(summary["summary_only"])
+        self.assertEqual(summary["detail_status"], "loading")
+        self.assertIn("runtime_attachment", summary)
+
     def test_recent_log_does_not_claim_live_chat_attachment(self) -> None:
         now = datetime.now(timezone.utc)
         row = LocalSession(
@@ -783,11 +1041,13 @@ class DashboardWindowTests(unittest.TestCase):
 
         self.assertEqual(detail["state"]["label"], "Active log")
         self.assertEqual(detail["runtime_attachment"]["action_label"], "Open workspace")
+        self.assertEqual(detail["runtime_attachment"]["identity_label"], "Likely workspace")
         self.assertFalse(detail["runtime_attachment"]["exact_return_available"])
         self.assertEqual(detail["runtime_attachment"]["exact_return_label"], "Workspace only")
         self.assertIn("Exact AI chat return is not available", detail["runtime_attachment"]["reason"])
         self.assertEqual(capsule["source_path"], "/Users/test/.codex/sessions/recent-log.jsonl")
         self.assertEqual(capsule["runtime_attachment"]["exact_return_label"], "Workspace only")
+        self.assertEqual(capsule["runtime_attachment"]["identity_label"], "Likely workspace")
         self.assertNotIn("/Users/test/.codex/sessions/recent-log.jsonl", capsule["next_brief"])
 
     def test_context_health_groups_duplicate_project_sessions(self) -> None:

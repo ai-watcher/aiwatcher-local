@@ -77,14 +77,42 @@ class LocalStateTests(unittest.TestCase):
                     decision="new_chat",
                     reason="Critical context pressure.",
                     expected_saved_context_tokens=240_000,
+                    action_channel="dashboard",
                 )
                 recent = local_state.recent_handoff_decisions()
 
         self.assertEqual(record["phase"], "control")
         self.assertEqual(record["intervention_type"], "handoff_bubble")
+        self.assertEqual(record["receipt_kind"], "fresh_start")
+        self.assertEqual(record["source_session_id"], "session-1")
+        self.assertEqual(record["action_channel"], "dashboard")
+        self.assertIsNone(record["next_session_id"])
+        self.assertEqual(record["next_session_correlation"]["status"], "waiting")
         self.assertEqual(recent[0]["decision"], "new_chat")
         self.assertEqual(recent[0]["expected_saved_context_tokens"], 240_000)
         self.assertNotIn("prompt", json.dumps(recent).lower())
+
+    def test_link_handoff_decision_next_session_keeps_source_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                record = local_state.record_handoff_decision(
+                    session_id="source-session",
+                    decision="new_chat",
+                    reason="Critical context pressure.",
+                )
+                linked = local_state.link_handoff_decision_next_session(
+                    record["id"],
+                    next_session_id="next-session",
+                    correlation={"status": "linked", "confidence": "high", "reason": "same project"},
+                )
+                recent = local_state.recent_handoff_decisions()
+
+        self.assertTrue(linked)
+        self.assertEqual(recent[0]["session_id"], "source-session")
+        self.assertEqual(recent[0]["source_session_id"], "source-session")
+        self.assertEqual(recent[0]["next_session_id"], "next-session")
+        self.assertEqual(recent[0]["next_session_correlation"]["status"], "linked")
 
     def test_intervention_stores_hashes_not_prompt_text(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -279,12 +307,39 @@ class LocalStateTests(unittest.TestCase):
                     record["fingerprint"], state="displayed", channel="overlay"
                 )
                 self.assertFalse(local_state.ambient_intervention_delivery_allowed(record["fingerprint"], channel="overlay"))
-                self.assertTrue(local_state.ambient_intervention_delivery_allowed(record["fingerprint"], channel="notification"))
+                self.assertFalse(local_state.ambient_intervention_delivery_allowed(record["fingerprint"], channel="notification"))
                 rows = local_state.recent_ambient_interventions()
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["id"], record["id"])
         self.assertEqual(rows[0]["expected_savings"]["context_tokens"], 180_000)
+
+    def test_ambient_visible_channel_can_realert_when_severity_worsens(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                record = local_state.upsert_ambient_intervention(
+                    session_id="sess-1",
+                    signal_kind="velocity",
+                    action="narrow scope",
+                    severity="warning",
+                    session_stamp="stamp-1",
+                    reason="Fast activity.",
+                )
+                local_state.record_ambient_intervention_action(
+                    record["fingerprint"], state="displayed", channel="overlay"
+                )
+                self.assertFalse(local_state.ambient_intervention_delivery_allowed(record["fingerprint"], channel="notification"))
+                local_state.upsert_ambient_intervention(
+                    session_id="sess-1",
+                    signal_kind="velocity",
+                    action="narrow scope",
+                    severity="critical",
+                    session_stamp="stamp-2",
+                    reason="Fast activity worsened.",
+                )
+
+                self.assertTrue(local_state.ambient_intervention_delivery_allowed(record["fingerprint"], channel="notification"))
 
     def test_ambient_action_stays_quiet_until_severity_worsens(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -306,6 +361,45 @@ class LocalStateTests(unittest.TestCase):
                     session_id="sess-1", signal_kind="velocity", action="narrow scope",
                     severity="critical", session_stamp="stamp-3", reason="Fast activity became critical.",
                 )
+                self.assertTrue(local_state.ambient_intervention_delivery_allowed(record["fingerprint"], channel="overlay"))
+
+    def test_late_delivery_events_do_not_clear_terminal_ambient_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                record = local_state.upsert_ambient_intervention(
+                    session_id="sess-1", signal_kind="critical_context", action="start fresh",
+                    severity="critical", session_stamp="stamp-1", reason="Context pressure.",
+                )
+                local_state.record_ambient_intervention_action(record["fingerprint"], state="acted", channel="overlay")
+                local_state.record_ambient_intervention_action(record["fingerprint"], state="failed", channel="overlay")
+                local_state.record_ambient_intervention_action(record["fingerprint"], state="displayed", channel="notification")
+                rows = local_state.recent_ambient_interventions()
+
+        self.assertEqual(rows[0]["state"], "acted")
+        self.assertEqual(rows[0]["channels"]["overlay"]["state"], "failed")
+        self.assertEqual(rows[0]["channels"]["notification"]["state"], "displayed")
+        self.assertEqual(rows[0]["events"][-1]["state"], "displayed")
+
+    def test_failed_ambient_delivery_retries_after_backoff(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                record = local_state.upsert_ambient_intervention(
+                    session_id="sess-1", signal_kind="critical_context", action="start fresh",
+                    severity="critical", session_stamp="stamp-1", reason="Context pressure.",
+                )
+                local_state.record_ambient_intervention_action(record["fingerprint"], state="failed", channel="overlay")
+                self.assertFalse(local_state.ambient_intervention_delivery_allowed(record["fingerprint"], channel="overlay"))
+                rows = local_state.recent_ambient_interventions()
+                rows[0]["channels"]["overlay"]["updated_at"] = (
+                    datetime.now(timezone.utc) - timedelta(minutes=6)
+                ).isoformat()
+                with local_state._locked_state():
+                    data = local_state._load()
+                    data["ambient_interventions"] = list(reversed(rows))
+                    local_state._save(data)
+
                 self.assertTrue(local_state.ambient_intervention_delivery_allowed(record["fingerprint"], channel="overlay"))
 
     def test_ambient_snooze_expires_without_new_session_activity(self) -> None:

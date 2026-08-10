@@ -28,9 +28,9 @@ from .cli import (
     setup_checklist,
     timeline_analysis,
 )
-from .correlate import link_recent_interventions_to_sessions
+from .correlate import link_recent_fresh_start_receipts_to_sessions, link_recent_interventions_to_sessions
 from .evidence_capture import record_missing_evidence_snapshots_from_evidence
-from .handoff import build_handoff_capsule
+from .handoff import TARGET_LABELS, build_handoff_capsule
 from .metrics import model_cost_comparison, pace_vs_baseline, replayed_context_cost
 from .local_state import (
     COMMAND_GATE_BLOCKED_DECISIONS,
@@ -116,6 +116,21 @@ def compact_int(value: int) -> str:
     if value >= 1_000:
         return f"{value / 1_000:.1f}k"
     return str(value)
+
+
+def _usage_summary(row: LocalSession) -> dict[str, object]:
+    tokens = row.tokens_in + row.tokens_out
+    calls = max(0, int(row.agent_calls))
+    return {
+        "tokens": tokens,
+        "tokens_label": compact_int(tokens),
+        "model_calls": row.agent_calls,
+        "tool_calls": row.tool_calls,
+        "api_value_usd": round(row.cost_usd, 6),
+        "api_value_label": money(row.cost_usd),
+        "tokens_per_model_call_label": compact_int(round(tokens / calls)) if calls else "not measured",
+        "cost_per_model_call_label": money(row.cost_usd / calls) if calls else "not measured",
+    }
 
 
 def short_path(path: str | None, max_len: int = 54) -> str:
@@ -423,7 +438,7 @@ def session_state(row: LocalSession, *, now: datetime | None = None) -> dict[str
             "status": "stale",
             "label": "Stale log",
             "tone": "limited",
-            "reason": "Old local session. Use it for evidence or handoff, not live control.",
+            "reason": "Old local session. Use it for evidence or Fresh Start, not live control.",
             "age_seconds": round(age_seconds, 1),
         }
     return {
@@ -442,20 +457,32 @@ def session_actions(
     attachment: RuntimeAttachment | None = None,
 ) -> list[dict[str, object]]:
     actions: list[dict[str, object]] = []
+    runtime = attachment or runtime_attachment_for_session(row, state=session_state(row), processes=[])
+    tokens = row.tokens_in + row.tokens_out
+    needs_fresh_start = tokens >= 500_000 or row.agent_calls >= 250 or row.tool_calls >= 250
+    identity_level = runtime.identity_level
+    if identity_level == "exact_session":
+        handoff_label = "Open Fresh Start"
+        handoff_reason = "This active AI work is heavy enough that a Fresh Start brief is safer than replaying the full history."
+    elif identity_level == "likely_workspace":
+        handoff_label = "Open Fresh Start"
+        handoff_reason = "AIWatcher can identify the workspace, but not the exact running chat. Copy a Fresh Start brief before continuing."
+    else:
+        handoff_label = "Inspect evidence"
+        handoff_reason = "This is historical local evidence. Inspect it before using a Fresh Start brief."
     if not outcome:
         actions.append({
             "id": "review_outcome",
             "label": "Review outcome",
-            "primary": True,
+            "primary": not needs_fresh_start or identity_level == "historical_log",
             "reason": "Mark whether this work was useful so AIWatcher can measure value.",
         })
-    tokens = row.tokens_in + row.tokens_out
-    if tokens >= 500_000 or row.agent_calls >= 250 or row.tool_calls >= 250:
+    if needs_fresh_start:
         actions.append({
             "id": "handoff",
-            "label": "Copy handoff",
-            "primary": bool(outcome),
-            "reason": "Start fresh with repo, file, and guardrail context instead of replaying a bloated session.",
+            "label": handoff_label,
+            "primary": identity_level != "historical_log",
+            "reason": handoff_reason,
         })
     actions.append({
         "id": "optimize_next_prompt",
@@ -463,7 +490,6 @@ def session_actions(
         "primary": False,
         "reason": "Use this session's pressure signals to tighten the next ask.",
     })
-    runtime = attachment or runtime_attachment_for_session(row, state=session_state(row), processes=[])
     actions.append({
         "id": "open_tool",
         "label": runtime.action_label,
@@ -474,6 +500,14 @@ def session_actions(
         "level": runtime.level,
         "confidence": runtime.confidence,
     })
+    primary_seen = False
+    for action in actions:
+        if not action.get("primary"):
+            continue
+        if primary_seen:
+            action["primary"] = False
+        else:
+            primary_seen = True
     return actions
 
 
@@ -517,10 +551,10 @@ def rows_for_window(days: int) -> list[LocalSession]:
     old `updated_at`-only rule overstated every total."""
     since = datetime.now().astimezone() - timedelta(days=days)
     try:
-        events = scan_all_events()
+        events = scan_all_events(since=since)
     except OSError:
         events = []
-    return clip_sessions_to_window(scan_all(), events, since)
+    return clip_sessions_to_window(scan_all(since=since), events, since)
 
 
 def _session_row_json(
@@ -676,6 +710,44 @@ def recent_session_json(
         "runtime_attachment": attachment.to_json(),
         "actions": session_actions(row, outcome=window_outcomes.get(row.session_id), attachment=attachment),
     }
+
+
+def session_summary_json(row: LocalSession) -> dict[str, object]:
+    try:
+        outcome = get_outcome(row.session_id)
+    except OSError:
+        outcome = None
+    state = session_state(row)
+    attachment = runtime_attachment_for_session(row, state=state, processes=safe_runtime_processes())
+    return {
+        "session_id": row.session_id,
+        "tool": row.tool,
+        "project": row.project_path if is_reliable_project_path(row.project_path) else "unknown",
+        "project_short": project_label(row.project_path),
+        "model": display_model_name(row.model),
+        "tokens": row.tokens_in + row.tokens_out,
+        "tokens_label": compact_int(row.tokens_in + row.tokens_out),
+        "api_value_usd": round(row.cost_usd, 6),
+        "api_value": money(row.cost_usd),
+        "calls": row.agent_calls,
+        "tool_calls": row.tool_calls,
+        "started_at": row.started_at.isoformat() if row.started_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        "source_path": row.source_path,
+        "outcome": outcome["outcome"] if outcome else None,
+        "state": state,
+        "runtime_attachment": attachment.to_json(),
+        "actions": session_actions(row, outcome=outcome, attachment=attachment),
+        "summary_only": True,
+        "detail_status": "loading",
+    }
+
+
+def build_session_summary(session_id: str, days: int = 30) -> dict[str, object]:
+    row = _find_session_row(session_id, days=days)
+    if not row:
+        return {"error": "session not found"}
+    return session_summary_json(row)
 
 
 def event_json(row: LocalEvent) -> dict[str, object]:
@@ -846,6 +918,83 @@ def _related_active_workspaces(row: LocalSession, *, limit: int = 3) -> list[str
     return workspaces
 
 
+def build_basic_handoff_detail(
+    session_id: str,
+    days: int = 30,
+    target: str = "generic",
+) -> dict[str, object]:
+    """Return a copyable Fresh Start brief without event/git enrichment.
+
+    The full Fresh Start detail can pay for timeline parsing and evidence collection after
+    first paint. This one only depends on the cached session row, so the user
+    can copy a truthful continuation brief immediately.
+    """
+    row = _find_session_row(session_id, days=days)
+    if not row:
+        return {"error": "session not found"}
+    target = target if target in TARGET_LABELS else "generic"
+    state = session_state(row)
+    attachment = runtime_attachment_for_session(row, state=state, processes=safe_runtime_processes())
+    project = row.project_path if is_reliable_project_path(row.project_path) else "unknown"
+    usage = _usage_summary(row)
+    warnings = [
+        (
+            f"Source session had {usage['tokens_label']} tokens, "
+            f"{usage['model_calls']} model calls, {usage['tool_calls']} tool calls, "
+            f"and {usage['api_value_label']} API-equivalent value."
+        ),
+        "Detailed git, timeline, and prompt evidence is still loading; inspect the repository before editing.",
+    ]
+    next_brief = "\n".join([
+        "AIWatcher Fresh Start brief",
+        "",
+        "You are starting a fresh AI coding session. Do not assume access to the previous chat.",
+        "Continue from repository state on disk, not from hidden conversation history.",
+        f"Target tool: {TARGET_LABELS[target]}.",
+        "",
+        "Workspace",
+        f"- Project: {project}",
+        f"- Source session: {session_id}",
+        f"- Source tool/model: {row.tool} / {row.model or 'unknown'}",
+        "",
+        "Why start fresh",
+        *[f"- {item}" for item in warnings],
+        "",
+        "Immediate next checkpoint",
+        "- Run `git status --short` and inspect the files already changed in this repository.",
+        "- Reconstruct what appears done, what remains uncertain, and the smallest safe next checkpoint.",
+        "- Continue only after that checkpoint is clear; do not replay broad exploration from the old session.",
+        "",
+        "Guardrails",
+        "- Preserve unrelated changes.",
+        "- Do not expose secrets.",
+        "- Stop before destructive changes or broad refactors.",
+    ])
+    return {
+        "session_id": row.session_id,
+        "project": project,
+        "project_reliable": project != "unknown",
+        "tool": row.tool,
+        "model": display_model_name(row.model),
+        "source_path": row.source_path,
+        "target": target,
+        "target_label": TARGET_LABELS[target],
+        "updated_at": row.updated_at.isoformat() if row.updated_at else row.started_at.isoformat() if row.started_at else None,
+        "usage": usage,
+        "outcome": None,
+        "evidence": {"commits": [], "changed_files": [], "tests": [], "confidence": "predicted"},
+        "warnings": warnings,
+        "include_prompt_excerpt": False,
+        "costliest_prompt": None,
+        "decisions": [],
+        "related_workspaces": [],
+        "next_brief": next_brief,
+        "runtime_attachment": attachment.to_json(),
+        "basic": True,
+        "enrichment_status": "loading",
+    }
+
+
 def build_handoff_detail(
     session_id: str,
     days: int = 30,
@@ -971,7 +1120,6 @@ def build_weekly_digest(days: int = 7) -> dict[str, object]:
     candidates (P1-3), command-gate activity (P1-3), prompt-preflight activity
     (P1-1), survival economics (P1-4), and one recommendation.
     """
-    all_rows = scan_all()
     rows = rows_for_window(days)
     window_session_ids = {row.session_id for row in rows}
     try:
@@ -1138,13 +1286,13 @@ def _context_action(health: ContextHealth) -> dict[str, str]:
     if health.severity == "critical":
         return {
             "label": "Start fresh",
-            "secondary_label": "Copy handoff",
+            "secondary_label": "Fresh Start",
             "reason": "Critical context pressure is likely to waste turns or miss details.",
         }
     if health.is_context_pressure or health.is_high_bloat:
         return {
             "label": "Compact",
-            "secondary_label": "Prepare handoff",
+            "secondary_label": "Prepare Fresh Start",
             "reason": "Context is growing; compact before it compounds further.",
         }
     if health.is_stale:
@@ -1203,6 +1351,12 @@ def _context_health_card(health: ContextHealth, session: LocalSession | None, *,
             if session
             else None
         ),
+        "updated_at": (
+            (session.updated_at or session.started_at).isoformat()
+            if session and (session.updated_at or session.started_at)
+            else None
+        ),
+        "source_path": session.source_path if session else None,
         "can_handoff": bool(session),
         "compact_prompt": _build_compact_prompt(health),
         "group_note": (
@@ -1254,27 +1408,29 @@ def _handoff_bubble(context_health: list[dict[str, object]]) -> dict[str, object
     saved_label = str(candidate.get("estimated_replayed_context_label") or candidate.get("latest_turn_tokens") or "context")
     project = str(candidate.get("project") or "this session")
     runtime = candidate.get("runtime_attachment") if isinstance(candidate.get("runtime_attachment"), dict) else {}
-    runtime_available = bool(runtime.get("available"))
+    runtime_available = bool(runtime.get("available")) and runtime.get("level") != "app"
     runtime_action = str(runtime.get("action_label") or "Open workspace")
     if severity == "critical":
-        title = f"Start a new chat to save ~{saved_label} tokens of context"
+        title = f"Fresh Start recommended before ~{saved_label} tokens of replayed context compounds"
         body = (
-            f"{project} is at critical context pressure. Create a fresh-session handoff brief so the next agent "
-            "keeps the goal, repo, files, and guardrails without replaying the bloated history."
+            f"{project} is at critical context pressure. Copy a Fresh Start brief so the next AI session keeps "
+            "the goal, repo, files, and guardrails without replaying the bloated history."
         )
-        primary_label = f"Copy brief + {runtime_action}" if runtime_available else "Copy fresh-chat brief"
+        primary_label = f"Copy brief + {runtime_action}" if runtime_available else "Copy Fresh Start brief"
     else:
         title = f"This session is getting heavy: ~{saved_label} tokens are replayed context"
         body = (
             f"{project} is showing context pressure. Compact or start fresh before the next broad task so usage "
             "does not compound."
         )
-        primary_label = f"Copy brief + {runtime_action}" if runtime_available else "Prepare handoff"
+        primary_label = f"Copy brief + {runtime_action}" if runtime_available else "Prepare Fresh Start"
     reason = str(candidate.get("recommendation") or candidate.get("action", {}).get("reason") or body)
     return {
         "session_id": candidate.get("session_id"),
         "project": project,
         "tool": candidate.get("tool"),
+        "updated_at": candidate.get("updated_at"),
+        "source_path": candidate.get("source_path"),
         "severity": severity,
         "title": title,
         "body": body,
@@ -1619,19 +1775,132 @@ def _change_rows(
     return rows
 
 
-def _handoff_decision_rows(limit: int = 10) -> list[dict[str, object]]:
+def _handoff_decision_rows(
+    limit: int = 10,
+    *,
+    sessions: list[LocalSession] | None = None,
+) -> list[dict[str, object]]:
+    session_by_id = {row.session_id: row for row in sessions or []}
+    session_ids = set(session_by_id)
+    try:
+        outcome_map = outcomes_for_sessions(session_ids) if session_ids else {}
+    except OSError:
+        outcome_map = {}
+    try:
+        evidence_map = evidence_snapshots_for_sessions(session_ids) if session_ids else {}
+    except OSError:
+        evidence_map = {}
     rows: list[dict[str, object]] = []
     for row in recent_handoff_decisions(limit=limit):
         expected = row.get("expected_saved_context_tokens")
         expected_int = expected if isinstance(expected, int) and expected > 0 else None
+        decision = str(row.get("decision") or "")
+        source_session_id = str(row.get("source_session_id") or row.get("session_id") or "")
+        source_session = session_by_id.get(source_session_id)
+        next_session_id = row.get("next_session_id") if isinstance(row.get("next_session_id"), str) else None
+        next_session = session_by_id.get(next_session_id or "")
+        correlation = row.get("next_session_correlation") if isinstance(row.get("next_session_correlation"), dict) else {}
+        proof_status = "No fresh start claimed"
+        proof_reason = "This decision did not claim a fresh follow-up session."
+        if decision in {"new_chat", "copy_handoff"}:
+            status = str(correlation.get("status") or "waiting")
+            if next_session:
+                proof_status = "Next session observed"
+                proof_reason = str(
+                    correlation.get("reason")
+                    or "Observed a later local session in the same project after the Fresh Start action."
+                )
+            elif status == "ambiguous":
+                proof_status = "Multiple possible next sessions"
+                proof_reason = str(correlation.get("reason") or "AIWatcher found more than one possible follow-up.")
+            else:
+                proof_status = "Waiting for next session"
+                proof_reason = str(correlation.get("reason") or "No later same-project local session has been observed yet.")
+        elif decision == "continue_here":
+            proof_status = "Continued here"
+            proof_reason = "The user chose to keep working in the current session."
+        next_outcome = outcome_map.get(next_session.session_id) if next_session else None
+        next_evidence = evidence_map.get(next_session.session_id) if next_session else None
+        observed_followup = None
+        source_usage = _usage_summary(source_session) if source_session else None
+        next_usage = _usage_summary(next_session) if next_session else None
+        proof_evidence = None
+        if isinstance(next_evidence, dict):
+            commit_shas = next_evidence.get("commit_shas") if isinstance(next_evidence.get("commit_shas"), list) else []
+            test_artifacts = (
+                next_evidence.get("test_artifact_hashes")
+                if isinstance(next_evidence.get("test_artifact_hashes"), list)
+                else []
+            )
+            proof_evidence = {
+                "label": str(next_evidence.get("confidence") or correlation.get("confidence") or "observed"),
+                "commits": len(commit_shas),
+                "tests": len(test_artifacts),
+                "inferred_outcome": next_evidence.get("inferred_outcome"),
+            }
+        if source_session and next_session:
+            source_tokens = source_session.tokens_in + source_session.tokens_out
+            next_tokens = next_session.tokens_in + next_session.tokens_out
+            delta = source_tokens - next_tokens
+            cost_delta = source_session.cost_usd - next_session.cost_usd
+            if delta > 0 and cost_delta > 0:
+                followup_label = (
+                    f"Follow-up is {compact_int(delta)} tokens smaller and {money(cost_delta)} lower so far"
+                )
+            elif delta > 0:
+                followup_label = f"Follow-up is {compact_int(delta)} tokens smaller so far; cost is not lower yet"
+            elif cost_delta > 0:
+                followup_label = f"Follow-up is {money(cost_delta)} lower so far; tokens are not lower yet"
+            else:
+                followup_label = "Follow-up is not smaller or cheaper yet"
+            observed_followup = {
+                "source_tokens_label": compact_int(source_tokens),
+                "next_tokens_label": compact_int(next_tokens),
+                "delta_tokens_label": compact_int(abs(delta)),
+                "source_api_value_label": money(source_session.cost_usd),
+                "next_api_value_label": money(next_session.cost_usd),
+                "delta_api_value_label": money(abs(cost_delta)),
+                "source_model_calls": source_session.agent_calls,
+                "next_model_calls": next_session.agent_calls,
+                "source_tool_calls": source_session.tool_calls,
+                "next_tool_calls": next_session.tool_calls,
+                "source_tokens_per_model_call_label": (
+                    source_usage["tokens_per_model_call_label"] if source_usage else "not measured"
+                ),
+                "next_tokens_per_model_call_label": (
+                    next_usage["tokens_per_model_call_label"] if next_usage else "not measured"
+                ),
+                "source_cost_per_model_call_label": (
+                    source_usage["cost_per_model_call_label"] if source_usage else "not measured"
+                ),
+                "next_cost_per_model_call_label": (
+                    next_usage["cost_per_model_call_label"] if next_usage else "not measured"
+                ),
+                "direction": "smaller" if delta > 0 else "larger_or_equal",
+                "label": followup_label,
+                "basis": "Observed local session totals so far; this is proof of follow-up shape, not a final savings claim.",
+            }
         rows.append({
             "id": row.get("id"),
             "created_at": row.get("created_at"),
             "session_id": row.get("session_id"),
-            "decision": row.get("decision"),
+            "source_session_id": source_session_id,
+            "next_session_id": next_session_id,
+            "decision": decision,
+            "receipt_kind": row.get("receipt_kind"),
             "reason": row.get("reason"),
+            "action_channel": row.get("action_channel"),
             "expected_saved_context_tokens": expected_int,
             "expected_saved_context_label": compact_int(expected_int) if expected_int else None,
+            "proof_status": proof_status,
+            "proof_reason": proof_reason,
+            "proof_confidence": correlation.get("confidence"),
+            "source_usage": source_usage,
+            "next_usage": next_usage,
+            "outcome": next_outcome.get("outcome") if isinstance(next_outcome, dict) else None,
+            "inferred_outcome": next_evidence.get("inferred_outcome") if isinstance(next_evidence, dict) else None,
+            "proof_evidence": proof_evidence,
+            "observed_followup": observed_followup,
         })
     return rows
 
@@ -1799,6 +2068,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
     _index_sessions(all_rows)
     try:
         link_recent_interventions_to_sessions(all_rows)
+        link_recent_fresh_start_receipts_to_sessions(all_rows)
     except OSError:
         pass
     # Events are loaded up front because the windows are clipped by them: a
@@ -1806,7 +2076,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
     # it had ever cost, which on long-running sessions roughly doubled the
     # reported total.
     try:
-        all_events = scan_all_events()
+        all_events = scan_all_events(since=since)
     except OSError:
         all_events = []
     rows = clip_sessions_to_window(all_rows, all_events, since)
@@ -1826,7 +2096,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
     detected = discover_tools()
     notes = sorted({note for row in rows for note in row.notes})
     context_health = _context_health_cards(rows, all_events)
-    handoff_decisions = _handoff_decision_rows(limit=10)
+    handoff_decisions = _handoff_decision_rows(limit=10, sessions=all_rows)
     suppressed_handoff_sessions = _recent_handoff_decision_session_ids(handoff_decisions)
     handoff_bubble = _handoff_bubble([
         row for row in context_health
@@ -2016,6 +2286,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
         "setup": setup_checklist(),
         "watcher": get_watcher_status(),
         "context_health": context_health,
+        "context_health_status": "ready",
         "handoff_bubble": handoff_bubble,
         "handoff_decisions": handoff_decisions,
         "recent_sessions": [
@@ -2102,6 +2373,7 @@ def _build_summary_shell(days: int = 7) -> dict[str, object]:
     _index_sessions(all_rows)
     try:
         link_recent_interventions_to_sessions(all_rows)
+        link_recent_fresh_start_receipts_to_sessions(all_rows)
     except OSError:
         pass
     rows = [row for row in all_rows if in_window(row, since)]
@@ -2184,8 +2456,9 @@ def _build_summary_shell(days: int = 7) -> dict[str, object]:
         "setup": setup_checklist(),
         "watcher": get_watcher_status(),
         "context_health": [],
+        "context_health_status": "pending",
         "handoff_bubble": None,
-        "handoff_decisions": _handoff_decision_rows(limit=10),
+        "handoff_decisions": _handoff_decision_rows(limit=10, sessions=all_rows),
         "recent_sessions": [
             recent_session_json(row, window_outcomes=window_outcomes)
             for row in recent
@@ -2679,15 +2952,12 @@ HTML = r"""<!doctype html>
   </section>
 
   <nav class="product-nav" aria-label="AIWatcher Local sections">
-    <button class="nav-tab active" data-view="today" onclick="showView('today')">Today</button>
-    <button class="nav-tab" data-view="prompt" onclick="showView('prompt')">Prompt</button>
-    <button class="nav-tab" data-view="projects" onclick="showView('projects')">Projects</button>
-    <button class="nav-tab" data-view="sessions" onclick="showView('sessions')">Sessions</button>
-    <button class="nav-tab" data-view="changes" onclick="showView('changes')">Changes</button>
-    <button class="nav-tab" data-view="receipts" onclick="showView('receipts')">Receipts</button>
-    <button class="nav-tab" data-view="insights" onclick="showView('insights')">Insights</button>
-    <button class="nav-tab" data-view="coverage" onclick="showView('coverage')">Coverage</button>
-    <button class="nav-tab" data-view="setup" onclick="showView('setup')">Setup</button>
+    <button class="nav-tab active" data-view="today" onclick="showView('today')">Home</button>
+    <button class="nav-tab" data-view="prompt" onclick="showView('prompt')">Control</button>
+    <button class="nav-tab" data-view="sessions" onclick="showView('sessions')">Work</button>
+    <button class="nav-tab" data-view="receipts" onclick="showView('receipts')">Evidence</button>
+    <button class="nav-tab" data-view="insights" onclick="showView('insights')">Spend</button>
+    <button class="nav-tab" data-view="setup" onclick="showView('setup')">Settings</button>
   </nav>
 
   <section id="view-today" class="view">
@@ -2730,12 +3000,12 @@ HTML = r"""<!doctype html>
     </section>
 
     <section class="card" style="margin-bottom:14px">
-      <div class="section-title"><div><h2>Latest handoff decision</h2><p>Fresh-session handoff choices and expected context avoided.</p></div></div>
+      <div class="section-title"><div><h2>Latest Fresh Start receipt</h2><p>Fresh Start choices, expected replayed context, and follow-up proof.</p></div></div>
       <div id="latestHandoffDecision"></div>
     </section>
 
     <section class="card" style="margin-bottom:14px">
-      <div class="section-title"><div><h2>Session health</h2><p>Context bloat, runway pressure, and handoff actions for active local work.</p></div></div>
+      <div class="section-title"><div><h2>Session health</h2><p>Context bloat, runway pressure, and Fresh Start actions for active local work.</p></div></div>
       <div id="contextHealth"></div>
     </section>
 
@@ -2812,8 +3082,12 @@ HTML = r"""<!doctype html>
   <section id="view-sessions" class="view" hidden>
     <div class="card">
       <div class="section-title">
-        <div><h2>Sessions</h2><p>Search and resume prior local AI work. Click any row to inspect locally — prompt text is shown for your own review only, never uploaded.</p></div>
+        <div><h2>Work</h2><p>Search sessions, inspect projects, review changes, and continue prior local AI work. Prompt text is shown for your own review only, never uploaded.</p></div>
         <span class="pill">Local machine only</span>
+      </div>
+      <div class="actions" style="margin-bottom:12px">
+        <button class="btn-quiet" data-view="projects" onclick="showView('projects')">Projects</button>
+        <button class="btn-quiet" data-view="changes" onclick="showView('changes')">Changes ledger</button>
       </div>
       <div class="session-filters">
         <input id="sessionSearch" type="text" placeholder="Search project, tool, model, session id, or a file/topic keyword" oninput="debounceSessionSearch()">
@@ -2864,11 +3138,11 @@ HTML = r"""<!doctype html>
   <section id="view-receipts" class="view" hidden>
     <div class="card" style="margin-bottom:14px">
       <div class="section-title">
-        <div><h2>Handoff decisions</h2><p>When AIWatcher suggested a fresh session, what you chose, and expected context avoided.</p></div>
+        <div><h2>Fresh Start receipts</h2><p>When AIWatcher suggested a fresh session, what you chose, and whether a follow-up session was observed.</p></div>
         <span class="pill">Metadata only</span>
       </div>
       <div class="table-wrap"><table>
-        <thead><tr><th>Time</th><th>Decision</th><th>Expected context avoided</th><th>Session</th><th></th></tr></thead>
+        <thead><tr><th>Time</th><th>Decision</th><th>Expected context at risk</th><th>Proof</th><th>Sessions</th><th></th></tr></thead>
         <tbody id="handoffDecisionRows"></tbody>
       </table></div>
     </div>
@@ -2887,7 +3161,7 @@ HTML = r"""<!doctype html>
   <section id="view-insights" class="view" hidden>
     <section class="card" style="margin-bottom:14px">
       <div class="section-title">
-        <div><h2>What your week cost</h2><p>Ranked by how much money each finding is about.</p></div>
+        <div><h2>Spend and improvement signals</h2><p>Ranked by money, context pressure, and what to change next.</p></div>
         <span class="pill">Local logs only</span>
       </div>
       <div id="insightHeadline"></div>
@@ -2918,10 +3192,13 @@ HTML = r"""<!doctype html>
   <section id="view-setup" class="view" hidden>
     <div class="card">
       <div class="section-title">
-        <div><h2>Setup Checklist</h2><p>Get to first value without overclaiming which surfaces are protected.</p></div>
+        <div><h2>Settings</h2><p>Setup, coverage, privacy, and local companion behavior.</p></div>
         <span class="pill">Local only</span>
       </div>
       <p class="receipt-note">Ambient Watch starts with the dashboard by default. For standalone mode, run <code>aiwatcher watch --notify --overlay --interval 60</code>.</p>
+      <div class="actions" style="margin-bottom:12px">
+        <button class="btn-quiet" data-view="coverage" onclick="showView('coverage')">Surface coverage</button>
+      </div>
       <div id="setupRows" class="coverage-grid"></div>
     </div>
   </section>
@@ -2987,34 +3264,56 @@ function renderReceiptRows(receipts) {
 }
 function handoffDecisionLabel(value) {
   const labels = {
-    new_chat: 'Prepared fresh-session handoff',
+    new_chat: 'Prepared Fresh Start',
     continue_here: 'Continued in current session',
-    copy_handoff: 'Copied handoff brief',
+    copy_handoff: 'Copied Fresh Start brief',
     dismissed: 'Dismissed'
   };
   return labels[value] || value || 'unknown';
 }
 function renderLatestHandoffDecision(decisions) {
   const decision = (decisions || [])[0];
-  if (!decision) return '<div class="empty">No handoff bubble decisions recorded yet.</div>';
+  if (!decision) return '<div class="empty">No Fresh Start decisions recorded yet.</div>';
   const saved = decision.expected_saved_context_label
-    ? `<span class="pill">~${esc(decision.expected_saved_context_label)} context avoided</span>`
+    ? `<span class="pill">~${esc(decision.expected_saved_context_label)} expected context at risk</span>`
+    : '';
+  const usage = decision.next_usage
+    ? `<span class="pill">${esc(decision.next_usage.tokens_label)} next-session tokens</span><span class="pill">${esc(decision.next_usage.api_value_label)} next-session value</span><span class="pill">${esc(decision.next_usage.model_calls)} model calls</span>`
+    : '';
+  const outcome = decision.outcome || decision.inferred_outcome
+    ? `<span class="pill">${esc(decision.outcome ? `outcome: ${decision.outcome}` : `evidence: ${decision.inferred_outcome}`)}</span>`
+    : '';
+  const observed = decision.observed_followup
+    ? `<span class="pill">${esc(decision.observed_followup.source_tokens_label)} → ${esc(decision.observed_followup.next_tokens_label)} tokens</span><span class="pill">${esc(decision.observed_followup.source_api_value_label)} → ${esc(decision.observed_followup.next_api_value_label)}</span><span class="pill">${esc(decision.observed_followup.label)}</span>`
+    : '';
+  const evidence = decision.proof_evidence
+    ? `<span class="pill">${esc(decision.proof_evidence.label)} evidence</span><span class="pill">${esc(decision.proof_evidence.commits)} commits</span><span class="pill">${esc(decision.proof_evidence.tests)} tests</span>`
+    : '';
+  const observedNote = decision.observed_followup
+    ? `<p class="receipt-note">${esc(decision.observed_followup.basis)}</p>`
+    : '';
+  const perCall = decision.observed_followup
+    ? `<p class="receipt-note">Per model call: ${esc(decision.observed_followup.source_tokens_per_model_call_label)} tokens / ${esc(decision.observed_followup.source_cost_per_model_call_label)} source → ${esc(decision.observed_followup.next_tokens_per_model_call_label)} tokens / ${esc(decision.observed_followup.next_cost_per_model_call_label)} follow-up.</p>`
     : '';
   return `<div class="receipt-summary"><div>
     <div class="session-title">${esc(handoffDecisionLabel(decision.decision))}</div>
-    <div class="session-meta">${esc(dateLabel(decision.created_at))} · session ${esc(decision.session_id || 'unknown')}</div>
-    <p>${esc(decision.reason || 'AIWatcher recommended a fresh-session handoff because local context health crossed a threshold.')}</p>
-    <div class="pill-row"><span class="pill">handoff bubble</span>${saved}</div>
-  </div>${decision.session_id ? `<button class="btn-quiet" onclick="selectSession('${esc(decision.session_id)}')">Inspect session</button>` : ''}</div>`;
+    <div class="session-meta">${esc(dateLabel(decision.created_at))} · source ${esc(decision.source_session_id || decision.session_id || 'unknown')}${decision.next_session_id ? ` → next ${esc(decision.next_session_id)}` : ''}</div>
+    <p>${esc(decision.reason || 'AIWatcher recommended a Fresh Start because local context health crossed a threshold.')}</p>
+    <p class="receipt-note">${esc(decision.proof_status || 'Waiting for next session')} · ${esc(decision.proof_reason || 'AIWatcher has not observed a follow-up session yet.')}</p>
+    ${observedNote}
+    ${perCall}
+    <div class="pill-row"><span class="pill">Fresh Start receipt</span>${saved}${usage}${outcome}${observed}${evidence}</div>
+  </div>${decision.next_session_id ? `<button class="btn-primary" onclick="selectSession('${esc(decision.next_session_id)}')">Inspect next session</button>` : decision.source_session_id ? `<button class="btn-quiet" onclick="selectSession('${esc(decision.source_session_id)}')">Inspect source</button>` : ''}</div>`;
 }
 function renderHandoffDecisionRows(decisions) {
-  if (!decisions.length) return '<tr><td colspan="5"><div class="empty">No handoff decisions recorded yet.</div></td></tr>';
+  if (!decisions.length) return '<tr><td colspan="6"><div class="empty">No Fresh Start receipts recorded yet.</div></td></tr>';
   return decisions.map(decision => `<tr>
     <td>${esc(dateLabel(decision.created_at))}</td>
     <td>${esc(handoffDecisionLabel(decision.decision))}</td>
     <td>${esc(decision.expected_saved_context_label ? `~${decision.expected_saved_context_label}` : '—')}</td>
-    <td>${esc(decision.session_id || 'unknown')}</td>
-    <td>${decision.session_id ? `<button class="row-action" onclick="selectSession('${esc(decision.session_id)}')">Inspect</button>` : ''}</td>
+    <td><strong>${esc(decision.proof_status || 'Waiting')}</strong><br><span class="sub">${esc(decision.observed_followup ? decision.observed_followup.label : decision.outcome || decision.inferred_outcome || decision.proof_confidence || '')}</span>${decision.proof_evidence ? `<br><span class="sub">${esc(decision.proof_evidence.label)} · ${esc(decision.proof_evidence.commits)} commits · ${esc(decision.proof_evidence.tests)} tests</span>` : ''}</td>
+    <td><span class="sub">source</span> ${esc(decision.source_session_id || decision.session_id || 'unknown')}<br><span class="sub">next</span> ${esc(decision.next_session_id || 'waiting')}</td>
+    <td>${decision.next_session_id ? `<button class="row-action" onclick="selectSession('${esc(decision.next_session_id)}')">Inspect next</button>` : decision.source_session_id ? `<button class="row-action" onclick="selectSession('${esc(decision.source_session_id)}')">Inspect source</button>` : ''}</td>
   </tr>`).join('');
 }
 function openReceipt(receiptId) {
@@ -3115,9 +3414,16 @@ function showToast(message, kind = 'success') {
   window.clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => { toast.className = 'toast'; }, 3200);
 }
+async function requestRuntimeReturn(sessionId) {
+  return fetch('/api/runtime-return', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({session_id: sessionId})
+  });
+}
 async function returnToRuntime(sessionId) {
   try {
-    const res = await fetch(`/api/runtime-return?id=${encodeURIComponent(sessionId)}`);
+    const res = await requestRuntimeReturn(sessionId);
     const data = await res.json();
     if (!res.ok || data.error) {
       showToast(data.error || 'Could not find this local session.', 'error');
@@ -3162,6 +3468,37 @@ function sessionStatePill(state) {
   if (!state) return '';
   return `<span class="session-state ${esc(state.status || 'unknown')}">${esc(state.label || state.status || 'unknown')}</span>`;
 }
+function shortSessionId(value) {
+  const text = String(value || '');
+  return text.length > 12 ? `${text.slice(0, 8)}...${text.slice(-4)}` : text || 'unknown';
+}
+function identityTone(runtime) {
+  const level = (runtime || {}).identity_level || (runtime || {}).level || 'historical_log';
+  if (level === 'exact_session' || level === 'active_process') return 'active';
+  if (level === 'likely_workspace' || level === 'app' || level === 'workspace') return 'recent';
+  return 'ended';
+}
+function renderIdentityStrip(item, runtime, sourcePath) {
+  runtime = runtime || {};
+  const sessionId = item.session_id || runtime.session_id || '';
+  const project = item.project || item.project_short || runtime.project_path || 'unknown';
+  const surface = runtime.surface || item.surface || 'unknown surface';
+  const updated = item.updated_at || item.updated_at_label || '';
+  const identityLabel = runtime.identity_label || runtime.label || 'Historical log only';
+  const identityReason = runtime.identity_reason || runtime.reason || 'AIWatcher found local session evidence, but no verified exact chat attachment.';
+  return `<div class="runtime-strip">
+    <div class="runtime-copy">
+      <strong>${esc(identityLabel)}</strong>
+      <span>${esc(item.tool || runtime.tool || 'unknown tool')} · ${esc(surface)} · ${esc(project)}</span>
+    </div>
+    <span class="session-state ${identityTone(runtime)}">${esc(shortSessionId(sessionId))}</span>
+  </div>
+  <div class="runtime-source">
+    <strong>Last activity</strong><span>${esc(updated ? dateLabel(updated) : 'unknown')}</span>
+    <strong>Identity</strong><span>${esc(identityReason)}</span>
+    ${sourcePath ? `<strong>Source log</strong><span>${esc(sourcePath)}</span>` : ''}
+  </div>`;
+}
 function runtimeReturnPanel(runtime, sourcePath) {
   runtime = runtime || {};
   const available = !!runtime.available;
@@ -3174,7 +3511,7 @@ function runtimeReturnPanel(runtime, sourcePath) {
   const exactReason = runtime.exact_return_reason || 'Exact chat return needs a verified app window, terminal pane, or host deep link.';
   const source = sourcePath || 'unknown';
   const action = available
-    ? `<button class="btn-primary" data-session="${esc(runtime.session_id || '')}" onclick="returnToRuntime(this.dataset.session)">${esc(runtime.action_label || 'Open workspace')}</button>`
+    ? `<button class="btn-quiet" data-session="${esc(runtime.session_id || '')}" onclick="returnToRuntime(this.dataset.session)">${esc(runtime.action_label || 'Open workspace')}</button>`
     : `<button class="btn-quiet" disabled>No exact return</button>`;
   return `<section class="detail-section runtime-return">
     <div class="section-title">
@@ -3305,23 +3642,38 @@ function renderHandoff(capsule) {
   const runtime = capsule.runtime_attachment || {};
   const target = capsule.target || 'generic';
   const includePrompt = !!capsule.include_prompt_excerpt;
-  const runtimeButton = runtime.available
-    ? `<button class="btn-primary" onclick="returnToRuntime('${esc(capsule.session_id)}')" title="${esc(runtime.reason || '')}">${esc(runtime.action_label || 'Open workspace')}</button>`
-    : `<button class="btn-quiet" disabled title="${esc(runtime.reason || 'No safe return target is available yet.')}">${esc(runtime.action_label || 'Copy handoff')}</button>`;
+  const canOpenRuntime = !!runtime.available && runtime.level !== 'app';
+  const enrichment = capsule.basic
+    ? '<div class="loading">Basic brief is ready. Loading timeline, git evidence, and prompt enrichment...</div>'
+    : '';
+  const primaryLabel = canOpenRuntime ? 'Copy brief + open workspace' : 'Copy brief';
+  const primaryHelp = canOpenRuntime
+    ? 'AIWatcher will copy the brief, open the safest available workspace or app target, and save a local Fresh Start receipt.'
+    : 'AIWatcher will copy the brief and save a local Fresh Start receipt. Open the correct AI chat or workspace yourself before pasting.';
   return `<section class="detail-section">
-    <h2>Fresh-session handoff</h2>
-    <p>Use this when a session gets expensive, stale, or hard to continue. It keeps the next ${esc(capsule.target_label || 'AI tool')} focused without carrying the whole chat history.</p>
+    <h2>Fresh Start</h2>
+    <p>AIWatcher prepared a restart brief for the next ${esc(capsule.target_label || 'AI tool')} session. Copy it into a fresh chat only after the identity below matches the work you intend to continue.</p>
+    ${renderIdentityStrip(capsule, runtime, capsule.source_path)}
     <div class="mini-grid">
       <div class="mini"><span class="label">Previous usage</span><strong>${esc(usage.tokens_label || '—')}</strong></div>
       <div class="mini"><span class="label">API value</span><strong>${esc(usage.api_value_label || '—')}</strong></div>
       <div class="mini"><span class="label">Model calls</span><strong>${esc(usage.model_calls ?? '—')}</strong></div>
       <div class="mini"><span class="label">Evidence</span><strong>${esc((evidence.commits || []).length)} commits</strong></div>
     </div>
-    <div class="copy-row">
-      ${runtimeButton}
-      ${['generic','claude','codex','cursor','vscode'].map(item => `<button class="${item === target ? 'btn-primary' : 'btn-quiet'}" onclick="openHandoff('${esc(capsule.session_id)}','${item}', ${includePrompt})">${esc(item === 'generic' ? 'Generic' : item)}</button>`).join('')}
+    <div id="handoffStatus" class="verdict-card useful" style="margin-top:14px">
+      <h3>Best next action: start fresh in the same workspace</h3>
+      <p>${esc(primaryHelp)} AIWatcher will watch for a later same-project session as proof.</p>
+      <div class="copy-row" style="margin-top:12px">
+        <button class="btn-primary" data-runtime="${canOpenRuntime ? '1' : '0'}" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', this.dataset.runtime === '1')">${esc(primaryLabel)}</button>
+        <button class="btn-quiet" onclick="selectSession('${esc(capsule.session_id)}')">Inspect source session</button>
+      </div>
     </div>
-    <p class="tool-link-note">${esc(runtime.reason || 'Use the handoff brief when the exact running chat cannot be reopened.')}</p>
+    <div class="copy-row">
+      <span class="label" style="align-self:center">Format for</span>
+      ${['generic','claude','codex','cursor','vscode'].map(item => `<button class="btn-quiet" aria-pressed="${item === target ? 'true' : 'false'}" onclick="openHandoff('${esc(capsule.session_id)}','${item}', ${includePrompt})">${esc(item === 'generic' ? 'Generic' : item)}</button>`).join('')}
+    </div>
+    <p class="tool-link-note">${esc(runtime.reason || 'Use the Fresh Start brief when the exact running chat cannot be reopened.')}</p>
+    ${enrichment}
     <label class="prompt-opt-in">
       <input type="checkbox" ${includePrompt ? 'checked' : ''} onchange="openHandoff('${esc(capsule.session_id)}','${target}', this.checked)">
       <span class="prompt-opt-in-label">Include prompt excerpt <span class="pill">Privacy opt-in</span></span>
@@ -3329,36 +3681,84 @@ function renderHandoff(capsule) {
     </label>
   </section>
   ${runtimeReturnPanel(runtime, capsule.source_path)}
-  <section class="detail-section"><h3>Why hand off now</h3>
+  <section class="detail-section"><h3>Why start fresh now</h3>
     <ul class="insight-list">${(capsule.warnings || []).map(item => `<li>${esc(item)}</li>`).join('')}</ul>
   </section>
-  <section class="detail-section"><h3>Paste into the next AI tool</h3>
+  <section class="detail-section"><h3>Brief that will be copied</h3>
     <textarea id="handoffBrief" class="brief-box">${esc(capsule.next_brief || '')}</textarea>
-    <div class="copy-row"><button class="btn-primary" onclick="copyText(document.getElementById('handoffBrief').value, 'Handoff brief copied')">Copy handoff brief</button></div>
+    <div class="copy-row"><button class="btn-quiet" onclick="copyText(document.getElementById('handoffBrief').value, 'Fresh Start brief copied')">Copy brief only</button></div>
     ${changedFiles.length ? `<details class="aiw-details"><summary>${esc(changedFiles.length)} changed file${changedFiles.length === 1 ? '' : 's'} to inspect</summary><div class="details-body"><div class="pill-row">${changedFiles.slice(0, 12).map(file => `<span class="pill">${esc(file)}</span>`).join('')}</div></div></details>` : ''}
   </section>`;
 }
+async function copyFreshStartFromDrawer(sessionId, openRuntime = false) {
+  const brief = document.getElementById('handoffBrief') ? document.getElementById('handoffBrief').value : '';
+  const copied = await copyText(brief, 'Fresh Start brief copied');
+  if (!copied) return;
+  await fetch('/api/handoff-decision', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      session_id: sessionId,
+      decision: 'copy_handoff',
+      reason: 'Fresh Start brief copied from the session drawer.',
+      action_channel: 'dashboard_session',
+    })
+  }).catch(() => {});
+  let message = 'Fresh Start receipt saved. Open a fresh chat in the same workspace and paste the brief.';
+  if (openRuntime) {
+    try {
+      const returnRes = await requestRuntimeReturn(sessionId);
+      const returned = await returnRes.json();
+      if (returned && returned.ok) message = `${returned.message || 'Workspace opened.'} Paste the copied brief into a fresh chat.`;
+    } catch (error) {}
+  }
+  const status = document.getElementById('handoffStatus');
+  if (status) {
+    status.innerHTML = `<h3>Fresh Start ready</h3><p>${esc(message)} AIWatcher will link the next same-project session when it appears.</p>
+      <div class="copy-row" style="margin-top:12px"><button class="btn-primary" onclick="showView('receipts'); closeDrawer()">View receipt</button><button class="btn-quiet" onclick="closeDrawer()">Done</button></div>`;
+  }
+}
 async function openHandoff(sessionId, target = 'generic', includePrompt = false) {
-  openDrawer('Handoff capsule');
-  document.getElementById('detailContent').innerHTML = '<div class="loading">Building local handoff capsule...</div>';
-  const res = await fetch(`/api/handoff?id=${encodeURIComponent(sessionId)}&target=${encodeURIComponent(target)}&prompt=${includePrompt ? '1' : '0'}`);
+  openDrawer('Fresh Start');
+  const node = document.getElementById('detailContent');
+  node.innerHTML = '<div class="loading">Finding the source session before building the Fresh Start brief...</div>';
+  const summaryPromise = fetch(`/api/session-summary?id=${encodeURIComponent(sessionId)}`)
+    .then(res => res.json())
+    .catch(() => null);
+  const basicPromise = fetch(`/api/handoff-basic?id=${encodeURIComponent(sessionId)}&target=${encodeURIComponent(target)}`)
+    .then(res => res.json())
+    .catch(() => null);
+  const handoffPromise = fetch(`/api/handoff?id=${encodeURIComponent(sessionId)}&target=${encodeURIComponent(target)}&prompt=${includePrompt ? '1' : '0'}`);
+  const fastSummary = await summaryPromise;
+  if (fastSummary && !fastSummary.error) {
+    node.innerHTML = renderSessionSummary(fastSummary, 'Building Fresh Start brief...');
+  } else {
+    node.innerHTML = '<div class="loading">Building local Fresh Start brief...</div>';
+  }
+  const basicCapsule = await basicPromise;
+  if (basicCapsule && !basicCapsule.error && !includePrompt) {
+    node.innerHTML = renderHandoff(basicCapsule);
+  }
+  const res = await handoffPromise;
   const capsule = await res.json();
   if (capsule.error) {
-    document.getElementById('detailContent').innerHTML = `<div class="empty">${esc(capsule.error)}</div>`;
+    node.innerHTML = `<div class="empty">${esc(capsule.error)}</div>`;
     return;
   }
-  document.getElementById('detailContent').innerHTML = renderHandoff(capsule);
+  node.innerHTML = renderHandoff(capsule);
 }
 async function copyHandoffFromBubble(sessionId) {
-  if (window.currentHandoffBubble) await recordHandoffDecision(window.currentHandoffBubble, 'copy_handoff');
-  const res = await fetch(`/api/handoff?id=${encodeURIComponent(sessionId)}&target=generic&prompt=0`);
+  const res = await fetch(`/api/handoff-basic?id=${encodeURIComponent(sessionId)}&target=generic`);
   const capsule = await res.json();
   if (capsule.error) {
     showToast(capsule.error, 'error');
     return;
   }
-  const copied = await copyText(capsule.next_brief || '', 'Handoff copied — paste it into a fresh AI chat');
-  if (copied) renderHandoffCopied(window.currentHandoffBubble, sessionId);
+  const copied = await copyText(capsule.next_brief || '', 'Fresh Start brief copied — paste it into a fresh AI chat');
+  if (copied) {
+    if (window.currentHandoffBubble) await recordHandoffDecision(window.currentHandoffBubble, 'copy_handoff');
+    renderHandoffCopied(window.currentHandoffBubble, sessionId);
+  }
 }
 async function recordHandoffDecision(bubble, decision) {
   if (!bubble || !bubble.session_id) return;
@@ -3371,6 +3771,7 @@ async function recordHandoffDecision(bubble, decision) {
         decision,
         reason: bubble.reason || bubble.body || '',
         expected_saved_context_tokens: bubble.expected_saved_context_tokens || null,
+        action_channel: 'dashboard',
       })
     });
   } catch (error) {
@@ -3378,19 +3779,19 @@ async function recordHandoffDecision(bubble, decision) {
   }
 }
 async function startFreshFromBubble(sessionId) {
-  if (window.currentHandoffBubble) await recordHandoffDecision(window.currentHandoffBubble, 'new_chat');
-  const res = await fetch(`/api/handoff?id=${encodeURIComponent(sessionId)}&target=generic&prompt=0`);
+  const res = await fetch(`/api/handoff-basic?id=${encodeURIComponent(sessionId)}&target=generic`);
   const capsule = await res.json();
   if (capsule.error) {
     showToast(capsule.error, 'error');
     return;
   }
-  const copied = await copyText(capsule.next_brief || '', 'Fresh-chat brief copied');
+  const copied = await copyText(capsule.next_brief || '', 'Fresh Start brief copied');
   if (!copied) return;
+  if (window.currentHandoffBubble) await recordHandoffDecision(window.currentHandoffBubble, 'copy_handoff');
   const runtime = (window.currentHandoffBubble || {}).runtime_attachment || {};
-  if (runtime.available) {
+  if (runtime.available && runtime.level !== 'app') {
     try {
-      const returnRes = await fetch(`/api/runtime-return?id=${encodeURIComponent(sessionId)}`);
+      const returnRes = await requestRuntimeReturn(sessionId);
       const returned = await returnRes.json();
       showToast(returned.message || 'Brief copied and return target opened.', returned.ok ? 'success' : 'error');
     } catch (error) {
@@ -3404,7 +3805,7 @@ async function startFreshFromBubble(sessionId) {
 async function continueFromBubble() {
   if (window.currentHandoffBubble) await recordHandoffDecision(window.currentHandoffBubble, 'continue_here');
   document.getElementById('handoffBubble').hidden = true;
-  showToast('Handoff decision saved: continue here');
+  showToast('Fresh Start decision saved: continue here');
 }
 function renderHandoffCopied(bubble, sessionId) {
   const node = document.getElementById('handoffBubble');
@@ -3412,19 +3813,19 @@ function renderHandoffCopied(bubble, sessionId) {
   node.hidden = false;
   node.innerHTML = `<div class="section-title">
       <div>
-        <h2>Handoff copied. Start a fresh chat now.</h2>
-        <p>Paste the copied brief into Claude, Codex, Cursor, or your next AI tool. AIWatcher saved this decision locally and will stop nudging this session for now.</p>
+        <h2>Fresh Start ready</h2>
+        <p>Paste the copied brief into a fresh AI chat for the matching workspace. AIWatcher saved a local receipt and will watch for follow-up proof.</p>
       </div>
       <span class="pill">saved</span>
     </div>
     <div class="pill-row">
-      <span class="pill">${esc(bubble.expected_saved_context_label || 'fresh context')}</span>
+      <span class="pill">${esc(bubble.expected_saved_context_label ? '~' + bubble.expected_saved_context_label + ' expected context at risk' : 'proof pending')}</span>
       <span class="pill">privacy-safe metadata</span>
-      <span class="pill">decision receipt saved</span>
+      <span class="pill">Fresh Start receipt saved</span>
     </div>
     <div class="actions" style="margin-top:14px">
-      <button class="btn-primary" data-session="${esc(sessionId)}" onclick="openHandoff(this.dataset.session)">Open capsule</button>
-      <button class="btn-quiet" onclick="showView('receipts')">View receipt</button>
+      <button class="btn-primary" onclick="showView('receipts')">View receipt</button>
+      <button class="btn-quiet" data-session="${esc(sessionId)}" onclick="openHandoff(this.dataset.session)">Review brief</button>
       <button class="btn-quiet" onclick="document.getElementById('handoffBubble').hidden = true">Dismiss</button>
     </div>`;
 }
@@ -3437,9 +3838,6 @@ function renderHandoffBubble(bubble) {
     return;
   }
   const runtime = bubble.runtime_attachment || {};
-  const runtimeButton = runtime.available
-    ? `<button class="btn-quiet" data-session="${esc(bubble.session_id)}" onclick="returnToRuntime(this.dataset.session)" title="${esc(runtime.reason || '')}">${esc(runtime.action_label || 'Open workspace')}</button>`
-    : '';
   node.hidden = false;
   node.innerHTML = `<div class="section-title">
       <div>
@@ -3448,11 +3846,10 @@ function renderHandoffBubble(bubble) {
       </div>
       <span class="pill">${esc(bubble.severity)}</span>
     </div>
+    ${renderIdentityStrip(bubble, runtime, bubble.source_path)}
     <div class="pill-row">${(bubble.tags || []).map(tag => `<span class="pill">${esc(tag)}</span>`).join('')}</div>
     <div class="actions" style="margin-top:14px">
-      <button class="btn-primary" data-session="${esc(bubble.session_id)}" onclick="startFreshFromBubble(this.dataset.session)">${esc(bubble.primary_label || 'New chat')}</button>
-      ${runtimeButton}
-      <button class="btn-quiet" data-session="${esc(bubble.session_id)}" onclick="copyHandoffFromBubble(this.dataset.session)">Copy handoff</button>
+      <button class="btn-primary" data-session="${esc(bubble.session_id)}" onclick="startFreshFromBubble(this.dataset.session)">${esc(bubble.primary_label || 'Copy Fresh Start brief')}</button>
       <button class="btn-quiet" onclick="continueFromBubble()">${esc(bubble.continue_label || 'Continue here')}</button>
       <button class="btn-quiet" data-session="${esc(bubble.session_id)}" onclick="selectSession(this.dataset.session)">Inspect session</button>
     </div>`;
@@ -3528,6 +3925,8 @@ function renderUnbanked(card) {
       ${esc(card.max_lookback_hours)}h; anything older stays unbanked rather than being misattributed.</p>`;
 }
 function renderContextHealth(rows) {
+  const status = arguments.length > 1 ? arguments[1] : 'ready';
+  if (status === 'pending') return '<div class="loading">Checking context health and handoff opportunities...</div>';
   if (!rows.length) return '<div class="empty">No active context-health warnings. AIWatcher will surface bloat, stale sessions, and handoff opportunities here.</div>';
   return `<div class="coverage-grid">${rows.map(row => `<div class="health-card">
     <div class="health-head">
@@ -3632,10 +4031,37 @@ async function selectProject(project) {
         <td>${esc(s.tool)}</td><td>${esc(s.model)}</td><td>${sessionStatePill(s.state)} ${outcomeEvidencePill(s)}</td><td>${esc(s.tokens_label)}</td><td><button class="row-action">Review</button></td>
       </tr>`).join('')}</tbody></table></div></section>`;
 }
+function renderSessionSummary(s, label = 'Loading detailed evidence...') {
+  const actions = s.actions || [];
+  const action = actions.find(item => item.primary) || actions[0] || null;
+  const actionButton = action
+    ? action.id === 'handoff' && action.label !== 'Inspect evidence'
+      ? `<button class="btn-primary" onclick="openHandoff('${esc(s.session_id)}')">${esc(action.label || 'Open Fresh Start')}</button>`
+      : action.id === 'review_outcome'
+        ? `<button class="btn-primary" disabled>${esc(action.label || 'Review outcome')}</button>`
+        : `<button class="btn-primary" disabled>${esc(action.label || 'Review session')}</button>`
+    : '';
+  return `<section class="detail-section">
+    <h2 class="session-title">${esc(s.project_short || s.project || 'Session')}</h2>
+    <p class="session-meta">${esc(s.tool || 'unknown tool')} · ${esc(s.model || 'unknown model')}</p>
+    ${renderIdentityStrip(s, s.runtime_attachment, s.source_path)}
+    ${miniStats({ sessions: 1, api_value: s.api_value || '—', tokens: s.tokens_label || '—', tool_calls: s.tool_calls || 0 })}
+    <div class="pill-row">${sessionStatePill(s.state)}${outcomePill(s.outcome)}</div>
+  </section>
+  <section class="detail-section recommended-action">
+    <div class="section-title">
+      <div><h3>${esc(action ? action.label : 'Review session')}</h3><p>${esc(action ? action.reason : 'AIWatcher is loading full local evidence for this session.')}</p></div>
+      <span class="session-state recent">loading</span>
+    </div>
+    <div class="copy-row">${actionButton}<button class="btn-quiet" disabled>${esc(label)}</button></div>
+  </section>`;
+}
 function renderSessionActions(s) {
   const actions = s.actions || [];
-  const hasHandoff = actions.some(action => action.id === 'handoff');
+  const handoffAction = actions.find(action => action.id === 'handoff') || null;
+  const hasHandoff = !!handoffAction;
   const needsOutcome = actions.some(action => action.id === 'review_outcome');
+  const primaryId = (actions.find(action => action.primary) || {}).id || (needsOutcome ? 'review_outcome' : hasHandoff ? 'handoff' : 'optimize_next_prompt');
   const runtime = s.runtime_attachment || actions.find(action => action.id === 'open_tool') || {};
   const openAction = actions.find(action => action.id === 'open_tool') || {};
   const title = hasHandoff
@@ -3644,33 +4070,50 @@ function renderSessionActions(s) {
       ? 'Recommended: mark the outcome'
       : 'Recommended: tighten the next prompt';
   const body = hasHandoff
-    ? 'This session has enough context, model calls, or tool calls that a handoff brief is safer than replaying the whole history.'
+    ? 'This session has enough context, model calls, or tool calls that a Fresh Start brief is safer than replaying the whole history.'
     : needsOutcome
       ? 'Mark whether this worked so AIWatcher can measure value per useful change instead of only tokens.'
       : 'Use this session as evidence, then preflight the next prompt before sending it.';
   const openToolNote = runtime.reason || openAction.reason || 'No safe return target is available for this session yet.';
   const openButton = openAction.available
     ? `<button class="btn-quiet" onclick="returnToRuntime('${esc(s.session_id)}')" title="${esc(openToolNote)}">${esc(openAction.label || runtime.action_label || 'Open workspace')}</button>`
-    : `<button class="btn-quiet" disabled title="${esc(openToolNote)}">${esc(openAction.label || runtime.action_label || 'Copy handoff')}</button>`;
+    : `<button class="btn-quiet" disabled title="${esc(openToolNote)}">${esc(openAction.label || runtime.action_label || 'No live return')}</button>`;
   return `<section class="detail-section recommended-action"><div class="action-kicker">${sessionStatePill(s.state)}${outcomePill(s.outcome)}</div>
     <h3>${esc(title)}</h3>
     <p>${esc(body)}</p>
     <div class="copy-row">
-      ${hasHandoff ? `<button class="btn-primary" onclick="openHandoff('${esc(s.session_id)}')">Create handoff capsule</button>` : ''}
-      ${needsOutcome ? `<button class="btn-primary" onclick="document.getElementById('outcomePanel').scrollIntoView({ behavior: 'smooth', block: 'center' })">Mark outcome</button>` : ''}
-      <button class="btn-quiet" onclick="showView('prompt'); closeDrawer(); document.getElementById('promptInput').focus(); showToast('Paste the next prompt here to optimize it before sending')">Optimize next prompt</button>
+      ${hasHandoff ? `<button class="${primaryId === 'handoff' ? 'btn-primary' : 'btn-quiet'}" onclick="${handoffAction.label === 'Inspect evidence' ? "document.getElementById('evidencePanel').scrollIntoView({ behavior: 'smooth', block: 'center' })" : `openHandoff('${esc(s.session_id)}')`}">${esc(handoffAction.label || 'Open Fresh Start')}</button>` : ''}
+      ${needsOutcome ? `<button class="${primaryId === 'review_outcome' ? 'btn-primary' : 'btn-quiet'}" onclick="document.getElementById('outcomePanel').scrollIntoView({ behavior: 'smooth', block: 'center' })">Mark outcome</button>` : ''}
+      <button class="${primaryId === 'optimize_next_prompt' ? 'btn-primary' : 'btn-quiet'}" onclick="showView('prompt'); closeDrawer(); document.getElementById('promptInput').focus(); showToast('Paste the next prompt here to optimize it before sending')">Optimize next prompt</button>
       ${openButton}
     </div>
     <p class="tool-link-note">${esc(openToolNote)}</p>
   </section>`;
 }
-async function selectSession(sessionId) {
+async function selectSession(sessionId, attempt = 0) {
   openDrawer('Session review');
-  document.getElementById('detailContent').innerHTML = '<div class="loading">Loading session details...</div>';
-  const res = await fetch(`/api/session?id=${encodeURIComponent(sessionId)}`);
+  document.getElementById('drawerTitle').textContent = 'Session review';
+  const node = document.getElementById('detailContent');
+  node.innerHTML = `<div class="loading">Loading session identity for ${esc(sessionId)}...</div>`;
+  const summaryPromise = fetch(`/api/session-summary?id=${encodeURIComponent(sessionId)}`)
+    .then(res => res.json())
+    .catch(() => null);
+  const detailPromise = fetch(`/api/session?id=${encodeURIComponent(sessionId)}`);
+  const fastSummary = await summaryPromise;
+  if (fastSummary && !fastSummary.error) {
+    node.innerHTML = renderSessionSummary(fastSummary);
+  } else {
+    node.innerHTML = `<div class="loading">Loading session details for ${esc(sessionId)}...</div>`;
+  }
+  const res = await detailPromise;
   const s = await res.json();
   if (s.error) {
-    document.getElementById('detailContent').innerHTML = `<div class="empty">${esc(s.error)}</div>`;
+    if (attempt < 5) {
+      node.innerHTML = `<div class="loading">Still indexing this session. Retrying...</div>`;
+      window.setTimeout(() => selectSession(sessionId, attempt + 1), 1400);
+      return;
+    }
+    node.innerHTML = `<div class="empty">${esc(s.error)}</div>`;
     return;
   }
   document.getElementById('drawerTitle').textContent = 'Session review';
@@ -3772,6 +4215,7 @@ async function selectSession(sessionId) {
   document.getElementById('detailContent').innerHTML = `<section class="detail-section">
     <h2 class="session-title">${esc(s.project_short)}</h2>
     <p class="session-meta">${esc(s.tool)} · ${esc(s.model)}</p>
+    ${renderIdentityStrip(s, s.runtime_attachment, s.source_path)}
     ${miniStats({ sessions: 1, api_value: s.api_value, tokens: s.tokens_label, tool_calls: s.tool_calls })}
     <div class="pill-row">${sessionStatePill(s.state)}${outcomePill(s.outcome)}</div>
     </section>
@@ -3780,7 +4224,7 @@ async function selectSession(sessionId) {
     ${outcomeActions}
     ${renderVerdict(s)}
     ${promptReview}
-    ${renderEvidence(s.outcome_evidence)}
+    <div id="evidencePanel">${renderEvidence(s.outcome_evidence)}</div>
     ${insights}
     ${costBreakdown}
     <section class="detail-section"><details class="aiw-details"><summary>Session metadata</summary><div class="details-body">
@@ -3809,7 +4253,7 @@ async function markOutcome(sessionId, outcome) {
     }
     await Promise.all([selectSession(sessionId), load(false)]);
     const labels = { useful: 'Useful', rework: 'Needs rework', abandoned: 'Abandoned' };
-    showToast(`Outcome saved: ${labels[outcome]}`);
+    showToast(`Outcome saved: ${labels[outcome]}. Continue only if there is a clear next checkpoint.`);
   } catch (error) {
     showToast('Could not reach the local AIWatcher server.', 'error');
   } finally {
@@ -3942,8 +4386,9 @@ function showView(view) {
   document.querySelectorAll('.view').forEach(node => {
     node.hidden = node.id !== `view-${view}`;
   });
+  const activeView = ({ projects: 'sessions', changes: 'sessions', coverage: 'setup' })[view] || view;
   document.querySelectorAll('.nav-tab').forEach(node => {
-    node.classList.toggle('active', node.dataset.view === view);
+    node.classList.toggle('active', node.dataset.view === activeView);
   });
 }
 let sessionSearchTimer = null;
@@ -4037,7 +4482,7 @@ async function load(resetDetail = true, forceRefresh = false) {
   document.getElementById('latestHandoffDecision').innerHTML = renderLatestHandoffDecision(handoffDecisions);
   document.getElementById('receiptRows').innerHTML = renderReceiptRows(receiptCache);
   document.getElementById('handoffDecisionRows').innerHTML = renderHandoffDecisionRows(handoffDecisions);
-  document.getElementById('contextHealth').innerHTML = renderContextHealth(data.context_health || []);
+  document.getElementById('contextHealth').innerHTML = renderContextHealth(data.context_health || [], data.context_health_status || 'ready');
   document.getElementById('unbanked').innerHTML = renderUnbanked(data.unbanked);
   const changeRows = data.changes || [];
   document.getElementById('changeRows').innerHTML = renderChangeRows(changeRows);
@@ -4119,7 +4564,7 @@ OVERLAY_HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AIWatcher Handoff</title>
+  <title>AIWatcher Fresh Start</title>
   <style>
     :root {
       color-scheme: dark;
@@ -4165,6 +4610,17 @@ OVERLAY_HTML = r"""<!doctype html>
       font-weight: 800;
     }
     .body { padding: 16px 22px 18px; }
+    .identity {
+      border: 1px solid rgba(126, 172, 255, 0.22);
+      background: rgba(255, 255, 255, 0.04);
+      border-radius: 12px;
+      padding: 10px 12px;
+      margin-bottom: 14px;
+      color: #d9e5f7;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .identity strong { color: #ffffff; }
     .tags { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
     .tag {
       border: 1px solid rgba(126, 172, 255, 0.24);
@@ -4215,7 +4671,7 @@ OVERLAY_HTML = r"""<!doctype html>
 </head>
 <body>
   <main class="bubble" id="bubble">
-    <div class="empty">Loading AIWatcher handoff recommendation...</div>
+    <div class="empty">Loading AIWatcher Fresh Start recommendation...</div>
   </main>
 <script>
 function esc(value) {
@@ -4230,8 +4686,10 @@ async function copyText(value, label = 'Copied') {
   try {
     await navigator.clipboard.writeText(value || '');
     renderSaved(label);
+    return true;
   } catch (error) {
-    renderSaved('Copy failed. Open dashboard and copy from the handoff drawer.');
+    renderSaved('Copy failed. Open dashboard and copy from the Fresh Start drawer.');
+    return false;
   }
 }
 async function recordDecision(decision, bubble) {
@@ -4278,15 +4736,16 @@ function renderSaved(message) {
     <div class="body"><div class="actions"><button class="primary" onclick="window.close()">Close</button><a href="/">Open dashboard</a></div></div>`;
 }
 async function copyHandoff(bubble, decision) {
-  await recordDecision(decision, bubble);
-  const res = await fetch(`/api/handoff?id=${encodeURIComponent(bubble.session_id)}&target=generic&prompt=0`);
+  const res = await fetch(`/api/handoff-basic?id=${encodeURIComponent(bubble.session_id)}&target=generic`);
   const capsule = await res.json();
   if (capsule.error) {
     renderSaved(capsule.error);
     return;
   }
+  const copied = await copyText(capsule.next_brief || '', 'Fresh Start brief copied');
+  if (!copied) return;
+  await recordDecision(decision, bubble);
   await recordAmbientAction('acted');
-  await copyText(capsule.next_brief || '', 'Fresh-session brief copied');
 }
 async function copyFocusedBrief(bubble, intervention) {
   const brief = `AIWatcher focused continuation
@@ -4322,16 +4781,16 @@ function interventionPresentation(bubble, intervention) {
       title: bubble.title,
       body: bubble.body,
       severity: bubble.severity,
-      primaryLabel: 'Copy fresh-session brief',
+      primaryLabel: 'Copy Fresh Start brief',
       primaryMode: 'fresh_chat',
     };
   }
   const action = intervention.action || 'fresh_chat';
   const options = {
-    fresh_chat: ['Context is getting expensive', 'Copy fresh-session brief', 'fresh_chat'],
+    fresh_chat: ['Context is getting expensive', 'Copy Fresh Start brief', 'fresh_chat'],
     recover_loop: ['Possible loop detected', 'Inspect and stop', 'inspect'],
     continue_focused: ['Focus the next checkpoint', 'Copy focused next step', 'focused'],
-    switch_tool: ['Usage runway is getting low', 'Copy handoff brief', 'fresh_chat'],
+    switch_tool: ['Usage runway is getting low', 'Copy Fresh Start brief', 'fresh_chat'],
   };
   const selected = options[action] || ['AIWatcher found something to review', 'Inspect', 'inspect'];
   return {
@@ -4342,16 +4801,25 @@ function interventionPresentation(bubble, intervention) {
     primaryMode: selected[2],
   };
 }
+function shortSessionId(value) {
+  const text = String(value || '');
+  return text.length > 12 ? `${text.slice(0, 8)}...${text.slice(-4)}` : text || 'unknown';
+}
 function renderBubble(bubble, intervention) {
   const presentation = interventionPresentation(bubble, intervention);
+  const runtime = bubble.runtime_attachment || {};
+  const identityLabel = runtime.identity_label || runtime.label || 'Local session';
+  const surface = runtime.surface || 'unknown surface';
+  const last = bubble.updated_at ? new Date(bubble.updated_at).toLocaleString() : 'unknown';
   const tags = (bubble.tags || []).map(tag => `<span class="tag">${esc(tag)}</span>`).join('');
   document.getElementById('bubble').innerHTML = `<div class="top">
     <div><h1>${esc(presentation.title || 'AIWatcher found something to review')}</h1><p>${esc(presentation.body || 'Review the local evidence before continuing.')}</p></div>
     <span class="badge">${esc(presentation.severity || 'warning')}</span>
   </div>
   <div class="body">
+    <div class="identity"><strong>${esc(identityLabel)}</strong><br>${esc(bubble.tool || runtime.tool || 'unknown tool')} · ${esc(surface)} · ${esc(bubble.project || runtime.project_path || 'unknown workspace')} · ${esc(shortSessionId(bubble.session_id || runtime.session_id))}<br>Last activity: ${esc(last)}</div>
     <div class="tags">${tags}</div>
-    <p>${esc(bubble.reason || 'Use a handoff brief to preserve the outcome without carrying the full chat history.')}</p>
+    <p>${esc(bubble.reason || 'Use a Fresh Start brief to preserve the outcome without carrying the full chat history.')}</p>
     <div class="actions">
       <button class="primary" id="primaryAction">${esc(presentation.primaryLabel)}</button>
       ${presentation.primaryMode === 'inspect' ? '' : '<button id="inspect">Inspect</button>'}
@@ -4385,8 +4853,8 @@ async function load() {
         project: health.project,
         tool: health.tool,
         severity: health.severity,
-        title: `Start a new chat to save ~${saved} tokens of context`,
-        body: health.recommendation || 'This session is getting heavy. Use a handoff brief before continuing.',
+        title: `Fresh Start recommended before ~${saved} tokens of replayed context compounds`,
+        body: health.recommendation || 'This session is getting heavy. Use a Fresh Start brief before continuing.',
         reason: health.recommendation || 'Context pressure is elevated.',
         expected_saved_context_tokens: health.estimated_replayed_context_tokens || null,
         tags: [`${health.latest_turn_tokens} tokens/turn`, `${saved} replayed`].concat(
@@ -4394,8 +4862,14 @@ async function load() {
       };
     }
   }
+  if (wanted && (!bubble || bubble.session_id !== wanted) && data.context_health_status === 'pending') {
+    document.getElementById('bubble').innerHTML = `<div class="top"><div><h1>Loading this session evidence</h1><p>AIWatcher is still building the local context-health index for this deep link.</p></div><span class="badge">checking</span></div>
+      <div class="body"><div class="actions"><a class="primary" href="/?session=${encodeURIComponent(wanted)}">Open dashboard</a><button onclick="window.close()">Close</button></div></div>`;
+    window.setTimeout(load, 1600);
+    return;
+  }
   if (!bubble) {
-    document.getElementById('bubble').innerHTML = `<div class="top"><div><h1>No handoff needed right now</h1><p>AIWatcher did not find warning or critical context pressure in the current local window.</p></div><span class="badge">healthy</span></div>
+    document.getElementById('bubble').innerHTML = `<div class="top"><div><h1>No Fresh Start needed right now</h1><p>AIWatcher did not find warning or critical context pressure in the current local window.</p></div><span class="badge">healthy</span></div>
       <div class="body"><div class="actions"><a class="primary" href="/">Open dashboard</a><button onclick="window.close()">Close</button></div></div>`;
     return;
   }
@@ -4554,15 +5028,24 @@ class UIHandler(BaseHTTPRequestHandler):
             session_id = params.get("id", [""])[0]
             self._send(200, json.dumps(build_session_detail(session_id)), "application/json; charset=utf-8")
             return
-        if parsed.path == "/api/runtime-return":
+        if parsed.path == "/api/session-summary":
             params = parse_qs(parsed.query)
             session_id = params.get("id", [""])[0]
+            self._send(200, json.dumps(build_session_summary(session_id)), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/handoff-basic":
+            params = parse_qs(parsed.query)
+            session_id = params.get("id", [""])[0]
+            target = params.get("target", ["generic"])[0]
             try:
                 days = max(1, min(90, int(params.get("days", ["30"])[0])))
             except ValueError:
                 days = 30
-            payload = build_runtime_return(session_id, days)
-            self._send(200 if payload.get("ok") or payload.get("error") != "session not found" else 404, json.dumps(payload), "application/json; charset=utf-8")
+            self._send(
+                200,
+                json.dumps(build_basic_handoff_detail(session_id, days, target)),
+                "application/json; charset=utf-8",
+            )
             return
         if parsed.path == "/api/handoff":
             params = parse_qs(parsed.query)
@@ -4648,6 +5131,7 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/preflight",
             "/api/handoff-decision",
             "/api/ambient-intervention-action",
+            "/api/runtime-return",
         }:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
@@ -4707,20 +5191,41 @@ class UIHandler(BaseHTTPRequestHandler):
                 return
             self._send(200, json.dumps(record), "application/json; charset=utf-8")
             return
+        if parsed.path == "/api/runtime-return":
+            session_id = str(payload.get("session_id", payload.get("id", ""))).strip()
+            if not session_id:
+                self._send(400, json.dumps({"error": "session_id is required"}), "application/json; charset=utf-8")
+                return
+            raw_days = payload.get("days", 30)
+            try:
+                days = max(1, min(90, int(raw_days)))
+            except (TypeError, ValueError):
+                days = 30
+            result = build_runtime_return(session_id, days)
+            self._send(
+                200 if result.get("ok") or result.get("error") != "session not found" else 404,
+                json.dumps(result),
+                "application/json; charset=utf-8",
+            )
+            return
         if parsed.path == "/api/handoff-decision":
             session_id = str(payload.get("session_id", "")).strip()
             decision = str(payload.get("decision", "")).strip()
             reason = str(payload.get("reason", "")).strip()
+            action_channel = str(payload.get("action_channel", "dashboard")).strip() or "dashboard"
             expected = payload.get("expected_saved_context_tokens")
             if not session_id:
                 self._send(400, json.dumps({"error": "session_id is required"}), "application/json; charset=utf-8")
                 return
             try:
+                source_row = _find_session_row(session_id)
                 record = record_handoff_decision(
                     session_id=session_id,
                     decision=decision,
                     reason=reason,
                     expected_saved_context_tokens=expected if isinstance(expected, int) else None,
+                    action_channel=action_channel,
+                    source_project_path=source_row.project_path if source_row else None,
                 )
             except ValueError as exc:
                 self._send(400, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")

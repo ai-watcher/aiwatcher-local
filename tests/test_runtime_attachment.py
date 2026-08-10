@@ -32,6 +32,8 @@ class RuntimeAttachmentTests(unittest.TestCase):
         self.assertTrue(attachment.available)
         self.assertFalse(attachment.exact_return_available)
         self.assertEqual(attachment.exact_return_label, "App focus only")
+        self.assertEqual(attachment.identity_level, "likely_workspace")
+        self.assertEqual(attachment.identity_label, "Likely active app")
         self.assertIn("does not expose a stable deep link", attachment.reason)
         self.assertIn("exact desktop chat", attachment.exact_return_reason)
 
@@ -64,6 +66,8 @@ class RuntimeAttachmentTests(unittest.TestCase):
         self.assertEqual(attachment.pid, 123)
         self.assertFalse(attachment.exact_return_available)
         self.assertEqual(attachment.exact_return_label, "Needs native companion")
+        self.assertEqual(attachment.identity_level, "exact_session")
+        self.assertEqual(attachment.identity_label, "Exact active session")
         self.assertIn("Exact terminal/chat focus needs", attachment.reason)
 
     def test_stale_session_uses_handoff_instead_of_live_return(self) -> None:
@@ -77,6 +81,8 @@ class RuntimeAttachmentTests(unittest.TestCase):
         self.assertFalse(attachment.available)
         self.assertEqual(attachment.level, "historical")
         self.assertEqual(attachment.action_label, "No live return")
+        self.assertEqual(attachment.identity_level, "historical_log")
+        self.assertEqual(attachment.identity_label, "Historical log only")
         self.assertFalse(attachment.native_companion_required)
 
     def test_perform_runtime_return_opens_macos_app(self) -> None:

@@ -13,7 +13,7 @@ Every other tool in this space reports on sessions that failed. The expensive
 ones usually don't. A task phrased loosely, twenty turns of drift and redirect,
 and then it works — so nobody looks, at three times the tokens it needed.
 
-![The AIWatcher Local dashboard's Today tab: latest AI work and one thing worth changing up top; useful outcomes, preflight decisions, sessions observed, and API-equivalent value tiles; the latest intervention receipt with predicted savings; projects driving usage and recent sessions below.](docs/dashboard.svg)
+![The AIWatcher Local dashboard's Today tab: latest AI work and one thing worth changing up top; useful outcomes, preflight decisions, sessions observed, and API-equivalent value tiles; the latest receipt with proof status; projects driving usage and recent sessions below.](docs/dashboard.svg)
 
 ## Contents
 
@@ -240,32 +240,28 @@ The mockups below use synthetic data — like the PR that introduced them, this
 README does not embed real dashboard screenshots, since those can expose
 private local paths, project names, and AI usage history.
 
-- **Today**: latest work, useful outcomes, preflight decisions, one next
-  recommendation, and a handoff bubble when context is getting expensive.
-- **Prompt**: local Prompt Companion for surfaces AIWatcher cannot hook yet.
-- **Projects**: local repos and folders driving usage.
-- **Sessions**: inspect recent work, rank every prompt in a session by cost
-  under **Expensive asks** (cost is cumulative — a short prompt late in a long
-  session can still be expensive, since it re-sends the whole conversation),
-  mark outcomes, and create a handoff capsule to continue in a fresh session.
+- **Home**: latest work, useful outcomes, preflight decisions, one next
+  recommendation, and a Fresh Start companion when context is getting expensive.
+- **Control**: local Prompt Companion for surfaces AIWatcher cannot hook yet.
+- **Work**: inspect recent sessions, projects, and changes; rank every prompt in
+  a session by cost under **Expensive asks** (cost is cumulative — a short
+  prompt late in a long session can still be expensive, since it re-sends the
+  whole conversation), mark outcomes, review the changes ledger, and create a
+  Fresh Start brief to continue in a fresh session.
 
-  ![Sessions tab: a session list next to a review drawer showing Expensive asks with the costliest step highlighted, outcome buttons, outcome evidence, and Create handoff capsule.](docs/dashboard-sessions.svg)
-- **Changes**: the git ledger — what each commit cost, its $/line, how much of
-  it survived, and the unbanked spend that never reached a commit at all.
-
-  ![Changes tab: a cost-per-change table with commit, cost, lines, dollars per line, survival percentage, and subject, above an unbanked spend panel breaking down money with no commit behind it.](docs/dashboard-changes.svg)
-- **Receipts**: connect each preflight decision to its resulting session —
-  predicted savings before execution, observed usage after, an inferred
-  estimate of what was actually avoided (labeled as inferred, not a
-  guaranteed counterfactual), risk change, and developer outcome.
+  ![Work tab: a session list next to a review drawer showing Expensive asks with the costliest step highlighted, outcome buttons, outcome evidence, and a Fresh Start action.](docs/dashboard-sessions.svg)
+- **Evidence**: connect each Fresh Start action or preflight decision to what
+  happened next — expected replayed context at risk, observed follow-up sessions,
+  resulting usage, inferred savings labeled as estimates, risk change, and
+  developer outcome.
 
   ![Receipts tab: a table of intervention receipts with time, tool/project, decision, risk change, result, and a review action per row.](docs/dashboard-receipts.svg)
-- **Insights**: local suggestions for waste and risk — concentrated spend,
+- **Spend**: local suggestions for waste and risk — concentrated spend,
   large-context sessions, possible iterative loops, subscription/limited
   usage, and unmarked outcome evidence — plus a privacy-safe daily journal
   and weekly report.
 
-  ![Insights tab: a stacked list of flagged suggestions — concentrated spend, a large-context session, a possible iterative loop, subscription/limited usage, and unmarked outcome evidence — next to a daily journal and weekly report, with privacy contract and enterprise handoff panels below.](docs/dashboard-insights.svg)
+  ![Spend tab: a stacked list of flagged suggestions — concentrated spend, a large-context session, a possible iterative loop, subscription/limited usage, and unmarked outcome evidence — next to a daily journal and weekly report, with privacy contract and enterprise path panels below.](docs/dashboard-insights.svg)
 
 ### 4. Mark whether work was useful
 
@@ -289,7 +285,7 @@ privacy-safe evidence snapshot: commit SHAs, hashes of file paths/test
 artifacts, confidence, and inferred outcome. It does not store source diffs,
 prompt text, commit subjects, or file contents.
 
-This persisted snapshot is separate from the one-time handoff brief you copy
+This persisted snapshot is separate from the one-time Fresh Start brief you copy
 elsewhere (below), which does include the real commit subject and body. A
 commit message is written by whoever made the change specifically to explain
 it to a future reader, so unlike prompt text it is not treated as private —
@@ -381,18 +377,21 @@ Replace `<your-project>` with part of your own project's name — for a repo at
 project path, tool, model, or session id, and falls back to a rough topic match
 over changed file names, so a fragment is usually enough.
 
-The brief opens with why AIWatcher is suggesting a handoff now: degraded
+The brief opens with why AIWatcher is suggesting a Fresh Start now: degraded
 context health or a stale session, 250+ model calls, 80+ tool calls, or
 $5+ in API-equivalent value — so you know whether it's worth acting on
 before reading further.
 
-The dashboard also surfaces this as a **handoff bubble** on Today when active
+The dashboard also surfaces this as a **Fresh Start companion** on Home when active
 local work reaches warning or critical context pressure. AIWatcher gives the
 signal one primary action, plus **Inspect**, **Snooze**, and **Dismiss**. It
-records only local decision metadata and estimated replayed context avoided,
-not prompt or source text. Recent handoff decisions appear in Today, Receipts,
-and `aiwatcher hook-status`. After you act, snooze, or dismiss, the same signal
-stays quiet across the native and browser companions unless severity worsens.
+records only local decision metadata and estimated replayed context at risk,
+not prompt or source text. When a later same-project local session appears,
+AIWatcher links it as a Fresh Start receipt and shows observed next-session
+usage/outcome without claiming a guaranteed counterfactual. Recent Fresh Start
+decisions appear in Home, Evidence, and `aiwatcher hook-status`. After you act,
+snooze, or dismiss, the same signal stays quiet across the native and browser
+companions unless severity worsens.
 
 For a lower-friction desktop flow, start the local dashboard. It now starts
 Ambient Watch while the dashboard is open, so warnings can appear without a
@@ -434,13 +433,13 @@ highest-cost prompt from the session — off by default, and labeled as a
 privacy opt-in in both the CLI and the dashboard.
 
 **Or do the whole thing in the dashboard.** Run `python -m aiwatcher_cli ui`,
-open the **Sessions** tab, search for the work, click the session, then press
-**Create handoff capsule**. The drawer exposes the same controls as the flags
+open **Work**, search for the work, click the session, then press
+**Copy Fresh Start brief**. The drawer exposes the same controls as the flags
 above: the five targets as buttons, the prompt excerpt as a checkbox, and
-**Copy handoff brief** in place of `--copy`. Same capability either way — use
+**Copy Fresh Start brief** in place of `--copy`. Same capability either way — use
 whichever suits the moment.
 
-The **Today** tab also surfaces a handoff button directly on sessions under
+The **Home** tab also surfaces a Fresh Start button directly on sessions under
 context pressure, so you can act on one without going looking for it.
 
 ### 7. Log a decision that never became a commit
@@ -453,7 +452,7 @@ fresh session has no way to know that ground was already covered:
 python -m aiwatcher_cli log-decision "Chose X over Y" --reasoning "..." --rejected "Y"
 ```
 
-Logged decisions for a session are surfaced in its handoff brief, explicitly
+Logged decisions for a session are surfaced in its Fresh Start brief, explicitly
 labeled self-reported and not verified against what actually happened.
 Nothing is logged automatically. To have an AI session call this itself at
 real decision points, install a personal convention — this only ever touches
@@ -619,7 +618,7 @@ token.
   subscription or API usage pressure, plus stale local AI runtimes that may be
   wasting CPU/RAM/battery or expanding local attack surface.
 - **Control:** Let the developer use the brief, edit it, run the original,
-  cancel, or start a fresh-session handoff when context pressure would waste
+  cancel, or start fresh when context pressure would waste
   turns. High-risk automatic hooks pause before execution.
 - **Prove:** Ledger every commit against the AI spend that produced it — $/line,
   how much of the change is still alive, and the unbanked spend that never
@@ -628,7 +627,7 @@ token.
   can still mark a result useful, rework, or abandoned by hand.
 - **Improve:** Compare predicted pressure with observed usage and outcomes,
   log a decision that never became a commit, then recommend one better
-  behavior or create a handoff capsule for the next fresh session.
+  behavior or create a Fresh Start brief for the next fresh session.
 
 The [Prompt Gate](#prompt-preflight-hook) is what makes **Control** interactive
 instead of just a log: install the prompt hook with `--gate` and you get to

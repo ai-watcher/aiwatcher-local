@@ -160,6 +160,15 @@ class ProjectPathTests(unittest.TestCase):
 
         self.assertEqual(hints, [str(project.resolve())])
 
+    def test_project_hints_ignore_unresolvable_tilde_user(self) -> None:
+        self.assertEqual(scanner._project_hints_from_text("Please inspect ~est before changing code."), [])
+
+    def test_project_hints_ignore_long_quoted_prose_that_starts_like_path(self) -> None:
+        with patch.object(scanner.Path, "exists", side_effect=AssertionError("prose should not touch filesystem")):
+            hints = scanner._project_hints_from_text('Review "/private/tmp/repo and then read this long pasted transcript ' + ("x" * 600) + '"')
+
+        self.assertEqual(hints, [])
+
     def test_absolute_path_pattern_keeps_full_windows_path(self) -> None:
         match = scanner._ABSOLUTE_PATH_RE.search(
             r"Please work in C:\Users\developer\projects\right-repo before editing."
@@ -195,6 +204,37 @@ class ProjectPathTests(unittest.TestCase):
         self.assertEqual(sessions[0].agent_calls, 2)
         self.assertEqual(len(events), 2)
         self.assertNotIn("cumulative", " ".join(sessions[0].notes).lower())
+
+    def test_codex_window_scan_reads_recent_tail_of_large_rollout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rollout = Path(temp_dir) / "rollout-large.jsonl"
+            old_line = json.dumps({
+                "timestamp": "2026-05-01T10:00:00Z",
+                "type": "response_item",
+                "payload": {"role": "assistant", "content": "old" * 400},
+            })
+            recent_line = json.dumps({
+                "timestamp": "2026-08-09T10:00:00Z",
+                "type": "event_msg",
+                "payload": {"type": "token_count", "info": {
+                    "total_token_usage": {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110},
+                    "last_token_usage": {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110},
+                }},
+            })
+            rollout.write_text("\n".join([old_line] * 40 + [recent_line]) + "\n", encoding="utf-8")
+            since = datetime(2026, 8, 8, tzinfo=timezone.utc)
+            with (
+                patch.object(scanner, "CODEX_TAIL_MIN_FILE_BYTES", 1),
+                patch.object(scanner, "CODEX_TAIL_INITIAL_BYTES", len(recent_line) + 20),
+                patch.object(scanner, "CODEX_TAIL_MAX_BYTES", len(recent_line) + 80),
+            ):
+                lines = [line for _, line in scanner._codex_rollout_lines(rollout, since)]
+
+        self.assertTrue(lines)
+        self.assertTrue(any("2026-08-09T10:00:00Z" in line for line in lines))
+        self.assertFalse(any("2026-05-01T10:00:00Z" in line for line in lines))
+        self.assertTrue(scanner._codex_window_line_is_essential(recent_line))
+        self.assertFalse(scanner._codex_window_line_is_essential(old_line))
 
     def test_claude_user_path_hint_overrides_stale_session_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

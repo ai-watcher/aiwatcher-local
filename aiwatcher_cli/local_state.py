@@ -601,10 +601,12 @@ def record_handoff_decision(
     decision: str,
     reason: str,
     expected_saved_context_tokens: int | None = None,
+    action_channel: str | None = None,
+    source_project_path: str | None = None,
 ) -> dict[str, Any]:
-    """Record a local, privacy-safe handoff bubble decision.
+    """Record a local, privacy-safe Fresh Start companion decision.
 
-    The handoff bubble is a Control-phase intervention: AIWatcher suggests
+    The Fresh Start companion is a Control-phase intervention: AIWatcher suggests
     continuing in a fresh session when context pressure is likely to waste
     turns. Store only metadata and the user's choice, not prompt/source text.
     """
@@ -614,20 +616,37 @@ def record_handoff_decision(
         raise ValueError("session_id is required")
     with _locked_state():
         data = _load()
+        actionable_fresh_start = decision in {"new_chat", "copy_handoff"}
         record = {
             "id": str(uuid.uuid4()),
             "created_at": datetime.now(timezone.utc).isoformat(),
             "phase": "control",
             "intervention_type": "handoff_bubble",
+            "receipt_kind": "fresh_start" if actionable_fresh_start else "handoff_decision",
             "session_id": session_id,
+            "source_session_id": session_id,
             "decision": decision,
             "reason": reason.strip()[:500],
+            "action_channel": (action_channel or "dashboard").strip()[:80],
+            "source_project_path": source_project_path.strip()[:1000] if isinstance(source_project_path, str) else None,
             "expected_saved_context_tokens": (
                 int(expected_saved_context_tokens)
                 if isinstance(expected_saved_context_tokens, int) and expected_saved_context_tokens > 0
                 else None
             ),
         }
+        if actionable_fresh_start:
+            record.update({
+                "next_session_id": None,
+                "next_session_linked_at": None,
+                "next_session_correlation": {
+                    "status": "waiting",
+                    "method": "first_following_local_session",
+                    "window_hours": 24,
+                    "confidence": None,
+                    "reason": "Waiting for a later local session in the same project.",
+                },
+            })
         data["handoff_decisions"].append(record)
         data["handoff_decisions"] = data["handoff_decisions"][-MAX_HANDOFF_DECISIONS_STORED:]
         _save(data)
@@ -644,6 +663,30 @@ def recent_handoff_decisions(limit: int = 10) -> list[dict[str, Any]]:
     return list(reversed(rows[-max(1, limit):]))
 
 
+def link_handoff_decision_next_session(
+    decision_id: str,
+    *,
+    next_session_id: str | None = None,
+    correlation: dict[str, Any] | None = None,
+) -> bool:
+    """Attach Fresh Start proof metadata to an existing handoff decision."""
+    if not decision_id.strip():
+        return False
+    with _locked_state():
+        data = _load()
+        for row in reversed(data["handoff_decisions"]):
+            if not isinstance(row, dict) or row.get("id") != decision_id:
+                continue
+            if next_session_id:
+                row["next_session_id"] = next_session_id
+                row["next_session_linked_at"] = datetime.now(timezone.utc).isoformat()
+            if correlation is not None:
+                row["next_session_correlation"] = correlation
+            _save(data)
+            return True
+    return False
+
+
 VALID_AMBIENT_INTERVENTION_STATES = {
     "detected",
     "delivered",
@@ -653,6 +696,7 @@ VALID_AMBIENT_INTERVENTION_STATES = {
     "dismissed",
     "failed",
 }
+TERMINAL_AMBIENT_INTERVENTION_STATES = {"acted", "snoozed", "dismissed"}
 AMBIENT_SEVERITY_RANK = {"info": 0, "warning": 1, "critical": 2}
 MAX_AMBIENT_INTERVENTIONS_STORED = 500
 MAX_AMBIENT_INTERVENTION_EVENTS = 25
@@ -852,9 +896,29 @@ def ambient_intervention_delivery_allowed(fingerprint: str, *, channel: str) -> 
             except (TypeError, ValueError):
                 return False
 
-    channel_state = record.get("channels", {}).get(channel, {})
+    channels = record.get("channels", {})
+    if not isinstance(channels, dict):
+        channels = {}
+    for other_channel, other_state in channels.items():
+        if other_channel == channel or not isinstance(other_state, dict):
+            continue
+        if other_state.get("state") not in {"delivered", "displayed"}:
+            continue
+        if _ambient_severity_rank(current_severity) <= _ambient_severity_rank(other_state.get("severity")):
+            return False
+
+    channel_state = channels.get(channel, {})
     if not isinstance(channel_state, dict) or not channel_state:
         return True
+    if channel_state.get("state") == "failed":
+        updated_at = channel_state.get("updated_at")
+        try:
+            failed_at = datetime.fromisoformat(str(updated_at))
+            if failed_at.tzinfo is None:
+                failed_at = failed_at.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - failed_at.astimezone(timezone.utc)).total_seconds() >= 5 * 60
+        except (TypeError, ValueError):
+            return True
     return _ambient_severity_rank(current_severity) > _ambient_severity_rank(channel_state.get("severity"))
 
 
@@ -893,7 +957,11 @@ def record_ambient_intervention_action(
             if record is None:
                 return None
             now = datetime.now(timezone.utc).isoformat()
-            record["state"] = state
+            prior_state = str(record.get("state") or "")
+            incoming_terminal = state in TERMINAL_AMBIENT_INTERVENTION_STATES
+            sticky_terminal = prior_state in TERMINAL_AMBIENT_INTERVENTION_STATES and not incoming_terminal
+            if not sticky_terminal:
+                record["state"] = state
             record["updated_at"] = now
             if state in {"delivered", "displayed", "failed"} and channel:
                 record.setdefault("channels", {})[channel] = {

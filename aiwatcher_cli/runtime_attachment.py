@@ -38,6 +38,9 @@ class RuntimeAttachment:
         "Local history does not include a verified app window, terminal pane, or chat deep link for this exact session."
     )
     native_companion_required: bool = True
+    identity_level: str = "historical_log"
+    identity_label: str = "Historical log only"
+    identity_reason: str = "AIWatcher found local history, but no verified live runtime for this exact AI session."
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -58,6 +61,9 @@ class RuntimeAttachment:
             "exact_return_label": self.exact_return_label,
             "exact_return_reason": self.exact_return_reason,
             "native_companion_required": self.native_companion_required,
+            "identity_level": self.identity_level,
+            "identity_label": self.identity_label,
+            "identity_reason": self.identity_reason,
         }
 
 
@@ -137,6 +143,12 @@ def runtime_attachment_for_session(
                 "AIWatcher matched a live process, but returning to the exact chat needs an opt-in native companion "
                 "that records a trusted window, terminal pane, or host deep link."
             ),
+            identity_level="exact_session",
+            identity_label="Exact active session",
+            identity_reason=(
+                f"Matched this AIWatcher session to a live {process.tool} process. Exact chat focus still depends "
+                "on the host exposing a window, terminal pane, or deep link."
+            ),
         )
 
     if status not in {"active", "recent"}:
@@ -148,12 +160,15 @@ def runtime_attachment_for_session(
             action_label="No live return",
             available=False,
             confidence="low",
-            reason="This session is not fresh enough for live return. Use it for evidence, prompt optimization, or a handoff brief.",
+            reason="This session is not fresh enough for live return. Use it for evidence, prompt optimization, or a Fresh Start brief.",
             tool=session.tool,
             surface=session.surface,
             project_path=project_path,
             app_name=app_name,
             native_companion_required=False,
+            identity_level="historical_log",
+            identity_label="Historical log only",
+            identity_reason="This is local history, not a verified in-progress AI chat.",
         )
 
     if session.surface == "desktop" and app_name:
@@ -177,6 +192,11 @@ def runtime_attachment_for_session(
             exact_return_reason=(
                 f"AIWatcher can bring {app_name} forward. Returning to the exact desktop chat needs a platform "
                 "API, extension, or explicit native companion with accessibility permission."
+            ),
+            identity_level="likely_workspace",
+            identity_label="Likely active app",
+            identity_reason=(
+                f"The {app_name} app surface is recent, but AIWatcher has not verified the exact desktop chat."
             ),
         )
 
@@ -202,6 +222,13 @@ def runtime_attachment_for_session(
             else "AIWatcher only found a local session log; no safe return target is available."
         ),
         native_companion_required=available,
+        identity_level="likely_workspace",
+        identity_label="Likely workspace" if available else "Likely active session",
+        identity_reason=(
+            "AIWatcher can identify the workspace, but not the exact running AI chat."
+            if available
+            else "AIWatcher sees a recent local session, but cannot open a safe workspace or exact chat target on this platform."
+        ),
     )
 
 
@@ -232,7 +259,7 @@ def perform_runtime_return(attachment: RuntimeAttachment) -> dict[str, object]:
             return {"ok": True, "message": "Opened workspace in VS Code.", "attachment": attachment.to_json()}
         if attachment.mode == "folder" and attachment.project_path and sys.platform == "darwin":
             subprocess.Popen(["open", attachment.project_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return {"ok": True, "message": "Opened project folder. Use the handoff brief if you need a fresh AI chat.", "attachment": attachment.to_json()}
+            return {"ok": True, "message": "Opened project folder. Use the Fresh Start brief if you need a fresh AI chat.", "attachment": attachment.to_json()}
     except OSError as exc:
         return {"ok": False, "message": f"Could not open return target: {exc}", "attachment": attachment.to_json()}
 

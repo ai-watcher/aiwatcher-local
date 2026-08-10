@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Sequence
 from urllib.parse import quote
 
-from .correlate import link_recent_interventions_to_sessions
+from .correlate import link_recent_fresh_start_receipts_to_sessions, link_recent_interventions_to_sessions
 from .evidence_capture import record_missing_evidence_snapshots
 from .local_state import (
     COMMAND_GATE_BLOCKED_DECISIONS,
@@ -83,7 +83,7 @@ from .receipt import (
     rewrite_in_progress,
     survival_note,
 )
-from .runtime_attachment import runtime_attachment_for_session
+from .runtime_attachment import runtime_attachment_for_session, safe_runtime_processes
 from .outcome_evidence import (
     VALID_EVIDENCE_OUTCOMES,
     build_outcome_evidence,
@@ -282,6 +282,11 @@ def format_short_datetime(value: datetime) -> str:
     return f"{value.strftime('%b')} {value.day} {value.strftime('%H:%M')}"
 
 
+def short_session_id(value: str | None) -> str:
+    text = str(value or "")
+    return f"{text[:8]}...{text[-4:]}" if len(text) > 12 else text or "unknown"
+
+
 def in_window(session: LocalSession, since: datetime) -> bool:
     stamp = session.updated_at or session.started_at
     return bool(stamp and stamp.astimezone() >= since)
@@ -296,10 +301,10 @@ def sessions_since(days: int) -> list[LocalSession]:
     """
     since = datetime.now().astimezone() - timedelta(days=days)
     try:
-        events = scan_all_events()
+        events = scan_all_events(since=since)
     except OSError:
         events = []
-    return clip_sessions_to_window(scan_all(), events, since)
+    return clip_sessions_to_window(scan_all(since=since), events, since)
 
 
 def summarize(sessions: Iterable[LocalSession]) -> dict[str, float | int]:
@@ -762,6 +767,7 @@ _HANDOFF_SECTION_HEADERS = {
     "Objective",
     "Project",
     "Previous session",
+    "Why start fresh now",
     "Why hand off now",
     "Local evidence to inspect",
     "Fresh-session instructions",
@@ -798,19 +804,75 @@ def _normalize_handoff_project(lines: Sequence[str]) -> str | None:
     return None
 
 
+LONG_PROMPT_BRIEF_THRESHOLD = 2500
+LONG_PROMPT_EXCERPT_CHARS = 1200
+
+
+def _long_prompt_excerpt(text: str) -> str:
+    compacted = re.sub(r"\n{3,}", "\n\n", text.strip())
+    if len(compacted) <= LONG_PROMPT_EXCERPT_CHARS:
+        return compacted
+    return (
+        compacted[:LONG_PROMPT_EXCERPT_CHARS].rstrip()
+        + "\n\n[AIWatcher omitted the rest of the pasted transcript. Ask the user for the specific missing detail if needed.]"
+    )
+
+
+def _long_prompt_topics(text: str) -> list[str]:
+    lower = text.lower()
+    topics: list[str] = []
+    if ("handoff" in lower or "fresh start" in lower) and ("link" in lower or "current session" in lower or "active session" in lower):
+        topics.append("- Audit Fresh Start/session identity: can the user tell which active AI session the action refers to?")
+    if "slow" in lower or "loading" in lower or "loads after" in lower:
+        topics.append("- Audit slow-loading session and Fresh Start screens: identify fast first-paint vs deferred evidence gaps.")
+    if "fresh" in lower or "new session" in lower or "context" in lower:
+        topics.append("- Audit Fresh Start continuation: does one action create the right brief/workspace path without extra context replay?")
+    if "moat" in lower or "strategy" in lower:
+        topics.append("- Check the recommendation against the current AIWatcher OSS moat/strategy before proposing changes.")
+    return topics[:4]
+
+
+def _plan_only_requested(lower: str) -> bool:
+    patterns = [
+        r"\bdo\s+not\s+(?:edit|fix|implement|change|modify|write|patch)\b",
+        r"\bdon'?t\s+(?:edit|fix|implement|change|modify|write|patch|jump on fixing|work on (?:any )?code changes)\b",
+        r"\bno\s+(?:code\s+)?changes\b",
+        r"\bwithout\s+(?:editing|changing|modifying|fixing|implementing)\b",
+        r"\bplan\s+only\b",
+        r"\breview\s+only\b",
+        r"\baudit\s+only\b",
+        r"\bjust\s+(?:tell|explain|review|analy[sz]e|plan)\b",
+    ]
+    return any(re.search(pattern, lower) for pattern in patterns)
+
+
 def _brief_task_sections(prompt: str, *, cwd: str | None) -> list[str]:
     """Build the task section of an execution brief.
 
     For normal prompts, preserve the user's request exactly. For AIWatcher
-    handoff prompts, keep the output task-first by extracting the useful
-    structured sections instead of pasting the whole handoff blob under Task.
+    Fresh Start prompts, keep the output task-first by extracting the useful
+    structured sections instead of pasting the whole brief under Task.
     """
     text = prompt.strip()
-    if "AIWatcher fresh-session handoff" not in text:
+    if "AIWatcher fresh-session handoff" not in text and "AIWatcher Fresh Start brief" not in text:
+        if len(text) > LONG_PROMPT_BRIEF_THRESHOLD:
+            sections = [
+                "Triage this long request before execution.",
+                "",
+                "Requested outcome",
+                "- Identify the concrete question, bug, or product decision the user wants handled now.",
+                "- Do not execute every item in the pasted transcript as one task.",
+                "- Propose the smallest useful next checkpoint and wait if broader scope is needed.",
+            ]
+            topics = _long_prompt_topics(text)
+            if topics:
+                sections.extend(["", "Likely focus areas", *topics])
+            sections.extend(["", "Source request excerpt", _long_prompt_excerpt(text)])
+            return sections
         return [text]
 
     sections: list[str] = [
-        "Continue the AIWatcher fresh-session handoff from repository state on disk."
+        "Continue the AIWatcher Fresh Start brief from repository state on disk."
     ]
     objective = _structured_section_lines(text, "Objective", max_lines=5)
     if objective:
@@ -832,7 +894,10 @@ def _brief_task_sections(prompt: str, *, cwd: str | None) -> list[str]:
     if evidence:
         sections.extend(["", "Local evidence to inspect", *evidence])
 
-    handoff_reason = _structured_section_lines(text, "Why hand off now", max_lines=3)
+    handoff_reason = (
+        _structured_section_lines(text, "Why start fresh now", max_lines=3)
+        or _structured_section_lines(text, "Why hand off now", max_lines=3)
+    )
     if handoff_reason:
         sections.extend(["", "Supporting pressure context", *handoff_reason])
 
@@ -1308,12 +1373,17 @@ def build_execution_brief(
     sensitive_or_destructive: bool,
     vague_scope: bool,
     multiple_tasks: bool,
+    plan_only: bool = False,
 ) -> str:
     """Preserve the requested outcome while adding only relevant controls."""
     lines = ["Task"]
     lines.extend(_brief_task_sections(prompt, cwd=cwd))
     lines.extend(["", "Execution approach"])
-    if broad_scope:
+    if plan_only:
+        lines.append("- Review and reason only; do not edit files, run migrations, or make code changes.")
+        lines.append("- Return findings with the relevant files/functions, root cause, and minimal proposed fix/tests.")
+        lines.append("- Stop with a recommendation and implementation plan unless the user explicitly asks you to make changes.")
+    elif broad_scope:
         lines.append(
             "- Inspect the repository structure, identify the smallest relevant subsystem, and propose a phased plan before editing."
         )
@@ -1332,19 +1402,22 @@ def build_execution_brief(
             "- Do not reveal secret values or customer data. Ask for confirmation before deleting data, credentials, or production resources."
         )
 
-    lines.extend([
-        "- Preserve unrelated behavior and existing user changes.",
-        "- Run the narrowest relevant verification after implementation.",
-        "- Stop when the requested outcome is verified; do not expand into unrelated cleanup.",
-    ])
+    lines.append("- Preserve unrelated behavior and existing user changes.")
+    if plan_only:
+        lines.append("- Do not claim code was changed or tests were run unless the user later authorizes implementation.")
+    else:
+        lines.extend([
+            "- Run the narrowest relevant verification after implementation.",
+            "- Stop when the requested outcome is verified; do not expand into unrelated cleanup.",
+        ])
     reliable_cwd = _brief_working_directory(cwd)
     if reliable_cwd:
         lines.extend(["", "Working directory", reliable_cwd])
-    lines.extend([
-        "",
-        "Completion report",
-        "Summarize what changed, verification performed, remaining uncertainty, and any cost or security tradeoff.",
-    ])
+    lines.extend(["", "Completion report"])
+    if plan_only:
+        lines.append("Summarize findings, recommended minimal fix/tests, remaining uncertainty, and any cost or safety tradeoff.")
+    else:
+        lines.append("Summarize what changed, verification performed, remaining uncertainty, and any cost or security tradeoff.")
     return "\n".join(lines)
 
 
@@ -1578,6 +1651,7 @@ def analyze_prompt(
     suggestions: list[str] = []
     guardrails: list[dict[str, str]] = []
     score = 0
+    plan_only = _plan_only_requested(lower)
 
     broad_terms = [
         "entire codebase", "whole codebase", "all files", "everything", "full rewrite",
@@ -1733,6 +1807,11 @@ def analyze_prompt(
         suggestions.append("Split this into one task per prompt and checkpoint between them.")
         guardrails.append({"icon": "✂️", "label": "Split into smaller tasks"})
 
+    if plan_only and score > 0:
+        findings.append("Prompt asks for review/planning only, so the execution brief should prevent code edits.")
+        suggestions.append("Keep this as an audit: return findings, proposed fix/tests, and wait before changing files.")
+        guardrails.append({"icon": "\U0001F6A7", "label": "Review only"})
+
     if not findings:
         findings.append("No obvious cost or safety risk found from prompt text alone.")
         suggestions.append("Keep the task scoped and ask for a brief plan before large edits.")
@@ -1784,10 +1863,11 @@ def analyze_prompt(
         text,
         cwd=cwd,
         broad_scope=broad_scope,
-        needs_checkpoint=needs_checkpoint,
+        needs_checkpoint=needs_checkpoint and not plan_only,
         sensitive_or_destructive=sensitive_or_destructive,
         vague_scope=vague_scope,
         multiple_tasks=multiple_tasks,
+        plan_only=plan_only,
     )
     return {
         "risk": risk,
@@ -3262,6 +3342,7 @@ def command_today(_args: argparse.Namespace) -> int:
     all_sessions = scan_all()
     try:
         link_recent_interventions_to_sessions(all_sessions)
+        link_recent_fresh_start_receipts_to_sessions(all_sessions)
     except OSError:
         pass
     try:
@@ -4058,10 +4139,11 @@ def _runway_pressure(tool: str, sessions: Sequence[LocalSession]) -> dict[str, o
 LOOP_FLAG_REPEAT = 3     # a single action repeated this many times (or more) is worth a mention
 LOOP_CAPSULE_REPEAT = 5  # this many repeats -- stop and get a rescoped brief, not just "narrow scope"
 VELOCITY_WINDOW_MINUTES = 10.0  # look at the most recent N minutes of a session's own events
-VELOCITY_RATIO = 2.0            # tokens/minute at or above this multiple of the tool's baseline = runaway
-VELOCITY_MIN_TOKENS_PER_MINUTE = 5_000.0
-VELOCITY_MIN_WINDOW_TOKENS = 50_000
-VELOCITY_MIN_SPAN_MINUTES = 3.0
+VELOCITY_RATIO = 3.0            # tokens/minute at or above this multiple of the tool's baseline = runaway
+VELOCITY_MIN_TOKENS_PER_MINUTE = 12_000.0
+VELOCITY_MIN_WINDOW_TOKENS = 80_000
+VELOCITY_MIN_SPAN_MINUTES = 5.0
+VELOCITY_MIN_RECENT_EVENTS = 5
 
 
 def _loop_signal(events: Sequence[LocalEvent]) -> dict[str, object] | None:
@@ -4132,7 +4214,7 @@ def _velocity_signal(tool: str, events: Sequence[LocalEvent]) -> dict[str, objec
     latest = max(e.timestamp for e in timestamped)
     window_start = latest - timedelta(minutes=VELOCITY_WINDOW_MINUTES)
     window_events = [e for e in timestamped if e.timestamp >= window_start]
-    if len(window_events) < 3:
+    if len(window_events) < VELOCITY_MIN_RECENT_EVENTS:
         return None
     window_tokens = sum(e.tokens_in + e.tokens_out for e in window_events)
     observed_span_minutes = (latest - min(e.timestamp for e in window_events)).total_seconds() / 60.0
@@ -4244,7 +4326,7 @@ def _watch_intervention_presentation(status: dict[str, object]) -> dict[str, str
     presentations = {
         "critical_context": {
             "title": "AIWatcher: start fresh before the next turn",
-            "primary_label": "Copy fresh-chat brief",
+            "primary_label": "Copy Fresh Start brief",
             "action_mode": "fresh_chat",
         },
         "loop": {
@@ -4259,7 +4341,7 @@ def _watch_intervention_presentation(status: dict[str, object]) -> dict[str, str
         },
         "runway": {
             "title": "AIWatcher: switch lanes before usage pressure grows",
-            "primary_label": "Copy cross-tool handoff",
+            "primary_label": "Copy cross-tool Fresh Start",
             "action_mode": "switch_tool",
         },
         "warning_context": {
@@ -4279,6 +4361,28 @@ def _watch_intervention_presentation(status: dict[str, object]) -> dict[str, str
         "signal_kind": signal_kind,
         "body": reason,
     }
+
+
+def _watch_action_display(action: object) -> str:
+    """Map internal watch actions to user-facing language."""
+    if str(action) == "create handoff capsule now":
+        return "prepare Fresh Start brief now"
+    return str(action)
+
+
+def _watch_allows_desktop_interruption(session: LocalSession, attachment: object) -> bool:
+    """Return whether a watch signal should interrupt outside the dashboard.
+
+    The dashboard can show every local signal. A desktop popup is stronger: it
+    should be reserved for work AIWatcher can tie to a live runtime, otherwise
+    background Codex/agent sessions can interrupt the user for stale work.
+    """
+    level = str(getattr(attachment, "level", "") or "")
+    if level == "active_process":
+        return True
+    if session.surface == "cli" and level != "historical":
+        return True
+    return False
 
 
 def _focused_continuation_brief(session: LocalSession, status: dict[str, object]) -> str:
@@ -4360,7 +4464,7 @@ def _print_watch_status_card(
             f"{float(runway['pressure_ratio']):.1f}x typical {runway['tool']} session "
             "-- local estimate, not a real-time quota API"
         )
-    print(f"  Recommended: {status['action']} -- {status['reason']}")
+    print(f"  Recommended: {_watch_action_display(status['action'])} -- {status['reason']}")
 
     if (getattr(args, "notify", False) or getattr(args, "overlay", False)) and status["action"] != "continue":
         key = f"{session.session_id}:{status['action']}"
@@ -4397,8 +4501,35 @@ def _print_watch_status_card(
         if fingerprint:
             overlay_url = f"{overlay_url}&intervention={quote(fingerprint, safe='')}"
         channel = "overlay" if getattr(args, "overlay", False) else "notification"
+        held_key = f"{key}:held:{channel}"
+        if notification_seen is not None and held_key in notification_seen:
+            print(f"  {channel.title()}: already held for dashboard")
+            return
+        is_recent = stamp != MIN_DT and (datetime.now(timezone.utc) - stamp).total_seconds() <= 30 * 60
+        attachment = runtime_attachment_for_session(
+            session,
+            state={"status": "active" if is_recent else "historical"},
+            processes=safe_runtime_processes(),
+        )
+        if not _watch_allows_desktop_interruption(session, attachment):
+            if notification_seen is not None:
+                notification_seen[held_key] = stamp
+            print(f"  {channel.title()}: held for dashboard (no live runtime attached)")
+            try:
+                record_watch_notification(
+                    session_id=session.session_id,
+                    tool=session.tool,
+                    action=str(status["action"]),
+                    reason=str(status["reason"]),
+                    sent=False,
+                    detail=f"{channel} held for dashboard - no live runtime attached",
+                    url=dashboard_url,
+                )
+            except OSError:
+                pass
+            return
         already_seen = (
-            notification_seen is not None and notification_seen.get(key) == stamp
+            notification_seen is not None and key in notification_seen
         ) or (fingerprint and not ambient_intervention_delivery_allowed(fingerprint, channel=channel))
         if already_seen:
             print(f"  {channel.title()}: already handled for this signal")
@@ -4444,30 +4575,28 @@ def _print_watch_status_card(
                         overlay_brief = str(capsule.get("next_brief") or "")
                 except OSError:
                     overlay_brief = None
-                is_recent = stamp != MIN_DT and (datetime.now(timezone.utc) - stamp).total_seconds() <= 30 * 60
-                attachment = runtime_attachment_for_session(
-                    session,
-                    state={"status": "active" if is_recent else "historical"},
-                    processes=[],
-                )
-                if fingerprint:
-                    record_ambient_intervention_action(
-                        fingerprint,
-                        state="delivered",
-                        channel="overlay",
-                        detail="companion launch requested",
-                    )
+                primary_label = str(presentation["primary_label"])
+                if (
+                    presentation["action_mode"] == "fresh_chat"
+                    and attachment.available
+                    and getattr(attachment, "level", "") != "app"
+                ):
+                    primary_label = "Copy brief + open workspace"
                 overlay_ok, overlay_detail = _open_handoff_overlay(
                     overlay_url,
                     title=presentation["title"],
-                    body=f"{project_label(session.project_path)} — {status['reason']}",
+                    body=(
+                        f"{project_label(session.project_path)} "
+                        f"[{session.tool}/{session.surface or 'unknown'}, {short_session_id(session.session_id)}] - "
+                        f"{getattr(attachment, 'identity_label', 'Local session')}: {status['reason']}"
+                    ),
                     severity=severity,
                     brief_text=overlay_brief,
                     intervention_fingerprint=fingerprint,
                     signal_kind=str(presentation["signal_kind"]),
-                    primary_label=presentation["primary_label"],
+                    primary_label=primary_label,
                     primary_mode="inspect" if presentation["action_mode"] == "recover_loop" else "copy",
-                    runtime_action_available=attachment.available,
+                    runtime_action_available=attachment.available and getattr(attachment, "level", "") != "app",
                 )
                 print(f"  Overlay: {'opened' if overlay_ok else 'not opened'} ({overlay_detail})")
                 if fingerprint and not overlay_ok:
@@ -4498,7 +4627,7 @@ def _print_watch_status_card(
         # (in-memory, not persisted), so restarting watch will regenerate it once more.
         if critical_capsule_seen.get(session.session_id) == stamp:
             print(
-                f"\n  Capsule already generated this session. Run "
+                f"\n  Fresh Start brief already generated this session. Run "
                 f"`aiwatcher resume --session-id {session.session_id} --target {args.target} --copy` to get it again."
             )
         else:
@@ -4518,12 +4647,12 @@ def _print_watch_status_card(
                 extra_warnings=extra_warnings or None,
             )
             rendered = render_handoff_capsule(capsule)
-            print("\n  Stopping here is recommended -- generating a handoff capsule now:\n")
+            print("\n  Stopping here is recommended -- generating a Fresh Start brief now:\n")
             for line in rendered.splitlines():
                 print(f"  {line}" if line else "")
             ok, detail = _copy_to_clipboard(str(capsule.get("next_brief") or rendered))
             if ok:
-                print(f"\n  Copied {capsule.get('target_label') or 'handoff'} brief to clipboard.")
+                print(f"\n  Copied {capsule.get('target_label') or 'Fresh Start'} brief to clipboard.")
             else:
                 print(f"\n  Could not copy to clipboard ({detail}).")
     print()
@@ -4775,7 +4904,7 @@ def command_watch(args: argparse.Namespace) -> int:
     print("AIWatcher Local watch")
     print(
         "Read-only local scan. No data leaves this machine. "
-        "On critical context, AIWatcher may copy a local handoff brief. Press Ctrl+C to stop."
+        "On critical context, AIWatcher may copy a local Fresh Start brief. Press Ctrl+C to stop."
     )
     print("This re-scans local session logs on a timer -- it is not a live hook into a running agent.\n")
 
@@ -5311,7 +5440,10 @@ def _classify_hook_prompt_source(prompt: str | None) -> dict[str, object]:
             "finding": "Hook payload looks like a host-generated task notification, not a direct user prompt.",
             "suggestion": "Allowing the host notification; AIWatcher will continue watching the resulting session metadata.",
         }
-    if text.startswith("AIWatcher handoff capsule") and _consume_brief_token_safely(
+    if (
+        text.startswith("AIWatcher handoff capsule")
+        or text.startswith("AIWatcher Fresh Start capsule")
+    ) and _consume_brief_token_safely(
         _extract_brief_token(text, "handoff_capsule"), "handoff_capsule"
     ):
         return {
@@ -5319,8 +5451,8 @@ def _classify_hook_prompt_source(prompt: str | None) -> dict[str, object]:
             "actionable": False,
             "skip_scoring": True,
             "event": "skipped_generated_brief",
-            "finding": "Hook payload is an AIWatcher-generated handoff capsule with a verified token.",
-            "suggestion": "Allowing the scoped capsule without opening another prompt gate.",
+            "finding": "Hook payload is an AIWatcher-generated Fresh Start capsule with a verified token.",
+            "suggestion": "Allowing the scoped Fresh Start capsule without opening another prompt gate.",
         }
     looks_like_execution_brief = (
         text.startswith("Task\n") and "Execution approach" in text and "Completion report" in text
@@ -6483,6 +6615,7 @@ def _matching_hook_intervention(
     event_tool = event.get("tool")
     event_session = event.get("session_id")
     event_cwd = event.get("cwd")
+    event_created_at = _parse_hook_status_time(event.get("created_at"))
     for row in interventions:
         if row.get("tool") != event_tool:
             continue
@@ -6490,8 +6623,25 @@ def _matching_hook_intervention(
             continue
         if event_cwd and row.get("cwd") and row.get("cwd") != event_cwd:
             continue
+        if not event_session:
+            intervention_created_at = _parse_hook_status_time(row.get("created_at"))
+            if not event_created_at or not intervention_created_at:
+                continue
+            delta_seconds = (intervention_created_at - event_created_at).total_seconds()
+            if delta_seconds < -10 or delta_seconds > 5 * 60:
+                continue
         return row
     return None
+
+
+def _parse_hook_status_time(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _hook_event_action(event: dict[str, object], interventions: list[dict[str, object]]) -> str:
@@ -6568,10 +6718,10 @@ def command_hook_status(_args: argparse.Namespace) -> int:
             print(line)
     handoff_decisions = recent_handoff_decisions(limit=5)
     if handoff_decisions:
-        print("\nRecent handoff bubble decisions")
+        print("\nRecent Fresh Start decisions")
         for row in handoff_decisions:
             expected = row.get("expected_saved_context_tokens")
-            saved = f" | ~{compact_int(expected)} context avoided" if isinstance(expected, int) and expected > 0 else ""
+            saved = f" | ~{compact_int(expected)} expected context at risk" if isinstance(expected, int) and expected > 0 else ""
             line = (
                 f"- {row.get('created_at', 'unknown')} | "
                 f"{row.get('decision', 'unknown')}{saved}"
@@ -6999,7 +7149,7 @@ def build_parser() -> argparse.ArgumentParser:
     timeline.add_argument("--limit", type=int, default=30, help="Maximum number of events to show")
     timeline.set_defaults(func=command_timeline)
 
-    handoff = sub.add_parser("handoff", help="Create a local handoff capsule for continuing work in a fresh AI session")
+    handoff = sub.add_parser("handoff", help="Create a local Fresh Start brief for continuing work in a fresh AI session")
     handoff.add_argument("--session-id", help="Build the capsule from this session instead of the most recent one")
     handoff.add_argument("--days", type=int, default=30, help="How many days back to search for the session")
     handoff.add_argument("--target", choices=sorted(TARGET_LABELS), default="generic", help="Format the brief for a target AI tool")
@@ -7079,11 +7229,11 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument(
         "--overlay",
         action="store_true",
-        help="Open a local AIWatcher companion overlay when watch recommends a handoff or other action",
+        help="Open a local AIWatcher companion overlay when watch recommends Fresh Start or another action",
     )
     watch.add_argument(
         "--target", choices=sorted(TARGET_LABELS), default="generic",
-        help="Format the auto-generated CRITICAL-context handoff capsule for this AI tool",
+        help="Format the auto-generated CRITICAL-context Fresh Start brief for this AI tool",
     )
     watch.set_defaults(func=command_watch)
 

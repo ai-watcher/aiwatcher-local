@@ -379,7 +379,7 @@ Carry context between sessions and tools.
 
 ### `aiwatcher handoff`
 
-Create a local handoff capsule for continuing work in a fresh AI session
+Create a local Fresh Start brief for continuing work in a fresh AI session
 
 ```sh
 aiwatcher handoff [--session-id SESSION_ID] [--days DAYS]
@@ -499,8 +499,8 @@ aiwatcher watch --interval 30 --notify
 | `--calls-threshold` | integer | `250` | Flag a session above this many model calls |
 | `--tokens-threshold` | integer | `500000` | Flag a session above this many tokens |
 | `--notify` | flag |  | Send a best-effort local OS notification when watch recommends action, and for outcome-review signals (survival, churn, same-file re-prompt, cost-per-surviving-change) |
-| `--overlay` | flag |  | Open a local AIWatcher companion overlay when watch recommends a handoff or other action |
-| `--target` | `claude`, `codex`, `cursor`, `generic`, `vscode` | `generic` | Format the auto-generated CRITICAL-context handoff capsule for this AI tool |
+| `--overlay` | flag |  | Open a local AIWatcher companion overlay when watch recommends Fresh Start or another action |
+| `--target` | `claude`, `codex`, `cursor`, `generic`, `vscode` | `generic` | Format the auto-generated CRITICAL-context Fresh Start brief for this AI tool |
 
 ### `aiwatcher statusline`
 

@@ -1,4 +1,4 @@
-"""Tiny native handoff companion for AIWatcher Local.
+"""Tiny native Fresh Start companion for AIWatcher Local.
 
 This is intentionally dependency-free. It gives `aiwatcher watch --overlay` a
 real desktop window that can float above Claude, Codex, Cursor, or a browser
@@ -121,13 +121,29 @@ def overlay_config(
     return config
 
 
+def _infer_signal_kind_from_title(signal_kind: str | None, title: str | None, body: str | None = None) -> str:
+    normalized = _normalize_signal_kind(signal_kind)
+    if normalized != "generic":
+        return normalized
+    text = f"{title or ''} {body or ''}".lower()
+    if "fresh" in text or "handoff" in text or "context is getting expensive" in text:
+        return "critical_context"
+    if "loop" in text or "repeated" in text:
+        return "loop"
+    if "velocity" in text or "moving unusually fast" in text:
+        return "velocity"
+    if "runway" in text or "switch lane" in text or "usage pressure" in text:
+        return "runway"
+    return normalized
+
+
 MACOS_SWIFT_OVERLAY = r'''
 import Cocoa
 import Foundation
 
 let args = CommandLine.arguments
 let urlString = args.count > 1 ? args[1] : ""
-let titleText = args.count > 2 ? args[2] : "AIWatcher handoff recommended"
+let titleText = args.count > 2 ? args[2] : "AIWatcher Fresh Start recommended"
 let bodyText = args.count > 3 ? args[3] : "AIWatcher found context pressure."
 let severityText = args.count > 4 ? args[4] : "warning"
 let briefFile = args.count > 5 ? args[5] : ""
@@ -155,7 +171,7 @@ func postDecision(_ decision: String) {
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    let payload: [String: Any] = ["session_id": sid, "decision": decision, "reason": bodyText]
+    let payload: [String: Any] = ["session_id": sid, "decision": decision, "reason": bodyText, "action_channel": "native_overlay"]
     request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
     let sem = DispatchSemaphore(value: 0)
     URLSession.shared.dataTask(with: request) { _, _, _ in sem.signal() }.resume()
@@ -165,7 +181,11 @@ func postDecision(_ decision: String) {
 func postInterventionAction(_ action: String, snoozeMinutes: Int? = nil) {
     guard !interventionFingerprint.isEmpty,
           let url = URL(string: "\(baseURL)/api/ambient-intervention-action") else {
-        postDecision(action == "snooze" ? "continue_here" : action == "dismiss" ? "dismissed" : "copy_handoff")
+        if action == "snooze" {
+            postDecision("continue_here")
+        } else if action == "dismiss" {
+            postDecision("dismissed")
+        }
         return
     }
     var request = URLRequest(url: url)
@@ -185,9 +205,12 @@ func postInterventionAction(_ action: String, snoozeMinutes: Int? = nil) {
 
 func requestRuntimeReturn() {
     guard runtimeActionAvailable,
-          let encoded = sid.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-          let url = URL(string: "\(baseURL)/api/runtime-return?id=\(encoded)") else { return }
-    URLSession.shared.dataTask(with: url).resume()
+          let url = URL(string: "\(baseURL)/api/runtime-return") else { return }
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try? JSONSerialization.data(withJSONObject: ["session_id": sid])
+    URLSession.shared.dataTask(with: request).resume()
 }
 
 func fetchHandoffBrief() -> String? {
@@ -197,7 +220,7 @@ func fetchHandoffBrief() -> String? {
         return value
     }
     guard let encoded = sid.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-          let url = URL(string: "\(baseURL)/api/handoff?id=\(encoded)&target=generic&prompt=0") else { return nil }
+          let url = URL(string: "\(baseURL)/api/handoff-basic?id=\(encoded)&target=generic") else { return nil }
     let sem = DispatchSemaphore(value: 0)
     var result: String?
     URLSession.shared.dataTask(with: url) { data, _, _ in
@@ -227,7 +250,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
         let frame = NSRect(x: screen.maxX - width - 28, y: screen.minY + 28, width: width, height: height)
         window = NSPanel(contentRect: frame, styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.title = "AIWatcher Handoff"
+        window.title = "AIWatcher Fresh Start"
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.hidesOnDeactivate = false
@@ -301,11 +324,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let brief = fetchHandoffBrief() {
             copyToClipboard(brief)
             postInterventionAction("acted")
+            if signalKind == "critical_context" {
+                postDecision("copy_handoff")
+            }
             requestRuntimeReturn()
             let destination = runtimeActionAvailable ? "The return target was opened." : "Return to your AI tool."
             finish("Brief copied. \(destination) Paste it to continue.")
         } else {
-            finish("Could not copy. Open the dashboard to copy the handoff.")
+            finish("Could not copy. Open the dashboard to copy the Fresh Start brief.")
         }
     }
 
@@ -365,6 +391,7 @@ def _record_decision(base: str, session_id: str, decision: str, reason: str) -> 
                 "session_id": session_id,
                 "decision": decision,
                 "reason": reason,
+                "action_channel": "native_overlay",
             },
         )
     except (OSError, urllib.error.URLError, json.JSONDecodeError):
@@ -399,7 +426,7 @@ def _request_runtime_return(base: str, session_id: str) -> bool:
     if not session_id:
         return False
     try:
-        result = _request_json(f"{base}/api/runtime-return?id={urllib.parse.quote(session_id)}")
+        result = _request_json(f"{base}/api/runtime-return", {"session_id": session_id})
     except (OSError, urllib.error.URLError, json.JSONDecodeError):
         return False
     return bool(result.get("ok"))
@@ -444,7 +471,8 @@ def _run_macos_swift_overlay(
     try:
         with open(script_path, "w", encoding="utf-8") as handle:
             handle.write(MACOS_SWIFT_OVERLAY)
-        config = overlay_config(signal_kind, primary_label=primary_label)
+        inferred_signal_kind = _infer_signal_kind_from_title(signal_kind, title, body)
+        config = overlay_config(inferred_signal_kind, primary_label=primary_label)
         subprocess.Popen(
             [
                 swift,
@@ -483,6 +511,7 @@ def run_native_overlay(
     primary_mode: str | None = None,
     runtime_action_available: bool = False,
 ) -> int:
+    signal_kind = _infer_signal_kind_from_title(signal_kind, title, body)
     config = overlay_config(signal_kind, primary_label=primary_label)
     title = title or config.title
     primary_mode = primary_mode or config.primary_mode
@@ -512,7 +541,7 @@ def run_native_overlay(
     local_brief = _read_brief_file(brief_file)
 
     root = tk.Tk()
-    root.title("AIWatcher Handoff")
+    root.title("AIWatcher Fresh Start")
     root.configure(bg="#edf4ff")
     root.attributes("-topmost", True)
     try:
@@ -576,11 +605,13 @@ def run_native_overlay(
             root.clipboard_append(brief)
             root.update()
             _record_intervention_action(base, intervention_fingerprint, "acted")
+            if _normalize_signal_kind(signal_kind) == "critical_context":
+                _record_decision(base, session_id, "copy_handoff", body or "Fresh Start brief copied.")
             opened = runtime_action_available and _request_runtime_return(base, session_id)
             destination = "The return target was opened." if opened else "Return to your AI tool."
             show_saved(f"Brief copied. {destination} Paste it to continue.")
         except (OSError, urllib.error.URLError, json.JSONDecodeError, tk.TclError):
-            status.set("Could not copy. Open the dashboard to copy the handoff manually.")
+            status.set("Could not copy. Open the dashboard to copy the Fresh Start brief manually.")
 
     def snooze() -> None:
         _record_intervention_action(base, intervention_fingerprint, "snooze", snooze_minutes=15)

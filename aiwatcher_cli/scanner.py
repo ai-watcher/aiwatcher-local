@@ -454,6 +454,11 @@ _ABSOLUTE_PATH_RE = re.compile(
     r"|(?:[A-Za-z]:[\\/][^\s:*?\"<>|`\r\n]+))"
     r")"
 )
+_JSON_TIMESTAMP_PREFIX_RE = re.compile(r'"timestamp"\s*:\s*"([^"]+)"')
+CODEX_TAIL_INITIAL_BYTES = 8 * 1024 * 1024
+CODEX_TAIL_MAX_BYTES = 128 * 1024 * 1024
+CODEX_TAIL_MIN_FILE_BYTES = 16 * 1024 * 1024
+CODEX_MAX_WINDOW_JSON_LINE_BYTES = 2 * 1024 * 1024
 
 
 def _normalize_project_hint(path: str | None) -> str | None:
@@ -470,7 +475,21 @@ def _normalize_project_hint(path: str | None) -> str | None:
     cleaned = path.strip().strip("`'\"()[]{}<>,.;:")
     if not cleaned:
         return None
-    candidate = Path(cleaned).expanduser()
+    # Quoted prose can contain an absolute-looking token and then continue for
+    # hundreds of characters. Treat that as prose, not a filesystem path; it is
+    # both slow to normalize and likely to pollute project attribution.
+    if len(cleaned) > 512 or "\n" in cleaned or "\r" in cleaned:
+        return None
+    try:
+        candidate = Path(cleaned).expanduser()
+    except RuntimeError:
+        return None
+    if any(ch.isspace() for ch in cleaned):
+        try:
+            if not candidate.exists():
+                return None
+        except OSError:
+            return None
     if not candidate.is_absolute():
         return None
 
@@ -496,6 +515,77 @@ def _project_hints_from_text(text: str | None) -> list[str]:
             hints.append(normalized)
             seen.add(normalized)
     return hints
+
+
+def _line_timestamp_from_prefix(line: str) -> datetime | None:
+    stamp_match = _JSON_TIMESTAMP_PREFIX_RE.search(line[:160])
+    if not stamp_match:
+        return None
+    return _parse_ts(stamp_match.group(1))
+
+
+def _codex_rollout_lines(path: Path, since: datetime | None) -> Iterable[tuple[int, str]]:
+    """Yield rollout lines, reading only the recent tail for windowed scans.
+
+    Codex transcripts can grow to hundreds of megabytes and occasionally get a
+    fresh mtime even when the session started months ago. For `since` scans,
+    rollout rows are chronological and timestamp-prefixed, so we can seek near
+    the end and expand backward until the chunk begins before the requested
+    window. Full scans still read the whole file.
+    """
+    if since is None:
+        with path.open(errors="replace") as handle:
+            for index, line in enumerate(handle):
+                yield index, line
+        return
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    if size < CODEX_TAIL_MIN_FILE_BYTES:
+        with path.open(errors="replace") as handle:
+            for index, line in enumerate(handle):
+                yield index, line
+        return
+
+    threshold = since.astimezone(timezone.utc) - MTIME_SAFETY_MARGIN
+    window = min(CODEX_TAIL_INITIAL_BYTES, size)
+    selected_start = 0
+    selected_lines: list[str] = []
+    while True:
+        start = max(0, size - window)
+        with path.open("rb") as handle:
+            handle.seek(start)
+            if start > 0:
+                handle.readline()
+            chunk = handle.read()
+        lines = [line.decode("utf-8", errors="replace") for line in chunk.splitlines(keepends=True)]
+        selected_start = start
+        selected_lines = lines
+        first_timestamp = next(
+            (stamp for line in lines for stamp in [_line_timestamp_from_prefix(line)] if stamp is not None),
+            None,
+        )
+        if start == 0 or (first_timestamp and first_timestamp.astimezone(timezone.utc) <= threshold):
+            break
+        if window >= min(CODEX_TAIL_MAX_BYTES, size):
+            break
+        window = min(window * 2, CODEX_TAIL_MAX_BYTES, size)
+    approx_index = max(0, selected_start)
+    for offset, line in enumerate(selected_lines):
+        yield approx_index + offset, line
+
+
+def _codex_window_line_is_essential(line: str) -> bool:
+    prefix = line[:512]
+    return (
+        '"type":"token_count"' in prefix
+        or '"type": "token_count"' in prefix
+        or '"type":"session_meta"' in prefix
+        or '"type": "session_meta"' in prefix
+        or '"type":"turn_context"' in prefix
+        or '"type": "turn_context"' in prefix
+    )
 
 
 def _codex_user_prompt_text(row_type: str | None, payload: dict[str, Any]) -> str | None:
@@ -1235,8 +1325,8 @@ def scan_claude_code_events(since: datetime | None = None) -> list[LocalEvent]:
     return events
 
 
-def scan_codex_cli() -> list[LocalSession]:
-    rollout_sessions, _ = scan_codex_rollouts()
+def scan_codex_cli(since: datetime | None = None) -> list[LocalSession]:
+    rollout_sessions, _ = scan_codex_rollouts(since=since)
     codex_db = _first_existing(CODEX_DB_PATHS)
     if not codex_db:
         return rollout_sessions
@@ -1344,10 +1434,18 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
             lambda: {"tokens_in": 0.0, "tokens_out": 0.0, "cost_usd": 0.0, "agent_calls": 0.0, "tool_calls": 0.0}
         )
         try:
-            with path.open(errors="replace") as handle:
-                for index, line in enumerate(handle):
-                    if not line.strip():
+            for index, line in _codex_rollout_lines(path, since):
+                    if not line or line == "\n":
                         continue
+                    if since is not None:
+                        line_timestamp = _line_timestamp_from_prefix(line)
+                        if line_timestamp and line_timestamp < since - MTIME_SAFETY_MARGIN:
+                            continue
+                        if (
+                            len(line) > CODEX_MAX_WINDOW_JSON_LINE_BYTES
+                            and not _codex_window_line_is_essential(line)
+                        ):
+                            continue
                     try:
                         row = json.loads(line)
                     except json.JSONDecodeError:
@@ -1541,8 +1639,8 @@ def model_usage_totals(sessions: Iterable[LocalSession]) -> dict[str, dict[str, 
     return dict(totals)
 
 
-def scan_all() -> list[LocalSession]:
-    return [*scan_claude_code(), *scan_codex_cli(), *scan_cursor_limited()]
+def scan_all(since: datetime | None = None) -> list[LocalSession]:
+    return [*scan_claude_code(), *scan_codex_cli(since=since), *scan_cursor_limited()]
 
 
 # How far before a caller's `since` a transcript file may have been last

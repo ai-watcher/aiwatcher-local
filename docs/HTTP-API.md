@@ -118,21 +118,22 @@ supported for external callers** — treat them as private and expect them to
 change without a deprecation period.
 
 `GET` — `/api/health`, `/api/summary`, `/api/sessions`, `/api/session`,
-`/api/project`, `/api/report`, `/api/journal`, `/api/handoff`,
-`/api/context-health`, `/api/runtime-return`, `/api/ambient-intervention`
-
-`/api/runtime-return` is dashboard-only. It asks AIWatcher to open the safest
-available return target for a local session: exact process attachment when a
-host exposes enough metadata, otherwise app/workspace return, otherwise a
-handoff fallback. It must not be treated as a stable deep-link API.
+`/api/project`, `/api/report`, `/api/journal`, `/api/handoff-basic`, `/api/handoff`,
+`/api/context-health`, `/api/ambient-intervention`
 
 `/api/ambient-intervention` returns the content-free local signal metadata
 needed to keep the browser fallback consistent with the native companion.
+`/api/handoff-basic` returns a copyable Fresh Start brief without waiting for
+timeline, git, or prompt enrichment; `/api/handoff` returns the enriched drawer
+payload.
 
 `POST` — `/api/handoff-decision`, which records which action you took on a
-handoff bubble, and `/api/ambient-intervention-action`, which records the
+Fresh Start companion, and `/api/ambient-intervention-action`, which records the
 native companion lifecycle (`displayed`, `acted`, `snoozed`, `dismissed`, or
-`failed`). Both are called by the dashboard or native companion only.
+`failed`). `/api/runtime-return` asks AIWatcher to open the safest available
+return target for a local session: exact process attachment when a host exposes
+enough metadata, otherwise app/workspace return, otherwise a Fresh Start fallback.
+These endpoints are called by the dashboard or native companion only.
 
 If you need one of these programmatically, prefer the equivalent CLI command
 with `--format json` where available, or
