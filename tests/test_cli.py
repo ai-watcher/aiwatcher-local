@@ -2612,7 +2612,7 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         brief = str(result["suggested_prompt"])
         self.assertLess(len(brief), len(original))
         self.assertIn("Review and reason only; do not edit files", brief)
-        self.assertIn("Audit handoff/session identity", brief)
+        self.assertIn("Audit Fresh Start/session identity", brief)
         self.assertIn("Audit slow-loading session", brief)
         self.assertIn("Audit Fresh Start continuation", brief)
         self.assertIn("Review only", [item["label"] for item in result["guardrails"]])

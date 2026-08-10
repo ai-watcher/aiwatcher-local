@@ -118,8 +118,9 @@ supported for external callers** — treat them as private and expect them to
 change without a deprecation period.
 
 `GET` — `/api/health`, `/api/summary`, `/api/sessions`, `/api/session`,
-`/api/project`, `/api/report`, `/api/journal`, `/api/handoff-basic`, `/api/handoff`,
-`/api/context-health`, `/api/ambient-intervention`
+`/api/session-summary`, `/api/project`, `/api/report`, `/api/journal`,
+`/api/handoff-basic`, `/api/handoff`, `/api/context-health`,
+`/api/ambient-intervention`
 
 `/api/ambient-intervention` returns the content-free local signal metadata
 needed to keep the browser fallback consistent with the native companion.
