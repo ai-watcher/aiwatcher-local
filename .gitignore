@@ -21,9 +21,14 @@ env/
 htmlcov/
 .tox/
 
-# Local export artifacts
-aiwatcher-local-export.json
-aiwatcher-local-events.json
+# Local export artifacts. No prompt text or source, but they do carry local
+# paths, project names, session ids and usage history -- the same things the
+# docs refuse to put in a screenshot. `export` writes wherever it is pointed,
+# so match the shapes people actually use, not just the two names in the docs.
+aiwatcher-*.json
+events.json
+*-events.json
+*-export.json
 
 # Editor / OS
 .vscode/
