@@ -407,6 +407,35 @@ class PromptSavingsBaselineTests(unittest.TestCase):
         self.assertEqual(result, 0)
         serve.assert_called_once()
 
+    def test_ui_startup_does_not_wait_for_cache_refresh(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_baseline_refresh() -> dict[str, object]:
+            entered.set()
+            release.wait(timeout=5)
+            return {}
+
+        with (
+            patch.object(cli, "get_or_refresh_baselines", side_effect=slow_baseline_refresh),
+            patch.object(cli, "get_or_refresh_survival", return_value={}),
+            patch.object(cli, "get_or_refresh_receipt_baseline", return_value={}),
+            patch.object(cli, "recheck_evidence_survival", return_value=0),
+            patch("aiwatcher_cli.ui.serve") as serve,
+        ):
+            result = cli.command_ui(SimpleNamespace(
+                host="127.0.0.1",
+                port=8765,
+                no_port_fallback=True,
+                port_attempts=1,
+                restart=False,
+                no_watch=True,
+            ))
+            self.assertEqual(result, 0)
+            serve.assert_called_once()
+            self.assertTrue(entered.wait(timeout=1))
+            release.set()
+
     def test_ui_startup_starts_ambient_watch_by_default(self) -> None:
         started: dict[str, object] = {}
         proc = Mock()

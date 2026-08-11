@@ -30,7 +30,7 @@ from .cli import (
 )
 from .correlate import link_recent_fresh_start_receipts_to_sessions, link_recent_interventions_to_sessions
 from .evidence_capture import record_missing_evidence_snapshots_from_evidence
-from .handoff import TARGET_LABELS, build_handoff_capsule
+from .handoff import HANDOFF_TYPE_LABELS, TARGET_LABELS, build_handoff_capsule
 from .metrics import model_cost_comparison, pace_vs_baseline, replayed_context_cost
 from .local_state import (
     COMMAND_GATE_BLOCKED_DECISIONS,
@@ -922,6 +922,11 @@ def build_basic_handoff_detail(
     session_id: str,
     days: int = 30,
     target: str = "generic",
+    handoff_type: str = "coding",
+    objective: str | None = None,
+    source_refs: list[str] | None = None,
+    constraints: list[str] | None = None,
+    acceptance_criteria: list[str] | None = None,
 ) -> dict[str, object]:
     """Return a copyable Fresh Start brief without event/git enrichment.
 
@@ -933,6 +938,7 @@ def build_basic_handoff_detail(
     if not row:
         return {"error": "session not found"}
     target = target if target in TARGET_LABELS else "generic"
+    handoff_type = handoff_type if handoff_type in HANDOFF_TYPE_LABELS else "coding"
     state = session_state(row)
     attachment = runtime_attachment_for_session(row, state=state, processes=safe_runtime_processes())
     project = row.project_path if is_reliable_project_path(row.project_path) else "unknown"
@@ -951,6 +957,27 @@ def build_basic_handoff_detail(
         "You are starting a fresh AI work session. Do not assume access to the previous chat.",
         "Continue from repository state on disk, not from hidden conversation history.",
         f"Target tool: {TARGET_LABELS[target]}.",
+        f"Continuation type: {HANDOFF_TYPE_LABELS[handoff_type]}.",
+        *([
+            "",
+            "Goal",
+            f"- User objective: {objective.strip()}",
+        ] if objective and objective.strip() else []),
+        *([
+            "",
+            "Source of truth to load first",
+            *[f"- {item}" for item in (source_refs or [])[:8] if item],
+        ] if source_refs else []),
+        *([
+            "",
+            "Do not lose these constraints",
+            *[f"- {item}" for item in (constraints or [])[:8] if item],
+        ] if constraints else []),
+        *([
+            "",
+            "Acceptance checks",
+            *[f"- {item}" for item in (acceptance_criteria or [])[:8] if item],
+        ] if acceptance_criteria else []),
         "",
         "Workspace",
         f"- Project: {project}",
@@ -984,6 +1011,12 @@ def build_basic_handoff_detail(
         "outcome": None,
         "evidence": {"commits": [], "changed_files": [], "tests": [], "confidence": "predicted"},
         "warnings": warnings,
+        "handoff_type": handoff_type,
+        "handoff_type_label": HANDOFF_TYPE_LABELS[handoff_type],
+        "objective": objective.strip() if objective else None,
+        "source_refs": (source_refs or [])[:8],
+        "constraints": (constraints or [])[:8],
+        "acceptance_criteria": (acceptance_criteria or [])[:8],
         "include_prompt_excerpt": False,
         "costliest_prompt": None,
         "decisions": [],
@@ -1000,6 +1033,11 @@ def build_handoff_detail(
     days: int = 30,
     target: str = "generic",
     include_prompt_excerpt: bool = False,
+    handoff_type: str = "coding",
+    objective: str | None = None,
+    source_refs: list[str] | None = None,
+    constraints: list[str] | None = None,
+    acceptance_criteria: list[str] | None = None,
 ) -> dict[str, object]:
     row = _find_session_row(session_id, days=days)
     if not row:
@@ -1018,11 +1056,142 @@ def build_handoff_detail(
         outcome=outcome.get("outcome") if outcome else None,
         include_prompt_excerpt=include_prompt_excerpt,
         target=target if target in {"generic", "claude", "codex", "cursor", "vscode"} else "generic",
+        handoff_type=handoff_type if handoff_type in HANDOFF_TYPE_LABELS else "coding",
+        objective=objective,
+        source_refs=source_refs or [],
+        constraints=constraints or [],
+        acceptance_criteria=acceptance_criteria or [],
         related_workspaces=_related_active_workspaces(row),
     )
     attachment = runtime_attachment_for_session(row, state=session_state(row), processes=safe_runtime_processes())
     capsule["runtime_attachment"] = attachment.to_json()
     return capsule
+
+
+def build_demo_handoff_detail(
+    target: str = "generic",
+    handoff_type: str = "product",
+    objective: str | None = None,
+    source_refs: list[str] | None = None,
+    constraints: list[str] | None = None,
+    acceptance_criteria: list[str] | None = None,
+) -> dict[str, object]:
+    target = target if target in TARGET_LABELS else "generic"
+    handoff_type = handoff_type if handoff_type in HANDOFF_TYPE_LABELS else "product"
+    now = datetime.now(timezone.utc)
+    project_path = os.getcwd()
+    session = LocalSession(
+        session_id="demo-fresh-start",
+        tool="codex-desktop",
+        project_path=project_path,
+        source_path="AIWatcher demo data",
+        started_at=now - timedelta(hours=3),
+        updated_at=now - timedelta(minutes=8),
+        model="gpt-5.5",
+        tokens_in=176_000,
+        tokens_out=14_000,
+        cost_usd=3.84,
+        agent_calls=96,
+        tool_calls=43,
+    )
+    capsule = build_handoff_capsule(
+        session,
+        [],
+        outcome=None,
+        target=target,
+        handoff_type=handoff_type,
+        objective=objective or "Continue the work in a fresh session without losing decisions, constraints, or acceptance criteria.",
+        source_refs=source_refs or ["Current repo state", "Strategy or spec document", "Relevant PR or issue"],
+        constraints=constraints or [
+            "Do not assume access to the previous chat.",
+            "Do not broaden scope beyond the next checkpoint.",
+            "Preserve unrelated local changes and privacy boundaries.",
+        ],
+        acceptance_criteria=acceptance_criteria or [
+            "First reply states what appears done, what remains uncertain, and the smallest next checkpoint.",
+            "The next session loads source-of-truth files before editing.",
+            "The result reports verification and remaining uncertainty.",
+        ],
+        extra_warnings=[
+            "Demo context pressure: previous session had 190.0k tokens and several exploratory turns.",
+            "Use this sample to verify the brief shape, copy action, and receipt flow before testing real local history.",
+        ],
+    )
+    capsule["runtime_attachment"] = RuntimeAttachment(
+        session_id=session.session_id,
+        level="none",
+        mode="demo",
+        label="Demo data",
+        action_label="Copy brief",
+        available=False,
+        confidence="demo",
+        reason="This is seeded demo data. Copy the brief to inspect the Fresh Start flow; no live AI app will be opened.",
+        tool=session.tool,
+        surface="dashboard-demo",
+        project_path=project_path,
+        identity_level="demo",
+        identity_label="Demo sample",
+        identity_reason="Seeded sample for testing Fresh Start without real bloated local history.",
+    ).to_json()
+    capsule["demo"] = True
+    capsule["basic"] = False
+    capsule["enrichment_status"] = "complete"
+    return capsule
+
+
+def _query_items(params: dict[str, list[str]], name: str) -> list[str]:
+    values: list[str] = []
+    for raw in params.get(name, []):
+        for line in str(raw).splitlines():
+            item = " ".join(line.strip().split())
+            if item and item not in values:
+                values.append(item)
+            if len(values) >= 8:
+                return values
+    return values
+
+
+def _handoff_options_from_query(params: dict[str, list[str]], *, default_type: str = "coding") -> dict[str, object]:
+    if default_type not in HANDOFF_TYPE_LABELS:
+        default_type = "coding"
+    handoff_type = params.get("type", [default_type])[0]
+    if handoff_type not in HANDOFF_TYPE_LABELS:
+        handoff_type = default_type
+    objective = params.get("objective", [""])[0].strip() or None
+    return {
+        "handoff_type": handoff_type,
+        "objective": objective,
+        "source_refs": _query_items(params, "source"),
+        "constraints": _query_items(params, "constraint"),
+        "acceptance_criteria": _query_items(params, "acceptance"),
+    }
+
+
+def _payload_items(payload: dict[str, object], name: str) -> list[str]:
+    raw = payload.get(name, [])
+    if isinstance(raw, str):
+        values = [raw]
+    elif isinstance(raw, list):
+        values = [str(item) for item in raw]
+    else:
+        values = []
+    return _query_items({name: values}, name)
+
+
+def _handoff_options_from_payload(payload: dict[str, object], *, default_type: str = "coding") -> dict[str, object]:
+    if default_type not in HANDOFF_TYPE_LABELS:
+        default_type = "coding"
+    handoff_type = str(payload.get("type", default_type)).strip() or default_type
+    if handoff_type not in HANDOFF_TYPE_LABELS:
+        handoff_type = default_type
+    objective = str(payload.get("objective", "")).strip() or None
+    return {
+        "handoff_type": handoff_type,
+        "objective": objective,
+        "source_refs": _payload_items(payload, "source_refs"),
+        "constraints": _payload_items(payload, "constraints"),
+        "acceptance_criteria": _payload_items(payload, "acceptance_criteria"),
+    }
 
 
 def build_report(days: int = 7) -> dict[str, object]:
@@ -2642,7 +2811,7 @@ HTML = r"""<!doctype html>
     }
     button { cursor: pointer; transition: background .15s ease, border-color .15s ease, color .15s ease; }
     button:hover { background: var(--surface-hover); border-color: #53647a; }
-    button:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+    button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
     button:disabled { cursor: not-allowed; opacity: .62; }
     .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
     .btn-primary { background: #2f6fbd; border-color: #5594df; color: white; }
@@ -2864,6 +3033,30 @@ HTML = r"""<!doctype html>
     .handoff-cta h4 { margin: 0; font-size: 13px; }
     .handoff-cta p { font-size: 12px; }
     .handoff-cta .btn-primary { width: fit-content; }
+    .handoff-form {
+      margin-top: 14px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #0b1118;
+      display: grid;
+      gap: 12px;
+    }
+    .handoff-form-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+    .handoff-form-head h3 { margin: 0; font-size: 16px; }
+    .handoff-form-head p { margin-top: 4px; color: var(--muted); font-size: 12px; }
+    .handoff-form-grid { display: grid; grid-template-columns: minmax(150px, .55fr) minmax(0, 1.45fr); gap: 10px; }
+    .handoff-form label { display: grid; gap: 6px; min-width: 0; }
+    .handoff-form input, .handoff-form select, .handoff-form textarea {
+      width: 100%;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: #090f16;
+      color: var(--text);
+      padding: 9px 10px;
+      font: inherit;
+    }
+    .handoff-form textarea { min-height: 74px; resize: vertical; font-size: 12px; line-height: 1.45; }
     .prompt-opt-in { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); font-size: 13px; color: #d5deea; cursor: pointer; }
     .prompt-opt-in input { width: 15px; height: 15px; accent-color: var(--blue, #4f8cff); }
     .prompt-opt-in .hint { flex-basis: 100%; color: #93a2b8; font-size: 12px; }
@@ -3199,6 +3392,11 @@ HTML = r"""<!doctype html>
       <div class="actions" style="margin-bottom:12px">
         <button class="btn-quiet" data-view="coverage" onclick="showView('coverage')">Surface coverage</button>
       </div>
+      <div class="handoff-cta" style="margin-bottom:14px">
+        <h4>Test Fresh Start with sample data</h4>
+        <p>Open a seeded context-pressure case, tune the continuation brief, and verify the copy flow without waiting for a real bloated session.</p>
+        <button class="btn-primary" onclick="openDemoHandoff()">Try Fresh Start demo</button>
+      </div>
       <div id="setupRows" class="coverage-grid"></div>
     </div>
   </section>
@@ -3213,6 +3411,14 @@ HTML = r"""<!doctype html>
 </aside>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script>
+const HANDOFF_TYPES = [
+  { id: 'coding', label: 'Coding continuation' },
+  { id: 'product', label: 'Product/strategy continuation' },
+  { id: 'review', label: 'Review continuation' },
+  { id: 'bugbash', label: 'Bug bash continuation' },
+  { id: 'investigation', label: 'Investigation continuation' },
+  { id: 'general', label: 'General work continuation' },
+];
 function maxValue(rows) {
   return Math.max(0.000001, ...rows.map(r => Number(r.api_value_usd || 0)));
 }
@@ -3635,6 +3841,67 @@ function renderVerdict(s) {
     <ul>${verdict.bullets.map(item => `<li>${esc(item)}</li>`).join('')}</ul>
   </div>`;
 }
+function splitLines(value) {
+  return String(value || '').split(/\n+/).map(item => item.trim().replace(/\s+/g, ' ')).filter(Boolean).slice(0, 8);
+}
+function handoffOptionsFromForm(defaultType = 'coding') {
+  const typeEl = document.getElementById('handoffType');
+  const objectiveEl = document.getElementById('handoffObjective');
+  const sourceEl = document.getElementById('handoffSources');
+  const constraintEl = document.getElementById('handoffConstraints');
+  const acceptanceEl = document.getElementById('handoffAcceptance');
+  return {
+    type: typeEl ? typeEl.value : defaultType,
+    objective: objectiveEl ? objectiveEl.value.trim() : '',
+    sources: splitLines(sourceEl ? sourceEl.value : ''),
+    constraints: splitLines(constraintEl ? constraintEl.value : ''),
+    acceptance: splitLines(acceptanceEl ? acceptanceEl.value : ''),
+  };
+}
+function handoffPayload(sessionId, target, includePrompt, options) {
+  const next = options || {};
+  return {
+    session_id: sessionId || '',
+    target: target || 'generic',
+    prompt: !!includePrompt,
+    type: next.type || 'coding',
+    objective: next.objective || '',
+    source_refs: next.sources || [],
+    constraints: next.constraints || [],
+    acceptance_criteria: next.acceptance || [],
+  };
+}
+async function postJson(path, payload) {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload || {}),
+  });
+  return res.json();
+}
+function renderHandoffForm(capsule) {
+  const selected = capsule.handoff_type || 'coding';
+  const sourceRefs = (capsule.source_refs || []).join('\n');
+  const constraints = (capsule.constraints || []).join('\n');
+  const acceptance = (capsule.acceptance_criteria || []).join('\n');
+  return `<div class="handoff-form">
+    <div class="handoff-form-head">
+      <div>
+        <h3>Shape the next session</h3>
+        <p>Keep this brief specific enough that the new chat can continue from evidence, not from hidden memory.</p>
+      </div>
+      <span class="pill">${esc(capsule.demo ? 'sample data' : 'local only')}</span>
+    </div>
+    <div class="handoff-form-grid">
+      <label><span class="label">Work type</span><select id="handoffType">${HANDOFF_TYPES.map(item => `<option value="${esc(item.id)}" ${item.id === selected ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}</select></label>
+      <label><span class="label">Objective</span><input id="handoffObjective" value="${esc(capsule.objective || '')}" placeholder="What should the next chat accomplish?"></label>
+      <label><span class="label">Source of truth</span><textarea id="handoffSources" placeholder="One file, PR, issue, or local state per line">${esc(sourceRefs)}</textarea></label>
+      <label><span class="label">Constraints</span><textarea id="handoffConstraints" placeholder="Scope, privacy, files not to touch, decisions already made">${esc(constraints)}</textarea></label>
+      <label><span class="label">Acceptance checks</span><textarea id="handoffAcceptance" placeholder="How should the next chat know it is done?">${esc(acceptance)}</textarea></label>
+    </div>
+    <div class="copy-row"><button class="btn-quiet" onclick="regenerateHandoff('${esc(capsule.session_id)}','${esc(capsule.target || 'generic')}', ${capsule.include_prompt_excerpt ? 'true' : 'false'}, ${capsule.demo ? 'true' : 'false'})">Regenerate brief</button></div>
+  </div>`;
+}
 function renderHandoff(capsule) {
   const usage = capsule.usage || {};
   const evidence = capsule.evidence || {};
@@ -3642,6 +3909,7 @@ function renderHandoff(capsule) {
   const runtime = capsule.runtime_attachment || {};
   const target = capsule.target || 'generic';
   const includePrompt = !!capsule.include_prompt_excerpt;
+  const isDemo = !!capsule.demo;
   const canOpenRuntime = !!runtime.available && runtime.level !== 'app';
   const enrichment = capsule.basic
     ? '<div class="loading">Basic brief is ready. Loading timeline, git evidence, and prompt enrichment...</div>'
@@ -3664,18 +3932,19 @@ function renderHandoff(capsule) {
       <h3>Best next action: start fresh in the same workspace</h3>
       <p>${esc(primaryHelp)} AIWatcher will watch for a later same-project session as proof.</p>
       <div class="copy-row" style="margin-top:12px">
-        <button class="btn-primary" data-runtime="${canOpenRuntime ? '1' : '0'}" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', this.dataset.runtime === '1')">${esc(primaryLabel)}</button>
-        <button class="btn-quiet" onclick="selectSession('${esc(capsule.session_id)}')">Inspect source session</button>
+        <button class="btn-primary" data-runtime="${canOpenRuntime ? '1' : '0'}" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', this.dataset.runtime === '1', ${isDemo ? 'true' : 'false'})">${esc(isDemo ? 'Copy demo brief' : primaryLabel)}</button>
+        ${isDemo ? `<button class="btn-quiet" onclick="showView('sessions'); closeDrawer()">Find real sessions</button>` : `<button class="btn-quiet" onclick="selectSession('${esc(capsule.session_id)}')">Inspect source session</button>`}
       </div>
     </div>
+    ${renderHandoffForm(capsule)}
     <div class="copy-row">
       <span class="label" style="align-self:center">Format for</span>
-      ${['generic','claude','codex','cursor','vscode'].map(item => `<button class="btn-quiet" aria-pressed="${item === target ? 'true' : 'false'}" onclick="openHandoff('${esc(capsule.session_id)}','${item}', ${includePrompt})">${esc(item === 'generic' ? 'Generic' : item)}</button>`).join('')}
+      ${['generic','claude','codex','cursor','vscode'].map(item => `<button class="btn-quiet" aria-pressed="${item === target ? 'true' : 'false'}" onclick="regenerateHandoff('${esc(capsule.session_id)}','${item}', ${includePrompt}, ${isDemo ? 'true' : 'false'})">${esc(item === 'generic' ? 'Generic' : item)}</button>`).join('')}
     </div>
     <p class="tool-link-note">${esc(runtime.reason || 'Use the Fresh Start brief when the exact running chat cannot be reopened.')}</p>
     ${enrichment}
     <label class="prompt-opt-in">
-      <input type="checkbox" ${includePrompt ? 'checked' : ''} onchange="openHandoff('${esc(capsule.session_id)}','${target}', this.checked)">
+      <input type="checkbox" ${includePrompt ? 'checked' : ''} onchange="regenerateHandoff('${esc(capsule.session_id)}','${target}', this.checked, ${isDemo ? 'true' : 'false'})">
       <span class="prompt-opt-in-label">Include prompt excerpt <span class="pill">Privacy opt-in</span></span>
       <span class="hint">Off by default: everything else in this brief is metadata (counts, hashes, file paths). This adds your actual prompt text from the costliest turn, so review it before pasting into another tool.</span>
     </label>
@@ -3690,21 +3959,25 @@ function renderHandoff(capsule) {
     ${changedFiles.length ? `<details class="aiw-details"><summary>${esc(changedFiles.length)} changed file${changedFiles.length === 1 ? '' : 's'} to inspect</summary><div class="details-body"><div class="pill-row">${changedFiles.slice(0, 12).map(file => `<span class="pill">${esc(file)}</span>`).join('')}</div></div></details>` : ''}
   </section>`;
 }
-async function copyFreshStartFromDrawer(sessionId, openRuntime = false) {
+async function copyFreshStartFromDrawer(sessionId, openRuntime = false, isDemo = false) {
   const brief = document.getElementById('handoffBrief') ? document.getElementById('handoffBrief').value : '';
   const copied = await copyText(brief, 'Fresh Start brief copied');
   if (!copied) return;
-  await fetch('/api/handoff-decision', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      session_id: sessionId,
-      decision: 'copy_handoff',
-      reason: 'Fresh Start brief copied from the session drawer.',
-      action_channel: 'dashboard_session',
-    })
-  }).catch(() => {});
-  let message = 'Fresh Start receipt saved. Open a fresh chat in the same workspace and paste the brief.';
+  if (!isDemo) {
+    await fetch('/api/handoff-decision', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        decision: 'copy_handoff',
+        reason: 'Fresh Start brief copied from the session drawer.',
+        action_channel: 'dashboard_session',
+      })
+    }).catch(() => {});
+  }
+  let message = isDemo
+    ? 'Demo brief copied. In a live session AIWatcher would save a local Fresh Start receipt and watch for follow-up proof.'
+    : 'Fresh Start receipt saved. Open a fresh chat in the same workspace and paste the brief.';
   if (openRuntime) {
     try {
       const returnRes = await requestRuntimeReturn(sessionId);
@@ -3714,21 +3987,49 @@ async function copyFreshStartFromDrawer(sessionId, openRuntime = false) {
   }
   const status = document.getElementById('handoffStatus');
   if (status) {
-    status.innerHTML = `<h3>Fresh Start ready</h3><p>${esc(message)} AIWatcher will link the next same-project session when it appears.</p>
-      <div class="copy-row" style="margin-top:12px"><button class="btn-primary" onclick="showView('receipts'); closeDrawer()">View receipt</button><button class="btn-quiet" onclick="closeDrawer()">Done</button></div>`;
+    status.innerHTML = `<h3>${esc(isDemo ? 'Demo Fresh Start copied' : 'Fresh Start ready')}</h3><p>${esc(message)}${isDemo ? '' : ' AIWatcher will link the next same-project session when it appears.'}</p>
+      <div class="copy-row" style="margin-top:12px">${isDemo ? '<button class="btn-primary" onclick="showView(\'sessions\'); closeDrawer()">Find real sessions</button>' : '<button class="btn-primary" onclick="showView(\'receipts\'); closeDrawer()">View receipt</button>'}<button class="btn-quiet" onclick="closeDrawer()">Done</button></div>`;
   }
 }
-async function openHandoff(sessionId, target = 'generic', includePrompt = false) {
+async function regenerateHandoff(sessionId, target = 'generic', includePrompt = false, isDemo = false) {
+  const options = handoffOptionsFromForm(isDemo ? 'product' : 'coding');
+  if (isDemo) {
+    await openDemoHandoff(target, includePrompt, options);
+  } else {
+    await openHandoff(sessionId, target, includePrompt, options);
+  }
+}
+async function openDemoHandoff(target = 'generic', includePrompt = false, options = null) {
+  openDrawer('Fresh Start');
+  const node = document.getElementById('detailContent');
+  node.innerHTML = '<div class="loading">Building Fresh Start demo from sample context pressure...</div>';
+  const demoOptions = options || {
+    type: 'product',
+    objective: 'Continue the work in a fresh session without losing decisions, constraints, or acceptance criteria.',
+    sources: ['Current repo state', 'Strategy or spec document', 'Relevant PR or issue'],
+    constraints: ['Do not assume access to the previous chat.', 'Do not broaden scope beyond the next checkpoint.', 'Preserve unrelated local changes and privacy boundaries.'],
+    acceptance: ['First reply states what appears done, what remains uncertain, and the smallest next checkpoint.', 'The next session loads source-of-truth files before editing.', 'The result reports verification and remaining uncertainty.'],
+  };
+  const payload = handoffPayload('', target, includePrompt, demoOptions);
+  const capsule = await postJson('/api/handoff-demo', payload);
+  if (capsule.error) {
+    node.innerHTML = `<div class="empty">${esc(capsule.error)}</div>`;
+    return;
+  }
+  node.innerHTML = renderHandoff(capsule);
+}
+async function openHandoff(sessionId, target = 'generic', includePrompt = false, options = null) {
   openDrawer('Fresh Start');
   const node = document.getElementById('detailContent');
   node.innerHTML = '<div class="loading">Finding the source session before building the Fresh Start brief...</div>';
+  const handoffOptions = options || handoffOptionsFromForm();
+  const payload = handoffPayload(sessionId, target, includePrompt, handoffOptions);
   const summaryPromise = fetch(`/api/session-summary?id=${encodeURIComponent(sessionId)}`)
     .then(res => res.json())
     .catch(() => null);
-  const basicPromise = fetch(`/api/handoff-basic?id=${encodeURIComponent(sessionId)}&target=${encodeURIComponent(target)}`)
-    .then(res => res.json())
+  const basicPromise = postJson('/api/handoff-basic', payload)
     .catch(() => null);
-  const handoffPromise = fetch(`/api/handoff?id=${encodeURIComponent(sessionId)}&target=${encodeURIComponent(target)}&prompt=${includePrompt ? '1' : '0'}`);
+  const handoffPromise = postJson('/api/handoff', payload);
   const fastSummary = await summaryPromise;
   if (fastSummary && !fastSummary.error) {
     node.innerHTML = renderSessionSummary(fastSummary, 'Building Fresh Start brief...');
@@ -3739,8 +4040,7 @@ async function openHandoff(sessionId, target = 'generic', includePrompt = false)
   if (basicCapsule && !basicCapsule.error && !includePrompt) {
     node.innerHTML = renderHandoff(basicCapsule);
   }
-  const res = await handoffPromise;
-  const capsule = await res.json();
+  const capsule = await handoffPromise;
   if (capsule.error) {
     node.innerHTML = `<div class="empty">${esc(capsule.error)}</div>`;
     return;
@@ -5037,13 +5337,14 @@ class UIHandler(BaseHTTPRequestHandler):
             params = parse_qs(parsed.query)
             session_id = params.get("id", [""])[0]
             target = params.get("target", ["generic"])[0]
+            handoff_options = _handoff_options_from_query(params)
             try:
                 days = max(1, min(90, int(params.get("days", ["30"])[0])))
             except ValueError:
                 days = 30
             self._send(
                 200,
-                json.dumps(build_basic_handoff_detail(session_id, days, target)),
+                json.dumps(build_basic_handoff_detail(session_id, days, target, **handoff_options)),
                 "application/json; charset=utf-8",
             )
             return
@@ -5052,13 +5353,24 @@ class UIHandler(BaseHTTPRequestHandler):
             session_id = params.get("id", [""])[0]
             target = params.get("target", ["generic"])[0]
             include_prompt_excerpt = params.get("prompt", ["0"])[0] == "1"
+            handoff_options = _handoff_options_from_query(params)
             try:
                 days = max(1, min(90, int(params.get("days", ["30"])[0])))
             except ValueError:
                 days = 30
             self._send(
                 200,
-                json.dumps(build_handoff_detail(session_id, days, target, include_prompt_excerpt)),
+                json.dumps(build_handoff_detail(session_id, days, target, include_prompt_excerpt, **handoff_options)),
+                "application/json; charset=utf-8",
+            )
+            return
+        if parsed.path == "/api/handoff-demo":
+            params = parse_qs(parsed.query)
+            target = params.get("target", ["generic"])[0]
+            handoff_options = _handoff_options_from_query(params, default_type="product")
+            self._send(
+                200,
+                json.dumps(build_demo_handoff_detail(target=target, **handoff_options)),
                 "application/json; charset=utf-8",
             )
             return
@@ -5129,6 +5441,9 @@ class UIHandler(BaseHTTPRequestHandler):
         if parsed.path not in {
             "/api/outcome",
             "/api/preflight",
+            "/api/handoff-basic",
+            "/api/handoff",
+            "/api/handoff-demo",
             "/api/handoff-decision",
             "/api/ambient-intervention-action",
             "/api/runtime-return",
@@ -5154,6 +5469,40 @@ class UIHandler(BaseHTTPRequestHandler):
             cwd = str(payload.get("cwd", "")).strip() or None
             response = build_prompt_preflight(prompt, tool=tool, cwd=cwd)
             status = 400 if response.get("error") else 200
+            self._send(status, json.dumps(response), "application/json; charset=utf-8")
+            return
+        if parsed.path in {"/api/handoff-basic", "/api/handoff", "/api/handoff-demo"}:
+            target = str(payload.get("target", "generic")).strip() or "generic"
+            if parsed.path == "/api/handoff-demo":
+                handoff_options = _handoff_options_from_payload(payload, default_type="product")
+                self._send(
+                    200,
+                    json.dumps(build_demo_handoff_detail(target=target, **handoff_options)),
+                    "application/json; charset=utf-8",
+                )
+                return
+            session_id = str(payload.get("session_id", payload.get("id", ""))).strip()
+            if not session_id:
+                self._send(400, json.dumps({"error": "session_id is required"}), "application/json; charset=utf-8")
+                return
+            raw_days = payload.get("days", 30)
+            try:
+                days = max(1, min(90, int(raw_days)))
+            except (TypeError, ValueError):
+                days = 30
+            handoff_options = _handoff_options_from_payload(payload)
+            if parsed.path == "/api/handoff-basic":
+                response = build_basic_handoff_detail(session_id, days, target, **handoff_options)
+            else:
+                include_prompt_excerpt = bool(payload.get("prompt", False))
+                response = build_handoff_detail(
+                    session_id,
+                    days,
+                    target,
+                    include_prompt_excerpt,
+                    **handoff_options,
+                )
+            status = 404 if response.get("error") == "session not found" else 200
             self._send(status, json.dumps(response), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/ambient-intervention-action":

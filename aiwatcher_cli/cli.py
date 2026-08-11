@@ -6973,16 +6973,19 @@ def command_export(args: argparse.Namespace) -> int:
 def command_ui(args: argparse.Namespace) -> int:
     from .ui import serve
 
-    try:
-        get_or_refresh_baselines()
-        get_or_refresh_survival()
-        get_or_refresh_receipt_baseline()
-    except OSError:
-        pass
-    try:
-        recheck_evidence_survival()
-    except OSError:
-        pass
+    def refresh_ui_caches() -> None:
+        try:
+            get_or_refresh_baselines()
+            get_or_refresh_survival()
+            get_or_refresh_receipt_baseline()
+        except OSError:
+            pass
+        try:
+            recheck_evidence_survival()
+        except OSError:
+            pass
+
+    threading.Thread(target=refresh_ui_caches, name="aiwatcher-ui-cache-refresh", daemon=True).start()
 
     def start_ambient_watch(_: str, __: int) -> subprocess.Popen[bytes] | None:
         if getattr(args, "no_watch", False):

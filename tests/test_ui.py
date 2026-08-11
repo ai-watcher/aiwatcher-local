@@ -140,6 +140,18 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Loading session details for", ui.HTML)
         self.assertIn("/api/session-summary", ui.HTML)
         self.assertIn("/api/handoff-basic", ui.HTML)
+        self.assertIn("/api/handoff-demo", ui.HTML)
+        self.assertIn("openDemoHandoff", ui.HTML)
+        self.assertIn("Try Fresh Start demo", ui.HTML)
+        self.assertIn('id="handoffType"', ui.HTML)
+        self.assertIn('id="handoffObjective"', ui.HTML)
+        self.assertIn('id="handoffSources"', ui.HTML)
+        self.assertIn('id="handoffConstraints"', ui.HTML)
+        self.assertIn('id="handoffAcceptance"', ui.HTML)
+        self.assertIn("Regenerate brief", ui.HTML)
+        self.assertIn("handoffPayload", ui.HTML)
+        self.assertIn("postJson('/api/handoff'", ui.HTML)
+        self.assertIn("if (!isDemo)", ui.HTML)
         self.assertIn("renderSessionSummary", ui.HTML)
         self.assertIn("Loading session identity for", ui.HTML)
         self.assertIn("Building Fresh Start brief", ui.HTML)
@@ -978,6 +990,138 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(capsule["usage"]["tokens_label"], "128.0k")
         self.assertIn("AIWatcher Fresh Start brief", capsule["next_brief"])
         self.assertIn("Detailed git, timeline, and prompt evidence is still loading", capsule["next_brief"])
+
+    def test_structured_handoff_fields_shape_the_brief(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="structured",
+            tool="codex-cli",
+            project_path="/repo/product",
+            started_at=now - timedelta(hours=2),
+            updated_at=now - timedelta(minutes=5),
+            tokens_in=140_000,
+            tokens_out=9_000,
+            cost_usd=0.92,
+            agent_calls=12,
+            tool_calls=4,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all", return_value=[row]),
+                patch.object(ui, "scan_all_events", return_value=[]),
+                patch.object(ui, "safe_runtime_processes", return_value=[]),
+            ):
+                capsule = ui.build_handoff_detail(
+                    "structured",
+                    days=7,
+                    target="cursor",
+                    handoff_type="review",
+                    objective="Review the Fresh Start flow against the OSS strategy.",
+                    source_refs=["strategy.md", "PR 46"],
+                    constraints=["Findings first.", "Do not broaden scope."],
+                    acceptance_criteria=["No fake savings claims.", "Tests cover structured fields."],
+                )
+
+        self.assertEqual(capsule["handoff_type"], "review")
+        self.assertEqual(capsule["objective"], "Review the Fresh Start flow against the OSS strategy.")
+        self.assertEqual(capsule["source_refs"], ["strategy.md", "PR 46"])
+        self.assertEqual(capsule["constraints"], ["Findings first.", "Do not broaden scope."])
+        self.assertEqual(capsule["acceptance_criteria"], ["No fake savings claims.", "Tests cover structured fields."])
+        self.assertIn("Continuation type: Review continuation.", capsule["next_brief"])
+        self.assertIn("Review the Fresh Start flow", capsule["next_brief"])
+        self.assertIn("strategy.md", capsule["next_brief"])
+        self.assertIn("No fake savings claims.", capsule["next_brief"])
+
+    def test_basic_handoff_detail_accepts_structured_fields_without_event_scan(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="basic-structured",
+            tool="codex-cli",
+            project_path="/repo/fast",
+            started_at=now - timedelta(hours=2),
+            updated_at=now - timedelta(minutes=5),
+            tokens_in=120_000,
+            tokens_out=8_000,
+            cost_usd=0.42,
+        )
+        with ui._SUMMARY_CACHE_LOCK:
+            ui._SESSION_INDEX.clear()
+            ui._SUMMARY_CACHE.clear()
+        ui._index_sessions([row])
+        with (
+            patch.object(ui, "scan_all_events", side_effect=AssertionError("basic handoff should not scan events")),
+            patch.object(ui, "safe_runtime_processes", return_value=[]),
+        ):
+            capsule = ui.build_basic_handoff_detail(
+                "basic-structured",
+                days=7,
+                target="codex",
+                handoff_type="bugbash",
+                objective="Reproduce and fix the broken handoff drawer.",
+                source_refs=["screenshot", "local UI"],
+                constraints=["Keep privacy opt-in."],
+                acceptance_criteria=["Copy flow works from Settings."],
+            )
+
+        self.assertTrue(capsule["basic"])
+        self.assertEqual(capsule["handoff_type"], "bugbash")
+        self.assertIn("Continuation type: Bug bash continuation.", capsule["next_brief"])
+        self.assertIn("Reproduce and fix", capsule["next_brief"])
+        self.assertIn("Keep privacy opt-in.", capsule["next_brief"])
+
+    def test_demo_handoff_is_seeded_privacy_safe_and_not_live(self) -> None:
+        capsule = ui.build_demo_handoff_detail(
+            target="codex",
+            handoff_type="product",
+            objective="Validate Fresh Start before testing real sessions.",
+        )
+
+        self.assertTrue(capsule["demo"])
+        self.assertEqual(capsule["session_id"], "demo-fresh-start")
+        self.assertEqual(capsule["handoff_type"], "product")
+        self.assertIn("Validate Fresh Start", capsule["next_brief"])
+        self.assertTrue(any("Demo context pressure" in item for item in capsule["warnings"]))
+        runtime = capsule["runtime_attachment"]
+        self.assertFalse(runtime["available"])
+        self.assertEqual(runtime["identity_level"], "demo")
+        self.assertEqual(runtime["identity_label"], "Demo sample")
+
+    def test_invalid_demo_handoff_type_falls_back_to_demo_default(self) -> None:
+        options = ui._handoff_options_from_query({"type": ["bad"]}, default_type="product")
+
+        self.assertEqual(options["handoff_type"], "product")
+
+    def test_handoff_demo_endpoint_accepts_posted_structured_fields(self) -> None:
+        server, thread, base = DashboardServeTests()._serve_one()
+        payload = json.dumps({
+            "target": "cursor",
+            "type": "review",
+            "objective": "Review the handoff flow.",
+            "source_refs": ["strategy.md"],
+            "constraints": ["Findings first."],
+            "acceptance_criteria": ["No overclaims."],
+        }).encode("utf-8")
+        http_request = request.Request(
+            f"{base}/api/handoff-demo",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with request.urlopen(http_request, timeout=5) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        finally:
+            thread.join(timeout=5)
+            server.server_close()
+
+        self.assertTrue(body["demo"])
+        self.assertEqual(body["target"], "cursor")
+        self.assertEqual(body["handoff_type"], "review")
+        self.assertEqual(body["source_refs"], ["strategy.md"])
+        self.assertEqual(body["constraints"], ["Findings first."])
+        self.assertEqual(body["acceptance_criteria"], ["No overclaims."])
 
     def test_session_summary_uses_cached_index_without_event_scan(self) -> None:
         now = datetime.now(timezone.utc)
