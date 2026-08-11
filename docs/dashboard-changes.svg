@@ -1,0 +1,140 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 736" font-family="'Inter','Segoe UI',system-ui,-apple-system,sans-serif" role="img" aria-labelledby="t-changes d-changes">
+  <title id="t-changes">AIWatcher Local — Cost per change</title>
+  <desc id="d-changes">Changes tab: a cost-per-change table with commit, cost, lines, dollars per line, survival percentage, and subject, above an unbanked spend panel breaking down money with no commit behind it.</desc>
+  <defs>
+    <radialGradient id="bg-changes" cx="0%" cy="0%" r="95%">
+      <stop offset="0" stop-color="#18243a"/>
+      <stop offset="0.55" stop-color="#0b1018"/>
+      <stop offset="1" stop-color="#090b10"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1200" height="736" fill="url(#bg-changes)"/>
+
+  <rect x="36" y="22" width="40" height="40" rx="10" fill="#141924" stroke="#2a3140"/>
+  <text x="56" y="48" font-size="14" font-weight="700" fill="#eef3fb" text-anchor="middle">AW</text>
+  <text x="88" y="40" font-size="22" font-weight="700" fill="#eef3fb">AIWatcher Local</text>
+  <rect x="234" y="24" width="150" height="24" rx="12" fill="#0f2a1f" stroke="#1f4a34"/>
+  <circle cx="248" cy="36" r="4" fill="#3ddc84"/>
+  <text x="260" y="40" font-size="11" fill="#8fe9b8">Private and local</text>
+  <text x="88" y="62" font-size="13" fill="#8b96a8">Your AI coding work, outcomes, and improvement signals.</text>
+
+  <rect x="808" y="22" width="132" height="34" rx="8" fill="#12151c" stroke="#262b38"/>
+  <text x="824" y="44" font-size="13" fill="#dbe2ee">Last 30 days</text>
+  <text x="926" y="44" font-size="12" fill="#8b96a8" text-anchor="end">▾</text>
+  <rect x="952" y="22" width="104" height="34" rx="8" fill="#12151c" stroke="#262b38"/>
+  <text x="1004" y="44" font-size="13" fill="#dbe2ee" text-anchor="middle">Refresh data</text>
+  <rect x="1068" y="22" width="96" height="34" rx="8" fill="#12151c" stroke="#3a6fd8"/>
+  <text x="1116" y="44" font-size="13" font-weight="600" fill="#8fb4f7" text-anchor="middle">Enterprise</text>
+
+  <g font-size="13">
+    <text x="63" y="104" fill="#8b96a8" text-anchor="middle">Today</text>
+    <text x="130" y="104" fill="#8b96a8" text-anchor="middle">Prompt</text>
+    <text x="208" y="104" fill="#8b96a8" text-anchor="middle">Projects</text>
+    <text x="294" y="104" fill="#8b96a8" text-anchor="middle">Sessions</text>
+    <rect x="338" y="86" width="76" height="28" rx="14" fill="#eef1f6"/>
+    <text x="376" y="105" fill="#141a26" font-weight="700" text-anchor="middle">Changes</text>
+    <text x="458" y="104" fill="#8b96a8" text-anchor="middle">Receipts</text>
+    <text x="540" y="104" fill="#8b96a8" text-anchor="middle">Insights</text>
+  </g>
+
+  <rect x="36" y="140" width="1128" height="376" rx="12" fill="#111722" stroke="#263145"/>
+  <text x="54" y="172" font-size="18" font-weight="700" fill="#eef3fb">Cost per change</text>
+  <text x="54" y="192" font-size="13" fill="#98a5b8">What each commit cost in AI spend, and how much of it is still in the code.</text>
+  <rect x="972" y="160" width="192" height="26" rx="13" fill="#0d1320" stroke="#263145"/>
+  <text x="1068" y="177" font-size="11" fill="#98a5b8" text-anchor="middle">Survival is a floor, not exact</text>
+
+  <g font-size="12" fill="#8b96a8">
+    <text x="54" y="222">Commit</text>
+    <text x="196" y="222" text-anchor="end">Cost</text>
+    <text x="320" y="222" text-anchor="end">Lines</text>
+    <text x="420" y="222" text-anchor="end">$/line</text>
+    <text x="500" y="222" text-anchor="end">Alive</text>
+    <text x="540" y="222">Subject</text>
+  </g>
+  <line x1="54" y1="234" x2="1140" y2="234" stroke="#263145"/>
+
+  <g font-size="13">
+    <text x="54" y="262" fill="#dce6f6" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace">7c41a9e0b3</text>
+    <text x="196" y="262" fill="#eef3fb" font-weight="600" text-anchor="end">$38.20</text>
+    <text x="320" y="262" fill="#98a5b8" text-anchor="end">+80/-92</text>
+    <text x="420" y="262" fill="#dce6f6" text-anchor="end">$0.22</text>
+    <text x="500" y="262" fill="#6d7889" text-anchor="end">—</text>
+    <text x="540" y="262" fill="#dce6f6">fix(billing): retry webhook delivery with backoff</text>
+  </g>
+
+  <line x1="54" y1="278" x2="1140" y2="278" stroke="#1c2130"/>
+  <g font-size="13">
+    <text x="54" y="306" fill="#dce6f6" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace">2f88d1c47a</text>
+    <text x="196" y="306" fill="#eef3fb" font-weight="600" text-anchor="end">$31.06</text>
+    <text x="320" y="306" fill="#98a5b8" text-anchor="end">+338/-48</text>
+    <text x="420" y="306" fill="#dce6f6" text-anchor="end">$0.08</text>
+    <text x="500" y="306" fill="#6d7889" text-anchor="end">—</text>
+    <text x="540" y="306" fill="#dce6f6">feat(api): paginate the transactions endpoint</text>
+  </g>
+
+  <line x1="54" y1="322" x2="1140" y2="322" stroke="#1c2130"/>
+  <g font-size="13">
+    <text x="54" y="350" fill="#dce6f6" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace">9a3e57f210</text>
+    <text x="196" y="350" fill="#eef3fb" font-weight="600" text-anchor="end">$24.80</text>
+    <text x="320" y="350" fill="#98a5b8" text-anchor="end">+865/-33</text>
+    <text x="420" y="350" fill="#dce6f6" text-anchor="end">$0.02</text>
+    <text x="500" y="350" fill="#9fe1cb" text-anchor="end">78%</text>
+    <text x="540" y="350" fill="#dce6f6">feat(auth): rotate service tokens on a schedule</text>
+  </g>
+
+  <line x1="54" y1="366" x2="1140" y2="366" stroke="#1c2130"/>
+  <g font-size="13">
+    <text x="54" y="394" fill="#dce6f6" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace">b64c0d8e11</text>
+    <text x="196" y="394" fill="#eef3fb" font-weight="600" text-anchor="end">$18.72</text>
+    <text x="320" y="394" fill="#98a5b8" text-anchor="end">+814/-9</text>
+    <text x="420" y="394" fill="#dce6f6" text-anchor="end">$0.02</text>
+    <text x="500" y="394" fill="#9fe1cb" text-anchor="end">81%</text>
+    <text x="540" y="394" fill="#dce6f6">refactor(ledger): split settlement out of posting</text>
+  </g>
+
+  <line x1="54" y1="410" x2="1140" y2="410" stroke="#1c2130"/>
+  <g font-size="13">
+    <text x="54" y="438" fill="#dce6f6" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace">4e17ba9c05</text>
+    <text x="196" y="438" fill="#eef3fb" font-weight="600" text-anchor="end">$16.90</text>
+    <text x="320" y="438" fill="#98a5b8" text-anchor="end">+52/-1</text>
+    <text x="420" y="438" fill="#f0c274" text-anchor="end">$0.32</text>
+    <text x="500" y="438" fill="#9fe1cb" text-anchor="end">92%</text>
+    <text x="540" y="438" fill="#dce6f6">fix(auth): reject expired refresh tokens</text>
+  </g>
+
+  <line x1="54" y1="454" x2="1140" y2="454" stroke="#1c2130"/>
+  <rect x="44" y="458" width="1112" height="40" rx="8" fill="#1d1616" stroke="#4a2b2b"/>
+  <g font-size="13">
+    <text x="54" y="483" fill="#f6dcdc" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace">d902f36ac8</text>
+    <text x="196" y="483" fill="#ffeaea" font-weight="600" text-anchor="end">$14.85</text>
+    <text x="320" y="483" fill="#c9a7a7" text-anchor="end">+141/-16</text>
+    <text x="420" y="483" fill="#f6dcdc" text-anchor="end">$0.09</text>
+    <text x="500" y="483" fill="#ff9d9d" font-weight="700" text-anchor="end">8%</text>
+    <text x="540" y="483" fill="#f6dcdc">feat(reports): add the quarterly export screen</text>
+  </g>
+
+  <rect x="36" y="536" width="556" height="164" rx="12" fill="#111722" stroke="#4a3a1f"/>
+  <text x="54" y="568" font-size="16" font-weight="700" fill="#f0c274">Unbanked spend</text>
+  <text x="54" y="590" font-size="12.5" fill="#98a5b8">Money with no commit behind it, in the last 30 days.</text>
+  <text x="54" y="626" font-size="26" font-weight="700" fill="#f0c274">$198.40</text>
+  <text x="152" y="626" font-size="13" fill="#98a5b8">24% of spend · $612.30 reached a commit</text>
+  <g font-size="12.5">
+    <text x="54" y="656" fill="#dce6f6">~/code/payments-api</text>
+    <text x="566" y="656" fill="#dce6f6" text-anchor="end">$112.60</text>
+    <text x="54" y="676" fill="#dce6f6">~/code/internal-docs</text>
+    <text x="566" y="676" fill="#dce6f6" text-anchor="end">$0.22</text>
+  </g>
+
+  <rect x="608" y="536" width="556" height="164" rx="12" fill="#111722" stroke="#263145"/>
+  <text x="626" y="568" font-size="16" font-weight="700" fill="#eef3fb">How this is counted</text>
+  <g font-size="12.5" fill="#98a5b8">
+    <text x="626" y="594">A change is a commit. Its cost is the AI spend in that repo</text>
+    <text x="626" y="614">since the previous commit — a rule, not a heuristic.</text>
+    <text x="626" y="640">Blank survival means not measured, not "did not survive".</text>
+    <text x="626" y="660">Commits rest 7 days before survival is measured at all.</text>
+    <text x="626" y="686">Commits authored by someone else are excluded entirely.</text>
+  </g>
+
+  <text x="54" y="722" font-size="12" fill="#98a5b8" font-style="italic">Exploration that went nowhere and work still uncommitted both land in unbanked — this cannot tell them apart, and does not pretend to.</text>
+</svg>

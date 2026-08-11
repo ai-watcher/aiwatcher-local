@@ -32,9 +32,10 @@
     <text x="130" y="104" fill="#8b96a8" text-anchor="middle">Prompt</text>
     <text x="208" y="104" fill="#8b96a8" text-anchor="middle">Projects</text>
     <text x="294" y="104" fill="#8b96a8" text-anchor="middle">Sessions</text>
-    <rect x="342" y="86" width="76" height="28" rx="14" fill="#eef1f6"/>
-    <text x="380" y="105" fill="#141a26" font-weight="700" text-anchor="middle">Receipts</text>
-    <text x="462" y="104" fill="#8b96a8" text-anchor="middle">Insights</text>
+    <text x="376" y="104" fill="#8b96a8" text-anchor="middle">Changes</text>
+    <rect x="420" y="86" width="76" height="28" rx="14" fill="#eef1f6"/>
+    <text x="458" y="105" fill="#141a26" font-weight="700" text-anchor="middle">Receipts</text>
+    <text x="540" y="104" fill="#8b96a8" text-anchor="middle">Insights</text>
   </g>
 
   <rect x="36" y="172" width="1128" height="528" rx="12" fill="#111722" stroke="#263145"/>

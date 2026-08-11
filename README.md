@@ -1,11 +1,17 @@
 # AIWatcher Local
 
-Improve and control local AI coding work before, during, and after execution.
+Catch expensive AI coding sessions before they run. Find the waste hiding in
+the ones that succeeded. Tie every session to whether the work was worth it.
 
 AIWatcher Local is a private control loop for Claude Code, Codex, Cursor, and
-other local AI coding tools. It preflights risky work, watches local sessions,
-records outcomes, and turns the history those tools already keep into useful
-cost and security guidance with no account or cloud upload.
+other local AI coding tools. It scores prompts before they run, watches sessions
+while they do, then attributes what you spent to the commits it produced — so
+"was that worth it?" has an answer instead of a token count. No account, no
+cloud upload, no LLM calls.
+
+Every other tool in this space reports on sessions that failed. The expensive
+ones usually don't. A task phrased loosely, twenty turns of drift and redirect,
+and then it works — so nobody looks, at three times the tokens it needed.
 
 ![The AIWatcher Local dashboard's Today tab: latest AI work and one thing worth changing up top; useful outcomes, preflight decisions, sessions observed, and API-equivalent value tiles; the latest intervention receipt with predicted savings; projects driving usage and recent sessions below.](docs/dashboard.svg)
 
@@ -23,12 +29,14 @@ cost and security guidance with no account or cloud upload.
   - [2. Check a prompt by hand](#2-check-a-prompt-by-hand)
   - [3. Use the local dashboard](#3-use-the-local-dashboard)
   - [4. Mark whether work was useful](#4-mark-whether-work-was-useful)
-  - [5. Resume work without rebuilding context](#5-resume-work-without-rebuilding-context)
-  - [6. Log a decision that never became a commit](#6-log-a-decision-that-never-became-a-commit)
-  - [7. Check runtime hygiene](#7-check-runtime-hygiene)
-  - [8. Export local evidence](#8-export-local-evidence)
+  - [5. See what each commit cost](#5-see-what-each-commit-cost)
+  - [6. Resume work without rebuilding context](#6-resume-work-without-rebuilding-context)
+  - [7. Log a decision that never became a commit](#7-log-a-decision-that-never-became-a-commit)
+  - [8. Check runtime hygiene](#8-check-runtime-hygiene)
+  - [9. Export local evidence](#9-export-local-evidence)
 - [Commands](#commands) — day-one subset; [full CLI reference](docs/CLI.md)
 - [Example Output](#example-output)
+- [Why a Loop, Not Another Usage Dashboard](#why-a-loop-not-another-usage-dashboard)
 - [The Local Control Loop](#the-local-control-loop)
   - [Hook coverage by tool](#hook-coverage-by-tool)
   - [Prompt Companion for Non-Hook Surfaces](#prompt-companion-for-non-hook-surfaces)
@@ -53,18 +61,19 @@ reads and why, it should not read it.
 
 ### 1. Install
 
-Clone and run directly with Python 3.9+:
+Python 3.9+ on macOS, Linux, or Windows:
+
+```sh
+pip install aiwatcher-cli
+```
+
+Until that release lands on PyPI, run from a clone instead — same commands, no
+install step:
 
 ```sh
 git clone https://github.com/ai-watcher/aiwatcher-local.git
 cd aiwatcher-local
 python -m pip install -e .
-```
-
-After the PyPI release, this becomes:
-
-```sh
-pipx install aiwatcher-cli
 ```
 
 On Windows PowerShell the same commands work. If `python` is not on PATH, use
@@ -241,6 +250,10 @@ private local paths, project names, and AI usage history.
   mark outcomes, and create a handoff capsule to continue in a fresh session.
 
   ![Sessions tab: a session list next to a review drawer showing Expensive asks with the costliest step highlighted, outcome buttons, outcome evidence, and Create handoff capsule.](docs/dashboard-sessions.svg)
+- **Changes**: the git ledger — what each commit cost, its $/line, how much of
+  it survived, and the unbanked spend that never reached a commit at all.
+
+  ![Changes tab: a cost-per-change table with commit, cost, lines, dollars per line, survival percentage, and subject, above an unbanked spend panel breaking down money with no commit behind it.](docs/dashboard-changes.svg)
 - **Receipts**: connect each preflight decision to its resulting session —
   predicted savings before execution, observed usage after, an inferred
   estimate of what was actually avoided (labeled as inferred, not a
@@ -282,7 +295,78 @@ commit message is written by whoever made the change specifically to explain
 it to a future reader, so unlike prompt text it is not treated as private —
 just not persisted to disk beyond the hash above.
 
-### 5. Resume work without rebuilding context
+### 5. See what each commit cost
+
+Marking outcomes by hand answers "was that session useful?" The change ledger
+answers the harder question without being asked: what did this commit cost, and
+is the code still there?
+
+```sh
+python -m aiwatcher_cli changes --days 30
+```
+
+A **change** is a commit, and its cost is the AI spend in that repo since the
+previous commit. That is a rule rather than a heuristic — there is no matching
+step to get wrong, and two sessions running in parallel on one repo both count
+toward the commit they preceded. Attribution is per event, not per session, so a
+long session spanning several commits splits across them at the turn the spend
+actually happened instead of dumping everything on whichever commit came last.
+
+Three numbers are doing the work:
+
+- **$/line** ranks changes by what they cost to produce.
+- **Alive** is line-level survival: of the lines a change added, how many does
+  `git blame` still attribute to it — and of the lines it deleted, how many have
+  stayed gone. Measuring both directions matters, because a change whose whole
+  job was deleting dead code adds nothing, and an additions-only measure would
+  score it 0%, exactly backwards. Survival is a **floor, not an exact figure**:
+  reformatting reattributes lines to the formatting commit. A blank means *not
+  measured*, not *did not survive*, and commits are left alone for 7 days before
+  it is measured at all.
+- **Unbanked** is spend with no commit behind it — exploration that went
+  nowhere, or work still sitting uncommitted. It is reported separately rather
+  than folded into the next commit, because it is the most direct measure of
+  waste here: money spent with nothing to show for it. It cannot tell those two
+  cases apart, and says so rather than guessing.
+
+Commits written by someone else are excluded. They arrived by fetch, so no spend
+on your machine belongs to them.
+
+For the same thing one commit at a time, printed right after you commit:
+
+```sh
+python -m aiwatcher_cli commit-receipt
+python -m aiwatcher_cli install-commit-hook --write
+```
+
+The receipt names what the change cost, its lines and $/line, and how that rate
+compares with your median over the trailing baseline — so a change that ran
+several times your usual rate says so while you still remember writing it. Its
+shape, with your own numbers in place of these:
+
+```text
+AIWatcher receipt  59d7cb1520  fix(prompt-gate): quote JS string escapes
+  This change    $19.47  |  +52/-1 lines  |  $0.37/line
+                 62 model calls  |  claude-code
+  vs baseline    $0.04/line median over 30 days (41 changes) -- this one is 9.3x your usual
+  Still unbanked $58.54 spent here in the last 7d has no commit behind it
+```
+
+To see the number while it is still moving rather than after the fact, put it in
+Claude Code's status line:
+
+```sh
+python -m aiwatcher_cli install-statusline --write
+```
+
+```text
+* $8.01 since commit | $8.01 session | 100K/turn
+```
+
+"Since commit" is unbanked spend as it accumulates — the running total of money
+that does not yet have a change behind it.
+
+### 6. Resume work without rebuilding context
 
 When a session gets stale, expensive, or you want to move from Claude to Codex,
 generate a target-ready continuation brief:
@@ -344,7 +428,7 @@ whichever suits the moment.
 The **Today** tab also surfaces a handoff button directly on sessions under
 context pressure, so you can act on one without going looking for it.
 
-### 6. Log a decision that never became a commit
+### 7. Log a decision that never became a commit
 
 A commit message explains changes that shipped. It cannot explain an approach
 you seriously considered and rejected without ever writing code for it — a
@@ -365,7 +449,7 @@ collaborators:
 python -m aiwatcher_cli install-claude-decision-log --write
 ```
 
-### 7. Check runtime hygiene
+### 8. Check runtime hygiene
 
 ```sh
 python -m aiwatcher_cli processes --stale-only
@@ -381,7 +465,7 @@ This is local CPU/RAM/battery and security hygiene, not a billing claim:
 AIWatcher does not assume a stale process is still making model/API calls.
 It prints a copyable kill command for review, but never kills a process for you.
 
-### 8. Export local evidence
+### 9. Export local evidence
 
 ```sh
 python -m aiwatcher_cli export --format json --days 30
@@ -410,6 +494,8 @@ These are the commands worth knowing on day one:
 | `last` | Inspect the most recent session in detail |
 | `sessions` | List and search recent sessions |
 | `preflight "..."` | Review a prompt for cost, scope, and safety before running it |
+| `changes` | What each commit cost, its $/line, and how much of it is still alive |
+| `commit-receipt` | What the latest commit cost, against your usual rate |
 | `outcome useful` | Mark how the last session turned out |
 | `journal` | Daily summary plus one thing to change next time |
 | `resume --target codex --copy` | Continue work in a different tool without rebuilding context |
@@ -453,6 +539,63 @@ This week: $17.21
 This month: $77.87
 ```
 
+And the ledger behind it — this one captured from AIWatcher's own repo, so the
+commit subjects are its real history:
+
+```text
+$ aiwatcher changes --days 30
+Cost per change - last 30 days, ranked by spend
+
+Commit          Cost        Lines    $/line  Alive    Subject
+----------------------------------------------------------------------------------------
+ae260330bd    $43.34      +80/-92     $0.25      -   fix(report): render line survival instea
+abdf2097a3    $37.45     +338/-48     $0.10      - ~ fix(health): measure context bloat as a
+f116b2e56e    $27.53     +425/-25     $0.06      - ~ fix(cost): count and price prompt-cache
+a4147f4544    $21.44      +136/-0     $0.16      -   fix(cost): bill each API request once, n
+68be623c8a    $21.23     +865/-33     $0.02    78% ~ feat(outcome): commit survival tracking,
+1ac0d61a58    $20.45      +814/-9     $0.02    81%   feat(watch): surface outcome-review noti
+59d7cb1520    $19.47       +52/-1     $0.37    92%   fix(prompt-gate): quote JS string escape
+be6acc01bc    $15.90     +141/-16     $0.10      8%  feat(handoff): enrich brief with commit/
+...
+
+2 of 77 commits have no observed AI spend (hand-written, or committed more than 12h after the work).
+59 commit(s) written by someone else were excluded: they arrived by fetch, so no spend on this machine belongs to them.
+~ marks a commit that was rebased or amended. Cost is attributed by when the work was authored, not when git restamped it.
+Blank survival means not measured, not 'did not survive'. It is a floor either way.
+
+Unbanked: $253.32 of the last 30 days (31%) has no commit behind it ($566.66 reached one).
+  ~/code/payments-api                                   $141.23
+  ~/code/internal-docs                                    $0.14
+  Exploration that went nowhere, or work still uncommitted -- this cannot tell them apart.
+```
+
+The last row is the one worth staring at. `be6acc01bc` cost $15.90 and 8% of the
+lines it wrote are still in the tree. Nothing failed — it committed, it passed,
+nobody reverted it. It just didn't last. That session is invisible to every tool
+that reports on errors.
+
+## Why a Loop, Not Another Usage Dashboard
+
+**Usage dashboards** — `ccusage`, vendor consoles, OTel exports — tell you what
+happened after the money is gone. They are built to investigate failures, so
+they have nothing to say about the session that succeeded expensively, which is
+where the waste actually lives.
+
+**API gateways** block and route traffic on the one path routed through them.
+They never see the coding agent on your laptop, which is where a growing share
+of AI work now happens.
+
+**Your own vigilance** is the fallback, and it is the real control plane at most
+companies: Claude Code asks permission for every command until the prompts get
+turned off. Watching a terminal by hand defeats the point of using agents.
+
+AIWatcher Local replaces none of that and covers the gaps between them. The
+loose prompt that would have burned 3x the tokens is caught at preflight and
+rewritten into a scoped brief before the first token is spent. The week where
+spend crept up becomes a filter rather than an investigation. And "was any of it
+worth it?" gets answered by the ledger — cost per surviving change, not cost per
+token.
+
 ## The Local Control Loop
 
 - **Plan:** Preflight broad, destructive, vague, or potentially expensive work
@@ -463,9 +606,11 @@ This month: $77.87
 - **Control:** Let the developer use the brief, edit it, run the original,
   cancel, or start a fresh-session handoff when context pressure would waste
   turns. High-risk automatic hooks pause before execution.
-- **Prove:** Inspect a privacy-safe intervention receipt and session timeline,
-  review local git/test evidence, then mark the result useful, rework, or
-  abandoned.
+- **Prove:** Ledger every commit against the AI spend that produced it — $/line,
+  how much of the change is still alive, and the unbanked spend that never
+  reached a commit. Cost per surviving change, not cost per token. Intervention
+  receipts, session timelines, and local git/test evidence back it up, and you
+  can still mark a result useful, rework, or abandoned by hand.
 - **Improve:** Compare predicted pressure with observed usage and outcomes,
   log a decision that never became a commit, then recommend one better
   behavior or create a handoff capsule for the next fresh session.
