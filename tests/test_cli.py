@@ -710,6 +710,45 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertEqual(args.session_id, "session-2")
         handoff.assert_called_once_with(args)
 
+    def test_handoff_passes_structured_capsule_fields_to_builder(self) -> None:
+        rows = [session(1, project="/repo/product")]
+        args = SimpleNamespace(
+            session_id="session-1",
+            days=7,
+            target="codex",
+            copy=False,
+            format="text",
+            include_prompt_excerpt=False,
+            type="product",
+            objective="Continue the product plan.",
+            source=["strategy.md"],
+            constraint=["Do not build a generic dashboard."],
+            acceptance=["Restate the acceptance bar before coding."],
+        )
+
+        with (
+            patch.object(cli, "sessions_since", return_value=rows),
+            patch.object(cli, "events_for_session", return_value=[]),
+            patch.object(cli, "get_outcome", return_value=None),
+            patch.object(
+                cli,
+                "build_handoff_capsule",
+                return_value={"next_brief": "brief", "target_label": "Codex"},
+            ) as builder,
+            patch.object(cli, "render_handoff_capsule", return_value="rendered"),
+            patch("sys.stdout", io.StringIO()),
+        ):
+            result = cli.command_handoff(args)
+
+        self.assertEqual(result, 0)
+        _, _, kwargs = builder.mock_calls[0]
+        self.assertEqual(kwargs["target"], "codex")
+        self.assertEqual(kwargs["handoff_type"], "product")
+        self.assertEqual(kwargs["objective"], "Continue the product plan.")
+        self.assertEqual(kwargs["source_refs"], ["strategy.md"])
+        self.assertEqual(kwargs["constraints"], ["Do not build a generic dashboard."])
+        self.assertEqual(kwargs["acceptance_criteria"], ["Restate the acceptance bar before coding."])
+
     def test_resume_outcome_filter_finds_most_recent_matching_outcome(self) -> None:
         now = datetime.now(timezone.utc)
         rows = [

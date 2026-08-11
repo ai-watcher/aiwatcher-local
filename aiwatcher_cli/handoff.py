@@ -85,6 +85,7 @@ def _safe_project_path(path: str | None) -> tuple[str, bool]:
 
 
 HandoffTarget = Literal["generic", "claude", "codex", "cursor", "vscode"]
+HandoffType = Literal["coding", "product", "review", "bugbash", "investigation", "general"]
 
 
 TARGET_LABELS: dict[str, str] = {
@@ -94,6 +95,122 @@ TARGET_LABELS: dict[str, str] = {
     "cursor": "Cursor",
     "vscode": "VS Code",
 }
+
+
+HANDOFF_TYPE_LABELS: dict[str, str] = {
+    "coding": "Coding continuation",
+    "product": "Product/strategy continuation",
+    "review": "Review continuation",
+    "bugbash": "Bug bash continuation",
+    "investigation": "Investigation continuation",
+    "general": "General work continuation",
+}
+
+
+TYPE_PROFILES: dict[str, dict[str, object]] = {
+    "coding": {
+        "session_label": "AI coding session",
+        "purpose": [
+            "Preserve momentum from the previous session without replaying its bloated context.",
+            "Reconstruct the work from disk, recent commits, changed files, decisions, and the evidence below.",
+            "Pick one smallest safe next checkpoint and continue only that checkpoint.",
+        ],
+        "checkpoint": [
+            "Run `git status --short` and inspect only the files listed in Local evidence first.",
+            "Summarize what appears done, what remains uncertain, and propose one smallest next checkpoint.",
+            "Continue only after that checkpoint is clear; do not replay broad exploration from the old session.",
+        ],
+        "finish": "Report changed files, verification run, remaining uncertainty, and whether the result looks useful.",
+    },
+    "product": {
+        "session_label": "product/strategy session",
+        "purpose": [
+            "Carry forward the product intent, decisions, constraints, and source-of-truth files.",
+            "Re-read the source-of-truth materials before proposing scope or implementation.",
+            "Produce a clear recommendation, spec, or implementation slice tied to acceptance criteria.",
+        ],
+        "checkpoint": [
+            "Read the source-of-truth files first and restate the product thesis in your own words.",
+            "List decisions already made, open questions, and constraints before changing direction.",
+            "Propose one smallest useful next artifact or implementation slice.",
+        ],
+        "finish": "Report the decision/spec changes, evidence used, open questions, and recommended next step.",
+    },
+    "review": {
+        "session_label": "review session",
+        "purpose": [
+            "Continue the review with the same evidence standard and without re-reading irrelevant history.",
+            "Prioritize correctness, regressions, missing tests, product-fit gaps, and privacy/claim risks.",
+            "Produce actionable findings before summaries.",
+        ],
+        "checkpoint": [
+            "Identify the exact PR, branch, files, and source-of-truth docs before reviewing.",
+            "Compare the change against strategy, tests, and current product behavior.",
+            "Return findings ordered by severity with concrete file or scenario references.",
+        ],
+        "finish": "Report findings, residual risk, tests inspected or run, and whether the change should merge.",
+    },
+    "bugbash": {
+        "session_label": "bug bash session",
+        "purpose": [
+            "Continue validation against the defined release bar, not a generic QA sweep.",
+            "Use scenario IDs and acceptance criteria as the test oracle.",
+            "Record bugs with severity, reproduction, expected behavior, and privacy/product impact.",
+        ],
+        "checkpoint": [
+            "Open the bug-bash runbook or test cases before testing.",
+            "Pick one phase or workflow and execute it end to end.",
+            "File only observed failures; label unverified claims separately.",
+        ],
+        "finish": "Report pass/fail by scenario, bugs found, severity, and recommended release decision.",
+    },
+    "investigation": {
+        "session_label": "investigation session",
+        "purpose": [
+            "Continue the investigation from observed facts, not hidden conversation memory.",
+            "Separate confirmed evidence, likely causes, rejected hypotheses, and open questions.",
+            "Choose the next narrow diagnostic step before changing code.",
+        ],
+        "checkpoint": [
+            "Restate known facts and evidence sources before proposing a cause.",
+            "List hypotheses already rejected so the new session does not repeat them.",
+            "Run or propose one narrow diagnostic step that can change the conclusion.",
+        ],
+        "finish": "Report confirmed cause, evidence, fix or recommendation, and unresolved uncertainty.",
+    },
+    "general": {
+        "session_label": "AI work session",
+        "purpose": [
+            "Preserve the user's goal, constraints, decisions, and useful evidence across a fresh session.",
+            "Avoid redoing broad exploration from the previous session.",
+            "Choose one smallest productive next step.",
+        ],
+        "checkpoint": [
+            "Restate the objective, known facts, constraints, and uncertainty.",
+            "Inspect the listed source-of-truth items before acting.",
+            "Propose one smallest next step and continue only after it is clear.",
+        ],
+        "finish": "Report what changed, what was verified, what remains uncertain, and the next recommended step.",
+    },
+}
+
+
+def _handoff_profile(handoff_type: str) -> dict[str, object]:
+    return TYPE_PROFILES.get(handoff_type, TYPE_PROFILES["coding"])
+
+
+def _clean_user_items(items: Sequence[str] | None, *, limit: int = 8, item_limit: int = 220) -> list[str]:
+    cleaned: list[str] = []
+    for item in items or []:
+        text = " ".join(str(item).strip().split())
+        if not text:
+            continue
+        shortened = _short(text, item_limit) or ""
+        if shortened and shortened not in cleaned:
+            cleaned.append(shortened)
+        if len(cleaned) >= limit:
+            break
+    return cleaned
 
 
 def _target_guidance(target: str) -> list[str]:
@@ -130,6 +247,11 @@ def build_handoff_capsule(
     outcome: str | None = None,
     include_prompt_excerpt: bool = False,
     target: HandoffTarget = "generic",
+    handoff_type: HandoffType = "coding",
+    objective: str | None = None,
+    source_refs: Sequence[str] | None = None,
+    constraints: Sequence[str] | None = None,
+    acceptance_criteria: Sequence[str] | None = None,
     extra_warnings: Sequence[str] | None = None,
     related_workspaces: Sequence[str] | None = None,
 ) -> dict[str, object]:
@@ -174,8 +296,14 @@ def build_handoff_capsule(
         warnings.append("No urgent context or cost pressure was detected, but start with a concise status check.")
 
     target = target if target in TARGET_LABELS else "generic"
+    handoff_type = handoff_type if handoff_type in HANDOFF_TYPE_LABELS else "coding"
+    profile = _handoff_profile(handoff_type)
     target_guidance = _target_guidance(target)
     project_label, project_reliable = _safe_project_path(session.project_path)
+    objective_text = _short(objective, 420) if objective else None
+    source_ref_lines = _clean_user_items(source_refs)
+    constraint_lines = _clean_user_items(constraints)
+    acceptance_lines = _clean_user_items(acceptance_criteria)
     related = [
         item
         for item in dict.fromkeys(str(path) for path in (related_workspaces or []) if path)
@@ -286,29 +414,54 @@ def build_handoff_capsule(
 
     checkpoint_lines = [
         "- Continue in the same workspace/repository unless the user explicitly asks for a duplicate checkout or new worktree.",
-        "- Run `git status --short` and inspect only the files listed in Local evidence first.",
-        "- Summarize what appears done, what remains uncertain, and propose one smallest next checkpoint.",
-        "- Continue only after that checkpoint is clear; do not replay broad exploration from the old session.",
+        *[f"- {item}" for item in profile["checkpoint"]],
     ]
     if not project_reliable:
         checkpoint_lines.insert(0, "- Ask the user to confirm the repository/path before editing.")
 
+    source_section: list[str] = []
+    if source_ref_lines:
+        source_section = [
+            "",
+            "Source of truth to load first",
+            *[f"- {item}" for item in source_ref_lines],
+        ]
+
+    constraint_section: list[str] = []
+    if constraint_lines:
+        constraint_section = [
+            "",
+            "Do not lose these constraints",
+            *[f"- {item}" for item in constraint_lines],
+        ]
+
+    acceptance_section: list[str] = []
+    if acceptance_lines:
+        acceptance_section = [
+            "",
+            "Acceptance checks",
+            *[f"- {item}" for item in acceptance_lines],
+        ]
+
     next_brief = "\n".join([
         "AIWatcher Fresh Start brief",
         "",
-        "You are starting a fresh AI coding session. Do not assume access to the previous chat.",
+        f"You are starting a fresh {profile['session_label']}. Do not assume access to the previous chat.",
         "Continue from repository state and local evidence, not from hidden conversation history.",
         f"Target tool: {TARGET_LABELS[target]}.",
+        f"Continuation type: {HANDOFF_TYPE_LABELS[handoff_type]}.",
         "",
         "Goal",
-        "- Preserve momentum from the previous session without replaying its bloated context.",
-        "- Reconstruct the work from disk, recent commits, changed files, decisions, and the evidence below.",
-        "- Pick one smallest safe next checkpoint and continue only that checkpoint.",
+        *([f"- User objective: {objective_text}"] if objective_text else []),
+        *[f"- {item}" for item in profile["purpose"]],
         "",
         "Workspace",
         f"- Project: {project_label}",
         f"- Project confidence: {'reliable' if project_reliable else 'unconfirmed'}",
         *([f"- Related active workspace: {path}" for path in related[:3]] if related else []),
+        *source_section,
+        *constraint_section,
+        *acceptance_section,
         "",
         "What appears done",
         *done_lines,
@@ -345,7 +498,7 @@ def build_handoff_capsule(
         "- Stop before destructive changes, broad refactors, secret exposure, or unrelated cleanup.",
         "",
         "When finished",
-        "- Report changed files, verification run, remaining uncertainty, and whether the result looks useful.",
+        f"- {profile['finish']}",
     ])
 
     return {
@@ -358,6 +511,12 @@ def build_handoff_capsule(
         "target": target,
         "target_label": TARGET_LABELS[target],
         "target_guidance": target_guidance,
+        "handoff_type": handoff_type,
+        "handoff_type_label": HANDOFF_TYPE_LABELS[handoff_type],
+        "objective": objective_text,
+        "source_refs": source_ref_lines,
+        "constraints": constraint_lines,
+        "acceptance_criteria": acceptance_lines,
         "updated_at": _stamp(session),
         "usage": {
             "tokens": session.tokens_in + session.tokens_out,
@@ -387,6 +546,7 @@ def render_handoff_capsule(capsule: dict[str, object]) -> str:
         "",
         f"Use this when moving work into a fresh {capsule.get('target_label') or 'Claude/Codex/Cursor'} session.",
         "",
+        f"Continuation type: {capsule.get('handoff_type_label') or 'Coding continuation'}",
         f"Project: {capsule.get('project')}",
         f"Target: {capsule.get('target_label') or 'generic'}",
         f"Tool/model: {capsule.get('tool')} / {capsule.get('model')}",

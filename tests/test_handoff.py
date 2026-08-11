@@ -97,6 +97,52 @@ class HandoffTests(unittest.TestCase):
         self.assertIn("Treat this as a fresh Codex session with no prior chat context", capsule["next_brief"])
         self.assertNotIn("Paste this as the first prompt", capsule["next_brief"])
 
+    def test_product_handoff_carries_objective_sources_constraints_and_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                session = LocalSession(
+                    session_id="product-session",
+                    tool="codex-desktop",
+                    project_path="/repo/product-docs",
+                    updated_at=datetime.now(timezone.utc),
+                    model="gpt-5.5",
+                    tokens_in=180_000,
+                    agent_calls=220,
+                    tool_calls=80,
+                )
+
+                capsule = build_handoff_capsule(
+                    session,
+                    [],
+                    target="codex",
+                    handoff_type="product",
+                    objective="Align the product plan with the latest strategy before implementation.",
+                    source_refs=["strategy.md", "enterprise/test-cases.md"],
+                    constraints=["Do not build a generic dashboard."],
+                    acceptance_criteria=["First reply restates the thesis and smallest next artifact."],
+                )
+
+        brief = capsule["next_brief"]
+        self.assertEqual(capsule["handoff_type"], "product")
+        self.assertEqual(capsule["handoff_type_label"], "Product/strategy continuation")
+        self.assertEqual(capsule["objective"], "Align the product plan with the latest strategy before implementation.")
+        self.assertEqual(capsule["source_refs"], ["strategy.md", "enterprise/test-cases.md"])
+        self.assertEqual(capsule["constraints"], ["Do not build a generic dashboard."])
+        self.assertEqual(
+            capsule["acceptance_criteria"],
+            ["First reply restates the thesis and smallest next artifact."],
+        )
+        self.assertIn("fresh product/strategy session", brief)
+        self.assertIn("Continuation type: Product/strategy continuation.", brief)
+        self.assertIn("User objective: Align the product plan", brief)
+        self.assertIn("Source of truth to load first", brief)
+        self.assertIn("- strategy.md", brief)
+        self.assertIn("Do not lose these constraints", brief)
+        self.assertIn("- Do not build a generic dashboard.", brief)
+        self.assertIn("Acceptance checks", brief)
+        self.assertIn("Read the source-of-truth files first", brief)
+
     def test_next_brief_includes_commit_sha_and_changed_files(self) -> None:
         now = datetime.now(timezone.utc)
         with tempfile.TemporaryDirectory() as temp_dir:

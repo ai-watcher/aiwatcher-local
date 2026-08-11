@@ -72,7 +72,7 @@ from .local_state import (
     state_path,
     upsert_ambient_intervention,
 )
-from .handoff import TARGET_LABELS, build_handoff_capsule, render_handoff_capsule
+from .handoff import HANDOFF_TYPE_LABELS, TARGET_LABELS, build_handoff_capsule, render_handoff_capsule
 from .ledger import Ledger, build_ledger, cost_per_surviving_line, repos_matching, unbanked_summary
 from .statusline import statusline_from_stdin, statusline_settings_snippet
 from .receipt import (
@@ -4043,8 +4043,13 @@ def command_handoff(args: argparse.Namespace) -> int:
         session,
         events_for_session(session.session_id, days=args.days),
         outcome=outcome.get("outcome") if outcome else None,
-        include_prompt_excerpt=args.include_prompt_excerpt,
-        target=args.target,
+        include_prompt_excerpt=getattr(args, "include_prompt_excerpt", False),
+        target=getattr(args, "target", "generic"),
+        handoff_type=getattr(args, "type", "coding"),
+        objective=getattr(args, "objective", None),
+        source_refs=getattr(args, "source", []),
+        constraints=getattr(args, "constraint", []),
+        acceptance_criteria=getattr(args, "acceptance", []),
     )
     if args.format == "json":
         rendered = json.dumps(capsule, indent=2)
@@ -7156,6 +7161,31 @@ def build_parser() -> argparse.ArgumentParser:
     handoff.add_argument("--copy", action="store_true", help="Copy the next-session brief to the clipboard when supported")
     handoff.add_argument("--format", choices=["text", "json"], default="text", help="Print the capsule as text or JSON")
     handoff.add_argument("--include-prompt-excerpt", action="store_true", help="Include a local prompt excerpt in the capsule output")
+    handoff.add_argument(
+        "--type",
+        choices=sorted(HANDOFF_TYPE_LABELS),
+        default="coding",
+        help="Shape the Fresh Start brief for the kind of continuation",
+    )
+    handoff.add_argument("--objective", help="User-visible objective to carry into the fresh session")
+    handoff.add_argument(
+        "--source",
+        action="append",
+        default=[],
+        help="Source-of-truth file, URL, PR, or artifact the fresh session should read first; repeatable",
+    )
+    handoff.add_argument(
+        "--constraint",
+        action="append",
+        default=[],
+        help="Non-negotiable constraint or known bad path the fresh session must preserve; repeatable",
+    )
+    handoff.add_argument(
+        "--acceptance",
+        action="append",
+        default=[],
+        help="Acceptance check the fresh session should use before calling the work done; repeatable",
+    )
     handoff.set_defaults(func=command_handoff)
 
     resume = sub.add_parser("resume", help="Find a local session and create a target-ready continuation brief")
@@ -7177,6 +7207,31 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--format", choices=["text", "json"], default="text", help="Print the brief as text or JSON")
     resume.add_argument(
         "--include-prompt-excerpt", action="store_true", help="Include a local prompt excerpt in the brief output",
+    )
+    resume.add_argument(
+        "--type",
+        choices=sorted(HANDOFF_TYPE_LABELS),
+        default="coding",
+        help="Shape the Fresh Start brief for the kind of continuation",
+    )
+    resume.add_argument("--objective", help="User-visible objective to carry into the fresh session")
+    resume.add_argument(
+        "--source",
+        action="append",
+        default=[],
+        help="Source-of-truth file, URL, PR, or artifact the fresh session should read first; repeatable",
+    )
+    resume.add_argument(
+        "--constraint",
+        action="append",
+        default=[],
+        help="Non-negotiable constraint or known bad path the fresh session must preserve; repeatable",
+    )
+    resume.add_argument(
+        "--acceptance",
+        action="append",
+        default=[],
+        help="Acceptance check the fresh session should use before calling the work done; repeatable",
     )
     resume.set_defaults(func=command_resume)
 

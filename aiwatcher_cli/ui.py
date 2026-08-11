@@ -948,7 +948,7 @@ def build_basic_handoff_detail(
     next_brief = "\n".join([
         "AIWatcher Fresh Start brief",
         "",
-        "You are starting a fresh AI coding session. Do not assume access to the previous chat.",
+        "You are starting a fresh AI work session. Do not assume access to the previous chat.",
         "Continue from repository state on disk, not from hidden conversation history.",
         f"Target tool: {TARGET_LABELS[target]}.",
         "",
