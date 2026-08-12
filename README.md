@@ -240,8 +240,10 @@ The mockups below use synthetic data — like the PR that introduced them, this
 README does not embed real dashboard screenshots, since those can expose
 private local paths, project names, and AI usage history.
 
-- **Home**: latest work, useful outcomes, preflight decisions, one next
-  recommendation, and a Fresh Start companion when context is getting expensive.
+- **Home**: a ranked **Needs action** queue first — Fresh Start, outcome
+  review, receipt proof, coverage gaps, or spend signals — followed by latest
+  work, useful outcomes, preflight decisions, and the Fresh Start companion when
+  context is getting expensive.
 - **Control**: local Prompt Companion for surfaces AIWatcher cannot hook yet.
 - **Work**: inspect recent sessions, projects, and changes; rank every prompt in
   a session by cost under **Expensive asks** (cost is cumulative — a short

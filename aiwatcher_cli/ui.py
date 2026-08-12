@@ -1974,7 +1974,7 @@ def _handoff_decision_rows(
         if decision in {"new_chat", "copy_handoff"}:
             status = str(correlation.get("status") or "waiting")
             if next_session:
-                proof_status = "Next session observed"
+                proof_status = "Follow-up observed"
                 proof_reason = str(
                     correlation.get("reason")
                     or "Observed a later local session in the same project after the Fresh Start action."
@@ -1983,8 +1983,10 @@ def _handoff_decision_rows(
                 proof_status = "Multiple possible next sessions"
                 proof_reason = str(correlation.get("reason") or "AIWatcher found more than one possible follow-up.")
             else:
-                proof_status = "Waiting for next session"
+                proof_status = "Proof pending"
                 proof_reason = str(correlation.get("reason") or "No later same-project local session has been observed yet.")
+                if "saved tokens" not in proof_reason:
+                    proof_reason = f"{proof_reason} AIWatcher will not claim saved tokens until one is linked."
         elif decision == "continue_here":
             proof_status = "Continued here"
             proof_reason = "The user chose to keep working in the current session."
@@ -2047,7 +2049,7 @@ def _handoff_decision_rows(
                 ),
                 "direction": "smaller" if delta > 0 else "larger_or_equal",
                 "label": followup_label,
-                "basis": "Observed local session totals so far; this is proof of follow-up shape, not a final savings claim.",
+                "basis": "Observed local session totals so far; this compares the follow-up shape, but it is not a final saved-token or saved-dollar claim.",
             }
         rows.append({
             "id": row.get("id"),
@@ -2909,6 +2911,26 @@ HTML = r"""<!doctype html>
     .insight strong { display: block; margin-bottom: 3px; color: white; }
     .pill-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
     .pill { border: 1px solid var(--line); background: #0b1118; border-radius: 999px; padding: 5px 9px; color: #bdc9d9; font-size: 11px; }
+    .action-queue { display: grid; gap: 10px; }
+    .action-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 14px;
+      align-items: center;
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--line-strong);
+      border-radius: 8px;
+      background: #0b1118;
+      padding: 14px;
+    }
+    .action-row.critical { border-left-color: var(--red); }
+    .action-row.high { border-left-color: var(--amber); }
+    .action-row.medium { border-left-color: var(--blue); }
+    .action-row.low { border-left-color: var(--green); }
+    .action-title { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-weight: 780; color: white; }
+    .action-row p { margin: 6px 0 0; color: var(--muted); line-height: 1.45; }
+    .action-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+    .action-row .actions { justify-content: flex-end; }
     .coverage-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
     .coverage-card, .health-card { border: 1px solid var(--line); border-radius: 8px; background: #0b1118; padding: 14px; }
     .coverage-head, .health-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
@@ -3155,6 +3177,14 @@ HTML = r"""<!doctype html>
 
   <section id="view-today" class="view">
     <section id="handoffBubble" class="card handoff-bubble" style="margin-bottom:14px" hidden></section>
+
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title">
+        <div><h2>Needs action</h2><p>The highest-confidence local actions before the charts. Every row says what AIWatcher knows and what it still cannot prove.</p></div>
+        <button class="btn-quiet" onclick="showView('setup')">Check coverage</button>
+      </div>
+      <div id="actionQueue" class="action-queue"></div>
+    </section>
 
     <section class="grid two" style="margin-bottom:14px">
       <div class="card hero-card">
@@ -3431,6 +3461,13 @@ function esc(value) {
     "'": '&#39;'
   }[ch]));
 }
+function jsArg(value) {
+  return `'${String(value ?? '')
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')}'`;
+}
 let receiptCache = [];
 function riskFlow(receipt) {
   const original = `<span class="risk-chip ${esc(receipt.original_risk)}">${esc(receipt.original_risk)} · ${esc(receipt.original_score ?? '—')}</span>`;
@@ -3446,6 +3483,103 @@ function predictedStats(receipt) {
     <div class="mini"><span class="label">Tool calls avoided</span><strong>${esc(p.tool_calls_label || '—')}</strong></div>
     <div class="mini"><span class="label">API-equivalent savings</span><strong>${esc(p.api_value_label || '—')}</strong></div>
   </div><p class="receipt-note">${esc(p.confidence || 'unknown')} confidence · ${esc(p.basis || '')}</p>`;
+}
+function actionRow(item) {
+  const meta = (item.meta || []).map(value => `<span class="pill">${esc(value)}</span>`).join('');
+  return `<div class="action-row ${esc(item.severity || 'medium')}">
+    <div>
+      <div class="action-title"><span>${esc(item.title)}</span><span class="pill">${esc(item.evidence || 'local evidence')}</span></div>
+      <p>${esc(item.body)}</p>
+      ${meta ? `<div class="action-meta">${meta}</div>` : ''}
+    </div>
+    <div class="actions">${(item.actions || []).map(action => `<button class="${esc(action.primary ? 'btn-primary' : 'btn-quiet')}" onclick="${esc(action.onclick)}">${esc(action.label)}</button>`).join('')}</div>
+  </div>`;
+}
+function buildActionQueue(data) {
+  const items = [];
+  const bubble = data.handoff_bubble;
+  if (bubble && bubble.session_id) {
+    items.push({
+      severity: bubble.severity === 'critical' ? 'critical' : 'high',
+      title: bubble.title || 'Fresh Start recommended',
+      body: bubble.body || bubble.reason || 'Context pressure is elevated in a local session.',
+      evidence: 'observed local session',
+      meta: [
+        bubble.expected_saved_context_label ? `~${bubble.expected_saved_context_label} context at risk` : 'proof pending',
+        bubble.tool || 'unknown tool',
+        bubble.project || 'unknown project',
+      ],
+      actions: [
+        { label: bubble.primary_label || 'Open Fresh Start', primary: true, onclick: `openHandoff(${jsArg(bubble.session_id)})` },
+        { label: 'Inspect session', onclick: `selectSession(${jsArg(bubble.session_id)})` },
+      ],
+    });
+  }
+  (data.context_health || []).slice(0, bubble ? 2 : 3).forEach(row => {
+    if (bubble && row.session_id === bubble.session_id) return;
+    items.push({
+      severity: row.severity === 'critical' ? 'critical' : 'high',
+      title: row.action && row.action.label ? row.action.label : 'Review context health',
+      body: row.recommendation || row.action && row.action.reason || 'AIWatcher found context or pace pressure.',
+      evidence: row.bloat_measurable ? 'measured replay' : 'observed signal',
+      meta: [row.project, row.tool, row.latest_turn_tokens ? `${row.latest_turn_tokens} latest turn` : '', row.bloat_label ? `${row.bloat_label} replay` : ''].filter(Boolean),
+      actions: [
+        { label: row.can_handoff ? 'Open Fresh Start' : 'Review session', primary: true, onclick: row.can_handoff ? `openHandoff(${jsArg(row.session_id)})` : `selectSession(${jsArg(row.session_id)})` },
+        { label: 'Inspect evidence', onclick: `selectSession(${jsArg(row.session_id)})` },
+      ],
+    });
+  });
+  (data.handoff_decisions || []).filter(decision => !decision.next_session_id).slice(0, 2).forEach(decision => {
+    const sessionId = decision.source_session_id || decision.session_id || '';
+    items.push({
+      severity: 'medium',
+      title: 'Fresh Start proof pending',
+      body: decision.proof_reason || 'A brief was copied, but AIWatcher has not linked a follow-up session yet.',
+      evidence: 'receipt pending',
+      meta: [decision.expected_saved_context_label ? `~${decision.expected_saved_context_label} context at risk` : 'no savings claim yet', sessionId ? `source ${shortSessionId(sessionId)}` : 'source unknown'].filter(Boolean),
+      actions: [
+        { label: sessionId ? 'Inspect source' : 'View Evidence', primary: false, onclick: sessionId ? `selectSession(${jsArg(sessionId)})` : "showView('receipts')" },
+        { label: 'View receipts', primary: true, onclick: "showView('receipts')" },
+      ],
+    });
+  });
+  (data.recent_sessions || []).filter(s => !s.outcome && ['useful', 'needs_review', 'churned'].includes(s.inferred_outcome)).slice(0, 3).forEach(s => {
+    items.push({
+      severity: s.inferred_outcome === 'churned' ? 'high' : 'medium',
+      title: s.inferred_outcome === 'useful' ? 'Confirm likely useful work' : s.inferred_outcome === 'churned' ? 'Review rewritten work' : 'Review unconfirmed outcome',
+      body: 'AIWatcher found local code/test evidence, but your outcome confirmation is what makes value metrics trustworthy.',
+      evidence: `inferred: ${s.inferred_outcome}`,
+      meta: [s.project, s.tool, s.api_value || s.tokens],
+      actions: [{ label: 'Mark outcome', primary: true, onclick: `selectSession(${jsArg(s.session_id)})` }],
+    });
+  });
+  const coverageGap = (data.coverage || []).find(row => ['unverified', 'not_detected', 'unsupported'].includes(row.status));
+  if (coverageGap) {
+    items.push({
+      severity: coverageGap.status === 'unsupported' ? 'medium' : 'high',
+      title: `Verify ${coverageGap.label} coverage`,
+      body: coverageGap.action || 'Coverage is not automatic yet. Verify whether this surface is protected, companion-only, or history-only.',
+      evidence: 'coverage state',
+      meta: [coverageGap.status_label, coverageGap.history, coverageGap.automatic_gate],
+      actions: [{ label: 'Open Settings', primary: true, onclick: "showView('setup')" }],
+    });
+  }
+  if (!items.length && data.insights && data.insights.length) {
+    const insight = data.insights[0];
+    items.push({
+      severity: insight.severity || 'low',
+      title: insight.title,
+      body: insight.body,
+      evidence: insight.impact_label ? 'cost signal' : 'local signal',
+      meta: [insight.impact_label || 'no urgent intervention'],
+      actions: insight.session_id ? [{ label: 'Inspect session', primary: true, onclick: `selectSession(${jsArg(insight.session_id)})` }] : [{ label: 'Open Spend', primary: true, onclick: "showView('insights')" }],
+    });
+  }
+  if (!items.length) {
+    return `<div class="empty">No action needed right now. AIWatcher will stay quiet until it has local evidence worth interrupting you for.</div>`;
+  }
+  const order = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+  return items.sort((a, b) => (order[a.severity] ?? 4) - (order[b.severity] ?? 4)).slice(0, 5).map(actionRow).join('');
 }
 function renderLatestReceipt(receipt) {
   if (!receipt) return '<div class="empty">No prompt intervention recorded in this window.</div>';
@@ -3497,7 +3631,7 @@ function renderLatestHandoffDecision(decisions) {
     : '';
   const observedNote = decision.observed_followup
     ? `<p class="receipt-note">${esc(decision.observed_followup.basis)}</p>`
-    : '';
+    : `<p class="receipt-note">Proof pending means the brief was copied, but no follow-up session has been linked yet. AIWatcher records expected context at risk, not saved tokens.</p>`;
   const perCall = decision.observed_followup
     ? `<p class="receipt-note">Per model call: ${esc(decision.observed_followup.source_tokens_per_model_call_label)} tokens / ${esc(decision.observed_followup.source_cost_per_model_call_label)} source → ${esc(decision.observed_followup.next_tokens_per_model_call_label)} tokens / ${esc(decision.observed_followup.next_cost_per_model_call_label)} follow-up.</p>`
     : '';
@@ -3505,7 +3639,7 @@ function renderLatestHandoffDecision(decisions) {
     <div class="session-title">${esc(handoffDecisionLabel(decision.decision))}</div>
     <div class="session-meta">${esc(dateLabel(decision.created_at))} · source ${esc(decision.source_session_id || decision.session_id || 'unknown')}${decision.next_session_id ? ` → next ${esc(decision.next_session_id)}` : ''}</div>
     <p>${esc(decision.reason || 'AIWatcher recommended a Fresh Start because local context health crossed a threshold.')}</p>
-    <p class="receipt-note">${esc(decision.proof_status || 'Waiting for next session')} · ${esc(decision.proof_reason || 'AIWatcher has not observed a follow-up session yet.')}</p>
+    <p class="receipt-note"><strong>${esc(decision.proof_status || 'Proof pending')}</strong> · ${esc(decision.proof_reason || 'AIWatcher has not observed a follow-up session yet.')}</p>
     ${observedNote}
     ${perCall}
     <div class="pill-row"><span class="pill">Fresh Start receipt</span>${saved}${usage}${outcome}${observed}${evidence}</div>
@@ -3517,7 +3651,7 @@ function renderHandoffDecisionRows(decisions) {
     <td>${esc(dateLabel(decision.created_at))}</td>
     <td>${esc(handoffDecisionLabel(decision.decision))}</td>
     <td>${esc(decision.expected_saved_context_label ? `~${decision.expected_saved_context_label}` : '—')}</td>
-    <td><strong>${esc(decision.proof_status || 'Waiting')}</strong><br><span class="sub">${esc(decision.observed_followup ? decision.observed_followup.label : decision.outcome || decision.inferred_outcome || decision.proof_confidence || '')}</span>${decision.proof_evidence ? `<br><span class="sub">${esc(decision.proof_evidence.label)} · ${esc(decision.proof_evidence.commits)} commits · ${esc(decision.proof_evidence.tests)} tests</span>` : ''}</td>
+    <td><strong>${esc(decision.proof_status || 'Proof pending')}</strong><br><span class="sub">${esc(decision.observed_followup ? decision.observed_followup.label : decision.proof_reason || decision.outcome || decision.inferred_outcome || decision.proof_confidence || 'No saved-token claim yet')}</span>${decision.proof_evidence ? `<br><span class="sub">${esc(decision.proof_evidence.label)} · ${esc(decision.proof_evidence.commits)} commits · ${esc(decision.proof_evidence.tests)} tests</span>` : ''}</td>
     <td><span class="sub">source</span> ${esc(decision.source_session_id || decision.session_id || 'unknown')}<br><span class="sub">next</span> ${esc(decision.next_session_id || 'waiting')}</td>
     <td>${decision.next_session_id ? `<button class="row-action" onclick="selectSession('${esc(decision.next_session_id)}')">Inspect next</button>` : decision.source_session_id ? `<button class="row-action" onclick="selectSession('${esc(decision.source_session_id)}')">Inspect source</button>` : ''}</td>
   </tr>`).join('');
@@ -4251,12 +4385,21 @@ function renderContextHealth(rows) {
 }
 function renderCoverage(rows) {
   if (!rows.length) return '<div class="empty">Coverage could not be determined on this machine.</div>';
+  const modeCopy = {
+    automatic: 'Protected automatically when the tool invokes its hook.',
+    companion: 'Companion/manual protection. AIWatcher can help, but it is not intercepting this surface directly.',
+    limited: 'Partial coverage. Treat findings as local evidence, not full control.',
+    unverified: 'Not verified on this machine yet. Run the suggested check before trusting protection claims.',
+    not_detected: 'Tool not detected. Install or open the tool, then refresh coverage.',
+    unsupported: 'No direct hook known. Use Prompt Companion or history-only review.',
+  };
   return rows.map(row => `<div class="coverage-card">
     <div class="coverage-head">
       <h3>${esc(row.label)}</h3>
       <span class="coverage-status ${esc(row.status)}">${esc(row.status_label)}</span>
     </div>
     <div class="coverage-detail">
+      <div><strong>Protection:</strong> ${esc(modeCopy[row.status] || 'Local evidence only until verified.')}</div>
       <div><strong>Gate:</strong> ${esc(row.automatic_gate)}</div>
       <div><strong>History:</strong> ${esc(row.history)}</div>
       <div><strong>Sessions:</strong> ${esc(row.session_count)}</div>
@@ -4274,6 +4417,7 @@ function renderSetup(rows) {
     </div>
     <div class="coverage-detail">
       <div>${esc(row.why)}</div>
+      <div><strong>Verify:</strong> run this, then refresh Settings. If no recent hook event appears, that surface is companion/history-only until proven otherwise.</div>
       <code>${esc(row.command)}</code>
       <button class="btn-quiet" data-command="${esc(row.command)}" onclick="copyText(this.dataset.command, 'Command copied')">Copy command</button>
     </div>
@@ -4760,6 +4904,7 @@ async function load(resetDetail = true, forceRefresh = false) {
   renderWatcher(data.watcher || null);
   renderCacheStatus(data.cache || null);
   renderHandoffBubble(data.handoff_bubble || null);
+  document.getElementById('actionQueue').innerHTML = buildActionQueue(data);
   const totals = data.totals;
   document.getElementById('apiValue').textContent = totals.api_value_label;
   document.getElementById('windowLabel').textContent = totals.window_label;

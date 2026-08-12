@@ -2680,6 +2680,8 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         brief = str(result["suggested_prompt"])
         self.assertLess(len(brief), len(original))
         self.assertIn("Review and reason only; do not edit files", brief)
+        self.assertIn("Restate the exact outcome and success criteria", brief)
+        self.assertIn("Make the first checkpoint explicit", brief)
         self.assertIn("Audit Fresh Start/session identity", brief)
         self.assertIn("Audit slow-loading session", brief)
         self.assertIn("Audit Fresh Start continuation", brief)
@@ -3242,6 +3244,8 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         brief = result["suggested_prompt"]
         self.assertTrue(brief.startswith(f"Task\n{original}"))
         self.assertIn("Do not reveal secret values", brief)
+        self.assertIn("Restate the exact outcome and success criteria", brief)
+        self.assertIn("what you will inspect, what you will change if needed", brief)
         self.assertIn(str(Path("/repo/payments").resolve()), brief)
         self.assertNotIn("Original task:", brief)
 

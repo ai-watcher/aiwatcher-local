@@ -114,6 +114,10 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn('data-view="coverage"', ui.HTML)
         self.assertIn('data-view="setup"', ui.HTML)
         self.assertIn('id="latestIntervention"', ui.HTML)
+        self.assertIn('id="actionQueue"', ui.HTML)
+        self.assertIn("Needs action", ui.HTML)
+        self.assertIn("buildActionQueue", ui.HTML)
+        self.assertIn("Every row says what AIWatcher knows", ui.HTML)
         self.assertIn('id="contextHealth"', ui.HTML)
         self.assertIn('id="handoffBubble"', ui.HTML)
         self.assertIn('id="latestHandoffDecision"', ui.HTML)
@@ -152,6 +156,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("handoffPayload", ui.HTML)
         self.assertIn("postJson('/api/handoff'", ui.HTML)
         self.assertIn("if (!isDemo)", ui.HTML)
+        self.assertIn("Proof pending means the brief was copied", ui.HTML)
+        self.assertIn("Protection:", ui.HTML)
+        self.assertIn("companion/history-only until proven otherwise", ui.HTML)
         self.assertIn("renderSessionSummary", ui.HTML)
         self.assertIn("Loading session identity for", ui.HTML)
         self.assertIn("Building Fresh Start brief", ui.HTML)
@@ -224,7 +231,7 @@ class DashboardWindowTests(unittest.TestCase):
 
         rows = ui._handoff_decision_rows(limit=5, sessions=[source, next_session])
 
-        self.assertEqual(rows[0]["proof_status"], "Next session observed")
+        self.assertEqual(rows[0]["proof_status"], "Follow-up observed")
         self.assertEqual(rows[0]["source_session_id"], "source")
         self.assertEqual(rows[0]["next_session_id"], "next")
         self.assertEqual(rows[0]["next_usage"]["tokens_label"], "16.0k")
@@ -241,7 +248,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(rows[0]["observed_followup"]["next_api_value_label"], "$0.08")
         self.assertEqual(rows[0]["observed_followup"]["next_tokens_per_model_call_label"], "4.0k")
         self.assertEqual(rows[0]["observed_followup"]["direction"], "smaller")
-        self.assertIn("not a final savings claim", rows[0]["observed_followup"]["basis"])
+        self.assertIn("not a final saved-token", rows[0]["observed_followup"]["basis"])
 
     def test_fresh_start_receipt_rows_wait_before_follow_up_is_observed(self) -> None:
         record_handoff_decision(
@@ -255,7 +262,8 @@ class DashboardWindowTests(unittest.TestCase):
             LocalSession(session_id="source", tool="claude-code", project_path="/repo/app")
         ])
 
-        self.assertEqual(rows[0]["proof_status"], "Waiting for next session")
+        self.assertEqual(rows[0]["proof_status"], "Proof pending")
+        self.assertIn("will not claim saved tokens", rows[0]["proof_reason"])
         self.assertIsNone(rows[0]["next_usage"])
         self.assertIsNone(rows[0]["outcome"])
 

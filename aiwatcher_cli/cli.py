@@ -1379,6 +1379,8 @@ def build_execution_brief(
     lines = ["Task"]
     lines.extend(_brief_task_sections(prompt, cwd=cwd))
     lines.extend(["", "Execution approach"])
+    lines.append("- Restate the exact outcome and success criteria in one or two sentences before spending context on tools.")
+    lines.append("- Make the first checkpoint explicit: what you will inspect, what you will change if needed, and where you will stop.")
     if plan_only:
         lines.append("- Review and reason only; do not edit files, run migrations, or make code changes.")
         lines.append("- Return findings with the relevant files/functions, root cause, and minimal proposed fix/tests.")
