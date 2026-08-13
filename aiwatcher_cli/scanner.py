@@ -628,6 +628,30 @@ def _choose_project_path(
     hint_counts: dict[str, int] | None = None,
     hint_costs: dict[str, float] | None = None,
 ) -> str:
+    """Attribute a session to a project, preferring observed cwd over prompt text.
+
+    A recorded cwd is an observation: the tool writes it on every event, so a
+    single session carries hundreds of them. A path mentioned in a prompt is an
+    inference from one line of text, and prompts mention paths for all sorts of
+    reasons -- "does the setting in /etc/nginx/nginx.conf matter here?" is not a
+    statement about which project the session belongs to.
+
+    So hints are a fallback, not an override. They decide attribution only when
+    no cwd resolves to a usable project, which is exactly the case they were
+    added for: cwd pointing at `/`, AI tool storage, a temp dir, or a generic
+    home folder. Those already normalize to None, so the hint still wins there.
+    """
+    candidates: dict[str, tuple[float, int]] = {}
+    for cwd, count in cwd_counts.items():
+        normalized = _normalize_project_path(cwd)
+        if not normalized:
+            continue
+        cost, existing_count = candidates.get(normalized, (0.0, 0))
+        candidates[normalized] = (cost + cwd_costs.get(cwd, 0.0), existing_count + count)
+
+    if candidates:
+        return max(candidates, key=lambda path: (candidates[path][0], candidates[path][1]))
+
     hint_candidates: dict[str, tuple[int, float]] = {}
     for hint, count in (hint_counts or {}).items():
         normalized = _normalize_project_path(hint)
@@ -640,17 +664,6 @@ def _choose_project_path(
         )
     if hint_candidates:
         return max(hint_candidates, key=lambda path: (hint_candidates[path][0], hint_candidates[path][1]))
-
-    candidates: dict[str, tuple[float, int]] = {}
-    for cwd, count in cwd_counts.items():
-        normalized = _normalize_project_path(cwd)
-        if not normalized:
-            continue
-        cost, existing_count = candidates.get(normalized, (0.0, 0))
-        candidates[normalized] = (cost + cwd_costs.get(cwd, 0.0), existing_count + count)
-
-    if candidates:
-        return max(candidates, key=lambda path: (candidates[path][0], candidates[path][1]))
 
     normalized_fallback = _normalize_project_path(fallback_path)
     return normalized_fallback or "unknown"
@@ -1243,9 +1256,11 @@ def scan_claude_code_events(since: datetime | None = None) -> list[LocalEvent]:
 
                             ts = _parse_ts(obj.get("timestamp") or obj.get("createdAt"))
                             cwd = obj.get("cwd")
-                            project_path = _normalize_project_path(cwd if isinstance(cwd, str) else None)
-                            if not project_path:
-                                project_path = _normalize_project_path(fallback_project_path) or fallback_project_path
+                            resolved_project_path = (
+                                _normalize_project_path(cwd if isinstance(cwd, str) else None)
+                                or _normalize_project_path(fallback_project_path)
+                            )
+                            project_path = resolved_project_path or fallback_project_path
 
                             message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
                             msg_type = obj.get("type") or "unknown"
@@ -1254,7 +1269,10 @@ def scan_claude_code_events(since: datetime | None = None) -> list[LocalEvent]:
                             hints = _project_hints_from_text(prompt_text)
                             if hints:
                                 hinted_project_path = hints[0]
-                            if hinted_project_path:
+                            # Same precedence as _choose_project_path: a path
+                            # mentioned in a prompt is a fallback for an unusable
+                            # cwd, never an override for one that resolved.
+                            if hinted_project_path and not resolved_project_path:
                                 project_path = hinted_project_path
                             model = message.get("model") or obj.get("model")
                             tokens = _anthropic_usage(message.get("usage") or obj.get("usage") or {})
@@ -1478,7 +1496,12 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
                         hint_counts[hint] += 1
                         hint_costs[hint] += estimate_cost(model, 0, 0)
                     if hint_counts:
-                        project_path = _choose_project_path(project_path or "", {}, {}, hint_counts, hint_costs)
+                        # project_path here is the cwd Codex recorded in
+                        # session_meta/turn_context. Pass it as observed evidence
+                        # rather than a bare fallback, so prompt hints only take
+                        # over when it did not resolve to a usable project.
+                        observed_cwd = {project_path: 1} if project_path else {}
+                        project_path = _choose_project_path(project_path or "", observed_cwd, {}, hint_counts, hint_costs)
                     if row_type != "event_msg" or payload.get("type") != "token_count":
                         continue
                     info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
@@ -1523,7 +1546,8 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
         if not final_input and not final_output:
             continue
         if hint_counts:
-            project_path = _choose_project_path(project_path or "", {}, {}, hint_counts, hint_costs)
+            observed_cwd = {project_path: 1} if project_path else {}
+            project_path = _choose_project_path(project_path or "", observed_cwd, {}, hint_counts, hint_costs)
         sessions.append(LocalSession(
             session_id=session_id,
             tool="codex-cli",
