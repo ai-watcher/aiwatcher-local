@@ -592,6 +592,71 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("watcher", summary)
         self.assertEqual(summary["context_health_status"], "pending")
 
+    def test_first_paint_shell_is_never_persisted_to_the_disk_cache(self) -> None:
+        """A shell must not outlive the process that built it.
+
+        The shell carries the same schema version as a full summary, so if a
+        background refresh crashes or is killed after first paint, a persisted
+        shell would be served as a normal summary for the whole disk TTL --
+        blank survival, context health, and receipts, with no error anywhere.
+        """
+        now = datetime.now(timezone.utc)
+        rows = [
+            LocalSession(
+                session_id="recent",
+                tool="claude-code",
+                project_path="/repo/recent",
+                started_at=now - timedelta(hours=2),
+                updated_at=now - timedelta(hours=1),
+                tokens_in=100,
+                tokens_out=50,
+                cost_usd=0.1,
+            )
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all", return_value=rows),
+                patch.object(ui, "discover_tools", return_value={}),
+                patch.object(ui, "surface_coverage", return_value=[]),
+                # Stand in for a background refresh that never completes.
+                patch.object(ui, "_maybe_refresh_summary_cache", return_value=False),
+            ):
+                ui._SUMMARY_CACHE.clear()
+                ui._SUMMARY_REFRESHED_AT.clear()
+                first = ui.build_summary_cached(7)
+                self.assertEqual(first["cache"]["status"], "building")
+                self.assertFalse(ui._summary_cache_path(7).exists())
+
+                # With memory cleared there is nothing to fall back to, so the
+                # next request rebuilds a shell rather than serving a stale one.
+                ui._SUMMARY_CACHE.clear()
+                ui._SUMMARY_REFRESHED_AT.clear()
+                second = ui.build_summary_cached(7)
+
+        self.assertEqual(second["cache"]["status"], "building")
+        self.assertEqual(second["cache"]["source"], "computed")
+
+    def test_incomplete_summary_on_disk_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                cache_path = ui._summary_cache_path(7)
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                payload = {
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "cache_schema_version": ui.SUMMARY_CACHE_SCHEMA_VERSION,
+                    "summary_complete": False,
+                    "survival": {"available": False, "reason": "Background evidence refresh pending."},
+                }
+                cache_path.write_text(json.dumps(payload), encoding="utf-8")
+                self.assertIsNone(ui._read_summary_disk_cache(7))
+
+                payload["summary_complete"] = True
+                cache_path.write_text(json.dumps(payload), encoding="utf-8")
+                self.assertIsNotNone(ui._read_summary_disk_cache(7))
+
     def test_stale_summary_disk_cache_without_schema_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")

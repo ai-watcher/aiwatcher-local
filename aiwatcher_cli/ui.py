@@ -83,7 +83,9 @@ MAX_REQUEST_BYTES = 64 * 1024
 MIN_DT = datetime.min.replace(tzinfo=timezone.utc)
 SUMMARY_MEMORY_TTL_SECONDS = 45
 SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
-SUMMARY_CACHE_SCHEMA_VERSION = 3
+# Bump whenever build_summary's payload shape changes, so a cache written by an
+# older build is discarded instead of rendering blank sections in a newer UI.
+SUMMARY_CACHE_SCHEMA_VERSION = 4
 SUMMARY_BACKGROUND_COOLDOWN_SECONDS = 8
 ACTIVE_SESSION_MINUTES = 30
 RECENT_SESSION_HOURS = 4
@@ -2407,6 +2409,7 @@ def build_summary(days: int = 7) -> dict[str, object]:
     return {
         "generated_at": now.isoformat(),
         "cache_schema_version": SUMMARY_CACHE_SCHEMA_VERSION,
+        "summary_complete": True,
         "_session_index": _session_index_payload(all_rows),
         "days": days,
         "privacy": [
@@ -2505,6 +2508,8 @@ def _read_summary_disk_cache(days: int, *, max_age_seconds: int = SUMMARY_DISK_T
         return None
     if raw.get("cache_schema_version") != SUMMARY_CACHE_SCHEMA_VERSION:
         return None
+    if raw.get("summary_complete") is not True:
+        return None
     generated_at = raw.get("generated_at")
     try:
         generated = datetime.fromisoformat(str(generated_at)).astimezone(timezone.utc)
@@ -2516,6 +2521,13 @@ def _read_summary_disk_cache(days: int, *, max_age_seconds: int = SUMMARY_DISK_T
 
 
 def _write_summary_disk_cache(days: int, summary: dict[str, object]) -> None:
+    # Only complete summaries are worth persisting. A first-paint shell is cheap
+    # to rebuild but expensive to serve by mistake: it carries the same schema
+    # version as a full payload, so a shell left on disk by a crashed or killed
+    # background refresh would be served as a normal summary for the whole disk
+    # TTL, rendering empty survival/context-health/receipt sections with no error.
+    if summary.get("summary_complete") is not True:
+        return
     try:
         path = _summary_cache_path(days)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2590,6 +2602,9 @@ def _build_summary_shell(days: int = 7) -> dict[str, object]:
     return {
         "generated_at": now.isoformat(),
         "cache_schema_version": SUMMARY_CACHE_SCHEMA_VERSION,
+        # First-paint shell: the event/evidence-backed sections below are still
+        # placeholders, so this payload must never reach the disk cache.
+        "summary_complete": False,
         "_session_index": _session_index_payload(all_rows),
         "days": days,
         "privacy": [
