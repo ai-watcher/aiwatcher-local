@@ -1068,6 +1068,9 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
     cli_code = hook_liveness(
         rows, hook_events, session_tool="claude-code", hook_tool="claude", surface="cli",
     )
+    codex_desktop = hook_liveness(
+        rows, hook_events, session_tool="codex-cli", hook_tool="codex", surface="desktop",
+    )
 
     return [
         SurfaceCoverage(
@@ -1184,31 +1187,44 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
         SurfaceCoverage(
             surface_id="codex-desktop",
             label="Codex Desktop",
+            # Was "is there any codex hook event in the buffer", which proves
+            # nothing about the Desktop surface and was in practice satisfied by
+            # test-written events. Same session-id matching as the Claude rows.
             status=(
-                "limited" if (codex_desktop_sessions and detected.get("codex-cli") and codex_hook_seen)
+                "limited" if codex_desktop.state == "working"
+                else "silent" if codex_desktop.state == "silent"
                 else "unverified" if codex_desktop_sessions
                 else "companion"
             ),
             status_label=(
-                "Hook active + history" if (codex_desktop_sessions and detected.get("codex-cli") and codex_hook_seen)
+                "Hook active + history" if codex_desktop.state == "working"
+                else "Hook not firing" if codex_desktop.state == "silent"
                 else "Unverified automatic gate" if codex_desktop_sessions
                 else "Companion only"
             ),
             detected=bool(codex_desktop_sessions),
             automatic_gate=(
-                "Hook fires; Desktop conversation surface may share CLI hook invocation"
-                if (codex_desktop_sessions and codex_hook_seen)
+                "Hook fires on this surface, matched by session id"
+                if codex_desktop.state == "working"
                 else "Do not assume Desktop conversation prompts invoke hooks"
             ),
             history="Visible only when Codex writes readable local sessions",
             action=(
-                "Verify with `aiwatcher hook-status` after a Desktop prompt."
-                if (codex_desktop_sessions and codex_hook_seen)
+                "Nothing to do." if codex_desktop.state == "working"
+                else "Reinstall with `aiwatcher install-codex-hook`, then run `aiwatcher hook-status`."
+                if codex_desktop.state == "silent"
                 else "Use Prompt Companion unless `hook-status` proves the hook fired."
             ),
             detail=(
-                "Hook events seen for Codex; Desktop coverage verified by `hook-status`."
-                if (codex_desktop_sessions and codex_hook_seen)
+                f"Verified: hooks fired for {codex_desktop.hooked} of {codex_desktop.judged} recent "
+                "Desktop session(s), matched by session id."
+                if codex_desktop.state == "working"
+                else f"{codex_desktop.judged} recent Desktop session(s) and no hook fired for any of "
+                "them, so those prompts were ungated."
+                if codex_desktop.state == "silent"
+                # Codex tops out at "limited" even when proven: token totals here
+                # are cumulative and subscription-based, so history stays weaker
+                # than Claude's regardless of how well the gate is working.
                 else "This surface needs real-device verification before stronger claims."
             ),
             session_count=codex_desktop_sessions,
@@ -1584,6 +1600,9 @@ def scan_codex_cli(since: datetime | None = None) -> list[LocalSession]:
                     project_path=row["cwd"],
                     started_at=_parse_ts(row["created_at_ms"]),
                     updated_at=_parse_ts(row["updated_at_ms"]),
+                    # Codex's own recorded timestamp, never a file mtime, so it
+                    # is a sound basis for judging real activity.
+                    last_message_at=_parse_ts(row["updated_at_ms"]),
                     model=row["model"] or "codex",
                     tokens_in=tokens,
                     tokens_out=0,
@@ -1777,6 +1796,9 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
             project_path=project_path,
             started_at=started_at or _mtime(path),
             updated_at=updated_at or _mtime(path),
+            # Content-derived only, so surface coverage can tell real activity
+            # from a file the OS merely touched. See LocalSession.last_message_at.
+            last_message_at=updated_at,
             model=model or "codex",
             tokens_in=final_input,
             tokens_out=final_output,

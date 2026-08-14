@@ -234,6 +234,76 @@ class ProjectPathTests(unittest.TestCase):
         row = self._cli_coverage(rows, [])
         self.assertEqual(row.session_count, 1)
 
+    def _codex_coverage(self, rows, hook_events):
+        tools = dict(self.TOOLS, **{"codex-cli": True})
+        with (
+            patch.object(scanner, "discover_tools", return_value=tools),
+            patch.object(scanner, "recent_hook_events", return_value=hook_events),
+        ):
+            coverage = {row.surface_id: row for row in scanner.surface_coverage(rows)}
+        return coverage["codex-desktop"]
+
+    @staticmethod
+    def _codex_desktop_session(session_id: str, last_message_at):
+        return scanner.LocalSession(
+            session_id=session_id, tool="codex-cli", surface="desktop",
+            last_message_at=last_message_at, updated_at=last_message_at,
+        )
+
+    def test_codex_desktop_needs_a_matching_session_not_just_any_codex_event(self) -> None:
+        # The regression: this row asked "is there any codex hook event?", which
+        # test-written events with no session id were satisfying -- so it claimed
+        # a working hook on the strength of fixture data.
+        session_at = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        row = self._codex_coverage(
+            [self._codex_desktop_session("codex-1", session_at)],
+            [{"tool": "codex", "event": "received", "session_id": None,
+              "cwd": "/repo", "created_at": "2026-08-14T11:00:00+00:00"}],
+        )
+        self.assertEqual(row.status, "silent")
+        self.assertEqual(row.status_label, "Hook not firing")
+
+    def test_codex_desktop_is_proven_by_a_matching_session_id(self) -> None:
+        session_at = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        row = self._codex_coverage(
+            [self._codex_desktop_session("codex-1", session_at)],
+            [{"tool": "codex", "event": "received", "session_id": "codex-1",
+              "created_at": "2026-08-14T11:00:00+00:00"}],
+        )
+        self.assertEqual(row.status_label, "Hook active + history")
+        self.assertIn("1 of 1", row.detail)
+        # Tops out at "limited", never "automatic": Codex token totals are
+        # cumulative and subscription-based, so history stays weaker than
+        # Claude's however well the gate is proven to work.
+        self.assertEqual(row.status, "limited")
+
+    def test_codex_rollout_sessions_carry_a_content_derived_timestamp(self) -> None:
+        # Without last_message_at every Codex session is unjudgeable by
+        # hook_liveness, so the coverage row above could never leave
+        # "unverified" however well the hook was working.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "sessions"
+            root.mkdir()
+            rollout = root / "rollout-session-1.jsonl"
+            rows = [
+                {"timestamp": "2026-07-01T10:00:00Z", "type": "session_meta",
+                 "payload": {"id": "session-1", "cwd": temp_dir, "originator": "codex_desktop"}},
+                {"timestamp": "2026-07-01T10:00:02Z", "type": "event_msg", "payload": {"type": "token_count", "info": {
+                    "total_token_usage": {"input_tokens": 1000, "output_tokens": 100, "total_tokens": 1100},
+                    "last_token_usage": {"input_tokens": 1000, "output_tokens": 100, "total_tokens": 1100},
+                }}},
+            ]
+            rollout.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+            with patch.object(scanner, "CODEX_SESSIONS_DIRS", [root]):
+                sessions, _events = scanner.scan_codex_rollouts()
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].surface, "desktop")
+        self.assertEqual(
+            sessions[0].last_message_at,
+            datetime(2026, 7, 1, 10, 0, 2, tzinfo=timezone.utc),
+        )
+
     def test_decode_claude_path_preserves_hyphenated_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir) / "my-project"
