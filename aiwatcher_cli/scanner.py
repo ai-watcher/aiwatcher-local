@@ -100,8 +100,39 @@ def _is_inside(path: Path, parent: Path) -> bool:
     return True
 
 
+def _agent_worktree_owner(path: Path) -> Path | None:
+    """The repository an agent worktree was cut from, if this is one.
+
+    Claude Code runs isolated agents in a throwaway worktree at
+    `<repo>/.claude/worktrees/agent-<id>`, then deletes it when the agent
+    finishes. Because the directory is gone, the git-root lookup below cannot
+    fold it back into its repository, so each one would otherwise rank as its
+    own project -- splitting the real repo's cost across entries that no longer
+    exist on disk.
+
+    The owning repository is the path up to `.claude`, so recover it rather than
+    dropping the session as unattributed.
+    """
+    parts = path.parts
+    for index in range(1, len(parts) - 1):
+        if parts[index] == ".claude" and parts[index + 1] == "worktrees":
+            return Path(*parts[:index])
+    return None
+
+
+def _is_agent_scratch_path(path: Path) -> bool:
+    """Scratch space a local AI tool created for itself under a temp root.
+
+    Deliberately narrow: a temp subdirectory can be somebody's real project, so
+    only agent-owned directory names are rejected, not everything under temp.
+    """
+    if not any(_is_inside(path, temp_dir) for temp_dir in TEMP_DIRS):
+        return False
+    return any(part == "claude" or part.startswith("claude-") for part in path.parts)
+
+
 def _is_tool_storage_path(path: Path) -> bool:
-    if any(part.startswith("claude-") for part in path.parts) and any(_is_inside(path, temp_dir) for temp_dir in TEMP_DIRS):
+    if _is_agent_scratch_path(path):
         return True
     storage_roots = [
         *CLAUDE_PROJECTS_DIRS,
@@ -437,6 +468,14 @@ def _normalize_project_path(path: str | None) -> str | None:
         resolved = candidate.resolve()
     except OSError:
         resolved = candidate
+
+    owner = _agent_worktree_owner(resolved)
+    if owner is not None:
+        # Re-normalize the owning repo so it still faces every check below --
+        # a worktree under ~/.claude must resolve to home, and so to None.
+        # The owner never contains .claude/worktrees, so this cannot recurse.
+        PROJECT_PATH_CACHE[path] = _normalize_project_path(str(owner))
+        return PROJECT_PATH_CACHE[path]
 
     if resolved == HOME_DIR or resolved in COMMON_NON_PROJECT_DIRS or resolved.parent == resolved or _is_tool_storage_path(resolved):
         PROJECT_PATH_CACHE[path] = None

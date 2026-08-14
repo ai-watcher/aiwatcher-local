@@ -181,6 +181,55 @@ class ProjectPathTests(unittest.TestCase):
             self.assertIsNone(scanner._normalize_project_path(str(task_path)))
             self.assertEqual(scanner._choose_project_path(str(task_path), {str(task_path): 2}, {str(task_path): 9.0}), "unknown")
 
+    def test_agent_worktree_rolls_up_to_the_repository_it_was_cut_from(self) -> None:
+        """Throwaway agent worktrees must not rank as projects of their own.
+
+        Claude Code runs isolated agents in `<repo>/.claude/worktrees/agent-*`
+        and deletes the directory afterwards. Since it no longer exists, the
+        git-root lookup cannot fold it back, so each one would otherwise split
+        cost off the real repo into an entry nobody can open.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir) / "my-repo"
+            repo.mkdir()
+            worktree = repo / ".claude" / "worktrees" / "agent-a1d5324e6133bcc34"
+            scanner.PROJECT_PATH_CACHE.clear()
+
+            # Deleted worktree: the path no longer exists, which is the norm.
+            self.assertEqual(scanner._normalize_project_path(str(worktree)), str(repo.resolve()))
+
+            # A worktree still on disk folds back the same way.
+            worktree.mkdir(parents=True)
+            scanner.PROJECT_PATH_CACHE.clear()
+            self.assertEqual(scanner._normalize_project_path(str(worktree)), str(repo.resolve()))
+
+    def test_agent_worktree_under_home_does_not_become_a_project(self) -> None:
+        """Rolling up must not smuggle a junk owner past the usual checks."""
+        scanner.PROJECT_PATH_CACHE.clear()
+        self.assertIsNone(
+            scanner._normalize_project_path(str(Path.home() / ".claude" / "worktrees" / "agent-abc123"))
+        )
+
+    def test_agent_scratchpad_under_temp_is_not_a_project(self) -> None:
+        """The scratchpad root is named `claude` exactly -- no trailing hyphen."""
+        temp_root = next(iter(scanner.TEMP_DIRS))
+        scratch = temp_root / "claude" / "C--Users-dev-repo" / "session-id" / "scratchpad"
+        scanner.PROJECT_PATH_CACHE.clear()
+        self.assertTrue(scanner._is_agent_scratch_path(scratch))
+        self.assertIsNone(scanner._normalize_project_path(str(scratch)))
+
+    def test_ordinary_temp_subdirectory_is_still_a_real_project(self) -> None:
+        """Working out of a temp checkout is legitimate; only agent dirs are junk.
+
+        Guards against fixing the scratchpad case by rejecting everything under
+        a temp root, which would erase real work from the Projects page.
+        """
+        temp_root = next(iter(scanner.TEMP_DIRS))
+        workspace = temp_root / "aiwatcher-fast-ui"
+        scanner.PROJECT_PATH_CACHE.clear()
+        self.assertFalse(scanner._is_agent_scratch_path(workspace))
+        self.assertEqual(scanner._normalize_project_path(str(workspace)), str(workspace))
+
     def test_tmp_root_and_claude_tmp_root_are_not_treated_as_projects(self) -> None:
         scanner.PROJECT_PATH_CACHE.clear()
         self.assertIsNone(scanner._normalize_project_path("/private/tmp"))
