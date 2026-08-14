@@ -86,7 +86,9 @@ SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
 # Bump whenever build_summary's payload shape changes, so a cache written by an
 # older build is discarded instead of rendering blank sections in a newer UI.
 SUMMARY_CACHE_SCHEMA_VERSION = 4
+SESSION_SNAPSHOT_SCHEMA_VERSION = 1
 SUMMARY_BACKGROUND_COOLDOWN_SECONDS = 8
+SUMMARY_WINDOWS = (1, 7, 30)
 ACTIVE_SESSION_MINUTES = 30
 RECENT_SESSION_HOURS = 4
 UNATTRIBUTED_PROJECT = "__unattributed__"
@@ -97,6 +99,9 @@ _SUMMARY_REFRESHING: set[int] = set()
 _SUMMARY_REFRESHED_AT: dict[int, float] = {}
 _SUMMARY_CACHE_LOCK = threading.RLock()
 _SESSION_INDEX: dict[str, LocalSession] = {}
+_EVENT_INDEX: dict[str, list[LocalEvent]] = {}
+_EVENT_INDEX_READY = False
+_SUMMARY_REFRESH_ERROR: str | None = None
 
 
 def money(value: float) -> str:
@@ -221,6 +226,8 @@ def _session_from_json(raw: object) -> LocalSession | None:
         model=raw.get("model") if isinstance(raw.get("model"), str) else None,
         tokens_in=int(raw.get("tokens_in") or 0),
         tokens_out=int(raw.get("tokens_out") or 0),
+        cache_read_tokens=int(raw.get("cache_read_tokens") or 0),
+        cache_write_tokens=int(raw.get("cache_write_tokens") or 0),
         cost_usd=float(raw.get("cost_usd") or 0.0),
         agent_calls=int(raw.get("agent_calls") or 0),
         tool_calls=int(raw.get("tool_calls") or 0),
@@ -235,6 +242,25 @@ def _index_sessions(rows: list[LocalSession]) -> None:
     with _SUMMARY_CACHE_LOCK:
         for row in rows:
             _SESSION_INDEX[row.session_id] = row
+
+
+def _index_events(rows: list[LocalEvent], *, complete: bool = False) -> None:
+    global _EVENT_INDEX_READY
+    grouped: dict[str, list[LocalEvent]] = defaultdict(list)
+    for row in rows:
+        grouped[row.session_id].append(row)
+    with _SUMMARY_CACHE_LOCK:
+        _EVENT_INDEX.clear()
+        _EVENT_INDEX.update(grouped)
+        if complete:
+            _EVENT_INDEX_READY = True
+
+
+def _cached_events_for_session(session_id: str) -> list[LocalEvent] | None:
+    with _SUMMARY_CACHE_LOCK:
+        if not _EVENT_INDEX_READY:
+            return None
+        return list(_EVENT_INDEX.get(session_id, []))
 
 
 def _session_index_payload(rows: list[LocalSession]) -> list[dict[str, object]]:
@@ -548,10 +574,22 @@ def group_by_model_breakdown(rows: list[LocalSession]) -> list[dict[str, object]
     return result
 
 
-def rows_for_window(days: int) -> list[LocalSession]:
+def rows_for_window(days: int, *, prefer_cache: bool = False) -> list[LocalSession]:
     """Sessions clipped to the window -- see clip_sessions_to_window for why the
     old `updated_at`-only rule overstated every total."""
     since = datetime.now().astimezone() - timedelta(days=days)
+    if prefer_cache:
+        cached_rows = _cached_session_rows()
+        with _SUMMARY_CACHE_LOCK:
+            event_index_ready = _EVENT_INDEX_READY
+            cached_events = [event for events in _EVENT_INDEX.values() for event in events]
+        if cached_rows:
+            if event_index_ready:
+                return clip_sessions_to_window(cached_rows, cached_events, since)
+            # The normalized snapshot is intentionally usable before event
+            # enrichment finishes. This keeps Work/Projects interactive while
+            # exact window clipping catches up in the background.
+            return [row for row in cached_rows if in_window(row, since)]
     try:
         events = scan_all_events(since=since)
     except OSError:
@@ -595,7 +633,7 @@ def build_session_search(
 ) -> dict[str, object]:
     """S-27: UI-facing search/filter over local sessions, reusing filter_sessions()
     (cli.py) rather than re-implementing matching here."""
-    rows = rows_for_window(days)
+    rows = rows_for_window(days, prefer_cache=True)
     matched = filter_sessions(rows, search=search, outcome=outcome, evidence=evidence)
     matched = sorted(matched, key=lambda row: row.updated_at or row.started_at or MIN_DT, reverse=True)
     total_matched = len(matched)
@@ -775,7 +813,7 @@ def _safe_window_outcomes(session_ids: set[str]) -> tuple[dict[str, dict[str, ob
 
 
 def build_project_detail(project: str, days: int = 7) -> dict[str, object]:
-    rows = [row for row in rows_for_window(days) if project_key(row.project_path) == project]
+    rows = [row for row in rows_for_window(days, prefer_cache=True) if project_key(row.project_path) == project]
     stats = summarize(rows)
     sessions = sorted(rows, key=lambda row: row.updated_at or row.started_at or MIN_DT, reverse=True)
     return {
@@ -853,14 +891,27 @@ def build_prompt_analysis(
 EVENT_DISPLAY_LIMIT = 5000
 
 
-def build_session_detail(session_id: str, days: int = 30) -> dict[str, object]:
+def build_session_detail(session_id: str, days: int = 30, *, allow_pending: bool = False) -> dict[str, object]:
     row = _find_session_row(session_id, days=days)
     if not row:
         return {"error": "session not found"}
+    cached_events = _cached_events_for_session(session_id)
+    if cached_events is None:
+        if not allow_pending:
+            cached_events = [event for event in scan_all_events() if event.session_id == session_id]
+        else:
+            # Never rescan every transcript on the HTTP request thread. The fast
+            # identity/action card remains useful while the shared summary worker
+            # builds the event index once for every view.
+            return {
+                **session_summary_json(row),
+                "detail_pending": True,
+                "detail_message": "Timeline and outcome evidence are still indexing in the background.",
+            }
     # A single-session view shows the whole session, not just the last `days` — otherwise
     # early turns of a long-running session are hidden. We only filter by session id here.
     events = sorted(
-        [event for event in scan_all_events() if event.session_id == session_id],
+        cached_events,
         key=lambda event: event.timestamp or MIN_DT,
     )
     costliest = max(events, key=lambda event: (event.cost_usd, event.tokens_in + event.tokens_out), default=None)
@@ -2233,11 +2284,18 @@ def _insight_feed(
     return [*with_impact, *without_impact]
 
 
-def build_summary(days: int = 7) -> dict[str, object]:
+def build_summary(
+    days: int = 7,
+    *,
+    all_rows: list[LocalSession] | None = None,
+    all_events: list[LocalEvent] | None = None,
+) -> dict[str, object]:
     now = datetime.now().astimezone()
     since = now - timedelta(days=days)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    all_rows = scan_all()
+    if all_rows is None:
+        all_rows = scan_all(since=now - timedelta(days=max(32, days + 2)))
+    _write_session_snapshot(all_rows)
     _index_sessions(all_rows)
     try:
         link_recent_interventions_to_sessions(all_rows)
@@ -2248,10 +2306,12 @@ def build_summary(days: int = 7) -> dict[str, object]:
     # session merely *touched* inside a window used to contribute every dollar
     # it had ever cost, which on long-running sessions roughly doubled the
     # reported total.
-    try:
-        all_events = scan_all_events(since=since)
-    except OSError:
-        all_events = []
+    if all_events is None:
+        try:
+            all_events = scan_all_events(since=since)
+        except OSError:
+            all_events = []
+    _index_events(all_events, complete=True)
     rows = clip_sessions_to_window(all_rows, all_events, since)
     month_rows = clip_sessions_to_window(all_rows, all_events, month_start)
 
@@ -2483,6 +2543,67 @@ def _summary_cache_path(days: int) -> Path:
     return _summary_cache_dir() / f"ui-summary-{days}.json"
 
 
+def _session_snapshot_path() -> Path:
+    return _summary_cache_dir() / "session-index.json"
+
+
+def _read_session_snapshot() -> list[LocalSession]:
+    try:
+        raw = json.loads(_session_snapshot_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(raw, dict) or raw.get("schema_version") != SESSION_SNAPSHOT_SCHEMA_VERSION:
+        return []
+    items = raw.get("sessions")
+    if not isinstance(items, list):
+        return []
+    return [row for item in items if (row := _session_from_json(item)) is not None]
+
+
+def _write_session_snapshot(rows: list[LocalSession]) -> None:
+    payload = {
+        "schema_version": SESSION_SNAPSHOT_SCHEMA_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "sessions": _session_index_payload(rows),
+    }
+    try:
+        path = _session_snapshot_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(tmp_path, path)
+    except OSError:
+        pass
+
+
+def _cached_session_rows() -> list[LocalSession]:
+    with _SUMMARY_CACHE_LOCK:
+        if _SESSION_INDEX:
+            return list(_SESSION_INDEX.values())
+    rows = _read_session_snapshot()
+    if rows:
+        _index_sessions(rows)
+        return rows
+
+    # Upgrade path: older PR #46 builds already persisted the session index in
+    # complete summary caches. Reuse that stable metadata even when the summary
+    # schema itself changed, then write the dedicated snapshot for next start.
+    for days in SUMMARY_WINDOWS:
+        try:
+            raw = json.loads(_summary_cache_path(days).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        items = raw.get("_session_index") if isinstance(raw, dict) else None
+        if not isinstance(items, list):
+            continue
+        rows = [row for item in items if (row := _session_from_json(item)) is not None]
+        if rows:
+            _index_sessions(rows)
+            _write_session_snapshot(rows)
+            return rows
+    return []
+
+
 def _mark_summary_cache(summary: dict[str, object], *, status: str, source: str, refreshing: bool) -> dict[str, object]:
     copy = dict(summary)
     copy.pop("_session_index", None)
@@ -2494,6 +2615,7 @@ def _mark_summary_cache(summary: dict[str, object], *, status: str, source: str,
         "refreshing": refreshing,
         "generated_at": generated_at,
         "schema_version": SUMMARY_CACHE_SCHEMA_VERSION,
+        "error": _SUMMARY_REFRESH_ERROR,
     }
     return copy
 
@@ -2547,12 +2669,19 @@ def _store_summary_cache(days: int, summary: dict[str, object], *, mark_refreshe
     _write_summary_disk_cache(days, summary)
 
 
-def _build_summary_shell(days: int = 7) -> dict[str, object]:
+def _build_summary_shell(
+    days: int = 7,
+    *,
+    all_rows: list[LocalSession] | None = None,
+) -> dict[str, object]:
     """Build the dashboard's fast first-paint data without event/evidence scans."""
     now = datetime.now().astimezone()
     since = now - timedelta(days=days)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    all_rows = scan_all()
+    # Never scan transcript history on the request thread. A cold Codex parse
+    # can take tens of seconds; the last normalized local snapshot is enough
+    # for a truthful first paint while one shared background refresh catches up.
+    all_rows = list(all_rows) if all_rows is not None else _cached_session_rows()
     _index_sessions(all_rows)
     try:
         link_recent_interventions_to_sessions(all_rows)
@@ -2653,44 +2782,66 @@ def _build_summary_shell(days: int = 7) -> dict[str, object]:
     }
 
 
-def _refresh_summary_cache(days: int) -> None:
-    with _SUMMARY_CACHE_LOCK:
-        if days in _SUMMARY_REFRESHING:
-            return
-        _SUMMARY_REFRESHING.add(days)
+def _summary_refresh_windows(requested_days: int) -> list[int]:
+    return [requested_days, *[days for days in SUMMARY_WINDOWS if days != requested_days]]
+
+
+def _run_shared_summary_refresh(requested_days: int) -> None:
+    """Scan local histories once, then materialize every dashboard window."""
+    global _SUMMARY_REFRESH_ERROR
     try:
-        summary = build_summary(days)
-        _store_summary_cache(days, summary, mark_refreshed=True)
+        now = datetime.now().astimezone()
+        scan_days = max(32, requested_days + 2)
+        all_rows = scan_all(since=now - timedelta(days=scan_days))
+        # Publish session identity as soon as the comparatively slow transcript
+        # scan finishes. Filters and detail headers do not need to wait for git,
+        # outcome, or event enrichment.
+        _write_session_snapshot(all_rows)
+        _index_sessions(all_rows)
+        try:
+            all_events = scan_all_events(since=now - timedelta(days=scan_days))
+        except OSError:
+            all_events = []
+        _index_events(all_events, complete=True)
+        for days in _summary_refresh_windows(requested_days):
+            summary = build_summary(days, all_rows=all_rows, all_events=all_events)
+            _store_summary_cache(days, summary, mark_refreshed=True)
+        _SUMMARY_REFRESH_ERROR = None
+    except Exception as exc:  # fail soft: cached local data remains usable
+        _SUMMARY_REFRESH_ERROR = f"Background refresh failed: {type(exc).__name__}"
     finally:
         with _SUMMARY_CACHE_LOCK:
-            _SUMMARY_REFRESHING.discard(days)
+            _SUMMARY_REFRESHING.clear()
 
 
-def _maybe_refresh_summary_cache(days: int) -> bool:
+def _refresh_summary_cache(days: int) -> None:
+    with _SUMMARY_CACHE_LOCK:
+        if _SUMMARY_REFRESHING:
+            return
+        _SUMMARY_REFRESHING.update(_summary_refresh_windows(days))
+    _run_shared_summary_refresh(days)
+
+
+def _maybe_refresh_summary_cache(days: int, *, force: bool = False) -> bool:
     now = time.monotonic()
     with _SUMMARY_CACHE_LOCK:
-        if days in _SUMMARY_REFRESHING:
+        if _SUMMARY_REFRESHING:
             return True
-        if now - _SUMMARY_REFRESHED_AT.get(days, 0) < SUMMARY_BACKGROUND_COOLDOWN_SECONDS:
+        if not force and now - _SUMMARY_REFRESHED_AT.get(days, 0) < SUMMARY_BACKGROUND_COOLDOWN_SECONDS:
             return False
-        _SUMMARY_REFRESHING.add(days)
+        _SUMMARY_REFRESHING.update(_summary_refresh_windows(days))
 
     def run() -> None:
-        try:
-            summary = build_summary(days)
-            _store_summary_cache(days, summary, mark_refreshed=True)
-        finally:
-            with _SUMMARY_CACHE_LOCK:
-                _SUMMARY_REFRESHING.discard(days)
+        _run_shared_summary_refresh(days)
 
-    thread = threading.Thread(target=run, name=f"aiwatcher-summary-refresh-{days}", daemon=True)
+    thread = threading.Thread(target=run, name="aiwatcher-summary-refresh", daemon=True)
     thread.start()
     return True
 
 
 def build_summary_cached(days: int = 7, *, force: bool = False) -> dict[str, object]:
     if force:
-        _maybe_refresh_summary_cache(days)
+        _maybe_refresh_summary_cache(days, force=True)
         shell = _build_summary_shell(days)
         return _mark_summary_cache(shell, status="refreshing", source="computed", refreshing=True)
     with _SUMMARY_CACHE_LOCK:
@@ -3163,7 +3314,7 @@ HTML = r"""<!doctype html>
       </div>
     </div>
     <div class="actions">
-      <select id="days" onchange="load()">
+      <select id="days" onchange="changeWindow()">
         <option value="1">Last 24 hours</option>
         <option value="7" selected>Last 7 days</option>
         <option value="30">Last 30 days</option>
@@ -4575,6 +4726,15 @@ async function selectSession(sessionId, attempt = 0) {
     node.innerHTML = `<div class="empty">${esc(s.error)}</div>`;
     return;
   }
+  if (s.detail_pending) {
+    if (!fastSummary || fastSummary.error) node.innerHTML = renderSessionSummary(s);
+    const pending = document.createElement('div');
+    pending.className = 'loading';
+    pending.textContent = s.detail_message || 'Timeline and evidence are still indexing in the background.';
+    node.appendChild(pending);
+    if (attempt < 8) window.setTimeout(() => selectSession(sessionId, attempt + 1), 1400);
+    return;
+  }
   document.getElementById('drawerTitle').textContent = 'Session review';
   const summary = s.timeline_summary || {};
   const costliest = summary.costliest;
@@ -4841,6 +5001,9 @@ function renderInsightFeed(insights) {
       ${card.impact_label ? `<span class="feed-impact mono">${esc(card.impact_label)}</span>` : ''}
     </div>`).join('');
 }
+let sessionsLoadedForDays = null;
+let reportLoadedForDays = null;
+let reportLoading = false;
 function showView(view) {
   document.querySelectorAll('.view').forEach(node => {
     node.hidden = node.id !== `view-${view}`;
@@ -4849,6 +5012,14 @@ function showView(view) {
   document.querySelectorAll('.nav-tab').forEach(node => {
     node.classList.toggle('active', node.dataset.view === activeView);
   });
+  const days = document.getElementById('days').value;
+  if (view === 'sessions' && sessionsLoadedForDays !== days) loadSessions();
+  if (view === 'insights' && reportLoadedForDays !== days) loadReport();
+}
+function changeWindow() {
+  sessionsLoadedForDays = null;
+  reportLoadedForDays = null;
+  load();
 }
 let sessionSearchTimer = null;
 function debounceSessionSearch() {
@@ -4895,6 +5066,25 @@ async function loadSessions() {
     : `<tr><td colspan="5"><div class="empty">${filtered
         ? 'No sessions match those filters. Try clearing the search or a different outcome/evidence filter.'
         : 'No local sessions found for this window.'}</div></td></tr>`;
+  sessionsLoadedForDays = days;
+}
+async function loadReport() {
+  const days = document.getElementById('days').value;
+  if (reportLoading || reportLoadedForDays === days) return;
+  reportLoading = true;
+  document.getElementById('report').innerHTML = '<div class="loading">Building local spend and outcome evidence...</div>';
+  try {
+    const reportRes = await fetch(`/api/report?days=${days}`);
+    const report = await reportRes.json();
+    if (document.getElementById('days').value !== days) return;
+    document.getElementById('todayDigest').innerHTML = renderTodayDigest(report.digest);
+    document.getElementById('report').innerHTML = renderReport(report);
+    reportLoadedForDays = days;
+  } catch (error) {
+    document.getElementById('report').innerHTML = '<div class="empty">Spend evidence is still building. Try again in a moment.</div>';
+  } finally {
+    reportLoading = false;
+  }
 }
 async function load(resetDetail = true, forceRefresh = false) {
   const days = document.getElementById('days').value;
@@ -4981,24 +5171,14 @@ async function load(resetDetail = true, forceRefresh = false) {
         <td class="mono">${esc(p.api_value_label)}</td>
       </tr>`).join('')
     : '<tr><td colspan="6"><div class="empty">No local project usage found for this window.</div></td></tr>';
-  loadSessions();
-  try {
-    // /api/journal is still served for the CLI's `aiwatcher journal`, but the
-    // dashboard no longer renders it: every line it produced was a restatement
-    // of something already in the insight feed.
-    const reportRes = await fetch(`/api/report?days=${days}`);
-    const report = await reportRes.json();
-    document.getElementById('todayDigest').innerHTML = renderTodayDigest(report.digest);
-    document.getElementById('report').innerHTML = renderReport(report);
-    document.getElementById('insightHeadline').innerHTML = renderInsightHeadline(data.totals);
-    document.getElementById('insightFeed').innerHTML = renderInsightFeed(data.insights);
-  } catch (error) {
-    document.getElementById('todayDigest').innerHTML = '<div class="empty">Digest is still building. Refresh again in a moment.</div>';
-  } finally {
-    if (refreshButton) {
-      refreshButton.disabled = false;
-      refreshButton.textContent = previousRefreshText || 'Refresh data';
-    }
+  document.getElementById('insightHeadline').innerHTML = renderInsightHeadline(data.totals);
+  document.getElementById('insightFeed').innerHTML = renderInsightFeed(data.insights);
+  if (reportLoadedForDays !== days) {
+    document.getElementById('todayDigest').innerHTML = '<div class="empty">Open Spend for the evidence-backed weekly digest.</div>';
+  }
+  if (refreshButton) {
+    refreshButton.disabled = false;
+    refreshButton.textContent = previousRefreshText || 'Refresh data';
   }
   if (resetDetail && document.getElementById('detailDrawer').classList.contains('open')) closeDrawer();
   if (data.cache && data.cache.refreshing && !forceRefresh) {
@@ -5486,7 +5666,7 @@ class UIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/session":
             params = parse_qs(parsed.query)
             session_id = params.get("id", [""])[0]
-            self._send(200, json.dumps(build_session_detail(session_id)), "application/json; charset=utf-8")
+            self._send(200, json.dumps(build_session_detail(session_id, allow_pending=True)), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/session-summary":
             params = parse_qs(parsed.query)

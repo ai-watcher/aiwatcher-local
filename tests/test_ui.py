@@ -578,7 +578,8 @@ class DashboardWindowTests(unittest.TestCase):
             state_file = os.path.join(temp_dir, "state.json")
             with (
                 patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
-                patch.object(ui, "scan_all", return_value=rows),
+                patch.object(ui, "_cached_session_rows", return_value=rows),
+                patch.object(ui, "scan_all", side_effect=AssertionError("session scan should be background-only")),
                 patch.object(ui, "scan_all_events", side_effect=AssertionError("event scan should be background-only")),
                 patch.object(ui, "discover_tools", return_value={}),
                 patch.object(ui, "surface_coverage", return_value=[]),
@@ -656,6 +657,60 @@ class DashboardWindowTests(unittest.TestCase):
                 payload["summary_complete"] = True
                 cache_path.write_text(json.dumps(payload), encoding="utf-8")
                 self.assertIsNotNone(ui._read_summary_disk_cache(7))
+
+    def test_shared_refresh_scans_once_and_materializes_all_windows(self) -> None:
+        now = datetime.now(timezone.utc)
+        rows = [LocalSession(
+            session_id="shared-refresh",
+            tool="codex-cli",
+            project_path="/repo/shared",
+            started_at=now - timedelta(hours=2),
+            updated_at=now - timedelta(hours=1),
+        )]
+        complete = {
+            "generated_at": now.isoformat(),
+            "cache_schema_version": ui.SUMMARY_CACHE_SCHEMA_VERSION,
+            "summary_complete": True,
+            "_session_index": [row.to_json() for row in rows],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all", return_value=rows) as scan_sessions,
+                patch.object(ui, "scan_all_events", return_value=[]) as scan_events,
+                patch.object(ui, "build_summary", side_effect=lambda days, **kwargs: {**complete, "days": days}) as build,
+            ):
+                with ui._SUMMARY_CACHE_LOCK:
+                    ui._SUMMARY_CACHE.clear()
+                    ui._SUMMARY_REFRESHING.clear()
+                ui._refresh_summary_cache(7)
+
+        scan_sessions.assert_called_once()
+        scan_events.assert_called_once()
+        self.assertEqual([call.args[0] for call in build.call_args_list], [7, 1, 30])
+        self.assertTrue(all(window in ui._SUMMARY_CACHE for window in (1, 7, 30)))
+
+    def test_http_session_detail_returns_fast_pending_card_before_event_index(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="pending-detail",
+            tool="codex-cli",
+            project_path="/repo/pending",
+            started_at=now - timedelta(hours=1),
+            updated_at=now - timedelta(minutes=2),
+        )
+        with ui._SUMMARY_CACHE_LOCK:
+            ui._SESSION_INDEX.clear()
+            ui._EVENT_INDEX.clear()
+            ui._EVENT_INDEX_READY = False
+        ui._index_sessions([row])
+        with patch.object(ui, "scan_all_events", side_effect=AssertionError("request thread must not scan transcripts")):
+            detail = ui.build_session_detail("pending-detail", allow_pending=True)
+
+        self.assertTrue(detail["detail_pending"])
+        self.assertEqual(detail["session_id"], "pending-detail")
+        self.assertTrue(detail["summary_only"])
 
     def test_stale_summary_disk_cache_without_schema_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1718,7 +1773,7 @@ class SessionSearchTests(unittest.TestCase):
             state_file = os.path.join(temp_dir, "state.json")
             with (
                 patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
-                patch.object(ui, "scan_all", return_value=rows),
+                patch.object(ui, "_cached_session_rows", return_value=rows),
                 patch.object(ui, "evidence_for_sessions", return_value={}),
                 patch.object(ui, "survival_by_session", return_value={}),
             ):
@@ -1734,7 +1789,7 @@ class SessionSearchTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as temp_dir,
             patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(temp_dir, "state.json")}),
-            patch.object(ui, "scan_all", return_value=rows),
+            patch.object(ui, "_cached_session_rows", return_value=rows),
             patch.object(ui, "evidence_for_sessions", return_value={}),
             patch.object(ui, "survival_by_session", return_value={}),
             patch("aiwatcher_cli.cli.evidence_for_sessions", return_value={}),
@@ -1749,7 +1804,7 @@ class SessionSearchTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as temp_dir,
             patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(temp_dir, "state.json")}),
-            patch.object(ui, "scan_all", return_value=rows),
+            patch.object(ui, "_cached_session_rows", return_value=rows),
             patch.object(ui, "evidence_for_sessions", return_value={}),
             patch.object(ui, "survival_by_session", return_value={}),
         ):
@@ -1770,7 +1825,7 @@ class SessionSearchTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as temp_dir,
             patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(temp_dir, "state.json")}),
-            patch.object(ui, "scan_all", return_value=rows),
+            patch.object(ui, "_cached_session_rows", return_value=rows),
             patch.object(ui, "evidence_for_sessions") as mock_evidence,
         ):
             ui.build_session_search(30)
@@ -1783,7 +1838,7 @@ class SessionSearchTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as temp_dir,
             patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(temp_dir, "state.json")}),
-            patch.object(ui, "scan_all", return_value=rows),
+            patch.object(ui, "_cached_session_rows", return_value=rows),
             patch.object(ui, "evidence_for_sessions") as mock_evidence,
             patch("aiwatcher_cli.cli.evidence_for_sessions", return_value={"s1": SimpleNamespace(inferred_outcome="needs_review")}),
         ):

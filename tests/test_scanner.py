@@ -141,6 +141,23 @@ class ProjectPathTests(unittest.TestCase):
 
         self.assertEqual(selected, "/repo/real")
 
+    def test_choose_project_allows_explicit_workspace_transition_to_override_stale_cwd(self) -> None:
+        normalized = {
+            "/repo/stale": "/repo/stale",
+            "/repo/target": "/repo/target",
+        }
+        with patch.object(scanner, "_normalize_project_path", side_effect=lambda value: normalized.get(value)):
+            selected = scanner._choose_project_path(
+                "/repo/stale",
+                {"/repo/stale": 500},
+                {"/repo/stale": 42.0},
+                {"/repo/target": 1},
+                {"/repo/target": 0.0},
+                {"/repo/target": 1},
+            )
+
+        self.assertEqual(selected, "/repo/target")
+
     def test_project_root_is_not_treated_as_project(self) -> None:
         scanner.PROJECT_PATH_CACHE.clear()
         self.assertIsNone(scanner._normalize_project_path(str(Path("/").resolve())))
@@ -185,6 +202,23 @@ class ProjectPathTests(unittest.TestCase):
             hints = scanner._project_hints_from_text(f"Please work in `{readme}` before editing.")
 
         self.assertEqual(hints, [str(project.resolve())])
+
+    def test_project_transition_hints_distinguish_instruction_from_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            current = Path(temp_dir) / "current"
+            other = Path(temp_dir) / "other"
+            current.mkdir()
+            other.mkdir()
+
+            explicit = scanner._intentional_project_hints_from_text(
+                f"Continue the dashboard work in {other}."
+            )
+            incidental = scanner._intentional_project_hints_from_text(
+                f"Does the setting in {other / 'config.toml'} matter here?"
+            )
+
+        self.assertEqual(explicit, [str(other.resolve())])
+        self.assertEqual(incidental, [])
 
     def test_project_hints_ignore_unresolvable_tilde_user(self) -> None:
         self.assertEqual(scanner._project_hints_from_text("Please inspect ~est before changing code."), [])
@@ -337,6 +371,27 @@ class ProjectPathTests(unittest.TestCase):
         self.assertTrue(events)
         self.assertTrue(all(event.project_path == str(real_repo.resolve()) for event in events))
 
+    def test_claude_explicit_workspace_transition_overrides_stale_real_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            stale_repo = Path(temp_dir) / "stale-repo"
+            target_repo = Path(temp_dir) / "target-repo"
+            stale_repo.mkdir()
+            target_repo.mkdir()
+            scanner.PROJECT_PATH_CACHE.clear()
+            projects = self._write_claude_session(
+                temp_dir,
+                str(stale_repo),
+                f"Continue the AIWatcher UI work in {target_repo}.",
+            )
+
+            with patch.object(scanner, "CLAUDE_PROJECTS_DIRS", [projects]):
+                sessions = scanner.scan_claude_code()
+                events = scanner.scan_claude_code_events()
+
+        self.assertEqual(sessions[0].project_path, str(target_repo.resolve()))
+        self.assertTrue(events)
+        self.assertTrue(all(event.project_path == str(target_repo.resolve()) for event in events))
+
     def _run_codex_rollout(self, temp_dir: str, cwd: str, prompt: str):
         root = Path(temp_dir) / "sessions"
         root.mkdir()
@@ -410,6 +465,21 @@ class ProjectPathTests(unittest.TestCase):
         self.assertEqual(sessions[0].project_path, str(real_repo.resolve()))
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].project_path, str(real_repo.resolve()))
+
+    def test_codex_explicit_workspace_transition_overrides_stale_real_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            stale_repo = Path(temp_dir) / "stale-repo"
+            target_repo = Path(temp_dir) / "target-repo"
+            stale_repo.mkdir()
+            target_repo.mkdir()
+            sessions, events = self._run_codex_rollout(
+                temp_dir,
+                str(stale_repo),
+                f"Continue the AIWatcher UI work in {target_repo}.",
+            )
+
+        self.assertEqual(sessions[0].project_path, str(target_repo.resolve()))
+        self.assertEqual(events[0].project_path, str(target_repo.resolve()))
 
 
 class PromptCacheAccountingTests(unittest.TestCase):

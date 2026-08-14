@@ -517,6 +517,40 @@ def _project_hints_from_text(text: str | None) -> list[str]:
     return hints
 
 
+_PROJECT_TRANSITION_RE = re.compile(
+    r"(?:"
+    r"\b(?:work|continue|resume|switch|move|implement|build|fix|edit|change)\b"
+    r"[^\n.!?]{0,80}\b(?:in|inside|under|from|at)\s*"
+    r"|\b(?:workspace|project|repo|repository)\s*(?::|is|=)\s*"
+    r")$",
+    re.IGNORECASE,
+)
+
+
+def _intentional_project_hints_from_text(text: str | None) -> list[str]:
+    """Paths that are part of an explicit workspace-transition instruction.
+
+    A path mention is weak evidence: developers routinely ask about configs,
+    logs, or sibling repositories while remaining in the current project. An
+    instruction such as "continue the work in /repo/app" is different: it is
+    direct evidence that the recorded host cwd may be stale. Keep those two
+    signals separate so neither one wins unconditionally.
+    """
+    if not text:
+        return []
+    hints: list[str] = []
+    seen: set[str] = set()
+    for match in _ABSOLUTE_PATH_RE.finditer(text):
+        prefix = text[max(0, match.start() - 120):match.start()]
+        if not _PROJECT_TRANSITION_RE.search(prefix):
+            continue
+        normalized = _normalize_project_hint(match.group("quoted") or match.group("plain"))
+        if normalized and normalized not in seen:
+            hints.append(normalized)
+            seen.add(normalized)
+    return hints
+
+
 def _line_timestamp_from_prefix(line: str) -> datetime | None:
     stamp_match = _JSON_TIMESTAMP_PREFIX_RE.search(line[:160])
     if not stamp_match:
@@ -627,8 +661,9 @@ def _choose_project_path(
     cwd_costs: dict[str, float],
     hint_counts: dict[str, int] | None = None,
     hint_costs: dict[str, float] | None = None,
+    intentional_hint_counts: dict[str, int] | None = None,
 ) -> str:
-    """Attribute a session to a project, preferring observed cwd over prompt text.
+    """Attribute a session using observed cwd plus explicit transition intent.
 
     A recorded cwd is an observation: the tool writes it on every event, so a
     single session carries hundreds of them. A path mentioned in a prompt is an
@@ -636,10 +671,10 @@ def _choose_project_path(
     reasons -- "does the setting in /etc/nginx/nginx.conf matter here?" is not a
     statement about which project the session belongs to.
 
-    So hints are a fallback, not an override. They decide attribution only when
-    no cwd resolves to a usable project, which is exactly the case they were
-    added for: cwd pointing at `/`, AI tool storage, a temp dir, or a generic
-    home folder. Those already normalize to None, so the hint still wins there.
+    Ordinary path hints are fallback-only. A path in an explicit workspace
+    transition may override a usable cwd because desktop tools can keep logging
+    the workspace where a chat started after the user deliberately moves the
+    task to another repository.
     """
     candidates: dict[str, tuple[float, int]] = {}
     for cwd, count in cwd_counts.items():
@@ -649,8 +684,21 @@ def _choose_project_path(
         cost, existing_count = candidates.get(normalized, (0.0, 0))
         candidates[normalized] = (cost + cwd_costs.get(cwd, 0.0), existing_count + count)
 
-    if candidates:
-        return max(candidates, key=lambda path: (candidates[path][0], candidates[path][1]))
+    observed = max(candidates, key=lambda path: (candidates[path][0], candidates[path][1])) if candidates else None
+
+    intentional_candidates: dict[str, int] = {}
+    for hint, count in (intentional_hint_counts or {}).items():
+        normalized = _normalize_project_path(hint)
+        if normalized:
+            intentional_candidates[normalized] = intentional_candidates.get(normalized, 0) + count
+    if intentional_candidates:
+        ranked = sorted(intentional_candidates.items(), key=lambda item: item[1], reverse=True)
+        # Do not invent certainty when two explicit workspace instructions tie.
+        if len(ranked) == 1 or ranked[0][1] > ranked[1][1]:
+            return ranked[0][0]
+
+    if observed:
+        return observed
 
     hint_candidates: dict[str, tuple[int, float]] = {}
     for hint, count in (hint_counts or {}).items():
@@ -1100,6 +1148,7 @@ def scan_claude_code() -> list[LocalSession]:
                 cwd_costs: dict[str, float] = defaultdict(float)
                 hint_counts: dict[str, int] = defaultdict(int)
                 hint_costs: dict[str, float] = defaultdict(float)
+                intentional_hint_counts: dict[str, int] = defaultdict(int)
                 try:
                     with fpath.open(errors="replace") as handle:
                         for line in handle:
@@ -1162,6 +1211,8 @@ def scan_claude_code() -> list[LocalSession]:
                             for hint in _project_hints_from_text(prompt_text):
                                 hint_counts[hint] += 1
                                 hint_costs[hint] += event_cost
+                            for hint in _intentional_project_hints_from_text(prompt_text):
+                                intentional_hint_counts[hint] += 1
                             is_agent_call = bool(msg_type == "assistant" or event_model)
                             is_tool_call = bool(
                                 obj.get("toolUseResult") is not None or obj.get("toolUseID") or msg_type == "tool_result"
@@ -1218,7 +1269,14 @@ def scan_claude_code() -> list[LocalSession]:
                 ))
 
                 session = sessions[-1]
-                session.project_path = _choose_project_path(fallback_project_path, cwd_counts, cwd_costs, hint_counts, hint_costs)
+                session.project_path = _choose_project_path(
+                    fallback_project_path,
+                    cwd_counts,
+                    cwd_costs,
+                    hint_counts,
+                    hint_costs,
+                    intentional_hint_counts,
+                )
 
     return sessions
 
@@ -1244,6 +1302,7 @@ def scan_claude_code_events(since: datetime | None = None) -> list[LocalEvent]:
                 # lines that request produced. See _usage_receipt_key.
                 counted_requests: set[str] = set()
                 hinted_project_path: str | None = None
+                intentional_project_path: str | None = None
                 try:
                     with fpath.open(errors="replace") as handle:
                         for index, line in enumerate(handle):
@@ -1269,10 +1328,15 @@ def scan_claude_code_events(since: datetime | None = None) -> list[LocalEvent]:
                             hints = _project_hints_from_text(prompt_text)
                             if hints:
                                 hinted_project_path = hints[0]
-                            # Same precedence as _choose_project_path: a path
-                            # mentioned in a prompt is a fallback for an unusable
-                            # cwd, never an override for one that resolved.
-                            if hinted_project_path and not resolved_project_path:
+                            intentional_hints = _intentional_project_hints_from_text(prompt_text)
+                            if intentional_hints:
+                                intentional_project_path = intentional_hints[0]
+                            # Same precedence as _choose_project_path: ordinary
+                            # references are fallback-only; an explicit
+                            # workspace transition can correct a stale host cwd.
+                            if intentional_project_path:
+                                project_path = intentional_project_path
+                            elif hinted_project_path and not resolved_project_path:
                                 project_path = hinted_project_path
                             model = message.get("model") or obj.get("model")
                             tokens = _anthropic_usage(message.get("usage") or obj.get("usage") or {})
@@ -1448,6 +1512,7 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
         previous_total = -1
         hint_counts: dict[str, int] = defaultdict(int)
         hint_costs: dict[str, float] = defaultdict(float)
+        intentional_hint_counts: dict[str, int] = defaultdict(int)
         model_totals: dict[str, dict[str, float]] = defaultdict(
             lambda: {"tokens_in": 0.0, "tokens_out": 0.0, "cost_usd": 0.0, "agent_calls": 0.0, "tool_calls": 0.0}
         )
@@ -1495,13 +1560,22 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
                     for hint in _project_hints_from_text(prompt_text):
                         hint_counts[hint] += 1
                         hint_costs[hint] += estimate_cost(model, 0, 0)
+                    for hint in _intentional_project_hints_from_text(prompt_text):
+                        intentional_hint_counts[hint] += 1
                     if hint_counts:
                         # project_path here is the cwd Codex recorded in
                         # session_meta/turn_context. Pass it as observed evidence
                         # rather than a bare fallback, so prompt hints only take
                         # over when it did not resolve to a usable project.
                         observed_cwd = {project_path: 1} if project_path else {}
-                        project_path = _choose_project_path(project_path or "", observed_cwd, {}, hint_counts, hint_costs)
+                        project_path = _choose_project_path(
+                            project_path or "",
+                            observed_cwd,
+                            {},
+                            hint_counts,
+                            hint_costs,
+                            intentional_hint_counts,
+                        )
                     if row_type != "event_msg" or payload.get("type") != "token_count":
                         continue
                     info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
@@ -1547,7 +1621,14 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
             continue
         if hint_counts:
             observed_cwd = {project_path: 1} if project_path else {}
-            project_path = _choose_project_path(project_path or "", observed_cwd, {}, hint_counts, hint_costs)
+            project_path = _choose_project_path(
+                project_path or "",
+                observed_cwd,
+                {},
+                hint_counts,
+                hint_costs,
+                intentional_hint_counts,
+            )
         sessions.append(LocalSession(
             session_id=session_id,
             tool="codex-cli",
