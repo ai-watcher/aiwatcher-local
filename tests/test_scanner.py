@@ -65,15 +65,120 @@ class ProjectPathTests(unittest.TestCase):
         self.assertEqual(coverage_no_hooks["claude-desktop-chat"].status, "companion")
         self.assertIn("No verified local hook", coverage_no_hooks["claude-desktop-chat"].automatic_gate)
 
-        # With hook events for "claude": Desktop Code tab upgrades to "automatic" ([OK])
+        # A bare "some claude hook fired" event is NOT proof this surface is
+        # hooked -- it carries no session id, so it could have come from the CLI
+        # while the Desktop tab went entirely ungated.
         with (
             patch.object(scanner, "discover_tools", return_value=tools),
             patch.object(scanner, "recent_hook_events", return_value=[{"tool": "claude", "event": "received"}]),
         ):
-            coverage_with_hooks = {row.surface_id: row for row in scanner.surface_coverage(rows)}
+            coverage_bare = {row.surface_id: row for row in scanner.surface_coverage(rows)}
 
-        self.assertEqual(coverage_with_hooks["claude-desktop-code"].status, "automatic")
-        self.assertEqual(coverage_with_hooks["claude-desktop-code"].status_label, "Auto gate + history")
+        self.assertEqual(coverage_bare["claude-desktop-code"].status, "limited")
+
+    TOOLS = {
+        "claude-code": True, "codex-cli": False, "cursor": False,
+        "cline": False, "windsurf": False,
+    }
+
+    def _desktop_coverage(self, rows, hook_events):
+        with (
+            patch.object(scanner, "discover_tools", return_value=self.TOOLS),
+            patch.object(scanner, "recent_hook_events", return_value=hook_events),
+        ):
+            coverage = {row.surface_id: row for row in scanner.surface_coverage(rows)}
+        return coverage["claude-desktop-code"]
+
+    @staticmethod
+    def _desktop_session(session_id: str, last_message_at, updated_at=None):
+        return scanner.LocalSession(
+            session_id=session_id,
+            tool="claude-code",
+            surface="desktop",
+            last_message_at=last_message_at,
+            updated_at=updated_at or last_message_at,
+        )
+
+    def test_desktop_code_tab_is_ok_when_a_hook_fired_for_a_real_desktop_session(self) -> None:
+        # Proof by session id, not by "a claude hook fired somewhere".
+        session_at = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        row = self._desktop_coverage(
+            [self._desktop_session("sess-1", session_at)],
+            [{"tool": "claude", "event": "received", "session_id": "sess-1",
+              "created_at": "2026-08-14T11:00:00+00:00"}],
+        )
+        self.assertEqual(row.status, "automatic")
+        self.assertEqual(row.status_label, "Auto gate + history")
+        self.assertIn("1 of 1", row.detail)
+
+    def test_desktop_code_tab_reports_silent_when_work_happened_with_no_hook(self) -> None:
+        # The state the tool could not express before: the hook is installed but
+        # is not reaching this surface, so those prompts went through ungated.
+        session_at = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        row = self._desktop_coverage(
+            [self._desktop_session("sess-1", session_at)],
+            # Evidence exists from the same period, just never for this surface.
+            [{"tool": "codex", "event": "received", "session_id": "other",
+              "created_at": "2026-08-14T11:00:00+00:00"}],
+        )
+        self.assertEqual(row.status, "silent")
+        self.assertEqual(row.status_label, "Hook not firing")
+        self.assertIn("ungated", row.detail)
+
+    def test_desktop_session_older_than_the_evidence_buffer_is_not_called_broken(self) -> None:
+        # hook_events is a 50-entry ring buffer. A session predating everything
+        # we still hold has no evidence either way -- "we forgot" must not be
+        # reported as "the hook failed".
+        row = self._desktop_coverage(
+            [self._desktop_session("ancient", datetime(2026, 1, 1, tzinfo=timezone.utc))],
+            [{"tool": "codex", "event": "received", "session_id": "other",
+              "created_at": "2026-08-14T11:00:00+00:00"}],
+        )
+        self.assertEqual(row.status, "limited")
+
+    def test_mtime_refreshed_session_does_not_fake_recent_desktop_activity(self) -> None:
+        # updated_at falls back to file mtime when a transcript ends in
+        # untimestamped housekeeping lines, so a backup or re-index touching an
+        # old file makes it read as active today. Judging by that would report a
+        # healthy machine as broken. Only last_message_at may decide recency.
+        stale = self._desktop_session(
+            "touched-but-old",
+            last_message_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc),
+        )
+        row = self._desktop_coverage(
+            [stale],
+            [{"tool": "codex", "event": "received", "session_id": "other",
+              "created_at": "2026-08-14T11:00:00+00:00"}],
+        )
+        self.assertEqual(row.status, "limited")
+
+    def test_partial_hook_coverage_still_counts_as_working(self) -> None:
+        # A session where no prompt was ever submitted fires no UserPromptSubmit,
+        # so less-than-total coverage is normal rather than a fault.
+        base = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        row = self._desktop_coverage(
+            [self._desktop_session("sess-1", base), self._desktop_session("sess-2", base)],
+            [{"tool": "claude", "event": "received", "session_id": "sess-1",
+              "created_at": "2026-08-14T11:00:00+00:00"}],
+        )
+        self.assertEqual(row.status, "automatic")
+        self.assertIn("1 of 2", row.detail)
+
+    def test_desktop_status_survives_a_burst_of_other_tool_hook_events(self) -> None:
+        # The regression this replaces: coverage used to ask "is there a claude
+        # event in the last 50?", so a run of Codex work evicted the Claude
+        # evidence and silently downgraded a working surface.
+        session_at = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        events = [{"tool": "claude", "event": "received", "session_id": "sess-1",
+                   "created_at": "2026-08-14T11:00:00+00:00"}]
+        events += [
+            {"tool": "codex", "event": "received", "session_id": f"codex-{i}",
+             "created_at": "2026-08-14T11:30:00+00:00"}
+            for i in range(49)
+        ]
+        row = self._desktop_coverage([self._desktop_session("sess-1", session_at)], events)
+        self.assertEqual(row.status, "automatic")
 
     def test_decode_claude_path_preserves_hyphenated_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

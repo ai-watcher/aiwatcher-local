@@ -122,6 +122,13 @@ class LocalSession:
     project_path: str | None = None
     started_at: datetime | None = None
     updated_at: datetime | None = None
+    # The last timestamp that came from an actual message, never the file mtime
+    # that updated_at falls back to. Anything asking "was this session really
+    # active recently?" must use this: a transcript whose trailing lines are
+    # untimestamped housekeeping takes its updated_at from the mtime, so a file
+    # merely touched by a backup or re-index reads as active today when its last
+    # real message was weeks ago. None when the transcript carried no timestamps.
+    last_message_at: datetime | None = None
     model: str | None = None
     # tokens_in counts EVERY input token the provider billed for, including the
     # cached ones. cache_read_tokens/cache_write_tokens break out how much of it
@@ -157,6 +164,7 @@ class LocalSession:
             "project_path": self.project_path,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "last_message_at": self.last_message_at.isoformat() if self.last_message_at else None,
             "model": self.model,
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
@@ -942,6 +950,87 @@ def discover_tools() -> dict[str, bool]:
     }
 
 
+@dataclass
+class HookLiveness:
+    """Whether a surface's hook is actually firing, judged only from evidence.
+
+    state is one of:
+      "working"  -- work happened on this surface and hooks fired for it
+      "silent"   -- work happened on this surface and no hook fired for any of it
+      "unproven" -- nothing recent enough to judge; claim nothing either way
+    """
+    state: str
+    judged: int = 0
+    hooked: int = 0
+    last_hooked_at: datetime | None = None
+
+
+def hook_liveness(
+    sessions: Sequence[LocalSession],
+    hook_events: Sequence[dict[str, Any]],
+    *,
+    session_tool: str,
+    hook_tool: str,
+    surface: str,
+) -> HookLiveness:
+    """Match hook events to sessions by id to prove a surface is really hooked.
+
+    Deliberately not "did any hook fire lately": hook_events is a small ring
+    buffer shared by every tool, so a run of Codex work evicts the Claude
+    evidence and that test would flip a healthy surface to unverified for no
+    reason. Matching ids instead asks the question that actually matters --
+    when you worked on this surface, did AIWatcher see it? -- which needs no
+    timer, and self-heals in both directions.
+
+    Sessions older than the oldest event we still hold are excluded rather than
+    counted as unhooked: their evidence may simply have aged out of the buffer,
+    and "we forgot" must never be reported as "it failed".
+    """
+    stamped = [
+        (row, _parse_ts(row.get("created_at")))
+        for row in hook_events
+        if isinstance(row, dict)
+    ]
+    stamped = [(row, ts) for row, ts in stamped if ts is not None]
+    if not stamped:
+        return HookLiveness(state="unproven")
+
+    # The floor spans every tool: eviction is global, so a Codex event is just
+    # as much proof that we still remember this far back as a Claude one.
+    evidence_floor = min(ts for _, ts in stamped)
+    hooked_ids = {
+        str(row.get("session_id"))
+        for row, _ in stamped
+        if row.get("tool") == hook_tool and row.get("session_id")
+    }
+
+    judged = [
+        row for row in sessions
+        if row.tool == session_tool
+        and row.surface == surface
+        and row.last_message_at is not None
+        and row.last_message_at >= evidence_floor
+    ]
+    if not judged:
+        return HookLiveness(state="unproven")
+
+    hooked = [row for row in judged if row.session_id in hooked_ids]
+    last_hooked_at = max(
+        (ts for row, ts in stamped
+         if row.get("tool") == hook_tool and str(row.get("session_id")) in {r.session_id for r in hooked}),
+        default=None,
+    )
+    return HookLiveness(
+        # One match is enough: a session where you never submitted a prompt
+        # fires no UserPromptSubmit, so partial coverage is normal and healthy.
+        # Only zero-out-of-N means the hook is not reaching this surface.
+        state="working" if hooked else "silent",
+        judged=len(judged),
+        hooked=len(hooked),
+        last_hooked_at=last_hooked_at,
+    )
+
+
 def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[SurfaceCoverage]:
     """Explain what AIWatcher can and cannot protect for each local surface.
 
@@ -972,6 +1061,9 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
     hooked_tools = {str(e.get("tool", "")) for e in hook_events if isinstance(e, dict)}
     claude_hook_seen = "claude" in hooked_tools
     codex_hook_seen = "codex" in hooked_tools
+    desktop_code = hook_liveness(
+        rows, hook_events, session_tool="claude-code", hook_tool="claude", surface="desktop",
+    )
 
     return [
         SurfaceCoverage(
@@ -990,22 +1082,34 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
             surface_id="claude-desktop-code",
             label="Claude Desktop Code tab",
             status=(
-                "automatic" if (claude_desktop_sessions and detected.get("claude-code") and claude_hook_seen)
+                "automatic" if desktop_code.state == "working"
+                else "silent" if desktop_code.state == "silent"
                 else "limited" if detected.get("claude-code")
                 else "unknown"
             ),
             status_label=(
-                "Auto gate + history" if (claude_desktop_sessions and detected.get("claude-code") and claude_hook_seen)
+                "Auto gate + history" if desktop_code.state == "working"
+                else "Hook not firing" if desktop_code.state == "silent"
                 else "Hook-capable, verify locally"
             ),
             detected=bool(detected.get("claude-code") or claude_desktop_sessions),
             automatic_gate="UserPromptSubmit hook fires from both Claude Code CLI and the Desktop Code tab",
             history="Visible when the host writes Claude Code JSONL",
             action=(
-                "Verify with `aiwatcher hook-status`." if (claude_desktop_sessions and claude_hook_seen)
+                "Nothing to do." if desktop_code.state == "working"
+                else "Reinstall with `aiwatcher install-claude-hook`, then run `aiwatcher hook-status`."
+                if desktop_code.state == "silent"
                 else "Submit a test prompt, then run `aiwatcher hook-status`."
             ),
-            detail="The user-level hook covers both Claude Code CLI and the Desktop Code tab.",
+            detail=(
+                f"Verified: hooks fired for {desktop_code.hooked} of {desktop_code.judged} recent Desktop "
+                "sessions. Sessions with no prompt submitted fire no hook, so partial is normal."
+                if desktop_code.state == "working"
+                else f"{desktop_code.judged} recent Desktop session(s) and no hook fired for any of them. "
+                "The hook is installed but not reaching this surface, so those prompts were ungated."
+                if desktop_code.state == "silent"
+                else "The user-level hook covers both Claude Code CLI and the Desktop Code tab."
+            ),
             session_count=claude_desktop_sessions,
         ),
         SurfaceCoverage(
@@ -1241,6 +1345,8 @@ def scan_claude_code() -> list[LocalSession]:
 
                 if events_seen == 0:
                     continue
+                # Capture before the mtime fallback below overwrites it.
+                last_message_at = updated_at
                 if trailing_untimestamped:
                     updated_at = _max_dt(updated_at, _mtime(fpath))
                 primary_model = model or "claude-code"
@@ -1255,6 +1361,7 @@ def scan_claude_code() -> list[LocalSession]:
                     project_path=fallback_project_path,
                     started_at=started_at or _mtime(fpath),
                     updated_at=updated_at or _mtime(fpath),
+                    last_message_at=last_message_at,
                     model=primary_model,
                     tokens_in=tokens_in,
                     tokens_out=tokens_out,
