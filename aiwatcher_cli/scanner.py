@@ -1049,6 +1049,7 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
         )
 
     claude_sessions = count("claude-code")
+    claude_cli_sessions = count("claude-code", "cli")
     claude_desktop_sessions = count("claude-code", "desktop")
     codex_sessions = count("codex-cli")
     codex_desktop_sessions = count("codex-cli", "desktop")
@@ -1064,19 +1065,53 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
     desktop_code = hook_liveness(
         rows, hook_events, session_tool="claude-code", hook_tool="claude", surface="desktop",
     )
+    cli_code = hook_liveness(
+        rows, hook_events, session_tool="claude-code", hook_tool="claude", surface="cli",
+    )
 
     return [
         SurfaceCoverage(
             surface_id="claude-code-cli",
             label="Claude Code CLI",
-            status="automatic" if detected.get("claude-code") else "not_detected",
-            status_label="Automatic gate + history" if detected.get("claude-code") else "Not detected",
+            # Held to the same evidence bar as the Desktop row below. This used
+            # to report "automatic" whenever ~/.claude/projects existed, which
+            # only proves Claude Code ran here once -- never that a hook is
+            # installed, trusted, or firing. Uninstalling the hook left the row
+            # claiming full protection.
+            status=(
+                "automatic" if cli_code.state == "working"
+                else "silent" if cli_code.state == "silent"
+                else "limited" if detected.get("claude-code")
+                else "not_detected"
+            ),
+            status_label=(
+                "Automatic gate + history" if cli_code.state == "working"
+                else "Hook not firing" if cli_code.state == "silent"
+                else "Hook-capable, verify locally" if detected.get("claude-code")
+                else "Not detected"
+            ),
             detected=bool(detected.get("claude-code")),
             automatic_gate="UserPromptSubmit and command gates when installed/trusted",
             history="Full local JSONL session and token history",
-            action="Verify with `aiwatcher hook-status`.",
-            detail="Best-covered Claude surface. Prompt/source content stays local.",
-            session_count=claude_sessions,
+            action=(
+                "Nothing to do." if cli_code.state == "working"
+                else "Reinstall with `aiwatcher install-claude-hook`, then run `aiwatcher hook-status`."
+                if cli_code.state == "silent"
+                else "Submit a test prompt, then run `aiwatcher hook-status`."
+            ),
+            detail=(
+                f"Verified: hooks fired for {cli_code.hooked} of {cli_code.judged} recent CLI sessions. "
+                "Prompt/source content stays local."
+                if cli_code.state == "working"
+                else f"{cli_code.judged} recent CLI session(s) and no hook fired for any of them. "
+                "The hook is not reaching this surface, so those prompts were ungated."
+                if cli_code.state == "silent"
+                # Deliberately not alarming: no recent CLI work to check is a
+                # different thing from a hook that stopped working.
+                else "No recent CLI sessions inside the retained evidence window, so coverage is "
+                "unproven rather than broken. Prompt/source content stays local."
+            ),
+            session_count=claude_cli_sessions,
         ),
         SurfaceCoverage(
             surface_id="claude-desktop-code",

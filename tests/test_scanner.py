@@ -180,6 +180,60 @@ class ProjectPathTests(unittest.TestCase):
         row = self._desktop_coverage([self._desktop_session("sess-1", session_at)], events)
         self.assertEqual(row.status, "automatic")
 
+    def _cli_coverage(self, rows, hook_events):
+        with (
+            patch.object(scanner, "discover_tools", return_value=self.TOOLS),
+            patch.object(scanner, "recent_hook_events", return_value=hook_events),
+        ):
+            coverage = {row.surface_id: row for row in scanner.surface_coverage(rows)}
+        return coverage["claude-code-cli"]
+
+    def test_cli_row_does_not_claim_automatic_from_a_directory_existing(self) -> None:
+        # The over-claim: discover_tools() only reports that ~/.claude/projects
+        # exists, which proves Claude Code ran here once -- not that a hook is
+        # installed, trusted, or firing. Uninstall the hook and this row used to
+        # keep reporting full automatic protection.
+        row = self._cli_coverage([], [])
+        self.assertEqual(row.status, "limited")
+        self.assertEqual(row.status_label, "Hook-capable, verify locally")
+
+    def test_cli_row_is_ok_once_a_hook_fired_for_a_real_cli_session(self) -> None:
+        session_at = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        cli_session = scanner.LocalSession(
+            session_id="cli-1", tool="claude-code", surface="cli",
+            last_message_at=session_at, updated_at=session_at,
+        )
+        row = self._cli_coverage(
+            [cli_session],
+            [{"tool": "claude", "event": "received", "session_id": "cli-1",
+              "created_at": "2026-08-14T11:00:00+00:00"}],
+        )
+        self.assertEqual(row.status, "automatic")
+        self.assertIn("1 of 1", row.detail)
+
+    def test_cli_row_with_no_recent_sessions_reads_as_unproven_not_broken(self) -> None:
+        # No recent CLI work to check is not the same as a hook that stopped
+        # working, and must not be reported with the same alarm.
+        row = self._cli_coverage(
+            [],
+            [{"tool": "codex", "event": "received", "session_id": "other",
+              "created_at": "2026-08-14T11:00:00+00:00"}],
+        )
+        self.assertEqual(row.status, "limited")
+        self.assertIn("unproven rather than broken", row.detail)
+
+    def test_cli_row_counts_only_cli_sessions_not_every_claude_session(self) -> None:
+        # It reported every claude-code session, so a machine used entirely
+        # through the Desktop tab showed a large CLI session count.
+        base = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        rows = [
+            self._desktop_session("d1", base), self._desktop_session("d2", base),
+            scanner.LocalSession(session_id="c1", tool="claude-code", surface="cli",
+                                 last_message_at=base, updated_at=base),
+        ]
+        row = self._cli_coverage(rows, [])
+        self.assertEqual(row.session_count, 1)
+
     def test_decode_claude_path_preserves_hyphenated_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir) / "my-project"
