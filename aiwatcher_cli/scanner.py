@@ -9,6 +9,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import tempfile
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -20,6 +21,17 @@ from .pricing import estimate_cost
 
 
 HOME_DIR = Path.home().resolve()
+TEMP_DIRS = {
+    Path("/tmp").resolve(),
+    Path("/private/tmp").resolve(),
+    Path(tempfile.gettempdir()).resolve(),
+}
+COMMON_NON_PROJECT_DIRS = {
+    HOME_DIR / "Desktop",
+    HOME_DIR / "Documents",
+    HOME_DIR / "Downloads",
+    *TEMP_DIRS,
+}
 
 
 def _env_path(name: str, *parts: str) -> Path | None:
@@ -78,6 +90,60 @@ CODEX_ROLLOUT_CACHE: tuple[
 
 def _first_existing(paths: list[Path]) -> Path | None:
     return next((path for path in paths if path.exists()), None)
+
+
+def _is_inside(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _agent_worktree_owner(path: Path) -> Path | None:
+    """The repository an agent worktree was cut from, if this is one.
+
+    Claude Code runs isolated agents in a throwaway worktree at
+    `<repo>/.claude/worktrees/agent-<id>`, then deletes it when the agent
+    finishes. Because the directory is gone, the git-root lookup below cannot
+    fold it back into its repository, so each one would otherwise rank as its
+    own project -- splitting the real repo's cost across entries that no longer
+    exist on disk.
+
+    The owning repository is the path up to `.claude`, so recover it rather than
+    dropping the session as unattributed.
+    """
+    parts = path.parts
+    for index in range(1, len(parts) - 1):
+        if parts[index] == ".claude" and parts[index + 1] == "worktrees":
+            return Path(*parts[:index])
+    return None
+
+
+def _is_agent_scratch_path(path: Path) -> bool:
+    """Scratch space a local AI tool created for itself under a temp root.
+
+    Deliberately narrow: a temp subdirectory can be somebody's real project, so
+    only agent-owned directory names are rejected, not everything under temp.
+    """
+    if not any(_is_inside(path, temp_dir) for temp_dir in TEMP_DIRS):
+        return False
+    return any(part == "claude" or part.startswith("claude-") for part in path.parts)
+
+
+def _is_tool_storage_path(path: Path) -> bool:
+    if _is_agent_scratch_path(path):
+        return True
+    storage_roots = [
+        *CLAUDE_PROJECTS_DIRS,
+        *CURSOR_LOGS_DIRS,
+        *CURSOR_STATE_DIRS,
+        *CODEX_DIRS,
+        *CODEX_SESSIONS_DIRS,
+        *CLINE_DIRS,
+        *WINDSURF_DIRS,
+    ]
+    return any(_is_inside(path, root.resolve()) for root in storage_roots if root.exists())
 
 
 @dataclass
@@ -403,7 +469,15 @@ def _normalize_project_path(path: str | None) -> str | None:
     except OSError:
         resolved = candidate
 
-    if resolved == HOME_DIR:
+    owner = _agent_worktree_owner(resolved)
+    if owner is not None:
+        # Re-normalize the owning repo so it still faces every check below --
+        # a worktree under ~/.claude must resolve to home, and so to None.
+        # The owner never contains .claude/worktrees, so this cannot recurse.
+        PROJECT_PATH_CACHE[path] = _normalize_project_path(str(owner))
+        return PROJECT_PATH_CACHE[path]
+
+    if resolved == HOME_DIR or resolved in COMMON_NON_PROJECT_DIRS or resolved.parent == resolved or _is_tool_storage_path(resolved):
         PROJECT_PATH_CACHE[path] = None
         return None
 
@@ -412,11 +486,235 @@ def _normalize_project_path(path: str | None) -> str | None:
     return PROJECT_PATH_CACHE[path]
 
 
+_ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![\w.-])(?:"
+    r"[`'\"](?P<quoted>(?:~|/|[A-Za-z]:[\\/])[^`'\"\r\n]+)[`'\"]"
+    r"|(?P<plain>(?:~|/[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)+)"
+    r"|(?:[A-Za-z]:[\\/][^\s:*?\"<>|`\r\n]+))"
+    r")"
+)
+_JSON_TIMESTAMP_PREFIX_RE = re.compile(r'"timestamp"\s*:\s*"([^"]+)"')
+CODEX_TAIL_INITIAL_BYTES = 8 * 1024 * 1024
+CODEX_TAIL_MAX_BYTES = 128 * 1024 * 1024
+CODEX_TAIL_MIN_FILE_BYTES = 16 * 1024 * 1024
+CODEX_MAX_WINDOW_JSON_LINE_BYTES = 2 * 1024 * 1024
+
+
+def _normalize_project_hint(path: str | None) -> str | None:
+    """Normalize an explicit path mentioned by the user into a project root.
+
+    This is intentionally conservative: the path must be absolute-ish and
+    resolve to something on this machine, either directly or through an
+    existing parent directory. It lets a prompt like "work in /repo/aiwatcher"
+    override a stale/wrong tool cwd, without trying to infer projects from
+    fuzzy topic words.
+    """
+    if not path:
+        return None
+    cleaned = path.strip().strip("`'\"()[]{}<>,.;:")
+    if not cleaned:
+        return None
+    # Quoted prose can contain an absolute-looking token and then continue for
+    # hundreds of characters. Treat that as prose, not a filesystem path; it is
+    # both slow to normalize and likely to pollute project attribution.
+    if len(cleaned) > 512 or "\n" in cleaned or "\r" in cleaned:
+        return None
+    try:
+        candidate = Path(cleaned).expanduser()
+    except RuntimeError:
+        return None
+    if any(ch.isspace() for ch in cleaned):
+        try:
+            if not candidate.exists():
+                return None
+        except OSError:
+            return None
+    if not candidate.is_absolute():
+        return None
+
+    probe = candidate
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    if not probe.exists():
+        return None
+    if probe.is_file():
+        probe = probe.parent
+
+    return _normalize_project_path(str(probe))
+
+
+def _project_hints_from_text(text: str | None) -> list[str]:
+    if not text:
+        return []
+    hints: list[str] = []
+    seen: set[str] = set()
+    for match in _ABSOLUTE_PATH_RE.finditer(text):
+        normalized = _normalize_project_hint(match.group("quoted") or match.group("plain"))
+        if normalized and normalized not in seen:
+            hints.append(normalized)
+            seen.add(normalized)
+    return hints
+
+
+_PROJECT_TRANSITION_RE = re.compile(
+    r"(?:"
+    r"\b(?:work|continue|resume|switch|move|implement|build|fix|edit|change)\b"
+    r"[^\n.!?]{0,80}\b(?:in|inside|under|from|at)\s*"
+    r"|\b(?:workspace|project|repo|repository)\s*(?::|is|=)\s*"
+    r")$",
+    re.IGNORECASE,
+)
+
+
+def _intentional_project_hints_from_text(text: str | None) -> list[str]:
+    """Paths that are part of an explicit workspace-transition instruction.
+
+    A path mention is weak evidence: developers routinely ask about configs,
+    logs, or sibling repositories while remaining in the current project. An
+    instruction such as "continue the work in /repo/app" is different: it is
+    direct evidence that the recorded host cwd may be stale. Keep those two
+    signals separate so neither one wins unconditionally.
+    """
+    if not text:
+        return []
+    hints: list[str] = []
+    seen: set[str] = set()
+    for match in _ABSOLUTE_PATH_RE.finditer(text):
+        prefix = text[max(0, match.start() - 120):match.start()]
+        if not _PROJECT_TRANSITION_RE.search(prefix):
+            continue
+        normalized = _normalize_project_hint(match.group("quoted") or match.group("plain"))
+        if normalized and normalized not in seen:
+            hints.append(normalized)
+            seen.add(normalized)
+    return hints
+
+
+def _line_timestamp_from_prefix(line: str) -> datetime | None:
+    stamp_match = _JSON_TIMESTAMP_PREFIX_RE.search(line[:160])
+    if not stamp_match:
+        return None
+    return _parse_ts(stamp_match.group(1))
+
+
+def _codex_rollout_lines(path: Path, since: datetime | None) -> Iterable[tuple[int, str]]:
+    """Yield rollout lines, reading only the recent tail for windowed scans.
+
+    Codex transcripts can grow to hundreds of megabytes and occasionally get a
+    fresh mtime even when the session started months ago. For `since` scans,
+    rollout rows are chronological and timestamp-prefixed, so we can seek near
+    the end and expand backward until the chunk begins before the requested
+    window. Full scans still read the whole file.
+    """
+    if since is None:
+        with path.open(errors="replace") as handle:
+            for index, line in enumerate(handle):
+                yield index, line
+        return
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    if size < CODEX_TAIL_MIN_FILE_BYTES:
+        with path.open(errors="replace") as handle:
+            for index, line in enumerate(handle):
+                yield index, line
+        return
+
+    threshold = since.astimezone(timezone.utc) - MTIME_SAFETY_MARGIN
+    window = min(CODEX_TAIL_INITIAL_BYTES, size)
+    selected_start = 0
+    selected_lines: list[str] = []
+    while True:
+        start = max(0, size - window)
+        with path.open("rb") as handle:
+            handle.seek(start)
+            if start > 0:
+                handle.readline()
+            chunk = handle.read()
+        lines = [line.decode("utf-8", errors="replace") for line in chunk.splitlines(keepends=True)]
+        selected_start = start
+        selected_lines = lines
+        first_timestamp = next(
+            (stamp for line in lines for stamp in [_line_timestamp_from_prefix(line)] if stamp is not None),
+            None,
+        )
+        if start == 0 or (first_timestamp and first_timestamp.astimezone(timezone.utc) <= threshold):
+            break
+        if window >= min(CODEX_TAIL_MAX_BYTES, size):
+            break
+        window = min(window * 2, CODEX_TAIL_MAX_BYTES, size)
+    approx_index = max(0, selected_start)
+    for offset, line in enumerate(selected_lines):
+        yield approx_index + offset, line
+
+
+def _codex_window_line_is_essential(line: str) -> bool:
+    prefix = line[:512]
+    return (
+        '"type":"token_count"' in prefix
+        or '"type": "token_count"' in prefix
+        or '"type":"session_meta"' in prefix
+        or '"type": "session_meta"' in prefix
+        or '"type":"turn_context"' in prefix
+        or '"type": "turn_context"' in prefix
+    )
+
+
+def _codex_user_prompt_text(row_type: str | None, payload: dict[str, Any]) -> str | None:
+    """Best-effort extraction of real user prompt text from Codex rollout rows.
+
+    Codex rollout schemas have changed over time, so this accepts the common
+    message/user_input shapes while avoiding assistant/tool payloads.
+    """
+    role = str(payload.get("role") or "").lower()
+    payload_type = str(payload.get("type") or "").lower()
+    if row_type in {"user_message", "user_prompt"}:
+        candidates = [payload.get("text"), payload.get("message"), payload.get("prompt")]
+    elif row_type == "event_msg" and payload_type in {"user_message", "user_prompt", "user_input"}:
+        candidates = [payload.get("text"), payload.get("message"), payload.get("prompt")]
+    elif row_type == "response_item" and role == "user":
+        candidates = [payload.get("content"), payload.get("text")]
+    else:
+        return None
+
+    parts: list[str] = []
+    for candidate in candidates:
+        if isinstance(candidate, str):
+            parts.append(candidate)
+        elif isinstance(candidate, list):
+            for item in candidate:
+                if isinstance(item, dict):
+                    text = item.get("text") or item.get("input_text")
+                    if isinstance(text, str):
+                        parts.append(text)
+                elif isinstance(item, str):
+                    parts.append(item)
+    text = "\n".join(part.strip() for part in parts if part and part.strip()).strip()
+    return text or None
+
+
 def _choose_project_path(
     fallback_path: str,
     cwd_counts: dict[str, int],
     cwd_costs: dict[str, float],
+    hint_counts: dict[str, int] | None = None,
+    hint_costs: dict[str, float] | None = None,
+    intentional_hint_counts: dict[str, int] | None = None,
 ) -> str:
+    """Attribute a session using observed cwd plus explicit transition intent.
+
+    A recorded cwd is an observation: the tool writes it on every event, so a
+    single session carries hundreds of them. A path mentioned in a prompt is an
+    inference from one line of text, and prompts mention paths for all sorts of
+    reasons -- "does the setting in /etc/nginx/nginx.conf matter here?" is not a
+    statement about which project the session belongs to.
+
+    Ordinary path hints are fallback-only. A path in an explicit workspace
+    transition may override a usable cwd because desktop tools can keep logging
+    the workspace where a chat started after the user deliberately moves the
+    task to another repository.
+    """
     candidates: dict[str, tuple[float, int]] = {}
     for cwd, count in cwd_counts.items():
         normalized = _normalize_project_path(cwd)
@@ -425,11 +723,37 @@ def _choose_project_path(
         cost, existing_count = candidates.get(normalized, (0.0, 0))
         candidates[normalized] = (cost + cwd_costs.get(cwd, 0.0), existing_count + count)
 
-    if candidates:
-        return max(candidates, key=lambda path: (candidates[path][0], candidates[path][1]))
+    observed = max(candidates, key=lambda path: (candidates[path][0], candidates[path][1])) if candidates else None
+
+    intentional_candidates: dict[str, int] = {}
+    for hint, count in (intentional_hint_counts or {}).items():
+        normalized = _normalize_project_path(hint)
+        if normalized:
+            intentional_candidates[normalized] = intentional_candidates.get(normalized, 0) + count
+    if intentional_candidates:
+        ranked = sorted(intentional_candidates.items(), key=lambda item: item[1], reverse=True)
+        # Do not invent certainty when two explicit workspace instructions tie.
+        if len(ranked) == 1 or ranked[0][1] > ranked[1][1]:
+            return ranked[0][0]
+
+    if observed:
+        return observed
+
+    hint_candidates: dict[str, tuple[int, float]] = {}
+    for hint, count in (hint_counts or {}).items():
+        normalized = _normalize_project_path(hint)
+        if not normalized:
+            continue
+        existing_count, existing_cost = hint_candidates.get(normalized, (0, 0.0))
+        hint_candidates[normalized] = (
+            existing_count + count,
+            existing_cost + (hint_costs or {}).get(hint, 0.0),
+        )
+    if hint_candidates:
+        return max(hint_candidates, key=lambda path: (hint_candidates[path][0], hint_candidates[path][1]))
 
     normalized_fallback = _normalize_project_path(fallback_path)
-    return normalized_fallback or fallback_path
+    return normalized_fallback or "unknown"
 
 
 CLIP_FALLBACK_NOTE = "Windowed whole-session: this tool reports no per-turn events to clip by."
@@ -680,7 +1004,10 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
     codex_desktop_sessions = count("codex-cli", "desktop")
     cursor_sessions = count("cursor")
 
-    hook_events = recent_hook_events(limit=50)
+    try:
+        hook_events = recent_hook_events(limit=50)
+    except OSError:
+        hook_events = []
     hooked_tools = {str(e.get("tool", "")) for e in hook_events if isinstance(e, dict)}
     claude_hook_seen = "claude" in hooked_tools
     codex_hook_seen = "codex" in hooked_tools
@@ -858,6 +1185,9 @@ def scan_claude_code() -> list[LocalSession]:
                 trailing_untimestamped = False
                 cwd_counts: dict[str, int] = defaultdict(int)
                 cwd_costs: dict[str, float] = defaultdict(float)
+                hint_counts: dict[str, int] = defaultdict(int)
+                hint_costs: dict[str, float] = defaultdict(float)
+                intentional_hint_counts: dict[str, int] = defaultdict(int)
                 try:
                     with fpath.open(errors="replace") as handle:
                         for line in handle:
@@ -916,6 +1246,12 @@ def scan_claude_code() -> list[LocalSession]:
                             cost += event_cost
                             if event_model:
                                 model = event_model
+                            prompt_text = _user_prompt_text(message.get("content")) if msg_type == "user" and not obj.get("isMeta") else None
+                            for hint in _project_hints_from_text(prompt_text):
+                                hint_counts[hint] += 1
+                                hint_costs[hint] += event_cost
+                            for hint in _intentional_project_hints_from_text(prompt_text):
+                                intentional_hint_counts[hint] += 1
                             is_agent_call = bool(msg_type == "assistant" or event_model)
                             is_tool_call = bool(
                                 obj.get("toolUseResult") is not None or obj.get("toolUseID") or msg_type == "tool_result"
@@ -972,7 +1308,14 @@ def scan_claude_code() -> list[LocalSession]:
                 ))
 
                 session = sessions[-1]
-                session.project_path = _choose_project_path(fallback_project_path, cwd_counts, cwd_costs)
+                session.project_path = _choose_project_path(
+                    fallback_project_path,
+                    cwd_counts,
+                    cwd_costs,
+                    hint_counts,
+                    hint_costs,
+                    intentional_hint_counts,
+                )
 
     return sessions
 
@@ -997,6 +1340,8 @@ def scan_claude_code_events(since: datetime | None = None) -> list[LocalEvent]:
                 # One usage block per API request, however many transcript
                 # lines that request produced. See _usage_receipt_key.
                 counted_requests: set[str] = set()
+                hinted_project_path: str | None = None
+                intentional_project_path: str | None = None
                 try:
                     with fpath.open(errors="replace") as handle:
                         for index, line in enumerate(handle):
@@ -1009,12 +1354,29 @@ def scan_claude_code_events(since: datetime | None = None) -> list[LocalEvent]:
 
                             ts = _parse_ts(obj.get("timestamp") or obj.get("createdAt"))
                             cwd = obj.get("cwd")
-                            project_path = _normalize_project_path(cwd if isinstance(cwd, str) else None)
-                            if not project_path:
-                                project_path = _normalize_project_path(fallback_project_path) or fallback_project_path
+                            resolved_project_path = (
+                                _normalize_project_path(cwd if isinstance(cwd, str) else None)
+                                or _normalize_project_path(fallback_project_path)
+                            )
+                            project_path = resolved_project_path or fallback_project_path
 
                             message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
                             msg_type = obj.get("type") or "unknown"
+                            content = message.get("content")
+                            prompt_text = _user_prompt_text(content) if msg_type == "user" and not obj.get("isMeta") else None
+                            hints = _project_hints_from_text(prompt_text)
+                            if hints:
+                                hinted_project_path = hints[0]
+                            intentional_hints = _intentional_project_hints_from_text(prompt_text)
+                            if intentional_hints:
+                                intentional_project_path = intentional_hints[0]
+                            # Same precedence as _choose_project_path: ordinary
+                            # references are fallback-only; an explicit
+                            # workspace transition can correct a stale host cwd.
+                            if intentional_project_path:
+                                project_path = intentional_project_path
+                            elif hinted_project_path and not resolved_project_path:
+                                project_path = hinted_project_path
                             model = message.get("model") or obj.get("model")
                             tokens = _anthropic_usage(message.get("usage") or obj.get("usage") or {})
                             # Every line of a multi-block reply repeats the same
@@ -1040,7 +1402,6 @@ def scan_claude_code_events(since: datetime | None = None) -> list[LocalEvent]:
                             )
 
                             content_hash = None
-                            content = message.get("content")
                             if msg_type in {"user", "assistant"}:
                                 content_hash = _hash_text(content)
                             elif obj.get("toolUseID") or obj.get("toolUseResult") is not None:
@@ -1059,7 +1420,7 @@ def scan_claude_code_events(since: datetime | None = None) -> list[LocalEvent]:
 
                             # A real user prompt opens a new turn; every following event belongs to it.
                             # Same boundary test as segment_session_by_prompt() so turn numbers align.
-                            if msg_type == "user" and not obj.get("isMeta") and _user_prompt_text(content):
+                            if msg_type == "user" and not obj.get("isMeta") and prompt_text:
                                 turn += 1
 
                             events.append(LocalEvent(
@@ -1085,8 +1446,8 @@ def scan_claude_code_events(since: datetime | None = None) -> list[LocalEvent]:
     return events
 
 
-def scan_codex_cli() -> list[LocalSession]:
-    rollout_sessions, _ = scan_codex_rollouts()
+def scan_codex_cli(since: datetime | None = None) -> list[LocalSession]:
+    rollout_sessions, _ = scan_codex_rollouts(since=since)
     codex_db = _first_existing(CODEX_DB_PATHS)
     if not codex_db:
         return rollout_sessions
@@ -1188,14 +1549,25 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
         agent_calls = 0
         tool_calls = 0
         previous_total = -1
+        hint_counts: dict[str, int] = defaultdict(int)
+        hint_costs: dict[str, float] = defaultdict(float)
+        intentional_hint_counts: dict[str, int] = defaultdict(int)
         model_totals: dict[str, dict[str, float]] = defaultdict(
             lambda: {"tokens_in": 0.0, "tokens_out": 0.0, "cost_usd": 0.0, "agent_calls": 0.0, "tool_calls": 0.0}
         )
         try:
-            with path.open(errors="replace") as handle:
-                for index, line in enumerate(handle):
-                    if not line.strip():
+            for index, line in _codex_rollout_lines(path, since):
+                    if not line or line == "\n":
                         continue
+                    if since is not None:
+                        line_timestamp = _line_timestamp_from_prefix(line)
+                        if line_timestamp and line_timestamp < since - MTIME_SAFETY_MARGIN:
+                            continue
+                        if (
+                            len(line) > CODEX_MAX_WINDOW_JSON_LINE_BYTES
+                            and not _codex_window_line_is_essential(line)
+                        ):
+                            continue
                     try:
                         row = json.loads(line)
                     except json.JSONDecodeError:
@@ -1223,6 +1595,26 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
                         tool_calls += 1
                         if model:
                             model_totals[model]["tool_calls"] += 1
+                    prompt_text = _codex_user_prompt_text(row_type, payload)
+                    for hint in _project_hints_from_text(prompt_text):
+                        hint_counts[hint] += 1
+                        hint_costs[hint] += estimate_cost(model, 0, 0)
+                    for hint in _intentional_project_hints_from_text(prompt_text):
+                        intentional_hint_counts[hint] += 1
+                    if hint_counts:
+                        # project_path here is the cwd Codex recorded in
+                        # session_meta/turn_context. Pass it as observed evidence
+                        # rather than a bare fallback, so prompt hints only take
+                        # over when it did not resolve to a usable project.
+                        observed_cwd = {project_path: 1} if project_path else {}
+                        project_path = _choose_project_path(
+                            project_path or "",
+                            observed_cwd,
+                            {},
+                            hint_counts,
+                            hint_costs,
+                            intentional_hint_counts,
+                        )
                     if row_type != "event_msg" or payload.get("type") != "token_count":
                         continue
                     info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
@@ -1266,6 +1658,16 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
             continue
         if not final_input and not final_output:
             continue
+        if hint_counts:
+            observed_cwd = {project_path: 1} if project_path else {}
+            project_path = _choose_project_path(
+                project_path or "",
+                observed_cwd,
+                {},
+                hint_counts,
+                hint_costs,
+                intentional_hint_counts,
+            )
         sessions.append(LocalSession(
             session_id=session_id,
             tool="codex-cli",
@@ -1381,8 +1783,8 @@ def model_usage_totals(sessions: Iterable[LocalSession]) -> dict[str, dict[str, 
     return dict(totals)
 
 
-def scan_all() -> list[LocalSession]:
-    return [*scan_claude_code(), *scan_codex_cli(), *scan_cursor_limited()]
+def scan_all(since: datetime | None = None) -> list[LocalSession]:
+    return [*scan_claude_code(), *scan_codex_cli(since=since), *scan_cursor_limited()]
 
 
 # How far before a caller's `since` a transcript file may have been last

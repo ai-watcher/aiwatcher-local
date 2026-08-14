@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 736" font-family="'Inter','Segoe UI',system-ui,-apple-system,sans-serif" role="img" aria-labelledby="t-sessions d-sessions">
-  <title id="t-sessions">AIWatcher Local — Sessions review</title>
-  <desc id="d-sessions">Sessions tab showing a session list, an Expensive asks cost breakdown with the costliest step highlighted, outcome buttons, outcome evidence, and a Create handoff capsule action.</desc>
+  <title id="t-sessions">AIWatcher Local — Work review</title>
+  <desc id="d-sessions">Work tab showing a session list, an Expensive asks cost breakdown with the costliest step highlighted, outcome buttons, outcome evidence, and a Fresh Start action.</desc>
   <defs>
     <radialGradient id="bg-sessions" cx="0%" cy="0%" r="95%">
       <stop offset="0" stop-color="#18243a"/>
@@ -28,14 +28,13 @@
   <text x="1116" y="44" font-size="13" font-weight="600" fill="#8fb4f7" text-anchor="middle">Enterprise</text>
 
   <g font-size="13">
-    <text x="63" y="104" fill="#8b96a8" text-anchor="middle">Today</text>
-    <text x="130" y="104" fill="#8b96a8" text-anchor="middle">Prompt</text>
-    <text x="208" y="104" fill="#8b96a8" text-anchor="middle">Projects</text>
-    <rect x="254" y="86" width="80" height="28" rx="14" fill="#eef1f6"/>
-    <text x="294" y="105" fill="#141a26" font-weight="700" text-anchor="middle">Sessions</text>
-    <text x="376" y="104" fill="#8b96a8" text-anchor="middle">Changes</text>
-    <text x="458" y="104" fill="#8b96a8" text-anchor="middle">Receipts</text>
-    <text x="540" y="104" fill="#8b96a8" text-anchor="middle">Insights</text>
+    <text x="63" y="104" fill="#8b96a8" text-anchor="middle">Home</text>
+    <text x="142" y="104" fill="#8b96a8" text-anchor="middle">Control</text>
+    <rect x="198" y="86" width="72" height="28" rx="14" fill="#eef1f6"/>
+    <text x="234" y="105" fill="#141a26" font-weight="700" text-anchor="middle">Work</text>
+    <text x="322" y="104" fill="#8b96a8" text-anchor="middle">Evidence</text>
+    <text x="420" y="104" fill="#8b96a8" text-anchor="middle">Spend</text>
+    <text x="512" y="104" fill="#8b96a8" text-anchor="middle">Settings</text>
   </g>
 
   <rect x="36" y="172" width="350" height="528" rx="12" fill="#111722" stroke="#263145"/>
@@ -99,5 +98,5 @@
   <text x="446" y="630" font-size="12" fill="#98a5b8" font-style="italic">Evidence to review, not automatic truth.</text>
 
   <rect x="850" y="656" width="290" height="40" rx="10" fill="#15233b" stroke="#33537f"/>
-  <text x="995" y="681" font-size="14" fill="#dcebff" text-anchor="middle">Create handoff capsule</text>
+  <text x="995" y="681" font-size="14" fill="#dcebff" text-anchor="middle">Copy Fresh Start brief</text>
 </svg>

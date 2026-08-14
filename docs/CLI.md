@@ -379,13 +379,16 @@ Carry context between sessions and tools.
 
 ### `aiwatcher handoff`
 
-Create a local handoff capsule for continuing work in a fresh AI session
+Create a local Fresh Start brief for continuing work in a fresh AI session
 
 ```sh
 aiwatcher handoff [--session-id SESSION_ID] [--days DAYS]
                   [--target {claude,codex,cursor,generic,vscode}]
                   [--copy] [--format {text,json}]
                   [--include-prompt-excerpt]
+                  [--type {bugbash,coding,general,investigation,product,review}]
+                  [--objective OBJECTIVE] [--source SOURCE]
+                  [--constraint CONSTRAINT] [--acceptance ACCEPTANCE]
 ```
 
 Example:
@@ -402,6 +405,11 @@ aiwatcher handoff --target claude --copy
 | `--copy` | flag |  | Copy the next-session brief to the clipboard when supported |
 | `--format` | `text`, `json` | `text` | Print the capsule as text or JSON |
 | `--include-prompt-excerpt` | flag |  | Include a local prompt excerpt in the capsule output |
+| `--type` | `bugbash`, `coding`, `general`, `investigation`, `product`, `review` | `coding` | Shape the Fresh Start brief for the kind of continuation |
+| `--objective` | text |  | User-visible objective to carry into the fresh session |
+| `--source` | repeatable |  | Source-of-truth file, URL, PR, or artifact the fresh session should read first; repeatable |
+| `--constraint` | repeatable |  | Non-negotiable constraint or known bad path the fresh session must preserve; repeatable |
+| `--acceptance` | repeatable |  | Acceptance check the fresh session should use before calling the work done; repeatable |
 
 ### `aiwatcher resume`
 
@@ -415,6 +423,9 @@ aiwatcher resume [--session-id SESSION_ID] [--search SEARCH]
                  [--target {claude,codex,cursor,generic,vscode}]
                  [--copy] [--format {text,json}]
                  [--include-prompt-excerpt]
+                 [--type {bugbash,coding,general,investigation,product,review}]
+                 [--objective OBJECTIVE] [--source SOURCE]
+                 [--constraint CONSTRAINT] [--acceptance ACCEPTANCE]
 ```
 
 Examples:
@@ -435,6 +446,11 @@ aiwatcher resume --search <your-project> --days 30
 | `--copy` | flag |  | Copy the continuation brief to the clipboard when supported |
 | `--format` | `text`, `json` | `text` | Print the brief as text or JSON |
 | `--include-prompt-excerpt` | flag |  | Include a local prompt excerpt in the brief output |
+| `--type` | `bugbash`, `coding`, `general`, `investigation`, `product`, `review` | `coding` | Shape the Fresh Start brief for the kind of continuation |
+| `--objective` | text |  | User-visible objective to carry into the fresh session |
+| `--source` | repeatable |  | Source-of-truth file, URL, PR, or artifact the fresh session should read first; repeatable |
+| `--constraint` | repeatable |  | Non-negotiable constraint or known bad path the fresh session must preserve; repeatable |
+| `--acceptance` | repeatable |  | Acceptance check the fresh session should use before calling the work done; repeatable |
 
 ### `aiwatcher log-decision`
 
@@ -499,8 +515,8 @@ aiwatcher watch --interval 30 --notify
 | `--calls-threshold` | integer | `250` | Flag a session above this many model calls |
 | `--tokens-threshold` | integer | `500000` | Flag a session above this many tokens |
 | `--notify` | flag |  | Send a best-effort local OS notification when watch recommends action, and for outcome-review signals (survival, churn, same-file re-prompt, cost-per-surviving-change) |
-| `--overlay` | flag |  | Open a local AIWatcher companion overlay when watch recommends a handoff or other action |
-| `--target` | `claude`, `codex`, `cursor`, `generic`, `vscode` | `generic` | Format the auto-generated CRITICAL-context handoff capsule for this AI tool |
+| `--overlay` | flag |  | Open a local AIWatcher companion overlay when watch recommends Fresh Start or another action |
+| `--target` | `claude`, `codex`, `cursor`, `generic`, `vscode` | `generic` | Format the auto-generated CRITICAL-context Fresh Start brief for this AI tool |
 
 ### `aiwatcher statusline`
 
@@ -992,7 +1008,7 @@ Run the local-only AIWatcher dashboard
 ```sh
 aiwatcher ui [--host HOST] [--port PORT]
              [--port-attempts PORT_ATTEMPTS] [--no-port-fallback]
-             [--restart]
+             [--restart] [--no-watch] [--watch-interval WATCH_INTERVAL]
 ```
 
 Example:
@@ -1008,6 +1024,8 @@ aiwatcher ui --port 9000 --restart
 | `--port-attempts` | integer | `20` | How many sequential ports to try when the requested port is busy |
 | `--no-port-fallback` | flag |  | Fail instead of trying the next available port |
 | `--restart` | flag |  | Stop an existing local process on the requested port before starting |
+| `--no-watch` | flag |  | Do not start Ambient Watch alongside the dashboard |
+| `--watch-interval` | integer | `60` | Seconds between Ambient Watch scans when started with the UI |
 
 ## Internal hook commands
 

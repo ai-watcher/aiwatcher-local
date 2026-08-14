@@ -99,6 +99,193 @@ class ProjectPathTests(unittest.TestCase):
             )
         self.assertEqual(selected, "/repo/b")
 
+    def test_choose_project_uses_user_path_hint_when_cwd_is_unusable(self) -> None:
+        """Hints decide attribution when no cwd resolves to a real project.
+
+        This is the case the hint feature exists for: cwd pointing at `/`, AI
+        tool storage, a temp dir, or a generic home folder, all of which
+        normalize to None.
+        """
+        normalized = {"/repo/right": "/repo/right"}
+        with patch.object(scanner, "_normalize_project_path", side_effect=lambda value: normalized.get(value)):
+            selected = scanner._choose_project_path(
+                "/unusable",
+                {"/unusable": 25},
+                {"/unusable": 10.0},
+                {"/repo/right": 1},
+                {"/repo/right": 0.0},
+            )
+
+        self.assertEqual(selected, "/repo/right")
+
+    def test_choose_project_keeps_observed_cwd_over_incidental_path_mention(self) -> None:
+        """An incidental path in a prompt must not outrank observed cwd.
+
+        Prompts mention paths for all sorts of reasons -- "does the setting in
+        /etc/nginx/nginx.conf matter here?" says nothing about which project the
+        session belongs to. cwd is recorded on every event, so it is the far
+        stronger signal whenever it resolves at all.
+        """
+        normalized = {
+            "/repo/real": "/repo/real",
+            "/etc/nginx": "/etc/nginx",
+        }
+        with patch.object(scanner, "_normalize_project_path", side_effect=lambda value: normalized.get(value)):
+            selected = scanner._choose_project_path(
+                "/repo/real",
+                {"/repo/real": 500},
+                {"/repo/real": 42.0},
+                {"/etc/nginx": 1},
+                {"/etc/nginx": 0.0},
+            )
+
+        self.assertEqual(selected, "/repo/real")
+
+    def test_choose_project_allows_explicit_workspace_transition_to_override_stale_cwd(self) -> None:
+        normalized = {
+            "/repo/stale": "/repo/stale",
+            "/repo/target": "/repo/target",
+        }
+        with patch.object(scanner, "_normalize_project_path", side_effect=lambda value: normalized.get(value)):
+            selected = scanner._choose_project_path(
+                "/repo/stale",
+                {"/repo/stale": 500},
+                {"/repo/stale": 42.0},
+                {"/repo/target": 1},
+                {"/repo/target": 0.0},
+                {"/repo/target": 1},
+            )
+
+        self.assertEqual(selected, "/repo/target")
+
+    def test_project_root_is_not_treated_as_project(self) -> None:
+        scanner.PROJECT_PATH_CACHE.clear()
+        self.assertIsNone(scanner._normalize_project_path(str(Path("/").resolve())))
+        self.assertEqual(scanner._choose_project_path(str(Path("/").resolve()), {}, {}), "unknown")
+
+    def test_tool_storage_path_is_not_treated_as_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_root = Path(temp_dir) / ".claude" / "projects"
+            log_project = storage_root / "-Users-chandrakala"
+            log_project.mkdir(parents=True)
+            scanner.PROJECT_PATH_CACHE.clear()
+            with patch.object(scanner, "CLAUDE_PROJECTS_DIRS", [storage_root]):
+                self.assertIsNone(scanner._normalize_project_path(str(log_project)))
+                self.assertEqual(scanner._choose_project_path(str(log_project), {str(log_project): 2}, {str(log_project): 9.0}), "unknown")
+
+    def test_claude_task_temp_path_is_not_treated_as_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            task_path = Path(temp_dir) / "claude-501" / "-Users-chandrakala" / "session-id" / "tasks"
+            task_path.mkdir(parents=True)
+            scanner.PROJECT_PATH_CACHE.clear()
+            self.assertIsNone(scanner._normalize_project_path(str(task_path)))
+            self.assertEqual(scanner._choose_project_path(str(task_path), {str(task_path): 2}, {str(task_path): 9.0}), "unknown")
+
+    def test_agent_worktree_rolls_up_to_the_repository_it_was_cut_from(self) -> None:
+        """Throwaway agent worktrees must not rank as projects of their own.
+
+        Claude Code runs isolated agents in `<repo>/.claude/worktrees/agent-*`
+        and deletes the directory afterwards. Since it no longer exists, the
+        git-root lookup cannot fold it back, so each one would otherwise split
+        cost off the real repo into an entry nobody can open.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir) / "my-repo"
+            repo.mkdir()
+            worktree = repo / ".claude" / "worktrees" / "agent-a1d5324e6133bcc34"
+            scanner.PROJECT_PATH_CACHE.clear()
+
+            # Deleted worktree: the path no longer exists, which is the norm.
+            self.assertEqual(scanner._normalize_project_path(str(worktree)), str(repo.resolve()))
+
+            # A worktree still on disk folds back the same way.
+            worktree.mkdir(parents=True)
+            scanner.PROJECT_PATH_CACHE.clear()
+            self.assertEqual(scanner._normalize_project_path(str(worktree)), str(repo.resolve()))
+
+    def test_agent_worktree_under_home_does_not_become_a_project(self) -> None:
+        """Rolling up must not smuggle a junk owner past the usual checks."""
+        scanner.PROJECT_PATH_CACHE.clear()
+        self.assertIsNone(
+            scanner._normalize_project_path(str(Path.home() / ".claude" / "worktrees" / "agent-abc123"))
+        )
+
+    def test_agent_scratchpad_under_temp_is_not_a_project(self) -> None:
+        """The scratchpad root is named `claude` exactly -- no trailing hyphen."""
+        temp_root = next(iter(scanner.TEMP_DIRS))
+        scratch = temp_root / "claude" / "C--Users-dev-repo" / "session-id" / "scratchpad"
+        scanner.PROJECT_PATH_CACHE.clear()
+        self.assertTrue(scanner._is_agent_scratch_path(scratch))
+        self.assertIsNone(scanner._normalize_project_path(str(scratch)))
+
+    def test_ordinary_temp_subdirectory_is_still_a_real_project(self) -> None:
+        """Working out of a temp checkout is legitimate; only agent dirs are junk.
+
+        Guards against fixing the scratchpad case by rejecting everything under
+        a temp root, which would erase real work from the Projects page.
+        """
+        temp_root = next(iter(scanner.TEMP_DIRS))
+        workspace = temp_root / "aiwatcher-fast-ui"
+        scanner.PROJECT_PATH_CACHE.clear()
+        self.assertFalse(scanner._is_agent_scratch_path(workspace))
+        self.assertEqual(scanner._normalize_project_path(str(workspace)), str(workspace))
+
+    def test_tmp_root_and_claude_tmp_root_are_not_treated_as_projects(self) -> None:
+        scanner.PROJECT_PATH_CACHE.clear()
+        self.assertIsNone(scanner._normalize_project_path("/private/tmp"))
+        self.assertIsNone(scanner._normalize_project_path("/private/tmp/claude-501"))
+
+    def test_common_user_folders_are_not_treated_as_projects(self) -> None:
+        scanner.PROJECT_PATH_CACHE.clear()
+        self.assertIsNone(scanner._normalize_project_path(str(Path.home() / "Downloads")))
+        child_project = Path.home() / "Documents" / "example-project"
+        self.assertEqual(scanner._normalize_project_path(str(child_project)), str(child_project))
+
+    def test_project_hints_require_real_absolute_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "right-repo"
+            project.mkdir()
+            readme = project / "README.md"
+            readme.write_text("demo", encoding="utf-8")
+
+            hints = scanner._project_hints_from_text(f"Please work in `{readme}` before editing.")
+
+        self.assertEqual(hints, [str(project.resolve())])
+
+    def test_project_transition_hints_distinguish_instruction_from_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            current = Path(temp_dir) / "current"
+            other = Path(temp_dir) / "other"
+            current.mkdir()
+            other.mkdir()
+
+            explicit = scanner._intentional_project_hints_from_text(
+                f"Continue the dashboard work in {other}."
+            )
+            incidental = scanner._intentional_project_hints_from_text(
+                f"Does the setting in {other / 'config.toml'} matter here?"
+            )
+
+        self.assertEqual(explicit, [str(other.resolve())])
+        self.assertEqual(incidental, [])
+
+    def test_project_hints_ignore_unresolvable_tilde_user(self) -> None:
+        self.assertEqual(scanner._project_hints_from_text("Please inspect ~est before changing code."), [])
+
+    def test_project_hints_ignore_long_quoted_prose_that_starts_like_path(self) -> None:
+        with patch.object(scanner.Path, "exists", side_effect=AssertionError("prose should not touch filesystem")):
+            hints = scanner._project_hints_from_text('Review "/private/tmp/repo and then read this long pasted transcript ' + ("x" * 600) + '"')
+
+        self.assertEqual(hints, [])
+
+    def test_absolute_path_pattern_keeps_full_windows_path(self) -> None:
+        match = scanner._ABSOLUTE_PATH_RE.search(
+            r"Please work in C:\Users\developer\projects\right-repo before editing."
+        )
+
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group("plain"), r"C:\Users\developer\projects\right-repo")
+
     def test_codex_rollout_uses_measured_token_events(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "sessions"
@@ -126,6 +313,222 @@ class ProjectPathTests(unittest.TestCase):
         self.assertEqual(sessions[0].agent_calls, 2)
         self.assertEqual(len(events), 2)
         self.assertNotIn("cumulative", " ".join(sessions[0].notes).lower())
+
+    def test_codex_window_scan_reads_recent_tail_of_large_rollout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rollout = Path(temp_dir) / "rollout-large.jsonl"
+            old_line = json.dumps({
+                "timestamp": "2026-05-01T10:00:00Z",
+                "type": "response_item",
+                "payload": {"role": "assistant", "content": "old" * 400},
+            })
+            recent_line = json.dumps({
+                "timestamp": "2026-08-09T10:00:00Z",
+                "type": "event_msg",
+                "payload": {"type": "token_count", "info": {
+                    "total_token_usage": {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110},
+                    "last_token_usage": {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110},
+                }},
+            })
+            rollout.write_text("\n".join([old_line] * 40 + [recent_line]) + "\n", encoding="utf-8")
+            since = datetime(2026, 8, 8, tzinfo=timezone.utc)
+            with (
+                patch.object(scanner, "CODEX_TAIL_MIN_FILE_BYTES", 1),
+                patch.object(scanner, "CODEX_TAIL_INITIAL_BYTES", len(recent_line) + 20),
+                patch.object(scanner, "CODEX_TAIL_MAX_BYTES", len(recent_line) + 80),
+            ):
+                lines = [line for _, line in scanner._codex_rollout_lines(rollout, since)]
+
+        self.assertTrue(lines)
+        self.assertTrue(any("2026-08-09T10:00:00Z" in line for line in lines))
+        self.assertFalse(any("2026-05-01T10:00:00Z" in line for line in lines))
+        self.assertTrue(scanner._codex_window_line_is_essential(recent_line))
+        self.assertFalse(scanner._codex_window_line_is_essential(old_line))
+
+    def _write_claude_session(self, temp_dir: str, cwd: str, prompt: str) -> Path:
+        projects = Path(temp_dir) / "projects"
+        if os.name == "nt":
+            encoded = cwd.replace(":", "-").replace("\\", "-")
+        else:
+            encoded = "-" + cwd.lstrip("/").replace("/", "-")
+        project_dir = projects / encoded
+        project_dir.mkdir(parents=True)
+        rows = [
+            {
+                "type": "user",
+                "timestamp": "2026-07-12T10:00:00Z",
+                "cwd": cwd,
+                "message": {"role": "user", "content": [{"type": "text", "text": prompt}]},
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2026-07-12T10:00:01Z",
+                "cwd": cwd,
+                "message": {
+                    "model": "claude-sonnet-4-6",
+                    "usage": {"input_tokens": 100, "output_tokens": 20},
+                },
+            },
+        ]
+        (project_dir / "sess.jsonl").write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
+        )
+        return projects
+
+    def test_claude_user_path_hint_used_when_recorded_cwd_is_unusable(self) -> None:
+        """The home directory does not resolve to a project, so the hint decides."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            right_repo = Path(temp_dir) / "right-repo"
+            right_repo.mkdir()
+            scanner.PROJECT_PATH_CACHE.clear()
+            projects = self._write_claude_session(
+                temp_dir,
+                str(Path.home()),
+                f"Fix the attribution in {right_repo}.",
+            )
+
+            with patch.object(scanner, "CLAUDE_PROJECTS_DIRS", [projects]):
+                sessions = scanner.scan_claude_code()
+                events = scanner.scan_claude_code_events()
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].project_path, str(right_repo.resolve()))
+        self.assertTrue(events)
+        self.assertTrue(all(event.project_path == str(right_repo.resolve()) for event in events))
+
+    def test_claude_incidental_path_mention_does_not_move_session_off_real_cwd(self) -> None:
+        """Mentioning an unrelated path in passing must not re-attribute the session."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            real_repo = Path(temp_dir) / "real-repo"
+            unrelated = Path(temp_dir) / "etc" / "nginx"
+            real_repo.mkdir()
+            unrelated.mkdir(parents=True)
+            (unrelated / "nginx.conf").write_text("worker_processes 1;", encoding="utf-8")
+            scanner.PROJECT_PATH_CACHE.clear()
+            projects = self._write_claude_session(
+                temp_dir,
+                str(real_repo),
+                f"quick q: does the setting in {unrelated / 'nginx.conf'} matter here?",
+            )
+
+            with patch.object(scanner, "CLAUDE_PROJECTS_DIRS", [projects]):
+                sessions = scanner.scan_claude_code()
+                events = scanner.scan_claude_code_events()
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].project_path, str(real_repo.resolve()))
+        self.assertTrue(events)
+        self.assertTrue(all(event.project_path == str(real_repo.resolve()) for event in events))
+
+    def test_claude_explicit_workspace_transition_overrides_stale_real_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            stale_repo = Path(temp_dir) / "stale-repo"
+            target_repo = Path(temp_dir) / "target-repo"
+            stale_repo.mkdir()
+            target_repo.mkdir()
+            scanner.PROJECT_PATH_CACHE.clear()
+            projects = self._write_claude_session(
+                temp_dir,
+                str(stale_repo),
+                f"Continue the AIWatcher UI work in {target_repo}.",
+            )
+
+            with patch.object(scanner, "CLAUDE_PROJECTS_DIRS", [projects]):
+                sessions = scanner.scan_claude_code()
+                events = scanner.scan_claude_code_events()
+
+        self.assertEqual(sessions[0].project_path, str(target_repo.resolve()))
+        self.assertTrue(events)
+        self.assertTrue(all(event.project_path == str(target_repo.resolve()) for event in events))
+
+    def _run_codex_rollout(self, temp_dir: str, cwd: str, prompt: str):
+        root = Path(temp_dir) / "sessions"
+        root.mkdir()
+        rows = [
+            {
+                "timestamp": "2026-07-01T10:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": "session-1", "cwd": cwd, "originator": "codex-tui"},
+            },
+            {
+                "timestamp": "2026-07-01T10:00:01Z",
+                "type": "response_item",
+                "payload": {"role": "user", "content": [{"type": "input_text", "text": prompt}]},
+            },
+            {
+                "timestamp": "2026-07-01T10:00:02Z",
+                "type": "turn_context",
+                "payload": {"model": "gpt-5.5", "cwd": cwd},
+            },
+            {
+                "timestamp": "2026-07-01T10:00:03Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {"input_tokens": 1000, "output_tokens": 100, "total_tokens": 1100},
+                        "last_token_usage": {"input_tokens": 1000, "output_tokens": 100, "total_tokens": 1100},
+                    },
+                },
+            },
+        ]
+        (root / "rollout-session-1.jsonl").write_text(
+            "\n".join(json.dumps(row) for row in rows), encoding="utf-8"
+        )
+        scanner.PROJECT_PATH_CACHE.clear()
+        with patch.object(scanner, "CODEX_SESSIONS_DIRS", [root]):
+            scanner.CODEX_ROLLOUT_CACHE = None
+            result = scanner.scan_codex_rollouts()
+        scanner.CODEX_ROLLOUT_CACHE = None
+        return result
+
+    def test_codex_user_path_hint_used_when_recorded_cwd_is_unusable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            right_repo = Path(temp_dir) / "right-repo"
+            right_repo.mkdir()
+            sessions, events = self._run_codex_rollout(
+                temp_dir,
+                str(Path.home()),
+                f"Continue the AIWatcher UI work in {right_repo}.",
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].project_path, str(right_repo.resolve()))
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].project_path, str(right_repo.resolve()))
+
+    def test_codex_incidental_path_mention_does_not_move_session_off_real_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            real_repo = Path(temp_dir) / "real-repo"
+            unrelated = Path(temp_dir) / "etc" / "nginx"
+            real_repo.mkdir()
+            unrelated.mkdir(parents=True)
+            (unrelated / "nginx.conf").write_text("worker_processes 1;", encoding="utf-8")
+            sessions, events = self._run_codex_rollout(
+                temp_dir,
+                str(real_repo),
+                f"quick q: does the setting in {unrelated / 'nginx.conf'} matter here?",
+            )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].project_path, str(real_repo.resolve()))
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].project_path, str(real_repo.resolve()))
+
+    def test_codex_explicit_workspace_transition_overrides_stale_real_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            stale_repo = Path(temp_dir) / "stale-repo"
+            target_repo = Path(temp_dir) / "target-repo"
+            stale_repo.mkdir()
+            target_repo.mkdir()
+            sessions, events = self._run_codex_rollout(
+                temp_dir,
+                str(stale_repo),
+                f"Continue the AIWatcher UI work in {target_repo}.",
+            )
+
+        self.assertEqual(sessions[0].project_path, str(target_repo.resolve()))
+        self.assertEqual(events[0].project_path, str(target_repo.resolve()))
 
 
 class PromptCacheAccountingTests(unittest.TestCase):

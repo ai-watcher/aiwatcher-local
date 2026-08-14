@@ -24,20 +24,23 @@ import time as time_module
 import webbrowser
 from collections import Counter, defaultdict
 from datetime import date, datetime, time, timedelta, timezone
+from pathlib import Path
 from typing import Callable, Iterable, Sequence
 from urllib.parse import quote
 
-from .correlate import link_recent_interventions_to_sessions
+from .correlate import link_recent_fresh_start_receipts_to_sessions, link_recent_interventions_to_sessions
 from .evidence_capture import record_missing_evidence_snapshots
 from .local_state import (
     COMMAND_GATE_BLOCKED_DECISIONS,
     VALID_OUTCOMES,
+    ambient_intervention_delivery_allowed,
     command_hash,
     consume_brief_token,
     evidence_snapshots_for_sessions,
     get_baselines,
     get_outcome,
     get_ui_server,
+    get_watcher_status,
     has_sent_notification,
     is_command_pattern_always_allowed,
     issue_brief_token,
@@ -48,6 +51,7 @@ from .local_state import (
     recent_hook_events,
     recent_interventions,
     record_always_allow_command_pattern,
+    record_ambient_intervention_action,
     record_command_decision,
     record_decision,
     record_evidence_snapshot,
@@ -56,6 +60,7 @@ from .local_state import (
     record_notification_sent,
     record_outcome,
     record_survival_check,
+    record_watcher_heartbeat,
     record_watch_notification,
     recent_watch_notifications,
     redact_command_for_storage,
@@ -65,8 +70,9 @@ from .local_state import (
     save_receipt_baseline,
     save_survival_summary,
     state_path,
+    upsert_ambient_intervention,
 )
-from .handoff import TARGET_LABELS, build_handoff_capsule, render_handoff_capsule
+from .handoff import HANDOFF_TYPE_LABELS, TARGET_LABELS, build_handoff_capsule, render_handoff_capsule
 from .ledger import Ledger, build_ledger, cost_per_surviving_line, repos_matching, unbanked_summary
 from .statusline import statusline_from_stdin, statusline_settings_snippet
 from .receipt import (
@@ -77,6 +83,7 @@ from .receipt import (
     rewrite_in_progress,
     survival_note,
 )
+from .runtime_attachment import runtime_attachment_for_session, safe_runtime_processes
 from .outcome_evidence import (
     VALID_EVIDENCE_OUTCOMES,
     build_outcome_evidence,
@@ -213,6 +220,56 @@ def short_path(path: str | None, max_len: int = 46) -> str:
     return "..." + path[-(max_len - 3):]
 
 
+def _is_inside_path(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+UNATTRIBUTED_PROJECT = "__unattributed__"
+UNATTRIBUTED_PROJECT_LABEL = "Unattributed sessions"
+
+
+def is_reliable_project_path(path: str | None) -> bool:
+    if not path or path == "unknown" or path == UNATTRIBUTED_PROJECT:
+        return False
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except OSError:
+        resolved = Path(path).expanduser()
+    temp_dirs = {
+        Path("/tmp").resolve(),
+        Path("/private/tmp").resolve(),
+        Path(tempfile.gettempdir()).resolve(),
+    }
+    common_non_projects = {
+        Path.home() / "Desktop",
+        Path.home() / "Documents",
+        Path.home() / "Downloads",
+        *temp_dirs,
+    }
+    if resolved in common_non_projects:
+        return False
+    parts = set(resolved.parts)
+    if ".claude" in parts or ".codex" in parts or ".cursor" in parts:
+        return False
+    if any(part.startswith("claude-") for part in resolved.parts) and any(_is_inside_path(resolved, temp_dir) for temp_dir in temp_dirs):
+        return False
+    return resolved.parent != resolved
+
+
+def project_key(path: str | None) -> str:
+    return path if is_reliable_project_path(path) else UNATTRIBUTED_PROJECT
+
+
+def project_label(path: str | None, max_len: int = 46) -> str:
+    if not is_reliable_project_path(path):
+        return UNATTRIBUTED_PROJECT_LABEL
+    return short_path(path, max_len)
+
+
 def local_midnight(day: date) -> datetime:
     return datetime.combine(day, time.min).astimezone()
 
@@ -223,6 +280,11 @@ def format_full_date(value: datetime) -> str:
 
 def format_short_datetime(value: datetime) -> str:
     return f"{value.strftime('%b')} {value.day} {value.strftime('%H:%M')}"
+
+
+def short_session_id(value: str | None) -> str:
+    text = str(value or "")
+    return f"{text[:8]}...{text[-4:]}" if len(text) > 12 else text or "unknown"
 
 
 def in_window(session: LocalSession, since: datetime) -> bool:
@@ -239,10 +301,10 @@ def sessions_since(days: int) -> list[LocalSession]:
     """
     since = datetime.now().astimezone() - timedelta(days=days)
     try:
-        events = scan_all_events()
+        events = scan_all_events(since=since)
     except OSError:
         events = []
-    return clip_sessions_to_window(scan_all(), events, since)
+    return clip_sessions_to_window(scan_all(since=since), events, since)
 
 
 def summarize(sessions: Iterable[LocalSession]) -> dict[str, float | int]:
@@ -277,12 +339,16 @@ def top_project(sessions: Iterable[LocalSession]) -> tuple[str, float, int] | No
     totals: dict[str, float] = defaultdict(float)
     counts: dict[str, int] = defaultdict(int)
     for session in sessions:
-        label = session.project_path or "unknown"
+        label = project_key(session.project_path)
         totals[label] += session.cost_usd
         counts[label] += 1
     if not totals:
         return None
-    best = max(totals, key=lambda key: (totals[key], counts[key]))
+    best = min(totals, key=lambda key: (
+        0 if key != UNATTRIBUTED_PROJECT else 1,
+        -totals[key],
+        -counts[key],
+    ))
     return best, totals[best], counts[best]
 
 
@@ -579,7 +645,7 @@ def render_today(days: int = 1) -> str:
     for row in rows:
         tool_key = f"{row.tool} ({row.surface})" if row.surface else row.tool
         by_tool[tool_key].append(row)
-        by_project[row.project_path or "unknown"].append(row)
+        by_project[project_key(row.project_path)].append(row)
     model_totals = model_usage_totals(rows)
 
     lines = [
@@ -591,9 +657,12 @@ def render_today(days: int = 1) -> str:
         f"Tool calls: {stats['tool_calls']}",
     ]
     if by_project:
-        project, project_rows = max(by_project.items(), key=lambda item: summarize(item[1])["cost_usd"])
+        project, project_rows = min(by_project.items(), key=lambda item: (
+            0 if item[0] != UNATTRIBUTED_PROJECT else 1,
+            -summarize(item[1])["cost_usd"],
+        ))
         project_stats = summarize(project_rows)
-        lines.append(f"Top project: {short_path(project)} ({money(float(project_stats['cost_usd']))})")
+        lines.append(f"Top project: {project_label(project)} ({money(float(project_stats['cost_usd']))})")
     if by_tool:
         tool, tool_rows = max(by_tool.items(), key=lambda item: summarize(item[1])["cost_usd"])
         lines.append(f"Top tool: {tool} ({summarize(tool_rows)['sessions']} sessions)")
@@ -606,18 +675,21 @@ def render_today(days: int = 1) -> str:
 def project_summary_text(days: int = 7, project: str | None = None) -> str:
     rows = sessions_since(days)
     if project:
-        rows = [row for row in rows if (row.project_path or "unknown") == project]
+        rows = [row for row in rows if project_key(row.project_path) == project]
     by_project: dict[str, list[LocalSession]] = defaultdict(list)
     for row in rows:
-        by_project[row.project_path or "unknown"].append(row)
+        by_project[project_key(row.project_path)].append(row)
     if not by_project:
         return f"No local AI project activity found in the last {days} days."
     lines = [f"AIWatcher project summary - last {days} days"]
-    ranked = sorted(by_project.items(), key=lambda item: summarize(item[1])["cost_usd"], reverse=True)
+    ranked = sorted(by_project.items(), key=lambda item: (
+        0 if item[0] != UNATTRIBUTED_PROJECT else 1,
+        -summarize(item[1])["cost_usd"],
+    ))
     for label, project_rows in ranked[:8]:
         stats = summarize(project_rows)
         lines.append(
-            f"- {short_path(label, 72)}: {stats['sessions']} sessions, "
+            f"- {project_label(label, 72)}: {stats['sessions']} sessions, "
             f"{compact_int(int(stats['tokens_in']) + int(stats['tokens_out']))} tokens, "
             f"{money(float(stats['cost_usd']))} API-equivalent value"
         )
@@ -667,6 +739,169 @@ def _number_range_label(low: int, high: int) -> str:
     if high == low:
         return compact_int(high)
     return f"{compact_int(low)}-{compact_int(high)}"
+
+
+def _brief_working_directory(cwd: str | None) -> str | None:
+    """Return a cwd only when it is specific enough to help the next agent.
+
+    A missing scanner attribution can collapse to "/" on POSIX. Including that
+    in a prompt is worse than omitting it: it nudges the next agent toward the
+    whole filesystem instead of a repo. Keep synthetic/fake test paths like
+    /repo/auth usable, but never present a root directory as a reliable project.
+    """
+    if not cwd:
+        return None
+    value = os.path.expanduser(str(cwd).strip())
+    if not value:
+        return None
+    normalized = os.path.abspath(value)
+    drive, tail = os.path.splitdrive(normalized)
+    if normalized == os.path.abspath(os.sep):
+        return None
+    if drive and tail in {"", os.sep, "\\"}:
+        return None
+    return normalized
+
+
+_HANDOFF_SECTION_HEADERS = {
+    "Objective",
+    "Project",
+    "Previous session",
+    "Why start fresh now",
+    "Why hand off now",
+    "Local evidence to inspect",
+    "Fresh-session instructions",
+    "When finished",
+}
+
+
+def _structured_section_lines(text: str, header: str, *, max_lines: int = 6) -> list[str]:
+    lines = text.splitlines()
+    captured: list[str] = []
+    in_section = False
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        if line.strip() == header:
+            in_section = True
+            continue
+        if in_section and line.strip() in _HANDOFF_SECTION_HEADERS:
+            break
+        if in_section:
+            if not line.strip():
+                continue
+            captured.append(line)
+            if len(captured) >= max_lines:
+                break
+    return captured
+
+
+def _normalize_handoff_project(lines: Sequence[str]) -> str | None:
+    for line in lines:
+        value = line.strip().strip("-").strip()
+        reliable = _brief_working_directory(value)
+        if reliable:
+            return reliable
+    return None
+
+
+LONG_PROMPT_BRIEF_THRESHOLD = 2500
+LONG_PROMPT_EXCERPT_CHARS = 1200
+
+
+def _long_prompt_excerpt(text: str) -> str:
+    compacted = re.sub(r"\n{3,}", "\n\n", text.strip())
+    if len(compacted) <= LONG_PROMPT_EXCERPT_CHARS:
+        return compacted
+    return (
+        compacted[:LONG_PROMPT_EXCERPT_CHARS].rstrip()
+        + "\n\n[AIWatcher omitted the rest of the pasted transcript. Ask the user for the specific missing detail if needed.]"
+    )
+
+
+def _long_prompt_topics(text: str) -> list[str]:
+    lower = text.lower()
+    topics: list[str] = []
+    if ("handoff" in lower or "fresh start" in lower) and ("link" in lower or "current session" in lower or "active session" in lower):
+        topics.append("- Audit Fresh Start/session identity: can the user tell which active AI session the action refers to?")
+    if "slow" in lower or "loading" in lower or "loads after" in lower:
+        topics.append("- Audit slow-loading session and Fresh Start screens: identify fast first-paint vs deferred evidence gaps.")
+    if "fresh" in lower or "new session" in lower or "context" in lower:
+        topics.append("- Audit Fresh Start continuation: does one action create the right brief/workspace path without extra context replay?")
+    if "moat" in lower or "strategy" in lower:
+        topics.append("- Check the recommendation against the current AIWatcher OSS moat/strategy before proposing changes.")
+    return topics[:4]
+
+
+def _plan_only_requested(lower: str) -> bool:
+    patterns = [
+        r"\bdo\s+not\s+(?:edit|fix|implement|change|modify|write|patch)\b",
+        r"\bdon'?t\s+(?:edit|fix|implement|change|modify|write|patch|jump on fixing|work on (?:any )?code changes)\b",
+        r"\bno\s+(?:code\s+)?changes\b",
+        r"\bwithout\s+(?:editing|changing|modifying|fixing|implementing)\b",
+        r"\bplan\s+only\b",
+        r"\breview\s+only\b",
+        r"\baudit\s+only\b",
+        r"\bjust\s+(?:tell|explain|review|analy[sz]e|plan)\b",
+    ]
+    return any(re.search(pattern, lower) for pattern in patterns)
+
+
+def _brief_task_sections(prompt: str, *, cwd: str | None) -> list[str]:
+    """Build the task section of an execution brief.
+
+    For normal prompts, preserve the user's request exactly. For AIWatcher
+    Fresh Start prompts, keep the output task-first by extracting the useful
+    structured sections instead of pasting the whole brief under Task.
+    """
+    text = prompt.strip()
+    if "AIWatcher fresh-session handoff" not in text and "AIWatcher Fresh Start brief" not in text:
+        if len(text) > LONG_PROMPT_BRIEF_THRESHOLD:
+            sections = [
+                "Triage this long request before execution.",
+                "",
+                "Requested outcome",
+                "- Identify the concrete question, bug, or product decision the user wants handled now.",
+                "- Do not execute every item in the pasted transcript as one task.",
+                "- Propose the smallest useful next checkpoint and wait if broader scope is needed.",
+            ]
+            topics = _long_prompt_topics(text)
+            if topics:
+                sections.extend(["", "Likely focus areas", *topics])
+            sections.extend(["", "Source request excerpt", _long_prompt_excerpt(text)])
+            return sections
+        return [text]
+
+    sections: list[str] = [
+        "Continue the AIWatcher Fresh Start brief from repository state on disk."
+    ]
+    objective = _structured_section_lines(text, "Objective", max_lines=5)
+    if objective:
+        sections.extend(["", "Requested outcome", *objective])
+
+    project = _normalize_handoff_project(_structured_section_lines(text, "Project", max_lines=2))
+    if not project:
+        project = _brief_working_directory(cwd)
+    if project:
+        sections.extend(["", "Project", project])
+    else:
+        sections.extend([
+            "",
+            "Project",
+            "unknown - inspect git status and current workspace before editing.",
+        ])
+
+    evidence = _structured_section_lines(text, "Local evidence to inspect", max_lines=8)
+    if evidence:
+        sections.extend(["", "Local evidence to inspect", *evidence])
+
+    handoff_reason = (
+        _structured_section_lines(text, "Why start fresh now", max_lines=3)
+        or _structured_section_lines(text, "Why hand off now", max_lines=3)
+    )
+    if handoff_reason:
+        sections.extend(["", "Supporting pressure context", *handoff_reason])
+
+    return sections
 
 
 def _quantile(values: list[float], q: float) -> float:
@@ -745,7 +980,7 @@ def get_or_refresh_survival(max_age_hours: int = SURVIVAL_MAX_AGE_HOURS) -> dict
     try:
         ledger = build_ledger(scan_all_events(), days=SURVIVAL_WINDOW_DAYS)
         summary = dict(cost_per_surviving_line(ledger))
-    except OSError:
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
         return cached or {}
     summary["computed_at"] = datetime.now(timezone.utc).isoformat()
     summary["accounting_version"] = SURVIVAL_ACCOUNTING_VERSION
@@ -801,7 +1036,7 @@ def get_or_refresh_receipt_baseline(
 
     try:
         repos = compute_repo_baselines(scan_all_events())
-    except OSError:
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
         return cached or {}
     payload = {
         "repos": repos,
@@ -952,6 +1187,7 @@ OUTCOME_SIGNAL_SAMPLE_CAP = 10  # bounds subprocess spawns per pass, same reason
 # Capping per pass spreads the backlog across subsequent OUTCOME_SIGNAL_INTERVAL_SECONDS
 # passes instead -- a few every 5 minutes rather than dozens all at once.
 MAX_OUTCOME_NOTIFICATIONS_PER_PASS = 3
+OVERLAY_REMINDER_SCOPE = "overlay"
 
 
 def recheck_evidence_survival(cap: int = SURVIVAL_RECHECK_CAP) -> int:
@@ -1137,15 +1373,19 @@ def build_execution_brief(
     sensitive_or_destructive: bool,
     vague_scope: bool,
     multiple_tasks: bool,
+    plan_only: bool = False,
 ) -> str:
     """Preserve the requested outcome while adding only relevant controls."""
-    lines = [
-        "Task",
-        prompt.strip(),
-        "",
-        "Execution approach",
-    ]
-    if broad_scope:
+    lines = ["Task"]
+    lines.extend(_brief_task_sections(prompt, cwd=cwd))
+    lines.extend(["", "Execution approach"])
+    lines.append("- Restate the exact outcome and success criteria in one or two sentences before spending context on tools.")
+    lines.append("- Make the first checkpoint explicit: what you will inspect, what you will change if needed, and where you will stop.")
+    if plan_only:
+        lines.append("- Review and reason only; do not edit files, run migrations, or make code changes.")
+        lines.append("- Return findings with the relevant files/functions, root cause, and minimal proposed fix/tests.")
+        lines.append("- Stop with a recommendation and implementation plan unless the user explicitly asks you to make changes.")
+    elif broad_scope:
         lines.append(
             "- Inspect the repository structure, identify the smallest relevant subsystem, and propose a phased plan before editing."
         )
@@ -1164,18 +1404,22 @@ def build_execution_brief(
             "- Do not reveal secret values or customer data. Ask for confirmation before deleting data, credentials, or production resources."
         )
 
-    lines.extend([
-        "- Preserve unrelated behavior and existing user changes.",
-        "- Run the narrowest relevant verification after implementation.",
-        "- Stop when the requested outcome is verified; do not expand into unrelated cleanup.",
-    ])
-    if cwd:
-        lines.extend(["", "Working directory", cwd])
-    lines.extend([
-        "",
-        "Completion report",
-        "Summarize what changed, verification performed, remaining uncertainty, and any cost or security tradeoff.",
-    ])
+    lines.append("- Preserve unrelated behavior and existing user changes.")
+    if plan_only:
+        lines.append("- Do not claim code was changed or tests were run unless the user later authorizes implementation.")
+    else:
+        lines.extend([
+            "- Run the narrowest relevant verification after implementation.",
+            "- Stop when the requested outcome is verified; do not expand into unrelated cleanup.",
+        ])
+    reliable_cwd = _brief_working_directory(cwd)
+    if reliable_cwd:
+        lines.extend(["", "Working directory", reliable_cwd])
+    lines.extend(["", "Completion report"])
+    if plan_only:
+        lines.append("Summarize findings, recommended minimal fix/tests, remaining uncertainty, and any cost or safety tradeoff.")
+    else:
+        lines.append("Summarize what changed, verification performed, remaining uncertainty, and any cost or security tradeoff.")
     return "\n".join(lines)
 
 
@@ -1409,6 +1653,7 @@ def analyze_prompt(
     suggestions: list[str] = []
     guardrails: list[dict[str, str]] = []
     score = 0
+    plan_only = _plan_only_requested(lower)
 
     broad_terms = [
         "entire codebase", "whole codebase", "all files", "everything", "full rewrite",
@@ -1564,6 +1809,11 @@ def analyze_prompt(
         suggestions.append("Split this into one task per prompt and checkpoint between them.")
         guardrails.append({"icon": "✂️", "label": "Split into smaller tasks"})
 
+    if plan_only and score > 0:
+        findings.append("Prompt asks for review/planning only, so the execution brief should prevent code edits.")
+        suggestions.append("Keep this as an audit: return findings, proposed fix/tests, and wait before changing files.")
+        guardrails.append({"icon": "\U0001F6A7", "label": "Review only"})
+
     if not findings:
         findings.append("No obvious cost or safety risk found from prompt text alone.")
         suggestions.append("Keep the task scoped and ask for a brief plan before large edits.")
@@ -1615,10 +1865,11 @@ def analyze_prompt(
         text,
         cwd=cwd,
         broad_scope=broad_scope,
-        needs_checkpoint=needs_checkpoint,
+        needs_checkpoint=needs_checkpoint and not plan_only,
         sensitive_or_destructive=sensitive_or_destructive,
         vague_scope=vague_scope,
         multiple_tasks=multiple_tasks,
+        plan_only=plan_only,
     )
     return {
         "risk": risk,
@@ -2549,8 +2800,11 @@ def render_journal(days: int = 1) -> str:
     stats = summarize(rows)
     by_project: dict[str, list[LocalSession]] = defaultdict(list)
     for row in rows:
-        by_project[row.project_path or "unknown"].append(row)
-    top = max(by_project.items(), key=lambda item: summarize(item[1])["cost_usd"])
+        by_project[project_key(row.project_path)].append(row)
+    top = min(by_project.items(), key=lambda item: (
+        0 if item[0] != UNATTRIBUTED_PROJECT else 1,
+        -summarize(item[1])["cost_usd"],
+    ))
     top_project_stats = summarize(top[1])
     costliest = max(rows, key=lambda row: (row.cost_usd, row.tokens_in + row.tokens_out))
     pressure_rows = [row for row in rows if not has_cumulative_totals(row)]
@@ -2567,15 +2821,15 @@ def render_journal(days: int = 1) -> str:
     return "\n".join([
         f"AIWatcher daily journal - last {days} day{'s' if days != 1 else ''}",
         f"Sessions: {stats['sessions']} | {money(float(stats['cost_usd']))} API-equivalent | {token_summary_label(rows)}",
-        f"Top project: {short_path(top[0], 72)} ({money(float(top_project_stats['cost_usd']))})",
-        f"Most expensive session: {short_path(costliest.project_path)} | {costliest.tool} | {money(costliest.cost_usd)} | {compact_int(costliest.tokens_in + costliest.tokens_out)} tokens",
+        f"Top project: {project_label(top[0], 72)} ({money(float(top_project_stats['cost_usd']))})",
+        f"Most expensive session: {project_label(costliest.project_path)} | {costliest.tool} | {money(costliest.cost_usd)} | {compact_int(costliest.tokens_in + costliest.tokens_out)} tokens",
         (
-            f"Largest reliable context session: {short_path(largest_context.project_path)} | "
+            f"Largest reliable context session: {project_label(largest_context.project_path)} | "
             f"{compact_int(largest_context.tokens_in + largest_context.tokens_out)} tokens"
             if largest_context else "Largest reliable context session: unavailable from local logs"
         ),
         (
-            f"Loop signal: {loop_candidate.agent_calls} model calls in {short_path(loop_candidate.project_path)}"
+            f"Loop signal: {loop_candidate.agent_calls} model calls in {project_label(loop_candidate.project_path)}"
             if loop_candidate else "Loop signal: unavailable from local logs"
         ),
         "",
@@ -3090,6 +3344,7 @@ def command_today(_args: argparse.Namespace) -> int:
     all_sessions = scan_all()
     try:
         link_recent_interventions_to_sessions(all_sessions)
+        link_recent_fresh_start_receipts_to_sessions(all_sessions)
     except OSError:
         pass
     try:
@@ -3169,13 +3424,13 @@ def command_today(_args: argparse.Namespace) -> int:
             share_base = float(today_stats["cost_usd"]) or float(today_stats["sessions"]) or 1
             share_value = spend if float(today_stats["cost_usd"]) else session_count
             share = round(share_value / share_base * 100)
-            print(f"\nTop project: {short_path(label)} ({share}% of today's {'API-equivalent value' if float(today_stats['cost_usd']) else 'sessions'})")
+            print(f"\nTop project: {project_label(label)} ({share}% of today's {'API-equivalent value' if float(today_stats['cost_usd']) else 'sessions'})")
 
         longest = longest_session(today, today_start)
         if longest:
             print(
                 f"Longest session: {compact_duration(reliable_session_seconds(longest, today_start))} "
-                f"in {short_path(longest.project_path)} "
+                f"in {project_label(longest.project_path)} "
                 f"({longest.tool}, {money(longest.cost_usd)})"
             )
         else:
@@ -3216,13 +3471,16 @@ def command_projects(args: argparse.Namespace) -> int:
     sessions = sessions_since(args.days)
     by_project: dict[str, list[LocalSession]] = defaultdict(list)
     for session in sessions:
-        by_project[session.project_path or "unknown"].append(session)
+        by_project[project_key(session.project_path)].append(session)
     print(f"AI usage by project - last {args.days} days")
     print("Cost is shown as API-equivalent value; subscription plans may differ.\n")
-    ranked = sorted(by_project.items(), key=lambda item: summarize(item[1])["cost_usd"], reverse=True)
+    ranked = sorted(by_project.items(), key=lambda item: (
+        0 if item[0] != UNATTRIBUTED_PROJECT else 1,
+        -summarize(item[1])["cost_usd"],
+    ))
     for project, rows in ranked[: args.limit]:
         stats = summarize(rows)
-        print(f"{money(float(stats['cost_usd'])):>10}  {stats['sessions']:>4} sessions  {compact_int(int(stats['tokens_in']) + int(stats['tokens_out'])):>8} tokens  {project}")
+        print(f"{money(float(stats['cost_usd'])):>10}  {stats['sessions']:>4} sessions  {compact_int(int(stats['tokens_in']) + int(stats['tokens_out'])):>8} tokens  {project_label(project, 80)}")
     if args.days > 30:
         print_cloud_hint("Need org-wide project attribution? Cloud maps spend by user, team, and repo.")
     return 0
@@ -3245,12 +3503,15 @@ def command_report(args: argparse.Namespace) -> int:
     projects: dict[str, list[LocalSession]] = defaultdict(list)
     tools: dict[str, list[LocalSession]] = defaultdict(list)
     for row in rows:
-        projects[row.project_path or "unknown"].append(row)
+        projects[project_key(row.project_path)].append(row)
         tool_key = f"{row.tool} ({row.surface})" if row.surface else row.tool
         tools[tool_key].append(row)
     model_totals = model_usage_totals(rows)
 
-    ranked_projects = sorted(projects.items(), key=lambda item: summarize(item[1])["cost_usd"], reverse=True)
+    ranked_projects = sorted(projects.items(), key=lambda item: (
+        0 if item[0] != UNATTRIBUTED_PROJECT else 1,
+        -summarize(item[1])["cost_usd"],
+    ))
     ranked_tools = sorted(tools.items(), key=lambda item: summarize(item[1])["cost_usd"], reverse=True)
     ranked_models = sorted(model_totals.items(), key=lambda item: item[1]["cost_usd"], reverse=True)
 
@@ -3264,7 +3525,7 @@ def command_report(args: argparse.Namespace) -> int:
     if ranked_projects:
         project, project_rows = ranked_projects[0]
         project_stats = summarize(project_rows)
-        print(f"Top project: {short_path(project)} ({money(float(project_stats['cost_usd']))})")
+        print(f"Top project: {project_label(project)} ({money(float(project_stats['cost_usd']))})")
     if ranked_tools:
         tool, tool_rows = ranked_tools[0]
         tool_stats = summarize(tool_rows)
@@ -3497,18 +3758,15 @@ def _send_local_notification(title: str, body: str, *, url: str | None = None) -
             )
             return True, "terminal-notifier"
         if sys.platform == "darwin" and shutil.which("osascript"):
-            script = (
-                f"display notification {json.dumps(clean_body)} "
-                f"with title {json.dumps(clean_title)}"
-            )
-            subprocess.run(
-                ["osascript", "-l", "AppleScript", "-e", script],
-                check=True,
-                timeout=3,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return True, "osascript"
+            # AppleScript notifications are owned by the Script Editor/
+            # osascript host. macOS therefore sends the user to Script Editor
+            # when they click "Show", and AppleScript's `display notification`
+            # cannot attach our dashboard URL. That is worse than a quiet
+            # failure because it looks like a broken AIWatcher action. The
+            # actionable native companion is the supported no-dependency
+            # fallback; a future signed menu-bar app can own Notification
+            # Center alerts under the AIWatcher identity.
+            return False, "macOS action notification unavailable; use the AIWatcher companion overlay"
         if shutil.which("notify-send"):
             subprocess.run(
                 ["notify-send", clean_title, clean_body],
@@ -3592,7 +3850,19 @@ def _watch_ui_base_url() -> str:
     return f"http://{ui_host}:{ui_port}"
 
 
-def _open_native_handoff_overlay(url: str, *, title: str, body: str, severity: str) -> tuple[bool, str]:
+def _open_native_handoff_overlay(
+    url: str,
+    *,
+    title: str,
+    body: str,
+    severity: str,
+    brief_file: str | None = None,
+    intervention_fingerprint: str = "",
+    signal_kind: str = "generic",
+    primary_label: str | None = None,
+    primary_mode: str | None = None,
+    runtime_action_available: bool = False,
+) -> tuple[bool, str]:
     """Launch the small always-on-top desktop companion when available."""
     mode = os.environ.get("AIWATCHER_OVERLAY_MODE", "native").strip().lower()
     if mode in {"browser", "web"}:
@@ -3623,6 +3893,17 @@ def _open_native_handoff_overlay(url: str, *, title: str, body: str, severity: s
                 body,
                 "--severity",
                 severity,
+                *(
+                    ["--brief-file", brief_file]
+                    if brief_file
+                    else []
+                ),
+                *(["--intervention-fingerprint", intervention_fingerprint] if intervention_fingerprint else []),
+                "--signal-kind",
+                signal_kind,
+                *(["--primary-label", primary_label] if primary_label else []),
+                *(["--primary-mode", primary_mode] if primary_mode else []),
+                *(["--runtime-action-available"] if runtime_action_available else []),
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -3639,11 +3920,36 @@ def _open_handoff_overlay(
     title: str = "AIWatcher handoff recommended",
     body: str = "",
     severity: str = "warning",
+    brief_text: str | None = None,
+    intervention_fingerprint: str = "",
+    signal_kind: str = "generic",
+    primary_label: str | None = None,
+    primary_mode: str | None = None,
+    runtime_action_available: bool = False,
 ) -> tuple[bool, str]:
     """Best-effort local companion overlay outside the AI tool UI."""
     if os.environ.get("AIWATCHER_DISABLE_OVERLAY", "").strip().lower() in {"1", "true", "yes", "on"}:
         return False, "disabled by AIWATCHER_DISABLE_OVERLAY"
-    native_ok, native_detail = _open_native_handoff_overlay(url, title=title, body=body, severity=severity)
+    brief_file = None
+    if brief_text:
+        try:
+            fd, brief_file = tempfile.mkstemp(prefix="aiwatcher-handoff-", suffix=".txt")
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(brief_text)
+        except OSError:
+            brief_file = None
+    native_ok, native_detail = _open_native_handoff_overlay(
+        url,
+        title=title,
+        body=body,
+        severity=severity,
+        brief_file=brief_file,
+        intervention_fingerprint=intervention_fingerprint,
+        signal_kind=signal_kind,
+        primary_label=primary_label,
+        primary_mode=primary_mode,
+        runtime_action_available=runtime_action_available,
+    )
     if native_ok:
         return True, native_detail
     if os.environ.get("AIWATCHER_OVERLAY_MODE", "").strip().lower() in {"native", "desktop", "native-only"}:
@@ -3739,8 +4045,13 @@ def command_handoff(args: argparse.Namespace) -> int:
         session,
         events_for_session(session.session_id, days=args.days),
         outcome=outcome.get("outcome") if outcome else None,
-        include_prompt_excerpt=args.include_prompt_excerpt,
-        target=args.target,
+        include_prompt_excerpt=getattr(args, "include_prompt_excerpt", False),
+        target=getattr(args, "target", "generic"),
+        handoff_type=getattr(args, "type", "coding"),
+        objective=getattr(args, "objective", None),
+        source_refs=getattr(args, "source", []),
+        constraints=getattr(args, "constraint", []),
+        acceptance_criteria=getattr(args, "acceptance", []),
     )
     if args.format == "json":
         rendered = json.dumps(capsule, indent=2)
@@ -3835,7 +4146,11 @@ def _runway_pressure(tool: str, sessions: Sequence[LocalSession]) -> dict[str, o
 LOOP_FLAG_REPEAT = 3     # a single action repeated this many times (or more) is worth a mention
 LOOP_CAPSULE_REPEAT = 5  # this many repeats -- stop and get a rescoped brief, not just "narrow scope"
 VELOCITY_WINDOW_MINUTES = 10.0  # look at the most recent N minutes of a session's own events
-VELOCITY_RATIO = 2.0            # tokens/minute at or above this multiple of the tool's baseline = runaway
+VELOCITY_RATIO = 3.0            # tokens/minute at or above this multiple of the tool's baseline = runaway
+VELOCITY_MIN_TOKENS_PER_MINUTE = 12_000.0
+VELOCITY_MIN_WINDOW_TOKENS = 80_000
+VELOCITY_MIN_SPAN_MINUTES = 5.0
+VELOCITY_MIN_RECENT_EVENTS = 5
 
 
 def _loop_signal(events: Sequence[LocalEvent]) -> dict[str, object] | None:
@@ -3906,13 +4221,16 @@ def _velocity_signal(tool: str, events: Sequence[LocalEvent]) -> dict[str, objec
     latest = max(e.timestamp for e in timestamped)
     window_start = latest - timedelta(minutes=VELOCITY_WINDOW_MINUTES)
     window_events = [e for e in timestamped if e.timestamp >= window_start]
-    if len(window_events) < 2:
+    if len(window_events) < VELOCITY_MIN_RECENT_EVENTS:
         return None
     window_tokens = sum(e.tokens_in + e.tokens_out for e in window_events)
-    span_minutes = max(1.0, (latest - min(e.timestamp for e in window_events)).total_seconds() / 60.0)
+    observed_span_minutes = (latest - min(e.timestamp for e in window_events)).total_seconds() / 60.0
+    if observed_span_minutes < VELOCITY_MIN_SPAN_MINUTES or window_tokens < VELOCITY_MIN_WINDOW_TOKENS:
+        return None
+    span_minutes = max(1.0, observed_span_minutes)
     tokens_per_minute = window_tokens / span_minutes
     ratio = tokens_per_minute / baseline_tokens_per_minute
-    if ratio < VELOCITY_RATIO:
+    if ratio < VELOCITY_RATIO or tokens_per_minute < VELOCITY_MIN_TOKENS_PER_MINUTE:
         return None
     return {
         "tool": baseline_tool,
@@ -3948,15 +4266,19 @@ def _watch_status(
     )
 
     action = "continue"
+    signal_kind = "healthy"
     reason = "No urgent local signal detected."
     if health is not None and health.severity == "critical":
         action = "create handoff capsule now"
+        signal_kind = "critical_context"
         reason = health.recommendations[0] if health.recommendations else "Context health is critical."
     elif loop is not None and loop["max_repeat"] >= LOOP_CAPSULE_REPEAT:
         action = "create handoff capsule now"
+        signal_kind = "loop"
         reason = str(loop["diagnosis"])
     elif velocity is not None:
         action = "narrow scope"
+        signal_kind = "velocity"
         reason = (
             f"Velocity is {velocity['ratio']:.1f}x your typical {velocity['tool']} pace "
             f"({compact_int(int(velocity['tokens_per_minute']))} tokens/min over the last "
@@ -3964,6 +4286,7 @@ def _watch_status(
         )
     elif runway is not None and float(runway["pressure_ratio"]) >= RUNWAY_PRESSURE_RATIO:
         action = "switch tool or lane"
+        signal_kind = "runway"
         suggested_target = _alternate_target_for_tool(str(runway["tool"]))
         reason = (
             f"Estimated usage in the last {RUNWAY_WINDOW_HOURS:.0f}h is "
@@ -3974,12 +4297,15 @@ def _watch_status(
         )
     elif health is not None and health.severity == "warning":
         action = "start fresh" if health.is_critical_stale else "narrow scope"
+        signal_kind = "warning_context"
         reason = health.recommendations[0] if health.recommendations else "Context pressure is elevated."
     elif loop is not None:
         action = "narrow scope"
+        signal_kind = "loop"
         reason = str(loop["diagnosis"])
     elif insights:
         action = "narrow scope"
+        signal_kind = "usage_pressure"
         reason = insights[0]
 
     return {
@@ -3989,8 +4315,105 @@ def _watch_status(
         "runway": runway,
         "insights": insights,
         "action": action,
+        "signal_kind": signal_kind,
         "reason": reason,
     }
+
+
+def _watch_intervention_presentation(status: dict[str, object]) -> dict[str, str]:
+    """Translate a watch signal into one calm, truthful next action.
+
+    Detection and presentation are deliberately separate. A velocity spike is
+    a reason to focus the current run; it is not automatically a reason to
+    abandon the chat. Keeping this mapping centralized prevents the dashboard,
+    native companion, and OS notification from giving contradictory advice.
+    """
+    signal_kind = str(status.get("signal_kind") or "usage_pressure")
+    reason = str(status.get("reason") or "AIWatcher found local execution pressure.")
+    presentations = {
+        "critical_context": {
+            "title": "AIWatcher: start fresh before the next turn",
+            "primary_label": "Copy Fresh Start brief",
+            "action_mode": "fresh_chat",
+        },
+        "loop": {
+            "title": "AIWatcher: stop the repeated work",
+            "primary_label": "Inspect and stop",
+            "action_mode": "recover_loop",
+        },
+        "velocity": {
+            "title": "AIWatcher: narrow this run",
+            "primary_label": "Copy focused next step",
+            "action_mode": "continue_focused",
+        },
+        "runway": {
+            "title": "AIWatcher: switch lanes before usage pressure grows",
+            "primary_label": "Copy cross-tool Fresh Start",
+            "action_mode": "switch_tool",
+        },
+        "warning_context": {
+            "title": "AIWatcher: reduce context before broad work",
+            "primary_label": "Copy compact next step",
+            "action_mode": "continue_focused",
+        },
+        "usage_pressure": {
+            "title": "AIWatcher: focus the next step",
+            "primary_label": "Copy focused next step",
+            "action_mode": "continue_focused",
+        },
+    }
+    selected = presentations.get(signal_kind, presentations["usage_pressure"])
+    return {
+        **selected,
+        "signal_kind": signal_kind,
+        "body": reason,
+    }
+
+
+def _watch_action_display(action: object) -> str:
+    """Map internal watch actions to user-facing language."""
+    if str(action) == "create handoff capsule now":
+        return "prepare Fresh Start brief now"
+    return str(action)
+
+
+def _watch_allows_desktop_interruption(session: LocalSession, attachment: object) -> bool:
+    """Return whether a watch signal should interrupt outside the dashboard.
+
+    The dashboard can show every local signal. A desktop popup is stronger: it
+    should be reserved for work AIWatcher can tie to a live runtime, otherwise
+    background Codex/agent sessions can interrupt the user for stale work.
+    """
+    level = str(getattr(attachment, "level", "") or "")
+    if level == "active_process":
+        return True
+    if session.surface == "cli" and level != "historical":
+        return True
+    return False
+
+
+def _focused_continuation_brief(session: LocalSession, status: dict[str, object]) -> str:
+    """Create a paste-ready checkpoint for a run that should continue, focused.
+
+    Unlike a handoff capsule this does not tell the host it is a fresh chat. It
+    is safe to paste into the current session after a velocity, warning-context,
+    or generic usage-pressure signal.
+    """
+    reason = str(status.get("reason") or "Execution pressure is elevated.")
+    return "\n".join([
+        "AIWatcher focused continuation",
+        "",
+        f"Workspace: {project_label(session.project_path, max_len=120)}",
+        f"Observed signal: {reason}",
+        "",
+        "Before using more tools:",
+        "- Restate the exact outcome for this checkpoint in one sentence.",
+        "- Summarize what is already known and avoid repeating broad discovery.",
+        "- Inspect only the smallest relevant files or commands.",
+        "- Stop and ask before destructive changes or unrelated cleanup.",
+        "",
+        "Continue only the smallest checkpoint, run the narrowest useful verification, and report what remains.",
+    ])
 
 
 def _print_watch_status_card(
@@ -4018,7 +4441,7 @@ def _print_watch_status_card(
 
     print(f"Latest observed session ({when}, local logs only -- not a live feed)")
     print(f"  Tool/model : {session.tool} / {session.model or 'unknown'}")
-    print(f"  Project    : {short_path(session.project_path)}")
+    print(f"  Project    : {project_label(session.project_path)}")
     print(
         f"  Usage      : {money(session.cost_usd)} API-equivalent, "
         f"{compact_int(session.tokens_in + session.tokens_out)} tokens, "
@@ -4048,50 +4471,149 @@ def _print_watch_status_card(
             f"{float(runway['pressure_ratio']):.1f}x typical {runway['tool']} session "
             "-- local estimate, not a real-time quota API"
         )
-    print(f"  Recommended: {status['action']} -- {status['reason']}")
+    print(f"  Recommended: {_watch_action_display(status['action'])} -- {status['reason']}")
 
     if (getattr(args, "notify", False) or getattr(args, "overlay", False)) and status["action"] != "continue":
         key = f"{session.session_id}:{status['action']}"
-        # persist_key includes the session's own stamp, so a later run against
-        # unchanged local activity recognizes "already told you about this
-        # exact state" even though notification_seen (in-memory) resets on
-        # every fresh `--once` process -- without this, repeated `--once`
-        # invocations re-fire the same recommendation forever.
         persist_key = f"{key}:{stamp.isoformat()}"
-        already_seen = (notification_seen is not None and notification_seen.get(key) == stamp) or has_sent_notification(
-            persist_key
+        presentation = _watch_intervention_presentation(status)
+        severity = (
+            str(health.severity)
+            if health is not None and health.severity in {"warning", "critical"}
+            else "critical"
+            if loop is not None and int(loop.get("max_repeat", 0)) >= LOOP_CAPSULE_REPEAT
+            else "warning"
         )
+        base_url = _watch_ui_base_url()
+        dashboard_url = f"{base_url}/?session={quote(session.session_id, safe='')}"
+        overlay_url = f"{base_url}/overlay?session={quote(session.session_id, safe='')}"
+        expected_savings = None
+        if health is not None and health.latest_turn_replayed_tokens > 0:
+            expected_savings = {
+                "context_tokens": health.latest_turn_replayed_tokens,
+                "confidence": "measured_local_cache",
+                "basis": "latest turn cache-read tokens",
+            }
+        intervention = upsert_ambient_intervention(
+            session_id=session.session_id,
+            signal_kind=str(presentation["signal_kind"]),
+            action=str(presentation["action_mode"]),
+            severity=severity,
+            session_stamp=stamp.isoformat(),
+            reason=str(status["reason"]),
+            urls={"dashboard": dashboard_url, "overlay": overlay_url},
+            expected_savings=expected_savings,
+        )
+        fingerprint = str(intervention.get("fingerprint") or "") if intervention else ""
+        if fingerprint:
+            overlay_url = f"{overlay_url}&intervention={quote(fingerprint, safe='')}"
+        channel = "overlay" if getattr(args, "overlay", False) else "notification"
+        held_key = f"{key}:held:{channel}"
+        if notification_seen is not None and held_key in notification_seen:
+            print(f"  {channel.title()}: already held for dashboard")
+            return
+        is_recent = stamp != MIN_DT and (datetime.now(timezone.utc) - stamp).total_seconds() <= 30 * 60
+        attachment = runtime_attachment_for_session(
+            session,
+            state={"status": "active" if is_recent else "historical"},
+            processes=safe_runtime_processes(),
+        )
+        if not _watch_allows_desktop_interruption(session, attachment):
+            if notification_seen is not None:
+                notification_seen[held_key] = stamp
+            print(f"  {channel.title()}: held for dashboard (no live runtime attached)")
+            try:
+                record_watch_notification(
+                    session_id=session.session_id,
+                    tool=session.tool,
+                    action=str(status["action"]),
+                    reason=str(status["reason"]),
+                    sent=False,
+                    detail=f"{channel} held for dashboard - no live runtime attached",
+                    url=dashboard_url,
+                )
+            except OSError:
+                pass
+            return
+        already_seen = (
+            notification_seen is not None and key in notification_seen
+        ) or (fingerprint and not ambient_intervention_delivery_allowed(fingerprint, channel=channel))
         if already_seen:
-            print("  Notification: already sent for this session state")
+            print(f"  {channel.title()}: already handled for this signal")
         else:
             if notification_seen is not None:
                 notification_seen[key] = stamp
-            base_url = _watch_ui_base_url()
-            dashboard_url = f"{base_url}/?session={quote(session.session_id, safe='')}"
-            overlay_url = f"{base_url}/overlay?session={quote(session.session_id, safe='')}"
             ok = False
             detail = "not requested"
-            if getattr(args, "notify", False):
+            overlay_ok = False
+            overlay_detail = "not requested"
+            if channel == "notification":
                 ok, detail = _send_local_notification(
-                    f"AIWatcher: {status['action']}",
-                    f"{short_path(session.project_path)} - {status['reason']} - Review: {dashboard_url}",
+                    presentation["title"],
+                    f"{project_label(session.project_path)} - {status['reason']} - Review: {dashboard_url}",
                     url=dashboard_url,
                 )
                 print(f"  Notification: {'sent' if ok else 'not sent'} ({detail})")
-            overlay_ok = False
-            overlay_detail = "not requested"
-            if getattr(args, "overlay", False):
-                overlay_title = "AIWatcher: start a fresh chat"
-                overlay_body = f"{short_path(session.project_path)} — {status['reason']}"
-                overlay_severity = health.severity if health is not None else "warning"
+                if fingerprint:
+                    record_ambient_intervention_action(
+                        fingerprint,
+                        state="delivered" if ok else "failed",
+                        channel="notification",
+                        detail=detail,
+                    )
+            else:
+                if getattr(args, "notify", False):
+                    print("  Notification: not duplicated (companion owns this intervention)")
+                try:
+                    outcome = get_outcome(session.session_id)
+                except OSError:
+                    outcome = None
+                try:
+                    if presentation["action_mode"] in {"continue_focused"}:
+                        overlay_brief = _focused_continuation_brief(session, status)
+                    else:
+                        capsule = build_handoff_capsule(
+                            session,
+                            events,
+                            outcome=outcome.get("outcome") if outcome else None,
+                            target=args.target,
+                            extra_warnings=[str(loop["diagnosis"])] if loop is not None else None,
+                        )
+                        overlay_brief = str(capsule.get("next_brief") or "")
+                except OSError:
+                    overlay_brief = None
+                primary_label = str(presentation["primary_label"])
+                if (
+                    presentation["action_mode"] == "fresh_chat"
+                    and attachment.available
+                    and getattr(attachment, "level", "") != "app"
+                ):
+                    primary_label = "Copy brief + open workspace"
                 overlay_ok, overlay_detail = _open_handoff_overlay(
                     overlay_url,
-                    title=overlay_title,
-                    body=overlay_body,
-                    severity=str(overlay_severity),
+                    title=presentation["title"],
+                    body=(
+                        f"{project_label(session.project_path)} "
+                        f"[{session.tool}/{session.surface or 'unknown'}, {short_session_id(session.session_id)}] - "
+                        f"{getattr(attachment, 'identity_label', 'Local session')}: {status['reason']}"
+                    ),
+                    severity=severity,
+                    brief_text=overlay_brief,
+                    intervention_fingerprint=fingerprint,
+                    signal_kind=str(presentation["signal_kind"]),
+                    primary_label=primary_label,
+                    primary_mode="inspect" if presentation["action_mode"] == "recover_loop" else "copy",
+                    runtime_action_available=attachment.available and getattr(attachment, "level", "") != "app",
                 )
                 print(f"  Overlay: {'opened' if overlay_ok else 'not opened'} ({overlay_detail})")
-            record_notification_sent(persist_key)
+                if fingerprint and not overlay_ok:
+                    record_ambient_intervention_action(
+                        fingerprint,
+                        state="failed",
+                        channel="overlay",
+                        detail=overlay_detail,
+                    )
+            _record_notification_sent_safely(persist_key)
             try:
                 record_watch_notification(
                     session_id=session.session_id,
@@ -4099,14 +4621,7 @@ def _print_watch_status_card(
                     action=str(status["action"]),
                     reason=str(status["reason"]),
                     sent=ok or overlay_ok,
-                    detail=", ".join(
-                        part
-                        for part in [
-                            detail if detail != "not requested" else "",
-                            f"overlay {overlay_detail}" if overlay_detail != "not requested" else "",
-                        ]
-                        if part
-                    ),
+                    detail=detail if channel == "notification" else f"overlay {overlay_detail}",
                     url=dashboard_url,
                 )
             except OSError:
@@ -4119,7 +4634,7 @@ def _print_watch_status_card(
         # (in-memory, not persisted), so restarting watch will regenerate it once more.
         if critical_capsule_seen.get(session.session_id) == stamp:
             print(
-                f"\n  Capsule already generated this session. Run "
+                f"\n  Fresh Start brief already generated this session. Run "
                 f"`aiwatcher resume --session-id {session.session_id} --target {args.target} --copy` to get it again."
             )
         else:
@@ -4139,12 +4654,12 @@ def _print_watch_status_card(
                 extra_warnings=extra_warnings or None,
             )
             rendered = render_handoff_capsule(capsule)
-            print("\n  Stopping here is recommended -- generating a handoff capsule now:\n")
+            print("\n  Stopping here is recommended -- generating a Fresh Start brief now:\n")
             for line in rendered.splitlines():
                 print(f"  {line}" if line else "")
             ok, detail = _copy_to_clipboard(str(capsule.get("next_brief") or rendered))
             if ok:
-                print(f"\n  Copied {capsule.get('target_label') or 'handoff'} brief to clipboard.")
+                print(f"\n  Copied {capsule.get('target_label') or 'Fresh Start'} brief to clipboard.")
             else:
                 print(f"\n  Could not copy to clipboard ({detail}).")
     print()
@@ -4155,11 +4670,18 @@ def _outcome_dashboard_url(session_id: str | None = None) -> str:
     return f"{base}?session={quote(session_id, safe='')}" if session_id else base
 
 
+def _record_notification_sent_safely(signal_key: str) -> None:
+    try:
+        record_notification_sent(signal_key)
+    except OSError:
+        pass
+
+
 def _fire_outcome_notification(
     *, signal_key: str, signal_type: str, session_id: str, tool: str, title: str, reason: str, url: str
 ) -> None:
     ok, detail = _send_local_notification(title, f"{reason} Review: {url}", url=url)
-    record_notification_sent(signal_key)
+    _record_notification_sent_safely(signal_key)
     try:
         record_watch_notification(
             session_id=session_id,
@@ -4260,7 +4782,7 @@ def _check_outcome_review_signals(rows: Sequence[LocalSession]) -> None:
                 # discoverable at all (its source log aged out locally) -- there
                 # is nothing left to review, so mark it handled without ever
                 # popping a notification for a dead dashboard link.
-                record_notification_sent(signal_key)
+                _record_notification_sent_safely(signal_key)
                 already_reviewed += 1
                 continue
             if status == "survived":
@@ -4275,16 +4797,16 @@ def _check_outcome_review_signals(rows: Sequence[LocalSession]) -> None:
                 except OSError:
                     already_marked = False
                 if already_marked:
-                    record_notification_sent(signal_key)
+                    _record_notification_sent_safely(signal_key)
                     already_reviewed += 1
                     continue
-            project_label = short_path(session.project_path)
+            project_name = project_label(session.project_path)
             if status == "survived":
                 title = "AIWatcher: change survived"
-                reason = f"{project_label} - This session's change survived {bucket} days. Mark it useful?"
+                reason = f"{project_name} - This session's change survived {bucket} days. Mark it useful?"
             else:
                 title = "AIWatcher: change churned"
-                reason = f"{project_label} - This session looked useful, but the commit no longer exists on the branch."
+                reason = f"{project_name} - This session looked useful, but the commit no longer exists on the branch."
             _fire_outcome_notification(
                 signal_key=signal_key,
                 signal_type=f"survival_{bucket}",
@@ -4315,7 +4837,7 @@ def _check_outcome_review_signals(rows: Sequence[LocalSession]) -> None:
         except OSError:
             already_marked = False
         if already_marked:
-            record_notification_sent(signal_key)
+            _record_notification_sent_safely(signal_key)
             already_reviewed += 1
             continue
         _fire_outcome_notification(
@@ -4325,7 +4847,7 @@ def _check_outcome_review_signals(rows: Sequence[LocalSession]) -> None:
             tool=session.tool,
             title="AIWatcher: possible rework",
             reason=(
-                f"{short_path(session.project_path)} - A later session touched the same file(s) again. "
+                f"{project_label(session.project_path)} - A later session touched the same file(s) again. "
                 "Was the earlier session rework?"
             ),
             url=_outcome_dashboard_url(session.session_id),
@@ -4372,10 +4894,24 @@ def _check_outcome_review_signals(rows: Sequence[LocalSession]) -> None:
 
 
 def command_watch(args: argparse.Namespace) -> int:
+    if not getattr(args, "once", False):
+        current = get_watcher_status(max_age_seconds=max(30, int(getattr(args, "interval", 60)) * 2))
+        current_pid = current.get("pid") if isinstance(current, dict) else None
+        if current.get("running") and isinstance(current_pid, int) and current_pid != os.getpid():
+            try:
+                os.kill(current_pid, 0)
+            except (OSError, ProcessLookupError):
+                pass
+            else:
+                print(
+                    f"AIWatcher ambient Watch is already running (PID {current_pid}). "
+                    "Use the existing companion or stop that process before starting another."
+                )
+                return 0
     print("AIWatcher Local watch")
     print(
         "Read-only local scan. No data leaves this machine. "
-        "On critical context, AIWatcher may copy a local handoff brief. Press Ctrl+C to stop."
+        "On critical context, AIWatcher may copy a local Fresh Start brief. Press Ctrl+C to stop."
     )
     print("This re-scans local session logs on a timer -- it is not a live hook into a running agent.\n")
 
@@ -4385,6 +4921,13 @@ def command_watch(args: argparse.Namespace) -> int:
     last_outcome_signal_check: datetime | None = None
     try:
         while True:
+            record_watcher_heartbeat(
+                pid=os.getpid(),
+                mode="watch",
+                interval_seconds=max(2, int(args.interval)),
+                notify=bool(getattr(args, "notify", False)),
+                overlay=bool(getattr(args, "overlay", False)),
+            )
             rows = sorted(sessions_since(args.days), key=session_sort_key, reverse=True)
             try:
                 record_missing_evidence_snapshots(rows)
@@ -4456,7 +4999,7 @@ def command_watch(args: argparse.Namespace) -> int:
                     for row in interesting[:5]:
                         stamp = session_sort_key(row)
                         when = format_short_datetime(stamp.astimezone()) if stamp != MIN_DT else "unknown"
-                        print(f"[{when}] {row.tool} | {short_path(row.project_path)} | {money(row.cost_usd)} | {compact_int(row.tokens_in + row.tokens_out)} tokens")
+                        print(f"[{when}] {row.tool} | {project_label(row.project_path)} | {money(row.cost_usd)} | {compact_int(row.tokens_in + row.tokens_out)} tokens")
                         health = analyze_session_health(row, all_events.get(row.session_id, []))
                         if health is not None and health.severity in {"warning", "critical"}:
                             replay = (
@@ -4904,7 +5447,10 @@ def _classify_hook_prompt_source(prompt: str | None) -> dict[str, object]:
             "finding": "Hook payload looks like a host-generated task notification, not a direct user prompt.",
             "suggestion": "Allowing the host notification; AIWatcher will continue watching the resulting session metadata.",
         }
-    if text.startswith("AIWatcher handoff capsule") and _consume_brief_token_safely(
+    if (
+        text.startswith("AIWatcher handoff capsule")
+        or text.startswith("AIWatcher Fresh Start capsule")
+    ) and _consume_brief_token_safely(
         _extract_brief_token(text, "handoff_capsule"), "handoff_capsule"
     ):
         return {
@@ -4912,8 +5458,8 @@ def _classify_hook_prompt_source(prompt: str | None) -> dict[str, object]:
             "actionable": False,
             "skip_scoring": True,
             "event": "skipped_generated_brief",
-            "finding": "Hook payload is an AIWatcher-generated handoff capsule with a verified token.",
-            "suggestion": "Allowing the scoped capsule without opening another prompt gate.",
+            "finding": "Hook payload is an AIWatcher-generated Fresh Start capsule with a verified token.",
+            "suggestion": "Allowing the scoped Fresh Start capsule without opening another prompt gate.",
         }
     looks_like_execution_brief = (
         text.startswith("Task\n") and "Execution approach" in text and "Completion report" in text
@@ -6076,6 +6622,7 @@ def _matching_hook_intervention(
     event_tool = event.get("tool")
     event_session = event.get("session_id")
     event_cwd = event.get("cwd")
+    event_created_at = _parse_hook_status_time(event.get("created_at"))
     for row in interventions:
         if row.get("tool") != event_tool:
             continue
@@ -6083,8 +6630,25 @@ def _matching_hook_intervention(
             continue
         if event_cwd and row.get("cwd") and row.get("cwd") != event_cwd:
             continue
+        if not event_session:
+            intervention_created_at = _parse_hook_status_time(row.get("created_at"))
+            if not event_created_at or not intervention_created_at:
+                continue
+            delta_seconds = (intervention_created_at - event_created_at).total_seconds()
+            if delta_seconds < -10 or delta_seconds > 5 * 60:
+                continue
         return row
     return None
+
+
+def _parse_hook_status_time(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _hook_event_action(event: dict[str, object], interventions: list[dict[str, object]]) -> str:
@@ -6161,10 +6725,10 @@ def command_hook_status(_args: argparse.Namespace) -> int:
             print(line)
     handoff_decisions = recent_handoff_decisions(limit=5)
     if handoff_decisions:
-        print("\nRecent handoff bubble decisions")
+        print("\nRecent Fresh Start decisions")
         for row in handoff_decisions:
             expected = row.get("expected_saved_context_tokens")
-            saved = f" | ~{compact_int(expected)} context avoided" if isinstance(expected, int) and expected > 0 else ""
+            saved = f" | ~{compact_int(expected)} expected context at risk" if isinstance(expected, int) and expected > 0 else ""
             line = (
                 f"- {row.get('created_at', 'unknown')} | "
                 f"{row.get('decision', 'unknown')}{saved}"
@@ -6411,16 +6975,53 @@ def command_export(args: argparse.Namespace) -> int:
 def command_ui(args: argparse.Namespace) -> int:
     from .ui import serve
 
-    try:
-        get_or_refresh_baselines()
-        get_or_refresh_survival()
-        get_or_refresh_receipt_baseline()
-    except OSError:
-        pass
-    try:
-        recheck_evidence_survival()
-    except OSError:
-        pass
+    def refresh_ui_caches() -> None:
+        try:
+            get_or_refresh_baselines()
+            get_or_refresh_survival()
+            get_or_refresh_receipt_baseline()
+        except OSError:
+            pass
+        try:
+            recheck_evidence_survival()
+        except OSError:
+            pass
+
+    threading.Thread(target=refresh_ui_caches, name="aiwatcher-ui-cache-refresh", daemon=True).start()
+
+    def start_ambient_watch(_: str, __: int) -> subprocess.Popen[bytes] | None:
+        if getattr(args, "no_watch", False):
+            print("Ambient Watch not started (--no-watch).")
+            return None
+        watcher = get_watcher_status()
+        if watcher.get("running"):
+            print("Ambient Watch already running.")
+            return None
+        interval = max(15, int(getattr(args, "watch_interval", 60)))
+        command = [
+            sys.executable,
+            "-m",
+            "aiwatcher_cli",
+            "watch",
+            "--notify",
+            "--overlay",
+            "--interval",
+            str(interval),
+        ]
+        try:
+            proc = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            print(f"Ambient Watch started while the dashboard is open (interval {interval}s).")
+            return proc
+        except OSError as exc:
+            print(f"Ambient Watch could not start automatically: {exc}", file=sys.stderr)
+            print("Run `aiwatcher watch --notify --overlay --interval 60` manually if you want ambient nudges.", file=sys.stderr)
+            return None
 
     try:
         serve(
@@ -6429,6 +7030,7 @@ def command_ui(args: argparse.Namespace) -> int:
             auto_port=not args.no_port_fallback,
             port_attempts=args.port_attempts,
             restart=args.restart,
+            on_started=start_ambient_watch,
         )
     except OSError as exc:
         print(f"Could not start AIWatcher Local UI: {exc}", file=sys.stderr)
@@ -6557,13 +7159,38 @@ def build_parser() -> argparse.ArgumentParser:
     timeline.add_argument("--limit", type=int, default=30, help="Maximum number of events to show")
     timeline.set_defaults(func=command_timeline)
 
-    handoff = sub.add_parser("handoff", help="Create a local handoff capsule for continuing work in a fresh AI session")
+    handoff = sub.add_parser("handoff", help="Create a local Fresh Start brief for continuing work in a fresh AI session")
     handoff.add_argument("--session-id", help="Build the capsule from this session instead of the most recent one")
     handoff.add_argument("--days", type=int, default=30, help="How many days back to search for the session")
     handoff.add_argument("--target", choices=sorted(TARGET_LABELS), default="generic", help="Format the brief for a target AI tool")
     handoff.add_argument("--copy", action="store_true", help="Copy the next-session brief to the clipboard when supported")
     handoff.add_argument("--format", choices=["text", "json"], default="text", help="Print the capsule as text or JSON")
     handoff.add_argument("--include-prompt-excerpt", action="store_true", help="Include a local prompt excerpt in the capsule output")
+    handoff.add_argument(
+        "--type",
+        choices=sorted(HANDOFF_TYPE_LABELS),
+        default="coding",
+        help="Shape the Fresh Start brief for the kind of continuation",
+    )
+    handoff.add_argument("--objective", help="User-visible objective to carry into the fresh session")
+    handoff.add_argument(
+        "--source",
+        action="append",
+        default=[],
+        help="Source-of-truth file, URL, PR, or artifact the fresh session should read first; repeatable",
+    )
+    handoff.add_argument(
+        "--constraint",
+        action="append",
+        default=[],
+        help="Non-negotiable constraint or known bad path the fresh session must preserve; repeatable",
+    )
+    handoff.add_argument(
+        "--acceptance",
+        action="append",
+        default=[],
+        help="Acceptance check the fresh session should use before calling the work done; repeatable",
+    )
     handoff.set_defaults(func=command_handoff)
 
     resume = sub.add_parser("resume", help="Find a local session and create a target-ready continuation brief")
@@ -6585,6 +7212,31 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--format", choices=["text", "json"], default="text", help="Print the brief as text or JSON")
     resume.add_argument(
         "--include-prompt-excerpt", action="store_true", help="Include a local prompt excerpt in the brief output",
+    )
+    resume.add_argument(
+        "--type",
+        choices=sorted(HANDOFF_TYPE_LABELS),
+        default="coding",
+        help="Shape the Fresh Start brief for the kind of continuation",
+    )
+    resume.add_argument("--objective", help="User-visible objective to carry into the fresh session")
+    resume.add_argument(
+        "--source",
+        action="append",
+        default=[],
+        help="Source-of-truth file, URL, PR, or artifact the fresh session should read first; repeatable",
+    )
+    resume.add_argument(
+        "--constraint",
+        action="append",
+        default=[],
+        help="Non-negotiable constraint or known bad path the fresh session must preserve; repeatable",
+    )
+    resume.add_argument(
+        "--acceptance",
+        action="append",
+        default=[],
+        help="Acceptance check the fresh session should use before calling the work done; repeatable",
     )
     resume.set_defaults(func=command_resume)
 
@@ -6637,11 +7289,11 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument(
         "--overlay",
         action="store_true",
-        help="Open a local AIWatcher companion overlay when watch recommends a handoff or other action",
+        help="Open a local AIWatcher companion overlay when watch recommends Fresh Start or another action",
     )
     watch.add_argument(
         "--target", choices=sorted(TARGET_LABELS), default="generic",
-        help="Format the auto-generated CRITICAL-context handoff capsule for this AI tool",
+        help="Format the auto-generated CRITICAL-context Fresh Start brief for this AI tool",
     )
     watch.set_defaults(func=command_watch)
 
@@ -6795,6 +7447,8 @@ def build_parser() -> argparse.ArgumentParser:
     ui.add_argument("--port-attempts", type=int, default=20, help="How many sequential ports to try when the requested port is busy")
     ui.add_argument("--no-port-fallback", action="store_true", help="Fail instead of trying the next available port")
     ui.add_argument("--restart", action="store_true", help="Stop an existing local process on the requested port before starting")
+    ui.add_argument("--no-watch", action="store_true", help="Do not start Ambient Watch alongside the dashboard")
+    ui.add_argument("--watch-interval", type=int, default=60, help="Seconds between Ambient Watch scans when started with the UI")
     ui.set_defaults(func=command_ui)
 
     return parser

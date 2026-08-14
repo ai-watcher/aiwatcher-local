@@ -28,6 +28,7 @@ from unittest.mock import Mock, patch
 from aiwatcher_cli import cli, local_state, ui
 from aiwatcher_cli.local_state import recent_decisions
 from aiwatcher_cli.outcome_evidence import OutcomeEvidence
+from aiwatcher_cli.processes import RuntimeProcess
 from aiwatcher_cli.scanner import LocalEvent, LocalSession, SurfaceCoverage
 
 
@@ -115,6 +116,27 @@ class SurfaceCoverageCliTests(unittest.TestCase):
         self.assertIn("Cline", output)
         self.assertIn("Detected, not scanned", output)
         self.assertNotIn("Watching:", output)
+
+
+class ProjectAttributionCliTests(unittest.TestCase):
+    def test_projects_command_does_not_rank_filesystem_root_as_real_project(self) -> None:
+        rows = [
+            session(1, project="/"),
+            session(2, project="/repo/real"),
+        ]
+        rows[0].cost_usd = 100.0
+        rows[1].cost_usd = 1.0
+        with (
+            patch.object(cli, "sessions_since", return_value=rows),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_projects(SimpleNamespace(days=7, limit=10))
+
+        self.assertEqual(result, 0)
+        lines = [line for line in stdout.getvalue().splitlines() if line.strip().startswith("$")]
+        self.assertIn("/repo/real", lines[0])
+        self.assertIn("Unattributed sessions", lines[1])
+        self.assertNotIn("  /", lines[1])
 
 
 class PromptSavingsBaselineTests(unittest.TestCase):
@@ -253,13 +275,18 @@ class PromptSavingsBaselineTests(unittest.TestCase):
         with (
             patch.object(local_state, "_locked_state", side_effect=OSError("read-only state")),
             patch.object(cli, "scan_all", return_value=[]),
+            patch.object(cli, "scan_all_events", return_value=[]),
             patch.object(cli, "link_recent_interventions_to_sessions"),
+            patch.object(cli, "link_recent_fresh_start_receipts_to_sessions"),
             patch.object(cli, "_compute_baselines", return_value={
                 "computed_at": datetime.now(timezone.utc).isoformat(),
                 "history_days": 30,
                 "per_tool": {},
             }),
             patch.object(cli, "get_or_refresh_survival", return_value={}),
+            patch.object(cli, "get_or_refresh_receipt_baseline", return_value={}),
+            patch.object(cli, "record_missing_evidence_snapshots"),
+            patch.object(cli, "recheck_evidence_survival"),
             patch("sys.stdout", new_callable=io.StringIO),
         ):
             result = cli.command_today(SimpleNamespace())
@@ -276,6 +303,19 @@ class PromptSavingsBaselineTests(unittest.TestCase):
                 "per_tool": {},
             }),
             patch.object(cli, "get_or_refresh_survival", return_value={}),
+            patch.object(cli, "get_or_refresh_receipt_baseline", return_value={}),
+            patch.object(cli, "recheck_evidence_survival"),
+            patch("aiwatcher_cli.ui.build_weekly_digest", return_value={
+                "outcomes": {"useful": 0, "rework": 0, "abandoned": 0, "inferred_useful": 0, "inferred_churned": 0},
+                "highest_cost_useful_session": None,
+                "top_sessions": [],
+                "loop_candidates": [],
+                "velocity_candidates": [],
+                "command_gate": {"gates_fired": 0, "commands_blocked": 0},
+                "prompt_gate": {"flagged": 0, "modified": 0},
+                "survival": {"available": False, "reason": "Survival cache unavailable."},
+                "recommendation": "No urgent signal this window -- local usage looks healthy.",
+            }),
             patch("sys.stdout", new_callable=io.StringIO),
         ):
             result = cli.command_report(SimpleNamespace(days=7))
@@ -289,7 +329,17 @@ class PromptSavingsBaselineTests(unittest.TestCase):
             patch.object(cli, "get_or_refresh_survival", return_value={}),
             patch.object(cli, "get_or_refresh_receipt_baseline", return_value={}),
             patch.object(cli, "recheck_evidence_survival", return_value=0),
-            patch.object(ui, "_survival_summary", return_value=survival),
+            patch("aiwatcher_cli.ui.build_weekly_digest", return_value={
+                "outcomes": {"useful": 0, "rework": 0, "abandoned": 0, "inferred_useful": 0, "inferred_churned": 0},
+                "highest_cost_useful_session": None,
+                "top_sessions": [],
+                "loop_candidates": [],
+                "velocity_candidates": [],
+                "command_gate": {"gates_fired": 0, "commands_blocked": 0},
+                "prompt_gate": {"flagged": 0, "modified": 0},
+                "survival": survival,
+                "recommendation": "No urgent signal this window -- local usage looks healthy.",
+            }),
             patch("sys.stdout", new_callable=io.StringIO) as stdout,
         ):
             self.assertEqual(cli.command_report(SimpleNamespace(days=7)), 0)
@@ -343,6 +393,7 @@ class PromptSavingsBaselineTests(unittest.TestCase):
                 "per_tool": {},
             }),
             patch.object(cli, "get_or_refresh_survival", return_value={}),
+            patch.object(cli, "get_or_refresh_receipt_baseline", return_value={}),
             patch("aiwatcher_cli.ui.serve") as serve,
         ):
             result = cli.command_ui(SimpleNamespace(
@@ -356,11 +407,108 @@ class PromptSavingsBaselineTests(unittest.TestCase):
         self.assertEqual(result, 0)
         serve.assert_called_once()
 
+    def test_ui_startup_does_not_wait_for_cache_refresh(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_baseline_refresh() -> dict[str, object]:
+            entered.set()
+            release.wait(timeout=5)
+            return {}
+
+        with (
+            patch.object(cli, "get_or_refresh_baselines", side_effect=slow_baseline_refresh),
+            patch.object(cli, "get_or_refresh_survival", return_value={}),
+            patch.object(cli, "get_or_refresh_receipt_baseline", return_value={}),
+            patch.object(cli, "recheck_evidence_survival", return_value=0),
+            patch("aiwatcher_cli.ui.serve") as serve,
+        ):
+            result = cli.command_ui(SimpleNamespace(
+                host="127.0.0.1",
+                port=8765,
+                no_port_fallback=True,
+                port_attempts=1,
+                restart=False,
+                no_watch=True,
+            ))
+            self.assertEqual(result, 0)
+            serve.assert_called_once()
+            self.assertTrue(entered.wait(timeout=1))
+            release.set()
+
+    def test_ui_startup_starts_ambient_watch_by_default(self) -> None:
+        started: dict[str, object] = {}
+        proc = Mock()
+
+        def fake_serve(*_: object, **kwargs: object) -> None:
+            on_started = kwargs["on_started"]
+            started["resource"] = on_started("127.0.0.1", 8766)  # type: ignore[operator]
+
+        with (
+            patch.object(cli, "get_or_refresh_baselines", return_value={}),
+            patch.object(cli, "get_or_refresh_survival", return_value={}),
+            patch.object(cli, "get_or_refresh_receipt_baseline", return_value={}),
+            patch.object(cli, "recheck_evidence_survival"),
+            patch.object(cli, "get_watcher_status", return_value={"running": False}),
+            patch.object(cli.subprocess, "Popen", return_value=proc) as popen,
+            patch("aiwatcher_cli.ui.serve", side_effect=fake_serve),
+        ):
+            result = cli.command_ui(SimpleNamespace(
+                host="127.0.0.1",
+                port=8765,
+                no_port_fallback=True,
+                port_attempts=1,
+                restart=False,
+                no_watch=False,
+                watch_interval=5,
+            ))
+
+        self.assertEqual(result, 0)
+        self.assertIs(started["resource"], proc)
+        command = popen.call_args.args[0]
+        self.assertEqual(command[:4], [sys.executable, "-m", "aiwatcher_cli", "watch"])
+        self.assertIn("--notify", command)
+        self.assertIn("--overlay", command)
+        self.assertEqual(command[-2:], ["--interval", "15"])
+
+    def test_ui_startup_can_skip_ambient_watch(self) -> None:
+        def fake_serve(*_: object, **kwargs: object) -> None:
+            on_started = kwargs["on_started"]
+            self.assertIsNone(on_started("127.0.0.1", 8766))  # type: ignore[operator]
+
+        with (
+            patch.object(cli, "get_or_refresh_baselines", return_value={}),
+            patch.object(cli, "get_or_refresh_survival", return_value={}),
+            patch.object(cli, "get_or_refresh_receipt_baseline", return_value={}),
+            patch.object(cli, "recheck_evidence_survival"),
+            patch.object(cli.subprocess, "Popen") as popen,
+            patch("aiwatcher_cli.ui.serve", side_effect=fake_serve),
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            result = cli.command_ui(SimpleNamespace(
+                host="127.0.0.1",
+                port=8765,
+                no_port_fallback=True,
+                port_attempts=1,
+                restart=False,
+                no_watch=True,
+                watch_interval=60,
+            ))
+
+        self.assertEqual(result, 0)
+        popen.assert_not_called()
+
     def test_today_refreshes_a_missing_cache(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]
         with (
             patch.object(cli, "scan_all", return_value=[]),
+            patch.object(cli, "scan_all_events", return_value=[]),
             patch.object(cli, "link_recent_interventions_to_sessions"),
+            patch.object(cli, "link_recent_fresh_start_receipts_to_sessions"),
+            patch.object(cli, "record_missing_evidence_snapshots"),
+            patch.object(cli, "get_or_refresh_survival", return_value={}),
+            patch.object(cli, "get_or_refresh_receipt_baseline", return_value={}),
+            patch.object(cli, "recheck_evidence_survival"),
             patch.object(cli, "get_baselines", return_value={}),
             patch.object(cli, "sessions_since", return_value=rows),
             patch.object(cli, "save_baselines") as save,
@@ -376,8 +524,12 @@ class PromptSavingsBaselineTests(unittest.TestCase):
         rows = [session(1), session(2)]
         with (
             patch.object(cli, "scan_all", return_value=rows),
+            patch.object(cli, "scan_all_events", return_value=[]),
             patch.object(cli, "link_recent_interventions_to_sessions"),
-            patch.object(cli, "get_or_refresh_baselines"),
+            patch.object(cli, "link_recent_fresh_start_receipts_to_sessions"),
+            patch.object(cli, "get_or_refresh_baselines", return_value={}),
+            patch.object(cli, "get_or_refresh_survival", return_value={}),
+            patch.object(cli, "get_or_refresh_receipt_baseline", return_value={}),
             patch.object(cli, "recheck_evidence_survival"),
             patch.object(cli, "record_missing_evidence_snapshots") as recorder,
             patch("sys.stdout", new_callable=io.StringIO),
@@ -586,6 +738,45 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(args.session_id, "session-2")
         handoff.assert_called_once_with(args)
+
+    def test_handoff_passes_structured_capsule_fields_to_builder(self) -> None:
+        rows = [session(1, project="/repo/product")]
+        args = SimpleNamespace(
+            session_id="session-1",
+            days=7,
+            target="codex",
+            copy=False,
+            format="text",
+            include_prompt_excerpt=False,
+            type="product",
+            objective="Continue the product plan.",
+            source=["strategy.md"],
+            constraint=["Do not build a generic dashboard."],
+            acceptance=["Restate the acceptance bar before coding."],
+        )
+
+        with (
+            patch.object(cli, "sessions_since", return_value=rows),
+            patch.object(cli, "events_for_session", return_value=[]),
+            patch.object(cli, "get_outcome", return_value=None),
+            patch.object(
+                cli,
+                "build_handoff_capsule",
+                return_value={"next_brief": "brief", "target_label": "Codex"},
+            ) as builder,
+            patch.object(cli, "render_handoff_capsule", return_value="rendered"),
+            patch("sys.stdout", io.StringIO()),
+        ):
+            result = cli.command_handoff(args)
+
+        self.assertEqual(result, 0)
+        _, _, kwargs = builder.mock_calls[0]
+        self.assertEqual(kwargs["target"], "codex")
+        self.assertEqual(kwargs["handoff_type"], "product")
+        self.assertEqual(kwargs["objective"], "Continue the product plan.")
+        self.assertEqual(kwargs["source_refs"], ["strategy.md"])
+        self.assertEqual(kwargs["constraints"], ["Do not build a generic dashboard."])
+        self.assertEqual(kwargs["acceptance_criteria"], ["Restate the acceptance bar before coding."])
 
     def test_resume_outcome_filter_finds_most_recent_matching_outcome(self) -> None:
         now = datetime.now(timezone.utc)
@@ -910,7 +1101,7 @@ class PromptPreflightTests(unittest.TestCase):
             cli.command_watch(args)
         self.assertIn("not a live hook into a running agent", output.getvalue())
         self.assertIn("local logs only", output.getvalue())
-        self.assertIn("may copy a local handoff brief", output.getvalue())
+        self.assertIn("may copy a local Fresh Start brief", output.getvalue())
 
     def test_watch_critical_context_prints_handoff_capsule_inline(self) -> None:
         row = session(1, project="/repo/orcha")
@@ -939,10 +1130,10 @@ class PromptPreflightTests(unittest.TestCase):
             cli.command_watch(args)
         rendered = output.getvalue()
         self.assertIn("Context    : critical", rendered)
-        self.assertIn("Recommended: create handoff capsule now", rendered)
-        self.assertIn("generating a handoff capsule now", rendered)
-        self.assertIn("AIWatcher handoff capsule", rendered)
-        self.assertIn("AIWatcher fresh-session handoff", rendered)
+        self.assertIn("Recommended: prepare Fresh Start brief now", rendered)
+        self.assertIn("generating a Fresh Start brief now", rendered)
+        self.assertIn("AIWatcher Fresh Start capsule", rendered)
+        self.assertIn("AIWatcher Fresh Start brief", rendered)
         self.assertIn("Do not assume access to the previous chat", rendered)
         self.assertIn("First reply with what appears done", rendered)
 
@@ -983,12 +1174,13 @@ class PromptPreflightTests(unittest.TestCase):
             with patch("sys.stdout", second_output):
                 cli._print_watch_status_card(row, [row], args, all_events.get(row.session_id, []), critical_capsule_seen)
             copy_mock.assert_called_once()  # still just the one call from the first poll
-            self.assertIn("Capsule already generated", second_output.getvalue())
+            self.assertIn("Fresh Start brief already generated", second_output.getvalue())
             self.assertIn(f"--target {args.target}", second_output.getvalue())
 
     def test_watch_notify_sends_one_local_notification_per_session_state(self) -> None:
         row = session(1, project="/repo/orcha")
         row.agent_calls = 300
+        row.surface = "cli"
         args = SimpleNamespace(
             days=1,
             interval=15,
@@ -1002,24 +1194,28 @@ class PromptPreflightTests(unittest.TestCase):
         notification_seen: dict = {}
         output = io.StringIO()
 
-        with (
-            patch.object(cli, "get_baselines", return_value={}),
-            patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
-            patch("sys.stdout", output),
-        ):
-            cli._print_watch_status_card(row, [row], args, [], {}, notification_seen)
-            cli._print_watch_status_card(row, [row], args, [], {}, notification_seen)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(cli, "get_baselines", return_value={}),
+                patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
+                patch("sys.stdout", output),
+            ):
+                cli._print_watch_status_card(row, [row], args, [], {}, notification_seen)
+                cli._print_watch_status_card(row, [row], args, [], {}, notification_seen)
 
         notify.assert_called_once()
         rendered = output.getvalue()
         self.assertIn("Notification: sent", rendered)
-        self.assertIn("Notification: already sent", rendered)
+        self.assertIn("Notification: already handled for this signal", rendered)
 
     def test_watch_notify_passes_dashboard_deep_link_url(self) -> None:
         """Issue #31 (S-32): the notification should carry a deep link back
         into the local dashboard's session review, not just plain text."""
         row = session(1, project="/repo/orcha")
         row.agent_calls = 300
+        row.surface = "cli"
         args = SimpleNamespace(
             days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250,
             tokens_threshold=500_000, target="generic", notify=True,
@@ -1030,13 +1226,16 @@ class PromptPreflightTests(unittest.TestCase):
         # in local state, so without this the assertion silently depends on
         # whether the developer happens to have `aiwatcher ui` running, and on
         # which port. None exercises the DEFAULT_UI_PORT fallback deliberately.
-        with (
-            patch.object(cli, "get_baselines", return_value={}),
-            patch.object(cli, "get_ui_server", return_value=None),
-            patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
-            patch("sys.stdout", output),
-        ):
-            cli._print_watch_status_card(row, [row], args, [], {}, {})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(cli, "get_baselines", return_value={}),
+                patch.object(cli, "get_ui_server", return_value=None),
+                patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
+                patch("sys.stdout", output),
+            ):
+                cli._print_watch_status_card(row, [row], args, [], {}, {})
 
         notify.assert_called_once()
         _, kwargs = notify.call_args
@@ -1048,6 +1247,7 @@ class PromptPreflightTests(unittest.TestCase):
     def test_watch_overlay_opens_companion_without_notification(self) -> None:
         row = session(1, project="/repo/orcha")
         row.agent_calls = 300
+        row.surface = "cli"
         args = SimpleNamespace(
             days=1,
             interval=15,
@@ -1073,12 +1273,152 @@ class PromptPreflightTests(unittest.TestCase):
 
         notify.assert_not_called()
         overlay.assert_called_once()
-        self.assertEqual(
-            overlay.call_args.args[0],
-            f"http://127.0.0.1:{cli.DEFAULT_UI_PORT}/overlay?session={row.session_id}",
+        overlay_url = overlay.call_args.args[0]
+        self.assertTrue(
+            overlay_url.startswith(
+                f"http://127.0.0.1:{cli.DEFAULT_UI_PORT}/overlay?session={row.session_id}"
+            )
         )
+        self.assertIn("&intervention=", overlay_url)
         self.assertIn("Overlay: opened", stdout.getvalue())
         self.assertEqual(notifications[0]["detail"], "overlay test-overlay")
+
+    def test_watch_overlay_uses_live_runtime_process_attachment(self) -> None:
+        row = session(1, project="/repo/orcha")
+        row.agent_calls = 300
+        row.surface = "cli"
+        runtime = RuntimeProcess(
+            pid=123,
+            ppid=None,
+            age_seconds=60,
+            state="S",
+            tool="claude-code",
+            command="claude",
+            cwd="/repo/orcha",
+            session_id=row.session_id,
+        )
+        args = SimpleNamespace(
+            days=1,
+            interval=15,
+            once=True,
+            cost_threshold=5.0,
+            calls_threshold=250,
+            tokens_threshold=500_000,
+            target="generic",
+            notify=False,
+            overlay=True,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.object(cli, "get_baselines", return_value={}),
+                patch.object(cli, "safe_runtime_processes", return_value=[runtime]),
+                patch("aiwatcher_cli.runtime_attachment.shutil.which", return_value="/usr/local/bin/code"),
+                patch.object(cli, "_open_handoff_overlay", return_value=(True, "test-overlay")) as overlay,
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch("sys.stdout", io.StringIO()),
+            ):
+                cli._print_watch_status_card(row, [row], args, [], {}, {})
+
+        self.assertTrue(overlay.call_args.kwargs["runtime_action_available"])
+
+    def test_watch_overlay_dedupes_across_session_state_updates(self) -> None:
+        row = session(1, project="/repo/orcha")
+        row.agent_calls = 300
+        row.surface = "cli"
+        args = SimpleNamespace(
+            days=1,
+            interval=15,
+            once=True,
+            cost_threshold=5.0,
+            calls_threshold=250,
+            tokens_threshold=500_000,
+            target="generic",
+            notify=False,
+            overlay=True,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.object(cli, "get_baselines", return_value={}),
+                patch.object(cli, "_open_handoff_overlay", return_value=(True, "test-overlay")) as overlay,
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch("sys.stdout", io.StringIO()) as stdout,
+            ):
+                notification_seen = {}
+                cli._print_watch_status_card(row, [row], args, [], {}, notification_seen)
+                row.updated_at = (row.updated_at or datetime.now(timezone.utc)) + timedelta(minutes=1)
+                row.agent_calls += 1
+                cli._print_watch_status_card(row, [row], args, [], {}, notification_seen)
+
+        overlay.assert_called_once()
+        self.assertIn("already handled for this signal", stdout.getvalue())
+
+    def test_watch_overlay_holds_background_logs_without_live_runtime(self) -> None:
+        row = session(1, project="/repo/orcha")
+        row.agent_calls = 300
+        args = SimpleNamespace(
+            days=1,
+            interval=15,
+            once=True,
+            cost_threshold=5.0,
+            calls_threshold=250,
+            tokens_threshold=500_000,
+            target="generic",
+            notify=False,
+            overlay=True,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.object(cli, "get_baselines", return_value={}),
+                patch.object(cli, "safe_runtime_processes", return_value=[]),
+                patch.object(cli, "_open_handoff_overlay") as overlay,
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch("sys.stdout", io.StringIO()) as stdout,
+            ):
+                notification_seen = {}
+                cli._print_watch_status_card(row, [row], args, [], {}, notification_seen)
+                cli._print_watch_status_card(row, [row], args, [], {}, notification_seen)
+                notifications = local_state.recent_watch_notifications(limit=5)
+
+        overlay.assert_not_called()
+        self.assertIn("held for dashboard", stdout.getvalue())
+        self.assertIn("already held for dashboard", stdout.getvalue())
+        self.assertEqual(len(notifications), 1)
+        self.assertFalse(notifications[0]["sent"])
+
+    def test_watch_overlay_holds_historical_cli_logs_without_live_runtime(self) -> None:
+        row = session(1, project="/repo/orcha")
+        row.agent_calls = 300
+        row.surface = "cli"
+        row.updated_at = datetime.now(timezone.utc) - timedelta(hours=2)
+        args = SimpleNamespace(
+            days=1,
+            interval=15,
+            once=True,
+            cost_threshold=5.0,
+            calls_threshold=250,
+            tokens_threshold=500_000,
+            target="generic",
+            notify=False,
+            overlay=True,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.object(cli, "get_baselines", return_value={}),
+                patch.object(cli, "safe_runtime_processes", return_value=[]),
+                patch.object(cli, "_open_handoff_overlay") as overlay,
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch("sys.stdout", io.StringIO()) as stdout,
+            ):
+                cli._print_watch_status_card(row, [row], args, [], {}, {})
+                notifications = local_state.recent_watch_notifications(limit=5)
+
+        overlay.assert_not_called()
+        self.assertIn("held for dashboard", stdout.getvalue())
+        self.assertFalse(notifications[0]["sent"])
 
     def test_open_handoff_overlay_prefers_native_companion(self) -> None:
         with (
@@ -1090,6 +1430,28 @@ class PromptPreflightTests(unittest.TestCase):
                 title="AIWatcher: start fresh",
                 body="/repo — context is critical",
                 severity="critical",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "native desktop window")
+        native.assert_called_once()
+        browser.open.assert_not_called()
+
+    def test_open_handoff_overlay_passes_local_brief_file_to_native_companion(self) -> None:
+        def fake_native(*_: object, **kwargs: object) -> tuple[bool, str]:
+            brief_file = kwargs.get("brief_file")
+            self.assertIsInstance(brief_file, str)
+            with open(str(brief_file), encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "paste-ready handoff")
+            return True, "native desktop window"
+
+        with (
+            patch.object(cli, "_open_native_handoff_overlay", side_effect=fake_native) as native,
+            patch.object(cli, "webbrowser") as browser,
+        ):
+            ok, detail = cli._open_handoff_overlay(
+                "http://127.0.0.1:8765/overlay?session=session-1",
+                brief_text="paste-ready handoff",
             )
 
         self.assertTrue(ok)
@@ -1132,17 +1494,21 @@ class PromptPreflightTests(unittest.TestCase):
         # about the host rewrite.
         row = session(1, project="/repo/orcha")
         row.agent_calls = 300
+        row.surface = "cli"
         args = SimpleNamespace(
             days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250,
             tokens_threshold=500_000, target="generic", notify=True,
         )
-        with (
-            patch.object(cli, "get_baselines", return_value={}),
-            patch.object(cli, "get_ui_server", return_value={"host": "0.0.0.0", "port": 9123}),
-            patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
-            patch("sys.stdout", io.StringIO()),
-        ):
-            cli._print_watch_status_card(row, [row], args, [], {}, {})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(cli, "get_baselines", return_value={}),
+                patch.object(cli, "get_ui_server", return_value={"host": "0.0.0.0", "port": 9123}),
+                patch.object(cli, "_send_local_notification", return_value=(True, "test-notifier")) as notify,
+                patch("sys.stdout", io.StringIO()),
+            ):
+                cli._print_watch_status_card(row, [row], args, [], {}, {})
 
         _, kwargs = notify.call_args
         self.assertEqual(kwargs.get("url"), f"http://127.0.0.1:9123/?session={row.session_id}")
@@ -1154,6 +1520,7 @@ class PromptPreflightTests(unittest.TestCase):
         follow wherever the dashboard actually bound."""
         row = session(1, project="/repo/orcha")
         row.agent_calls = 300
+        row.surface = "cli"
         args = SimpleNamespace(
             days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250,
             tokens_threshold=500_000, target="generic", notify=True,
@@ -1179,6 +1546,7 @@ class PromptPreflightTests(unittest.TestCase):
         process exiting, not just live in the in-memory dedup dict."""
         row = session(1, project="/repo/orcha")
         row.agent_calls = 300
+        row.surface = "cli"
         args = SimpleNamespace(
             days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250,
             tokens_threshold=500_000, target="generic", notify=True,
@@ -1208,6 +1576,7 @@ class PromptPreflightTests(unittest.TestCase):
         issue #32's outcome-review signals are."""
         row = session(1, project="/repo/orcha")
         row.agent_calls = 300
+        row.surface = "cli"
         args = SimpleNamespace(
             days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250,
             tokens_threshold=500_000, target="generic", notify=True,
@@ -1229,14 +1598,14 @@ class PromptPreflightTests(unittest.TestCase):
                     cli._print_watch_status_card(row, [row], args, [], {}, {})
 
         notify.assert_called_once()
-        self.assertIn("already sent for this session state", output.getvalue())
+        self.assertIn("already handled for this signal", output.getvalue())
 
-    def test_watch_notify_fires_again_once_session_state_actually_changes(self) -> None:
-        """The persisted dedup key includes the session's stamp, so new local
-        activity (a later updated_at) must still be treated as a fresh,
-        notification-worthy state -- not suppressed forever."""
+    def test_watch_notify_stays_quiet_when_only_session_activity_changes(self) -> None:
+        """A changing log timestamp is not a new intervention. Continuous
+        sessions should not reopen the same warning on every watcher poll."""
         row = session(1, project="/repo/orcha")
         row.agent_calls = 300
+        row.surface = "cli"
         args = SimpleNamespace(
             days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250,
             tokens_threshold=500_000, target="generic", notify=True,
@@ -1253,7 +1622,7 @@ class PromptPreflightTests(unittest.TestCase):
                 row.updated_at = row.updated_at + timedelta(minutes=5)
                 cli._print_watch_status_card(row, [row], args, [], {}, {})
 
-        self.assertEqual(notify.call_count, 2)
+        self.assertEqual(notify.call_count, 1)
 
     def test_send_local_notification_terminal_notifier_opens_url_on_click(self) -> None:
         """Issue #31 (S-32): on macOS, terminal-notifier's `-open` flag makes
@@ -1285,6 +1654,29 @@ class PromptPreflightTests(unittest.TestCase):
 
         command = run_mock.call_args.args[0]
         self.assertNotIn("-open", command)
+
+    def test_send_local_notification_does_not_use_osascript_fallback(self) -> None:
+        """macOS attributes AppleScript notifications to Script Editor and
+        clicking Show cannot open AIWatcher, so fail quietly and let the
+        actionable companion overlay own the intervention instead."""
+        with (
+            patch.object(cli.sys, "platform", "darwin"),
+            patch.object(
+                cli.shutil,
+                "which",
+                side_effect=lambda name: "/usr/bin/osascript" if name == "osascript" else None,
+            ),
+            patch.object(cli.subprocess, "run") as run_mock,
+        ):
+            ok, detail = cli._send_local_notification(
+                "Context pressure",
+                "Session is at 92% context",
+                url="http://127.0.0.1:8765/?session=abc",
+            )
+
+        self.assertFalse(ok)
+        self.assertIn("companion overlay", detail)
+        run_mock.assert_not_called()
 
     def test_send_local_notification_powershell_messagebox_offers_yesno_when_url_given(self) -> None:
         """Issue #31 (S-32): with a dashboard URL available, the Windows
@@ -2102,16 +2494,53 @@ class VelocitySignalTests(unittest.TestCase):
         now = datetime.now(timezone.utc)
         rows = [session(index, tool="claude-code", age_days=index * 2, now=now) for index in range(10)]
         baselines = _baselines_from_sessions(rows)
-        # Baseline sessions run 15 real minutes each (see session()); burn the
-        # same order of tokens in under a minute here to force a clear multiple.
+        # Baseline sessions run 15 real minutes each (see session()); sustain
+        # materially high activity for several minutes to force a clear,
+        # actionable multiple rather than a one-turn spike.
         events = [
-            _event("s1", content_hash=f"c{i}", tokens_in=5000, tokens_out=1000, timestamp=now - timedelta(seconds=i * 5))
+            _event("s1", content_hash=f"c{i}", tokens_in=16000, tokens_out=1000, timestamp=now - timedelta(minutes=i))
             for i in range(6)
         ]
         with patch.object(cli, "get_baselines", return_value=baselines):
             velocity = cli._velocity_signal("claude-code", events)
         self.assertIsNotNone(velocity)
         self.assertGreaterEqual(velocity["ratio"], cli.VELOCITY_RATIO)
+
+    def test_suppresses_large_ratio_when_absolute_velocity_is_small(self) -> None:
+        now = datetime.now(timezone.utc)
+        baselines = {
+            "per_tool": {
+                "claude-code": {
+                    "session_count": cli.MIN_SAVINGS_SESSIONS,
+                    "history_span_days": cli.MIN_SAVINGS_HISTORY_DAYS,
+                    "p75_tokens_per_minute": 40.0,
+                }
+            }
+        }
+        events = [
+            _event("s1", content_hash=f"slow-{i}", tokens_in=4000, tokens_out=200, timestamp=now - timedelta(minutes=i))
+            for i in range(6)
+        ]
+        with patch.object(cli, "get_baselines", return_value=baselines):
+            self.assertIsNone(cli._velocity_signal("claude-code", events))
+
+    def test_suppresses_borderline_cache_replay_velocity(self) -> None:
+        now = datetime.now(timezone.utc)
+        baselines = {
+            "per_tool": {
+                "claude-code": {
+                    "session_count": cli.MIN_SAVINGS_SESSIONS,
+                    "history_span_days": cli.MIN_SAVINGS_HISTORY_DAYS,
+                    "p75_tokens_per_minute": 500.0,
+                }
+            }
+        }
+        events = [
+            _event("s1", content_hash=f"cache-{i}", tokens_in=10000, tokens_out=0, timestamp=now - timedelta(minutes=i))
+            for i in range(5)
+        ]
+        with patch.object(cli, "get_baselines", return_value=baselines):
+            self.assertIsNone(cli._velocity_signal("claude-code", events))
 
     def test_none_without_enough_baseline_history(self) -> None:
         baselines = _baselines_from_sessions([session(1, tool="claude-code")])
@@ -2130,6 +2559,31 @@ class VelocitySignalTests(unittest.TestCase):
         with patch.object(cli, "get_baselines", return_value=baselines):
             self.assertIsNone(cli._velocity_signal("claude-code", [_event("s1", timestamp=now)]))
 
+    def test_velocity_presentation_focuses_current_run_instead_of_forcing_handoff(self) -> None:
+        presentation = cli._watch_intervention_presentation({
+            "signal_kind": "velocity",
+            "reason": "Velocity is materially above the local baseline.",
+        })
+        self.assertEqual(presentation["action_mode"], "continue_focused")
+        self.assertIn("narrow", presentation["title"].lower())
+        self.assertNotIn("fresh", presentation["title"].lower())
+
+    def test_critical_context_presentation_is_a_truthful_copy_action(self) -> None:
+        presentation = cli._watch_intervention_presentation({
+            "signal_kind": "critical_context",
+            "reason": "Context is critical.",
+        })
+        self.assertEqual(presentation["action_mode"], "fresh_chat")
+        self.assertEqual(presentation["primary_label"], "Copy Fresh Start brief")
+
+    def test_loop_presentation_inspects_instead_of_promising_a_copy(self) -> None:
+        presentation = cli._watch_intervention_presentation({
+            "signal_kind": "loop",
+            "reason": "The same tool action repeated five times.",
+        })
+        self.assertEqual(presentation["action_mode"], "recover_loop")
+        self.assertEqual(presentation["primary_label"], "Inspect and stop")
+
 
 class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
     def test_watch_loop_seeded_capsule_leads_with_loop_diagnosis(self) -> None:
@@ -2145,15 +2599,15 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         ):
             cli.command_watch(args)
         rendered = output.getvalue()
-        self.assertIn("Recommended: create handoff capsule now", rendered)
+        self.assertIn("Recommended: prepare Fresh Start brief now", rendered)
         self.assertIn("Loop       : Possible loop", rendered)
-        self.assertIn("AIWatcher handoff capsule", rendered)
-        # The loop diagnosis must lead "Why hand off now", ahead of the generic checks.
-        why_hand_off = rendered.index("Why hand off now")
-        loop_in_capsule = rendered.index("Possible loop", why_hand_off)
+        self.assertIn("AIWatcher Fresh Start capsule", rendered)
+        # The loop diagnosis must lead "Why start fresh now", ahead of the generic checks.
+        why_start_fresh = rendered.index("Why start fresh now")
+        loop_in_capsule = rendered.index("Possible loop", why_start_fresh)
         # The loop diagnosis is the extra_warnings entry -- it must come
         # first in the bullet list, ahead of the generic cost/call checks.
-        first_bullet = rendered.index("- ", why_hand_off)
+        first_bullet = rendered.index("- ", why_start_fresh)
         self.assertEqual(loop_in_capsule, first_bullet + 2)
 
     def test_today_shows_every_model_used_and_tool_surface(self) -> None:
@@ -2211,6 +2665,29 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         self.assertEqual(original["risk"], "high")
         self.assertLess(selected["score"], original["score"])
         self.assertNotEqual(selected["risk"], "high")
+
+    def test_long_review_only_prompt_gets_compacted_audit_brief(self) -> None:
+        original = (
+            "dont work on any code changes, just tell me the plan. "
+            "Can you review my chat on handoff linking, slow loading session details, "
+            "and Fresh Start context handoff against the moat strategy?\n\n"
+            + ("Quoted prior chat and transcript detail. " * 160)
+        )
+
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt(original, tool="codex", cwd="/repo")
+
+        brief = str(result["suggested_prompt"])
+        self.assertLess(len(brief), len(original))
+        self.assertIn("Review and reason only; do not edit files", brief)
+        self.assertIn("Restate the exact outcome and success criteria", brief)
+        self.assertIn("Make the first checkpoint explicit", brief)
+        self.assertIn("Audit Fresh Start/session identity", brief)
+        self.assertIn("Audit slow-loading session", brief)
+        self.assertIn("Audit Fresh Start continuation", brief)
+        self.assertIn("Review only", [item["label"] for item in result["guardrails"]])
+        self.assertNotIn("Run the narrowest relevant verification after implementation", brief)
+        self.assertNotIn("Summarize what changed", brief)
 
     def test_guardrail_chips_match_triggered_findings(self) -> None:
         with patch.object(cli, "sessions_since", return_value=[]):
@@ -2550,7 +3027,7 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         core, suffix = cli._split_brief_for_display(full)
         self.assertNotIn("Working directory", core)
         self.assertNotIn("Completion report", core)
-        self.assertIn("Working directory\n/repo/auth", suffix)
+        self.assertIn(f"Working directory\n{Path('/repo/auth').resolve()}", suffix)
         self.assertIn("Completion report", suffix)
         # The split must be reversible -- nothing in the static suffix may be
         # dropped from what actually gets sent when reassembled.
@@ -2767,8 +3244,77 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         brief = result["suggested_prompt"]
         self.assertTrue(brief.startswith(f"Task\n{original}"))
         self.assertIn("Do not reveal secret values", brief)
-        self.assertIn("/repo/payments", brief)
+        self.assertIn("Restate the exact outcome and success criteria", brief)
+        self.assertIn("what you will inspect, what you will change if needed", brief)
+        self.assertIn(str(Path("/repo/payments").resolve()), brief)
         self.assertNotIn("Original task:", brief)
+
+    def test_execution_brief_omits_root_working_directory(self) -> None:
+        brief = cli.build_execution_brief(
+            "Delete old generated files after confirming the target directory",
+            cwd="/",
+            broad_scope=False,
+            needs_checkpoint=True,
+            sensitive_or_destructive=True,
+            vague_scope=False,
+            multiple_tasks=False,
+        )
+
+        self.assertNotIn("Working directory\n/", brief)
+        self.assertIn("Task\nDelete old generated files", brief)
+        self.assertIn("Ask for confirmation before deleting", brief)
+
+    def test_execution_brief_makes_aiwatcher_handoff_task_first(self) -> None:
+        handoff = """AIWatcher Fresh Start brief
+
+You are starting a fresh AI coding session. Do not assume access to the previous chat.
+
+Objective
+- Reconstruct the current state of the work from git status, recent commits, and the files listed below.
+- Identify the smallest safe next checkpoint.
+- Continue only that checkpoint after summarizing your plan.
+
+Project
+/
+
+Previous session
+- Previous tool/model: codex-cli / gpt-5.5
+- Usage observed: 679.2M tokens, 4472 model calls, 6370 tool calls, $0.00 API-equivalent value
+
+Why start fresh now
+- Context health is critical: latest turn used 163.6k input tokens with 0% efficiency.
+- 4472 model calls were observed; continue with a smaller checkpoint.
+
+Local evidence to inspect
+- Nearby commits: 0
+- Changed files: 0
+- Suggested check: git status --short
+- Suggested check: git diff --stat
+
+Fresh-session instructions
+- Treat this as a fresh AI coding session with no prior chat context.
+"""
+        brief = cli.build_execution_brief(
+            handoff,
+            cwd="/",
+            broad_scope=True,
+            needs_checkpoint=True,
+            sensitive_or_destructive=False,
+            vague_scope=False,
+            multiple_tasks=False,
+        )
+
+        self.assertTrue(
+            brief.startswith(
+                "Task\nContinue the AIWatcher Fresh Start brief from repository state on disk."
+            )
+        )
+        self.assertIn("Requested outcome\n- Reconstruct the current state", brief)
+        self.assertIn("Project\nunknown - inspect git status", brief)
+        self.assertIn("Local evidence to inspect\n- Nearby commits: 0", brief)
+        self.assertIn("Supporting pressure context\n- Context health is critical", brief)
+        self.assertNotIn("Working directory\n/", brief)
+        self.assertLess(brief.index("Requested outcome"), brief.index("Supporting pressure context"))
 
     def test_cumulative_codex_totals_do_not_trigger_session_pressure_alerts(self) -> None:
         row = session(1, tool="codex-cli")
@@ -3916,6 +4462,33 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertIn("action added edited brief", output)
         self.assertIn("brief_edited (added edited brief) | risk score 8 -> 2", output)
 
+    def test_hook_status_does_not_attach_old_same_repo_decision_without_session_id(self) -> None:
+        with (
+            patch.object(cli, "recent_hook_events", return_value=[{
+                "created_at": "2026-07-03T12:00:00+00:00",
+                "tool": "claude",
+                "cwd": "/repo",
+                "event": "received",
+                "prompt_found": True,
+                "risk": "high",
+                "score": 8,
+            }]),
+            patch.object(cli, "recent_interventions", return_value=[{
+                "created_at": "2026-07-03T11:00:00+00:00",
+                "tool": "claude",
+                "cwd": "/repo",
+                "decision": "blocked",
+                "score": 8,
+                "selected_score": None,
+            }]),
+            patch.object(cli, "recent_handoff_decisions", return_value=[]),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_hook_status(SimpleNamespace())
+
+        self.assertEqual(result, 0)
+        self.assertIn("action received; check recent decisions", stdout.getvalue())
+
     def test_hook_status_explains_context_added_is_not_a_popup(self) -> None:
         with (
             patch.object(cli, "recent_hook_events", return_value=[{
@@ -3991,9 +4564,9 @@ class IntegrationConfigTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         output = stdout.getvalue()
-        self.assertIn("Recent handoff bubble decisions", output)
+        self.assertIn("Recent Fresh Start decisions", output)
         self.assertIn("copy_handoff", output)
-        self.assertIn("~240.0k context avoided", output)
+        self.assertIn("~240.0k expected context at risk", output)
         self.assertIn("session sess-heavy", output)
 
 

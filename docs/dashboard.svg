@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1120" font-family="'Inter','Segoe UI',system-ui,-apple-system,sans-serif" role="img" aria-labelledby="t-today d-today">
   <title id="t-today">AIWatcher Local — Today</title>
-  <desc id="d-today">Today tab showing the latest AI work and one thing worth changing, useful outcomes/preflight decisions/sessions observed/API-equivalent value tiles, the latest intervention receipt with predicted savings, projects driving AI usage, and recent sessions.</desc>
+  <desc id="d-today">Today tab showing the latest AI work and one thing worth changing, useful outcomes/preflight decisions/sessions observed/API-equivalent value tiles, the latest receipt with proof status, projects driving AI usage, and recent sessions.</desc>
   <defs>
     <radialGradient id="bg-today" cx="0%" cy="0%" r="95%">
       <stop offset="0" stop-color="#18243a"/>

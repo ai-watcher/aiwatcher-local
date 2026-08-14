@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from aiwatcher_cli import local_state
-from aiwatcher_cli.correlate import link_recent_interventions_to_sessions
+from aiwatcher_cli.correlate import link_recent_fresh_start_receipts_to_sessions, link_recent_interventions_to_sessions
 from aiwatcher_cli.scanner import LocalSession
 
 
@@ -128,6 +128,122 @@ class CorrelateTests(unittest.TestCase):
                 ])
 
         self.assertEqual(linked, 0)
+
+    def test_links_fresh_start_receipt_to_first_later_same_project_session(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                decision = local_state.record_handoff_decision(
+                    session_id="source",
+                    decision="new_chat",
+                    reason="Context pressure.",
+                )
+                linked = link_recent_fresh_start_receipts_to_sessions([
+                    session(session_id="source", project="/repo/app", started_at=now - timedelta(hours=2)),
+                    session(session_id="later", project="/repo/app", started_at=now + timedelta(minutes=3)),
+                    session(session_id="latest", project="/repo/app", started_at=now + timedelta(minutes=20)),
+                ])
+                rows = local_state.recent_handoff_decisions()
+
+        self.assertEqual(linked, 1)
+        record = next(row for row in rows if row["id"] == decision["id"])
+        self.assertEqual(record["session_id"], "source")
+        self.assertEqual(record["next_session_id"], "later")
+        self.assertEqual(record["next_session_correlation"]["status"], "linked")
+        self.assertEqual(record["next_session_correlation"]["confidence"], "high")
+
+    def test_fresh_start_receipt_does_not_link_continue_here_or_wrong_project(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                continue_decision = local_state.record_handoff_decision(
+                    session_id="source",
+                    decision="continue_here",
+                    reason="Expected velocity.",
+                )
+                fresh_decision = local_state.record_handoff_decision(
+                    session_id="source",
+                    decision="new_chat",
+                    reason="Context pressure.",
+                )
+                linked = link_recent_fresh_start_receipts_to_sessions([
+                    session(session_id="source", project="/repo/app", started_at=now - timedelta(hours=2)),
+                    session(session_id="wrong-project", project="/repo/other", started_at=now + timedelta(minutes=3)),
+                ])
+                rows = local_state.recent_handoff_decisions()
+
+        self.assertEqual(linked, 0)
+        by_id = {row["id"]: row for row in rows}
+        self.assertNotIn("next_session_id", by_id[continue_decision["id"]])
+        self.assertIsNone(by_id[fresh_decision["id"]]["next_session_id"])
+        self.assertEqual(by_id[fresh_decision["id"]]["next_session_correlation"]["status"], "waiting")
+
+    def test_fresh_start_receipt_does_not_link_source_session_updated_after_decision(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                decision = local_state.record_handoff_decision(
+                    session_id="source",
+                    decision="copy_handoff",
+                    reason="Context pressure.",
+                )
+                linked = link_recent_fresh_start_receipts_to_sessions([
+                    session(
+                        session_id="source",
+                        project="/repo/app",
+                        started_at=now - timedelta(hours=2),
+                        updated_at=now + timedelta(minutes=10),
+                    ),
+                ])
+                rows = local_state.recent_handoff_decisions()
+
+        self.assertEqual(linked, 0)
+        record = next(row for row in rows if row["id"] == decision["id"])
+        self.assertIsNone(record["next_session_id"])
+
+    def test_fresh_start_receipt_does_not_link_without_known_source_project(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                decision = local_state.record_handoff_decision(
+                    session_id="missing-source",
+                    decision="new_chat",
+                    reason="Context pressure.",
+                )
+                linked = link_recent_fresh_start_receipts_to_sessions([
+                    session(session_id="candidate", project="/repo/app", started_at=now + timedelta(minutes=3)),
+                ])
+                rows = local_state.recent_handoff_decisions()
+
+        self.assertEqual(linked, 0)
+        record = next(row for row in rows if row["id"] == decision["id"])
+        self.assertIsNone(record["next_session_id"])
+        self.assertIn("Source project is unavailable", record["next_session_correlation"]["reason"])
+
+    def test_fresh_start_receipt_uses_stored_source_project_when_source_session_is_absent(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                decision = local_state.record_handoff_decision(
+                    session_id="missing-source",
+                    decision="new_chat",
+                    reason="Context pressure.",
+                    source_project_path="/repo/app",
+                )
+                linked = link_recent_fresh_start_receipts_to_sessions([
+                    session(session_id="candidate", project="/repo/app", started_at=now + timedelta(minutes=3)),
+                ])
+                rows = local_state.recent_handoff_decisions()
+
+        self.assertEqual(linked, 1)
+        record = next(row for row in rows if row["id"] == decision["id"])
+        self.assertEqual(record["next_session_id"], "candidate")
+        self.assertEqual(record["next_session_correlation"]["status"], "linked")
 
 
 if __name__ == "__main__":

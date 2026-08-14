@@ -7,7 +7,9 @@ import unittest
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
+from aiwatcher_cli import ui
 from aiwatcher_cli.ui import UIHandler
 
 
@@ -44,37 +46,41 @@ class AdapterContractTests(unittest.TestCase):
                 "http://127.0.0.1:5173",
                 "http://localhost:5173",
             ]
-            for origin in trusted_cases:
-                request = urllib.request.Request(
-                    f"http://127.0.0.1:{port}/api/context-health?tool=claude",
-                    headers={"Origin": origin},
-                )
-                with urllib.request.urlopen(request, timeout=20) as response:
-                    self.assertEqual(response.headers.get("Access-Control-Allow-Origin"), origin)
-
-            # Attacker-registerable domains that a naive str.startswith("http://127.0.0.1")
-            # or str.startswith("http://localhost") prefix check would incorrectly trust —
-            # both are real, ownable DNS names, not spoofed headers.
-            untrusted_cases = [
-                "https://evil.example.com",
-                "http://127.0.0.1.evil.com",
-                "http://localhost.evil.com",
-                "https://127.0.0.1",  # right host, wrong scheme
-            ]
-            for origin in untrusted_cases:
-                untrusted = urllib.request.Request(
-                    f"http://127.0.0.1:{port}/api/context-health?tool=claude",
-                    headers={"Origin": origin},
-                )
-                with urllib.request.urlopen(untrusted, timeout=20) as response:
-                    self.assertIsNone(
-                        response.headers.get("Access-Control-Allow-Origin"),
-                        f"Origin {origin!r} must not be trusted",
+            with (
+                patch.object(ui, "scan_all", return_value=[]),
+                patch.object(ui, "scan_all_events", return_value=[]),
+            ):
+                for origin in trusted_cases:
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{port}/api/context-health?tool=claude",
+                        headers={"Origin": origin},
                     )
+                    with urllib.request.urlopen(request, timeout=20) as response:
+                        self.assertEqual(response.headers.get("Access-Control-Allow-Origin"), origin)
 
-            no_origin = urllib.request.Request(f"http://127.0.0.1:{port}/api/context-health?tool=claude")
-            with urllib.request.urlopen(no_origin, timeout=20) as response:
-                self.assertIsNone(response.headers.get("Access-Control-Allow-Origin"))
+                # Attacker-registerable domains that a naive str.startswith("http://127.0.0.1")
+                # or str.startswith("http://localhost") prefix check would incorrectly trust —
+                # both are real, ownable DNS names, not spoofed headers.
+                untrusted_cases = [
+                    "https://evil.example.com",
+                    "http://127.0.0.1.evil.com",
+                    "http://localhost.evil.com",
+                    "https://127.0.0.1",  # right host, wrong scheme
+                ]
+                for origin in untrusted_cases:
+                    untrusted = urllib.request.Request(
+                        f"http://127.0.0.1:{port}/api/context-health?tool=claude",
+                        headers={"Origin": origin},
+                    )
+                    with urllib.request.urlopen(untrusted, timeout=20) as response:
+                        self.assertIsNone(
+                            response.headers.get("Access-Control-Allow-Origin"),
+                            f"Origin {origin!r} must not be trusted",
+                        )
+
+                no_origin = urllib.request.Request(f"http://127.0.0.1:{port}/api/context-health?tool=claude")
+                with urllib.request.urlopen(no_origin, timeout=20) as response:
+                    self.assertIsNone(response.headers.get("Access-Control-Allow-Origin"))
         finally:
             server.shutdown()
             server.server_close()
