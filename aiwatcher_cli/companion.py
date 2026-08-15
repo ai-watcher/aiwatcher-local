@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -52,6 +53,76 @@ def local_action_server_available() -> bool:
         return False
 
 
+def _terminate_pid(pid: int, *, force: bool = False) -> bool:
+    if pid <= 0 or pid == os.getpid():
+        return False
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            return True
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+    sig = signal.SIGKILL if force else signal.SIGTERM
+    try:
+        os.killpg(pid, sig)
+        return True
+    except ProcessLookupError:
+        pass
+    except OSError:
+        pass
+    try:
+        os.kill(pid, sig)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def _pids_matching(pattern: str) -> set[int]:
+    if sys.platform == "win32" or not shutil.which("pgrep"):
+        return set()
+    try:
+        output = subprocess.check_output(["pgrep", "-f", pattern], text=True, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError):
+        return set()
+    pids: set[int] = set()
+    current = {os.getpid(), os.getppid()}
+    for line in output.splitlines():
+        try:
+            pid = int(line.strip())
+        except ValueError:
+            continue
+        if pid > 0 and pid not in current:
+            pids.add(pid)
+    return pids
+
+
+def _orphan_companion_pids() -> set[int]:
+    patterns = (
+        r"aiwatcher_cli companion run",
+        r"aiwatcher_cli\.native_overlay .*--presence",
+        r"aiwatcher-native-presence\.swift",
+    )
+    pids: set[int] = set()
+    for pattern in patterns:
+        pids.update(_pids_matching(pattern))
+    return pids
+
+
+def cleanup_orphan_companion_processes(*, exclude_pid: int | None = None) -> list[int]:
+    stopped: list[int] = []
+    for pid in sorted(_orphan_companion_pids()):
+        if exclude_pid is not None and pid == exclude_pid:
+            continue
+        if _terminate_pid(pid):
+            stopped.append(pid)
+    return stopped
+
+
 def start_companion(
     interval_seconds: int = 30,
     *,
@@ -72,6 +143,7 @@ def start_companion(
             **current,
         }
 
+    cleanup_orphan_companion_processes()
     log_path = companion_log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     command = companion_command(
@@ -115,7 +187,15 @@ def stop_companion() -> dict[str, Any]:
     current = get_watcher_status()
     pid = current.get("pid")
     if not isinstance(pid, int):
+        stopped_orphans = cleanup_orphan_companion_processes()
         clear_watcher_heartbeat()
+        if stopped_orphans:
+            return {
+                "ok": True,
+                "stopped": True,
+                "message": f"Cleaned {len(stopped_orphans)} orphan presence process(es).",
+                "orphan_pids": stopped_orphans,
+            }
         return {"ok": True, "stopped": False, "message": "Companion is not running."}
     if current.get("mode") != "companion":
         return {
@@ -127,17 +207,18 @@ def stop_companion() -> dict[str, Any]:
             ),
             "pid": pid,
         }
-    try:
-        if sys.platform == "win32":
-            subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                capture_output=True,
-                timeout=5,
-                check=False,
-            )
-        else:
-            os.kill(pid, signal.SIGTERM)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"ok": False, "stopped": False, "message": str(exc), "pid": pid}
+    stopped_primary = _terminate_pid(pid)
+    stopped_orphans = cleanup_orphan_companion_processes(exclude_pid=pid)
     clear_watcher_heartbeat(pid=pid)
-    return {"ok": True, "stopped": True, "message": "Companion stopped.", "pid": pid}
+    if not stopped_primary and not stopped_orphans:
+        return {"ok": True, "stopped": False, "message": "Companion was already stopped; cleared stale state.", "pid": pid}
+    message = "Companion stopped."
+    if stopped_orphans:
+        message += f" Cleaned {len(stopped_orphans)} orphan presence process(es)."
+    return {
+        "ok": True,
+        "stopped": True,
+        "message": message,
+        "pid": pid,
+        "orphan_pids": stopped_orphans,
+    }

@@ -432,8 +432,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var collapseButton: NSButton!
     var expandButton: NSButton!
     var dragHandle: NSTextField!
+    var dotLabel: NSTextField!
     var primaryURL = dashboardURL
     var collapsed = false
+    var stateName = "watching"
     let expandedWidth: CGFloat = 386
     let expandedHeight: CGFloat = 58
     let collapsedWidth: CGFloat = 64
@@ -475,11 +477,11 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         dragHandle.toolTip = "Drag AIWatcher"
         rootView.addSubview(dragHandle)
 
-        let dot = NSTextField(labelWithString: "on")
-        dot.frame = NSRect(x: 30, y: 31, width: 22, height: 16)
-        dot.font = NSFont.systemFont(ofSize: 10, weight: .bold)
-        dot.textColor = NSColor(calibratedRed: 0.26, green: 0.80, blue: 0.55, alpha: 1)
-        rootView.addSubview(dot)
+        dotLabel = NSTextField(labelWithString: "on")
+        dotLabel.frame = NSRect(x: 30, y: 31, width: 22, height: 16)
+        dotLabel.font = NSFont.systemFont(ofSize: 10, weight: .bold)
+        dotLabel.textColor = NSColor(calibratedRed: 0.26, green: 0.80, blue: 0.55, alpha: 1)
+        rootView.addSubview(dotLabel)
 
         titleLabel = NSTextField(labelWithString: "AIWatcher")
         titleLabel.frame = NSRect(x: 56, y: 31, width: 88, height: 17)
@@ -527,6 +529,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         rootView.addSubview(expandButton)
 
         window.orderFrontRegardless()
+        updateAppearance()
         refreshState()
     }
 
@@ -556,10 +559,21 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         window.setFrame(target, display: true, animate: true)
         rootView.frame = NSRect(x: 0, y: 0, width: targetWidth, height: targetHeight)
         rootView.layer?.cornerRadius = collapsed ? 14 : 16
-        for view in [dragHandle, titleLabel, subtitleLabel, primaryButton, planButton, consoleButton, collapseButton] {
+        for view in [dragHandle, dotLabel, titleLabel, subtitleLabel, primaryButton, planButton, consoleButton, collapseButton] {
             view?.isHidden = collapsed
         }
         expandButton.isHidden = !collapsed
+        updateAppearance()
+    }
+
+    func updateAppearance() {
+        let needsAttention = ["prompt_gate", "control_recommended", "proof_pending", "needs_review"].contains(stateName)
+        let dark = NSColor(calibratedRed: 0.05, green: 0.07, blue: 0.10, alpha: 0.96).cgColor
+        let orange = NSColor(calibratedRed: 0.88, green: 0.36, blue: 0.12, alpha: 0.96).cgColor
+        rootView.layer?.backgroundColor = (collapsed && needsAttention) ? orange : dark
+        rootView.layer?.borderColor = needsAttention
+            ? NSColor(calibratedRed: 1.00, green: 0.63, blue: 0.24, alpha: 0.95).cgColor
+            : NSColor(calibratedRed: 0.25, green: 0.34, blue: 0.48, alpha: 0.90).cgColor
     }
 
     func refreshState() {
@@ -574,10 +588,12 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             DispatchQueue.main.async {
+                self.stateName = json["state"] as? String ?? "watching"
                 self.titleLabel.stringValue = String((json["label"] as? String ?? "AIWatcher").prefix(18))
                 self.subtitleLabel.stringValue = String((json["subtitle"] as? String ?? "Watching quietly").prefix(42))
                 self.primaryButton.title = String((json["primary_label"] as? String ?? "Watch").prefix(12))
                 self.primaryURL = absoluteURL(json["primary_url"] as? String ?? "/")
+                self.updateAppearance()
                 self.scheduleRefresh()
             }
         }.resume()
@@ -741,13 +757,12 @@ def _run_macos_swift_presence(url: str, prompt_url: str, position: str) -> int:
     try:
         with open(script_path, "w", encoding="utf-8") as handle:
             handle.write(MACOS_SWIFT_PRESENCE)
-        subprocess.Popen(
+        completed = subprocess.run(
             [swift, script_path, url, prompt_url, position],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
         )
-        return 0
+        return int(completed.returncode)
     except OSError as exc:
         print(f"AIWatcher presence unavailable: {exc}", file=sys.stderr)
         return 2
@@ -813,6 +828,7 @@ def run_native_presence(
     subtitle_var = tk.StringVar(value="Watching quietly")
     primary_label_var = tk.StringVar(value="Watch")
     primary_url_var = tk.StringVar(value=url)
+    state_var = tk.StringVar(value="watching")
     drag = ttk.Label(frame, text="::", style="PresenceDrag.TLabel", cursor="fleur")
     drag.pack(side="left", padx=(0, 6))
     title_stack = ttk.Frame(left, style="Presence.TFrame")
@@ -855,23 +871,37 @@ def run_native_presence(
             collapsed_frame.pack_forget()
             frame.pack(fill="both", expand=True)
             root.geometry(f"{expanded_width}x{expanded_height}")
+        update_attention_style()
+
+    def update_attention_style() -> None:
+        needs_attention = state_var.get() in {"prompt_gate", "control_recommended", "proof_pending", "needs_review"}
+        shell_bg = "#c6531e" if collapsed.get() and needs_attention else "#0d141f"
+        root.configure(bg=shell_bg)
+        style.configure("Presence.TFrame", background=shell_bg)
+        style.configure("PresenceTitle.TLabel", background=shell_bg)
+        style.configure("PresenceMuted.TLabel", background=shell_bg)
+        style.configure("PresenceDot.TLabel", background=shell_bg)
+        style.configure("PresenceDrag.TLabel", background=shell_bg)
 
     def refresh_state() -> None:
         try:
             request_url = f"{url.rstrip('/')}/api/companion-state"
             with urllib.request.urlopen(request_url, timeout=0.8) as response:
                 payload = json.loads(response.read().decode("utf-8"))
+            state_var.set(str(payload.get("state") or "watching"))
             title_var.set(str(payload.get("label") or "AIWatcher")[:18])
             subtitle_var.set(str(payload.get("subtitle") or "Watching quietly")[:42])
             primary_label_var.set(str(payload.get("primary_label") or "Watch")[:12])
             primary_path = str(payload.get("primary_url") or "/")
             primary_url_var.set(primary_path if primary_path.startswith("http") else f"{url.rstrip('/')}{primary_path}")
         except (OSError, urllib.error.URLError, json.JSONDecodeError, tk.TclError):
+            state_var.set("watching")
             title_var.set("AIWatcher")
             subtitle_var.set("Watching quietly")
             primary_label_var.set("Watch")
             primary_url_var.set(url)
         finally:
+            update_attention_style()
             try:
                 root.after(8000, refresh_state)
             except tk.TclError:

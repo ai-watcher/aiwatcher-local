@@ -66,6 +66,7 @@ class CompanionLifecycleTests(unittest.TestCase):
                     ],
                 ),
                 patch.object(companion.subprocess, "Popen", return_value=process),
+                patch.object(companion, "cleanup_orphan_companion_processes", return_value=[]),
                 patch.object(companion.time, "sleep"),
             ):
                 result = companion.start_companion(interval_seconds=30)
@@ -88,6 +89,7 @@ class CompanionLifecycleTests(unittest.TestCase):
                     ],
                 ),
                 patch.object(companion.subprocess, "Popen", return_value=process) as popen,
+                patch.object(companion, "cleanup_orphan_companion_processes", return_value=[]),
                 patch.object(companion.time, "sleep"),
             ):
                 result = companion.start_companion(
@@ -114,6 +116,65 @@ class CompanionLifecycleTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         kill.assert_not_called()
+
+    def test_stop_cleans_orphan_presence_when_heartbeat_is_stale(self) -> None:
+        with (
+            patch.object(companion, "get_watcher_status", return_value={}),
+            patch.object(companion, "cleanup_orphan_companion_processes", return_value=[111, 222]) as cleanup,
+            patch.object(companion, "clear_watcher_heartbeat") as clear,
+        ):
+            result = companion.stop_companion()
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["stopped"])
+        self.assertEqual(result["orphan_pids"], [111, 222])
+        cleanup.assert_called_once()
+        clear.assert_called_once()
+
+    def test_stop_cleans_orphans_after_primary_companion(self) -> None:
+        with (
+            patch.object(
+                companion,
+                "get_watcher_status",
+                return_value={"running": True, "mode": "companion", "pid": 123},
+            ),
+            patch.object(companion, "_terminate_pid", return_value=True) as terminate,
+            patch.object(companion, "cleanup_orphan_companion_processes", return_value=[456]) as cleanup,
+            patch.object(companion, "clear_watcher_heartbeat") as clear,
+        ):
+            result = companion.stop_companion()
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["stopped"])
+        self.assertEqual(result["orphan_pids"], [456])
+        terminate.assert_called_once_with(123)
+        cleanup.assert_called_once_with(exclude_pid=123)
+        clear.assert_called_once_with(pid=123)
+
+    def test_pgrep_sweep_matches_presence_processes(self) -> None:
+        with (
+            patch.object(companion.sys, "platform", "darwin"),
+            patch.object(companion.shutil, "which", return_value="/usr/bin/pgrep"),
+            patch.object(companion.subprocess, "check_output", side_effect=["123\n", "456\n", "789\n"]),
+            patch.object(companion.os, "getpid", return_value=999),
+            patch.object(companion.os, "getppid", return_value=998),
+        ):
+            pids = companion._orphan_companion_pids()
+
+        self.assertEqual(pids, {123, 456, 789})
+
+    def test_terminate_pid_falls_back_to_direct_process_kill(self) -> None:
+        with (
+            patch.object(companion.sys, "platform", "darwin"),
+            patch.object(companion.os, "getpid", return_value=999),
+            patch.object(companion.os, "killpg", side_effect=ProcessLookupError) as killpg,
+            patch.object(companion.os, "kill") as kill,
+        ):
+            result = companion._terminate_pid(123)
+
+        self.assertTrue(result)
+        killpg.assert_called_once_with(123, companion.signal.SIGTERM)
+        kill.assert_called_once_with(123, companion.signal.SIGTERM)
 
 
 if __name__ == "__main__":
