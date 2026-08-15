@@ -93,7 +93,9 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('"/api/companion-state"', source)
         self.assertIn('"Plan"', source)
         self.assertIn('"Console"', source)
-        self.assertIn('"AIW"', source)
+        self.assertIn('":: AIW"', source)
+        self.assertIn("hasPrimaryAction", source)
+        self.assertIn("scheduleAutoCollapse", source)
 
     def test_tk_presence_opens_dashboard_and_prompt_without_session_claim(self) -> None:
         source = inspect.getsource(native_overlay.run_native_presence)
@@ -112,7 +114,9 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("/api/companion-state", source)
         self.assertIn("text=\"Plan\"", source)
         self.assertIn("text=\"Console\"", source)
-        self.assertIn("text=\"AIW\"", source)
+        self.assertIn("text=\":: AIW\"", source)
+        self.assertIn("has_primary_action", source)
+        self.assertIn("schedule_auto_collapse", source)
         self.assertIn("textvariable=primary_label_var", source)
         self.assertNotIn("runtime-return", source)
 

@@ -441,9 +441,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var collapsed = false
     var stateName = "watching"
     var pulseOn = false
+    var autoCollapseToken = 0
     let expandedWidth: CGFloat = 468
     let expandedHeight: CGFloat = 58
-    let collapsedWidth: CGFloat = 64
+    let collapsedWidth: CGFloat = 82
     let collapsedHeight: CGFloat = 42
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -536,8 +537,8 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         collapseButton.toolTip = "Minimize AIWatcher"
         rootView.addSubview(collapseButton)
 
-        expandButton = NSButton(title: "AIW", target: self, action: #selector(toggleCollapsed))
-        expandButton.frame = NSRect(x: 8, y: 7, width: 48, height: 28)
+        expandButton = NSButton(title: ":: AIW", target: self, action: #selector(toggleCollapsed))
+        expandButton.frame = NSRect(x: 8, y: 7, width: 66, height: 28)
         expandButton.bezelStyle = .rounded
         expandButton.controlSize = .small
         expandButton.wantsLayer = true
@@ -550,6 +551,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         updateAppearance()
         schedulePulse()
         refreshState()
+        scheduleAutoCollapse(after: 8.0)
     }
 
     @objc func openDashboard() {
@@ -591,15 +593,27 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                 self.stateName = "watching"
                 self.titleLabel.stringValue = "Watching quietly"
                 self.subtitleLabel.stringValue = "Fresh Start decision saved"
-                self.primaryButton.title = "Console"
                 self.primaryURL = dashboardURL
                 self.updateAppearance()
+                self.scheduleAutoCollapse(after: 1.2)
             }
         }.resume()
     }
 
     @objc func toggleCollapsed() {
-        collapsed.toggle()
+        setCollapsed(!collapsed)
+        if !collapsed {
+            scheduleAutoCollapse(after: 10.0)
+        }
+    }
+
+    func setCollapsed(_ value: Bool) {
+        if collapsed == value {
+            applyVisibility()
+            updateAppearance()
+            return
+        }
+        collapsed = value
         let current = window.frame
         let targetWidth = collapsed ? collapsedWidth : expandedWidth
         let targetHeight = collapsed ? collapsedHeight : expandedHeight
@@ -612,15 +626,49 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         window.setFrame(target, display: true, animate: true)
         rootView.frame = NSRect(x: 0, y: 0, width: targetWidth, height: targetHeight)
         rootView.layer?.cornerRadius = collapsed ? 14 : 16
-        for view in [dragHandle, dotLabel, titleLabel, subtitleLabel, primaryButton, continueButton, planButton, consoleButton, collapseButton] {
-            view?.isHidden = collapsed
-        }
-        continueButton.isHidden = collapsed || continueSessionID.isEmpty
-        expandButton.isHidden = !collapsed
+        applyVisibility()
         updateAppearance()
     }
 
+    func hasPrimaryAction() -> Bool {
+        return ["prompt_gate", "control_recommended", "proof_pending", "needs_review"].contains(stateName)
+    }
+
+    func applyVisibility() {
+        if collapsed {
+            for view in [dragHandle, dotLabel, titleLabel, subtitleLabel, primaryButton, continueButton, planButton, consoleButton, collapseButton] {
+                view?.isHidden = true
+            }
+            expandButton.isHidden = false
+            return
+        }
+        dragHandle.isHidden = false
+        dotLabel.isHidden = false
+        titleLabel.isHidden = false
+        subtitleLabel.isHidden = false
+        planButton.isHidden = false
+        consoleButton.isHidden = false
+        collapseButton.isHidden = false
+        expandButton.isHidden = true
+        let showPrimary = hasPrimaryAction()
+        let showContinue = !continueSessionID.isEmpty && stateName == "control_recommended"
+        primaryButton.isHidden = !showPrimary
+        continueButton.isHidden = !showContinue
+        if showPrimary {
+            primaryButton.frame = NSRect(x: 206, y: 15, width: 88, height: 28)
+            if showContinue {
+                continueButton.frame = NSRect(x: 298, y: 15, width: 76, height: 28)
+                consoleButton.frame = NSRect(x: 378, y: 15, width: 64, height: 28)
+            } else {
+                consoleButton.frame = NSRect(x: 298, y: 15, width: 64, height: 28)
+            }
+        } else {
+            consoleButton.frame = NSRect(x: 206, y: 15, width: 64, height: 28)
+        }
+    }
+
     func updateAppearance() {
+        applyVisibility()
         let needsAttention = ["prompt_gate", "control_recommended", "proof_pending", "needs_review"].contains(stateName)
         let dark = NSColor(calibratedRed: 0.05, green: 0.07, blue: 0.10, alpha: 0.96).cgColor
         let orangeColor = pulseOn
@@ -665,11 +713,21 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                 self.continueSessionID = json["continue_session_id"] as? String ?? ""
                 self.continueReason = json["continue_reason"] as? String ?? ""
                 self.continueExpectedTokens = json["continue_expected_saved_context_tokens"] as? Int ?? 0
-                self.continueButton.isHidden = self.collapsed || self.continueSessionID.isEmpty
                 self.updateAppearance()
+                self.scheduleAutoCollapse(after: self.hasPrimaryAction() ? 10.0 : 4.0)
                 self.scheduleRefresh()
             }
         }.resume()
+    }
+
+    func scheduleAutoCollapse(after delay: Double) {
+        autoCollapseToken += 1
+        let token = autoCollapseToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            if token == self.autoCollapseToken && !self.collapsed {
+                self.setCollapsed(true)
+            }
+        }
     }
 
     func scheduleRefresh() {
@@ -871,7 +929,7 @@ def run_native_presence(
 
     expanded_width = 468
     expanded_height = 58
-    collapsed_width = 64
+    collapsed_width = 82
     collapsed_height = 42
     screen_width = int(root.winfo_screenwidth())
     screen_height = int(root.winfo_screenheight())
@@ -966,15 +1024,20 @@ def run_native_presence(
         state_var.set("watching")
         title_var.set("Watching quietly")
         subtitle_var.set("Fresh Start decision saved")
-        primary_label_var.set("Console")
         primary_url_var.set(url)
         update_attention_style()
+        schedule_auto_collapse(1200)
 
     collapsed = tk.BooleanVar(value=False)
     continue_packed = tk.BooleanVar(value=False)
+    primary_packed = tk.BooleanVar(value=True)
+    auto_collapse_token = tk.IntVar(value=0)
 
-    def toggle_collapsed() -> None:
-        collapsed.set(not collapsed.get())
+    def set_collapsed(value: bool) -> None:
+        if collapsed.get() == value:
+            update_attention_style()
+            return
+        collapsed.set(value)
         if collapsed.get():
             frame.pack_forget()
             collapsed_frame.pack(fill="both", expand=True)
@@ -984,6 +1047,30 @@ def run_native_presence(
             frame.pack(fill="both", expand=True)
             root.geometry(f"{expanded_width}x{expanded_height}")
         update_attention_style()
+
+    def toggle_collapsed() -> None:
+        set_collapsed(not collapsed.get())
+        if not collapsed.get():
+            schedule_auto_collapse(10000)
+
+    def has_primary_action() -> bool:
+        return state_var.get() in {"prompt_gate", "control_recommended", "proof_pending", "needs_review"}
+
+    def schedule_auto_collapse(delay_ms: int = 6000) -> None:
+        auto_collapse_token.set(auto_collapse_token.get() + 1)
+        token = auto_collapse_token.get()
+
+        def collapse_if_current() -> None:
+            try:
+                if token == auto_collapse_token.get() and not collapsed.get():
+                    set_collapsed(True)
+            except tk.TclError:
+                pass
+
+        try:
+            root.after(delay_ms, collapse_if_current)
+        except tk.TclError:
+            pass
 
     def update_attention_style() -> None:
         needs_attention = state_var.get() in {"prompt_gate", "control_recommended", "proof_pending", "needs_review"}
@@ -1002,6 +1089,13 @@ def run_native_presence(
         )
         primary_button.configure(style="PresenceAttention.TButton" if needs_attention else "Presence.TButton")
         collapsed_button.configure(style="PresenceAttention.TButton" if needs_attention else "Presence.TButton")
+        should_show_primary = has_primary_action() and not collapsed.get()
+        if should_show_primary and not primary_packed.get():
+            primary_button.pack(side="left", padx=(0, 4), before=continue_button if continue_packed.get() else console_button)
+            primary_packed.set(True)
+        elif not should_show_primary and primary_packed.get():
+            primary_button.pack_forget()
+            primary_packed.set(False)
         should_show_continue = bool(continue_session_id_var.get().strip()) and not collapsed.get()
         if should_show_continue and not continue_packed.get():
             continue_button.pack(side="left", padx=(0, 4), before=console_button)
@@ -1045,6 +1139,7 @@ def run_native_presence(
             continue_session_id_var.set("")
         finally:
             update_attention_style()
+            schedule_auto_collapse(10000 if has_primary_action() else 4000)
             try:
                 root.after(8000, refresh_state)
             except tk.TclError:
@@ -1057,9 +1152,10 @@ def run_native_presence(
     console_button = ttk.Button(frame, text="Console", width=8, style="Presence.TButton", command=open_dashboard)
     console_button.pack(side="left")
     ttk.Button(frame, text="-", width=2, style="PresenceMini.TButton", command=toggle_collapsed).pack(side="left", padx=(4, 0))
-    collapsed_button = ttk.Button(collapsed_frame, text="AIW", width=5, style="Presence.TButton", command=toggle_collapsed)
+    collapsed_button = ttk.Button(collapsed_frame, text=":: AIW", width=7, style="Presence.TButton", command=toggle_collapsed)
     collapsed_button.pack(fill="both", expand=True)
     refresh_state()
+    schedule_auto_collapse(8000)
     pulse_attention()
     root.mainloop()
     return 0

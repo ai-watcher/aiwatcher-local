@@ -2976,7 +2976,7 @@ def build_companion_state() -> dict[str, object]:
             "subtitle": str(bubble.get("body") or bubble.get("reason") or "Context pressure needs a decision."),
             "primary_label": "Fresh Start",
             "primary_url": f"/?session={session_id}",
-            "continue_label": str(bubble.get("continue_label") or "Continue"),
+            "continue_label": "Continue",
             "continue_session_id": session_id,
             "continue_reason": str(bubble.get("reason") or bubble.get("body") or "User chose to keep working in the current session."),
             "continue_expected_saved_context_tokens": bubble.get("expected_saved_context_tokens"),
@@ -4424,7 +4424,7 @@ function renderHandoff(capsule) {
   </section>
   <section class="detail-section"><h3>Brief that will be copied</h3>
     <textarea id="handoffBrief" class="brief-box">${esc(capsule.next_brief || '')}</textarea>
-    <div class="copy-row"><button class="btn-quiet" onclick="copyText(document.getElementById('handoffBrief').value, 'Fresh Start brief copied')">Copy brief only</button></div>
+    <div class="copy-row"><button class="btn-quiet" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', false, ${isDemo ? 'true' : 'false'})">Copy brief only</button></div>
     ${changedFiles.length ? `<details class="aiw-details"><summary>${esc(changedFiles.length)} changed file${changedFiles.length === 1 ? '' : 's'} to inspect</summary><div class="details-body"><div class="pill-row">${changedFiles.slice(0, 12).map(file => `<span class="pill">${esc(file)}</span>`).join('')}</div></div></details>` : ''}
   </section>`;
 }
@@ -4525,9 +4525,20 @@ async function copyHandoffFromBubble(sessionId) {
   }
   const copied = await copyText(capsule.next_brief || '', 'Fresh Start brief copied — paste it into a fresh AI chat');
   if (copied) {
-    if (window.currentHandoffBubble) await recordHandoffDecision(window.currentHandoffBubble, 'copy_handoff');
-    renderHandoffCopied(window.currentHandoffBubble, sessionId);
+    const bubble = handoffDecisionBubble(sessionId);
+    await recordHandoffDecision(bubble, 'copy_handoff');
+    renderHandoffCopied(bubble, sessionId);
   }
+}
+function handoffDecisionBubble(sessionId) {
+  const current = window.currentHandoffBubble || {};
+  if (current.session_id === sessionId) return current;
+  return {
+    session_id: sessionId,
+    reason: 'Fresh Start brief copied from the session review.',
+    body: 'Fresh Start brief copied from the session review.',
+    expected_saved_context_tokens: null,
+  };
 }
 async function recordHandoffDecision(bubble, decision) {
   if (!bubble || !bubble.session_id) return;
@@ -4556,8 +4567,9 @@ async function startFreshFromBubble(sessionId) {
   }
   const copied = await copyText(capsule.next_brief || '', 'Fresh Start brief copied');
   if (!copied) return;
-  if (window.currentHandoffBubble) await recordHandoffDecision(window.currentHandoffBubble, 'copy_handoff');
-  const runtime = (window.currentHandoffBubble || {}).runtime_attachment || {};
+  const bubble = handoffDecisionBubble(sessionId);
+  await recordHandoffDecision(bubble, 'copy_handoff');
+  const runtime = (bubble || {}).runtime_attachment || {};
   if (runtime.available && runtime.level !== 'app') {
     try {
       const returnRes = await requestRuntimeReturn(sessionId);
@@ -4569,7 +4581,7 @@ async function startFreshFromBubble(sessionId) {
   } else {
     showToast('Brief copied. Open a fresh chat in the same workspace and paste it.', 'success');
   }
-  renderHandoffCopied(window.currentHandoffBubble, sessionId);
+  renderHandoffCopied(bubble, sessionId);
 }
 async function continueFromBubble() {
   if (window.currentHandoffBubble) await recordHandoffDecision(window.currentHandoffBubble, 'continue_here');

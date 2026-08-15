@@ -176,6 +176,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("watch --notify", ui.HTML)
         self.assertIn("/api/handoff", ui.HTML)
         self.assertIn("/api/handoff-decision", ui.HTML)
+        self.assertIn("handoffDecisionBubble", ui.HTML)
+        self.assertIn("Fresh Start brief copied from the session review.", ui.HTML)
         self.assertIn("renderHandoffCopied", ui.HTML)
         self.assertIn("Fresh Start ready", ui.HTML)
         self.assertIn("Fresh Start receipt saved", ui.HTML)
