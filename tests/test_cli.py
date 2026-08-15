@@ -3514,6 +3514,7 @@ class HeadlessPromptGateTests(unittest.TestCase):
             probe.close()
         with (
             patch.object(cli, "_display_available", return_value=True),
+            patch.object(cli, "_existing_companion_presence_pid", return_value=None),
             patch.object(cli, "webbrowser") as webbrowser_mock,
         ):
             webbrowser_mock.open.return_value = True
@@ -3523,6 +3524,49 @@ class HeadlessPromptGateTests(unittest.TestCase):
             )
         webbrowser_mock.open.assert_called_once()
         self.assertIsNone(gate)  # nobody answered within the short timeout
+
+    def test_run_prompt_gate_lets_companion_own_browser_open_when_presence_is_running(self) -> None:
+        probe = socket.socket()
+        try:
+            probe.bind(("127.0.0.1", 0))
+        except PermissionError:
+            self.skipTest("loopback sockets are unavailable in this test sandbox")
+        finally:
+            probe.close()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+
+            def cancel_gate(url: str) -> None:
+                gate = local_state.active_prompt_gate()
+                self.assertIsNotNone(gate)
+                self.assertEqual(gate["url"], url)
+                payload = json.dumps({"decision": "cancel"}).encode("utf-8")
+                request = urllib.request.Request(
+                    url + "decision",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=5):
+                    pass
+
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(cli, "_display_available", return_value=True),
+                patch.object(cli, "_existing_companion_presence_pid", return_value=123),
+                patch.object(cli, "webbrowser") as webbrowser_mock,
+            ):
+                gate = cli.run_prompt_gate(
+                    tool="claude",
+                    cwd="/repo",
+                    prompt="delete the repo",
+                    result=self.GATE_RESULT,
+                    timeout_seconds=5,
+                    ready_callback=cancel_gate,
+                )
+
+        webbrowser_mock.open.assert_not_called()
+        self.assertEqual(gate["decision"], "cancel")
 
     def test_run_prompt_gate_shows_terminal_gate_when_no_display_and_tty(self) -> None:
         fake_stdin = Mock()
@@ -3601,6 +3645,7 @@ class HeadlessPromptGateTests(unittest.TestCase):
         fake_stdin.isatty.return_value = False
         with (
             patch.object(cli, "_display_available", return_value=True),
+            patch.object(cli, "_existing_companion_presence_pid", return_value=None),
             patch.object(cli, "webbrowser") as webbrowser_mock,
             patch.object(cli.sys, "stdin", fake_stdin),
             patch.dict(os.environ, {}, clear=True),

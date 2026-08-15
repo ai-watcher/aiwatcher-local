@@ -2435,7 +2435,8 @@ def run_prompt_gate(
     try:
         if ready_callback:
             ready_callback(url)
-        if open_browser:
+        companion_presence_pid = _existing_companion_presence_pid() if open_browser else None
+        if open_browser and companion_presence_pid is None:
             try:
                 opened = webbrowser.open(url)
             except Exception:

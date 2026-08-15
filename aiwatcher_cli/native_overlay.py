@@ -483,20 +483,20 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         dragHandle.toolTip = "Drag AIWatcher"
         rootView.addSubview(dragHandle)
 
-        dotLabel = NSTextField(labelWithString: "on")
-        dotLabel.frame = NSRect(x: 30, y: 31, width: 22, height: 16)
+        dotLabel = NSTextField(labelWithString: "AIW")
+        dotLabel.frame = NSRect(x: 30, y: 31, width: 30, height: 16)
         dotLabel.font = NSFont.systemFont(ofSize: 10, weight: .bold)
-        dotLabel.textColor = NSColor(calibratedRed: 0.26, green: 0.80, blue: 0.55, alpha: 1)
+        dotLabel.textColor = NSColor(calibratedRed: 0.34, green: 0.88, blue: 0.68, alpha: 1)
         rootView.addSubview(dotLabel)
 
         titleLabel = NSTextField(labelWithString: "AIWatcher")
-        titleLabel.frame = NSRect(x: 56, y: 31, width: 88, height: 17)
+        titleLabel.frame = NSRect(x: 66, y: 31, width: 88, height: 17)
         titleLabel.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
         titleLabel.textColor = NSColor.white
         rootView.addSubview(titleLabel)
 
         subtitleLabel = NSTextField(labelWithString: "Watching quietly")
-        subtitleLabel.frame = NSRect(x: 30, y: 12, width: 116, height: 16)
+        subtitleLabel.frame = NSRect(x: 30, y: 12, width: 124, height: 16)
         subtitleLabel.font = NSFont.systemFont(ofSize: 9)
         subtitleLabel.textColor = NSColor(calibratedRed: 0.67, green: 0.74, blue: 0.84, alpha: 1)
         rootView.addSubview(subtitleLabel)
@@ -547,11 +547,11 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         expandButton.isHidden = true
         rootView.addSubview(expandButton)
 
+        setCollapsed(true)
         window.orderFrontRegardless()
         updateAppearance()
         schedulePulse()
         refreshState()
-        scheduleAutoCollapse(after: 8.0)
     }
 
     @objc func openDashboard() {
@@ -617,12 +617,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         let current = window.frame
         let targetWidth = collapsed ? collapsedWidth : expandedWidth
         let targetHeight = collapsed ? collapsedHeight : expandedHeight
-        let target = NSRect(
-            x: current.minX,
-            y: current.maxY - targetHeight,
-            width: targetWidth,
-            height: targetHeight
-        )
+        let targetX = position.contains("right") ? current.maxX - targetWidth : current.minX
+        let targetY = position.contains("top") ? current.maxY - targetHeight : current.minY
+        let target = NSRect(x: targetX, y: targetY, width: targetWidth, height: targetHeight)
         window.setFrame(target, display: true, animate: true)
         rootView.frame = NSRect(x: 0, y: 0, width: targetWidth, height: targetHeight)
         rootView.layer?.cornerRadius = collapsed ? 14 : 16
@@ -715,7 +712,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                 self.continueExpectedTokens = json["continue_expected_saved_context_tokens"] as? Int ?? 0
                 self.updateAppearance()
                 self.scheduleAutoCollapse(after: self.hasPrimaryAction() ? 10.0 : 4.0)
-                self.scheduleRefresh()
+                self.scheduleRefresh(after: self.hasPrimaryAction() ? 2.0 : 3.0)
             }
         }.resume()
     }
@@ -730,8 +727,8 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func scheduleRefresh() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+    func scheduleRefresh(after delay: Double = 3.0) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
             self.refreshState()
         }
     }
@@ -970,7 +967,7 @@ def run_native_presence(
     drag.pack(side="left", padx=(0, 6))
     title_stack = ttk.Frame(left, style="Presence.TFrame")
     title_stack.pack(anchor="w")
-    ttk.Label(title_stack, text="on", style="PresenceDot.TLabel").pack(side="left", padx=(0, 6))
+    ttk.Label(title_stack, text="AIW", style="PresenceDot.TLabel").pack(side="left", padx=(0, 6))
     ttk.Label(title_stack, textvariable=title_var, style="PresenceTitle.TLabel").pack(side="left")
     ttk.Label(left, textvariable=subtitle_var, style="PresenceMuted.TLabel", wraplength=112).pack(anchor="w")
 
@@ -1141,7 +1138,7 @@ def run_native_presence(
             update_attention_style()
             schedule_auto_collapse(10000 if has_primary_action() else 4000)
             try:
-                root.after(8000, refresh_state)
+                root.after(3000, refresh_state)
             except tk.TclError:
                 pass
 
@@ -1154,8 +1151,8 @@ def run_native_presence(
     ttk.Button(frame, text="-", width=2, style="PresenceMini.TButton", command=toggle_collapsed).pack(side="left", padx=(4, 0))
     collapsed_button = ttk.Button(collapsed_frame, text=":: AIW", width=7, style="Presence.TButton", command=toggle_collapsed)
     collapsed_button.pack(fill="both", expand=True)
+    set_collapsed(True)
     refresh_state()
-    schedule_auto_collapse(8000)
     pulse_attention()
     root.mainloop()
     return 0
