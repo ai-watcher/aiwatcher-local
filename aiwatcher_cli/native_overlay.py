@@ -241,78 +241,104 @@ func copyToClipboard(_ value: String) {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSPanel!
     var statusLabel: NSTextField!
+    var completed = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
         let width: CGFloat = 680
-        let height: CGFloat = 210
+        let height: CGFloat = 168
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
         let frame = NSRect(x: screen.maxX - width - 28, y: screen.minY + 28, width: width, height: height)
-        window = NSPanel(contentRect: frame, styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.title = "AIWatcher Fresh Start"
+        window = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.hidesOnDeactivate = false
         window.isReleasedWhenClosed = false
+        window.becomesKeyOnlyIfNeeded = true
+        window.hasShadow = true
 
         let view = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor(calibratedRed: 0.93, green: 0.96, blue: 1.0, alpha: 1).cgColor
+        view.layer?.cornerRadius = 12
+        view.layer?.borderWidth = 1
+        view.layer?.borderColor = NSColor(calibratedRed: 0.65, green: 0.76, blue: 0.91, alpha: 1).cgColor
         window.contentView = view
 
         let title = NSTextField(labelWithString: titleText)
-        title.frame = NSRect(x: 22, y: 150, width: 500, height: 30)
-        title.font = NSFont.boldSystemFont(ofSize: 20)
+        title.frame = NSRect(x: 22, y: 122, width: 500, height: 26)
+        title.font = NSFont.boldSystemFont(ofSize: 18)
         title.textColor = NSColor(calibratedRed: 0.08, green: 0.32, blue: 0.65, alpha: 1)
         view.addSubview(title)
 
         let badge = NSTextField(labelWithString: severityText)
-        badge.frame = NSRect(x: 550, y: 151, width: 92, height: 24)
+        badge.frame = NSRect(x: 550, y: 124, width: 92, height: 22)
         badge.alignment = .center
         badge.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         badge.textColor = NSColor(calibratedRed: 0.30, green: 0.36, blue: 0.48, alpha: 1)
         view.addSubview(badge)
 
         let body = NSTextField(wrappingLabelWithString: bodyText)
-        body.frame = NSRect(x: 22, y: 92, width: 626, height: 48)
-        body.font = NSFont.systemFont(ofSize: 15)
+        body.frame = NSRect(x: 22, y: 78, width: 626, height: 38)
+        body.font = NSFont.systemFont(ofSize: 14)
         body.textColor = NSColor(calibratedRed: 0.22, green: 0.28, blue: 0.40, alpha: 1)
         view.addSubview(body)
 
-        let buttons: [(String, Selector)] = [
-            (primaryLabel, #selector(primaryAction)),
-            ("Inspect", #selector(inspectSession)),
-            ("Snooze 15 min", #selector(snooze)),
-            ("Dismiss for session", #selector(dismissSession))
-        ]
-        var x: CGFloat = 22
-        for item in buttons {
-            let button = NSButton(title: item.0, target: self, action: item.1)
-            let buttonWidth: CGFloat = item.0 == primaryLabel ? 178 : item.0 == "Dismiss for session" ? 142 : 112
-            button.frame = NSRect(x: x, y: 50, width: buttonWidth, height: 32)
-            button.bezelStyle = .rounded
-            view.addSubview(button)
-            x += button.frame.width + 10
-        }
+        let primary = NSButton(title: primaryLabel, target: self, action: #selector(primaryAction))
+        primary.frame = NSRect(x: 22, y: 38, width: 210, height: 32)
+        primary.bezelStyle = .rounded
+        primary.keyEquivalent = "\r"
+        view.addSubview(primary)
+
+        let continueButton = NSButton(title: "Continue here", target: self, action: #selector(continueHere))
+        continueButton.frame = NSRect(x: 244, y: 38, width: 130, height: 32)
+        continueButton.bezelStyle = .rounded
+        view.addSubview(continueButton)
+
+        let moreButton = NSButton(title: "...", target: self, action: #selector(showMore(_:)))
+        moreButton.frame = NSRect(x: 386, y: 38, width: 52, height: 32)
+        moreButton.bezelStyle = .rounded
+        view.addSubview(moreButton)
 
         statusLabel = NSTextField(labelWithString: "Local-only. Prompt/source content is not stored in this decision.")
-        statusLabel.frame = NSRect(x: 22, y: 18, width: 626, height: 20)
-        statusLabel.font = NSFont.systemFont(ofSize: 13)
+        statusLabel.frame = NSRect(x: 452, y: 44, width: 196, height: 18)
+        statusLabel.alignment = .right
+        statusLabel.font = NSFont.systemFont(ofSize: 11)
         statusLabel.textColor = NSColor(calibratedRed: 0.36, green: 0.43, blue: 0.55, alpha: 1)
         view.addSubview(statusLabel)
 
-        window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
         postInterventionAction("displayed")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20) {
+            if !self.completed {
+                postInterventionAction("snooze", snoozeMinutes: 15)
+                NSApp.terminate(nil)
+            }
+        }
     }
 
     func finish(_ message: String) {
+        completed = true
         statusLabel.stringValue = message
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
             NSApp.terminate(nil)
         }
+    }
+
+    @objc func continueHere() {
+        postDecision("continue_here")
+        postInterventionAction("snooze", snoozeMinutes: 15)
+        finish("Continuing. Quiet for 15 min.")
+    }
+
+    @objc func showMore(_ sender: NSButton) {
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Inspect evidence", action: #selector(inspectSession), keyEquivalent: "")
+        menu.addItem(withTitle: "Snooze 15 minutes", action: #selector(snooze), keyEquivalent: "")
+        menu.addItem(withTitle: "Dismiss for this session", action: #selector(dismissSession), keyEquivalent: "")
+        for item in menu.items { item.target = self }
+        menu.popUp(positioning: nil, at: NSPoint(x: sender.frame.minX, y: sender.frame.maxY), in: sender.superview)
     }
 
     @objc func primaryAction() {
@@ -515,6 +541,19 @@ def run_native_overlay(
     config = overlay_config(signal_kind, primary_label=primary_label)
     title = title or config.title
     primary_mode = primary_mode or config.primary_mode
+    if sys.platform == "darwin" and shutil.which("swift"):
+        return _run_macos_swift_overlay(
+            url,
+            title,
+            body,
+            severity,
+            brief_file,
+            intervention_fingerprint=intervention_fingerprint,
+            signal_kind=config.signal_kind,
+            primary_label=config.primary_label,
+            primary_mode=primary_mode,
+            runtime_action_available=runtime_action_available,
+        )
     try:
         import tkinter as tk
         from tkinter import ttk
@@ -541,16 +580,18 @@ def run_native_overlay(
     local_brief = _read_brief_file(brief_file)
 
     root = tk.Tk()
-    root.title("AIWatcher Fresh Start")
+    root.title("AIWatcher")
     root.configure(bg="#edf4ff")
     root.attributes("-topmost", True)
+    if sys.platform == "win32":
+        root.overrideredirect(True)
     try:
         root.call("::tk::unsupported::MacWindowStyle", "style", root._w, "utility", "closeBox")
     except tk.TclError:
         pass
 
     width = 680
-    height = 220
+    height = 180
     _set_window_position(root, width, height)
 
     style = ttk.Style(root)
@@ -578,7 +619,7 @@ def run_native_overlay(
         fill="x", pady=(12, 18), anchor="w"
     )
 
-    status = tk.StringVar(value="Choose an action. Prompt/source content stays local.")
+    status = tk.StringVar(value="Local-only; auto-hides in 20 seconds")
     button_row = ttk.Frame(frame, style="AIW.TFrame")
     button_row.pack(fill="x", pady=(0, 12))
 
@@ -617,6 +658,11 @@ def run_native_overlay(
         _record_intervention_action(base, intervention_fingerprint, "snooze", snooze_minutes=15)
         show_saved("Snoozed for 15 minutes. AIWatcher will stay quiet unless severity worsens.")
 
+    def continue_here() -> None:
+        _record_decision(base, session_id, "continue_here", body or "Continue in current session.")
+        _record_intervention_action(base, intervention_fingerprint, "snooze", snooze_minutes=15)
+        show_saved("Continuing here. AIWatcher will stay quiet for 15 minutes.")
+
     def dismiss_session() -> None:
         _record_intervention_action(base, intervention_fingerprint, "dismiss")
         show_saved("Dismissed for this session state.")
@@ -624,21 +670,40 @@ def run_native_overlay(
     ttk.Button(button_row, text=config.primary_label, style="AIW.TButton", command=primary_action).pack(
         side="left", padx=(0, 10)
     )
-    ttk.Button(
-        button_row,
-        text="Inspect",
-        style="AIW.TButton",
-        command=inspect_session,
-    ).pack(
+    ttk.Button(button_row, text="Continue here", style="AIW.TButton", command=continue_here).pack(
         side="left", padx=(0, 10)
     )
-    ttk.Button(button_row, text="Snooze 15 min", style="AIW.TButton", command=snooze).pack(side="left", padx=(0, 10))
-    ttk.Button(button_row, text="Dismiss", style="AIW.TButton", command=dismiss_session).pack(side="left")
+    more_menu = tk.Menu(root, tearoff=False)
+    more_menu.add_command(label="Inspect evidence", command=inspect_session)
+    more_menu.add_command(label="Snooze 15 minutes", command=snooze)
+    more_menu.add_command(label="Dismiss for this session", command=dismiss_session)
+
+    def show_more() -> None:
+        more_menu.tk_popup(root.winfo_pointerx(), root.winfo_pointery())
+
+    ttk.Button(button_row, text="...", style="AIW.TButton", command=show_more).pack(side="left")
 
     ttk.Label(frame, textvariable=status, style="AIWMuted.TLabel", wraplength=700).pack(fill="x", anchor="w")
 
-    root.lift()
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.user32.SetWindowPos(  # type: ignore[attr-defined]
+                root.winfo_id(), -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0040
+            )
+        except (AttributeError, OSError, tk.TclError):
+            pass
+    else:
+        root.lift()
     _record_intervention_action(base, intervention_fingerprint, "displayed")
+    root.after(
+        20_000,
+        lambda: (
+            _record_intervention_action(base, intervention_fingerprint, "snooze", snooze_minutes=15),
+            root.destroy(),
+        ),
+    )
     root.mainloop()
     return 0
 

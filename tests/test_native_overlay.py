@@ -52,6 +52,14 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('if action == "snooze"', native_overlay.MACOS_SWIFT_OVERLAY)
         self.assertNotIn('action == "dismiss" ? "dismissed" : "copy_handoff"', native_overlay.MACOS_SWIFT_OVERLAY)
 
+    def test_macos_overlay_is_nonactivating_and_has_one_primary_action(self) -> None:
+        source = native_overlay.MACOS_SWIFT_OVERLAY
+
+        self.assertIn(".nonactivatingPanel", source)
+        self.assertNotIn("NSApp.activate", source)
+        self.assertIn('NSButton(title: "Continue here"', source)
+        self.assertIn('NSButton(title: "..."', source)
+
     def test_tk_overlay_records_handoff_only_for_critical_context_copy(self) -> None:
         source = inspect.getsource(native_overlay.run_native_overlay)
 

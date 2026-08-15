@@ -314,6 +314,37 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(rows[0]["id"], record["id"])
         self.assertEqual(rows[0]["expected_savings"]["context_tokens"], 180_000)
 
+    def test_ambient_intervention_waits_for_two_observations_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                first = local_state.upsert_ambient_intervention(
+                    session_id="sess-1",
+                    signal_kind="critical_context",
+                    action="fresh_chat",
+                    severity="critical",
+                    session_stamp="stamp-1",
+                    reason="Context pressure.",
+                    required_observations=2,
+                )
+                self.assertFalse(
+                    local_state.ambient_intervention_delivery_allowed(first["fingerprint"], channel="overlay")
+                )
+                second = local_state.upsert_ambient_intervention(
+                    session_id="sess-1",
+                    signal_kind="critical_context",
+                    action="fresh_chat",
+                    severity="critical",
+                    session_stamp="stamp-1",
+                    reason="Context pressure.",
+                    required_observations=2,
+                )
+
+                self.assertEqual(second["observation_count"], 2)
+                self.assertTrue(
+                    local_state.ambient_intervention_delivery_allowed(second["fingerprint"], channel="overlay")
+                )
+
     def test_ambient_visible_channel_can_realert_when_severity_worsens(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")
@@ -435,6 +466,7 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(before["status"], "stopped")
         self.assertTrue(after["running"])
         self.assertEqual(after["pid"], 12345)
+        self.assertEqual(after["mode"], "watch")
         self.assertTrue(after["notify"])
         self.assertTrue(after["overlay"])
 

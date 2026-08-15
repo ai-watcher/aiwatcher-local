@@ -438,7 +438,6 @@ class PromptSavingsBaselineTests(unittest.TestCase):
 
     def test_ui_startup_starts_ambient_watch_by_default(self) -> None:
         started: dict[str, object] = {}
-        proc = Mock()
 
         def fake_serve(*_: object, **kwargs: object) -> None:
             on_started = kwargs["on_started"]
@@ -450,7 +449,7 @@ class PromptSavingsBaselineTests(unittest.TestCase):
             patch.object(cli, "get_or_refresh_receipt_baseline", return_value={}),
             patch.object(cli, "recheck_evidence_survival"),
             patch.object(cli, "get_watcher_status", return_value={"running": False}),
-            patch.object(cli.subprocess, "Popen", return_value=proc) as popen,
+            patch.object(cli, "start_companion", return_value={"ok": True, "pid": 123}) as start_companion,
             patch("aiwatcher_cli.ui.serve", side_effect=fake_serve),
         ):
             result = cli.command_ui(SimpleNamespace(
@@ -464,12 +463,8 @@ class PromptSavingsBaselineTests(unittest.TestCase):
             ))
 
         self.assertEqual(result, 0)
-        self.assertIs(started["resource"], proc)
-        command = popen.call_args.args[0]
-        self.assertEqual(command[:4], [sys.executable, "-m", "aiwatcher_cli", "watch"])
-        self.assertIn("--notify", command)
-        self.assertIn("--overlay", command)
-        self.assertEqual(command[-2:], ["--interval", "15"])
+        self.assertIsNone(started["resource"])
+        start_companion.assert_called_once_with(interval_seconds=15)
 
     def test_ui_startup_can_skip_ambient_watch(self) -> None:
         def fake_serve(*_: object, **kwargs: object) -> None:

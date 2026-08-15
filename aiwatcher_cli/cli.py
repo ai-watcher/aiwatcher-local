@@ -29,11 +29,13 @@ from typing import Callable, Iterable, Sequence
 from urllib.parse import quote
 
 from .correlate import link_recent_fresh_start_receipts_to_sessions, link_recent_interventions_to_sessions
+from .companion import companion_log_path, local_action_server_available, start_companion, stop_companion
 from .evidence_capture import record_missing_evidence_snapshots
 from .local_state import (
     COMMAND_GATE_BLOCKED_DECISIONS,
     VALID_OUTCOMES,
     ambient_intervention_delivery_allowed,
+    clear_watcher_heartbeat,
     command_hash,
     consume_brief_token,
     evidence_snapshots_for_sessions,
@@ -84,6 +86,12 @@ from .receipt import (
     survival_note,
 )
 from .runtime_attachment import runtime_attachment_for_session, safe_runtime_processes
+from .runtime_nudge import (
+    MAX_ACTIVE_IDLE_SECONDS,
+    build_runtime_nudge,
+    foreground_tool,
+    presentation_for_signal,
+)
 from .outcome_evidence import (
     VALID_EVIDENCE_OUTCOMES,
     build_outcome_evidence,
@@ -2891,9 +2899,9 @@ def setup_checklist() -> list[dict[str, str]]:
             "status": "optional",
         },
         {
-            "title": "Turn on ambient watch notifications",
-            "why": "While this command is running, AIWatcher can notify on context, loop, runway, or velocity pressure.",
-            "command": "aiwatcher watch --notify --interval 60",
+            "title": "Start the ambient companion",
+            "why": "Runs independently of the dashboard and shows one actionable nudge for active context, loop, runway, or velocity pressure.",
+            "command": "aiwatcher companion start",
             "status": "recommended",
         },
         {
@@ -2937,6 +2945,63 @@ def command_status(_args: argparse.Namespace) -> int:
         print(f"{marker} {row.label:26} {row.status_label:28} {row.session_count:>5} sessions")
     print("\nMode: local-only")
     print("Network: disabled unless hosted sync is configured separately")
+    return 0
+
+
+def command_companion(args: argparse.Namespace) -> int:
+    action = str(args.companion_action)
+    if action == "run":
+        if not local_action_server_available():
+            from .ui import serve
+
+            threading.Thread(
+                target=serve,
+                kwargs={"host": "127.0.0.1", "port": DEFAULT_UI_PORT, "auto_port": True},
+                name="aiwatcher-companion-actions",
+                daemon=True,
+            ).start()
+            for _ in range(20):
+                if local_action_server_available():
+                    break
+                time_module.sleep(0.1)
+        watch_args = argparse.Namespace(
+            days=1,
+            interval=max(15, int(args.interval)),
+            once=False,
+            cost_threshold=5.0,
+            calls_threshold=250,
+            tokens_threshold=500_000,
+            target="generic",
+            notify=False,
+            overlay=True,
+            companion=True,
+        )
+        return command_watch(watch_args)
+    if action == "start":
+        result = start_companion(interval_seconds=args.interval)
+        if not result.get("ok"):
+            print(f"Could not start AIWatcher companion: {result.get('message', 'unknown error')}", file=sys.stderr)
+            print(f"Log: {result.get('log_path') or companion_log_path()}", file=sys.stderr)
+            return 2
+        if result.get("already_running"):
+            print(f"AIWatcher companion is already running (PID {result.get('pid')}).")
+        else:
+            print(f"AIWatcher companion started (PID {result.get('pid')}).")
+        print("It stays local and shows one session-aware nudge only when action is justified.")
+        print(f"Log: {result.get('log_path') or companion_log_path()}")
+        return 0
+    if action == "stop":
+        result = stop_companion()
+        print(str(result.get("message") or "Companion stopped."))
+        return 0 if result.get("ok") else 2
+
+    status = get_watcher_status()
+    print("AIWatcher companion status")
+    print(f"Status: {status.get('status', 'unknown')}")
+    if status.get("pid"):
+        print(f"PID: {status['pid']}")
+    print(str(status.get("detail") or "No watcher heartbeat is available."))
+    print(f"Log: {companion_log_path()}")
     return 0
 
 
@@ -4330,44 +4395,7 @@ def _watch_intervention_presentation(status: dict[str, object]) -> dict[str, str
     """
     signal_kind = str(status.get("signal_kind") or "usage_pressure")
     reason = str(status.get("reason") or "AIWatcher found local execution pressure.")
-    presentations = {
-        "critical_context": {
-            "title": "AIWatcher: start fresh before the next turn",
-            "primary_label": "Copy Fresh Start brief",
-            "action_mode": "fresh_chat",
-        },
-        "loop": {
-            "title": "AIWatcher: stop the repeated work",
-            "primary_label": "Inspect and stop",
-            "action_mode": "recover_loop",
-        },
-        "velocity": {
-            "title": "AIWatcher: narrow this run",
-            "primary_label": "Copy focused next step",
-            "action_mode": "continue_focused",
-        },
-        "runway": {
-            "title": "AIWatcher: switch lanes before usage pressure grows",
-            "primary_label": "Copy cross-tool Fresh Start",
-            "action_mode": "switch_tool",
-        },
-        "warning_context": {
-            "title": "AIWatcher: reduce context before broad work",
-            "primary_label": "Copy compact next step",
-            "action_mode": "continue_focused",
-        },
-        "usage_pressure": {
-            "title": "AIWatcher: focus the next step",
-            "primary_label": "Copy focused next step",
-            "action_mode": "continue_focused",
-        },
-    }
-    selected = presentations.get(signal_kind, presentations["usage_pressure"])
-    return {
-        **selected,
-        "signal_kind": signal_kind,
-        "body": reason,
-    }
+    return presentation_for_signal(signal_kind, reason)
 
 
 def _watch_action_display(action: object) -> str:
@@ -4375,21 +4403,6 @@ def _watch_action_display(action: object) -> str:
     if str(action) == "create handoff capsule now":
         return "prepare Fresh Start brief now"
     return str(action)
-
-
-def _watch_allows_desktop_interruption(session: LocalSession, attachment: object) -> bool:
-    """Return whether a watch signal should interrupt outside the dashboard.
-
-    The dashboard can show every local signal. A desktop popup is stronger: it
-    should be reserved for work AIWatcher can tie to a live runtime, otherwise
-    background Codex/agent sessions can interrupt the user for stale work.
-    """
-    level = str(getattr(attachment, "level", "") or "")
-    if level == "active_process":
-        return True
-    if session.surface == "cli" and level != "historical":
-        return True
-    return False
 
 
 def _focused_continuation_brief(session: LocalSession, status: dict[str, object]) -> str:
@@ -4423,6 +4436,10 @@ def _print_watch_status_card(
     events: Sequence[LocalEvent],
     critical_capsule_seen: dict[str, datetime],
     notification_seen: dict[str, datetime] | None = None,
+    *,
+    delivery_session_id: str | None = None,
+    active_foreground_tool: str | None = None,
+    runtime_processes: list[RuntimeProcess] | None = None,
 ) -> None:
     status = _watch_status(
         session,
@@ -4473,17 +4490,34 @@ def _print_watch_status_card(
         )
     print(f"  Recommended: {_watch_action_display(status['action'])} -- {status['reason']}")
 
-    if (getattr(args, "notify", False) or getattr(args, "overlay", False)) and status["action"] != "continue":
+    may_deliver = delivery_session_id is None or delivery_session_id == session.session_id
+    if (
+        may_deliver
+        and (getattr(args, "notify", False) or getattr(args, "overlay", False))
+        and status["action"] != "continue"
+    ):
         key = f"{session.session_id}:{status['action']}"
         persist_key = f"{key}:{stamp.isoformat()}"
-        presentation = _watch_intervention_presentation(status)
-        severity = (
-            str(health.severity)
-            if health is not None and health.severity in {"warning", "critical"}
-            else "critical"
-            if loop is not None and int(loop.get("max_repeat", 0)) >= LOOP_CAPSULE_REPEAT
-            else "warning"
+        is_recent = stamp != MIN_DT and (datetime.now(timezone.utc) - stamp).total_seconds() <= 30 * 60
+        attachment = runtime_attachment_for_session(
+            session,
+            state={"status": "active" if is_recent else "historical"},
+            processes=list(runtime_processes) if runtime_processes is not None else safe_runtime_processes(),
         )
+        # command_watch always supplies delivery_session_id (including an
+        # empty string when no session is eligible). A direct renderer call is
+        # the legacy/manual path used by integrations and should not invent a
+        # second polling cycle before presenting an otherwise eligible signal.
+        enforce_pause = delivery_session_id is not None
+        nudge = build_runtime_nudge(
+            session,
+            status,
+            attachment,
+            active_foreground_tool=active_foreground_tool,
+            enforce_pause=enforce_pause,
+        )
+        presentation = presentation_for_signal(nudge.signal_kind, nudge.body)
+        severity = nudge.severity
         base_url = _watch_ui_base_url()
         dashboard_url = f"{base_url}/?session={quote(session.session_id, safe='')}"
         overlay_url = f"{base_url}/overlay?session={quote(session.session_id, safe='')}"
@@ -4503,25 +4537,32 @@ def _print_watch_status_card(
             reason=str(status["reason"]),
             urls={"dashboard": dashboard_url, "overlay": overlay_url},
             expected_savings=expected_savings,
+            required_observations=nudge.required_observations,
         )
         fingerprint = str(intervention.get("fingerprint") or "") if intervention else ""
         if fingerprint:
             overlay_url = f"{overlay_url}&intervention={quote(fingerprint, safe='')}"
         channel = "overlay" if getattr(args, "overlay", False) else "notification"
-        held_key = f"{key}:held:{channel}"
-        if notification_seen is not None and held_key in notification_seen:
-            print(f"  {channel.title()}: already held for dashboard")
-            return
-        is_recent = stamp != MIN_DT and (datetime.now(timezone.utc) - stamp).total_seconds() <= 30 * 60
-        attachment = runtime_attachment_for_session(
-            session,
-            state={"status": "active" if is_recent else "historical"},
-            processes=safe_runtime_processes(),
+        # Legacy/manual callers render one known session directly. Preserve
+        # their notification contract across headless Linux and let a recent
+        # CLI session use the existing overlay fallback even when no editor
+        # launcher is installed. The real companion always supplies
+        # delivery_session_id, so its foreground, pause, and attachment policy
+        # remains authoritative.
+        direct_delivery_fallback = (
+            not enforce_pause
+            and nudge.idle_seconds <= MAX_ACTIVE_IDLE_SECONDS
+            and (channel == "notification" or (session.surface or "").lower() == "cli")
         )
-        if not _watch_allows_desktop_interruption(session, attachment):
+        if not nudge.eligible and not direct_delivery_fallback:
+            held_key = f"{key}:held"
+            already_held = notification_seen is not None and held_key in notification_seen
+            if already_held:
+                print(f"  {channel.title()}: already held for dashboard ({nudge.hold_reason})")
+                return
             if notification_seen is not None:
                 notification_seen[held_key] = stamp
-            print(f"  {channel.title()}: held for dashboard (no live runtime attached)")
+            print(f"  {channel.title()}: held for dashboard ({nudge.hold_reason})")
             try:
                 record_watch_notification(
                     session_id=session.session_id,
@@ -4529,11 +4570,17 @@ def _print_watch_status_card(
                     action=str(status["action"]),
                     reason=str(status["reason"]),
                     sent=False,
-                    detail=f"{channel} held for dashboard - no live runtime attached",
+                    detail=f"{channel} held - {nudge.hold_reason}",
                     url=dashboard_url,
                 )
             except OSError:
                 pass
+            return
+        if intervention and int(intervention.get("observation_count") or 0) < nudge.required_observations:
+            print(
+                f"  {channel.title()}: confirming signal "
+                f"({intervention.get('observation_count', 0)}/{nudge.required_observations} observations)"
+            )
             return
         already_seen = (
             notification_seen is not None and key in notification_seen
@@ -4588,7 +4635,7 @@ def _print_watch_status_card(
                     and attachment.available
                     and getattr(attachment, "level", "") != "app"
                 ):
-                    primary_label = "Copy brief + open workspace"
+                    primary_label = "Open tool + copy brief"
                 overlay_ok, overlay_detail = _open_handoff_overlay(
                     overlay_url,
                     title=presentation["title"],
@@ -4893,6 +4940,62 @@ def _check_outcome_review_signals(rows: Sequence[LocalSession]) -> None:
         print(f"  Outcome review: nothing new ({already_reviewed} signal{plural} already reviewed).")
 
 
+def _select_runtime_nudge_session(
+    rows: Sequence[LocalSession],
+    all_events: dict[str, list[LocalEvent]],
+    args: argparse.Namespace,
+    *,
+    processes: list[RuntimeProcess],
+    active_foreground_tool: str | None,
+) -> str | None:
+    """Pick one active intervention for this poll across local sessions."""
+    severity_rank = {"critical": 2, "warning": 1, "healthy": 0}
+    action_rank = {"recover_loop": 5, "fresh_chat": 4, "switch_tool": 3, "continue_focused": 2}
+    candidates: list[tuple[tuple[int, int, int, datetime], str]] = []
+    now = datetime.now(timezone.utc)
+    for session in rows[:12]:
+        status = _watch_status(
+            session,
+            all_events.get(session.session_id, []),
+            rows,
+            cost_threshold=args.cost_threshold,
+            calls_threshold=args.calls_threshold,
+            tokens_threshold=args.tokens_threshold,
+        )
+        if status["action"] == "continue":
+            continue
+        stamp = session_sort_key(session)
+        is_recent = stamp != MIN_DT and (now - stamp).total_seconds() <= 30 * 60
+        attachment = runtime_attachment_for_session(
+            session,
+            state={"status": "active" if is_recent else "historical"},
+            processes=processes,
+        )
+        nudge = build_runtime_nudge(
+            session,
+            status,
+            attachment,
+            now=now,
+            active_foreground_tool=active_foreground_tool,
+        )
+        if not nudge.eligible:
+            continue
+        health = status.get("health")
+        replayed = int(getattr(health, "latest_turn_replayed_tokens", 0) or 0)
+        candidates.append((
+            (
+                severity_rank.get(nudge.severity, 0),
+                action_rank.get(nudge.action, 0),
+                replayed,
+                stamp,
+            ),
+            session.session_id,
+        ))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda candidate: candidate[0])[1]
+
+
 def command_watch(args: argparse.Namespace) -> int:
     if not getattr(args, "once", False):
         current = get_watcher_status(max_age_seconds=max(30, int(getattr(args, "interval", 60)) * 2))
@@ -4923,7 +5026,7 @@ def command_watch(args: argparse.Namespace) -> int:
         while True:
             record_watcher_heartbeat(
                 pid=os.getpid(),
-                mode="watch",
+                mode="companion" if getattr(args, "companion", False) else "watch",
                 interval_seconds=max(2, int(args.interval)),
                 notify=bool(getattr(args, "notify", False)),
                 overlay=bool(getattr(args, "overlay", False)),
@@ -4960,9 +5063,19 @@ def command_watch(args: argparse.Namespace) -> int:
             if not rows:
                 print(f"No local AI sessions detected in the last {args.days} days.")
                 if args.once:
+                    clear_watcher_heartbeat(pid=os.getpid())
                     return 0
             else:
                 all_events = events_by_session(rows, days=args.days)
+                runtime_processes = safe_runtime_processes()
+                active_tool = foreground_tool()
+                delivery_session_id = _select_runtime_nudge_session(
+                    rows,
+                    all_events,
+                    args,
+                    processes=runtime_processes,
+                    active_foreground_tool=active_tool,
+                )
                 _print_watch_status_card(
                     rows[0],
                     rows,
@@ -4970,7 +5083,29 @@ def command_watch(args: argparse.Namespace) -> int:
                     all_events.get(rows[0].session_id, []),
                     critical_capsule_seen,
                     notification_seen,
+                    delivery_session_id=delivery_session_id or "",
+                    active_foreground_tool=active_tool,
+                    runtime_processes=runtime_processes,
                 )
+
+                if delivery_session_id and delivery_session_id != rows[0].session_id:
+                    delivery_row = next(
+                        (row for row in rows if row.session_id == delivery_session_id),
+                        None,
+                    )
+                    if delivery_row is not None:
+                        print("Highest-value active runtime signal:")
+                        _print_watch_status_card(
+                            delivery_row,
+                            rows,
+                            args,
+                            all_events.get(delivery_row.session_id, []),
+                            critical_capsule_seen,
+                            notification_seen,
+                            delivery_session_id=delivery_session_id,
+                            active_foreground_tool=active_tool,
+                            runtime_processes=runtime_processes,
+                        )
 
                 interesting: list[LocalSession] = []
                 for row in rows[1:]:
@@ -5017,9 +5152,11 @@ def command_watch(args: argparse.Namespace) -> int:
                         print(f"  Next: aiwatcher resume --session-id {row.session_id} --target codex --copy")
 
             if args.once:
+                clear_watcher_heartbeat(pid=os.getpid())
                 return 0
             time_module.sleep(max(2, args.interval))
     except KeyboardInterrupt:
+        clear_watcher_heartbeat(pid=os.getpid())
         print("\nStopped AIWatcher Local watch.")
         return 0
 
@@ -6998,30 +7135,13 @@ def command_ui(args: argparse.Namespace) -> int:
             print("Ambient Watch already running.")
             return None
         interval = max(15, int(getattr(args, "watch_interval", 60)))
-        command = [
-            sys.executable,
-            "-m",
-            "aiwatcher_cli",
-            "watch",
-            "--notify",
-            "--overlay",
-            "--interval",
-            str(interval),
-        ]
-        try:
-            proc = subprocess.Popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            print(f"Ambient Watch started while the dashboard is open (interval {interval}s).")
-            return proc
-        except OSError as exc:
-            print(f"Ambient Watch could not start automatically: {exc}", file=sys.stderr)
-            print("Run `aiwatcher watch --notify --overlay --interval 60` manually if you want ambient nudges.", file=sys.stderr)
-            return None
+        result = start_companion(interval_seconds=interval)
+        if result.get("ok"):
+            print(f"Ambient companion running independently of the dashboard (interval {interval}s).")
+        else:
+            print(f"Ambient companion could not start: {result.get('message', 'unknown error')}", file=sys.stderr)
+            print("Run `aiwatcher companion start` manually if you want ambient nudges.", file=sys.stderr)
+        return None
 
     try:
         serve(
@@ -7046,6 +7166,23 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("start", help="Detect local AI coding tools and run a one-time local scan").set_defaults(func=command_start)
     sub.add_parser("setup", help="Show first-run setup, hook, coverage, and ambient watch steps").set_defaults(func=command_setup)
     sub.add_parser("status", help="Show detected tools and local AIWatcher status").set_defaults(func=command_status)
+    companion = sub.add_parser("companion", help="Run the local runtime-nudge companion without the dashboard")
+    companion_sub = companion.add_subparsers(
+        dest="companion_action",
+        required=True,
+        help="Start, inspect, stop, or foreground-run the local companion",
+    )
+    companion_start = companion_sub.add_parser("start", help="Start the companion in the background")
+    companion_start.add_argument("--interval", type=int, default=30, help="Seconds between local scans")
+    companion_start.set_defaults(func=command_companion)
+    companion_sub.add_parser("status", help="Show companion status").set_defaults(func=command_companion)
+    companion_sub.add_parser("stop", help="Stop the companion").set_defaults(func=command_companion)
+    companion_run = companion_sub.add_parser(
+        "run",
+        help="Run the companion in the foreground (used by companion start)",
+    )
+    companion_run.add_argument("--interval", type=int, default=30, help="Seconds between local scans")
+    companion_run.set_defaults(func=command_companion)
     sub.add_parser("today", help="Show today's local AI usage").set_defaults(func=command_today)
 
     tools = sub.add_parser("tools", help="Rank AI usage by tool")
@@ -7290,6 +7427,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--overlay",
         action="store_true",
         help="Open a local AIWatcher companion overlay when watch recommends Fresh Start or another action",
+    )
+    watch.add_argument(
+        "--companion",
+        action="store_true",
+        help="Mark this foreground watch as the dashboard-independent companion process",
     )
     watch.add_argument(
         "--target", choices=sorted(TARGET_LABELS), default="generic",

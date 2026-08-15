@@ -360,11 +360,17 @@ What to check:
   decision metadata.
 - Copying a Fresh Start brief from the Home companion should replace the recommendation
   with a clear "paste into a fresh chat" confirmation and receipt link.
-- `watch --overlay` should open the local `/overlay` companion when watch
-  recommends action, giving desktop users a dismissible Fresh Start surface outside
-  Claude/Codex/Cursor instead of requiring them to visit the full dashboard.
-  It should prefer the native always-on-top desktop bubble and fall back to the
-  browser companion when native UI is unavailable.
+- `companion start` should watch without the dashboard, confirm a signal on two
+  scans, wait for a pause, and show only the highest-value eligible session.
+- The native companion should not activate or steal focus from the host tool.
+  It should show one primary action and **Continue here**, with inspect, snooze,
+  and dismiss in the overflow menu.
+- Background or stale sessions should remain visible in the dashboard but must
+  not interrupt the desktop. Desktop/editor nudges require the matching host tool
+  in the foreground; CLI nudges require an attached runtime or matching workspace.
+- The same intervention should not appear simultaneously as a native panel,
+  browser companion, and OS notification. Native UI is preferred, with browser
+  fallback only when native UI is unavailable.
 - `resume`/`handoff` without `--include-prompt-excerpt` should not contain
   prompt text; with it, the brief should contain a labeled excerpt and nothing
   else in the surrounding output should change.

@@ -546,13 +546,13 @@ def get_watcher_status(max_age_seconds: int = 120) -> dict[str, Any]:
             "detail": "AIWatcher could not read local state.",
         }
     heartbeat = data.get("watcher_heartbeat")
-    command = "aiwatcher watch --notify --overlay --interval 60"
+    command = "aiwatcher companion start"
     if not isinstance(heartbeat, dict):
         return {
             "running": False,
             "status": "stopped",
-            "label": "Watcher stopped",
-            "detail": "Start ambient Watch to surface handoff and outcome nudges while you work.",
+            "label": "Companion stopped",
+            "detail": "Start the local companion to surface handoff and outcome nudges while you work.",
             "command": command,
         }
     updated_at = heartbeat.get("updated_at")
@@ -562,23 +562,40 @@ def get_watcher_status(max_age_seconds: int = 120) -> dict[str, Any]:
         updated = None
     age_seconds = (datetime.now(timezone.utc) - updated).total_seconds() if updated else None
     running = age_seconds is not None and age_seconds <= max_age_seconds
+    mode = str(heartbeat.get("mode") or "watch")
+    process_label = "Companion" if mode == "companion" else "Watcher"
     return {
         "running": running,
         "status": "running" if running else "stale",
-        "label": "Watcher running" if running else "Watcher not recently seen",
+        "label": f"{process_label} running" if running else f"{process_label} not recently seen",
         "detail": (
-            "Ambient Watch is checking local sessions for context pressure and handoff opportunities."
+            f"{process_label} is checking local sessions for context pressure and handoff opportunities."
             if running
-            else "The last watcher heartbeat is stale. Restart ambient Watch to catch new session pressure."
+            else f"The last {process_label.lower()} heartbeat is stale. Restart it to catch new session pressure."
         ),
         "command": command,
         "updated_at": updated.isoformat() if updated else None,
         "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
         "pid": heartbeat.get("pid"),
+        "mode": mode,
         "notify": bool(heartbeat.get("notify")),
         "overlay": bool(heartbeat.get("overlay")),
         "interval_seconds": heartbeat.get("interval_seconds"),
     }
+
+
+def clear_watcher_heartbeat(*, pid: int | None = None) -> None:
+    """Clear the watcher heartbeat, optionally only for the matching process."""
+    try:
+        with _locked_state():
+            data = _load()
+            heartbeat = data.get("watcher_heartbeat")
+            if pid is not None and isinstance(heartbeat, dict) and heartbeat.get("pid") != pid:
+                return
+            data.pop("watcher_heartbeat", None)
+            _save(data)
+    except OSError:
+        pass
 
 
 def recent_watch_notifications(limit: int = 10) -> list[dict[str, Any]]:
@@ -782,6 +799,7 @@ def upsert_ambient_intervention(
     reason: str,
     urls: dict[str, str] | None = None,
     expected_savings: dict[str, Any] | None = None,
+    required_observations: int = 1,
 ) -> dict[str, Any] | None:
     """Create or refresh the durable record shared by notification and overlay.
 
@@ -814,9 +832,11 @@ def upsert_ambient_intervention(
                     "state": "detected",
                     "events": [_ambient_event("detected")],
                     "channels": {},
+                    "observation_count": 1,
                 }
                 rows.append(record)
             else:
+                record["observation_count"] = max(1, int(record.get("observation_count") or 1)) + 1
                 prior_stamp = record.get("session_stamp")
                 prior_severity = record.get("severity")
                 if prior_stamp != session_stamp or prior_severity != normalized_severity:
@@ -834,6 +854,7 @@ def upsert_ambient_intervention(
                 "reason": reason.strip()[:500],
                 "urls": _safe_ambient_urls(urls),
                 "expected_savings": _safe_expected_savings(expected_savings),
+                "required_observations": max(1, int(required_observations)),
             })
             data["ambient_interventions"] = rows[-MAX_AMBIENT_INTERVENTIONS_STORED:]
             _save(data)
@@ -873,6 +894,8 @@ def ambient_intervention_delivery_allowed(fingerprint: str, *, channel: str) -> 
     """
     record = get_ambient_intervention(fingerprint)
     if not record:
+        return False
+    if int(record.get("observation_count") or 0) < int(record.get("required_observations") or 1):
         return False
     current_severity = record.get("severity")
 

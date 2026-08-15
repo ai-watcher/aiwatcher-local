@@ -105,6 +105,18 @@ python -m aiwatcher_cli ui
 busy, AIWatcher Local automatically tries the next available port and prints the
 URL it picked.
 
+For ambient runtime nudges without keeping the dashboard open, start the local
+companion once for the current login session:
+
+```sh
+python -m aiwatcher_cli companion start
+```
+
+It watches local session metadata in the background and presents at most one
+actionable nudge when the matching Claude, Codex, Cursor, editor, or terminal
+runtime is active. Use `companion status` or `companion stop` to inspect or stop
+it. The companion does not upload data and does not require the dashboard.
+
 ### 3. Install hooks so work is reviewed before it runs
 
 Everything above is retrospective. Hooks are what make AIWatcher act *before*
@@ -385,8 +397,11 @@ $5+ in API-equivalent value — so you know whether it's worth acting on
 before reading further.
 
 The dashboard also surfaces this as a **Fresh Start companion** on Home when active
-local work reaches warning or critical context pressure. AIWatcher gives the
-signal one primary action, plus **Inspect**, **Snooze**, and **Dismiss**. It
+local work reaches warning or critical context pressure. The background
+companion carries the same intervention into the developer's current workflow,
+so the dashboard is useful for review but is not required while coding. AIWatcher
+gives the signal one primary action and **Continue here**; inspect, snooze, and
+dismiss live in the overflow menu. It
 records only local decision metadata and estimated replayed context at risk,
 not prompt or source text. When a later same-project local session appears,
 AIWatcher links it as a Fresh Start receipt and shows observed next-session
@@ -395,22 +410,27 @@ decisions appear in Home, Evidence, and `aiwatcher hook-status`. After you act,
 snooze, or dismiss, the same signal stays quiet across the native and browser
 companions unless severity worsens.
 
-For a lower-friction desktop flow, start the local dashboard. It now starts
-Ambient Watch while the dashboard is open, so warnings can appear without a
-second command:
+For a lower-friction desktop flow, start the background companion directly:
 
 ```bash
-python -m aiwatcher_cli ui
+python -m aiwatcher_cli companion start
 ```
 
-When AIWatcher finds an actionable signal, it opens one small local companion
-outside Claude, Codex, Cursor, or your editor. It first tries a native
-always-on-top bubble and falls back to the browser companion if native UI is
-not available. The primary action matches the signal: copy a fresh-session
-brief for critical context, inspect a possible loop, copy a focused checkpoint
-for unusual velocity, or review a lane switch under runway pressure. You can
-also inspect, snooze for 15 minutes, or dismiss the signal for that session.
-AIWatcher does not inject UI into third-party apps.
+When AIWatcher confirms an actionable signal on two consecutive scans, it opens
+one compact local companion near the edge of the screen. It waits for a pause
+between turns, requires an active runtime or matching foreground tool, and
+ignores stale/background sessions. The primary action matches the signal: copy
+a fresh-session brief for critical context, inspect a possible loop, copy a
+focused checkpoint for unusual velocity, or review a lane switch under runway
+pressure. **Continue here** keeps the current session and quiets the signal for
+15 minutes. The overflow menu contains inspect, snooze, and dismiss.
+
+On macOS the companion uses a non-activating native panel; on Windows it uses a
+non-activating topmost window where the OS permits it. It deliberately avoids
+stacking a second OS notification for the same intervention. If native UI is
+unavailable, AIWatcher falls back to the local browser companion. AIWatcher does
+not inject UI into third-party apps and does not claim an exact-chat deep link
+when a host tool does not expose one.
 
 On macOS, AIWatcher deliberately does not fall back to AppleScript
 Notification Center alerts. macOS attributes those alerts to Script Editor,
@@ -418,10 +438,10 @@ so clicking **Show** opens Script Editor instead of AIWatcher. The actionable
 native companion is used instead; `terminal-notifier` remains supported for
 standalone `--notify` use because it can open the local dashboard correctly.
 
-You can still run Ambient Watch standalone:
+For foreground debugging, you can still run the watch loop directly:
 
 ```bash
-python -m aiwatcher_cli watch --notify --overlay
+python -m aiwatcher_cli watch --overlay
 ```
 
 Use `watch --once --overlay` as a one-shot smoke test, and set
@@ -515,6 +535,7 @@ These are the commands worth knowing on day one:
 | `outcome useful` | Mark how the last session turned out |
 | `journal` | Daily summary plus one thing to change next time |
 | `resume --target codex --copy` | Continue work in a different tool without rebuilding context |
+| `companion start` | Watch active local runtimes and show calm, session-aware nudges |
 | `watch --once` | Flag expensive or loop-like work |
 | `ui` | Local-only browser dashboard |
 | `doctor` | Check tool detection and integration status |
