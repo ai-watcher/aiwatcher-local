@@ -130,8 +130,10 @@ default. The Companion has quick paths for **Plan** (Prompt Companion),
 **Control** (the strongest recommended action, such as Fresh Start), **Watch**
 (current session evidence), and **Console** (the full dashboard). It presents at
 most one actionable nudge when the matching Claude, Codex, Cursor, editor, or
-terminal runtime is active. Use `companion status` or `companion stop` to inspect
-or stop it. The companion does not upload data and does not require the dashboard.
+terminal runtime is active. Drag it by its handle, minimize it to the small
+**AIW** pill when it is in the way, and expand it again when you need the
+controls. Use `companion status` or `companion stop` to inspect or stop it. The
+companion does not upload data and does not require the dashboard.
 
 ### 3. Install hooks so work is reviewed before it runs
 

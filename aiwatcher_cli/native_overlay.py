@@ -417,18 +417,33 @@ func absoluteURL(_ value: String) -> String {
     return dashboardBaseURL + value
 }
 
+final class DragView: NSView {
+    override var mouseDownCanMoveWindow: Bool { true }
+}
+
 final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var window: NSPanel!
+    var rootView: NSView!
     var titleLabel: NSTextField!
     var subtitleLabel: NSTextField!
     var primaryButton: NSButton!
+    var planButton: NSButton!
+    var consoleButton: NSButton!
+    var collapseButton: NSButton!
+    var expandButton: NSButton!
+    var dragHandle: NSTextField!
     var primaryURL = dashboardURL
+    var collapsed = false
+    let expandedWidth: CGFloat = 386
+    let expandedHeight: CGFloat = 58
+    let collapsedWidth: CGFloat = 64
+    let collapsedHeight: CGFloat = 42
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
-        let width: CGFloat = 420
-        let height: CGFloat = 74
+        let width: CGFloat = expandedWidth
+        let height: CGFloat = expandedHeight
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
         let margin: CGFloat = 24
         let x = position.contains("left") ? screen.minX + margin : screen.maxX - width - margin
@@ -442,48 +457,74 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         window.hidesOnDeactivate = false
         window.isReleasedWhenClosed = false
         window.becomesKeyOnlyIfNeeded = true
+        window.isMovableByWindowBackground = true
         window.hasShadow = true
 
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
-        view.wantsLayer = true
-        view.layer?.backgroundColor = NSColor(calibratedRed: 0.05, green: 0.07, blue: 0.10, alpha: 0.96).cgColor
-        view.layer?.cornerRadius = 18
-        view.layer?.borderWidth = 1
-        view.layer?.borderColor = NSColor(calibratedRed: 0.25, green: 0.34, blue: 0.48, alpha: 0.90).cgColor
-        window.contentView = view
+        rootView = DragView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        rootView.wantsLayer = true
+        rootView.layer?.backgroundColor = NSColor(calibratedRed: 0.05, green: 0.07, blue: 0.10, alpha: 0.96).cgColor
+        rootView.layer?.cornerRadius = 16
+        rootView.layer?.borderWidth = 1
+        rootView.layer?.borderColor = NSColor(calibratedRed: 0.25, green: 0.34, blue: 0.48, alpha: 0.90).cgColor
+        window.contentView = rootView
+
+        dragHandle = NSTextField(labelWithString: "::")
+        dragHandle.frame = NSRect(x: 10, y: 21, width: 18, height: 16)
+        dragHandle.font = NSFont.systemFont(ofSize: 12, weight: .bold)
+        dragHandle.textColor = NSColor(calibratedRed: 0.48, green: 0.58, blue: 0.70, alpha: 1)
+        dragHandle.toolTip = "Drag AIWatcher"
+        rootView.addSubview(dragHandle)
 
         let dot = NSTextField(labelWithString: "on")
-        dot.frame = NSRect(x: 16, y: 36, width: 22, height: 18)
+        dot.frame = NSRect(x: 30, y: 31, width: 22, height: 16)
         dot.font = NSFont.systemFont(ofSize: 10, weight: .bold)
         dot.textColor = NSColor(calibratedRed: 0.26, green: 0.80, blue: 0.55, alpha: 1)
-        view.addSubview(dot)
+        rootView.addSubview(dot)
 
         titleLabel = NSTextField(labelWithString: "AIWatcher")
-        titleLabel.frame = NSRect(x: 42, y: 42, width: 180, height: 18)
-        titleLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.frame = NSRect(x: 56, y: 31, width: 88, height: 17)
+        titleLabel.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
         titleLabel.textColor = NSColor.white
-        view.addSubview(titleLabel)
+        rootView.addSubview(titleLabel)
 
         subtitleLabel = NSTextField(labelWithString: "Watching quietly")
-        subtitleLabel.frame = NSRect(x: 42, y: 21, width: 190, height: 18)
-        subtitleLabel.font = NSFont.systemFont(ofSize: 10)
+        subtitleLabel.frame = NSRect(x: 30, y: 12, width: 116, height: 16)
+        subtitleLabel.font = NSFont.systemFont(ofSize: 9)
         subtitleLabel.textColor = NSColor(calibratedRed: 0.67, green: 0.74, blue: 0.84, alpha: 1)
-        view.addSubview(subtitleLabel)
+        rootView.addSubview(subtitleLabel)
 
-        let plan = NSButton(title: "Plan", target: self, action: #selector(openPrompt))
-        plan.frame = NSRect(x: 238, y: 24, width: 54, height: 28)
-        plan.bezelStyle = .rounded
-        view.addSubview(plan)
+        planButton = NSButton(title: "Plan", target: self, action: #selector(openPrompt))
+        planButton.frame = NSRect(x: 152, y: 15, width: 50, height: 28)
+        planButton.bezelStyle = .rounded
+        planButton.controlSize = .small
+        rootView.addSubview(planButton)
 
         primaryButton = NSButton(title: "Watch", target: self, action: #selector(openPrimary))
-        primaryButton.frame = NSRect(x: 296, y: 24, width: 66, height: 28)
+        primaryButton.frame = NSRect(x: 206, y: 15, width: 88, height: 28)
         primaryButton.bezelStyle = .rounded
-        view.addSubview(primaryButton)
+        primaryButton.controlSize = .small
+        rootView.addSubview(primaryButton)
 
-        let console = NSButton(title: "Console", target: self, action: #selector(openDashboard))
-        console.frame = NSRect(x: 364, y: 24, width: 52, height: 28)
-        console.bezelStyle = .rounded
-        view.addSubview(console)
+        consoleButton = NSButton(title: "Console", target: self, action: #selector(openDashboard))
+        consoleButton.frame = NSRect(x: 298, y: 15, width: 64, height: 28)
+        consoleButton.bezelStyle = .rounded
+        consoleButton.controlSize = .small
+        rootView.addSubview(consoleButton)
+
+        collapseButton = NSButton(title: "-", target: self, action: #selector(toggleCollapsed))
+        collapseButton.frame = NSRect(x: 364, y: 37, width: 18, height: 18)
+        collapseButton.bezelStyle = .rounded
+        collapseButton.controlSize = .mini
+        collapseButton.toolTip = "Minimize AIWatcher"
+        rootView.addSubview(collapseButton)
+
+        expandButton = NSButton(title: "AIW", target: self, action: #selector(toggleCollapsed))
+        expandButton.frame = NSRect(x: 8, y: 7, width: 48, height: 28)
+        expandButton.bezelStyle = .rounded
+        expandButton.controlSize = .small
+        expandButton.toolTip = "Open AIWatcher Companion"
+        expandButton.isHidden = true
+        rootView.addSubview(expandButton)
 
         window.orderFrontRegardless()
         refreshState()
@@ -501,6 +542,26 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         openURL(primaryURL)
     }
 
+    @objc func toggleCollapsed() {
+        collapsed.toggle()
+        let current = window.frame
+        let targetWidth = collapsed ? collapsedWidth : expandedWidth
+        let targetHeight = collapsed ? collapsedHeight : expandedHeight
+        let target = NSRect(
+            x: current.minX,
+            y: current.maxY - targetHeight,
+            width: targetWidth,
+            height: targetHeight
+        )
+        window.setFrame(target, display: true, animate: true)
+        rootView.frame = NSRect(x: 0, y: 0, width: targetWidth, height: targetHeight)
+        rootView.layer?.cornerRadius = collapsed ? 14 : 16
+        for view in [dragHandle, titleLabel, subtitleLabel, primaryButton, planButton, consoleButton, collapseButton] {
+            view?.isHidden = collapsed
+        }
+        expandButton.isHidden = !collapsed
+    }
+
     func refreshState() {
         guard let url = URL(string: stateURL) else {
             scheduleRefresh()
@@ -513,9 +574,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             DispatchQueue.main.async {
-                self.titleLabel.stringValue = String((json["label"] as? String ?? "AIWatcher").prefix(32))
-                self.subtitleLabel.stringValue = String((json["subtitle"] as? String ?? "Watching quietly").prefix(78))
-                self.primaryButton.title = String((json["primary_label"] as? String ?? "Watch").prefix(18))
+                self.titleLabel.stringValue = String((json["label"] as? String ?? "AIWatcher").prefix(18))
+                self.subtitleLabel.stringValue = String((json["subtitle"] as? String ?? "Watching quietly").prefix(42))
+                self.primaryButton.title = String((json["primary_label"] as? String ?? "Watch").prefix(12))
                 self.primaryURL = absoluteURL(json["primary_url"] as? String ?? "/")
                 self.scheduleRefresh()
             }
@@ -720,13 +781,15 @@ def run_native_presence(
     except tk.TclError:
         pass
 
-    width = 420
-    height = 74
+    expanded_width = 386
+    expanded_height = 58
+    collapsed_width = 64
+    collapsed_height = 42
     screen_width = int(root.winfo_screenwidth())
     screen_height = int(root.winfo_screenheight())
-    x = 24 if "left" in position else max(16, screen_width - width - 24)
-    y = 24 if "top" in position else max(16, screen_height - height - 92)
-    root.geometry(f"{width}x{height}+{x}+{y}")
+    x = 24 if "left" in position else max(16, screen_width - expanded_width - 24)
+    y = 24 if "top" in position else max(16, screen_height - expanded_height - 92)
+    root.geometry(f"{expanded_width}x{expanded_height}+{x}+{y}")
 
     style = ttk.Style(root)
     try:
@@ -734,21 +797,42 @@ def run_native_presence(
     except tk.TclError:
         pass
     style.configure("Presence.TFrame", background="#0d141f")
-    style.configure("PresenceTitle.TLabel", background="#0d141f", foreground="#f7fbff", font=("Helvetica", 12, "bold"))
-    style.configure("PresenceMuted.TLabel", background="#0d141f", foreground="#a8b6ca", font=("Helvetica", 10))
-    style.configure("PresenceDot.TLabel", background="#0d141f", foreground="#45d486", font=("Helvetica", 13, "bold"))
-    style.configure("Presence.TButton", font=("Helvetica", 10, "bold"), padding=(8, 4))
+    style.configure("PresenceTitle.TLabel", background="#0d141f", foreground="#f7fbff", font=("Helvetica", 11, "bold"))
+    style.configure("PresenceMuted.TLabel", background="#0d141f", foreground="#a8b6ca", font=("Helvetica", 9))
+    style.configure("PresenceDot.TLabel", background="#0d141f", foreground="#45d486", font=("Helvetica", 10, "bold"))
+    style.configure("PresenceDrag.TLabel", background="#0d141f", foreground="#7b8ba3", font=("Helvetica", 10, "bold"))
+    style.configure("Presence.TButton", font=("Helvetica", 9, "bold"), padding=(6, 3))
+    style.configure("PresenceMini.TButton", font=("Helvetica", 9, "bold"), padding=(4, 2))
 
-    frame = ttk.Frame(root, padding=(14, 8), style="Presence.TFrame")
+    frame = ttk.Frame(root, padding=(8, 6), style="Presence.TFrame")
     frame.pack(fill="both", expand=True)
+    collapsed_frame = ttk.Frame(root, padding=(8, 6), style="Presence.TFrame")
     left = ttk.Frame(frame, style="Presence.TFrame")
     left.pack(side="left", fill="both", expand=True)
     title_var = tk.StringVar(value="AIWatcher")
     subtitle_var = tk.StringVar(value="Watching quietly")
     primary_label_var = tk.StringVar(value="Watch")
     primary_url_var = tk.StringVar(value=url)
-    ttk.Label(left, textvariable=title_var, style="PresenceDot.TLabel").pack(anchor="w")
-    ttk.Label(left, textvariable=subtitle_var, style="PresenceMuted.TLabel", wraplength=190).pack(anchor="w")
+    drag = ttk.Label(frame, text="::", style="PresenceDrag.TLabel", cursor="fleur")
+    drag.pack(side="left", padx=(0, 6))
+    title_stack = ttk.Frame(left, style="Presence.TFrame")
+    title_stack.pack(anchor="w")
+    ttk.Label(title_stack, text="on", style="PresenceDot.TLabel").pack(side="left", padx=(0, 6))
+    ttk.Label(title_stack, textvariable=title_var, style="PresenceTitle.TLabel").pack(side="left")
+    ttk.Label(left, textvariable=subtitle_var, style="PresenceMuted.TLabel", wraplength=112).pack(anchor="w")
+
+    drag_start: dict[str, int] = {"x": 0, "y": 0}
+
+    def begin_drag(event: tk.Event) -> None:
+        drag_start["x"] = int(event.x)
+        drag_start["y"] = int(event.y)
+
+    def move_window(event: tk.Event) -> None:
+        root.geometry(f"+{int(event.x_root) - drag_start['x']}+{int(event.y_root) - drag_start['y']}")
+
+    for draggable in (root, frame, collapsed_frame, drag, left):
+        draggable.bind("<ButtonPress-1>", begin_drag)
+        draggable.bind("<B1-Motion>", move_window)
 
     def open_dashboard() -> None:
         webbrowser.open(url)
@@ -759,14 +843,27 @@ def run_native_presence(
     def open_primary() -> None:
         webbrowser.open(primary_url_var.get() or url)
 
+    collapsed = tk.BooleanVar(value=False)
+
+    def toggle_collapsed() -> None:
+        collapsed.set(not collapsed.get())
+        if collapsed.get():
+            frame.pack_forget()
+            collapsed_frame.pack(fill="both", expand=True)
+            root.geometry(f"{collapsed_width}x{collapsed_height}")
+        else:
+            collapsed_frame.pack_forget()
+            frame.pack(fill="both", expand=True)
+            root.geometry(f"{expanded_width}x{expanded_height}")
+
     def refresh_state() -> None:
         try:
             request_url = f"{url.rstrip('/')}/api/companion-state"
             with urllib.request.urlopen(request_url, timeout=0.8) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-            title_var.set(str(payload.get("label") or "AIWatcher")[:32])
-            subtitle_var.set(str(payload.get("subtitle") or "Watching quietly")[:78])
-            primary_label_var.set(str(payload.get("primary_label") or "Watch")[:18])
+            title_var.set(str(payload.get("label") or "AIWatcher")[:18])
+            subtitle_var.set(str(payload.get("subtitle") or "Watching quietly")[:42])
+            primary_label_var.set(str(payload.get("primary_label") or "Watch")[:12])
             primary_path = str(payload.get("primary_url") or "/")
             primary_url_var.set(primary_path if primary_path.startswith("http") else f"{url.rstrip('/')}{primary_path}")
         except (OSError, urllib.error.URLError, json.JSONDecodeError, tk.TclError):
@@ -780,9 +877,11 @@ def run_native_presence(
             except tk.TclError:
                 pass
 
-    ttk.Button(frame, text="Plan", style="Presence.TButton", command=open_prompt).pack(side="left", padx=(8, 4))
-    ttk.Button(frame, textvariable=primary_label_var, style="Presence.TButton", command=open_primary).pack(side="left", padx=(0, 4))
-    ttk.Button(frame, text="Console", style="Presence.TButton", command=open_dashboard).pack(side="left")
+    ttk.Button(frame, text="Plan", width=6, style="Presence.TButton", command=open_prompt).pack(side="left", padx=(8, 4))
+    ttk.Button(frame, textvariable=primary_label_var, width=11, style="Presence.TButton", command=open_primary).pack(side="left", padx=(0, 4))
+    ttk.Button(frame, text="Console", width=8, style="Presence.TButton", command=open_dashboard).pack(side="left")
+    ttk.Button(frame, text="-", width=2, style="PresenceMini.TButton", command=toggle_collapsed).pack(side="left", padx=(4, 0))
+    ttk.Button(collapsed_frame, text="AIW", width=5, style="Presence.TButton", command=toggle_collapsed).pack(fill="both", expand=True)
     refresh_state()
     root.mainloop()
     return 0

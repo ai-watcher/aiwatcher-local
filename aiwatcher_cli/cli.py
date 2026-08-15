@@ -4155,6 +4155,8 @@ def _open_handoff_overlay(
     """Best-effort local companion overlay outside the AI tool UI."""
     if os.environ.get("AIWATCHER_DISABLE_OVERLAY", "").strip().lower() in {"1", "true", "yes", "on"}:
         return False, "disabled by AIWATCHER_DISABLE_OVERLAY"
+    if _existing_companion_presence_pid() is not None:
+        return True, "companion presence already owns interventions"
     brief_file = None
     if brief_text:
         try:

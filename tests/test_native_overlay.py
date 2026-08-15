@@ -76,19 +76,26 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('@objc func openDashboard', source)
         self.assertIn('@objc func openPrompt', source)
         self.assertIn('@objc func openPrimary', source)
+        self.assertIn('@objc func toggleCollapsed', source)
+        self.assertIn('final class DragView', source)
+        self.assertIn('window.isMovableByWindowBackground = true', source)
         self.assertIn('"/api/companion-state"', source)
         self.assertIn('"Plan"', source)
         self.assertIn('"Console"', source)
+        self.assertIn('"AIW"', source)
 
     def test_tk_presence_opens_dashboard_and_prompt_without_session_claim(self) -> None:
         source = inspect.getsource(native_overlay.run_native_presence)
 
         self.assertIn("Watching quietly", source)
+        self.assertIn("toggle_collapsed", source)
+        self.assertIn("cursor=\"fleur\"", source)
         self.assertIn("webbrowser.open(url)", source)
         self.assertIn("webbrowser.open(prompt_url or url)", source)
         self.assertIn("/api/companion-state", source)
         self.assertIn("text=\"Plan\"", source)
         self.assertIn("text=\"Console\"", source)
+        self.assertIn("text=\"AIW\"", source)
         self.assertIn("textvariable=primary_label_var", source)
         self.assertNotIn("runtime-return", source)
 

@@ -370,10 +370,13 @@ What to check:
   chosen screen edge. It should show a clear state (`Watching quietly`, `Needs
   review`, `Fresh Start`, or `Proof pending`) plus quick **Plan**, current
   **Control**, and **Console** actions without claiming to inspect another app
-  or return to an exact chat.
+  or return to an exact chat. It should be draggable, minimizable to a small
+  **AIW** pill, and expandable without losing the current state.
 - The native companion should not activate or steal focus from the host tool.
-  It should show one primary action and **Continue here**, with inspect, snooze,
-  and dismiss in the overflow menu.
+  When the persistent Companion is running, runtime nudges should update that
+  surface rather than opening a second larger overlay. The legacy overlay may
+  still be used by explicit/manual `watch --overlay` runs when no Companion
+  presence is active.
 - Background or stale sessions should remain visible in the dashboard but must
   not interrupt the desktop. Desktop/editor nudges require the matching host tool
   in the foreground; CLI nudges require an attached runtime or matching workspace.

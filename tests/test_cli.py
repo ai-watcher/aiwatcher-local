@@ -214,6 +214,23 @@ class StartCommandCliTests(unittest.TestCase):
         )
         kill.assert_not_called()
 
+    def test_persistent_presence_owns_runtime_overlay_delivery(self) -> None:
+        with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=123),
+            patch.object(cli, "_open_native_handoff_overlay") as native_overlay,
+        ):
+            ok, detail = cli._open_handoff_overlay(
+                "http://127.0.0.1:8765/overlay?session=sess-1",
+                title="AIWatcher",
+                body="Context pressure",
+                severity="critical",
+                brief_text="Fresh Start brief",
+            )
+
+        self.assertTrue(ok)
+        self.assertIn("companion presence", detail)
+        native_overlay.assert_not_called()
+
 
 class ProjectAttributionCliTests(unittest.TestCase):
     def test_projects_command_does_not_rank_filesystem_root_as_real_project(self) -> None:
