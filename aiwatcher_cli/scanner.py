@@ -1090,13 +1090,13 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
                 else "companion"
             ),
             status_label=(
-                "Hook active + history" if (codex_desktop_sessions and detected.get("codex-cli") and codex_hook_seen)
+                "History seen; hook unverified" if (codex_desktop_sessions and detected.get("codex-cli") and codex_hook_seen)
                 else "Unverified automatic gate" if codex_desktop_sessions
                 else "Companion only"
             ),
             detected=bool(codex_desktop_sessions),
             automatic_gate=(
-                "Hook fires; Desktop conversation surface may share CLI hook invocation"
+                "Do not assume Desktop conversation prompts invoke hooks; verify this exact surface"
                 if (codex_desktop_sessions and codex_hook_seen)
                 else "Do not assume Desktop conversation prompts invoke hooks"
             ),
@@ -1107,7 +1107,7 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
                 else "Use Prompt Companion unless `hook-status` proves the hook fired."
             ),
             detail=(
-                "Hook events seen for Codex; Desktop coverage verified by `hook-status`."
+                "Codex hook events were observed somewhere on this machine; Desktop interception still needs same-surface proof."
                 if (codex_desktop_sessions and codex_hook_seen)
                 else "This surface needs real-device verification before stronger claims."
             ),

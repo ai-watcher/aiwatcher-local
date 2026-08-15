@@ -214,6 +214,34 @@ class StartCommandCliTests(unittest.TestCase):
         )
         kill.assert_not_called()
 
+    def test_presence_launcher_uses_windows_detached_flags(self) -> None:
+        original_import = __import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "tkinter":
+                return Mock()
+            return original_import(name, *args, **kwargs)
+
+        with (
+            patch("builtins.__import__", side_effect=fake_import),
+            patch.object(cli, "_existing_companion_presence_pid", return_value=None),
+            patch.object(cli.sys, "platform", "win32"),
+            patch.object(cli, "_companion_presence_pid_path") as pid_path,
+            patch.object(cli.subprocess, "Popen") as popen,
+        ):
+            process = Mock(pid=456)
+            popen.return_value = process
+            pid_path.return_value.parent.mkdir.return_value = None
+            pid_path.return_value.write_text.return_value = None
+            ok, detail = cli._open_native_companion_presence("http://127.0.0.1:8765")
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "native companion presence")
+        kwargs = popen.call_args.kwargs
+        self.assertFalse(kwargs["start_new_session"])
+        self.assertIn("creationflags", kwargs)
+        pid_path.return_value.write_text.assert_called_with("456", encoding="utf-8")
+
     def test_persistent_presence_owns_runtime_overlay_delivery(self) -> None:
         with (
             patch.object(cli, "_existing_companion_presence_pid", return_value=123),
@@ -1585,6 +1613,7 @@ class PromptPreflightTests(unittest.TestCase):
     def test_open_handoff_overlay_uses_startfile_on_windows(self) -> None:
         with (
             patch.object(cli, "_open_native_handoff_overlay", return_value=(False, "native unavailable")),
+            patch.object(cli, "_existing_companion_presence_pid", return_value=None),
             patch.object(cli.os, "name", "nt"),
             patch.object(cli.sys, "platform", "win32"),
             patch.object(cli.os, "startfile", create=True) as startfile,
@@ -1596,6 +1625,33 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertEqual(detail, "startfile")
         startfile.assert_called_once_with("http://127.0.0.1:8765/overlay?session=session-1")
         browser_open.assert_not_called()
+
+    def test_native_handoff_overlay_uses_windows_detached_flags(self) -> None:
+        original_import = __import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "tkinter":
+                return Mock()
+            return original_import(name, *args, **kwargs)
+
+        with (
+            patch("builtins.__import__", side_effect=fake_import),
+            patch.object(cli.sys, "platform", "win32"),
+            patch.object(cli.subprocess, "Popen") as popen,
+        ):
+            ok, detail = cli._open_native_handoff_overlay(
+                "http://127.0.0.1:8765/overlay?session=session-1",
+                title="AIWatcher",
+                body="Context pressure",
+                severity="critical",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "native desktop window")
+        kwargs = popen.call_args.kwargs
+        self.assertFalse(kwargs["start_new_session"])
+        self.assertIn("creationflags", kwargs)
+
     def test_watch_notify_rewrites_wildcard_bind_to_loopback(self) -> None:
         # A dashboard bound to 0.0.0.0 is recorded as such, but that address is
         # not browsable -- the deep link has to name a host the user can click.

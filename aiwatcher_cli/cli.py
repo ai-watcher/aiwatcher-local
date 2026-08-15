@@ -27,7 +27,7 @@ import webbrowser
 from collections import Counter, defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 from urllib.parse import quote
 
 from .correlate import link_recent_fresh_start_receipts_to_sessions, link_recent_interventions_to_sessions
@@ -3999,6 +3999,17 @@ def _watch_ui_base_url() -> str:
     return f"http://{ui_host}:{ui_port}"
 
 
+def _detached_process_kwargs() -> dict[str, Any]:
+    kwargs: dict[str, Any] = {"start_new_session": sys.platform != "win32"}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
+    return kwargs
+
+
 def _open_native_handoff_overlay(
     url: str,
     *,
@@ -4056,7 +4067,7 @@ def _open_native_handoff_overlay(
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            **_detached_process_kwargs(),
         )
     except OSError as exc:
         return False, str(exc)
@@ -4154,7 +4165,7 @@ def _open_native_companion_presence(
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            **_detached_process_kwargs(),
         )
         pid_path = _companion_presence_pid_path()
         pid_path.parent.mkdir(parents=True, exist_ok=True)
@@ -7023,6 +7034,11 @@ def _configured_hook_tools() -> dict[str, bool]:
 def _hook_status_diagnostics(events: list[dict[str, object]]) -> list[str]:
     installed = _configured_hook_tools()
     labels = {"claude": "Claude", "codex": "Codex", "cursor": "Cursor"}
+    surface_notes = {
+        "claude": "Claude Code CLI and Claude Desktop Code tab can invoke it; Claude Desktop general chat does not.",
+        "codex": "Some Codex Desktop conversation builds show hook config but do not invoke UserPromptSubmit.",
+        "cursor": "Cursor coverage depends on that build invoking its prompt hook.",
+    }
     stale_after = timedelta(minutes=10)
     now = datetime.now(timezone.utc)
     diagnostics: list[str] = []
@@ -7034,7 +7050,7 @@ def _hook_status_diagnostics(events: list[dict[str, object]]) -> list[str]:
         if latest is None:
             diagnostics.append(
                 f"{label} hook is installed, but no invocation is recorded. Submit a test prompt in that exact "
-                "surface; if this stays empty, use Companion -> Plan / Prompt for that surface."
+                f"surface; if this stays empty, use Companion -> Plan / Prompt for that surface. {surface_notes[tool]}"
             )
             continue
         age = now - latest
@@ -7042,7 +7058,7 @@ def _hook_status_diagnostics(events: list[dict[str, object]]) -> list[str]:
             minutes = max(1, int(age.total_seconds() // 60))
             diagnostics.append(
                 f"{label} hook is installed, but the last observed invocation was {minutes} minutes ago. "
-                "If you just sent a prompt, this surface did not invoke the hook; use Companion -> Plan / Prompt."
+                f"If you just sent a prompt, this surface did not invoke the hook; use Companion -> Plan / Prompt. {surface_notes[tool]}"
             )
     return diagnostics
 
