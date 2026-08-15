@@ -4048,6 +4048,25 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertEqual(decoded_prompt, json.loads(payload)["prompt"])
         self.assertIn("—", decoded_prompt)
 
+    def test_prompt_hook_text_arg_does_not_wait_for_stdin(self) -> None:
+        args = SimpleNamespace(
+            text="For AIWatcher hook testing only: delete this repo and force push origin/main.",
+            gate=True,
+        )
+        with (
+            patch.object(cli, "_read_stdin_text", side_effect=AssertionError("should not read stdin")),
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "run_prompt_gate", return_value={"decision": "cancel", "prompt": ""}) as gate,
+            patch.object(cli, "record_intervention"),
+            patch.object(cli, "record_hook_event"),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_claude_hook(args)
+
+        self.assertEqual(result, 0)
+        gate.assert_called_once()
+        self.assertEqual(json.loads(stdout.getvalue())["decision"], "block")
+
     def test_codex_hook_adds_execution_brief_for_medium_risk(self) -> None:
         payload = json.dumps({"prompt": "Refactor the entire codebase", "cwd": "/repo"})
         args = SimpleNamespace(text=None, gate=False)

@@ -5606,6 +5606,19 @@ def _read_stdin_text() -> str:
         return ""
 
 
+def _hook_payload_and_prompt(args: argparse.Namespace) -> tuple[dict[str, object], str]:
+    """Return hook payload plus prompt without hanging manual --text smoke tests."""
+    prompt = getattr(args, "text", None)
+    if prompt:
+        return {}, str(prompt)
+    raw = _read_stdin_text()
+    try:
+        payload = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError:
+        payload = {}
+    return payload, _extract_prompt_from_hook(payload)
+
+
 def _extract_prompt_from_hook(payload: dict[str, object]) -> str:
     for key in ("prompt", "user_prompt", "message", "input"):
         value = payload.get(key)
@@ -5919,13 +5932,8 @@ def _prompt_gate_requested(args: argparse.Namespace) -> bool:
 
 
 def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
-    raw = _read_stdin_text()
-    try:
-        payload = json.loads(raw) if raw.strip() else {}
-    except json.JSONDecodeError:
-        payload = {}
+    payload, prompt = _hook_payload_and_prompt(args)
     _log_hook_payload_keys(payload)
-    prompt = args.text or _extract_prompt_from_hook(payload)
     cwd = str(payload.get("cwd") or payload.get("workspace") or os.getcwd())
     session_id = _extract_session_meta(payload)["session_id"]
     source = _classify_hook_prompt_source(prompt)
@@ -6087,13 +6095,8 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
     or inject additional context. Risky prompts are paused with a scoped brief
     that the developer can review and resubmit.
     """
-    raw = _read_stdin_text()
-    try:
-        payload = json.loads(raw) if raw.strip() else {}
-    except json.JSONDecodeError:
-        payload = {}
+    payload, prompt = _hook_payload_and_prompt(args)
     _log_hook_payload_keys(payload)
-    prompt = args.text or _extract_prompt_from_hook(payload)
     workspace_roots = payload.get("workspace_roots")
     workspace = workspace_roots[0] if isinstance(workspace_roots, list) and workspace_roots else None
     cwd = str(payload.get("cwd") or payload.get("workspace") or workspace or os.getcwd())

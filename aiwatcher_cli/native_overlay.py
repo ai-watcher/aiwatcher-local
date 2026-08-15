@@ -436,6 +436,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var primaryURL = dashboardURL
     var collapsed = false
     var stateName = "watching"
+    var pulseOn = false
     let expandedWidth: CGFloat = 386
     let expandedHeight: CGFloat = 58
     let collapsedWidth: CGFloat = 64
@@ -505,6 +506,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         primaryButton.frame = NSRect(x: 206, y: 15, width: 88, height: 28)
         primaryButton.bezelStyle = .rounded
         primaryButton.controlSize = .small
+        primaryButton.wantsLayer = true
+        primaryButton.layer?.cornerRadius = 7
+        primaryButton.toolTip = "Open current AIWatcher action"
         rootView.addSubview(primaryButton)
 
         consoleButton = NSButton(title: "Console", target: self, action: #selector(openDashboard))
@@ -524,12 +528,15 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         expandButton.frame = NSRect(x: 8, y: 7, width: 48, height: 28)
         expandButton.bezelStyle = .rounded
         expandButton.controlSize = .small
+        expandButton.wantsLayer = true
+        expandButton.layer?.cornerRadius = 7
         expandButton.toolTip = "Open AIWatcher Companion"
         expandButton.isHidden = true
         rootView.addSubview(expandButton)
 
         window.orderFrontRegardless()
         updateAppearance()
+        schedulePulse()
         refreshState()
     }
 
@@ -569,11 +576,25 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     func updateAppearance() {
         let needsAttention = ["prompt_gate", "control_recommended", "proof_pending", "needs_review"].contains(stateName)
         let dark = NSColor(calibratedRed: 0.05, green: 0.07, blue: 0.10, alpha: 0.96).cgColor
-        let orange = NSColor(calibratedRed: 0.88, green: 0.36, blue: 0.12, alpha: 0.96).cgColor
-        rootView.layer?.backgroundColor = (collapsed && needsAttention) ? orange : dark
+        let orangeColor = pulseOn
+            ? NSColor(calibratedRed: 0.88, green: 0.36, blue: 0.12, alpha: 0.96)
+            : NSColor(calibratedRed: 0.64, green: 0.23, blue: 0.08, alpha: 0.96)
+        rootView.layer?.backgroundColor = (collapsed && needsAttention) ? orangeColor.cgColor : dark
         rootView.layer?.borderColor = needsAttention
             ? NSColor(calibratedRed: 1.00, green: 0.63, blue: 0.24, alpha: 0.95).cgColor
             : NSColor(calibratedRed: 0.25, green: 0.34, blue: 0.48, alpha: 0.90).cgColor
+        primaryButton.layer?.backgroundColor = needsAttention ? orangeColor.cgColor : NSColor.clear.cgColor
+        expandButton.layer?.backgroundColor = needsAttention ? orangeColor.cgColor : NSColor.clear.cgColor
+        primaryButton.contentTintColor = needsAttention ? NSColor.white : NSColor.controlTextColor
+        expandButton.contentTintColor = needsAttention ? NSColor.white : NSColor.controlTextColor
+    }
+
+    func schedulePulse() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            self.pulseOn.toggle()
+            self.updateAppearance()
+            self.schedulePulse()
+        }
     }
 
     func refreshState() {
@@ -817,6 +838,7 @@ def run_native_presence(
     style.configure("PresenceDot.TLabel", background="#0d141f", foreground="#45d486", font=("Helvetica", 10, "bold"))
     style.configure("PresenceDrag.TLabel", background="#0d141f", foreground="#7b8ba3", font=("Helvetica", 10, "bold"))
     style.configure("Presence.TButton", font=("Helvetica", 9, "bold"), padding=(6, 3))
+    style.configure("PresenceAttention.TButton", font=("Helvetica", 9, "bold"), padding=(6, 3))
     style.configure("PresenceMini.TButton", font=("Helvetica", 9, "bold"), padding=(4, 2))
 
     frame = ttk.Frame(root, padding=(8, 6), style="Presence.TFrame")
@@ -829,6 +851,7 @@ def run_native_presence(
     primary_label_var = tk.StringVar(value="Watch")
     primary_url_var = tk.StringVar(value=url)
     state_var = tk.StringVar(value="watching")
+    pulse_var = tk.BooleanVar(value=False)
     drag = ttk.Label(frame, text="::", style="PresenceDrag.TLabel", cursor="fleur")
     drag.pack(side="left", padx=(0, 6))
     title_stack = ttk.Frame(left, style="Presence.TFrame")
@@ -875,13 +898,29 @@ def run_native_presence(
 
     def update_attention_style() -> None:
         needs_attention = state_var.get() in {"prompt_gate", "control_recommended", "proof_pending", "needs_review"}
-        shell_bg = "#c6531e" if collapsed.get() and needs_attention else "#0d141f"
+        attention_bg = "#df5c1e" if pulse_var.get() else "#a83d14"
+        shell_bg = attention_bg if collapsed.get() and needs_attention else "#0d141f"
         root.configure(bg=shell_bg)
         style.configure("Presence.TFrame", background=shell_bg)
         style.configure("PresenceTitle.TLabel", background=shell_bg)
         style.configure("PresenceMuted.TLabel", background=shell_bg)
         style.configure("PresenceDot.TLabel", background=shell_bg)
         style.configure("PresenceDrag.TLabel", background=shell_bg)
+        style.configure(
+            "PresenceAttention.TButton",
+            background=attention_bg if needs_attention else "#f2f6fb",
+            foreground="#ffffff" if needs_attention else "#111827",
+        )
+        primary_button.configure(style="PresenceAttention.TButton" if needs_attention else "Presence.TButton")
+        collapsed_button.configure(style="PresenceAttention.TButton" if needs_attention else "Presence.TButton")
+
+    def pulse_attention() -> None:
+        pulse_var.set(not pulse_var.get())
+        update_attention_style()
+        try:
+            root.after(800, pulse_attention)
+        except tk.TclError:
+            pass
 
     def refresh_state() -> None:
         try:
@@ -908,11 +947,14 @@ def run_native_presence(
                 pass
 
     ttk.Button(frame, text="Plan", width=6, style="Presence.TButton", command=open_prompt).pack(side="left", padx=(8, 4))
-    ttk.Button(frame, textvariable=primary_label_var, width=11, style="Presence.TButton", command=open_primary).pack(side="left", padx=(0, 4))
+    primary_button = ttk.Button(frame, textvariable=primary_label_var, width=11, style="Presence.TButton", command=open_primary)
+    primary_button.pack(side="left", padx=(0, 4))
     ttk.Button(frame, text="Console", width=8, style="Presence.TButton", command=open_dashboard).pack(side="left")
     ttk.Button(frame, text="-", width=2, style="PresenceMini.TButton", command=toggle_collapsed).pack(side="left", padx=(4, 0))
-    ttk.Button(collapsed_frame, text="AIW", width=5, style="Presence.TButton", command=toggle_collapsed).pack(fill="both", expand=True)
+    collapsed_button = ttk.Button(collapsed_frame, text="AIW", width=5, style="Presence.TButton", command=toggle_collapsed)
+    collapsed_button.pack(fill="both", expand=True)
     refresh_state()
+    pulse_attention()
     root.mainloop()
     return 0
 
