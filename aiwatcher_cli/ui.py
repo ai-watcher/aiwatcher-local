@@ -3105,7 +3105,7 @@ HTML = r"""<!doctype html>
     .coverage-status.limited { color: #b8f0e0; border-color: rgba(53,211,153,.3); background: rgba(53,211,153,.1); }
     .coverage-status.unverified, .health-severity.warning { color: #ffe2a4; border-color: rgba(246,189,96,.45); background: var(--amber-soft); }
     .coverage-status.companion { color: #dceaff; border-color: rgba(112,167,255,.45); background: var(--blue-soft); }
-    .coverage-status.unsupported, .coverage-status.not_detected, .health-severity.critical { color: #ffc4ce; border-color: rgba(242,125,143,.45); background: var(--red-soft); }
+    .coverage-status.unsupported, .coverage-status.not_detected, .coverage-status.silent, .health-severity.critical { color: #ffc4ce; border-color: rgba(242,125,143,.45); background: var(--red-soft); }
     .coverage-detail, .health-detail { display: grid; gap: 6px; color: var(--muted); font-size: 12px; line-height: 1.45; }
     .health-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
     .handoff-bubble {
@@ -3719,7 +3719,10 @@ function buildActionQueue(data) {
       actions: [{ label: 'Mark outcome', primary: true, onclick: `selectSession(${jsArg(s.session_id)})` }],
     });
   });
-  const coverageGap = (data.coverage || []).find(row => ['unverified', 'not_detected', 'unsupported'].includes(row.status));
+  // 'silent' first: a surface that is silently ungated outranks one that was
+  // simply never verified.
+  const coverageGap = (data.coverage || []).find(row => row.status === 'silent')
+    || (data.coverage || []).find(row => ['unverified', 'not_detected', 'unsupported'].includes(row.status));
   if (coverageGap) {
     items.push({
       severity: coverageGap.status === 'unsupported' ? 'medium' : 'high',
@@ -4555,6 +4558,7 @@ function renderCoverage(rows) {
     automatic: 'Protected automatically when the tool invokes its hook.',
     companion: 'Companion/manual protection. AIWatcher can help, but it is not intercepting this surface directly.',
     limited: 'Partial coverage. Treat findings as local evidence, not full control.',
+    silent: 'Work went through this surface and no hook fired for any of it. Those prompts were ungated.',
     unverified: 'Not verified on this machine yet. Run the suggested check before trusting protection claims.',
     not_detected: 'Tool not detected. Install or open the tool, then refresh coverage.',
     unsupported: 'No direct hook known. Use Prompt Companion or history-only review.',

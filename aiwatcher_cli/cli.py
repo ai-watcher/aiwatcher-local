@@ -152,9 +152,14 @@ def _surface_marker(status: str) -> str:
     _G = "\033[32m" if use_color else ""   # green
     _Y = "\033[33m" if use_color else ""   # yellow
     _B = "\033[2m"  if use_color else ""   # dim
+    _R2 = "\033[31m" if use_color else ""  # red
     _R = "\033[0m"  if use_color else ""   # reset
     if status == "automatic":
         return f"{_G}{'✓' if _unicode_ok else '[OK]'}{_R}"
+    # Not dimmed like the other non-OK states: this one means work went through
+    # this surface ungated, which is the whole failure the tool exists to catch.
+    if status == "silent":
+        return f"{_R2}{'!' if _unicode_ok else '[!]'}{_R}"
     if status == "limited":
         return f"{_Y}{'◑' if _unicode_ok else '[~]'}{_R}"
     if status in {"companion", "unverified"}:

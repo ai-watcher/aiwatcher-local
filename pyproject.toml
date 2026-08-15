@@ -15,6 +15,12 @@ authors = [
 dependencies = []
 keywords = ["ai", "observability", "llm", "coding-agents", "cost"]
 
+[project.optional-dependencies]
+# Pinned to a major range on purpose: the matrix still covers Python 3.9, and
+# pytest 9 dropped it. Without a bound, pip silently resolves a different major
+# on the 3.9 runners than everywhere else.
+test = ["pytest>=8,<10"]
+
 [project.scripts]
 aiwatcher = "aiwatcher_cli.cli:main"
 

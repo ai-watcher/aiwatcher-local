@@ -39,11 +39,13 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install package
-        run: pip install -e .
+        run: pip install -e ".[test]"
       - name: Compile
         run: python -m compileall aiwatcher_cli
+      # pytest, not `unittest discover`: tests/conftest.py redirects local state
+      # to a temp dir per test, and conftest is a no-op under unittest.
       - name: Unit tests
-        run: python -m unittest discover -s tests -v
+        run: python -m pytest tests -v
       - name: CLI help
         run: aiwatcher --help
       - name: Status smoke test
