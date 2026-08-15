@@ -201,6 +201,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["state"], "control_recommended")
         self.assertEqual(state["primary_label"], "Fresh Start")
         self.assertEqual(state["primary_url"], "/?session=sess-1")
+        self.assertEqual(state["continue_label"], "Continue")
+        self.assertEqual(state["continue_session_id"], "sess-1")
         self.assertEqual(state["plan_url"], "/?view=prompt")
 
     def test_companion_state_stays_quiet_when_watching(self) -> None:
@@ -1002,7 +1004,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertNotEqual(open_tool["level"], "exact_session")
         self.assertIn(open_tool["level"], {"workspace", "unavailable"})
 
-    def test_historical_heavy_session_prioritizes_inspection_over_handoff(self) -> None:
+    def test_historical_heavy_session_still_offers_copyable_fresh_start(self) -> None:
         row = LocalSession(
             session_id="old-heavy",
             tool="codex-cli",
@@ -1016,8 +1018,9 @@ class DashboardWindowTests(unittest.TestCase):
         actions = ui.session_actions(row, outcome=None)
         handoff = next(action for action in actions if action["id"] == "handoff")
 
-        self.assertEqual(handoff["label"], "Inspect evidence")
+        self.assertEqual(handoff["label"], "Copy Fresh Start brief")
         self.assertFalse(handoff["primary"])
+        self.assertIn("historical local evidence", handoff["reason"])
         self.assertTrue(next(action for action in actions if action["id"] == "review_outcome")["primary"])
 
     def test_serve_terminates_started_ambient_resource_on_stop(self) -> None:

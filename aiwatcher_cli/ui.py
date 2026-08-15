@@ -497,8 +497,8 @@ def session_actions(
         handoff_label = "Open Fresh Start"
         handoff_reason = "AIWatcher can identify the workspace, but not the exact running chat. Copy a Fresh Start brief before continuing."
     else:
-        handoff_label = "Inspect evidence"
-        handoff_reason = "This is historical local evidence. Inspect it before using a Fresh Start brief."
+        handoff_label = "Copy Fresh Start brief"
+        handoff_reason = "This is historical local evidence, not a live chat. Copy a Fresh Start brief from the evidence instead of trying to return to the old session."
     if not outcome:
         actions.append({
             "id": "review_outcome",
@@ -2976,6 +2976,10 @@ def build_companion_state() -> dict[str, object]:
             "subtitle": str(bubble.get("body") or bubble.get("reason") or "Context pressure needs a decision."),
             "primary_label": "Fresh Start",
             "primary_url": f"/?session={session_id}",
+            "continue_label": str(bubble.get("continue_label") or "Continue"),
+            "continue_session_id": session_id,
+            "continue_reason": str(bubble.get("reason") or bubble.get("body") or "User chose to keep working in the current session."),
+            "continue_expected_saved_context_tokens": bubble.get("expected_saved_context_tokens"),
             "control_url": f"/?session={session_id}",
             "watch_url": f"/?session={session_id}",
             "detail": "Control recommendation is based on local context-health evidence.",

@@ -427,6 +427,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var titleLabel: NSTextField!
     var subtitleLabel: NSTextField!
     var primaryButton: NSButton!
+    var continueButton: NSButton!
     var planButton: NSButton!
     var consoleButton: NSButton!
     var collapseButton: NSButton!
@@ -434,10 +435,13 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var dragHandle: NSTextField!
     var dotLabel: NSTextField!
     var primaryURL = dashboardURL
+    var continueSessionID = ""
+    var continueReason = ""
+    var continueExpectedTokens = 0
     var collapsed = false
     var stateName = "watching"
     var pulseOn = false
-    let expandedWidth: CGFloat = 386
+    let expandedWidth: CGFloat = 468
     let expandedHeight: CGFloat = 58
     let collapsedWidth: CGFloat = 64
     let collapsedHeight: CGFloat = 42
@@ -511,14 +515,22 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         primaryButton.toolTip = "Open current AIWatcher action"
         rootView.addSubview(primaryButton)
 
+        continueButton = NSButton(title: "Continue", target: self, action: #selector(continueHere))
+        continueButton.frame = NSRect(x: 298, y: 15, width: 76, height: 28)
+        continueButton.bezelStyle = .rounded
+        continueButton.controlSize = .small
+        continueButton.toolTip = "Continue in this session and quiet this Fresh Start nudge"
+        continueButton.isHidden = true
+        rootView.addSubview(continueButton)
+
         consoleButton = NSButton(title: "Console", target: self, action: #selector(openDashboard))
-        consoleButton.frame = NSRect(x: 298, y: 15, width: 64, height: 28)
+        consoleButton.frame = NSRect(x: 378, y: 15, width: 64, height: 28)
         consoleButton.bezelStyle = .rounded
         consoleButton.controlSize = .small
         rootView.addSubview(consoleButton)
 
         collapseButton = NSButton(title: "-", target: self, action: #selector(toggleCollapsed))
-        collapseButton.frame = NSRect(x: 364, y: 37, width: 18, height: 18)
+        collapseButton.frame = NSRect(x: 444, y: 37, width: 18, height: 18)
         collapseButton.bezelStyle = .rounded
         collapseButton.controlSize = .mini
         collapseButton.toolTip = "Minimize AIWatcher"
@@ -552,6 +564,40 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         openURL(primaryURL)
     }
 
+    @objc func continueHere() {
+        guard !continueSessionID.isEmpty,
+              let url = URL(string: dashboardBaseURL + "/api/handoff-decision") else {
+            return
+        }
+        var payload: [String: Any] = [
+            "session_id": continueSessionID,
+            "decision": "continue_here",
+            "reason": continueReason.isEmpty ? "User chose to keep working in the current session." : continueReason,
+            "action_channel": "companion"
+        ]
+        if continueExpectedTokens > 0 {
+            payload["expected_saved_context_tokens"] = continueExpectedTokens
+        }
+        guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+        URLSession.shared.dataTask(with: request) { _, _, _ in
+            DispatchQueue.main.async {
+                self.continueSessionID = ""
+                self.stateName = "watching"
+                self.titleLabel.stringValue = "Watching quietly"
+                self.subtitleLabel.stringValue = "Fresh Start decision saved"
+                self.primaryButton.title = "Console"
+                self.primaryURL = dashboardURL
+                self.updateAppearance()
+            }
+        }.resume()
+    }
+
     @objc func toggleCollapsed() {
         collapsed.toggle()
         let current = window.frame
@@ -566,9 +612,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         window.setFrame(target, display: true, animate: true)
         rootView.frame = NSRect(x: 0, y: 0, width: targetWidth, height: targetHeight)
         rootView.layer?.cornerRadius = collapsed ? 14 : 16
-        for view in [dragHandle, dotLabel, titleLabel, subtitleLabel, primaryButton, planButton, consoleButton, collapseButton] {
+        for view in [dragHandle, dotLabel, titleLabel, subtitleLabel, primaryButton, continueButton, planButton, consoleButton, collapseButton] {
             view?.isHidden = collapsed
         }
+        continueButton.isHidden = collapsed || continueSessionID.isEmpty
         expandButton.isHidden = !collapsed
         updateAppearance()
     }
@@ -614,6 +661,11 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                 self.subtitleLabel.stringValue = String((json["subtitle"] as? String ?? "Watching quietly").prefix(42))
                 self.primaryButton.title = String((json["primary_label"] as? String ?? "Watch").prefix(12))
                 self.primaryURL = absoluteURL(json["primary_url"] as? String ?? "/")
+                self.continueButton.title = String((json["continue_label"] as? String ?? "Continue").prefix(10))
+                self.continueSessionID = json["continue_session_id"] as? String ?? ""
+                self.continueReason = json["continue_reason"] as? String ?? ""
+                self.continueExpectedTokens = json["continue_expected_saved_context_tokens"] as? Int ?? 0
+                self.continueButton.isHidden = self.collapsed || self.continueSessionID.isEmpty
                 self.updateAppearance()
                 self.scheduleRefresh()
             }
@@ -817,7 +869,7 @@ def run_native_presence(
     except tk.TclError:
         pass
 
-    expanded_width = 386
+    expanded_width = 468
     expanded_height = 58
     collapsed_width = 64
     collapsed_height = 42
@@ -850,6 +902,10 @@ def run_native_presence(
     subtitle_var = tk.StringVar(value="Watching quietly")
     primary_label_var = tk.StringVar(value="Watch")
     primary_url_var = tk.StringVar(value=url)
+    continue_label_var = tk.StringVar(value="Continue")
+    continue_session_id_var = tk.StringVar(value="")
+    continue_reason_var = tk.StringVar(value="")
+    continue_expected_tokens_var = tk.IntVar(value=0)
     state_var = tk.StringVar(value="watching")
     pulse_var = tk.BooleanVar(value=False)
     drag = ttk.Label(frame, text="::", style="PresenceDrag.TLabel", cursor="fleur")
@@ -882,7 +938,40 @@ def run_native_presence(
     def open_primary() -> None:
         webbrowser.open(primary_url_var.get() or url)
 
+    def continue_here() -> None:
+        session_id = continue_session_id_var.get().strip()
+        if not session_id:
+            return
+        payload = {
+            "session_id": session_id,
+            "decision": "continue_here",
+            "reason": continue_reason_var.get() or "User chose to keep working in the current session.",
+            "action_channel": "companion",
+        }
+        expected = int(continue_expected_tokens_var.get() or 0)
+        if expected > 0:
+            payload["expected_saved_context_tokens"] = expected
+        request = urllib.request.Request(
+            f"{url.rstrip('/')}/api/handoff-decision",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=1.5):
+                pass
+        except (OSError, urllib.error.URLError):
+            pass
+        continue_session_id_var.set("")
+        state_var.set("watching")
+        title_var.set("Watching quietly")
+        subtitle_var.set("Fresh Start decision saved")
+        primary_label_var.set("Console")
+        primary_url_var.set(url)
+        update_attention_style()
+
     collapsed = tk.BooleanVar(value=False)
+    continue_packed = tk.BooleanVar(value=False)
 
     def toggle_collapsed() -> None:
         collapsed.set(not collapsed.get())
@@ -913,6 +1002,13 @@ def run_native_presence(
         )
         primary_button.configure(style="PresenceAttention.TButton" if needs_attention else "Presence.TButton")
         collapsed_button.configure(style="PresenceAttention.TButton" if needs_attention else "Presence.TButton")
+        should_show_continue = bool(continue_session_id_var.get().strip()) and not collapsed.get()
+        if should_show_continue and not continue_packed.get():
+            continue_button.pack(side="left", padx=(0, 4), before=console_button)
+            continue_packed.set(True)
+        elif not should_show_continue and continue_packed.get():
+            continue_button.pack_forget()
+            continue_packed.set(False)
 
     def pulse_attention() -> None:
         pulse_var.set(not pulse_var.get())
@@ -933,12 +1029,20 @@ def run_native_presence(
             primary_label_var.set(str(payload.get("primary_label") or "Watch")[:12])
             primary_path = str(payload.get("primary_url") or "/")
             primary_url_var.set(primary_path if primary_path.startswith("http") else f"{url.rstrip('/')}{primary_path}")
+            continue_label_var.set(str(payload.get("continue_label") or "Continue")[:10])
+            continue_session_id_var.set(str(payload.get("continue_session_id") or ""))
+            continue_reason_var.set(str(payload.get("continue_reason") or ""))
+            try:
+                continue_expected_tokens_var.set(int(payload.get("continue_expected_saved_context_tokens") or 0))
+            except (TypeError, ValueError, tk.TclError):
+                continue_expected_tokens_var.set(0)
         except (OSError, urllib.error.URLError, json.JSONDecodeError, tk.TclError):
             state_var.set("watching")
             title_var.set("AIWatcher")
             subtitle_var.set("Watching quietly")
             primary_label_var.set("Watch")
             primary_url_var.set(url)
+            continue_session_id_var.set("")
         finally:
             update_attention_style()
             try:
@@ -949,7 +1053,9 @@ def run_native_presence(
     ttk.Button(frame, text="Plan", width=6, style="Presence.TButton", command=open_prompt).pack(side="left", padx=(8, 4))
     primary_button = ttk.Button(frame, textvariable=primary_label_var, width=11, style="Presence.TButton", command=open_primary)
     primary_button.pack(side="left", padx=(0, 4))
-    ttk.Button(frame, text="Console", width=8, style="Presence.TButton", command=open_dashboard).pack(side="left")
+    continue_button = ttk.Button(frame, textvariable=continue_label_var, width=9, style="Presence.TButton", command=continue_here)
+    console_button = ttk.Button(frame, text="Console", width=8, style="Presence.TButton", command=open_dashboard)
+    console_button.pack(side="left")
     ttk.Button(frame, text="-", width=2, style="PresenceMini.TButton", command=toggle_collapsed).pack(side="left", padx=(4, 0))
     collapsed_button = ttk.Button(collapsed_frame, text="AIW", width=5, style="Presence.TButton", command=toggle_collapsed)
     collapsed_button.pack(fill="both", expand=True)
