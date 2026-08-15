@@ -368,10 +368,13 @@ What to check:
   scans, wait for a pause, and show only the highest-value eligible session.
 - `companion start` should add a collapsed always-available Companion at the
   chosen screen edge. It should show a clear state (`Watching quietly`, `Needs
-  review`, `Fresh Start`, or `Proof pending`) plus quick **Plan**, current
-  **Control**, and **Console** actions without claiming to inspect another app
-  or return to an exact chat. It should be draggable, minimizable to a small
-  **AIW** pill, and expandable without losing the current state.
+  review`, `Prompt Gate`, `Fresh Start`, or `Proof pending`) plus quick **Plan**,
+  current **Control**, and **Console** actions without claiming to inspect
+  another app or return to an exact chat. It should be draggable, minimizable to
+  a small **AIW** pill, and expandable without losing the current state.
+- When a hook opens Prompt Gate, the persistent Companion should switch to
+  **Review Gate** and link to that temporary localhost decision page until the
+  hook receives a decision or times out.
 - The native companion should not activate or steal focus from the host tool.
   When the persistent Companion is running, runtime nudges should update that
   surface rather than opening a second larger overlay. The legacy overlay may

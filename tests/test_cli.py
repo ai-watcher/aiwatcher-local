@@ -3616,6 +3616,46 @@ class HeadlessPromptGateTests(unittest.TestCase):
         self.assertLess(elapsed, 1.0)
         self.assertEqual(gate, {"decision": "auto_block_headless", "prompt": ""})
 
+    def test_run_prompt_gate_publishes_active_companion_state_until_decision(self) -> None:
+        probe = socket.socket()
+        try:
+            probe.bind(("127.0.0.1", 0))
+        except PermissionError:
+            self.skipTest("loopback sockets are unavailable in this test sandbox")
+        finally:
+            probe.close()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+
+            def cancel_gate(url: str) -> None:
+                gate = local_state.active_prompt_gate()
+                self.assertIsNotNone(gate)
+                self.assertEqual(gate["tool"], "claude")
+                self.assertEqual(gate["risk"], "high")
+                self.assertEqual(gate["url"], url)
+                payload = json.dumps({"decision": "cancel"}).encode("utf-8")
+                request = urllib.request.Request(
+                    url + "decision",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=5):
+                    pass
+
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                gate = cli.run_prompt_gate(
+                    tool="claude",
+                    cwd="/repo",
+                    prompt="delete the repo",
+                    result=self.GATE_RESULT,
+                    timeout_seconds=5,
+                    open_browser=False,
+                    ready_callback=cancel_gate,
+                )
+                self.assertEqual(gate["decision"], "cancel")
+                self.assertIsNone(local_state.active_prompt_gate())
+
     def test_claude_hook_records_auto_block_headless_decision(self) -> None:
         payload = json.dumps({"prompt": "Refactor the entire codebase and delete old auth secrets", "cwd": "/repo"})
         args = SimpleNamespace(text=None, gate=True)

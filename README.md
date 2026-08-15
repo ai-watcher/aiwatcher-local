@@ -132,8 +132,10 @@ default. The Companion has quick paths for **Plan** (Prompt Companion),
 most one actionable nudge when the matching Claude, Codex, Cursor, editor, or
 terminal runtime is active. Drag it by its handle, minimize it to the small
 **AIW** pill when it is in the way, and expand it again when you need the
-controls. Use `companion status` or `companion stop` to inspect or stop it. The
-companion does not upload data and does not require the dashboard.
+controls. When a hook opens Prompt Gate for a risky prompt, the Companion
+switches to **Review Gate** and links to that local decision page while the
+AI tool is paused. Use `companion status` or `companion stop` to inspect or stop
+it. The companion does not upload data and does not require the dashboard.
 
 ### 3. Install hooks so work is reviewed before it runs
 

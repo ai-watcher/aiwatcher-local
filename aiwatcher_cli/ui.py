@@ -37,6 +37,7 @@ from .local_state import (
     MAX_COMMAND_DECISIONS_STORED,
     PROMPT_MODIFIED_DECISIONS,
     VALID_OUTCOMES,
+    active_prompt_gate,
     evidence_snapshots_for_sessions,
     get_outcome,
     get_watcher_status,
@@ -2887,6 +2888,26 @@ def build_companion_state() -> dict[str, object]:
         "console_url": "/",
         "detail": "Local-only. No prompt or source text is shown in the Companion.",
     }
+    try:
+        gate = active_prompt_gate()
+    except OSError:
+        gate = None
+    if isinstance(gate, dict):
+        tool = str(gate.get("tool") or "AI tool")
+        risk = str(gate.get("risk") or "risk")
+        score = gate.get("score")
+        score_label = f" score {score}" if isinstance(score, int) else ""
+        return {
+            **base,
+            "state": "prompt_gate",
+            "label": "Prompt Gate",
+            "title": "Prompt Gate",
+            "subtitle": f"{tool} {risk}-risk prompt waiting{score_label}.",
+            "primary_label": "Review Gate",
+            "primary_url": str(gate.get("url") or "/?view=prompt"),
+            "control_url": str(gate.get("url") or "/?view=prompt"),
+            "detail": "A hook paused this prompt locally. Review it before the AI tool continues.",
+        }
     bubble = summary.get("handoff_bubble")
     if isinstance(bubble, dict) and bubble.get("session_id"):
         session_id = str(bubble.get("session_id"))

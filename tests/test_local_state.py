@@ -633,6 +633,37 @@ class LocalStateTests(unittest.TestCase):
 
         self.assertEqual(len(data["interventions"]), 8)
 
+    def test_active_prompt_gate_expires_and_clears(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_active_prompt_gate(
+                    gate_id="gate-1",
+                    tool="claude",
+                    cwd="/repo",
+                    risk="high",
+                    score=8,
+                    url="http://127.0.0.1:9999/",
+                    expires_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+                    session_id="sess-1",
+                )
+                self.assertEqual(local_state.active_prompt_gate()["id"], "gate-1")
+                local_state.clear_active_prompt_gate("other-gate")
+                self.assertEqual(local_state.active_prompt_gate()["id"], "gate-1")
+                local_state.clear_active_prompt_gate("gate-1")
+                self.assertIsNone(local_state.active_prompt_gate())
+
+                local_state.record_active_prompt_gate(
+                    gate_id="gate-2",
+                    tool="claude",
+                    cwd="/repo",
+                    risk="high",
+                    score=8,
+                    url="http://127.0.0.1:9999/",
+                    expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+                )
+                self.assertIsNone(local_state.active_prompt_gate())
+
     def test_stale_lockfile_left_behind_does_not_deadlock_future_writes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "local-state.json")

@@ -22,6 +22,7 @@ import sys
 import tempfile
 import threading
 import time as time_module
+import uuid
 import webbrowser
 from collections import Counter, defaultdict
 from datetime import date, datetime, time, timedelta, timezone
@@ -49,10 +50,12 @@ from .local_state import (
     issue_brief_token,
     link_intervention_session,
     outcomes_for_sessions,
+    clear_active_prompt_gate,
     recent_command_decisions,
     recent_handoff_decisions,
     recent_hook_events,
     recent_interventions,
+    record_active_prompt_gate,
     record_always_allow_command_pattern,
     record_ambient_intervention_action,
     record_command_decision,
@@ -2339,6 +2342,7 @@ def run_prompt_gate(
     if open_browser and not _display_available():
         return _fallback_prompt_gate(tool=tool, prompt=prompt, result=result)
 
+    gate_id = uuid.uuid4().hex
     decision_event = threading.Event()
     state: dict[str, str] = {}
 
@@ -2417,6 +2421,18 @@ def run_prompt_gate(
     thread.start()
     url = f"http://127.0.0.1:{server.server_port}/"
     try:
+        record_active_prompt_gate(
+            gate_id=gate_id,
+            tool=tool,
+            cwd=cwd,
+            risk=str(result.get("risk") or "unknown"),
+            score=int(result.get("score") or 0),
+            url=url,
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=max(1, timeout_seconds)),
+        )
+    except OSError:
+        pass
+    try:
         if ready_callback:
             ready_callback(url)
         if open_browser:
@@ -2429,11 +2445,19 @@ def run_prompt_gate(
                 # couldn't launch anything (no known browser controller) --
                 # equivalent to no display: fall back rather than wait out
                 # the full timeout for a decision that will never come.
+                try:
+                    clear_active_prompt_gate(gate_id)
+                except OSError:
+                    pass
                 return _fallback_prompt_gate(tool=tool, prompt=prompt, result=result)
         if not decision_event.wait(max(1, timeout_seconds)):
             return None
         return dict(state)
     finally:
+        try:
+            clear_active_prompt_gate(gate_id)
+        except OSError:
+            pass
         server.shutdown()
         server.server_close()
 

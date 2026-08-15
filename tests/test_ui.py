@@ -204,18 +204,48 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["plan_url"], "/?view=prompt")
 
     def test_companion_state_stays_quiet_when_watching(self) -> None:
-        with patch.object(ui, "build_summary_cached", return_value={
-            "handoff_bubble": None,
-            "intervention_receipts": [],
-            "handoff_decisions": [],
-            "insights": [],
-            "watcher": {"running": True},
-        }):
+        with (
+            patch.object(ui, "active_prompt_gate", return_value=None),
+            patch.object(ui, "build_summary_cached", return_value={
+                "handoff_bubble": None,
+                "intervention_receipts": [],
+                "handoff_decisions": [],
+                "insights": [],
+                "watcher": {"running": True},
+            }),
+        ):
             state = ui.build_companion_state()
 
         self.assertEqual(state["state"], "watching")
         self.assertEqual(state["label"], "Watching quietly")
         self.assertEqual(state["primary_label"], "Console")
+
+    def test_companion_state_surfaces_active_prompt_gate(self) -> None:
+        with (
+            patch.object(ui, "active_prompt_gate", return_value={
+                "tool": "claude",
+                "risk": "high",
+                "score": 8,
+                "url": "http://127.0.0.1:9999/",
+            }),
+            patch.object(ui, "build_summary_cached", return_value={
+                "handoff_bubble": {
+                    "session_id": "sess-1",
+                    "severity": "critical",
+                    "body": "Context is getting expensive.",
+                },
+                "intervention_receipts": [],
+                "handoff_decisions": [],
+                "insights": [],
+                "watcher": {"running": True},
+            }),
+        ):
+            state = ui.build_companion_state()
+
+        self.assertEqual(state["state"], "prompt_gate")
+        self.assertEqual(state["label"], "Prompt Gate")
+        self.assertEqual(state["primary_label"], "Review Gate")
+        self.assertEqual(state["primary_url"], "http://127.0.0.1:9999/")
 
     def test_companion_state_surfaces_fresh_start_proof_pending(self) -> None:
         with patch.object(ui, "build_summary_cached", return_value={

@@ -170,6 +170,7 @@ def _empty_state() -> dict[str, Any]:
         "handoff_decisions": [],
         "ambient_interventions": [],
         "sent_notification_keys": [],
+        "active_prompt_gate": None,
         "ui_server": None,
         "watcher_heartbeat": None,
     }
@@ -236,6 +237,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("handoff_decisions", [])
     data.setdefault("ambient_interventions", [])
     data.setdefault("sent_notification_keys", [])
+    data.setdefault("active_prompt_gate", None)
     data.setdefault("ui_server", None)
     data.setdefault("watcher_heartbeat", None)
     return data
@@ -380,6 +382,66 @@ def record_hook_event(
         })
         data["hook_events"] = data["hook_events"][-50:]
         _save(data)
+
+
+def record_active_prompt_gate(
+    *,
+    gate_id: str,
+    tool: str,
+    cwd: str,
+    risk: str,
+    score: int,
+    url: str,
+    expires_at: datetime,
+    session_id: str | None = None,
+) -> None:
+    with _locked_state():
+        data = _load()
+        data["active_prompt_gate"] = {
+            "id": gate_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "expires_at": expires_at.astimezone(timezone.utc).isoformat(),
+            "tool": tool,
+            "cwd": cwd,
+            "risk": risk,
+            "score": score,
+            "url": url,
+            "session_id": session_id,
+        }
+        _save(data)
+
+
+def clear_active_prompt_gate(gate_id: str | None = None) -> None:
+    with _locked_state():
+        data = _load()
+        gate = data.get("active_prompt_gate")
+        if not isinstance(gate, dict):
+            data["active_prompt_gate"] = None
+            _save(data)
+            return
+        if gate_id is not None and gate.get("id") != gate_id:
+            return
+        data["active_prompt_gate"] = None
+        _save(data)
+
+
+def active_prompt_gate() -> dict[str, Any] | None:
+    with _locked_state():
+        data = _load()
+        gate = data.get("active_prompt_gate")
+        if not isinstance(gate, dict):
+            return None
+        try:
+            expires_at = datetime.fromisoformat(str(gate.get("expires_at")))
+        except ValueError:
+            expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at.astimezone(timezone.utc) < datetime.now(timezone.utc):
+            data["active_prompt_gate"] = None
+            _save(data)
+            return None
+        return dict(gate)
 
 
 def _prune_brief_tokens(data: dict[str, Any]) -> None:
