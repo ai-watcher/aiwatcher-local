@@ -303,6 +303,81 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["state"], "control_recommended")
         self.assertEqual(state["primary_url"], "/?session=sess-live")
 
+    def test_companion_state_quiets_after_continue_here(self) -> None:
+        decision = {
+            "session_id": "sess-live",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "decision": "continue_here",
+        }
+        with (
+            patch.object(ui, "build_summary_cached", return_value={
+                "handoff_bubble": {
+                    "session_id": "sess-live",
+                    "severity": "critical",
+                    "body": "Context is getting expensive.",
+                },
+                "intervention_receipts": [],
+                "handoff_decisions": [decision],
+                "insights": [],
+                "watcher": {"running": True},
+            }),
+            patch.object(ui, "recent_handoff_decisions", return_value=[]),
+        ):
+            state = ui.build_companion_state()
+
+        self.assertEqual(state["state"], "watching")
+        self.assertEqual(state["label"], "Watching quietly")
+        self.assertEqual(state["primary_label"], "Console")
+
+    def test_companion_state_quiets_from_direct_decision_before_summary_refresh(self) -> None:
+        with (
+            patch.object(ui, "build_summary_cached", return_value={
+                "handoff_bubble": {
+                    "session_id": "sess-live",
+                    "severity": "critical",
+                    "body": "Context is getting expensive.",
+                },
+                "intervention_receipts": [],
+                "handoff_decisions": [],
+                "insights": [],
+                "watcher": {"running": True},
+            }),
+            patch.object(ui, "recent_handoff_decisions", return_value=[{
+                "session_id": "sess-live",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "decision": "continue_here",
+            }]),
+        ):
+            state = ui.build_companion_state()
+
+        self.assertEqual(state["state"], "watching")
+        self.assertEqual(state["subtitle"], "Fresh Start decision saved")
+
+    def test_companion_state_moves_to_proof_pending_after_fresh_start_copy(self) -> None:
+        with (
+            patch.object(ui, "build_summary_cached", return_value={
+                "handoff_bubble": {
+                    "session_id": "sess-live",
+                    "severity": "critical",
+                    "body": "Context is getting expensive.",
+                },
+                "intervention_receipts": [],
+                "handoff_decisions": [{
+                    "session_id": "sess-live",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "decision": "copy_handoff",
+                }],
+                "insights": [],
+                "watcher": {"running": True},
+            }),
+            patch.object(ui, "recent_handoff_decisions", return_value=[]),
+        ):
+            state = ui.build_companion_state()
+
+        self.assertEqual(state["state"], "proof_pending")
+        self.assertEqual(state["label"], "Proof pending")
+        self.assertEqual(state["primary_label"], "View receipt")
+
     def test_fresh_start_receipt_rows_show_observed_next_session_proof(self) -> None:
         now = datetime.now(timezone.utc)
         source = LocalSession(

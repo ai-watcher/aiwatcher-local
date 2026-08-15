@@ -2146,6 +2146,32 @@ def _recent_handoff_decision_session_ids(rows: list[dict[str, object]]) -> set[s
                 pass
         session_ids.add(session_id)
     return session_ids
+
+
+def _recent_handoff_decision_for_session(
+    rows: list[dict[str, object]],
+    session_id: str,
+    *,
+    max_age: timedelta = timedelta(hours=24),
+) -> dict[str, object] | None:
+    if not session_id:
+        return None
+    cutoff = datetime.now(timezone.utc) - max_age
+    for row in rows:
+        row_session_id = row.get("session_id") or row.get("source_session_id")
+        if row_session_id != session_id:
+            continue
+        created_at = row.get("created_at")
+        if isinstance(created_at, str):
+            try:
+                if datetime.fromisoformat(created_at).astimezone(timezone.utc) < cutoff:
+                    continue
+            except ValueError:
+                pass
+        return row
+    return None
+
+
 def _insight_feed(
     rows: list[LocalSession],
     all_rows: list[LocalSession],
@@ -2911,6 +2937,36 @@ def build_companion_state() -> dict[str, object]:
     bubble = summary.get("handoff_bubble")
     if isinstance(bubble, dict) and bubble.get("session_id"):
         session_id = str(bubble.get("session_id"))
+        try:
+            direct_decisions = recent_handoff_decisions(limit=20)
+        except OSError:
+            direct_decisions = []
+        summary_decisions = summary.get("handoff_decisions") if isinstance(summary.get("handoff_decisions"), list) else []
+        recent_decision = _recent_handoff_decision_for_session(
+            direct_decisions or summary_decisions,
+            session_id,
+        )
+        if isinstance(recent_decision, dict):
+            decision = str(recent_decision.get("decision") or "")
+            if decision in {"continue_here", "dismissed"}:
+                return {
+                    **base,
+                    "state": "watching",
+                    "label": "Watching quietly",
+                    "subtitle": "Fresh Start decision saved",
+                    "primary_label": "Console",
+                    "detail": "AIWatcher will stay quiet for this session unless a new intervention is justified.",
+                }
+            if decision in {"new_chat", "copy_handoff"}:
+                return {
+                    **base,
+                    "state": "proof_pending",
+                    "label": "Proof pending",
+                    "subtitle": "Fresh Start brief copied. Waiting to observe follow-up evidence.",
+                    "primary_label": "View receipt",
+                    "primary_url": "/?view=receipts",
+                    "detail": "AIWatcher will not claim saved tokens until a follow-up session is observed.",
+                }
         severity = str(bubble.get("severity") or "warning")
         label = "Fresh Start" if severity == "critical" else "Review context"
         return {
