@@ -187,12 +187,32 @@ class StartCommandCliTests(unittest.TestCase):
         with (
             patch.object(cli, "_existing_companion_presence_pid", return_value=123),
             patch.object(cli, "_companion_presence_pid_path") as pid_path,
+            patch.object(cli.sys, "platform", "darwin"),
             patch.object(cli.os, "kill") as kill,
         ):
             pid_path.return_value.unlink.return_value = None
             cli._stop_native_companion_presence()
 
         kill.assert_called_once_with(123, cli.signal.SIGTERM)
+
+    def test_companion_stop_uses_taskkill_on_windows(self) -> None:
+        with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=123),
+            patch.object(cli, "_companion_presence_pid_path") as pid_path,
+            patch.object(cli.sys, "platform", "win32"),
+            patch.object(cli.subprocess, "run") as run,
+            patch.object(cli.os, "kill") as kill,
+        ):
+            pid_path.return_value.unlink.return_value = None
+            cli._stop_native_companion_presence()
+
+        run.assert_called_once_with(
+            ["taskkill", "/PID", "123", "/T", "/F"],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        kill.assert_not_called()
 
 
 class ProjectAttributionCliTests(unittest.TestCase):

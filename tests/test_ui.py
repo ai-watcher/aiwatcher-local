@@ -222,6 +222,7 @@ class DashboardWindowTests(unittest.TestCase):
             "handoff_bubble": None,
             "intervention_receipts": [],
             "handoff_decisions": [{
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "proof_status": "Proof pending",
                 "proof_reason": "No later same-project local session has been observed yet.",
             }],
@@ -233,6 +234,44 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["state"], "proof_pending")
         self.assertEqual(state["primary_label"], "View receipt")
         self.assertEqual(state["primary_url"], "/?view=receipts")
+
+    def test_companion_state_does_not_stay_stuck_on_stale_proof_pending(self) -> None:
+        with patch.object(ui, "build_summary_cached", return_value={
+            "handoff_bubble": None,
+            "intervention_receipts": [],
+            "handoff_decisions": [{
+                "created_at": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+                "proof_status": "Proof pending",
+                "proof_reason": "No later same-project local session has been observed yet.",
+            }],
+            "insights": [],
+            "watcher": {"running": True},
+        }):
+            state = ui.build_companion_state()
+
+        self.assertEqual(state["state"], "watching")
+        self.assertEqual(state["label"], "Watching quietly")
+
+    def test_companion_state_prioritizes_live_control_over_pending_receipt(self) -> None:
+        with patch.object(ui, "build_summary_cached", return_value={
+            "handoff_bubble": {
+                "session_id": "sess-live",
+                "severity": "critical",
+                "body": "Context is getting expensive.",
+            },
+            "intervention_receipts": [],
+            "handoff_decisions": [{
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "proof_status": "Proof pending",
+                "proof_reason": "No later same-project local session has been observed yet.",
+            }],
+            "insights": [],
+            "watcher": {"running": True},
+        }):
+            state = ui.build_companion_state()
+
+        self.assertEqual(state["state"], "control_recommended")
+        self.assertEqual(state["primary_url"], "/?session=sess-live")
 
     def test_fresh_start_receipt_rows_show_observed_next_session_proof(self) -> None:
         now = datetime.now(timezone.utc)

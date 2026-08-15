@@ -2859,6 +2859,18 @@ def build_summary_cached(days: int = 7, *, force: bool = False) -> dict[str, obj
     return _mark_summary_cache(shell, status="building", source="computed", refreshing=refreshing)
 
 
+def _parse_iso_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def build_companion_state() -> dict[str, object]:
     """Small, fast state contract for the always-available Companion surface."""
     summary = build_summary_cached(7)
@@ -2875,21 +2887,6 @@ def build_companion_state() -> dict[str, object]:
         "console_url": "/",
         "detail": "Local-only. No prompt or source text is shown in the Companion.",
     }
-    fresh_start_receipts = summary.get("handoff_decisions")
-    if isinstance(fresh_start_receipts, list):
-        for receipt in fresh_start_receipts:
-            if not isinstance(receipt, dict):
-                continue
-            if str(receipt.get("proof_status") or "").lower() == "proof pending":
-                return {
-                    **base,
-                    "state": "proof_pending",
-                    "label": "Proof pending",
-                    "subtitle": str(receipt.get("proof_reason") or "Waiting to observe the follow-up session."),
-                    "primary_label": "View receipt",
-                    "primary_url": "/?view=receipts",
-                    "detail": "AIWatcher copied or recorded an intervention and is waiting for observed outcome evidence.",
-                }
     bubble = summary.get("handoff_bubble")
     if isinstance(bubble, dict) and bubble.get("session_id"):
         session_id = str(bubble.get("session_id"))
@@ -2906,6 +2903,26 @@ def build_companion_state() -> dict[str, object]:
             "watch_url": f"/?session={session_id}",
             "detail": "Control recommendation is based on local context-health evidence.",
         }
+    fresh_start_receipts = summary.get("handoff_decisions")
+    if isinstance(fresh_start_receipts, list):
+        now = datetime.now(timezone.utc)
+        for receipt in fresh_start_receipts:
+            if not isinstance(receipt, dict):
+                continue
+            if str(receipt.get("proof_status") or "").lower() != "proof pending":
+                continue
+            created_at = _parse_iso_datetime(receipt.get("created_at"))
+            if created_at is not None and now - created_at > timedelta(minutes=45):
+                continue
+            return {
+                **base,
+                "state": "proof_pending",
+                "label": "Proof pending",
+                "subtitle": str(receipt.get("proof_reason") or "Waiting to observe the follow-up session."),
+                "primary_label": "View receipt",
+                "primary_url": "/?view=receipts",
+                "detail": "AIWatcher copied or recorded an intervention and is waiting for observed outcome evidence.",
+            }
     insights = summary.get("insights")
     if isinstance(insights, list) and insights:
         top = insights[0] if isinstance(insights[0], dict) else {}
