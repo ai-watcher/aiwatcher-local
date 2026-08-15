@@ -88,6 +88,19 @@ install at all. Once installed, `aiwatcher <command>` is equivalent everywhere.
 python -m aiwatcher_cli setup
 ```
 
+`start` detects which AI coding tools you have, reports what history it can
+already read, and starts the local Companion:
+
+```sh
+python -m aiwatcher_cli start
+```
+
+On macOS and Windows, a small AIWatcher Companion should appear near the screen
+edge. It stays local and quiet until a prompt, context, loop, velocity, runway,
+or receipt state needs attention. Use `--no-presence` if you want background
+watching without the floating control, or `--no-companion` if you only want the
+one-time scan.
+
 `setup` detects which AI coding tools you have, reports what history it can
 already read, and prints the exact next steps for your machine. Start here — it
 tells you which of the commands below will actually have data.
@@ -112,21 +125,13 @@ companion once for the current login session:
 python -m aiwatcher_cli companion start
 ```
 
-It watches local session metadata in the background and presents at most one
-actionable nudge when the matching Claude, Codex, Cursor, editor, or terminal
-runtime is active. Use `companion status` or `companion stop` to inspect or stop
-it. The companion does not upload data and does not require the dashboard.
-
-If you want AIWatcher to stay available while you work, add a collapsed desktop
-presence control:
-
-```sh
-python -m aiwatcher_cli companion start --presence
-```
-
-This keeps a small local AIWatcher control near the screen edge for opening the
-Dashboard or Prompt Companion. Actionable Fresh Start/context nudges still
-appear only when AIWatcher has a matching active session and a justified action.
+It watches local session metadata in the background and shows the Companion by
+default. The Companion has quick paths for **Plan** (Prompt Companion),
+**Control** (the strongest recommended action, such as Fresh Start), **Watch**
+(current session evidence), and **Console** (the full dashboard). It presents at
+most one actionable nudge when the matching Claude, Codex, Cursor, editor, or
+terminal runtime is active. Use `companion status` or `companion stop` to inspect
+or stop it. The companion does not upload data and does not require the dashboard.
 
 ### 3. Install hooks so work is reviewed before it runs
 
@@ -439,14 +444,15 @@ pressure. **Continue here** keeps the current session and quiets the signal for
 For an always-available entry point, use:
 
 ```bash
-python -m aiwatcher_cli companion start --presence
+python -m aiwatcher_cli companion start
 ```
 
 Presence mode is the lightweight **Companion** surface: it stays near the screen
-edge with quick access to **Open AIWatcher** and **Prompt**. It does not inspect
-other apps, read prompt text, or claim exact-chat return. The deeper local
-dashboard remains the **Dashboard** surface for sessions, spend, evidence,
-coverage, receipts, and detailed Fresh Start review.
+edge with quick access to **Plan**, the current recommended **Control** action,
+and **Console**. It does not inspect other apps, read prompt text, or claim
+exact-chat return. The deeper local dashboard remains the **Dashboard** surface
+for sessions, spend, evidence, coverage, receipts, and detailed Fresh Start
+review.
 
 On macOS the companion uses a non-activating native panel; on Windows it uses a
 non-activating topmost window where the OS permits it. It deliberately avoids
@@ -558,7 +564,7 @@ These are the commands worth knowing on day one:
 | `outcome useful` | Mark how the last session turned out |
 | `journal` | Daily summary plus one thing to change next time |
 | `resume --target codex --copy` | Continue work in a different tool without rebuilding context |
-| `companion start` | Watch active local runtimes and show calm, session-aware nudges; add `--presence` for the collapsed companion |
+| `companion start` | Show the Companion, watch active local runtimes, and surface calm session-aware nudges |
 | `watch --once` | Flag expensive or loop-like work |
 | `ui` | Local-only browser dashboard |
 | `doctor` | Check tool detection and integration status |

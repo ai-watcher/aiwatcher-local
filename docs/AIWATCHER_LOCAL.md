@@ -355,6 +355,10 @@ What to check:
 - The event export should contain hashes, not prompt text or code.
 - The dashboard time-window selector should visibly update the values.
 - Project rows and recent sessions should open useful detail.
+- `start` should perform the first local scan and start the Companion by default.
+  On macOS/Windows it should attempt a floating presence control; `--no-presence`
+  should keep background watching without that control, and `--no-companion`
+  should perform only the scan.
 - The Home dashboard should show a Fresh Start companion for warning/critical context
   health with Fresh Start and continue-here choices, then save only local
   decision metadata.
@@ -362,9 +366,11 @@ What to check:
   with a clear "paste into a fresh chat" confirmation and receipt link.
 - `companion start` should watch without the dashboard, confirm a signal on two
   scans, wait for a pause, and show only the highest-value eligible session.
-- `companion start --presence` should add a collapsed always-available companion
-  at the chosen screen edge. It should open the Dashboard and Prompt Companion
-  without claiming to inspect another app or return to an exact chat.
+- `companion start` should add a collapsed always-available Companion at the
+  chosen screen edge. It should show a clear state (`Watching quietly`, `Needs
+  review`, `Fresh Start`, or `Proof pending`) plus quick **Plan**, current
+  **Control**, and **Console** actions without claiming to inspect another app
+  or return to an exact chat.
 - The native companion should not activate or steal focus from the host tool.
   It should show one primary action and **Continue here**, with inspect, snooze,
   and dismiss in the overflow menu.

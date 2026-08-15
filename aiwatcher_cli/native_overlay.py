@@ -396,19 +396,39 @@ let dashboardURL = args.count > 1 ? args[1] : "http://127.0.0.1:8765"
 let promptURL = args.count > 2 ? args[2] : dashboardURL
 let position = args.count > 3 ? args[3] : "bottom-right"
 
+func withoutTrailingSlash(_ value: String) -> String {
+    var output = value
+    while output.hasSuffix("/") {
+        output.removeLast()
+    }
+    return output
+}
+
+let dashboardBaseURL = withoutTrailingSlash(dashboardURL)
+let stateURL = dashboardBaseURL + "/api/companion-state"
+
 func openURL(_ value: String) {
     guard let url = URL(string: value) else { return }
     NSWorkspace.shared.open(url)
 }
 
+func absoluteURL(_ value: String) -> String {
+    if value.hasPrefix("http://") || value.hasPrefix("https://") { return value }
+    return dashboardBaseURL + value
+}
+
 final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var window: NSPanel!
+    var titleLabel: NSTextField!
+    var subtitleLabel: NSTextField!
+    var primaryButton: NSButton!
+    var primaryURL = dashboardURL
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
-        let width: CGFloat = 286
-        let height: CGFloat = 54
+        let width: CGFloat = 420
+        let height: CGFloat = 74
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
         let margin: CGFloat = 24
         let x = position.contains("left") ? screen.minX + margin : screen.maxX - width - margin
@@ -433,34 +453,40 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         window.contentView = view
 
         let dot = NSTextField(labelWithString: "on")
-        dot.frame = NSRect(x: 16, y: 18, width: 18, height: 18)
+        dot.frame = NSRect(x: 16, y: 36, width: 22, height: 18)
         dot.font = NSFont.systemFont(ofSize: 10, weight: .bold)
         dot.textColor = NSColor(calibratedRed: 0.26, green: 0.80, blue: 0.55, alpha: 1)
         view.addSubview(dot)
 
-        let title = NSTextField(labelWithString: "AIWatcher")
-        title.frame = NSRect(x: 36, y: 25, width: 94, height: 18)
-        title.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        title.textColor = NSColor.white
-        view.addSubview(title)
+        titleLabel = NSTextField(labelWithString: "AIWatcher")
+        titleLabel.frame = NSRect(x: 42, y: 42, width: 180, height: 18)
+        titleLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.textColor = NSColor.white
+        view.addSubview(titleLabel)
 
-        let subtitle = NSTextField(labelWithString: "Watching quietly")
-        subtitle.frame = NSRect(x: 36, y: 10, width: 116, height: 16)
-        subtitle.font = NSFont.systemFont(ofSize: 10)
-        subtitle.textColor = NSColor(calibratedRed: 0.67, green: 0.74, blue: 0.84, alpha: 1)
-        view.addSubview(subtitle)
+        subtitleLabel = NSTextField(labelWithString: "Watching quietly")
+        subtitleLabel.frame = NSRect(x: 42, y: 21, width: 190, height: 18)
+        subtitleLabel.font = NSFont.systemFont(ofSize: 10)
+        subtitleLabel.textColor = NSColor(calibratedRed: 0.67, green: 0.74, blue: 0.84, alpha: 1)
+        view.addSubview(subtitleLabel)
 
-        let open = NSButton(title: "Open", target: self, action: #selector(openDashboard))
-        open.frame = NSRect(x: 156, y: 13, width: 58, height: 28)
-        open.bezelStyle = .rounded
-        view.addSubview(open)
+        let plan = NSButton(title: "Plan", target: self, action: #selector(openPrompt))
+        plan.frame = NSRect(x: 238, y: 24, width: 54, height: 28)
+        plan.bezelStyle = .rounded
+        view.addSubview(plan)
 
-        let prompt = NSButton(title: "Prompt", target: self, action: #selector(openPrompt))
-        prompt.frame = NSRect(x: 216, y: 13, width: 64, height: 28)
-        prompt.bezelStyle = .rounded
-        view.addSubview(prompt)
+        primaryButton = NSButton(title: "Watch", target: self, action: #selector(openPrimary))
+        primaryButton.frame = NSRect(x: 296, y: 24, width: 66, height: 28)
+        primaryButton.bezelStyle = .rounded
+        view.addSubview(primaryButton)
+
+        let console = NSButton(title: "Console", target: self, action: #selector(openDashboard))
+        console.frame = NSRect(x: 364, y: 24, width: 52, height: 28)
+        console.bezelStyle = .rounded
+        view.addSubview(console)
 
         window.orderFrontRegardless()
+        refreshState()
     }
 
     @objc func openDashboard() {
@@ -469,6 +495,37 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
     @objc func openPrompt() {
         openURL(promptURL)
+    }
+
+    @objc func openPrimary() {
+        openURL(primaryURL)
+    }
+
+    func refreshState() {
+        guard let url = URL(string: stateURL) else {
+            scheduleRefresh()
+            return
+        }
+        URLSession.shared.dataTask(with: url) { data, _, _ in
+            guard let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                self.scheduleRefresh()
+                return
+            }
+            DispatchQueue.main.async {
+                self.titleLabel.stringValue = String((json["label"] as? String ?? "AIWatcher").prefix(32))
+                self.subtitleLabel.stringValue = String((json["subtitle"] as? String ?? "Watching quietly").prefix(78))
+                self.primaryButton.title = String((json["primary_label"] as? String ?? "Watch").prefix(18))
+                self.primaryURL = absoluteURL(json["primary_url"] as? String ?? "/")
+                self.scheduleRefresh()
+            }
+        }.resume()
+    }
+
+    func scheduleRefresh() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+            self.refreshState()
+        }
     }
 }
 
@@ -663,8 +720,8 @@ def run_native_presence(
     except tk.TclError:
         pass
 
-    width = 286
-    height = 58
+    width = 420
+    height = 74
     screen_width = int(root.winfo_screenwidth())
     screen_height = int(root.winfo_screenheight())
     x = 24 if "left" in position else max(16, screen_width - width - 24)
@@ -686,8 +743,12 @@ def run_native_presence(
     frame.pack(fill="both", expand=True)
     left = ttk.Frame(frame, style="Presence.TFrame")
     left.pack(side="left", fill="both", expand=True)
-    ttk.Label(left, text="AIWatcher", style="PresenceDot.TLabel").pack(anchor="w")
-    ttk.Label(left, text="Watching quietly", style="PresenceMuted.TLabel").pack(anchor="w")
+    title_var = tk.StringVar(value="AIWatcher")
+    subtitle_var = tk.StringVar(value="Watching quietly")
+    primary_label_var = tk.StringVar(value="Watch")
+    primary_url_var = tk.StringVar(value=url)
+    ttk.Label(left, textvariable=title_var, style="PresenceDot.TLabel").pack(anchor="w")
+    ttk.Label(left, textvariable=subtitle_var, style="PresenceMuted.TLabel", wraplength=190).pack(anchor="w")
 
     def open_dashboard() -> None:
         webbrowser.open(url)
@@ -695,8 +756,34 @@ def run_native_presence(
     def open_prompt() -> None:
         webbrowser.open(prompt_url or url)
 
-    ttk.Button(frame, text="Open", style="Presence.TButton", command=open_dashboard).pack(side="left", padx=(8, 4))
-    ttk.Button(frame, text="Prompt", style="Presence.TButton", command=open_prompt).pack(side="left")
+    def open_primary() -> None:
+        webbrowser.open(primary_url_var.get() or url)
+
+    def refresh_state() -> None:
+        try:
+            request_url = f"{url.rstrip('/')}/api/companion-state"
+            with urllib.request.urlopen(request_url, timeout=0.8) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            title_var.set(str(payload.get("label") or "AIWatcher")[:32])
+            subtitle_var.set(str(payload.get("subtitle") or "Watching quietly")[:78])
+            primary_label_var.set(str(payload.get("primary_label") or "Watch")[:18])
+            primary_path = str(payload.get("primary_url") or "/")
+            primary_url_var.set(primary_path if primary_path.startswith("http") else f"{url.rstrip('/')}{primary_path}")
+        except (OSError, urllib.error.URLError, json.JSONDecodeError, tk.TclError):
+            title_var.set("AIWatcher")
+            subtitle_var.set("Watching quietly")
+            primary_label_var.set("Watch")
+            primary_url_var.set(url)
+        finally:
+            try:
+                root.after(8000, refresh_state)
+            except tk.TclError:
+                pass
+
+    ttk.Button(frame, text="Plan", style="Presence.TButton", command=open_prompt).pack(side="left", padx=(8, 4))
+    ttk.Button(frame, textvariable=primary_label_var, style="Presence.TButton", command=open_primary).pack(side="left", padx=(0, 4))
+    ttk.Button(frame, text="Console", style="Presence.TButton", command=open_dashboard).pack(side="left")
+    refresh_state()
     root.mainloop()
     return 0
 

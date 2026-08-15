@@ -118,6 +118,83 @@ class SurfaceCoverageCliTests(unittest.TestCase):
         self.assertNotIn("Watching:", output)
 
 
+class StartCommandCliTests(unittest.TestCase):
+    def test_start_runs_scan_and_starts_visible_companion_by_default(self) -> None:
+        coverage = [
+            SurfaceCoverage(
+                surface_id="codex-cli",
+                label="Codex CLI",
+                status="automatic",
+                status_label="Automatic gate + history",
+                detected=True,
+                automatic_gate="hook",
+                history="history",
+                action="verify",
+                detail="detail",
+                session_count=1,
+            ),
+        ]
+        with (
+            patch.object(cli, "sessions_since", return_value=[session(1)]),
+            patch.object(cli, "surface_coverage", return_value=coverage),
+            patch.object(cli, "start_companion", return_value={"ok": True, "pid": 123}) as start_companion,
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_start(SimpleNamespace(
+                interval=30,
+                no_companion=False,
+                no_presence=False,
+                presence_position="bottom-right",
+            ))
+
+        self.assertEqual(result, 0)
+        start_companion.assert_called_once_with(
+            interval_seconds=30,
+            presence=True,
+            presence_position="bottom-right",
+        )
+        self.assertIn("A small Companion should appear", stdout.getvalue())
+
+    def test_start_can_skip_companion(self) -> None:
+        with (
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "surface_coverage", return_value=[]),
+            patch.object(cli, "start_companion") as start_companion,
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            result = cli.command_start(SimpleNamespace(
+                interval=30,
+                no_companion=True,
+                no_presence=False,
+                presence_position="bottom-right",
+            ))
+
+        self.assertEqual(result, 0)
+        start_companion.assert_not_called()
+
+    def test_presence_launcher_reuses_existing_process(self) -> None:
+        with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=123),
+            patch.object(cli.subprocess, "Popen") as popen,
+        ):
+            ok, detail = cli._open_native_companion_presence("http://127.0.0.1:8765")
+
+        self.assertTrue(ok)
+        self.assertIn("already running", detail)
+        popen.assert_not_called()
+
+    def test_companion_stop_stops_presence_control(self) -> None:
+        with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=123),
+            patch.object(cli, "_companion_presence_pid_path") as pid_path,
+            patch.object(cli.os, "kill") as kill,
+        ):
+            pid_path.return_value.unlink.return_value = None
+            cli._stop_native_companion_presence()
+
+        kill.assert_called_once_with(123, cli.signal.SIGTERM)
+
+
 class ProjectAttributionCliTests(unittest.TestCase):
     def test_projects_command_does_not_rank_filesystem_root_as_real_project(self) -> None:
         rows = [

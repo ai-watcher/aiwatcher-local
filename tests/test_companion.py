@@ -13,9 +13,16 @@ class CompanionLifecycleTests(unittest.TestCase):
         command = companion.companion_command(10)
 
         self.assertEqual(command[1:5], ["-m", "aiwatcher_cli", "companion", "run"])
-        self.assertEqual(command[-1], "15")
+        self.assertIn("--presence", command)
+        self.assertEqual(command[command.index("--interval") + 1], "15")
 
-    def test_command_can_include_collapsed_presence(self) -> None:
+    def test_command_can_disable_collapsed_presence(self) -> None:
+        command = companion.companion_command(30, presence=False)
+
+        self.assertNotIn("--presence", command)
+        self.assertNotIn("--presence-position", command)
+
+    def test_command_can_place_collapsed_presence(self) -> None:
         command = companion.companion_command(30, presence=True, presence_position="top-left")
 
         self.assertIn("--presence", command)

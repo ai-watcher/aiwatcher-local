@@ -21,7 +21,7 @@ def companion_log_path() -> Path:
 def companion_command(
     interval_seconds: int,
     *,
-    presence: bool = False,
+    presence: bool = True,
     presence_position: str = "bottom-right",
 ) -> list[str]:
     command = [
@@ -55,7 +55,7 @@ def local_action_server_available() -> bool:
 def start_companion(
     interval_seconds: int = 30,
     *,
-    presence: bool = False,
+    presence: bool = True,
     presence_position: str = "bottom-right",
 ) -> dict[str, Any]:
     current = get_watcher_status(max_age_seconds=max(45, interval_seconds * 2))

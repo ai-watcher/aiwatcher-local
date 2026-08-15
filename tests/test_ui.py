@@ -184,6 +184,56 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Evidence captured", ui.HTML)
         self.assertNotIn("window.alert", ui.HTML)
 
+    def test_companion_state_surfaces_control_recommendation(self) -> None:
+        with patch.object(ui, "build_summary_cached", return_value={
+            "handoff_bubble": {
+                "session_id": "sess-1",
+                "severity": "critical",
+                "body": "Context is getting expensive.",
+            },
+            "intervention_receipts": [],
+            "handoff_decisions": [],
+            "insights": [],
+            "watcher": {"running": True},
+        }):
+            state = ui.build_companion_state()
+
+        self.assertEqual(state["state"], "control_recommended")
+        self.assertEqual(state["primary_label"], "Fresh Start")
+        self.assertEqual(state["primary_url"], "/?session=sess-1")
+        self.assertEqual(state["plan_url"], "/?view=prompt")
+
+    def test_companion_state_stays_quiet_when_watching(self) -> None:
+        with patch.object(ui, "build_summary_cached", return_value={
+            "handoff_bubble": None,
+            "intervention_receipts": [],
+            "handoff_decisions": [],
+            "insights": [],
+            "watcher": {"running": True},
+        }):
+            state = ui.build_companion_state()
+
+        self.assertEqual(state["state"], "watching")
+        self.assertEqual(state["label"], "Watching quietly")
+        self.assertEqual(state["primary_label"], "Console")
+
+    def test_companion_state_surfaces_fresh_start_proof_pending(self) -> None:
+        with patch.object(ui, "build_summary_cached", return_value={
+            "handoff_bubble": None,
+            "intervention_receipts": [],
+            "handoff_decisions": [{
+                "proof_status": "Proof pending",
+                "proof_reason": "No later same-project local session has been observed yet.",
+            }],
+            "insights": [],
+            "watcher": {"running": True},
+        }):
+            state = ui.build_companion_state()
+
+        self.assertEqual(state["state"], "proof_pending")
+        self.assertEqual(state["primary_label"], "View receipt")
+        self.assertEqual(state["primary_url"], "/?view=receipts")
+
     def test_fresh_start_receipt_rows_show_observed_next_session_proof(self) -> None:
         now = datetime.now(timezone.utc)
         source = LocalSession(

@@ -118,13 +118,16 @@ their shapes track whatever the current dashboard needs, and they are **not
 supported for external callers** — treat them as private and expect them to
 change without a deprecation period.
 
-`GET` — `/api/health`, `/api/summary`, `/api/sessions`, `/api/session`,
+`GET` — `/api/health`, `/api/summary`, `/api/companion-state`, `/api/sessions`, `/api/session`,
 `/api/session-summary`, `/api/project`, `/api/report`, `/api/journal`,
 `/api/handoff-basic`, `/api/handoff`, `/api/handoff-demo`, `/api/context-health`,
 `/api/ambient-intervention`
 
 `/api/ambient-intervention` returns the content-free local signal metadata
 needed to keep the browser fallback consistent with the native companion.
+`/api/companion-state` returns the small Plan/Control/Watch state used by the
+floating Companion presence control; it is intentionally content-free and does
+not expose prompt or source text.
 `/api/handoff-basic` returns a copyable Fresh Start brief without waiting for
 timeline, git, or prompt enrichment; `/api/handoff` returns the enriched drawer
 payload; `/api/handoff-demo` returns seeded demo data for the in-dashboard Fresh

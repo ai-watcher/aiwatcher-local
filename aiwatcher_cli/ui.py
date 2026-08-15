@@ -2859,6 +2859,77 @@ def build_summary_cached(days: int = 7, *, force: bool = False) -> dict[str, obj
     return _mark_summary_cache(shell, status="building", source="computed", refreshing=refreshing)
 
 
+def build_companion_state() -> dict[str, object]:
+    """Small, fast state contract for the always-available Companion surface."""
+    summary = build_summary_cached(7)
+    base = {
+        "state": "watching",
+        "label": "Watching quietly",
+        "title": "AIWatcher",
+        "subtitle": "Plan, control, watch",
+        "primary_label": "Watch",
+        "primary_url": "/",
+        "plan_url": "/?view=prompt",
+        "control_url": "/?view=prompt",
+        "watch_url": "/",
+        "console_url": "/",
+        "detail": "Local-only. No prompt or source text is shown in the Companion.",
+    }
+    fresh_start_receipts = summary.get("handoff_decisions")
+    if isinstance(fresh_start_receipts, list):
+        for receipt in fresh_start_receipts:
+            if not isinstance(receipt, dict):
+                continue
+            if str(receipt.get("proof_status") or "").lower() == "proof pending":
+                return {
+                    **base,
+                    "state": "proof_pending",
+                    "label": "Proof pending",
+                    "subtitle": str(receipt.get("proof_reason") or "Waiting to observe the follow-up session."),
+                    "primary_label": "View receipt",
+                    "primary_url": "/?view=receipts",
+                    "detail": "AIWatcher copied or recorded an intervention and is waiting for observed outcome evidence.",
+                }
+    bubble = summary.get("handoff_bubble")
+    if isinstance(bubble, dict) and bubble.get("session_id"):
+        session_id = str(bubble.get("session_id"))
+        severity = str(bubble.get("severity") or "warning")
+        label = "Fresh Start" if severity == "critical" else "Review context"
+        return {
+            **base,
+            "state": "control_recommended",
+            "label": label,
+            "subtitle": str(bubble.get("body") or bubble.get("reason") or "Context pressure needs a decision."),
+            "primary_label": "Fresh Start",
+            "primary_url": f"/?session={session_id}",
+            "control_url": f"/?session={session_id}",
+            "watch_url": f"/?session={session_id}",
+            "detail": "Control recommendation is based on local context-health evidence.",
+        }
+    insights = summary.get("insights")
+    if isinstance(insights, list) and insights:
+        top = insights[0] if isinstance(insights[0], dict) else {}
+        return {
+            **base,
+            "state": "needs_review",
+            "label": "Needs review",
+            "subtitle": str(top.get("title") or "Open AIWatcher for the latest local signal."),
+            "primary_label": "Review",
+            "primary_url": "/",
+            "detail": str(top.get("body") or "AIWatcher found local usage evidence worth reviewing."),
+        }
+    watcher = summary.get("watcher")
+    running = isinstance(watcher, dict) and bool(watcher.get("running"))
+    return {
+        **base,
+        "state": "watching" if running else "offline",
+        "label": "Watching quietly" if running else "Open AIWatcher",
+        "subtitle": "Local Companion is running" if running else "Companion state is available from the Dashboard",
+        "primary_label": "Console" if running else "Open",
+        "detail": "AIWatcher will interrupt only when a matching active session has a justified action." if running else base["detail"],
+    }
+
+
 def _build_compact_prompt(health: object) -> str:
     """Generate a /compact-style smart compaction prompt for a session."""
     if not isinstance(health, ContextHealth):
@@ -5632,6 +5703,9 @@ class UIHandler(BaseHTTPRequestHandler):
                 )
             }
             self._send(200, json.dumps(payload), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/companion-state":
+            self._send(200, json.dumps(build_companion_state()), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/summary":
             params = parse_qs(parsed.query)

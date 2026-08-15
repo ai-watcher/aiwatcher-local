@@ -12,6 +12,7 @@ import html
 import json
 import os
 import re
+import signal
 import shlex
 import shutil
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -2846,7 +2847,7 @@ def render_journal(days: int = 1) -> str:
     ])
 
 
-def command_start(_args: argparse.Namespace) -> int:
+def command_start(args: argparse.Namespace) -> int:
     sessions = sessions_since(1)
     print("AIWatcher v0.1.0 - local mode")
     print("Read-only scan. No data leaves this machine.\n")
@@ -2856,6 +2857,29 @@ def command_start(_args: argparse.Namespace) -> int:
         print(f"  {marker} {row.label:26} {row.status_label}")
     print(f"\nCollected {len(sessions)} sessions from the last 24 hours.")
     print("Run `aiwatcher today` or `python -m aiwatcher_cli today` to see your usage.")
+    if not getattr(args, "no_companion", False):
+        result = start_companion(
+            interval_seconds=getattr(args, "interval", 30),
+            presence=not getattr(args, "no_presence", False),
+            presence_position=str(getattr(args, "presence_position", "bottom-right")),
+        )
+        if result.get("ok"):
+            if result.get("already_running"):
+                print(f"Companion already running (PID {result.get('pid')}).")
+                if not getattr(args, "no_presence", False):
+                    ok, detail = _open_native_companion_presence(
+                        _watch_ui_base_url(),
+                        position=str(getattr(args, "presence_position", "bottom-right")),
+                    )
+                    if ok:
+                        print(f"Companion presence opened ({detail}).")
+            else:
+                print(f"Companion started (PID {result.get('pid')}).")
+                if not getattr(args, "no_presence", False):
+                    print("A small Companion should appear near the screen edge.")
+        else:
+            print(f"Companion could not start: {result.get('message', 'unknown error')}", file=sys.stderr)
+            print("Run `aiwatcher companion start` manually after stopping any legacy watcher.", file=sys.stderr)
     print("Connect Cloud later for team spend, budget guardrails, and audit evidence.")
     return 0
 
@@ -2863,8 +2887,14 @@ def command_start(_args: argparse.Namespace) -> int:
 def setup_checklist() -> list[dict[str, str]]:
     return [
         {
+            "title": "Start the local Companion",
+            "why": "Shows a small always-available Companion for Plan, Control, Watch, and Dashboard access while you work.",
+            "command": "aiwatcher start",
+            "status": "recommended",
+        },
+        {
             "title": "Open the local dashboard",
-            "why": "Today shows recent work, outcomes, receipts, session health, and coverage.",
+            "why": "The Dashboard is the deep console for recent work, outcomes, receipts, session health, spend, and coverage.",
             "command": "aiwatcher ui",
             "status": "recommended",
         },
@@ -2900,9 +2930,9 @@ def setup_checklist() -> list[dict[str, str]]:
         },
         {
             "title": "Start the ambient companion",
-            "why": "Runs independently of the dashboard and shows one actionable nudge for active context, loop, runway, or velocity pressure.",
+            "why": "Use this directly if you skipped `aiwatcher start`; it shows one actionable nudge for active context, loop, runway, or velocity pressure.",
             "command": "aiwatcher companion start",
-            "status": "recommended",
+            "status": "optional",
         },
         {
             "title": "Prove hook invocation",
@@ -2950,6 +2980,7 @@ def command_status(_args: argparse.Namespace) -> int:
 
 def command_companion(args: argparse.Namespace) -> int:
     action = str(args.companion_action)
+    presence_requested = not bool(getattr(args, "no_presence", False))
     if action == "run":
         if not local_action_server_available():
             from .ui import serve
@@ -2964,7 +2995,7 @@ def command_companion(args: argparse.Namespace) -> int:
                 if local_action_server_available():
                     break
                 time_module.sleep(0.1)
-        if getattr(args, "presence", False):
+        if presence_requested:
             base_url = _watch_ui_base_url()
             ok, detail = _open_native_companion_presence(
                 base_url,
@@ -2990,17 +3021,17 @@ def command_companion(args: argparse.Namespace) -> int:
     if action == "start":
         result = start_companion(
             interval_seconds=args.interval,
-            presence=bool(getattr(args, "presence", False)),
+            presence=presence_requested,
             presence_position=str(getattr(args, "presence_position", "bottom-right")),
         )
         if not result.get("ok"):
             print(f"Could not start AIWatcher companion: {result.get('message', 'unknown error')}", file=sys.stderr)
             print(f"Log: {result.get('log_path') or companion_log_path()}", file=sys.stderr)
             return 2
-        presence_available = bool(getattr(args, "presence", False) and not result.get("already_running"))
+        presence_available = bool(presence_requested and not result.get("already_running"))
         if result.get("already_running"):
             print(f"AIWatcher companion is already running (PID {result.get('pid')}).")
-            if getattr(args, "presence", False):
+            if presence_requested:
                 ok, detail = _open_native_companion_presence(
                     _watch_ui_base_url(),
                     position=str(getattr(args, "presence_position", "bottom-right")),
@@ -3018,6 +3049,7 @@ def command_companion(args: argparse.Namespace) -> int:
         print(f"Log: {result.get('log_path') or companion_log_path()}")
         return 0
     if action == "stop":
+        _stop_native_companion_presence()
         result = stop_companion()
         print(str(result.get("message") or "Companion stopped."))
         return 0 if result.get("ok") else 2
@@ -4006,12 +4038,65 @@ def _open_native_handoff_overlay(
     return True, "native desktop window"
 
 
+def _companion_presence_pid_path() -> Path:
+    return state_path().parent / "companion-presence.pid"
+
+
+def _pid_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def _existing_companion_presence_pid() -> int | None:
+    try:
+        pid = int(_companion_presence_pid_path().read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    if _pid_is_running(pid):
+        return pid
+    try:
+        _companion_presence_pid_path().unlink()
+    except OSError:
+        pass
+    return None
+
+
+def _stop_native_companion_presence() -> None:
+    pid = _existing_companion_presence_pid()
+    if pid is None:
+        return
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+        else:
+            os.kill(pid, signal.SIGTERM)
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    try:
+        _companion_presence_pid_path().unlink()
+    except OSError:
+        pass
+
+
 def _open_native_companion_presence(
     base_url: str,
     *,
     position: str = "bottom-right",
 ) -> tuple[bool, str]:
     """Launch the collapsed always-available companion entry point."""
+    existing_pid = _existing_companion_presence_pid()
+    if existing_pid is not None:
+        return True, f"native companion presence already running (PID {existing_pid})"
     mode = os.environ.get("AIWATCHER_OVERLAY_MODE", "native").strip().lower()
     if mode in {"browser", "web"}:
         return False, "native presence skipped by AIWATCHER_OVERLAY_MODE"
@@ -4029,7 +4114,7 @@ def _open_native_companion_presence(
         return False, "native presence unavailable: no tkinter or macOS Swift runtime"
     prompt_url = f"{base_url.rstrip('/')}/?view=prompt"
     try:
-        subprocess.Popen(
+        process = subprocess.Popen(
             [
                 sys.executable,
                 "-m",
@@ -4046,6 +4131,9 @@ def _open_native_companion_presence(
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
+        pid_path = _companion_presence_pid_path()
+        pid_path.parent.mkdir(parents=True, exist_ok=True)
+        pid_path.write_text(str(process.pid), encoding="utf-8")
     except OSError as exc:
         return False, str(exc)
     return True, "native companion presence"
@@ -7235,7 +7323,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aiwatcher", description="AIWatcher Local: private AI coding usage visibility")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("start", help="Detect local AI coding tools and run a one-time local scan").set_defaults(func=command_start)
+    start = sub.add_parser("start", help="Detect local AI coding tools and start the local Companion")
+    start.add_argument("--interval", type=int, default=30, help="Seconds between local Companion scans")
+    start.add_argument("--no-companion", action="store_true", help="Only scan; do not start the Companion")
+    start.add_argument("--no-presence", action="store_true", help="Start the Companion without the floating presence control")
+    start.add_argument(
+        "--presence-position",
+        choices=("bottom-right", "bottom-left", "top-right", "top-left"),
+        default="bottom-right",
+        help="Screen corner for the collapsed Companion",
+    )
+    start.set_defaults(func=command_start)
     sub.add_parser("setup", help="Show first-run setup, hook, coverage, and ambient watch steps").set_defaults(func=command_setup)
     sub.add_parser("status", help="Show detected tools and local AIWatcher status").set_defaults(func=command_status)
     companion = sub.add_parser("companion", help="Run the local runtime-nudge companion without the dashboard")
@@ -7246,11 +7344,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     companion_start = companion_sub.add_parser("start", help="Start the companion in the background")
     companion_start.add_argument("--interval", type=int, default=30, help="Seconds between local scans")
-    companion_start.add_argument(
-        "--presence",
-        action="store_true",
-        help="Also show a collapsed always-available companion for Dashboard and Prompt access",
-    )
+    companion_start.add_argument("--presence", action="store_true", help="Show the collapsed Companion presence control (default)")
+    companion_start.add_argument("--no-presence", action="store_true", help="Run background nudges without the floating presence control")
     companion_start.add_argument(
         "--presence-position",
         choices=("bottom-right", "bottom-left", "top-right", "top-left"),
@@ -7265,11 +7360,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run the companion in the foreground (used by companion start)",
     )
     companion_run.add_argument("--interval", type=int, default=30, help="Seconds between local scans")
-    companion_run.add_argument(
-        "--presence",
-        action="store_true",
-        help="Also show a collapsed always-available companion for Dashboard and Prompt access",
-    )
+    companion_run.add_argument("--presence", action="store_true", help="Show the collapsed Companion presence control (default)")
+    companion_run.add_argument("--no-presence", action="store_true", help="Run background nudges without the floating presence control")
     companion_run.add_argument(
         "--presence-position",
         choices=("bottom-right", "bottom-left", "top-right", "top-left"),

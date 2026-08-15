@@ -32,13 +32,20 @@ First run, detection, and health checks.
 
 ### `aiwatcher start`
 
-Detect local AI coding tools and run a one-time local scan
+Detect local AI coding tools and start the local Companion
 
 ```sh
-aiwatcher start
+aiwatcher start [--interval INTERVAL] [--no-companion]
+                [--no-presence]
+                [--presence-position {bottom-right,bottom-left,top-right,top-left}]
 ```
 
-Takes no arguments.
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--interval` | integer | `30` | Seconds between local Companion scans |
+| `--no-companion` | flag |  | Only scan; do not start the Companion |
+| `--no-presence` | flag |  | Start the Companion without the floating presence control |
+| `--presence-position` | `bottom-right`, `bottom-left`, `top-right`, `top-left` | `bottom-right` | Screen corner for the collapsed Companion |
 
 ### `aiwatcher setup`
 
@@ -542,13 +549,15 @@ Start the companion in the background
 
 ```sh
 aiwatcher companion start [--interval INTERVAL] [--presence]
+                          [--no-presence]
                           [--presence-position {bottom-right,bottom-left,top-right,top-left}]
 ```
 
 | Option | Accepts | Default | Description |
 | --- | --- | --- | --- |
 | `--interval` | integer | `30` | Seconds between local scans |
-| `--presence` | flag |  | Also show a collapsed always-available companion for Dashboard and Prompt access |
+| `--presence` | flag |  | Show the collapsed Companion presence control (default) |
+| `--no-presence` | flag |  | Run background nudges without the floating presence control |
 | `--presence-position` | `bottom-right`, `bottom-left`, `top-right`, `top-left` | `bottom-right` | Screen corner for the collapsed companion |
 
 #### `aiwatcher companion status`
@@ -577,13 +586,15 @@ Run the companion in the foreground (used by companion start)
 
 ```sh
 aiwatcher companion run [--interval INTERVAL] [--presence]
+                        [--no-presence]
                         [--presence-position {bottom-right,bottom-left,top-right,top-left}]
 ```
 
 | Option | Accepts | Default | Description |
 | --- | --- | --- | --- |
 | `--interval` | integer | `30` | Seconds between local scans |
-| `--presence` | flag |  | Also show a collapsed always-available companion for Dashboard and Prompt access |
+| `--presence` | flag |  | Show the collapsed Companion presence control (default) |
+| `--no-presence` | flag |  | Run background nudges without the floating presence control |
 | `--presence-position` | `bottom-right`, `bottom-left`, `top-right`, `top-left` | `bottom-right` | Screen corner for the collapsed companion |
 
 ### `aiwatcher statusline`
