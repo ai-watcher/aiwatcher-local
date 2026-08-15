@@ -6867,26 +6867,19 @@ def command_doctor(_args: argparse.Namespace) -> int:
     shell_rc = os.path.expanduser("~/.zshrc")
     codex_config = os.path.expanduser("~/.codex/config.toml")
 
-    def file_contains(path: str, needle: str) -> bool:
-        try:
-            with open(path, "r", encoding="utf-8") as handle:
-                return needle in handle.read()
-        except OSError:
-            return False
-
     print("AIWatcher Local doctor\n")
     print(f"Python: {sys.version.split()[0]} ({sys.executable})")
     print(f"Platform: {sys.platform}")
     print(f"Claude history: {'detected' if detected.get('claude-code') else 'not detected'}")
     print(f"Codex history: {'detected' if detected.get('codex-cli') else 'not detected'}")
-    print(f"Claude project hook: {'installed' if file_contains(claude_project, 'claude-hook') else 'not installed'}")
-    print(f"Claude user hook: {'installed' if file_contains(claude_user, 'claude-hook') else 'not installed'}")
-    print(f"Codex project hook: {'installed' if file_contains(codex_project, 'codex-hook') else 'not installed'}")
-    print(f"Codex user hook: {'installed' if file_contains(codex_user, 'codex-hook') else 'not installed'}")
-    print(f"Cursor project hook: {'installed' if file_contains(cursor_project, 'cursor-hook') else 'not installed'}")
-    print(f"Cursor user hook: {'installed' if file_contains(cursor_user, 'cursor-hook') else 'not installed'}")
-    print(f"Codex shell wrapper: {'installed' if file_contains(shell_rc, CODEX_WRAPPER_MARKER_START) else 'not installed'}")
-    print(f"Codex MCP config: {'referenced' if file_contains(codex_config, 'aiwatcher') else 'not detected'}")
+    print(f"Claude project hook: {'installed' if _file_contains(claude_project, 'claude-hook') else 'not installed'}")
+    print(f"Claude user hook: {'installed' if _file_contains(claude_user, 'claude-hook') else 'not installed'}")
+    print(f"Codex project hook: {'installed' if _file_contains(codex_project, 'codex-hook') else 'not installed'}")
+    print(f"Codex user hook: {'installed' if _file_contains(codex_user, 'codex-hook') else 'not installed'}")
+    print(f"Cursor project hook: {'installed' if _file_contains(cursor_project, 'cursor-hook') else 'not installed'}")
+    print(f"Cursor user hook: {'installed' if _file_contains(cursor_user, 'cursor-hook') else 'not installed'}")
+    print(f"Codex shell wrapper: {'installed' if _file_contains(shell_rc, CODEX_WRAPPER_MARKER_START) else 'not installed'}")
+    print(f"Codex MCP config: {'referenced' if _file_contains(codex_config, 'aiwatcher') else 'not detected'}")
     print(f"Local state: {state_path()}")
     print("\nSurface coverage")
     for row in surface_coverage(scan_all()):
@@ -6896,6 +6889,14 @@ def command_doctor(_args: argparse.Namespace) -> int:
     if os.name == "nt":
         print("Note: core scanning works on Windows; the Codex zsh wrapper is not available in PowerShell yet.")
     return 0
+
+
+def _file_contains(path: str, needle: str) -> bool:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return needle in handle.read()
+    except OSError:
+        return False
 
 
 def _hook_decision_action(decision: object) -> str:
@@ -6958,7 +6959,62 @@ def _hook_event_action(event: dict[str, object], interventions: list[dict[str, o
         return _hook_decision_action(match.get("decision"))
     if event.get("risk") == "low":
         return "allowed unchanged"
-    return "received; check recent decisions"
+    return "hook fired; no matching decision recorded"
+
+
+def _latest_hook_event_at(events: list[dict[str, object]], tool: str) -> datetime | None:
+    latest: datetime | None = None
+    for event in events:
+        if str(event.get("tool") or "") != tool:
+            continue
+        parsed = _parse_hook_status_time(event.get("created_at"))
+        if parsed and (latest is None or parsed > latest):
+            latest = parsed
+    return latest
+
+
+def _configured_hook_tools() -> dict[str, bool]:
+    return {
+        "claude": (
+            _file_contains(_claude_settings_path("project"), "claude-hook")
+            or _file_contains(_claude_settings_path("user"), "claude-hook")
+        ),
+        "codex": (
+            _file_contains(_codex_hooks_path("project"), "codex-hook")
+            or _file_contains(_codex_hooks_path("user"), "codex-hook")
+        ),
+        "cursor": (
+            _file_contains(_cursor_hooks_path("project"), "cursor-hook")
+            or _file_contains(_cursor_hooks_path("user"), "cursor-hook")
+        ),
+    }
+
+
+def _hook_status_diagnostics(events: list[dict[str, object]]) -> list[str]:
+    installed = _configured_hook_tools()
+    labels = {"claude": "Claude", "codex": "Codex", "cursor": "Cursor"}
+    stale_after = timedelta(minutes=10)
+    now = datetime.now(timezone.utc)
+    diagnostics: list[str] = []
+    for tool in ("claude", "codex", "cursor"):
+        if not installed.get(tool):
+            continue
+        label = labels[tool]
+        latest = _latest_hook_event_at(events, tool)
+        if latest is None:
+            diagnostics.append(
+                f"{label} hook is installed, but no invocation is recorded. Submit a test prompt in that exact "
+                "surface; if this stays empty, use Companion -> Plan / Prompt for that surface."
+            )
+            continue
+        age = now - latest
+        if age > stale_after:
+            minutes = max(1, int(age.total_seconds() // 60))
+            diagnostics.append(
+                f"{label} hook is installed, but the last observed invocation was {minutes} minutes ago. "
+                "If you just sent a prompt, this surface did not invoke the hook; use Companion -> Plan / Prompt."
+            )
+    return diagnostics
 
 
 def command_hook_status(_args: argparse.Namespace) -> int:
@@ -6985,6 +7041,11 @@ def command_hook_status(_args: argparse.Namespace) -> int:
             print(line)
             if event.get("error"):
                 print(f"  error: {event['error']}")
+    diagnostics = _hook_status_diagnostics(events)
+    if diagnostics:
+        print("\nCoverage diagnosis")
+        for diagnostic in diagnostics:
+            print(f"- {diagnostic}")
     if interventions:
         print("\nRecent preflight decisions")
         for row in interventions:

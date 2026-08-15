@@ -4573,13 +4573,14 @@ class IntegrationConfigTests(unittest.TestCase):
                 "score": 8,
                 "selected_score": None,
             }]),
+            patch.object(cli, "_hook_status_diagnostics", return_value=[]),
             patch.object(cli, "recent_handoff_decisions", return_value=[]),
             patch("sys.stdout", new_callable=io.StringIO) as stdout,
         ):
             result = cli.command_hook_status(SimpleNamespace())
 
         self.assertEqual(result, 0)
-        self.assertIn("action received; check recent decisions", stdout.getvalue())
+        self.assertIn("action hook fired; no matching decision recorded", stdout.getvalue())
 
     def test_hook_status_explains_context_added_is_not_a_popup(self) -> None:
         with (
@@ -4637,6 +4638,37 @@ class IntegrationConfigTests(unittest.TestCase):
         output = stdout.getvalue()
         self.assertIn("| session sess-real-id", output)
         self.assertEqual(output.count("sess-real-id"), 2)
+
+    def test_hook_status_warns_when_installed_codex_hook_is_not_firing(self) -> None:
+        old = datetime.now(timezone.utc) - timedelta(minutes=45)
+        with (
+            patch.object(cli, "recent_hook_events", return_value=[{
+                "created_at": old.isoformat(),
+                "tool": "codex",
+                "event": "received",
+                "prompt_found": True,
+                "risk": "high",
+                "score": 11,
+            }]),
+            patch.object(cli, "recent_interventions", return_value=[]),
+            patch.object(cli, "_configured_hook_tools", return_value={
+                "claude": False,
+                "codex": True,
+                "cursor": False,
+            }),
+            patch.object(cli, "recent_command_decisions", return_value=[]),
+            patch.object(cli, "recent_watch_notifications", return_value=[]),
+            patch.object(cli, "recent_handoff_decisions", return_value=[]),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_hook_status(SimpleNamespace())
+
+        self.assertEqual(result, 0)
+        output = stdout.getvalue()
+        self.assertIn("Coverage diagnosis", output)
+        self.assertIn("Codex hook is installed", output)
+        self.assertIn("this surface did not invoke the hook", output)
+        self.assertIn("Companion -> Plan / Prompt", output)
 
     def test_hook_status_shows_handoff_bubble_decisions(self) -> None:
         with (
