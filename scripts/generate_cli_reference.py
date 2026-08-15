@@ -400,7 +400,47 @@ def _render_command(name: str, parser: argparse.ArgumentParser, summary: str, no
             )
         lines.append("")
 
-    if not positionals and not options:
+    nested_subparsers = _iter_subparsers(parser)
+    if nested_subparsers:
+        nested_helps = _subcommand_help(parser)
+        lines.extend(["Subcommands:", "", "| Subcommand | Purpose |", "| --- | --- |"])
+        for sub_name, sub_parser in nested_subparsers.items():
+            lines.append(f"| `{sub_name}` | {nested_helps.get(sub_name, '')} |")
+        lines.append("")
+        for sub_name, sub_parser in nested_subparsers.items():
+            nested_summary = nested_helps.get(sub_name, "")
+            lines.extend([f"#### `aiwatcher {name} {sub_name}`", ""])
+            if nested_summary:
+                lines.extend([nested_summary, ""])
+            lines.extend(["```sh", _format_usage(sub_parser), "```", ""])
+            nested_positionals = [
+                a for a in sub_parser._actions  # noqa: SLF001
+                if not a.option_strings and not isinstance(a, argparse._SubParsersAction)  # noqa: SLF001
+            ]
+            nested_options = [
+                a for a in sub_parser._actions  # noqa: SLF001
+                if a.option_strings and not isinstance(a, argparse._HelpAction)  # noqa: SLF001
+            ]
+            if nested_positionals:
+                lines.extend(["| Argument | Accepts | Description |", "| --- | --- | --- |"])
+                for action in nested_positionals:
+                    lines.append(
+                        f"| `{action.dest}` | {_format_accepts(action)} | {(action.help or '').strip()} |"
+                    )
+                lines.append("")
+            if nested_options:
+                lines.extend(["| Option | Accepts | Default | Description |", "| --- | --- | --- | --- |"])
+                for action in nested_options:
+                    flags = ", ".join(f"`{flag}`" for flag in action.option_strings)
+                    lines.append(
+                        f"| {flags} | {_format_accepts(action)} | {_format_default(action)} "
+                        f"| {(action.help or '').strip()} |"
+                    )
+                lines.append("")
+            if not nested_positionals and not nested_options:
+                lines.extend(["Takes no arguments.", ""])
+
+    if not positionals and not options and not nested_subparsers:
         lines.extend(["Takes no arguments.", ""])
 
     if note:

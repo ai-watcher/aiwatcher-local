@@ -66,6 +66,24 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('_normalize_signal_kind(signal_kind) == "critical_context"', source)
         self.assertIn('_record_decision(base, session_id, "copy_handoff"', source)
 
+    def test_macos_presence_is_collapsed_nonactivating_companion(self) -> None:
+        source = native_overlay.MACOS_SWIFT_PRESENCE
+
+        self.assertIn(".nonactivatingPanel", source)
+        self.assertIn(".canJoinAllSpaces", source)
+        self.assertIn('"AIWatcher"', source)
+        self.assertIn('"Watching quietly"', source)
+        self.assertIn('@objc func openDashboard', source)
+        self.assertIn('@objc func openPrompt', source)
+
+    def test_tk_presence_opens_dashboard_and_prompt_without_session_claim(self) -> None:
+        source = inspect.getsource(native_overlay.run_native_presence)
+
+        self.assertIn("Watching quietly", source)
+        self.assertIn("webbrowser.open(url)", source)
+        self.assertIn("webbrowser.open(prompt_url or url)", source)
+        self.assertNotIn("runtime-return", source)
+
 
 if __name__ == "__main__":
     unittest.main()

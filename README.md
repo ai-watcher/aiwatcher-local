@@ -117,6 +117,17 @@ actionable nudge when the matching Claude, Codex, Cursor, editor, or terminal
 runtime is active. Use `companion status` or `companion stop` to inspect or stop
 it. The companion does not upload data and does not require the dashboard.
 
+If you want AIWatcher to stay available while you work, add a collapsed desktop
+presence control:
+
+```sh
+python -m aiwatcher_cli companion start --presence
+```
+
+This keeps a small local AIWatcher control near the screen edge for opening the
+Dashboard or Prompt Companion. Actionable Fresh Start/context nudges still
+appear only when AIWatcher has a matching active session and a justified action.
+
 ### 3. Install hooks so work is reviewed before it runs
 
 Everything above is retrospective. Hooks are what make AIWatcher act *before*
@@ -425,6 +436,18 @@ focused checkpoint for unusual velocity, or review a lane switch under runway
 pressure. **Continue here** keeps the current session and quiets the signal for
 15 minutes. The overflow menu contains inspect, snooze, and dismiss.
 
+For an always-available entry point, use:
+
+```bash
+python -m aiwatcher_cli companion start --presence
+```
+
+Presence mode is the lightweight **Companion** surface: it stays near the screen
+edge with quick access to **Open AIWatcher** and **Prompt**. It does not inspect
+other apps, read prompt text, or claim exact-chat return. The deeper local
+dashboard remains the **Dashboard** surface for sessions, spend, evidence,
+coverage, receipts, and detailed Fresh Start review.
+
 On macOS the companion uses a non-activating native panel; on Windows it uses a
 non-activating topmost window where the OS permits it. It deliberately avoids
 stacking a second OS notification for the same intervention. If native UI is
@@ -535,7 +558,7 @@ These are the commands worth knowing on day one:
 | `outcome useful` | Mark how the last session turned out |
 | `journal` | Daily summary plus one thing to change next time |
 | `resume --target codex --copy` | Continue work in a different tool without rebuilding context |
-| `companion start` | Watch active local runtimes and show calm, session-aware nudges |
+| `companion start` | Watch active local runtimes and show calm, session-aware nudges; add `--presence` for the collapsed companion |
 | `watch --once` | Flag expensive or loop-like work |
 | `ui` | Local-only browser dashboard |
 | `doctor` | Check tool detection and integration status |

@@ -387,6 +387,97 @@ app.delegate = delegate
 app.run()
 '''
 
+MACOS_SWIFT_PRESENCE = r'''
+import Cocoa
+import Foundation
+
+let args = CommandLine.arguments
+let dashboardURL = args.count > 1 ? args[1] : "http://127.0.0.1:8765"
+let promptURL = args.count > 2 ? args[2] : dashboardURL
+let position = args.count > 3 ? args[3] : "bottom-right"
+
+func openURL(_ value: String) {
+    guard let url = URL(string: value) else { return }
+    NSWorkspace.shared.open(url)
+}
+
+final class PresenceDelegate: NSObject, NSApplicationDelegate {
+    var window: NSPanel!
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+
+        let width: CGFloat = 286
+        let height: CGFloat = 54
+        let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
+        let margin: CGFloat = 24
+        let x = position.contains("left") ? screen.minX + margin : screen.maxX - width - margin
+        let y = position.contains("top") ? screen.maxY - height - margin : screen.minY + margin
+        window = NSPanel(contentRect: NSRect(x: x, y: y, width: width, height: height),
+                         styleMask: [.borderless, .nonactivatingPanel],
+                         backing: .buffered,
+                         defer: false)
+        window.level = .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.hidesOnDeactivate = false
+        window.isReleasedWhenClosed = false
+        window.becomesKeyOnlyIfNeeded = true
+        window.hasShadow = true
+
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor(calibratedRed: 0.05, green: 0.07, blue: 0.10, alpha: 0.96).cgColor
+        view.layer?.cornerRadius = 18
+        view.layer?.borderWidth = 1
+        view.layer?.borderColor = NSColor(calibratedRed: 0.25, green: 0.34, blue: 0.48, alpha: 0.90).cgColor
+        window.contentView = view
+
+        let dot = NSTextField(labelWithString: "on")
+        dot.frame = NSRect(x: 16, y: 18, width: 18, height: 18)
+        dot.font = NSFont.systemFont(ofSize: 10, weight: .bold)
+        dot.textColor = NSColor(calibratedRed: 0.26, green: 0.80, blue: 0.55, alpha: 1)
+        view.addSubview(dot)
+
+        let title = NSTextField(labelWithString: "AIWatcher")
+        title.frame = NSRect(x: 36, y: 25, width: 94, height: 18)
+        title.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        title.textColor = NSColor.white
+        view.addSubview(title)
+
+        let subtitle = NSTextField(labelWithString: "Watching quietly")
+        subtitle.frame = NSRect(x: 36, y: 10, width: 116, height: 16)
+        subtitle.font = NSFont.systemFont(ofSize: 10)
+        subtitle.textColor = NSColor(calibratedRed: 0.67, green: 0.74, blue: 0.84, alpha: 1)
+        view.addSubview(subtitle)
+
+        let open = NSButton(title: "Open", target: self, action: #selector(openDashboard))
+        open.frame = NSRect(x: 156, y: 13, width: 58, height: 28)
+        open.bezelStyle = .rounded
+        view.addSubview(open)
+
+        let prompt = NSButton(title: "Prompt", target: self, action: #selector(openPrompt))
+        prompt.frame = NSRect(x: 216, y: 13, width: 64, height: 28)
+        prompt.bezelStyle = .rounded
+        view.addSubview(prompt)
+
+        window.orderFrontRegardless()
+    }
+
+    @objc func openDashboard() {
+        openURL(dashboardURL)
+    }
+
+    @objc func openPrompt() {
+        openURL(promptURL)
+    }
+}
+
+let app = NSApplication.shared
+let delegate = PresenceDelegate()
+app.delegate = delegate
+app.run()
+'''
+
 
 def _api_base(url: str) -> str:
     parsed = urllib.parse.urlparse(url)
@@ -522,6 +613,92 @@ def _run_macos_swift_overlay(
     except OSError as exc:
         print(f"AIWatcher macOS overlay unavailable: {exc}", file=sys.stderr)
         return 2
+
+
+def _run_macos_swift_presence(url: str, prompt_url: str, position: str) -> int:
+    swift = shutil.which("swift")
+    if sys.platform != "darwin" or not swift:
+        return 2
+    script_path = os.path.join(tempfile.gettempdir(), "aiwatcher-native-presence.swift")
+    try:
+        with open(script_path, "w", encoding="utf-8") as handle:
+            handle.write(MACOS_SWIFT_PRESENCE)
+        subprocess.Popen(
+            [swift, script_path, url, prompt_url, position],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return 0
+    except OSError as exc:
+        print(f"AIWatcher presence unavailable: {exc}", file=sys.stderr)
+        return 2
+
+
+def run_native_presence(
+    url: str,
+    *,
+    prompt_url: str | None = None,
+    position: str = "bottom-right",
+) -> int:
+    """Run the collapsed always-available local companion entry point."""
+    prompt_url = prompt_url or f"{url.rstrip('/')}/?view=prompt"
+    if sys.platform == "darwin" and shutil.which("swift"):
+        return _run_macos_swift_presence(url, prompt_url, position)
+    try:
+        import tkinter as tk
+        from tkinter import ttk
+    except Exception as exc:  # pragma: no cover - depends on host Python build
+        print(f"AIWatcher companion presence unavailable: {exc}", file=sys.stderr)
+        return 2
+
+    root = tk.Tk()
+    root.title("AIWatcher Companion")
+    root.configure(bg="#0d141f")
+    root.attributes("-topmost", True)
+    if sys.platform == "win32":
+        root.overrideredirect(True)
+    try:
+        root.call("::tk::unsupported::MacWindowStyle", "style", root._w, "utility", "closeBox")
+    except tk.TclError:
+        pass
+
+    width = 286
+    height = 58
+    screen_width = int(root.winfo_screenwidth())
+    screen_height = int(root.winfo_screenheight())
+    x = 24 if "left" in position else max(16, screen_width - width - 24)
+    y = 24 if "top" in position else max(16, screen_height - height - 92)
+    root.geometry(f"{width}x{height}+{x}+{y}")
+
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+    style.configure("Presence.TFrame", background="#0d141f")
+    style.configure("PresenceTitle.TLabel", background="#0d141f", foreground="#f7fbff", font=("Helvetica", 12, "bold"))
+    style.configure("PresenceMuted.TLabel", background="#0d141f", foreground="#a8b6ca", font=("Helvetica", 10))
+    style.configure("PresenceDot.TLabel", background="#0d141f", foreground="#45d486", font=("Helvetica", 13, "bold"))
+    style.configure("Presence.TButton", font=("Helvetica", 10, "bold"), padding=(8, 4))
+
+    frame = ttk.Frame(root, padding=(14, 8), style="Presence.TFrame")
+    frame.pack(fill="both", expand=True)
+    left = ttk.Frame(frame, style="Presence.TFrame")
+    left.pack(side="left", fill="both", expand=True)
+    ttk.Label(left, text="AIWatcher", style="PresenceDot.TLabel").pack(anchor="w")
+    ttk.Label(left, text="Watching quietly", style="PresenceMuted.TLabel").pack(anchor="w")
+
+    def open_dashboard() -> None:
+        webbrowser.open(url)
+
+    def open_prompt() -> None:
+        webbrowser.open(prompt_url or url)
+
+    ttk.Button(frame, text="Open", style="Presence.TButton", command=open_dashboard).pack(side="left", padx=(8, 4))
+    ttk.Button(frame, text="Prompt", style="Presence.TButton", command=open_prompt).pack(side="left")
+    root.mainloop()
+    return 0
 
 
 def run_native_overlay(
@@ -710,7 +887,14 @@ def run_native_overlay(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="aiwatcher-native-overlay")
+    parser.add_argument("--presence", action="store_true", help="Run the collapsed always-available companion")
     parser.add_argument("--url", required=True)
+    parser.add_argument("--prompt-url")
+    parser.add_argument(
+        "--position",
+        choices=("bottom-right", "bottom-left", "top-right", "top-left"),
+        default="bottom-right",
+    )
     parser.add_argument("--title", default="Start a fresh AI session")
     parser.add_argument("--body", default="")
     parser.add_argument("--severity", default="warning")
@@ -721,6 +905,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--primary-mode", choices=("copy", "inspect"))
     parser.add_argument("--runtime-action-available", action="store_true")
     args = parser.parse_args(argv)
+    if args.presence:
+        return run_native_presence(args.url, prompt_url=args.prompt_url, position=args.position)
     return run_native_overlay(
         args.url,
         args.title,

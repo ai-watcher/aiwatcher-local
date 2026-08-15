@@ -527,7 +527,64 @@ Run the local runtime-nudge companion without the dashboard
 aiwatcher companion {start,status,stop,run} ...
 ```
 
+Subcommands:
+
+| Subcommand | Purpose |
+| --- | --- |
+| `start` | Start the companion in the background |
+| `status` | Show companion status |
+| `stop` | Stop the companion |
+| `run` | Run the companion in the foreground (used by companion start) |
+
+#### `aiwatcher companion start`
+
+Start the companion in the background
+
+```sh
+aiwatcher companion start [--interval INTERVAL] [--presence]
+                          [--presence-position {bottom-right,bottom-left,top-right,top-left}]
+```
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--interval` | integer | `30` | Seconds between local scans |
+| `--presence` | flag |  | Also show a collapsed always-available companion for Dashboard and Prompt access |
+| `--presence-position` | `bottom-right`, `bottom-left`, `top-right`, `top-left` | `bottom-right` | Screen corner for the collapsed companion |
+
+#### `aiwatcher companion status`
+
+Show companion status
+
+```sh
+aiwatcher companion status
+```
+
 Takes no arguments.
+
+#### `aiwatcher companion stop`
+
+Stop the companion
+
+```sh
+aiwatcher companion stop
+```
+
+Takes no arguments.
+
+#### `aiwatcher companion run`
+
+Run the companion in the foreground (used by companion start)
+
+```sh
+aiwatcher companion run [--interval INTERVAL] [--presence]
+                        [--presence-position {bottom-right,bottom-left,top-right,top-left}]
+```
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--interval` | integer | `30` | Seconds between local scans |
+| `--presence` | flag |  | Also show a collapsed always-available companion for Dashboard and Prompt access |
+| `--presence-position` | `bottom-right`, `bottom-left`, `top-right`, `top-left` | `bottom-right` | Screen corner for the collapsed companion |
 
 ### `aiwatcher statusline`
 

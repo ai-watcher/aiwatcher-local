@@ -5188,6 +5188,13 @@ async function load(resetDetail = true, forceRefresh = false) {
 document.addEventListener('keydown', event => { if (event.key === 'Escape') closeDrawer(); });
 (async () => {
   await load();
+  const requestedView = new URLSearchParams(location.search).get('view');
+  if (requestedView && ['today','prompt','sessions','projects','changes','receipts','insights','setup','coverage'].includes(requestedView)) {
+    showView(requestedView);
+    if (requestedView === 'prompt') {
+      document.getElementById('promptInput').focus();
+    }
+  }
   // Deep link from `aiwatcher watch --notify` (issue #31): ?session=<id>
   // opens straight to that session's review instead of the overview.
   const deepLinkSession = new URLSearchParams(location.search).get('session');

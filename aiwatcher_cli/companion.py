@@ -18,8 +18,13 @@ def companion_log_path() -> Path:
     return state_path().parent / "companion.log"
 
 
-def companion_command(interval_seconds: int) -> list[str]:
-    return [
+def companion_command(
+    interval_seconds: int,
+    *,
+    presence: bool = False,
+    presence_position: str = "bottom-right",
+) -> list[str]:
+    command = [
         sys.executable,
         "-m",
         "aiwatcher_cli",
@@ -28,6 +33,9 @@ def companion_command(interval_seconds: int) -> list[str]:
         "--interval",
         str(max(15, int(interval_seconds))),
     ]
+    if presence:
+        command.extend(["--presence", "--presence-position", presence_position])
+    return command
 
 
 def local_action_server_available() -> bool:
@@ -44,7 +52,12 @@ def local_action_server_available() -> bool:
         return False
 
 
-def start_companion(interval_seconds: int = 30) -> dict[str, Any]:
+def start_companion(
+    interval_seconds: int = 30,
+    *,
+    presence: bool = False,
+    presence_position: str = "bottom-right",
+) -> dict[str, Any]:
     current = get_watcher_status(max_age_seconds=max(45, interval_seconds * 2))
     if current.get("running"):
         if current.get("mode") == "companion":
@@ -61,7 +74,11 @@ def start_companion(interval_seconds: int = 30) -> dict[str, Any]:
 
     log_path = companion_log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    command = companion_command(interval_seconds)
+    command = companion_command(
+        interval_seconds,
+        presence=presence,
+        presence_position=presence_position,
+    )
     kwargs: dict[str, Any] = {
         "stdin": subprocess.DEVNULL,
         "start_new_session": sys.platform != "win32",

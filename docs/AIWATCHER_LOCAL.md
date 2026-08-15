@@ -362,6 +362,9 @@ What to check:
   with a clear "paste into a fresh chat" confirmation and receipt link.
 - `companion start` should watch without the dashboard, confirm a signal on two
   scans, wait for a pause, and show only the highest-value eligible session.
+- `companion start --presence` should add a collapsed always-available companion
+  at the chosen screen edge. It should open the Dashboard and Prompt Companion
+  without claiming to inspect another app or return to an exact chat.
 - The native companion should not activate or steal focus from the host tool.
   It should show one primary action and **Continue here**, with inspect, snooze,
   and dismiss in the overflow menu.

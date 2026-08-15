@@ -15,6 +15,13 @@ class CompanionLifecycleTests(unittest.TestCase):
         self.assertEqual(command[1:5], ["-m", "aiwatcher_cli", "companion", "run"])
         self.assertEqual(command[-1], "15")
 
+    def test_command_can_include_collapsed_presence(self) -> None:
+        command = companion.companion_command(30, presence=True, presence_position="top-left")
+
+        self.assertIn("--presence", command)
+        self.assertIn("--presence-position", command)
+        self.assertEqual(command[-1], "top-left")
+
     def test_existing_companion_is_reused(self) -> None:
         with patch.object(
             companion,
@@ -58,6 +65,34 @@ class CompanionLifecycleTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["pid"], 321)
+
+    def test_start_passes_presence_to_background_command(self) -> None:
+        process = Mock(pid=322)
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.object(companion, "companion_log_path", return_value=Path(temp_dir) / "companion.log"),
+                patch.object(
+                    companion,
+                    "get_watcher_status",
+                    side_effect=[
+                        {"running": False},
+                        {"running": True, "mode": "companion", "pid": 322},
+                    ],
+                ),
+                patch.object(companion.subprocess, "Popen", return_value=process) as popen,
+                patch.object(companion.time, "sleep"),
+            ):
+                result = companion.start_companion(
+                    interval_seconds=30,
+                    presence=True,
+                    presence_position="bottom-left",
+                )
+
+        self.assertTrue(result["ok"])
+        launched = popen.call_args.args[0]
+        self.assertIn("--presence", launched)
+        self.assertIn("bottom-left", launched)
 
     def test_stop_does_not_kill_a_foreground_watch(self) -> None:
         with (
