@@ -47,6 +47,7 @@ from .local_state import (
     recent_handoff_decisions,
     recent_interventions,
     get_ambient_intervention,
+    mark_recent_handoff_receipts_viewed,
     record_ambient_intervention_action,
     record_handoff_decision,
     record_evidence_snapshot,
@@ -2113,6 +2114,7 @@ def _handoff_decision_rows(
             "next_session_id": next_session_id,
             "decision": decision,
             "receipt_kind": row.get("receipt_kind"),
+            "receipt_viewed_at": row.get("receipt_viewed_at"),
             "reason": row.get("reason"),
             "action_channel": row.get("action_channel"),
             "expected_saved_context_tokens": expected_int,
@@ -2958,6 +2960,16 @@ def build_companion_state() -> dict[str, object]:
                     "detail": "AIWatcher will stay quiet for this session unless a new intervention is justified.",
                 }
             if decision in {"new_chat", "copy_handoff"}:
+                if recent_decision.get("receipt_viewed_at"):
+                    return {
+                        **base,
+                        "state": "watching",
+                        "label": "Watching quietly",
+                        "subtitle": "Fresh Start receipt reviewed; proof still pending.",
+                        "primary_label": "Console",
+                        "primary_url": "/?view=receipts",
+                        "detail": "Receipt remains available in Evidence while AIWatcher watches for follow-up proof.",
+                    }
                 return {
                     **base,
                     "state": "proof_pending",
@@ -2991,6 +3003,8 @@ def build_companion_state() -> dict[str, object]:
             if not isinstance(receipt, dict):
                 continue
             if str(receipt.get("proof_status") or "").lower() != "proof pending":
+                continue
+            if receipt.get("receipt_viewed_at"):
                 continue
             created_at = _parse_iso_datetime(receipt.get("created_at"))
             if created_at is not None and now - created_at > timedelta(minutes=45):
@@ -5185,6 +5199,16 @@ function renderInsightFeed(insights) {
 let sessionsLoadedForDays = null;
 let reportLoadedForDays = null;
 let reportLoading = false;
+let freshStartReceiptsMarkedViewed = false;
+async function markFreshStartReceiptsViewed() {
+  if (freshStartReceiptsMarkedViewed) return;
+  freshStartReceiptsMarkedViewed = true;
+  try {
+    await fetch('/api/handoff-receipts-viewed', { method: 'POST' });
+  } catch (error) {
+    // Receipt review acknowledgments should never block reading Evidence.
+  }
+}
 function showView(view) {
   document.querySelectorAll('.view').forEach(node => {
     node.hidden = node.id !== `view-${view}`;
@@ -5196,6 +5220,7 @@ function showView(view) {
   const days = document.getElementById('days').value;
   if (view === 'sessions' && sessionsLoadedForDays !== days) loadSessions();
   if (view === 'insights' && reportLoadedForDays !== days) loadReport();
+  if (view === 'receipts') markFreshStartReceiptsViewed();
 }
 function changeWindow() {
   sessionsLoadedForDays = null;
@@ -6118,6 +6143,18 @@ class UIHandler(BaseHTTPRequestHandler):
                 )
                 return
             self._send(200, json.dumps(record), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/handoff-receipts-viewed":
+            try:
+                updated = mark_recent_handoff_receipts_viewed()
+            except OSError as exc:
+                self._send(
+                    500,
+                    json.dumps({"error": f"Could not mark Fresh Start receipts viewed: {exc}"}),
+                    "application/json; charset=utf-8",
+                )
+                return
+            self._send(200, json.dumps({"ok": True, "updated": updated}), "application/json; charset=utf-8")
             return
         session_id = str(payload.get("session_id", "")).strip()
         outcome = str(payload.get("outcome", "")).strip()

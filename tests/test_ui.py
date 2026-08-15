@@ -176,6 +176,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("watch --notify", ui.HTML)
         self.assertIn("/api/handoff", ui.HTML)
         self.assertIn("/api/handoff-decision", ui.HTML)
+        self.assertIn("/api/handoff-receipts-viewed", ui.HTML)
+        self.assertIn("markFreshStartReceiptsViewed", ui.HTML)
         self.assertIn("handoffDecisionBubble", ui.HTML)
         self.assertIn("Fresh Start brief copied from the session review.", ui.HTML)
         self.assertIn("renderHandoffCopied", ui.HTML)
@@ -286,6 +288,24 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["state"], "watching")
         self.assertEqual(state["label"], "Watching quietly")
 
+    def test_companion_state_quiets_after_proof_pending_receipt_is_viewed(self) -> None:
+        with patch.object(ui, "build_summary_cached", return_value={
+            "handoff_bubble": None,
+            "intervention_receipts": [],
+            "handoff_decisions": [{
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "proof_status": "Proof pending",
+                "proof_reason": "No later same-project local session has been observed yet.",
+                "receipt_viewed_at": datetime.now(timezone.utc).isoformat(),
+            }],
+            "insights": [],
+            "watcher": {"running": True},
+        }):
+            state = ui.build_companion_state()
+
+        self.assertEqual(state["state"], "watching")
+        self.assertEqual(state["primary_label"], "Console")
+
     def test_companion_state_prioritizes_live_control_over_pending_receipt(self) -> None:
         with patch.object(ui, "build_summary_cached", return_value={
             "handoff_bubble": {
@@ -381,6 +401,32 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["state"], "proof_pending")
         self.assertEqual(state["label"], "Proof pending")
         self.assertEqual(state["primary_label"], "View receipt")
+
+    def test_companion_state_quiets_viewed_fresh_start_copy_even_with_live_bubble(self) -> None:
+        viewed_at = datetime.now(timezone.utc).isoformat()
+        with (
+            patch.object(ui, "build_summary_cached", return_value={
+                "handoff_bubble": {
+                    "session_id": "sess-live",
+                    "severity": "critical",
+                    "body": "Context is getting expensive.",
+                },
+                "intervention_receipts": [],
+                "handoff_decisions": [],
+                "insights": [],
+                "watcher": {"running": True},
+            }),
+            patch.object(ui, "recent_handoff_decisions", return_value=[{
+                "session_id": "sess-live",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "decision": "copy_handoff",
+                "receipt_viewed_at": viewed_at,
+            }]),
+        ):
+            state = ui.build_companion_state()
+
+        self.assertEqual(state["state"], "watching")
+        self.assertEqual(state["subtitle"], "Fresh Start receipt reviewed; proof still pending.")
 
     def test_fresh_start_receipt_rows_show_observed_next_session_proof(self) -> None:
         now = datetime.now(timezone.utc)

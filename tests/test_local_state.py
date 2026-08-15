@@ -114,6 +114,29 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(recent[0]["next_session_id"], "next-session")
         self.assertEqual(recent[0]["next_session_correlation"]["status"], "linked")
 
+    def test_mark_recent_handoff_receipts_viewed_acknowledges_fresh_start_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_handoff_decision(
+                    session_id="source-session",
+                    decision="copy_handoff",
+                    reason="Fresh Start brief copied.",
+                )
+                local_state.record_handoff_decision(
+                    session_id="source-session",
+                    decision="continue_here",
+                    reason="User chose to continue.",
+                )
+                updated = local_state.mark_recent_handoff_receipts_viewed()
+                recent = local_state.recent_handoff_decisions(limit=2)
+
+        self.assertEqual(updated, 1)
+        fresh_start = next(row for row in recent if row["decision"] == "copy_handoff")
+        continue_here = next(row for row in recent if row["decision"] == "continue_here")
+        self.assertIn("receipt_viewed_at", fresh_start)
+        self.assertNotIn("receipt_viewed_at", continue_here)
+
     def test_intervention_stores_hashes_not_prompt_text(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")

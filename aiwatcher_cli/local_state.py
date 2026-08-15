@@ -742,6 +742,33 @@ def recent_handoff_decisions(limit: int = 10) -> list[dict[str, Any]]:
     return list(reversed(rows[-max(1, limit):]))
 
 
+def mark_recent_handoff_receipts_viewed(limit: int = 20) -> int:
+    """Mark recent Fresh Start receipts as reviewed by the user.
+
+    A reviewed receipt can still be proof-pending; this only means the Companion
+    should stop blinking for that already-seen receipt while Evidence keeps the
+    pending proof visible.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    updated = 0
+    with _locked_state():
+        data = _load()
+        for row in reversed(data["handoff_decisions"]):
+            if updated >= max(1, limit):
+                break
+            if not isinstance(row, dict):
+                continue
+            if row.get("receipt_kind") != "fresh_start":
+                continue
+            if row.get("receipt_viewed_at"):
+                continue
+            row["receipt_viewed_at"] = now
+            updated += 1
+        if updated:
+            _save(data)
+    return updated
+
+
 def link_handoff_decision_next_session(
     decision_id: str,
     *,
