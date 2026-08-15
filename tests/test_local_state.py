@@ -137,6 +137,17 @@ class LocalStateTests(unittest.TestCase):
         self.assertIn("receipt_viewed_at", fresh_start)
         self.assertNotIn("receipt_viewed_at", continue_here)
 
+    def test_companion_skip_is_active_until_expiry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_companion_skip(key="proof_pending", reason="User quieted reminder.")
+                active = local_state.companion_skip_active("proof_pending")
+                inactive = local_state.companion_skip_active("needs_review")
+
+        self.assertTrue(active)
+        self.assertFalse(inactive)
+
     def test_intervention_stores_hashes_not_prompt_text(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")

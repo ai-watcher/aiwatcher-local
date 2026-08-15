@@ -177,7 +177,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("/api/handoff", ui.HTML)
         self.assertIn("/api/handoff-decision", ui.HTML)
         self.assertIn("/api/handoff-receipts-viewed", ui.HTML)
+        self.assertIn("/api/companion-skip", ui.HTML)
         self.assertIn("markFreshStartReceiptsViewed", ui.HTML)
+        self.assertIn("quietFreshStartReminders", ui.HTML)
         self.assertIn("handoffDecisionBubble", ui.HTML)
         self.assertIn("Fresh Start brief copied from the session review.", ui.HTML)
         self.assertIn("renderHandoffCopied", ui.HTML)
@@ -189,7 +191,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertNotIn("window.alert", ui.HTML)
 
     def test_companion_state_surfaces_control_recommendation(self) -> None:
-        with patch.object(ui, "build_summary_cached", return_value={
+        with (
+            patch.object(ui, "build_summary_cached", return_value={
             "handoff_bubble": {
                 "session_id": "sess-1",
                 "severity": "critical",
@@ -199,7 +202,9 @@ class DashboardWindowTests(unittest.TestCase):
             "handoff_decisions": [],
             "insights": [],
             "watcher": {"running": True},
-        }):
+            }),
+            patch.object(ui, "companion_skip_active", return_value=False),
+        ):
             state = ui.build_companion_state()
 
         self.assertEqual(state["state"], "control_recommended")
@@ -207,6 +212,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["primary_url"], "/?session=sess-1")
         self.assertEqual(state["continue_label"], "Continue")
         self.assertEqual(state["continue_session_id"], "sess-1")
+        self.assertEqual(state["skip_label"], "Skip")
+        self.assertEqual(state["skip_state"], "control_recommended")
+        self.assertEqual(state["skip_session_id"], "sess-1")
         self.assertEqual(state["plan_url"], "/?view=prompt")
 
     def test_companion_state_stays_quiet_when_watching(self) -> None:
@@ -254,7 +262,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["primary_url"], "http://127.0.0.1:9999/")
 
     def test_companion_state_surfaces_fresh_start_proof_pending(self) -> None:
-        with patch.object(ui, "build_summary_cached", return_value={
+        with (
+            patch.object(ui, "build_summary_cached", return_value={
             "handoff_bubble": None,
             "intervention_receipts": [],
             "handoff_decisions": [{
@@ -264,64 +273,97 @@ class DashboardWindowTests(unittest.TestCase):
             }],
             "insights": [],
             "watcher": {"running": True},
-        }):
+            }),
+            patch.object(ui, "companion_skip_active", return_value=False),
+        ):
             state = ui.build_companion_state()
 
         self.assertEqual(state["state"], "proof_pending")
         self.assertEqual(state["primary_label"], "View receipt")
         self.assertEqual(state["primary_url"], "/?view=receipts")
+        self.assertEqual(state["skip_label"], "Skip")
+        self.assertEqual(state["skip_state"], "proof_pending")
+
+    def test_companion_state_quiets_when_proof_pending_is_skipped(self) -> None:
+        with (
+            patch.object(ui, "build_summary_cached", return_value={
+                "handoff_bubble": None,
+                "intervention_receipts": [],
+                "handoff_decisions": [{
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "proof_status": "Proof pending",
+                    "proof_reason": "No later same-project local session has been observed yet.",
+                }],
+                "insights": [],
+                "watcher": {"running": True},
+            }),
+            patch.object(ui, "companion_skip_active", return_value=True),
+        ):
+            state = ui.build_companion_state()
+
+        self.assertEqual(state["state"], "watching")
+        self.assertEqual(state["subtitle"], "Proof reminder skipped")
 
     def test_companion_state_does_not_stay_stuck_on_stale_proof_pending(self) -> None:
-        with patch.object(ui, "build_summary_cached", return_value={
-            "handoff_bubble": None,
-            "intervention_receipts": [],
-            "handoff_decisions": [{
-                "created_at": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
-                "proof_status": "Proof pending",
-                "proof_reason": "No later same-project local session has been observed yet.",
-            }],
-            "insights": [],
-            "watcher": {"running": True},
-        }):
+        with (
+            patch.object(ui, "build_summary_cached", return_value={
+                "handoff_bubble": None,
+                "intervention_receipts": [],
+                "handoff_decisions": [{
+                    "created_at": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+                    "proof_status": "Proof pending",
+                    "proof_reason": "No later same-project local session has been observed yet.",
+                }],
+                "insights": [],
+                "watcher": {"running": True},
+            }),
+            patch.object(ui, "companion_skip_active", return_value=False),
+        ):
             state = ui.build_companion_state()
 
         self.assertEqual(state["state"], "watching")
         self.assertEqual(state["label"], "Watching quietly")
 
     def test_companion_state_quiets_after_proof_pending_receipt_is_viewed(self) -> None:
-        with patch.object(ui, "build_summary_cached", return_value={
-            "handoff_bubble": None,
-            "intervention_receipts": [],
-            "handoff_decisions": [{
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "proof_status": "Proof pending",
-                "proof_reason": "No later same-project local session has been observed yet.",
-                "receipt_viewed_at": datetime.now(timezone.utc).isoformat(),
-            }],
-            "insights": [],
-            "watcher": {"running": True},
-        }):
+        with (
+            patch.object(ui, "build_summary_cached", return_value={
+                "handoff_bubble": None,
+                "intervention_receipts": [],
+                "handoff_decisions": [{
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "proof_status": "Proof pending",
+                    "proof_reason": "No later same-project local session has been observed yet.",
+                    "receipt_viewed_at": datetime.now(timezone.utc).isoformat(),
+                }],
+                "insights": [],
+                "watcher": {"running": True},
+            }),
+            patch.object(ui, "companion_skip_active", return_value=False),
+        ):
             state = ui.build_companion_state()
 
         self.assertEqual(state["state"], "watching")
         self.assertEqual(state["primary_label"], "Console")
 
     def test_companion_state_prioritizes_live_control_over_pending_receipt(self) -> None:
-        with patch.object(ui, "build_summary_cached", return_value={
-            "handoff_bubble": {
-                "session_id": "sess-live",
-                "severity": "critical",
-                "body": "Context is getting expensive.",
-            },
-            "intervention_receipts": [],
-            "handoff_decisions": [{
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "proof_status": "Proof pending",
-                "proof_reason": "No later same-project local session has been observed yet.",
-            }],
-            "insights": [],
-            "watcher": {"running": True},
-        }):
+        with (
+            patch.object(ui, "build_summary_cached", return_value={
+                "handoff_bubble": {
+                    "session_id": "sess-live",
+                    "severity": "critical",
+                    "body": "Context is getting expensive.",
+                },
+                "intervention_receipts": [],
+                "handoff_decisions": [{
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "proof_status": "Proof pending",
+                    "proof_reason": "No later same-project local session has been observed yet.",
+                }],
+                "insights": [],
+                "watcher": {"running": True},
+            }),
+            patch.object(ui, "companion_skip_active", return_value=False),
+        ):
             state = ui.build_companion_state()
 
         self.assertEqual(state["state"], "control_recommended")
@@ -346,6 +388,7 @@ class DashboardWindowTests(unittest.TestCase):
                 "watcher": {"running": True},
             }),
             patch.object(ui, "recent_handoff_decisions", return_value=[]),
+            patch.object(ui, "companion_skip_active", return_value=False),
         ):
             state = ui.build_companion_state()
 

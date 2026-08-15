@@ -38,6 +38,7 @@ from .local_state import (
     PROMPT_MODIFIED_DECISIONS,
     VALID_OUTCOMES,
     active_prompt_gate,
+    companion_skip_active,
     evidence_snapshots_for_sessions,
     get_outcome,
     get_watcher_status,
@@ -48,6 +49,7 @@ from .local_state import (
     recent_interventions,
     get_ambient_intervention,
     mark_recent_handoff_receipts_viewed,
+    record_companion_skip,
     record_ambient_intervention_action,
     record_handoff_decision,
     record_evidence_snapshot,
@@ -2981,6 +2983,16 @@ def build_companion_state() -> dict[str, object]:
                 }
         severity = str(bubble.get("severity") or "warning")
         label = "Fresh Start" if severity == "critical" else "Review context"
+        skip_key = f"control_recommended:{session_id}"
+        if companion_skip_active(skip_key):
+            return {
+                **base,
+                "state": "watching",
+                "label": "Watching quietly",
+                "subtitle": "Fresh Start nudge skipped",
+                "primary_label": "Console",
+                "detail": "The recommendation remains in the Console, but the Companion will stay quiet for now.",
+            }
         return {
             **base,
             "state": "control_recommended",
@@ -2992,6 +3004,9 @@ def build_companion_state() -> dict[str, object]:
             "continue_session_id": session_id,
             "continue_reason": str(bubble.get("reason") or bubble.get("body") or "User chose to keep working in the current session."),
             "continue_expected_saved_context_tokens": bubble.get("expected_saved_context_tokens"),
+            "skip_label": "Skip",
+            "skip_state": "control_recommended",
+            "skip_session_id": session_id,
             "control_url": f"/?session={session_id}",
             "watch_url": f"/?session={session_id}",
             "detail": "Control recommendation is based on local context-health evidence.",
@@ -2999,6 +3014,16 @@ def build_companion_state() -> dict[str, object]:
     fresh_start_receipts = summary.get("handoff_decisions")
     if isinstance(fresh_start_receipts, list):
         now = datetime.now(timezone.utc)
+        if companion_skip_active("proof_pending"):
+            return {
+                **base,
+                "state": "watching",
+                "label": "Watching quietly",
+                "subtitle": "Proof reminder skipped",
+                "primary_label": "Console",
+                "primary_url": "/?view=receipts",
+                "detail": "Fresh Start receipts remain available in Evidence while AIWatcher watches for proof.",
+            }
         for receipt in fresh_start_receipts:
             if not isinstance(receipt, dict):
                 continue
@@ -3016,10 +3041,21 @@ def build_companion_state() -> dict[str, object]:
                 "subtitle": str(receipt.get("proof_reason") or "Waiting to observe the follow-up session."),
                 "primary_label": "View receipt",
                 "primary_url": "/?view=receipts",
+                "skip_label": "Skip",
+                "skip_state": "proof_pending",
                 "detail": "AIWatcher copied or recorded an intervention and is waiting for observed outcome evidence.",
             }
     insights = summary.get("insights")
     if isinstance(insights, list) and insights:
+        if companion_skip_active("needs_review"):
+            return {
+                **base,
+                "state": "watching",
+                "label": "Watching quietly",
+                "subtitle": "Review nudge skipped",
+                "primary_label": "Console",
+                "detail": "The insight remains in the Console, but the Companion will stay quiet for now.",
+            }
         top = insights[0] if isinstance(insights[0], dict) else {}
         return {
             **base,
@@ -3028,6 +3064,8 @@ def build_companion_state() -> dict[str, object]:
             "subtitle": str(top.get("title") or "Open AIWatcher for the latest local signal."),
             "primary_label": "Review",
             "primary_url": "/",
+            "skip_label": "Skip",
+            "skip_state": "needs_review",
             "detail": str(top.get("body") or "AIWatcher found local usage evidence worth reviewing."),
         }
     watcher = summary.get("watcher")
@@ -3711,7 +3749,7 @@ HTML = r"""<!doctype html>
     <div class="card" style="margin-bottom:14px">
       <div class="section-title">
         <div><h2>Fresh Start receipts</h2><p>When AIWatcher suggested a fresh session, what you chose, and whether a follow-up session was observed.</p></div>
-        <span class="pill">Metadata only</span>
+        <div class="actions"><button class="btn-quiet" onclick="quietFreshStartReminders()">Quiet reminders</button><span class="pill">Metadata only</span></div>
       </div>
       <div class="table-wrap"><table>
         <thead><tr><th>Time</th><th>Decision</th><th>Expected context at risk</th><th>Proof</th><th>Sessions</th><th></th></tr></thead>
@@ -5209,6 +5247,19 @@ async function markFreshStartReceiptsViewed() {
     // Receipt review acknowledgments should never block reading Evidence.
   }
 }
+async function quietFreshStartReminders() {
+  try {
+    await fetch('/api/companion-skip', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state: 'proof_pending' }),
+    });
+    freshStartReceiptsMarkedViewed = true;
+    showToast('Fresh Start reminders quieted. Receipts stay available here.');
+  } catch (error) {
+    showToast('Could not quiet Fresh Start reminders yet.', 'error');
+  }
+}
 function showView(view) {
   document.querySelectorAll('.view').forEach(node => {
     node.hidden = node.id !== `view-${view}`;
@@ -6155,6 +6206,58 @@ class UIHandler(BaseHTTPRequestHandler):
                 )
                 return
             self._send(200, json.dumps({"ok": True, "updated": updated}), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/companion-skip":
+            state = str(payload.get("state", "")).strip()
+            session_id = str(payload.get("session_id", "")).strip()
+            if state == "prompt_gate":
+                self._send(
+                    409,
+                    json.dumps({
+                        "error": "Prompt Gate is blocking an AI tool. Review the gate instead of skipping it.",
+                    }),
+                    "application/json; charset=utf-8",
+                )
+                return
+            try:
+                if state == "proof_pending":
+                    updated = mark_recent_handoff_receipts_viewed()
+                    record_companion_skip(key="proof_pending", reason="User skipped the proof-pending Companion reminder.")
+                    self._send(200, json.dumps({"ok": True, "updated": updated}), "application/json; charset=utf-8")
+                    return
+                if state == "control_recommended" and session_id:
+                    source_row = _find_session_row(session_id)
+                    record = record_handoff_decision(
+                        session_id=session_id,
+                        decision="dismissed",
+                        reason="User skipped the Fresh Start Companion nudge.",
+                        action_channel="companion_skip",
+                        source_project_path=source_row.project_path if source_row else None,
+                    )
+                    record_companion_skip(
+                        key=f"control_recommended:{session_id}",
+                        reason="User skipped the Fresh Start Companion nudge.",
+                    )
+                    self._send(200, json.dumps({"ok": True, "record": record}), "application/json; charset=utf-8")
+                    return
+                if state == "needs_review":
+                    record = record_companion_skip(
+                        key="needs_review",
+                        reason="User skipped the needs-review Companion nudge.",
+                    )
+                    self._send(200, json.dumps({"ok": True, "record": record}), "application/json; charset=utf-8")
+                    return
+            except ValueError as exc:
+                self._send(400, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")
+                return
+            except OSError as exc:
+                self._send(
+                    500,
+                    json.dumps({"error": f"Could not skip Companion nudge: {exc}"}),
+                    "application/json; charset=utf-8",
+                )
+                return
+            self._send(400, json.dumps({"error": "No skippable Companion nudge is active."}), "application/json; charset=utf-8")
             return
         session_id = str(payload.get("session_id", "")).strip()
         outcome = str(payload.get("outcome", "")).strip()

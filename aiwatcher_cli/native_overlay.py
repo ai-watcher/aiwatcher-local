@@ -428,6 +428,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var subtitleLabel: NSTextField!
     var primaryButton: NSButton!
     var continueButton: NSButton!
+    var skipButton: NSButton!
     var planButton: NSButton!
     var consoleButton: NSButton!
     var collapseButton: NSButton!
@@ -438,11 +439,13 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var continueSessionID = ""
     var continueReason = ""
     var continueExpectedTokens = 0
+    var skipState = ""
+    var skipSessionID = ""
     var collapsed = false
     var stateName = "watching"
     var pulseOn = false
     var autoCollapseToken = 0
-    let expandedWidth: CGFloat = 468
+    let expandedWidth: CGFloat = 540
     let expandedHeight: CGFloat = 58
     let collapsedWidth: CGFloat = 82
     let collapsedHeight: CGFloat = 42
@@ -524,14 +527,22 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         continueButton.isHidden = true
         rootView.addSubview(continueButton)
 
+        skipButton = NSButton(title: "Skip", target: self, action: #selector(skipCurrent))
+        skipButton.frame = NSRect(x: 378, y: 15, width: 52, height: 28)
+        skipButton.bezelStyle = .rounded
+        skipButton.controlSize = .small
+        skipButton.toolTip = "Quiet this Companion nudge without deleting the evidence"
+        skipButton.isHidden = true
+        rootView.addSubview(skipButton)
+
         consoleButton = NSButton(title: "Console", target: self, action: #selector(openDashboard))
-        consoleButton.frame = NSRect(x: 378, y: 15, width: 64, height: 28)
+        consoleButton.frame = NSRect(x: 442, y: 15, width: 64, height: 28)
         consoleButton.bezelStyle = .rounded
         consoleButton.controlSize = .small
         rootView.addSubview(consoleButton)
 
         collapseButton = NSButton(title: "-", target: self, action: #selector(toggleCollapsed))
-        collapseButton.frame = NSRect(x: 444, y: 37, width: 18, height: 18)
+        collapseButton.frame = NSRect(x: 516, y: 37, width: 18, height: 18)
         collapseButton.bezelStyle = .rounded
         collapseButton.controlSize = .mini
         collapseButton.toolTip = "Minimize AIWatcher"
@@ -563,7 +574,28 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func openPrimary() {
+        if stateName == "proof_pending" {
+            acknowledgeFreshStartReceipts()
+        }
         openURL(primaryURL)
+    }
+
+    func acknowledgeFreshStartReceipts() {
+        guard let url = URL(string: dashboardBaseURL + "/api/handoff-receipts-viewed") else {
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        URLSession.shared.dataTask(with: request) { _, _, _ in
+            DispatchQueue.main.async {
+                self.stateName = "watching"
+                self.skipState = ""
+                self.titleLabel.stringValue = "Watching quietly"
+                self.subtitleLabel.stringValue = "Fresh Start receipt opened"
+                self.updateAppearance()
+                self.scheduleAutoCollapse(after: 1.2)
+            }
+        }.resume()
     }
 
     @objc func continueHere() {
@@ -593,6 +625,36 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                 self.stateName = "watching"
                 self.titleLabel.stringValue = "Watching quietly"
                 self.subtitleLabel.stringValue = "Fresh Start decision saved"
+                self.primaryURL = dashboardURL
+                self.updateAppearance()
+                self.scheduleAutoCollapse(after: 1.2)
+            }
+        }.resume()
+    }
+
+    @objc func skipCurrent() {
+        guard !skipState.isEmpty,
+              let url = URL(string: dashboardBaseURL + "/api/companion-skip") else {
+            return
+        }
+        var payload: [String: Any] = [
+            "state": skipState,
+            "session_id": skipSessionID
+        ]
+        guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+        URLSession.shared.dataTask(with: request) { _, _, _ in
+            DispatchQueue.main.async {
+                self.skipState = ""
+                self.continueSessionID = ""
+                self.stateName = "watching"
+                self.titleLabel.stringValue = "Watching quietly"
+                self.subtitleLabel.stringValue = "Companion nudge skipped"
                 self.primaryURL = dashboardURL
                 self.updateAppearance()
                 self.scheduleAutoCollapse(after: 1.2)
@@ -633,7 +695,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
     func applyVisibility() {
         if collapsed {
-            for view in [dragHandle, dotLabel, titleLabel, subtitleLabel, primaryButton, continueButton, planButton, consoleButton, collapseButton] {
+            for view in [dragHandle, dotLabel, titleLabel, subtitleLabel, primaryButton, continueButton, skipButton, planButton, consoleButton, collapseButton] {
                 view?.isHidden = true
             }
             expandButton.isHidden = false
@@ -649,15 +711,27 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         expandButton.isHidden = true
         let showPrimary = hasPrimaryAction()
         let showContinue = !continueSessionID.isEmpty && stateName == "control_recommended"
+        let showSkip = !skipState.isEmpty && stateName != "prompt_gate"
         primaryButton.isHidden = !showPrimary
         continueButton.isHidden = !showContinue
+        skipButton.isHidden = !showSkip
         if showPrimary {
             primaryButton.frame = NSRect(x: 206, y: 15, width: 88, height: 28)
             if showContinue {
                 continueButton.frame = NSRect(x: 298, y: 15, width: 76, height: 28)
-                consoleButton.frame = NSRect(x: 378, y: 15, width: 64, height: 28)
+                if showSkip {
+                    skipButton.frame = NSRect(x: 378, y: 15, width: 52, height: 28)
+                    consoleButton.frame = NSRect(x: 434, y: 15, width: 64, height: 28)
+                } else {
+                    consoleButton.frame = NSRect(x: 378, y: 15, width: 64, height: 28)
+                }
             } else {
-                consoleButton.frame = NSRect(x: 298, y: 15, width: 64, height: 28)
+                if showSkip {
+                    skipButton.frame = NSRect(x: 298, y: 15, width: 52, height: 28)
+                    consoleButton.frame = NSRect(x: 354, y: 15, width: 64, height: 28)
+                } else {
+                    consoleButton.frame = NSRect(x: 298, y: 15, width: 64, height: 28)
+                }
             }
         } else {
             consoleButton.frame = NSRect(x: 206, y: 15, width: 64, height: 28)
@@ -710,6 +784,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                 self.continueSessionID = json["continue_session_id"] as? String ?? ""
                 self.continueReason = json["continue_reason"] as? String ?? ""
                 self.continueExpectedTokens = json["continue_expected_saved_context_tokens"] as? Int ?? 0
+                self.skipButton.title = String((json["skip_label"] as? String ?? "Skip").prefix(8))
+                self.skipState = json["skip_state"] as? String ?? ""
+                self.skipSessionID = json["skip_session_id"] as? String ?? ""
                 self.updateAppearance()
                 self.scheduleAutoCollapse(after: self.hasPrimaryAction() ? 10.0 : 4.0)
                 self.scheduleRefresh(after: self.hasPrimaryAction() ? 2.0 : 3.0)
@@ -924,7 +1001,7 @@ def run_native_presence(
     except tk.TclError:
         pass
 
-    expanded_width = 468
+    expanded_width = 540
     expanded_height = 58
     collapsed_width = 82
     collapsed_height = 42
@@ -961,6 +1038,9 @@ def run_native_presence(
     continue_session_id_var = tk.StringVar(value="")
     continue_reason_var = tk.StringVar(value="")
     continue_expected_tokens_var = tk.IntVar(value=0)
+    skip_label_var = tk.StringVar(value="Skip")
+    skip_state_var = tk.StringVar(value="")
+    skip_session_id_var = tk.StringVar(value="")
     state_var = tk.StringVar(value="watching")
     pulse_var = tk.BooleanVar(value=False)
     drag = ttk.Label(frame, text="::", style="PresenceDrag.TLabel", cursor="fleur")
@@ -991,6 +1071,19 @@ def run_native_presence(
         webbrowser.open(prompt_url or url)
 
     def open_primary() -> None:
+        if state_var.get() == "proof_pending":
+            request = urllib.request.Request(f"{url.rstrip('/')}/api/handoff-receipts-viewed", method="POST")
+            try:
+                with urllib.request.urlopen(request, timeout=1.5):
+                    pass
+            except (OSError, urllib.error.URLError):
+                pass
+            state_var.set("watching")
+            title_var.set("Watching quietly")
+            subtitle_var.set("Fresh Start receipt opened")
+            skip_state_var.set("")
+            update_attention_style()
+            schedule_auto_collapse(1200)
         webbrowser.open(primary_url_var.get() or url)
 
     def continue_here() -> None:
@@ -1025,8 +1118,37 @@ def run_native_presence(
         update_attention_style()
         schedule_auto_collapse(1200)
 
+    def skip_current() -> None:
+        state = skip_state_var.get().strip()
+        if not state:
+            return
+        payload = {
+            "state": state,
+            "session_id": skip_session_id_var.get().strip(),
+        }
+        request = urllib.request.Request(
+            f"{url.rstrip('/')}/api/companion-skip",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=1.5):
+                pass
+        except (OSError, urllib.error.URLError):
+            pass
+        skip_state_var.set("")
+        continue_session_id_var.set("")
+        state_var.set("watching")
+        title_var.set("Watching quietly")
+        subtitle_var.set("Companion nudge skipped")
+        primary_url_var.set(url)
+        update_attention_style()
+        schedule_auto_collapse(1200)
+
     collapsed = tk.BooleanVar(value=False)
     continue_packed = tk.BooleanVar(value=False)
+    skip_packed = tk.BooleanVar(value=False)
     primary_packed = tk.BooleanVar(value=True)
     auto_collapse_token = tk.IntVar(value=0)
 
@@ -1095,11 +1217,18 @@ def run_native_presence(
             primary_packed.set(False)
         should_show_continue = bool(continue_session_id_var.get().strip()) and not collapsed.get()
         if should_show_continue and not continue_packed.get():
-            continue_button.pack(side="left", padx=(0, 4), before=console_button)
+            continue_button.pack(side="left", padx=(0, 4), before=skip_button if skip_packed.get() else console_button)
             continue_packed.set(True)
         elif not should_show_continue and continue_packed.get():
             continue_button.pack_forget()
             continue_packed.set(False)
+        should_show_skip = bool(skip_state_var.get().strip()) and state_var.get() != "prompt_gate" and not collapsed.get()
+        if should_show_skip and not skip_packed.get():
+            skip_button.pack(side="left", padx=(0, 4), before=console_button)
+            skip_packed.set(True)
+        elif not should_show_skip and skip_packed.get():
+            skip_button.pack_forget()
+            skip_packed.set(False)
 
     def pulse_attention() -> None:
         pulse_var.set(not pulse_var.get())
@@ -1123,6 +1252,9 @@ def run_native_presence(
             continue_label_var.set(str(payload.get("continue_label") or "Continue")[:10])
             continue_session_id_var.set(str(payload.get("continue_session_id") or ""))
             continue_reason_var.set(str(payload.get("continue_reason") or ""))
+            skip_label_var.set(str(payload.get("skip_label") or "Skip")[:8])
+            skip_state_var.set(str(payload.get("skip_state") or ""))
+            skip_session_id_var.set(str(payload.get("skip_session_id") or ""))
             try:
                 continue_expected_tokens_var.set(int(payload.get("continue_expected_saved_context_tokens") or 0))
             except (TypeError, ValueError, tk.TclError):
@@ -1134,6 +1266,7 @@ def run_native_presence(
             primary_label_var.set("Watch")
             primary_url_var.set(url)
             continue_session_id_var.set("")
+            skip_state_var.set("")
         finally:
             update_attention_style()
             schedule_auto_collapse(10000 if has_primary_action() else 4000)
@@ -1146,6 +1279,7 @@ def run_native_presence(
     primary_button = ttk.Button(frame, textvariable=primary_label_var, width=11, style="Presence.TButton", command=open_primary)
     primary_button.pack(side="left", padx=(0, 4))
     continue_button = ttk.Button(frame, textvariable=continue_label_var, width=9, style="Presence.TButton", command=continue_here)
+    skip_button = ttk.Button(frame, textvariable=skip_label_var, width=6, style="Presence.TButton", command=skip_current)
     console_button = ttk.Button(frame, text="Console", width=8, style="Presence.TButton", command=open_dashboard)
     console_button.pack(side="left")
     ttk.Button(frame, text="-", width=2, style="PresenceMini.TButton", command=toggle_collapsed).pack(side="left", padx=(4, 0))

@@ -168,6 +168,7 @@ def _empty_state() -> dict[str, Any]:
         "brief_tokens": [],
         "watch_notifications": [],
         "handoff_decisions": [],
+        "companion_skips": [],
         "ambient_interventions": [],
         "sent_notification_keys": [],
         "active_prompt_gate": None,
@@ -235,6 +236,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("brief_tokens", [])
     data.setdefault("watch_notifications", [])
     data.setdefault("handoff_decisions", [])
+    data.setdefault("companion_skips", [])
     data.setdefault("ambient_interventions", [])
     data.setdefault("sent_notification_keys", [])
     data.setdefault("active_prompt_gate", None)
@@ -442,6 +444,66 @@ def active_prompt_gate() -> dict[str, Any] | None:
             _save(data)
             return None
         return dict(gate)
+
+
+def _prune_companion_skips(data: dict[str, Any]) -> None:
+    now = datetime.now(timezone.utc)
+    kept: list[dict[str, Any]] = []
+    for row in data.get("companion_skips", []):
+        if not isinstance(row, dict):
+            continue
+        try:
+            expires_at = datetime.fromisoformat(str(row.get("expires_at")))
+        except ValueError:
+            continue
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at.astimezone(timezone.utc) > now:
+            kept.append(row)
+    data["companion_skips"] = kept[-50:]
+
+
+def record_companion_skip(
+    *,
+    key: str,
+    reason: str = "",
+    minutes: int = 60,
+) -> dict[str, Any]:
+    """Quiet a non-blocking Companion attention state without deleting evidence."""
+    key = key.strip()[:160]
+    if not key:
+        raise ValueError("key is required")
+    now = datetime.now(timezone.utc)
+    record = {
+        "id": str(uuid.uuid4()),
+        "created_at": now.isoformat(),
+        "expires_at": (now + timedelta(minutes=max(1, minutes))).isoformat(),
+        "key": key,
+        "reason": reason.strip()[:500],
+    }
+    with _locked_state():
+        data = _load()
+        _prune_companion_skips(data)
+        data["companion_skips"].append(record)
+        data["companion_skips"] = data["companion_skips"][-50:]
+        _save(data)
+    return record
+
+
+def companion_skip_active(key: str) -> bool:
+    key = key.strip()[:160]
+    if not key:
+        return False
+    try:
+        with _locked_state():
+            data = _load()
+            _prune_companion_skips(data)
+            active = any(row.get("key") == key for row in data.get("companion_skips", []) if isinstance(row, dict))
+            if active:
+                _save(data)
+            return active
+    except OSError:
+        return False
 
 
 def _prune_brief_tokens(data: dict[str, Any]) -> None:
