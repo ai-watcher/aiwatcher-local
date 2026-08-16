@@ -3821,20 +3821,22 @@ class HeadlessPromptGateTests(unittest.TestCase):
         # the full timeout for a decision that will never come.
         fake_stdin = Mock()
         fake_stdin.isatty.return_value = False
-        with (
-            patch.object(cli, "_display_available", return_value=True),
-            patch.object(cli, "_existing_companion_presence_pid", return_value=None),
-            patch.object(cli, "webbrowser") as webbrowser_mock,
-            patch.object(cli.sys, "stdin", fake_stdin),
-            patch.dict(os.environ, {}, clear=True),
-        ):
-            webbrowser_mock.open.return_value = False
-            started = time.monotonic()
-            gate = cli.run_prompt_gate(
-                tool="claude", cwd="/repo", prompt="original prompt", result=self.GATE_RESULT,
-                timeout_seconds=180,
-            )
-            elapsed = time.monotonic() - started
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.object(cli, "_display_available", return_value=True),
+                patch.object(cli, "_existing_companion_presence_pid", return_value=None),
+                patch.object(cli, "webbrowser") as webbrowser_mock,
+                patch.object(cli.sys, "stdin", fake_stdin),
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}, clear=True),
+            ):
+                webbrowser_mock.open.return_value = False
+                started = time.monotonic()
+                gate = cli.run_prompt_gate(
+                    tool="claude", cwd="/repo", prompt="original prompt", result=self.GATE_RESULT,
+                    timeout_seconds=180,
+                )
+                elapsed = time.monotonic() - started
 
         self.assertLess(elapsed, 1.0)
         self.assertEqual(gate, {"decision": "auto_block_headless", "prompt": ""})

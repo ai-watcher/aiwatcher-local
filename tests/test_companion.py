@@ -227,7 +227,7 @@ class CompanionLifecycleTests(unittest.TestCase):
         with (
             patch.object(companion.sys, "platform", "darwin"),
             patch.object(companion.os, "getpid", return_value=999),
-            patch.object(companion.os, "killpg", side_effect=ProcessLookupError) as killpg,
+            patch.object(companion.os, "killpg", side_effect=ProcessLookupError, create=True) as killpg,
             patch.object(companion.os, "kill") as kill,
         ):
             result = companion._terminate_pid(123)
