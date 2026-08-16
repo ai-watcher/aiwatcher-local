@@ -5011,6 +5011,52 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertIn("this surface did not invoke the hook", output)
         self.assertIn("Companion -> Plan / Prompt", output)
 
+    def test_hook_status_warns_when_hook_points_at_different_aiwatcher_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_hooks = os.path.join(temp_dir, "hooks.json")
+            with open(codex_hooks, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "hooks": {
+                        "UserPromptSubmit": [
+                            {
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": (
+                                            "PYTHONPATH=/tmp/old-aiwatcher:${PYTHONPATH:-} "
+                                            "python3 -m aiwatcher_cli codex-hook --gate"
+                                        ),
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }, handle)
+            with (
+                patch.object(
+                    cli,
+                    "_claude_settings_path",
+                    side_effect=lambda scope, project_dir=None: os.path.join(temp_dir, f"claude-{scope}.json"),
+                ),
+                patch.object(
+                    cli,
+                    "_codex_hooks_path",
+                    side_effect=lambda scope, project_dir=None: codex_hooks
+                    if scope == "user"
+                    else os.path.join(temp_dir, "codex-project.json"),
+                ),
+                patch.object(
+                    cli,
+                    "_cursor_hooks_path",
+                    side_effect=lambda scope, project_dir=None: os.path.join(temp_dir, f"cursor-{scope}.json"),
+                ),
+            ):
+                warnings = cli._configured_aiwatcher_source_warnings()
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("different AIWatcher checkout", warnings[0])
+        self.assertIn("Reinstall it from this repo", warnings[0])
+
     def test_hook_status_shows_handoff_bubble_decisions(self) -> None:
         with (
             patch.object(cli, "recent_hook_events", return_value=[]),
