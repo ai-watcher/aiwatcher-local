@@ -7469,6 +7469,40 @@ def _file_contains(path: str, needle: str) -> bool:
         return False
 
 
+def _file_text(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read()
+    except OSError:
+        return ""
+
+
+def _configured_aiwatcher_source_warnings() -> list[str]:
+    package_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    if os.name == "nt":
+        package_root = package_root.replace("\\", "/")
+    checks = [
+        ("Claude project hook", _claude_settings_path("project"), "claude-hook"),
+        ("Claude user hook", _claude_settings_path("user"), "claude-hook"),
+        ("Codex project hook", _codex_hooks_path("project"), "codex-hook"),
+        ("Codex user hook", _codex_hooks_path("user"), "codex-hook"),
+        ("Cursor project hook", _cursor_hooks_path("project"), "cursor-hook"),
+        ("Cursor user hook", _cursor_hooks_path("user"), "cursor-hook"),
+    ]
+    warnings: list[str] = []
+    for label, path, marker in checks:
+        text = _file_text(path)
+        if marker not in text:
+            continue
+        normalized = text.replace("\\", "/")
+        if package_root not in normalized:
+            warnings.append(
+                f"{label} is installed from a different AIWatcher checkout. Reinstall it from this repo so hooks, "
+                f"Companion, and Prompt Gate use the same code. Path: {path}"
+            )
+    return warnings
+
+
 def _hook_decision_action(decision: object) -> str:
     labels = {
         "context_added": "added brief context (no popup)",
@@ -7570,7 +7604,7 @@ def _hook_status_diagnostics(events: list[dict[str, object]]) -> list[str]:
     }
     stale_after = timedelta(minutes=10)
     now = datetime.now(timezone.utc)
-    diagnostics: list[str] = []
+    diagnostics: list[str] = _configured_aiwatcher_source_warnings()
     for tool in ("claude", "codex", "cursor"):
         if not installed.get(tool):
             continue
@@ -7647,9 +7681,20 @@ def _hook_surface_verification_rows(events: list[dict[str, object]]) -> list[tup
 
 
 def command_hook_status(_args: argparse.Namespace) -> int:
-    events = recent_hook_events(limit=8)
-    interventions = recent_interventions(limit=5, days=7)
+    state_error: OSError | None = None
+    try:
+        events = recent_hook_events(limit=8)
+    except OSError as exc:
+        events = []
+        state_error = exc
+    try:
+        interventions = recent_interventions(limit=5, days=7)
+    except OSError as exc:
+        interventions = []
+        state_error = state_error or exc
     print("AIWatcher hook status\n")
+    if state_error is not None:
+        print(f"Local state unavailable: {state_error}")
     if not events:
         print("No recent hook events recorded.")
         print("Submit a test prompt after installing a Claude, Codex, or Cursor hook, then check again.")
@@ -7690,7 +7735,10 @@ def command_hook_status(_args: argparse.Namespace) -> int:
             if row.get("session_id"):
                 line += f" | session {row['session_id']}"
             print(line)
-    command_decisions = recent_command_decisions(limit=5)
+    try:
+        command_decisions = recent_command_decisions(limit=5)
+    except OSError:
+        command_decisions = []
     if command_decisions:
         print("\nRecent command gate decisions (S-19, Claude Code only)")
         for row in command_decisions:
@@ -7701,7 +7749,10 @@ def command_hook_status(_args: argparse.Namespace) -> int:
             if row.get("session_id"):
                 line += f" | session {row['session_id']}"
             print(line)
-    watch_notifications = recent_watch_notifications(limit=5)
+    try:
+        watch_notifications = recent_watch_notifications(limit=5)
+    except OSError:
+        watch_notifications = []
     if watch_notifications:
         print("\nRecent ambient watch notifications (`aiwatcher watch --notify`)")
         for row in watch_notifications:
@@ -7713,7 +7764,10 @@ def command_hook_status(_args: argparse.Namespace) -> int:
             if row.get("session_id"):
                 line += f" | session {row['session_id']}"
             print(line)
-    handoff_decisions = recent_handoff_decisions(limit=5)
+    try:
+        handoff_decisions = recent_handoff_decisions(limit=5)
+    except OSError:
+        handoff_decisions = []
     if handoff_decisions:
         print("\nRecent Fresh Start decisions")
         for row in handoff_decisions:
