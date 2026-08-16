@@ -3653,6 +3653,45 @@ class HeadlessPromptGateTests(unittest.TestCase):
         ):
             self.assertTrue(cli._display_available())
 
+    def test_companion_can_own_prompt_gate_from_running_heartbeat(self) -> None:
+        with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=None),
+            patch.object(
+                cli,
+                "get_watcher_status",
+                return_value={"running": True, "mode": "companion", "pid": 123},
+            ),
+        ):
+            self.assertTrue(cli._companion_can_own_prompt_gate())
+
+    def test_companion_can_own_prompt_gate_from_direct_state_read_when_status_lock_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with open(state_file, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "watcher_heartbeat": {
+                        "mode": "companion",
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                }, handle)
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(cli, "_existing_companion_presence_pid", return_value=None),
+                patch.object(cli, "get_watcher_status", side_effect=OSError("locked")),
+            ):
+                self.assertTrue(cli._companion_can_own_prompt_gate())
+
+    def test_companion_does_not_own_prompt_gate_from_legacy_watch_heartbeat(self) -> None:
+        with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=None),
+            patch.object(
+                cli,
+                "get_watcher_status",
+                return_value={"running": True, "status": "running", "mode": "watch", "pid": 123},
+            ),
+        ):
+            self.assertFalse(cli._companion_can_own_prompt_gate())
+
     def test_run_prompt_gate_still_uses_browser_when_display_available(self) -> None:
         probe = socket.socket()
         try:
@@ -3663,7 +3702,7 @@ class HeadlessPromptGateTests(unittest.TestCase):
             probe.close()
         with (
             patch.object(cli, "_display_available", return_value=True),
-            patch.object(cli, "_existing_companion_presence_pid", return_value=None),
+            patch.object(cli, "_companion_can_own_prompt_gate", return_value=False),
             patch.object(cli, "webbrowser") as webbrowser_mock,
         ):
             webbrowser_mock.open.return_value = True
@@ -3702,7 +3741,7 @@ class HeadlessPromptGateTests(unittest.TestCase):
             with (
                 patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
                 patch.object(cli, "_display_available", return_value=True),
-                patch.object(cli, "_existing_companion_presence_pid", return_value=123),
+                patch.object(cli, "_companion_can_own_prompt_gate", return_value=True),
                 patch.object(cli, "webbrowser") as webbrowser_mock,
             ):
                 gate = cli.run_prompt_gate(
@@ -3717,7 +3756,7 @@ class HeadlessPromptGateTests(unittest.TestCase):
         webbrowser_mock.open.assert_not_called()
         self.assertEqual(gate["decision"], "cancel")
 
-    def test_run_prompt_gate_falls_back_to_browser_when_companion_does_not_acknowledge(self) -> None:
+    def test_run_prompt_gate_does_not_redirect_when_companion_acknowledgement_is_slow(self) -> None:
         probe = socket.socket()
         try:
             probe.bind(("127.0.0.1", 0))
@@ -3730,7 +3769,7 @@ class HeadlessPromptGateTests(unittest.TestCase):
             with (
                 patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
                 patch.object(cli, "_display_available", return_value=True),
-                patch.object(cli, "_existing_companion_presence_pid", return_value=123),
+                patch.object(cli, "_companion_can_own_prompt_gate", return_value=True),
                 patch.object(cli, "active_prompt_gate_seen", return_value=False),
                 patch.object(cli, "webbrowser") as webbrowser_mock,
             ):
@@ -3743,7 +3782,7 @@ class HeadlessPromptGateTests(unittest.TestCase):
                     timeout_seconds=1,
                 )
 
-        webbrowser_mock.open.assert_called_once()
+        webbrowser_mock.open.assert_not_called()
         self.assertIsNone(gate)
 
     def test_run_prompt_gate_shows_terminal_gate_when_no_display_and_tty(self) -> None:
