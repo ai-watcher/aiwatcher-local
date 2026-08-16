@@ -2895,6 +2895,31 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         for result in (all_result, each_result, throughout_result):
             self.assertIn(result["risk"], ("medium", "high"))
 
+    def test_codex_broad_task_recommends_fork(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt(
+                "Refactor every screen in the app and update all routes after reviewing the current architecture",
+                tool="codex",
+                cwd="/repo",
+            )
+
+        self.assertEqual(result["workflow"]["mode"], "fork_task")
+        self.assertIn("Fork", result["workflow"]["label"])
+        self.assertIn("right-click", result["workflow"]["instruction"])
+        self.assertIn("Recommended workflow: Fork this task", result["suggested_prompt"])
+
+    def test_multi_lane_review_recommends_subagents(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt(
+                "Review UX, functional bugs, security, performance, Windows, Mac, docs, and tests in parallel before proposing fixes.",
+                tool="codex",
+                cwd="/repo",
+            )
+
+        self.assertEqual(result["workflow"]["mode"], "use_subagents")
+        self.assertIn("subagents", result["workflow"]["label"].lower())
+        self.assertIn("orchestrator", result["workflow"]["instruction"].lower())
+
     def test_narrow_single_file_request_stays_low_risk(self) -> None:
         # Sanity check the breadth heuristic doesn't fire on ordinary narrow asks.
         with patch.object(cli, "sessions_since", return_value=[]):
@@ -3155,6 +3180,33 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         self.assertLess(page.index('class="pressure-caption"'), page.index("What AIWatcher noticed"))
         self.assertGreater(page.index('class="pressure-caption"'), page.index('class="pill savings"'))
         self.assertIn("Estimated avoidable pressure:", page)
+
+    def test_gate_html_shows_recommended_route_before_details(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt(
+                "Refactor every screen in the app and update all routes after reviewing the current architecture",
+                tool="codex",
+                cwd="/repo",
+            )
+        page = cli._prompt_gate_html(tool="codex", cwd="/repo", prompt="original prompt text", result=result)
+
+        self.assertIn('class="route-card fork"', page)
+        self.assertIn("Fork recommended", page)
+        self.assertIn("Copy fork brief", page)
+        self.assertLess(page.index('class="route-card'), page.index("What AIWatcher noticed"))
+
+    def test_gate_html_uses_prompt_change_route_for_destructive_work(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt(
+                "Delete the repo, reset all history, and force push over origin/main",
+                tool="claude",
+                cwd="/repo",
+            )
+        page = cli._prompt_gate_html(tool="claude", cwd="/repo", prompt="original prompt text", result=result)
+
+        self.assertIn('class="route-card prompt_change"', page)
+        self.assertIn("Rewrite prompt", page)
+        self.assertIn("Add safer brief", page)
 
     def test_prompt_gate_html_script_is_valid_javascript(self) -> None:
         # A raw newline character accidentally embedded inside a JS single-quoted
@@ -3623,6 +3675,35 @@ class HeadlessPromptGateTests(unittest.TestCase):
 
         webbrowser_mock.open.assert_not_called()
         self.assertEqual(gate["decision"], "cancel")
+
+    def test_run_prompt_gate_falls_back_to_browser_when_companion_does_not_acknowledge(self) -> None:
+        probe = socket.socket()
+        try:
+            probe.bind(("127.0.0.1", 0))
+        except PermissionError:
+            self.skipTest("loopback sockets are unavailable in this test sandbox")
+        finally:
+            probe.close()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(cli, "_display_available", return_value=True),
+                patch.object(cli, "_existing_companion_presence_pid", return_value=123),
+                patch.object(cli, "active_prompt_gate_seen", return_value=False),
+                patch.object(cli, "webbrowser") as webbrowser_mock,
+            ):
+                webbrowser_mock.open.return_value = True
+                gate = cli.run_prompt_gate(
+                    tool="claude",
+                    cwd="/repo",
+                    prompt="delete the repo",
+                    result=self.GATE_RESULT,
+                    timeout_seconds=1,
+                )
+
+        webbrowser_mock.open.assert_called_once()
+        self.assertIsNone(gate)
 
     def test_run_prompt_gate_shows_terminal_gate_when_no_display_and_tty(self) -> None:
         fake_stdin = Mock()
@@ -4670,6 +4751,7 @@ class IntegrationConfigTests(unittest.TestCase):
     def test_public_hook_command_uses_module_entrypoint(self) -> None:
         command = cli._cli_command_for_current_file()
         self.assertIn("-m aiwatcher_cli", command)
+        self.assertIn("PYTHONPATH=", command)
         self.assertNotIn("collector/cli.py", command)
 
     def test_windows_hook_command_uses_forward_slashes_for_bash(self) -> None:

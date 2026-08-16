@@ -38,6 +38,7 @@ class RuntimeProcess:
     command: str
     cwd: str | None = None
     session_id: str | None = None
+    deep_link: str | None = None
     rss_kb: int | None = None
     cpu_percent: float | None = None
     stale_reasons: list[str] = field(default_factory=list)
@@ -189,6 +190,8 @@ def _tool_label(command: str, argv: list[str]) -> str | None:
         return "Claude"
     if "cursor.app/" in executable_path or executable_name == "cursor":
         return "Cursor"
+    if "ollama.app/" in executable_path or executable_name == "ollama":
+        return "Ollama"
     return None
 
 
@@ -200,6 +203,17 @@ def classify_process(row: ProcessRow, *, stale_minutes: int = DEFAULT_STALE_MINU
 
     cwd = _flag_value(argv, "--working-dir", "--working_dir", "--cwd", "--workspace", "--workspace-root")
     session_id = _flag_value(argv, "--session-id", "--session_id", "--conversation-id", "--conversation_id")
+    deep_link = _flag_value(
+        argv,
+        "--deep-link",
+        "--deeplink",
+        "--chat-url",
+        "--chat_url",
+        "--conversation-url",
+        "--conversation_url",
+        "--thread-url",
+        "--thread_url",
+    )
     kernel_path = next((part for part in argv if part.endswith("kernel.js")), None)
     reasons: list[str] = []
     age_seconds = row.age_seconds
@@ -233,6 +247,7 @@ def classify_process(row: ProcessRow, *, stale_minutes: int = DEFAULT_STALE_MINU
         command=row.command,
         cwd=cwd,
         session_id=session_id,
+        deep_link=deep_link,
         rss_kb=row.rss_kb,
         cpu_percent=row.cpu_percent,
         stale_reasons=sorted(set(reasons), key=reasons.index),

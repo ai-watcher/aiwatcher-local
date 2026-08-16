@@ -47,11 +47,14 @@ from .local_state import (
     recent_command_decisions,
     recent_handoff_decisions,
     recent_interventions,
+    recent_optimize_decisions,
     get_ambient_intervention,
+    mark_active_prompt_gate_seen,
     mark_recent_handoff_receipts_viewed,
     record_companion_skip,
     record_ambient_intervention_action,
     record_handoff_decision,
+    record_optimize_decision,
     record_evidence_snapshot,
     record_outcome,
     record_ui_server,
@@ -89,7 +92,7 @@ SUMMARY_MEMORY_TTL_SECONDS = 45
 SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
 # Bump whenever build_summary's payload shape changes, so a cache written by an
 # older build is discarded instead of rendering blank sections in a newer UI.
-SUMMARY_CACHE_SCHEMA_VERSION = 4
+SUMMARY_CACHE_SCHEMA_VERSION = 6
 SESSION_SNAPSHOT_SCHEMA_VERSION = 1
 SUMMARY_BACKGROUND_COOLDOWN_SECONDS = 8
 SUMMARY_WINDOWS = (1, 7, 30)
@@ -127,6 +130,16 @@ def compact_int(value: int) -> str:
     if value >= 1_000:
         return f"{value / 1_000:.1f}k"
     return str(value)
+
+
+def bytes_label(value: int) -> str:
+    if value >= 1024 ** 3:
+        return f"{value / (1024 ** 3):.1f} GB"
+    if value >= 1024 ** 2:
+        return f"{value / (1024 ** 2):.1f} MB"
+    if value >= 1024:
+        return f"{value / 1024:.1f} KB"
+    return f"{value} B"
 
 
 def _usage_summary(row: LocalSession) -> dict[str, object]:
@@ -357,6 +370,41 @@ def group_rows(rows: list[LocalSession], key_fn) -> list[dict[str, object]]:
     return result
 
 
+DETECTED_TOOL_LABELS = {
+    "cursor": "Cursor",
+    "ollama": "Ollama",
+}
+
+
+def _append_detected_tool_rows(
+    tools: list[dict[str, object]],
+    detected: dict[str, bool],
+) -> list[dict[str, object]]:
+    """Show installed/running AI tools even when AIWatcher has no spend rows yet."""
+    result = list(tools)
+    existing = {str(row.get("name") or "").lower() for row in result}
+    for tool_id, label in DETECTED_TOOL_LABELS.items():
+        if not detected.get(tool_id):
+            continue
+        if any(tool_id in name for name in existing):
+            continue
+        result.append({
+            "name": label,
+            "id": tool_id,
+            "short_name": label,
+            "sessions": 0,
+            "tokens": 0,
+            "tokens_label": "0",
+            "api_value_usd": 0.0,
+            "api_value_label": "$0.00",
+            "calls": 0,
+            "tool_calls": 0,
+            "detected_only": True,
+            "status_label": "Detected, not measured",
+        })
+    return result
+
+
 def _project_health(items: list[LocalSession]) -> dict[str, object]:
     stats = summarize(items)
     tokens = int(stats["tokens"])
@@ -437,6 +485,324 @@ def group_projects(rows: list[LocalSession]) -> list[dict[str, object]]:
     return result
 
 
+def _elapsed_label(stamp: datetime | None, *, now: datetime | None = None) -> str:
+    if stamp is None:
+        return "unknown age"
+    now = now or datetime.now(timezone.utc)
+    delta = now - stamp.astimezone(timezone.utc)
+    seconds = max(0, int(delta.total_seconds()))
+    if seconds < 90:
+        return "just now"
+    minutes = seconds // 60
+    if minutes < 90:
+        return f"{minutes}m ago"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours}h ago"
+    return f"{hours // 24}d ago"
+
+
+def _worktree_rows(projects: set[str]) -> list[dict[str, object]]:
+    """Read-only git worktree inventory for known project roots."""
+    rows: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for project in sorted(projects):
+        try:
+            root = Path(project).expanduser()
+        except (TypeError, ValueError):
+            continue
+        if not root.exists():
+            continue
+        try:
+            completed = subprocess.run(
+                ["git", "-C", str(root), "worktree", "list", "--porcelain"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if completed.returncode != 0:
+            continue
+        current: dict[str, object] = {}
+        for raw_line in [*completed.stdout.splitlines(), ""]:
+            line = raw_line.strip()
+            if not line:
+                path = current.get("path")
+                if isinstance(path, str) and path not in seen:
+                    seen.add(path)
+                    rows.append(current)
+                current = {}
+                continue
+            if line.startswith("worktree "):
+                current["path"] = line.split(" ", 1)[1]
+            elif line.startswith("branch "):
+                current["branch"] = line.split(" ", 1)[1].replace("refs/heads/", "")
+            elif line == "bare":
+                current["bare"] = True
+            elif line == "detached":
+                current["detached"] = True
+    return rows
+
+
+def _optimize_candidate_checklist(item: dict[str, object]) -> str:
+    project = str(item.get("project") or "Local machine")
+    title = str(item.get("title") or "Review workspace")
+    reason = str(item.get("why_inactive") or item.get("summary") or "AIWatcher found local evidence worth reviewing.")
+    impact = str(item.get("impact_label") or "No savings claim")
+    evidence = str(item.get("evidence") or "Local metadata only.")
+    project_full = str(item.get("project_full") or "")
+    kind = str(item.get("kind") or "")
+    lines = [
+        f"AIWatcher Optimize review: {project}",
+        "",
+        f"Goal: {title}.",
+        f"Why AIWatcher surfaced this: {reason}",
+        f"Evidence: {evidence}",
+        f"Impact signal: {impact}",
+        "",
+        "Safe review steps:",
+    ]
+    if kind == "session_cluster":
+        lines.extend([
+            "1. Open the matching AI app and find this project/workspace.",
+            "2. Confirm the work is finished, handed off, or no longer needed.",
+            "3. Archive or mark only those chats done inside the AI app.",
+            "4. Keep final source-of-truth files, commits, receipts, and notes.",
+            "5. Do not delete code, worktrees, chats, or processes from this checklist.",
+        ])
+    elif kind == "fresh_start_pending":
+        lines.extend([
+            "1. If you already started the fresh session, paste or keep the Fresh Start brief there.",
+            "2. If you stayed in the old session, mark the receipt as skipped/continue so AIWatcher stops nudging.",
+            "3. After the new session produces useful work, refresh AIWatcher so it can link proof.",
+            "4. Do not claim saved tokens until AIWatcher observes the follow-up.",
+        ])
+    elif kind == "worktree":
+        lines.extend([
+            f"1. Run: git -C {project_full or '<worktree>'} status --short",
+            "2. Confirm the branch is merged, abandoned, or intentionally disposable.",
+            "3. Remove the worktree only through git/worktree-safe commands after confirmation.",
+            "4. Do not delete the folder directly from this checklist.",
+        ])
+    elif kind == "stale_processes":
+        lines.extend([
+            "1. Run: aiwatcher processes --stale-only",
+            "2. Confirm each process is not attached to live AI work.",
+            "3. Stop only stale/orphaned runtimes you recognize.",
+            "4. Leave unknown processes alone.",
+        ])
+    else:
+        lines.extend([
+            "1. Review the local evidence in AIWatcher.",
+            "2. Confirm the work is finished before taking action.",
+            "3. Prefer archive/mark-done actions over deletion.",
+        ])
+    lines.extend([
+        "",
+        "Privacy: this checklist uses local metadata only. It does not include prompt/source content.",
+    ])
+    return "\n".join(lines)
+
+
+def _optimize_checklist(candidates: list[dict[str, object]]) -> str:
+    lines = [
+        "AIWatcher Optimize Workspace review",
+        "",
+        "Use this as a review queue. Take action one project at a time, and only inside the owning AI app or git tool.",
+        "",
+    ]
+    if not candidates:
+        lines.append("- No optimize candidates stood out in the current local window.")
+        return "\n".join(lines)
+    for index, item in enumerate(candidates, start=1):
+        lines.extend([
+            f"{index}. {item.get('title')}: {item.get('project')}",
+            f"   Why: {item.get('why_inactive') or item.get('summary')}",
+            f"   Evidence: {item.get('evidence_label')} - {item.get('evidence')}",
+            f"   Impact: {item.get('impact_label')}",
+        ])
+        lines.append("   Action: copy the project-specific checklist in AIWatcher before doing anything.")
+    lines.extend([
+        "",
+        "Do not delete worktrees, chats, or processes from this global list. Review each candidate independently.",
+    ])
+    return "\n".join(lines)
+
+
+def build_optimize_inventory(
+    rows: list[LocalSession],
+    *,
+    outcomes: dict[str, dict[str, object]] | None = None,
+    handoff_decisions: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    """Find safe, local cleanup opportunities without mutating any AI app."""
+    now = datetime.now(timezone.utc)
+    outcomes = outcomes or {}
+    handoff_decisions = handoff_decisions or []
+    receipts = recent_optimize_decisions(limit=20)
+    suppressed_projects: set[str] = set()
+    for receipt in receipts:
+        if not isinstance(receipt, dict) or receipt.get("decision") not in {"marked_done", "skipped"}:
+            continue
+        created = _parse_iso_datetime(receipt.get("created_at"))
+        if created is not None and now - created <= timedelta(days=3):
+            project_path = receipt.get("project_path")
+            if isinstance(project_path, str) and project_path:
+                suppressed_projects.add(project_path)
+
+    by_project: dict[str, list[LocalSession]] = defaultdict(list)
+    for row in rows:
+        if is_reliable_project_path(row.project_path):
+            by_project[str(row.project_path)].append(row)
+
+    candidates: list[dict[str, object]] = []
+    for project, items in by_project.items():
+        if project in suppressed_projects:
+            continue
+        inactive = [
+            row for row in items
+            if (row.updated_at or row.started_at)
+            and (now - (row.updated_at or row.started_at).astimezone(timezone.utc)) >= timedelta(hours=4)
+        ]
+        if len(inactive) < 2:
+            continue
+        tokens = sum(row.tokens_in + row.tokens_out for row in inactive)
+        calls = sum(row.agent_calls for row in inactive)
+        if tokens < 300_000 and calls < 120 and len(inactive) < 3:
+            continue
+        latest = max((row.updated_at or row.started_at for row in inactive if (row.updated_at or row.started_at)), default=None)
+        completed = sum(1 for row in inactive if outcomes.get(row.session_id, {}).get("outcome") == "useful")
+        tools = sorted({row.tool for row in inactive if row.tool})
+        latest_label = _elapsed_label(latest, now=now)
+        why_inactive = (
+            f"Last local activity was {latest_label}; {len(inactive)} same-project sessions "
+            f"from {', '.join(tools[:3]) if tools else 'local AI tools'} are still carrying context."
+        )
+        if completed:
+            why_inactive += f" {completed} already have useful outcomes, so archive review is lower risk."
+        candidates.append({
+            "id": f"sessions:{project}",
+            "kind": "session_cluster",
+            "title": "Archive completed or stale chats",
+            "project": project_label(project),
+            "project_full": project,
+            "summary": f"{len(inactive)} inactive same-project sessions are carrying ~{compact_int(tokens)} context. Archive or mark done once the work is no longer active.",
+            "why_inactive": why_inactive,
+            "evidence_label": "Observed",
+            "evidence": "Observed from local session timestamps, project path, token pressure, and outcome metadata. Archive action must happen in the AI app.",
+            "impact_label": f"~{compact_int(tokens)} context at risk",
+            "tokens_at_risk": tokens,
+            "session_count": len(inactive),
+            "completed_count": completed,
+            "updated_label": latest_label,
+            "action_label": "Copy project steps",
+        })
+
+    for decision in handoff_decisions:
+        if not isinstance(decision, dict):
+            continue
+        if str(decision.get("decision") or "") not in {"new_chat", "copy_handoff"}:
+            continue
+        if decision.get("next_session_id"):
+            continue
+        created_at = _parse_iso_datetime(decision.get("created_at"))
+        if created_at is not None and now - created_at < timedelta(hours=2):
+            continue
+        expected = decision.get("expected_saved_context_tokens")
+        tokens = int(expected) if isinstance(expected, int) and expected > 0 else 0
+        project = str(decision.get("source_project_path") or "")
+        if project and project in suppressed_projects:
+            continue
+        candidates.append({
+            "id": f"fresh-start:{decision.get('id') or decision.get('session_id')}",
+            "kind": "fresh_start_pending",
+            "title": "Finish Fresh Start cleanup",
+            "project": project_label(project),
+            "project_full": project if is_reliable_project_path(project) else "",
+            "summary": "A Fresh Start brief was copied, but no follow-up proof is linked yet. Mark the old chat done or paste the brief into the new chat.",
+            "why_inactive": "AIWatcher saw a Fresh Start decision but has not linked a later same-project session yet.",
+            "evidence_label": "Observed",
+            "evidence": "Observed from AIWatcher Fresh Start receipt metadata.",
+            "impact_label": f"~{compact_int(tokens)} context at risk" if tokens else "context at risk",
+            "tokens_at_risk": tokens,
+            "session_count": 1,
+            "updated_label": _elapsed_label(created_at, now=now),
+            "action_label": "Open Fresh Start receipts",
+            "view": "receipts",
+        })
+
+    projects = {project for project in by_project if is_reliable_project_path(project)}
+    for worktree in _worktree_rows(projects):
+        path = str(worktree.get("path") or "")
+        if not path or path in projects or path in suppressed_projects:
+            continue
+        path_obj = Path(path)
+        looks_agent_owned = ".claude/worktrees" in path or "/.worktrees/" in path or path_obj.name.startswith(("agent-", "codex-"))
+        if not looks_agent_owned:
+            continue
+        related_sessions = [row for row in rows if row.project_path and _is_inside_path(Path(row.project_path), path_obj)]
+        latest = max((row.updated_at or row.started_at for row in related_sessions if (row.updated_at or row.started_at)), default=None)
+        if latest is not None and now - latest.astimezone(timezone.utc) < timedelta(hours=12):
+            continue
+        candidates.append({
+            "id": f"worktree:{path}",
+            "kind": "worktree",
+            "title": "Review stale AI worktree",
+            "project": short_path(path),
+            "project_full": path,
+            "summary": "This looks like an AI-created worktree. AIWatcher will not delete it automatically; check git status first.",
+            "why_inactive": "The worktree path looks agent-created and no recent same-path local session activity was observed.",
+            "evidence_label": "Inferred",
+            "evidence": "Inferred from git worktree path shape and local session age.",
+            "impact_label": "disk cleanup possible",
+            "tokens_at_risk": 0,
+            "session_count": len(related_sessions),
+            "updated_label": _elapsed_label(latest, now=now) if latest else "no recent session",
+            "action_label": "Copy cleanup checklist",
+        })
+
+    try:
+        stale_processes = [process for process in safe_runtime_processes() if process.stale]
+    except OSError:
+        stale_processes = []
+    if stale_processes:
+        rss_kb = sum(process.rss_kb or 0 for process in stale_processes)
+        candidates.append({
+            "id": "stale-processes",
+            "kind": "stale_processes",
+            "title": "Review stale AI runtimes",
+            "project": "Local machine",
+            "project_full": "",
+            "summary": f"{len(stale_processes)} AI-related runtime process(es) look stale or orphaned. Review before killing anything.",
+            "why_inactive": "Local process metadata shows AI-related runtimes with stale/orphan signals.",
+            "evidence_label": "Observed",
+            "evidence": "Observed from local process metadata, not provider billing.",
+            "impact_label": f"{bytes_label(int(rss_kb * 1024))} RSS observed" if rss_kb else "runtime clutter",
+            "tokens_at_risk": 0,
+            "session_count": len(stale_processes),
+            "updated_label": "now",
+            "action_label": "Copy cleanup checklist",
+        })
+
+    candidates.sort(key=lambda item: (int(item.get("tokens_at_risk") or 0), int(item.get("session_count") or 0)), reverse=True)
+    for item in candidates:
+        item["checklist"] = _optimize_candidate_checklist(item)
+    total_tokens = sum(int(item.get("tokens_at_risk") or 0) for item in candidates)
+    return {
+        "status": "needs_action" if candidates else "quiet",
+        "title": "Optimize workspace" if candidates else "Workspace clean",
+        "summary": f"{len(candidates)} cleanup opportunity{'ies' if len(candidates) != 1 else 'y'} found." if candidates else "No stale forks, worktrees, or runtime cleanup opportunities stood out.",
+        "impact_label": f"~{compact_int(total_tokens)} context at risk" if total_tokens else "no context savings claim",
+        "evidence_label": "Observed/inferred" if candidates else "Observed",
+        "candidates": candidates[:8],
+        "top": candidates[0] if candidates else None,
+        "recent_receipts": receipts[:5],
+        "checklist": _optimize_checklist(candidates[:8]),
+    }
+
+
 def session_state(row: LocalSession, *, now: datetime | None = None) -> dict[str, object]:
     now = now or datetime.now(timezone.utc)
     stamp = row.updated_at or row.started_at
@@ -494,13 +860,13 @@ def session_actions(
     needs_fresh_start = tokens >= 500_000 or row.agent_calls >= 250 or row.tool_calls >= 250
     identity_level = runtime.identity_level
     if identity_level == "exact_session":
-        handoff_label = "Open Fresh Start"
+        handoff_label = "Build Fresh Start brief"
         handoff_reason = "This active AI work is heavy enough that a Fresh Start brief is safer than replaying the full history."
     elif identity_level == "likely_workspace":
-        handoff_label = "Open Fresh Start"
+        handoff_label = "Build Fresh Start brief"
         handoff_reason = "AIWatcher can identify the workspace, but not the exact running chat. Copy a Fresh Start brief before continuing."
     else:
-        handoff_label = "Copy Fresh Start brief"
+        handoff_label = "Build Fresh Start brief"
         handoff_reason = "This is historical local evidence, not a live chat. Copy a Fresh Start brief from the evidence instead of trying to return to the old session."
     if not outcome:
         actions.append({
@@ -615,7 +981,9 @@ def _session_row_json(
         "project_full": row.project_path if is_reliable_project_path(row.project_path) else "unknown",
         "model": display_model_name(row.model),
         "tokens": compact_int(row.tokens_in + row.tokens_out),
+        "tokens_value": row.tokens_in + row.tokens_out,
         "api_value": money(row.cost_usd),
+        "api_value_usd": round(row.cost_usd, 6),
         "outcome": (window_outcomes.get(row.session_id) or {}).get("outcome"),
         "inferred_outcome": evidence_by_session.get(row.session_id).inferred_outcome if evidence_by_session.get(row.session_id) else None,
         "state": state,
@@ -634,11 +1002,23 @@ def build_session_search(
     search: str | None = None,
     outcome: str | None = None,
     evidence: str | None = None,
+    state_filter: str | None = None,
 ) -> dict[str, object]:
     """S-27: UI-facing search/filter over local sessions, reusing filter_sessions()
     (cli.py) rather than re-implementing matching here."""
     rows = rows_for_window(days, prefer_cache=True)
     matched = filter_sessions(rows, search=search, outcome=outcome, evidence=evidence)
+    if state_filter:
+        def state_matches(row: LocalSession) -> bool:
+            status = str(session_state(row).get("status") or "")
+            if state_filter == "active_recent":
+                return status in {"active", "recent"}
+            if state_filter == "active":
+                return status == "active"
+            if state_filter == "history":
+                return status in {"ended", "stale", "unknown"}
+            return True
+        matched = [row for row in matched if state_matches(row)]
     matched = sorted(matched, key=lambda row: row.updated_at or row.started_at or MIN_DT, reverse=True)
     total_matched = len(matched)
     matched = matched[:SESSION_SEARCH_RESULT_LIMIT]
@@ -652,7 +1032,7 @@ def build_session_search(
         {row.session_id: SimpleNamespace(inferred_outcome=evidence) for row in matched} if evidence else {}
     )
     return {
-        "query": {"search": search or "", "outcome": outcome or "", "evidence": evidence or ""},
+        "query": {"search": search or "", "outcome": outcome or "", "evidence": evidence or "", "state": state_filter or ""},
         "total_scanned": len(rows),
         "total_matched": total_matched,
         "sessions": [_session_row_json(row, window_outcomes, evidence_by_session) for row in matched],
@@ -746,7 +1126,12 @@ def recent_session_json(
         "project_full": row.project_path if is_reliable_project_path(row.project_path) else "unknown",
         "model": display_model_name(row.model),
         "tokens": compact_int(row.tokens_in + row.tokens_out),
+        "tokens_label": compact_int(row.tokens_in + row.tokens_out),
+        "tokens_value": row.tokens_in + row.tokens_out,
         "api_value": money(row.cost_usd),
+        "api_value_usd": round(row.cost_usd, 6),
+        "calls": row.agent_calls,
+        "tool_calls": row.tool_calls,
         "outcome": (window_outcomes.get(row.session_id) or {}).get("outcome"),
         "inferred_outcome": evidence_by_session.get(row.session_id).inferred_outcome if evidence_by_session.get(row.session_id) else None,
         "updated_at": (row.updated_at or row.started_at).isoformat() if (row.updated_at or row.started_at) else None,
@@ -1008,18 +1393,28 @@ def build_basic_handoff_detail(
         ),
         "Detailed git, timeline, and prompt evidence is still loading; inspect the repository before editing.",
     ]
+    objective_text = objective.strip() if objective and objective.strip() else (
+        "Continue the same user goal from the source workspace, but reconstruct it from local evidence first."
+    )
     next_brief = "\n".join([
         "AIWatcher Fresh Start brief",
         "",
-        "You are starting a fresh AI work session. Do not assume access to the previous chat.",
-        "Continue from repository state on disk, not from hidden conversation history.",
+        "You are starting a fresh AI work session from an AIWatcher handoff.",
+        "Do not assume access to the previous chat, hidden memory, or unstated decisions.",
+        "Continue from repository state on disk and the source-of-truth evidence below.",
         f"Target tool: {TARGET_LABELS[target]}.",
         f"Continuation type: {HANDOFF_TYPE_LABELS[handoff_type]}.",
-        *([
-            "",
-            "Goal",
-            f"- User objective: {objective.strip()}",
-        ] if objective and objective.strip() else []),
+        "",
+        "Goal",
+        f"- User objective: {objective_text}",
+        "- Preserve momentum without replaying the bloated prior conversation.",
+        "- Choose the smallest useful next checkpoint before editing.",
+        "",
+        "How to continue",
+        "- If this is a fresh chat: first reconstruct the task from the workspace and evidence below.",
+        "- If this is a forked chat: keep the parent chat as source of truth and return only the final summary, files touched, verification, and unresolved questions.",
+        "- If this is a subagent task: inspect only the assigned lane, then report evidence and recommendations back to the orchestrator.",
+        "- If evidence is insufficient, ask one focused clarification instead of guessing.",
         *([
             "",
             "Source of truth to load first",
@@ -1044,15 +1439,24 @@ def build_basic_handoff_detail(
         "Why start fresh",
         *[f"- {item}" for item in warnings],
         "",
+        "First response required",
+        "- Say what appears done.",
+        "- Say what remains uncertain.",
+        "- Name the exact files, docs, commands, or screens you will inspect first.",
+        "- Propose one smallest next checkpoint and wait if the scope is ambiguous or risky.",
+        "",
         "Immediate next checkpoint",
-        "- Run `git status --short` and inspect the files already changed in this repository.",
-        "- Reconstruct what appears done, what remains uncertain, and the smallest safe next checkpoint.",
+        "- Run `git status --short`.",
+        "- Inspect changed files and any source-of-truth files listed above before editing.",
         "- Continue only after that checkpoint is clear; do not replay broad exploration from the old session.",
         "",
         "Guardrails",
         "- Preserve unrelated changes.",
         "- Do not expose secrets.",
-        "- Stop before destructive changes or broad refactors.",
+        "- Stop before destructive changes, force pushes, broad refactors, production writes, or unrelated cleanup.",
+        "",
+        "Done report",
+        "- Summarize what changed, what was verified, what remains uncertain, and whether the result looks useful.",
     ])
     return {
         "session_id": row.session_id,
@@ -1546,6 +1950,7 @@ def _context_health_card(health: ContextHealth, session: LocalSession | None, *,
         "session_id": health.session_id,
         "tool": health.tool,
         "project": project_label(health.project_path),
+        "project_full": health.project_path,
         "severity": health.severity,
         "session_count": len(group),
         "critical_sessions": critical_count,
@@ -1654,6 +2059,7 @@ def _handoff_bubble(context_health: list[dict[str, object]]) -> dict[str, object
     return {
         "session_id": candidate.get("session_id"),
         "project": project,
+        "project_full": candidate.get("project_full"),
         "tool": candidate.get("tool"),
         "updated_at": candidate.get("updated_at"),
         "source_path": candidate.get("source_path"),
@@ -1680,6 +2086,11 @@ def build_prompt_preflight(prompt: str, *, tool: str = "agent", cwd: str | None 
     if not text:
         return {"error": "prompt is required"}
     result = analyze_prompt(text, tool=tool or "agent", cwd=cwd)
+    try:
+        summary = build_summary_cached(7)
+    except OSError:
+        summary = {}
+    handoff_bubble = summary.get("handoff_bubble") if isinstance(summary, dict) else None
     impact = result.get("estimated_impact") if isinstance(result.get("estimated_impact"), dict) else {}
     impact_label = "AIWatcher needs local history before it can estimate savings."
     if impact:
@@ -1703,8 +2114,100 @@ def build_prompt_preflight(prompt: str, *, tool: str = "agent", cwd: str | None 
         "findings": result["findings"],
         "suggestions": result["suggestions"],
         "suggested_prompt": result["suggested_prompt"],
+        "workflow": result.get("workflow") if isinstance(result.get("workflow"), dict) else {},
+        "plan_action": _prompt_plan_action(text, result, handoff_bubble),
         "impact_label": impact_label,
         "privacy": "Prompt text is analyzed locally for this response and is not persisted by the Prompt Companion.",
+    }
+
+
+def _prompt_plan_action(
+    prompt: str,
+    result: dict[str, object],
+    handoff_bubble: object,
+) -> dict[str, object]:
+    workflow = result.get("workflow") if isinstance(result.get("workflow"), dict) else {}
+    mode = str(workflow.get("mode") or "")
+    lower = prompt.lower()
+    close_terms = [
+        "archive this",
+        "archive the chat",
+        "close this out",
+        "wrap up",
+        "mark outcome",
+        "we are done",
+        "this is done",
+        "summarize final",
+    ]
+    if isinstance(handoff_bubble, dict) and handoff_bubble.get("session_id"):
+        session_id = str(handoff_bubble.get("session_id"))
+        return {
+            "kind": "fresh_start",
+            "label": "Fresh Start",
+            "title": "Start fresh before sending this",
+            "why": str(
+                handoff_bubble.get("reason")
+                or handoff_bubble.get("body")
+                or "Current local context has enough pressure that a Fresh Start brief is safer than replaying the chat."
+            ),
+            "next_step": "Open the session, copy the Fresh Start brief, then paste this planned task into the new chat.",
+            "primary_label": "Open Fresh Start",
+            "primary_url": f"/?session={session_id}",
+            "confidence": "observed",
+        }
+    if any(term in lower for term in close_terms):
+        return {
+            "kind": "archive",
+            "label": "Archive / outcome",
+            "title": "Close the loop instead of continuing",
+            "why": "This prompt sounds like the work may be complete or ready to summarize.",
+            "next_step": "Mark the outcome in AIWatcher, capture the final summary, then start a new prompt only if there is a new objective.",
+            "primary_label": "Open Evidence",
+            "primary_url": "/?view=receipts",
+            "confidence": "inferred",
+        }
+    if mode == "fork_task":
+        return {
+            "kind": "fork",
+            "label": "Fork",
+            "title": str(workflow.get("title") or "Fork recommended"),
+            "why": str(workflow.get("why") or "This task is broad enough to isolate in a separate chat."),
+            "next_step": str(workflow.get("instruction") or "Fork the current chat or start a separate task, then paste the execution brief."),
+            "primary_label": "Copy fork brief",
+            "primary_url": "",
+            "confidence": "inferred",
+        }
+    if mode == "use_subagents":
+        return {
+            "kind": "fork",
+            "label": "Split work",
+            "title": str(workflow.get("title") or "Use subagents"),
+            "why": str(workflow.get("why") or "This request spans independent review lanes."),
+            "next_step": str(workflow.get("instruction") or "Split the work into independent lanes, then consolidate."),
+            "primary_label": "Copy split brief",
+            "primary_url": "",
+            "confidence": "inferred",
+        }
+    if mode in {"continue_with_confirmation", "checkpoint_current"} or str(result.get("risk")) in {"medium", "high"}:
+        return {
+            "kind": "prompt_change",
+            "label": "Rewrite prompt",
+            "title": str(workflow.get("title") or "Change the prompt first"),
+            "why": str(workflow.get("why") or "AIWatcher found scope, safety, or cost pressure before execution."),
+            "next_step": "Copy the execution brief instead of the original prompt.",
+            "primary_label": "Copy safer brief",
+            "primary_url": "",
+            "confidence": "observed",
+        }
+    return {
+        "kind": "continue",
+        "label": "Continue",
+        "title": "Continue in this chat",
+        "why": str(workflow.get("why") or "The prompt looks narrow enough to run in the current chat."),
+        "next_step": "Copy the brief if you want the checkpoint wrapper, or paste the original prompt unchanged.",
+        "primary_label": "Copy brief",
+        "primary_url": "",
+        "confidence": "observed",
     }
 
 
@@ -2358,6 +2861,7 @@ def build_summary(
 
     recent = sorted(rows, key=lambda row: row.updated_at or row.started_at or MIN_DT, reverse=True)[:12]
     detected = discover_tools()
+    tools = _append_detected_tool_rows(tools, detected)
     notes = sorted({note for row in rows for note in row.notes})
     context_health = _context_health_cards(rows, all_events)
     handoff_decisions = _handoff_decision_rows(limit=10, sessions=all_rows)
@@ -2407,6 +2911,11 @@ def build_summary(
         insights.append({
             "title": "Cursor detected, but usage is limited",
             "body": "Cursor is installed, but local token/cost history is not reliably exposed yet.",
+        })
+    if detected.get("ollama") and not any(row.tool == "ollama" for row in rows):
+        insights.append({
+            "title": "Ollama detected, but usage is not measured",
+            "body": "AIWatcher can see the local model runtime, but does not claim prompt, token, cost, or outcome coverage for Ollama yet.",
         })
     if detected.get("cline"):
         insights.append({
@@ -2470,6 +2979,20 @@ def build_summary(
         needs_review=needs_review,
         churned=churned,
     )
+    if detected.get("cursor") and not any(row.tool == "cursor" for row in rows):
+        insights.append({
+            "title": "Cursor detected, but usage is limited",
+            "body": "Cursor is installed or running, but local token/cost history is not reliably exposed yet. Use Prompt Companion for risky prompts and treat Cursor as coverage-limited.",
+            "view": "setup",
+            "cta": "Check coverage",
+        })
+    if detected.get("ollama") and not any(row.tool == "ollama" for row in rows):
+        insights.append({
+            "title": "Ollama detected, but usage is not measured",
+            "body": "AIWatcher can see the local model runtime, but does not claim prompt, token, cost, or outcome coverage for Ollama yet.",
+            "view": "setup",
+            "cta": "Check coverage",
+        })
     survival_summary = _survival_summary()
     window_ledger = _window_ledger(all_events, days)
     unbanked = _unbanked_card(window_ledger)
@@ -2491,12 +3014,18 @@ def build_summary(
     except OSError:
         receipt_outcomes = {}
     receipts = _build_intervention_receipts(interventions, all_rows, receipt_outcomes, receipt_events)
+    optimize = build_optimize_inventory(
+        rows,
+        outcomes=window_outcomes,
+        handoff_decisions=handoff_decisions,
+    )
     useful_rows = [
         row for row in rows
         if (window_outcomes.get(row.session_id) or {}).get("outcome") == "useful"
     ]
     useful_cost = sum(row.cost_usd for row in useful_rows)
     cost_per_useful = useful_cost / len(useful_rows) if useful_rows else None
+    handoff_decisions = _handoff_decision_rows(limit=10, sessions=all_rows)
     return {
         "generated_at": now.isoformat(),
         "cache_schema_version": SUMMARY_CACHE_SCHEMA_VERSION,
@@ -2552,6 +3081,7 @@ def build_summary(
         "watcher": get_watcher_status(),
         "context_health": context_health,
         "context_health_status": "ready",
+        "optimize": optimize,
         "handoff_bubble": handoff_bubble,
         "handoff_decisions": handoff_decisions,
         "recent_sessions": [
@@ -2728,6 +3258,8 @@ def _build_summary_shell(
     projects = group_projects(rows)
     tools = group_rows(rows, _tool_surface_key)
     models = group_by_model_breakdown(rows)
+    detected = discover_tools()
+    tools = _append_detected_tool_rows(tools, detected)
     recent = sorted(rows, key=lambda row: row.updated_at or row.started_at or MIN_DT, reverse=True)[:12]
     window_session_ids = {row.session_id for row in rows}
     window_outcomes, outcomes = _safe_window_outcomes(window_session_ids)
@@ -2753,12 +3285,38 @@ def _build_summary_shell(
             "title": "Subscription/limited usage detected",
             "body": f"{compact_int(split['plan_limited'])} tokens came from plan-based or limited-cost sources. Treat them as observed usage, not invoice spend.",
         })
+    if detected.get("cursor") and not any(row.tool == "cursor" for row in rows):
+        insights.append({
+            "title": "Cursor detected, but usage is limited",
+            "body": "Cursor is installed or running, but local token/cost history is not reliably exposed yet. Use Prompt Companion for risky prompts and treat Cursor as coverage-limited.",
+            "view": "setup",
+            "cta": "Check coverage",
+        })
+    if detected.get("ollama") and not any(row.tool == "ollama" for row in rows):
+        insights.append({
+            "title": "Ollama detected, but usage is not measured",
+            "body": "AIWatcher can see the local model runtime, but does not claim prompt, token, cost, or outcome coverage for Ollama yet.",
+            "view": "setup",
+            "cta": "Check coverage",
+        })
     useful_rows = [
         row for row in rows
         if (window_outcomes.get(row.session_id) or {}).get("outcome") == "useful"
     ]
     useful_cost = sum(row.cost_usd for row in useful_rows)
     cost_per_useful = useful_cost / len(useful_rows) if useful_rows else None
+    handoff_decisions = _handoff_decision_rows(limit=10, sessions=all_rows)
+    optimize = {
+        "status": "quiet",
+        "title": "Optimize workspace",
+        "summary": "Background evidence refresh pending.",
+        "impact_label": "no context savings claim",
+        "evidence_label": "Observed",
+        "candidates": [],
+        "top": None,
+        "recent_receipts": [],
+        "checklist": _optimize_checklist([]),
+    }
     return {
         "generated_at": now.isoformat(),
         "cache_schema_version": SUMMARY_CACHE_SCHEMA_VERSION,
@@ -2803,8 +3361,9 @@ def _build_summary_shell(
         "watcher": get_watcher_status(),
         "context_health": [],
         "context_health_status": "pending",
+        "optimize": optimize,
         "handoff_bubble": None,
-        "handoff_decisions": _handoff_decision_rows(limit=10, sessions=all_rows),
+        "handoff_decisions": handoff_decisions,
         "recent_sessions": [
             recent_session_json(row, window_outcomes=window_outcomes)
             for row in recent
@@ -2902,6 +3461,196 @@ def _parse_iso_datetime(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _ask_action(label: str, url: str) -> dict[str, str]:
+    return {"label": label, "url": url}
+
+
+def _ask_answer(
+    answer: str,
+    *,
+    confidence: str = "Observed local evidence",
+    bullets: list[str] | None = None,
+    actions: list[dict[str, str]] | None = None,
+) -> dict[str, object]:
+    return {
+        "answer": answer,
+        "confidence": confidence,
+        "bullets": bullets or [],
+        "actions": actions or [],
+        "privacy": "Answered from AIWatcher local metadata on this machine. No prompt/source text is sent to a model.",
+    }
+
+
+def answer_local_question(question: str, days: int = 7) -> dict[str, object]:
+    """Answer Companion Ask questions from local AIWatcher evidence only.
+
+    This is deliberately deterministic. It should help a user navigate local
+    evidence, not invent a chat-level diagnosis that AIWatcher cannot prove.
+    """
+    q = " ".join(str(question or "").strip().split())
+    if not q:
+        return _ask_answer(
+            "Ask about a current AI session, context health, archive safety, prompt outcomes, spend, or coverage.",
+            confidence="No question asked",
+            bullets=[
+                "Try: Can I archive this chat?",
+                "Try: What is my context health?",
+                "Try: Are my prompts driving outcomes?",
+            ],
+            actions=[_ask_action("Open Home", "/")],
+        )
+    lower = q.lower()
+    try:
+        summary = build_summary_cached(days)
+    except Exception as exc:  # fail soft; the UI should stay usable during refresh
+        return _ask_answer(
+            f"I could not read the local AIWatcher summary yet: {type(exc).__name__}. Refresh the console or try again after the background index finishes.",
+            confidence="Local index unavailable",
+            actions=[_ask_action("Open Console", "/")],
+        )
+
+    if any(word in lower for word in ("archive", "cleanup", "clean up", "stale", "close chat", "delete chat")):
+        optimize = summary.get("optimize") if isinstance(summary.get("optimize"), dict) else {}
+        candidates = optimize.get("candidates") if isinstance(optimize.get("candidates"), list) else []
+        top = optimize.get("top") if isinstance(optimize.get("top"), dict) else (candidates[0] if candidates and isinstance(candidates[0], dict) else {})
+        if top:
+            project = str(top.get("project_full") or top.get("project") or "this workspace")
+            impact = str(top.get("impact_label") or top.get("context_at_risk_label") or "context at risk")
+            evidence = str(top.get("evidence") or top.get("summary") or "local session history shows inactive same-project work")
+            count = top.get("session_count") or top.get("items") or top.get("count")
+            bullets = [
+                f"Top candidate: {project}",
+                f"Why it surfaced: {evidence}",
+                f"Potential impact: {impact}",
+                "AIWatcher cannot archive inside the AI app yet. Confirm the chat is finished before archiving it.",
+            ]
+            if count:
+                bullets.insert(1, f"Related local sessions: {count}")
+            return _ask_answer(
+                "Review this as an archive candidate, not a delete command. Keep the final source-of-truth files and receipts, then archive the finished AI chat in the owning AI app if you agree it is done.",
+                confidence="Observed/inferred from local session history",
+                bullets=bullets,
+                actions=[
+                    _ask_action("Review Optimize", "/?view=prompt#optimizeWorkspace"),
+                    _ask_action("Open Work", "/?view=sessions"),
+                ],
+            )
+        return _ask_answer(
+            "No strong archive candidate stands out in the current local window. I would not interrupt your work for cleanup right now.",
+            actions=[_ask_action("Open Improve", "/?view=insights")],
+        )
+
+    if any(word in lower for word in ("context", "bloat", "health", "fresh", "handoff", "compact")):
+        health_rows = summary.get("context_health") if isinstance(summary.get("context_health"), list) else []
+        if health_rows and isinstance(health_rows[0], dict):
+            row = health_rows[0]
+            project = str(row.get("project") or row.get("project_full") or "the top local session")
+            tool = str(row.get("tool") or "AI tool")
+            severity = str(row.get("severity") or "review")
+            latest = str(row.get("latest_turn_tokens") or row.get("latest_turn_tokens_label") or "unknown")
+            recommendation = str(row.get("recommendation") or "Use a narrower prompt or Fresh Start before continuing.")
+            session_id = str(row.get("session_id") or "")
+            actions = [_ask_action("Open Watch", "/?view=sessions")]
+            if session_id:
+                actions.insert(0, _ask_action("Inspect Session", f"/?session={session_id}"))
+            if row.get("can_handoff") and session_id:
+                actions.insert(0, _ask_action("Build Fresh Start", f"/?session={session_id}"))
+            return _ask_answer(
+                f"Context health needs attention for {project}. The strongest local signal is {severity} pressure in {tool}.",
+                confidence=str(row.get("confidence_label") or row.get("evidence_label") or "Observed local context signal"),
+                bullets=[
+                    f"Latest turn: {latest} tokens",
+                    f"Recommendation: {recommendation}",
+                    "AIWatcher should not claim saved tokens until a follow-up session is observed.",
+                ],
+                actions=actions,
+            )
+        return _ask_answer(
+            "No current context-health warning is visible in the local summary. Keep the next prompt scoped and let the Companion nudge only if pressure rises.",
+            actions=[_ask_action("Plan Next Prompt", "/?view=prompt")],
+        )
+
+    if any(word in lower for word in ("prompt", "prompts", "outcome", "productive", "useful", "rework", "driving")):
+        totals = summary.get("totals") if isinstance(summary.get("totals"), dict) else {}
+        receipts = summary.get("intervention_receipts") if isinstance(summary.get("intervention_receipts"), list) else []
+        handoffs = summary.get("handoff_decisions") if isinstance(summary.get("handoff_decisions"), list) else []
+        useful = totals.get("useful_outcomes", 0)
+        review = totals.get("needs_review_outcomes", 0)
+        decisions = totals.get("preflight_decisions", 0)
+        bullets = [
+            f"Useful outcomes recorded: {useful}",
+            f"Outcomes needing review: {review}",
+            f"Prompt/control decisions recorded: {decisions}",
+        ]
+        if receipts and isinstance(receipts[0], dict):
+            bullets.append(f"Latest Prompt Gate receipt: {receipts[0].get('decision_label') or 'recorded'}")
+        if handoffs and isinstance(handoffs[0], dict):
+            bullets.append(f"Latest Fresh Start proof: {handoffs[0].get('proof_status') or 'not linked yet'}")
+        return _ask_answer(
+            "AIWatcher can show whether prompts are leading to recorded outcomes only where outcome evidence exists. If many sessions are unmarked, the honest next step is to review outcomes before trusting productivity ratios.",
+            confidence="Observed receipts plus user-marked/inferred outcomes",
+            bullets=bullets,
+            actions=[
+                _ask_action("Open Prove", "/?view=receipts"),
+                _ask_action("Review Sessions", "/?view=sessions"),
+                _ask_action("Plan Next Prompt", "/?view=prompt"),
+            ],
+        )
+
+    if any(word in lower for word in ("cost", "spend", "money", "model", "tool", "token", "tokens")):
+        totals = summary.get("totals") if isinstance(summary.get("totals"), dict) else {}
+        projects = summary.get("projects") if isinstance(summary.get("projects"), list) else []
+        tools = summary.get("tools") if isinstance(summary.get("tools"), list) else []
+        top_project = projects[0] if projects and isinstance(projects[0], dict) else {}
+        top_tool = tools[0] if tools and isinstance(tools[0], dict) else {}
+        bullets = [
+            f"Window: {totals.get('window_label') or f'Last {days} days'}",
+            f"API-equivalent value: {totals.get('api_value_label') or 'unknown'}",
+            f"Tokens observed: {totals.get('tokens_label') or 'unknown'}",
+        ]
+        if top_project:
+            bullets.append(f"Top project: {top_project.get('short_name') or top_project.get('name')} ({top_project.get('api_value_label')})")
+        if top_tool:
+            bullets.append(f"Top tool: {top_tool.get('tool') or top_tool.get('name')} ({top_tool.get('api_value_label')})")
+        return _ask_answer(
+            "Here is the local spend picture AIWatcher can prove from observed usage. Subscription-limited tools are usage signals, not invoice spend.",
+            confidence="Observed local usage and pricing metadata",
+            bullets=bullets,
+            actions=[
+                _ask_action("Open Home", "/"),
+                _ask_action("Open Improve", "/?view=insights"),
+            ],
+        )
+
+    if any(word in lower for word in ("coverage", "hook", "hooks", "cursor", "ollama", "claude", "codex", "desktop")):
+        coverage = summary.get("coverage") if isinstance(summary.get("coverage"), list) else []
+        bullets = []
+        for row in coverage[:8]:
+            if isinstance(row, dict):
+                bullets.append(f"{row.get('label') or row.get('surface')}: {row.get('status_label') or row.get('status') or 'unknown'}")
+        return _ask_answer(
+            "Coverage tells you where AIWatcher can gate automatically, where it only has history, and where Companion/Plan is the manual bridge.",
+            confidence="Observed local setup and runtime detection",
+            bullets=bullets or ["No coverage rows are available yet. Open Settings after the local scan finishes."],
+            actions=[_ask_action("Open Settings", "/?view=setup")],
+        )
+
+    return _ask_answer(
+        "I can answer from local AIWatcher evidence. The strongest questions right now are context health, archive/cleanup safety, prompt outcomes, spend, and surface coverage.",
+        confidence="Local summary",
+        bullets=[
+            "For action: ask what should I do next?",
+            "For cleanup: ask can I archive this chat?",
+            "For quality: ask are my prompts driving outcomes?",
+        ],
+        actions=[
+            _ask_action("Open Home", "/"),
+            _ask_action("Plan Next Prompt", "/?view=prompt"),
+            _ask_action("Open Prove", "/?view=receipts"),
+        ],
+    )
+
+
 def build_companion_state() -> dict[str, object]:
     """Small, fast state contract for the always-available Companion surface."""
     summary = build_summary_cached(7)
@@ -2911,8 +3660,12 @@ def build_companion_state() -> dict[str, object]:
         "title": "AIWatcher",
         "subtitle": "Plan, control, watch",
         "primary_label": "Watch",
+        "primary_action": "open_url",
+        "primary_session_id": "",
+        "primary_runtime_available": False,
         "primary_url": "/",
         "plan_url": "/?view=prompt",
+        "ask_url": "/?ask=1",
         "control_url": "/?view=prompt",
         "watch_url": "/",
         "console_url": "/",
@@ -2927,13 +3680,20 @@ def build_companion_state() -> dict[str, object]:
         risk = str(gate.get("risk") or "risk")
         score = gate.get("score")
         score_label = f" score {score}" if isinstance(score, int) else ""
+        gate_id = gate.get("id")
+        if isinstance(gate_id, str) and gate_id:
+            try:
+                mark_active_prompt_gate_seen(gate_id)
+            except OSError:
+                pass
         return {
             **base,
             "state": "prompt_gate",
-            "label": "Prompt Gate",
+            "label": str(gate.get("workflow_label") or "Prompt Gate"),
             "title": "Prompt Gate",
-            "subtitle": f"{tool} {risk}-risk prompt waiting{score_label}.",
+            "subtitle": str(gate.get("workflow_reward") or f"{tool} {risk}-risk prompt waiting{score_label}."),
             "primary_label": "Review Gate",
+            "primary_action": "open_prompt_gate",
             "primary_url": str(gate.get("url") or "/?view=prompt"),
             "control_url": str(gate.get("url") or "/?view=prompt"),
             "detail": "A hook paused this prompt locally. Review it before the AI tool continues.",
@@ -2974,10 +3734,10 @@ def build_companion_state() -> dict[str, object]:
                     }
                 return {
                     **base,
-                    "state": "proof_pending",
-                    "label": "Proof pending",
-                    "subtitle": "Fresh Start brief copied. Waiting to observe follow-up evidence.",
-                    "primary_label": "View receipt",
+                    "state": "watching",
+                    "label": "Watching proof",
+                    "subtitle": str(recent_decision.get("proof_reason") or "Waiting to observe the follow-up session."),
+                    "primary_label": "Console",
                     "primary_url": "/?view=receipts",
                     "detail": "AIWatcher will not claim saved tokens until a follow-up session is observed.",
                 }
@@ -2999,6 +3759,12 @@ def build_companion_state() -> dict[str, object]:
             "label": label,
             "subtitle": str(bubble.get("body") or bubble.get("reason") or "Context pressure needs a decision."),
             "primary_label": "Fresh Start",
+            "primary_action": "copy_fresh_start",
+            "primary_session_id": session_id,
+            "primary_runtime_available": bool(
+                isinstance(bubble.get("runtime_attachment"), dict)
+                and bubble.get("runtime_attachment", {}).get("available")
+            ),
             "primary_url": f"/?session={session_id}",
             "continue_label": "Continue",
             "continue_session_id": session_id,
@@ -3007,6 +3773,7 @@ def build_companion_state() -> dict[str, object]:
             "skip_label": "Skip",
             "skip_state": "control_recommended",
             "skip_session_id": session_id,
+            "skip_project": str(bubble.get("project_full") or ""),
             "control_url": f"/?session={session_id}",
             "watch_url": f"/?session={session_id}",
             "detail": "Control recommendation is based on local context-health evidence.",
@@ -3036,45 +3803,54 @@ def build_companion_state() -> dict[str, object]:
                 continue
             return {
                 **base,
-                "state": "proof_pending",
-                "label": "Proof pending",
+                "state": "watching",
+                "label": "Watching proof",
                 "subtitle": str(receipt.get("proof_reason") or "Waiting to observe the follow-up session."),
-                "primary_label": "View receipt",
+                "primary_label": "Console",
                 "primary_url": "/?view=receipts",
-                "skip_label": "Skip",
-                "skip_state": "proof_pending",
                 "detail": "AIWatcher copied or recorded an intervention and is waiting for observed outcome evidence.",
             }
-    insights = summary.get("insights")
-    if isinstance(insights, list) and insights:
-        if companion_skip_active("needs_review"):
+    optimize = summary.get("optimize")
+    if isinstance(optimize, dict) and optimize.get("status") == "needs_action":
+        top = optimize.get("top") if isinstance(optimize.get("top"), dict) else {}
+        project = str(top.get("project_full") or top.get("project") or "")
+        project_quiet = companion_skip_active(f"optimize_workspace:{project}") if project else False
+        global_quiet = companion_skip_active("optimize_workspace:global")
+        if not (project_quiet or global_quiet):
             return {
                 **base,
-                "state": "watching",
-                "label": "Watching quietly",
-                "subtitle": "Review nudge skipped",
-                "primary_label": "Console",
-                "detail": "The insight remains in the Console, but the Companion will stay quiet for now.",
+                "state": "optimize_available",
+                "label": "Optimize",
+                "title": "Optimize workspace",
+                "subtitle": str(top.get("summary") or optimize.get("summary") or "Cleanup opportunity found."),
+                "primary_label": "Review",
+                "primary_url": "/?view=prompt#optimizeWorkspace",
+                "skip_label": "Skip",
+                "skip_state": "optimize_available",
+                "skip_project": project,
+                "detail": str(top.get("evidence") or "AIWatcher found local cleanup evidence."),
             }
-        top = insights[0] if isinstance(insights[0], dict) else {}
-        return {
-            **base,
-            "state": "needs_review",
-            "label": "Needs review",
-            "subtitle": str(top.get("title") or "Open AIWatcher for the latest local signal."),
-            "primary_label": "Review",
-            "primary_url": "/",
-            "skip_label": "Skip",
-            "skip_state": "needs_review",
-            "detail": str(top.get("body") or "AIWatcher found local usage evidence worth reviewing."),
-        }
     watcher = summary.get("watcher")
     running = isinstance(watcher, dict) and bool(watcher.get("running"))
+    quiet_subtitle = "Local Companion is running"
+    totals = summary.get("totals")
+    if isinstance(totals, dict):
+        window = str(totals.get("window_label") or "Last 7 days").replace("Last ", "", 1)
+        sessions = totals.get("sessions")
+        value = totals.get("api_value_label")
+        tokens = totals.get("tokens_label")
+        parts = [f"{sessions} session{'s' if sessions != 1 else ''}"] if sessions is not None else []
+        if value:
+            parts.append(str(value))
+        if tokens:
+            parts.append(f"{tokens} tokens")
+        if parts:
+            quiet_subtitle = f"{window}: " + " · ".join(parts)
     return {
         **base,
         "state": "watching" if running else "offline",
         "label": "Watching quietly" if running else "Open AIWatcher",
-        "subtitle": "Local Companion is running" if running else "Companion state is available from the Dashboard",
+        "subtitle": quiet_subtitle if running else "Companion state is available from the Dashboard",
         "primary_label": "Console" if running else "Open",
         "detail": "AIWatcher will interrupt only when a matching active session has a justified action." if running else base["detail"],
     }
@@ -3118,45 +3894,71 @@ HTML = r"""<!doctype html>
   <style>
     :root {
       color-scheme: dark;
-      --bg: #080b10;
-      --surface: #10151d;
-      --surface-raised: #161d27;
-      --surface-hover: #1b2430;
-      --text: #f5f7fa;
-      --muted: #9ba8b8;
-      --faint: #6f7d8f;
-      --line: #293443;
-      --line-strong: #3a485b;
-      --green: #35d399;
-      --green-soft: rgba(53, 211, 153, .12);
-      --blue: #70a7ff;
-      --blue-soft: rgba(112, 167, 255, .14);
-      --amber: #f6bd60;
-      --amber-soft: rgba(246, 189, 96, .13);
-      --red: #f27d8f;
-      --red-soft: rgba(242, 125, 143, .13);
+      --bg: #070b11;
+      --surface: #101720;
+      --surface-raised: #151e2a;
+      --surface-hover: #1a2533;
+      --text: #f7f9fc;
+      --muted: #aab7c8;
+      --faint: #78869a;
+      --line: #263346;
+      --line-strong: #354963;
+      --green: #43d9a3;
+      --green-soft: rgba(67, 217, 163, .12);
+      --blue: #65a7ff;
+      --blue-soft: rgba(101, 167, 255, .14);
+      --cyan: #58d7e8;
+      --cyan-soft: rgba(88, 215, 232, .11);
+      --amber: #f2bf6b;
+      --amber-soft: rgba(242, 191, 107, .13);
+      --red: #f2778f;
+      --red-soft: rgba(242, 119, 143, .13);
+      --drawer-bg: #080d14;
+      --drawer-surface: #0e151f;
+      --drawer-ink: #111a26;
+      --drawer-line: rgba(148, 163, 184, .14);
+      --drawer-line-strong: rgba(133, 169, 220, .30);
+      --drawer-glow: rgba(101, 167, 255, .18);
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
     * { box-sizing: border-box; }
     html { min-width: 320px; }
     body {
       margin: 0;
-      background: var(--bg);
+      background:
+        radial-gradient(circle at 10% -10%, rgba(88,215,232,.12), transparent 34%),
+        radial-gradient(circle at 82% 0%, rgba(67,217,163,.08), transparent 30%),
+        linear-gradient(180deg, #0b1119 0%, var(--bg) 44%, #05080d 100%);
+      background-attachment: fixed;
       color: var(--text);
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       font-size: 14px;
     }
     body.drawer-open { overflow: hidden; }
-    main { max-width: 1360px; margin: 0 auto; padding: 24px 28px 48px; }
-    header { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 20px; }
-    h1 { font-size: 22px; margin: 0; letter-spacing: 0; }
-    h2 { margin: 0; font-size: 16px; }
+    main {
+      width: min(100%, 1780px);
+      margin: 0 auto;
+      padding: 28px 36px 52px;
+      display: grid;
+      grid-template-columns: 192px minmax(0, 1fr);
+      gap: 20px 24px;
+      align-items: start;
+    }
+    header, .runtime-strip { grid-column: 1 / -1; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
+    h1 { font-size: 24px; margin: 0; letter-spacing: 0; line-height: 1.12; }
+    h2 { margin: 0; font-size: 17px; line-height: 1.25; }
     h3 { margin: 0; font-size: 14px; }
     p { color: var(--muted); line-height: 1.5; margin: 0; }
     .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
     .brand-mark {
-      display: grid; place-items: center; width: 36px; height: 36px;
-      border: 1px solid #4b86cf; border-radius: 8px; background: var(--blue-soft);
-      color: #dceaff; font-weight: 800;
+      display: grid; place-items: center; width: 38px; height: 38px;
+      border: 1px solid rgba(112,167,255,.58); border-radius: 8px;
+      background:
+        linear-gradient(135deg, rgba(88,215,232,.20), rgba(67,217,163,.16), rgba(101,167,255,.18)),
+        rgba(10,16,24,.88);
+      color: #e7f0ff; font-weight: 850;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.10), 0 14px 34px rgba(18,70,140,.18);
     }
     .brand-copy { min-width: 0; }
     .brand-copy p { margin-top: 2px; font-size: 12px; }
@@ -3168,8 +3970,12 @@ HTML = r"""<!doctype html>
     .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
     .runtime-strip {
       display: flex; align-items: center; justify-content: space-between; gap: 12px;
-      border: 1px solid var(--line); border-radius: 8px; background: #0c1118;
-      padding: 10px 12px; margin: -4px 0 18px;
+      border: 1px solid rgba(148,163,184,.18); border-radius: 8px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.035), transparent),
+        rgba(14,20,29,.78);
+      padding: 11px 13px; margin: -2px 0 18px;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.035), 0 18px 44px rgba(0,0,0,.10);
     }
     .runtime-copy { display: flex; align-items: center; gap: 9px; min-width: 0; }
     .runtime-copy strong { white-space: nowrap; }
@@ -3198,13 +4004,19 @@ HTML = r"""<!doctype html>
       font: inherit;
       font-weight: 650;
     }
+    select {
+      padding-right: 34px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.025), transparent),
+        var(--surface-raised);
+    }
     button { cursor: pointer; transition: background .15s ease, border-color .15s ease, color .15s ease; }
     button:hover { background: var(--surface-hover); border-color: #53647a; }
     button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
     button:disabled { cursor: not-allowed; opacity: .62; }
     .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
     .btn-primary { background: #2f6fbd; border-color: #5594df; color: white; }
-    .btn-primary:hover { background: #397dce; border-color: #76adf0; }
+    .btn-primary:hover { background: #397dce; border-color: #86bdff; }
     .btn-quiet { background: transparent; border-color: var(--line); color: #d5deea; }
     .link-button {
       text-decoration: none;
@@ -3218,30 +4030,85 @@ HTML = r"""<!doctype html>
     }
     .grid { display: grid; gap: 14px; }
     .product-nav {
-      display: flex; gap: 4px; width: fit-content; max-width: 100%; overflow-x: auto;
-      margin: 0 0 22px; padding: 4px; border: 1px solid var(--line);
-      border-radius: 8px; background: #0c1118;
+      position: sticky; top: 18px; display: grid; gap: 6px; width: 100%;
+      margin: 0; padding: 8px; border: 1px solid rgba(148,163,184,.18);
+      border-radius: 8px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.035), transparent),
+        rgba(13,19,28,.88);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.035), 0 18px 40px rgba(0,0,0,.13);
     }
     .nav-tab {
-      min-height: 34px; border: 0; background: transparent; border-radius: 6px;
-      padding: 7px 14px; color: #aebaca; font-size: 13px;
+      display: flex; align-items: center; justify-content: flex-start;
+      width: 100%; text-align: left; min-height: 42px; border: 1px solid transparent;
+      background: transparent; border-radius: 7px; padding: 10px 12px;
+      color: #b6c2d2; font-size: 13px;
+      white-space: nowrap;
     }
-    .nav-tab:hover { background: #151d27; border-color: transparent; }
-    .nav-tab.active { background: #273449; color: white; }
+    .nav-tab:hover { background: rgba(255,255,255,.035); border-color: rgba(148,163,184,.10); }
+    .nav-tab.active {
+      background:
+        linear-gradient(135deg, rgba(101,167,255,.24), rgba(88,215,232,.10)),
+        rgba(42,55,75,.82);
+      color: white;
+      border-color: rgba(126,176,241,.30);
+      box-shadow: inset 3px 0 0 var(--blue), inset 0 1px 0 rgba(255,255,255,.06), 0 8px 18px rgba(0,0,0,.10);
+    }
+    .view { grid-column: 2; min-width: 0; }
     .view[hidden] { display: none; }
     .kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 14px 0; }
     .two { grid-template-columns: minmax(0, 1.15fr) minmax(340px, .85fr); }
     .card {
-      background: var(--surface);
-      border: 1px solid var(--line);
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.006)),
+        rgba(16,23,32,.92);
+      border: 1px solid rgba(148,163,184,.18);
       border-radius: 8px;
       padding: 18px;
       min-width: 0;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.035), 0 18px 44px rgba(0,0,0,.14);
     }
-    .hero-card { border-color: #345b8b; background: #101925; }
-    .attention-card { border-color: #615233; background: #181710; }
+    .home-command-card {
+      position: relative;
+      overflow: hidden;
+      border-color: rgba(133,169,220,.30);
+      background:
+        radial-gradient(circle at 10% -12%, rgba(112,167,255,.12), transparent 30%),
+        linear-gradient(180deg, rgba(17,25,36,.98), rgba(11,16,23,.98));
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.035), 0 18px 44px rgba(0,0,0,.18);
+    }
+    .home-command-card::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto;
+      height: 2px;
+      background: linear-gradient(90deg, rgba(53,211,153,.70), rgba(112,167,255,.60), rgba(246,189,96,.46));
+      opacity: .74;
+      pointer-events: none;
+    }
+    .home-command-card .section-title { position: relative; z-index: 1; }
+    .hero-card {
+      border-color: rgba(112,167,255,.32);
+      background:
+        linear-gradient(135deg, rgba(101,167,255,.12), rgba(88,215,232,.04) 44%, transparent 64%),
+        #111b28;
+    }
+    .attention-card {
+      border-color: rgba(246,189,96,.34);
+      background:
+        linear-gradient(135deg, rgba(246,189,96,.10), transparent 56%),
+        #181710;
+    }
     .metric-card { min-height: 116px; position: relative; overflow: hidden; }
     .metric-card::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--metric, var(--blue)); }
+    .metric-card::after {
+      content: "";
+      position: absolute;
+      inset: auto 12px 10px;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,.08), transparent);
+      pointer-events: none;
+    }
     .metric-green { --metric: var(--green); }
     .metric-blue { --metric: var(--blue); }
     .metric-amber { --metric: var(--amber); }
@@ -3254,13 +4121,85 @@ HTML = r"""<!doctype html>
     .session-meta { margin-top: 5px; color: var(--muted); }
     .session-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
     .recommended-action {
-      border-color: rgba(86,157,231,.5);
-      background: linear-gradient(135deg, rgba(47,111,189,.2), rgba(14,20,29,.82));
+      border: 1px solid rgba(86,157,231,.30);
+      border-left: 3px solid var(--blue);
+      background: rgba(49,108,180,.08);
+      animation: recommendationPulse 1.3s ease-out 1;
     }
-    .recommended-action h3 { font-size: 21px; margin-bottom: 6px; }
+    .recommended-action h3 { font-size: 15px; margin-bottom: 5px; }
     .recommended-action p { color: #b9c6d8; }
+    .recommended-action.loading-action {
+      animation: none;
+      border-left-color: rgba(112,167,255,.54);
+      background:
+        linear-gradient(135deg, rgba(112,167,255,.08), transparent 54%),
+        rgba(7,12,18,.24);
+    }
     .action-kicker { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+    .action-composer {
+      display: grid;
+      gap: 14px;
+      border-left-color: var(--amber);
+      background:
+        linear-gradient(135deg, rgba(246,189,96,.09), transparent 48%),
+        rgba(7,12,18,.22);
+    }
+    .action-composer-head { display: grid; gap: 6px; }
+    .action-composer-head h3 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; color: #f7dd9c; text-transform: uppercase; letter-spacing: .06em; }
+    .action-composer-head strong { display: block; color: white; font-size: 22px; line-height: 1.15; letter-spacing: 0; text-transform: none; }
+    .action-evidence { display: flex; gap: 8px; flex-wrap: wrap; }
+    .action-evidence .pill { background: rgba(5,9,14,.38); }
+    .action-buttons { display: flex; flex-wrap: wrap; gap: 9px; align-items: center; }
+    .action-buttons .btn-primary { box-shadow: 0 0 0 1px rgba(255,255,255,.06), 0 10px 26px rgba(47,111,189,.24); }
     .tool-link-note { margin-top: 10px; font-size: 12px; color: #94a3b8; }
+    .ai-loading-panel {
+      display: grid;
+      grid-template-columns: 34px minmax(0, 1fr);
+      gap: 12px;
+      align-items: start;
+      margin-top: 14px;
+      padding: 13px 14px;
+      border: 1px solid rgba(112,167,255,.22);
+      border-radius: 8px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.025), transparent),
+        rgba(5,9,14,.34);
+    }
+    .ai-loading-mark {
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      color: #dceaff;
+      background:
+        linear-gradient(135deg, rgba(53,211,153,.20), rgba(112,167,255,.18)),
+        rgba(9,14,22,.9);
+      border: 1px solid rgba(112,167,255,.32);
+      font-size: 12px;
+      font-weight: 850;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.05);
+    }
+    .ai-loading-panel strong { display: block; color: white; margin-bottom: 2px; }
+    .ai-loading-panel p { font-size: 12px; }
+    .ai-loading-bar {
+      position: relative;
+      overflow: hidden;
+      height: 6px;
+      margin-top: 10px;
+      border-radius: 999px;
+      background: rgba(3,7,12,.72);
+      border: 1px solid rgba(148,163,184,.16);
+    }
+    .ai-loading-bar::before {
+      content: "";
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 38%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, rgba(53,211,153,.42), rgba(112,167,255,.72), rgba(246,189,96,.42));
+      animation: loadingSweep 1.6s ease-in-out infinite;
+    }
     .receipt-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: center; }
     .risk-flow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
     .risk-chip { border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; font-size: 12px; font-weight: 750; text-transform: capitalize; }
@@ -3282,7 +4221,7 @@ HTML = r"""<!doctype html>
     .amount { text-align: right; color: #dce6f6; font-variant-numeric: tabular-nums; }
     .insight { border-left: 3px solid var(--amber); padding: 8px 0 8px 13px; margin: 12px 0; }
     .headline { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 4px 0 16px; }
-    .headline-figure { font-size: 30px; font-weight: 600; letter-spacing: -.5px; }
+    .headline-figure { font-size: 30px; font-weight: 650; letter-spacing: 0; }
     .headline-sub { color: var(--muted); font-size: 14px; }
     .feed-row { display: flex; align-items: flex-start; gap: 14px; padding: 14px 0; border-top: 1px solid var(--line); }
     .feed-row:first-child { border-top: none; }
@@ -3298,18 +4237,31 @@ HTML = r"""<!doctype html>
     .insight strong { display: block; margin-bottom: 3px; color: white; }
     .pill-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
     .pill { border: 1px solid var(--line); background: #0b1118; border-radius: 999px; padding: 5px 9px; color: #bdc9d9; font-size: 11px; }
-    .action-queue { display: grid; gap: 10px; }
+    .action-queue { display: grid; gap: 10px; position: relative; z-index: 1; }
     .action-row {
+      position: relative;
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
       gap: 14px;
       align-items: center;
-      border: 1px solid var(--line);
+      border: 1px solid rgba(148,163,184,.16);
       border-left: 4px solid var(--line-strong);
       border-radius: 8px;
-      background: #0b1118;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.025), transparent),
+        rgba(5,9,14,.46);
       padding: 14px;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.025);
+      animation: sessionSurfaceIn .22s ease-out both;
     }
+    .action-queue > .action-row:first-child {
+      padding: 18px;
+      border-color: rgba(112,167,255,.28);
+      background:
+        linear-gradient(135deg, rgba(112,167,255,.13), transparent 52%),
+        rgba(5,9,14,.54);
+    }
+    .action-queue > .action-row:first-child .action-title { font-size: 18px; }
     .action-row.critical { border-left-color: var(--red); }
     .action-row.high { border-left-color: var(--amber); }
     .action-row.medium { border-left-color: var(--blue); }
@@ -3319,7 +4271,14 @@ HTML = r"""<!doctype html>
     .action-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
     .action-row .actions { justify-content: flex-end; }
     .coverage-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-    .coverage-card, .health-card { border: 1px solid var(--line); border-radius: 8px; background: #0b1118; padding: 14px; }
+    .coverage-card, .health-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.025), transparent),
+        rgba(11,17,24,.82);
+      padding: 14px;
+    }
     .coverage-head, .health-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
     .coverage-status, .health-severity { border-radius: 999px; border: 1px solid var(--line); padding: 4px 8px; font-size: 11px; font-weight: 800; white-space: nowrap; }
     .coverage-status.automatic, .health-severity.healthy { color: #bff5df; border-color: rgba(53,211,153,.45); background: var(--green-soft); }
@@ -3350,6 +4309,18 @@ HTML = r"""<!doctype html>
     th, td { border-bottom: 1px solid var(--line); padding: 11px 8px; text-align: left; }
     th { color: var(--muted); font-weight: 600; }
     td:last-child, th:last-child { text-align: right; }
+    .sort-head {
+      min-height: 0;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      font-size: inherit;
+      font-weight: inherit;
+      text-align: inherit;
+    }
+    .sort-head:hover { background: transparent; color: white; }
+    .sort-head span { display: inline-block; min-width: 10px; color: var(--blue); }
     tr.clickable:hover { background: rgba(112,167,255,.05); }
     .session-filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 14px 0 4px; }
     .session-filters input[type="text"] {
@@ -3367,14 +4338,86 @@ HTML = r"""<!doctype html>
     .digest-row .digest-row-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dce6f6; }
     .detail-section { padding: 20px 0; border-bottom: 1px solid var(--line); }
     .detail-section:last-child { border-bottom: 0; }
-    .verdict-card { border: 1px solid var(--line-strong); border-left: 4px solid var(--blue); border-radius: 8px; padding: 16px; background: #101925; margin-top: 14px; }
-    .verdict-card.high { border-left-color: var(--amber); background: #181710; }
-    .verdict-card.useful { border-left-color: var(--green); background: #101b17; }
-    .verdict-card h3 { font-size: 17px; margin: 0 0 8px; }
+    .session-review-shell {
+      position: relative;
+      border: 1px solid var(--drawer-line-strong);
+      border-radius: 8px;
+      background:
+        radial-gradient(circle at 16% -8%, rgba(112,167,255,.11), transparent 28%),
+        linear-gradient(180deg, rgba(18,27,39,.96), rgba(11,16,23,.98));
+      overflow: hidden;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.035), 0 18px 44px rgba(0,0,0,.28);
+      animation: sessionSurfaceIn .22s ease-out both;
+    }
+    .session-review-shell::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto;
+      height: 2px;
+      background: linear-gradient(90deg, rgba(53,211,153,.70), rgba(112,167,255,.62), rgba(246,189,96,.48));
+      opacity: .74;
+      pointer-events: none;
+    }
+    .session-review-shell > .detail-section {
+      padding: 18px 20px;
+      border-bottom: 1px solid var(--drawer-line);
+      background: transparent;
+    }
+    .session-review-shell > .detail-section:last-child { border-bottom: 0; }
+    .session-hero {
+      border-bottom: 1px solid var(--drawer-line);
+      background:
+        linear-gradient(135deg, rgba(112,167,255,.10), transparent 54%),
+        linear-gradient(180deg, rgba(255,255,255,.025), transparent);
+      padding: 22px;
+      margin: 0;
+    }
+    .session-hero h2 { margin-bottom: 5px; font-size: 22px; line-height: 1.2; overflow-wrap: anywhere; }
+    .session-hero .session-meta { margin-bottom: 12px; }
+    .session-identity-card {
+      display: grid;
+      gap: 10px;
+      border: 1px solid rgba(133,169,220,.24);
+      border-radius: 8px;
+      background: rgba(6,11,17,.42);
+      padding: 12px;
+      margin: 12px 0;
+    }
+    .session-identity-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .session-identity-main { min-width: 0; flex: 1; color: #d8e4f4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .session-id-chip { font: 700 12px/1.1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #f7dd9c; border: 1px solid rgba(246,189,96,.42); background: rgba(246,189,96,.12); border-radius: 999px; padding: 6px 9px; white-space: nowrap; }
+    .session-hero-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 14px 0 12px; }
+    .session-hero-fact {
+      border: 1px solid var(--drawer-line);
+      border-radius: 8px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.035), transparent),
+        rgba(5,9,14,.30);
+      padding: 11px 12px;
+      min-height: 86px;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.025);
+    }
+    .session-hero-fact span { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; font-weight: 800; }
+    .session-hero-fact strong { display: block; margin-top: 7px; font-size: 18px; line-height: 1.18; color: white; overflow-wrap: anywhere; }
+    .session-hero-status { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 11px; }
+    .session-meter { margin-top: 10px; }
+    .session-meter-track { height: 7px; border-radius: 999px; overflow: hidden; border: 1px solid rgba(148,163,184,.18); background: rgba(3,7,12,.62); }
+    .session-meter-fill { height: 100%; width: var(--meter-width, 0%); border-radius: inherit; background: linear-gradient(90deg, var(--green), var(--amber), var(--red)); }
+    .session-meter-label { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 11px; margin-top: 6px; }
+    .confidence-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--drawer-line); border-radius: 999px; padding: 5px 8px; font-size: 11px; font-weight: 800; color: #cbd7e8; background: rgba(5,9,14,.28); }
+    .confidence-chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--blue); }
+    .confidence-chip.verified::before, .confidence-chip.observed::before { background: var(--green); }
+    .confidence-chip.inferred::before { background: var(--amber); }
+    .confidence-chip.predicted::before, .confidence-chip.unknown::before { background: var(--faint); }
+    .outcome-help { display: grid; gap: 6px; margin-top: 10px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .verdict-card { border: 1px solid var(--drawer-line); border-left: 3px solid var(--blue); border-radius: 8px; padding: 14px; background: rgba(112,167,255,.055); margin-top: 12px; }
+    .verdict-card.high { border-left-color: var(--amber); background: rgba(246,189,96,.06); }
+    .verdict-card.useful { border-left-color: var(--green); background: rgba(53,211,153,.06); }
+    .verdict-card h3 { font-size: 15px; margin: 0 0 8px; }
     .verdict-card ul { margin: 10px 0 0; padding-left: 18px; color: #d9e4f2; line-height: 1.45; }
-    details.aiw-details { border: 1px solid var(--line); border-radius: 8px; background: #0b1118; margin-top: 12px; }
+    details.aiw-details { border: 1px solid var(--drawer-line); border-radius: 8px; background: rgba(5,9,14,.22); margin-top: 12px; }
     details.aiw-details summary { cursor: pointer; padding: 12px 14px; color: #dce6f6; font-weight: 750; }
-    details.aiw-details[open] summary { border-bottom: 1px solid var(--line); }
+    details.aiw-details[open] summary { border-bottom: 1px solid var(--drawer-line); }
     .details-body { padding: 14px; }
     .insight-list { margin: 8px 0 0; padding-left: 18px; }
     .insight-list li { margin: 6px 0; line-height: 1.45; }
@@ -3409,25 +4452,46 @@ HTML = r"""<!doctype html>
     .privacy-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .privacy-item { display: flex; align-items: center; gap: 9px; color: #c8d3e1; padding: 10px 0; }
     .privacy-check { color: var(--green); font-weight: 900; }
-    .prompt-shell { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, .86fr); gap: 14px; align-items: start; }
+    .prompt-shell { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, .86fr); gap: 18px; align-items: start; }
     .prompt-box, .brief-box {
       width: 100%;
       min-height: 260px;
       resize: vertical;
       border: 1px solid var(--line-strong);
       border-radius: 8px;
-      background: #090f16;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.018), transparent),
+        #080e15;
       color: var(--text);
       padding: 14px;
-      font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font: 13px/1.55 var(--mono);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.025);
     }
     .prompt-box:focus, .brief-box:focus { outline: 2px solid var(--blue); outline-offset: 2px; }
-    .prompt-form-row { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 10px; margin: 12px 0; }
+    .prompt-form-row { display: grid; grid-template-columns: minmax(160px, .24fr) minmax(0, 1fr); gap: 10px; margin: 12px 0; }
     .prompt-result { margin-top: 14px; }
-    .risk-card { border-left: 3px solid var(--amber); padding: 14px; border-radius: 8px; background: #111923; }
-    .risk-card.high { border-left-color: var(--red); background: #191116; }
-    .risk-card.low { border-left-color: var(--green); background: #101b17; }
+    .risk-card { border-left: 3px solid var(--amber); padding: 14px; border-radius: 8px; background: rgba(17,25,35,.86); }
+    .risk-card.high { border-left-color: var(--red); background: rgba(34,17,24,.86); }
+    .risk-card.low { border-left-color: var(--green); background: rgba(16,27,23,.86); }
     .risk-card h3 { font-size: 16px; margin-bottom: 8px; }
+    .plan-route-card {
+      border: 1px solid rgba(112,167,255,.34);
+      border-left: 4px solid var(--blue);
+      border-radius: 8px;
+      padding: 16px;
+      background:
+        linear-gradient(135deg, rgba(112,167,255,.12), transparent 54%),
+        rgba(10,16,24,.78);
+      display: grid;
+      gap: 10px;
+    }
+    .plan-route-card.fresh_start { border-left-color: var(--green); background: linear-gradient(135deg, rgba(53,211,153,.12), transparent 54%), rgba(10,16,24,.78); }
+    .plan-route-card.prompt_change { border-left-color: var(--amber); background: linear-gradient(135deg, rgba(246,189,96,.12), transparent 54%), rgba(10,16,24,.78); }
+    .plan-route-card.archive { border-left-color: var(--faint); }
+    .plan-route-card.fork { border-left-color: var(--blue); }
+    .plan-route-card h3 { font-size: 18px; margin: 0; }
+    .plan-route-card .plan-label { width: fit-content; }
+    .plan-next-step { color: #dce8f8; }
     .prompt-list { margin: 10px 0 0; padding-left: 18px; color: #d9e4f2; line-height: 1.55; }
     .copy-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
     .handoff-cta {
@@ -3460,30 +4524,102 @@ HTML = r"""<!doctype html>
       width: 100%;
       border: 1px solid var(--line-strong);
       border-radius: 8px;
-      background: #090f16;
+      background: #080e15;
       color: var(--text);
       padding: 9px 10px;
       font: inherit;
     }
     .handoff-form textarea { min-height: 74px; resize: vertical; font-size: 12px; line-height: 1.45; }
+    .fresh-preview, .receipt-widget {
+      border: 1px solid rgba(133,169,220,.24);
+      border-radius: 8px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.025), transparent),
+        rgba(5,9,14,.30);
+      padding: 14px;
+      margin-top: 14px;
+    }
+    .fresh-preview-head, .receipt-widget-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+    .fresh-preview-head h3, .receipt-widget-head h3 { margin: 0; font-size: 16px; }
+    .fresh-preview-grid { display: grid; gap: 10px; }
+    .fresh-preview-row {
+      display: grid;
+      grid-template-columns: 132px minmax(0, 1fr);
+      gap: 12px;
+      border-top: 1px solid var(--drawer-line);
+      padding-top: 10px;
+    }
+    .fresh-preview-row:first-child { border-top: 0; padding-top: 0; }
+    .fresh-preview-row strong { color: #d9e5f5; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+    .fresh-preview-row p { color: #eef4fc; overflow-wrap: anywhere; }
+    .receipt-widget { border-color: rgba(53,211,153,.34); background: linear-gradient(135deg, rgba(53,211,153,.10), rgba(5,9,14,.30)); }
+    .receipt-steps { display: grid; gap: 8px; margin-top: 10px; }
+    .receipt-step { display: flex; gap: 10px; align-items: flex-start; color: #d8e4f4; }
+    .receipt-step span { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 999px; background: rgba(53,211,153,.16); border: 1px solid rgba(53,211,153,.38); color: #bff5df; font-size: 11px; font-weight: 900; flex: none; }
+    .evidence-rail { display: grid; gap: 0; margin-top: 12px; }
+    .evidence-node { position: relative; display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 10px; padding: 0 0 14px; animation: evidenceNodeIn .22s ease-out both; }
+    .evidence-node::before { content: ""; position: absolute; left: 9px; top: 22px; bottom: 0; width: 1px; background: var(--drawer-line-strong); }
+    .evidence-node:last-child { padding-bottom: 0; }
+    .evidence-node:last-child::before { display: none; }
+    .evidence-dot { width: 19px; height: 19px; border-radius: 999px; border: 1px solid rgba(112,167,255,.54); background: rgba(112,167,255,.16); box-shadow: 0 0 0 4px rgba(112,167,255,.05); margin-top: 1px; }
+    .evidence-node.verified .evidence-dot, .evidence-node.observed .evidence-dot { border-color: rgba(53,211,153,.56); background: rgba(53,211,153,.18); }
+    .evidence-node.inferred .evidence-dot { border-color: rgba(246,189,96,.56); background: rgba(246,189,96,.18); }
+    .evidence-copy strong { display: flex; gap: 8px; align-items: center; color: white; font-size: 14px; }
+    .evidence-copy p { margin-top: 3px; font-size: 12px; color: var(--muted); }
     .prompt-opt-in { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); font-size: 13px; color: #d5deea; cursor: pointer; }
     .prompt-opt-in input { width: 15px; height: 15px; accent-color: var(--blue, #4f8cff); }
     .prompt-opt-in .hint { flex-basis: 100%; color: #93a2b8; font-size: 12px; }
+    .ask-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.48); opacity: 0; pointer-events: none; transition: opacity .18s ease; z-index: 24; }
+    .ask-backdrop.open { opacity: 1; pointer-events: auto; }
+    .ask-panel {
+      position: fixed; z-index: 25; right: 18px; bottom: 18px; width: min(520px, calc(100vw - 28px));
+      max-height: min(720px, calc(100vh - 34px));
+      display: grid; grid-template-rows: auto auto minmax(120px, 1fr) auto; gap: 12px;
+      padding: 16px; border: 1px solid rgba(112,167,255,.38); border-radius: 8px;
+      background:
+        linear-gradient(135deg, rgba(53,211,153,.10), rgba(112,167,255,.10) 42%, transparent),
+        #0b1118;
+      box-shadow: 0 22px 60px rgba(0,0,0,.52), inset 0 1px 0 rgba(255,255,255,.04);
+      transform: translateY(18px); opacity: 0; visibility: hidden; transition: transform .18s ease, opacity .18s ease, visibility .18s ease;
+    }
+    .ask-panel.open { transform: translateY(0); opacity: 1; visibility: visible; }
+    .ask-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+    .ask-head h2 { font-size: 18px; }
+    .ask-head p { margin-top: 3px; font-size: 12px; }
+    .ask-templates { display: flex; gap: 8px; flex-wrap: wrap; }
+    .ask-template { min-height: 30px; padding: 6px 9px; border-radius: 999px; font-size: 12px; color: #dceaff; background: rgba(112,167,255,.10); }
+    .ask-messages { display: grid; gap: 10px; overflow-y: auto; padding-right: 2px; }
+    .ask-message { border: 1px solid var(--line); border-radius: 8px; padding: 11px 12px; background: rgba(5,9,14,.46); }
+    .ask-message.user { justify-self: end; max-width: 88%; background: rgba(112,167,255,.13); border-color: rgba(112,167,255,.28); }
+    .ask-message.aiw { border-left: 3px solid var(--green); }
+    .ask-message strong { display: block; margin-bottom: 5px; color: white; }
+    .ask-message ul { margin: 8px 0 0; padding-left: 18px; color: #d9e4f2; line-height: 1.45; }
+    .ask-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .ask-actions a { text-decoration: none; border: 1px solid rgba(112,167,255,.38); border-radius: 8px; padding: 7px 9px; color: #dceaff; background: rgba(112,167,255,.10); font-size: 12px; font-weight: 750; }
+    .ask-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+    .ask-form textarea {
+      width: 100%; min-height: 46px; max-height: 110px; resize: vertical;
+      border: 1px solid var(--line-strong); border-radius: 8px; background: #080e15;
+      color: var(--text); padding: 10px; font: inherit;
+    }
     .drawer-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.62); opacity: 0; pointer-events: none; transition: opacity .18s ease; z-index: 20; }
     .drawer-backdrop.open { opacity: 1; pointer-events: auto; }
     .drawer {
       position: fixed; z-index: 21; top: 0; right: 0; bottom: 0; width: min(620px, 94vw);
-      background: #0d1219; border-left: 1px solid var(--line-strong); box-shadow: -18px 0 46px rgba(0,0,0,.42);
+      background: var(--drawer-bg); border-left: 1px solid var(--drawer-line-strong); box-shadow: -18px 0 46px rgba(0,0,0,.42);
       transform: translateX(102%); visibility: hidden; transition: transform .2s ease, visibility .2s ease; display: flex; flex-direction: column;
     }
     .drawer.open { transform: translateX(0); visibility: visible; }
-    .drawer-header { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 18px 22px; border-bottom: 1px solid var(--line); }
+    .drawer-header { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 18px 22px; border-bottom: 1px solid var(--drawer-line); background: rgba(5,9,14,.34); }
     .drawer-header p { font-size: 12px; margin-top: 2px; }
-    .drawer-content { padding: 0 22px 30px; overflow-y: auto; }
-    .outcome-control { margin-top: 16px; padding: 18px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface-raised); }
-    .outcome-control h3 { font-size: 16px; }
-    .outcome-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
-    .outcome-button { min-height: 44px; background: #0d131b; }
+    .drawer-content { padding: 16px 22px 30px; overflow-y: auto; }
+    .drawer .runtime-strip { border-color: var(--drawer-line); background: rgba(5,9,14,.24); margin: 10px 0 0; }
+    .drawer .copy-row { gap: 8px; }
+    .drawer .btn-primary, .drawer .btn-quiet { min-height: 34px; padding: 7px 10px; }
+    .outcome-control { padding: 18px 20px; border: 0; border-bottom: 1px solid var(--drawer-line); border-radius: 0; background: transparent; }
+    .outcome-control h3 { font-size: 15px; }
+    .outcome-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+    .outcome-button { min-height: 38px; background: #0d131b; }
     .outcome-button.useful { color: #bff5df; border-color: rgba(53,211,153,.45); }
     .outcome-button.rework { color: #ffe2a4; border-color: rgba(246,189,96,.45); }
     .outcome-button.abandoned { color: #ffc4ce; border-color: rgba(242,125,143,.45); }
@@ -3495,9 +4631,36 @@ HTML = r"""<!doctype html>
     .toast.show { opacity: 1; transform: translateY(0); }
     .toast.error { border-color: rgba(242,125,143,.55); background: #2a171d; }
     .loading { color: var(--muted); padding: 18px 0; }
+    .drawer .loading { padding: 18px 2px; }
+    @keyframes recommendationPulse {
+      0% { box-shadow: inset 0 0 0 0 rgba(112,167,255,.26); border-left-color: #9fc8ff; }
+      100% { box-shadow: inset 0 0 0 8px rgba(112,167,255,0); border-left-color: var(--blue); }
+    }
+    @keyframes sessionSurfaceIn {
+      from { opacity: .82; transform: translateY(5px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes evidenceNodeIn {
+      from { opacity: .70; transform: translateY(3px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes loadingSweep {
+      0% { transform: translateX(-110%); }
+      100% { transform: translateX(290%); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: .001ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+        transition-duration: .001ms !important;
+      }
+    }
     @media (max-width: 860px) {
-      main { padding: 18px; }
+      main { display: block; padding: 18px; }
       header { flex-direction: column; }
+      .product-nav { position: static; display: flex; width: 100%; max-width: 100%; overflow-x: auto; margin: 0 0 18px; }
+      .nav-tab { white-space: nowrap; }
       .actions { width: 100%; }
       .actions select { flex: 1; }
       .kpis { grid-template-columns: 1fr 1fr; }
@@ -3505,6 +4668,7 @@ HTML = r"""<!doctype html>
       .prompt-shell { grid-template-columns: 1fr; }
       .coverage-grid { grid-template-columns: 1fr; }
       .receipt-summary { grid-template-columns: 1fr; }
+      .session-hero-grid { grid-template-columns: 1fr 1fr; }
       .bar-row { grid-template-columns: 1fr; gap: 6px; }
       .amount { text-align: left; }
     }
@@ -3513,7 +4677,7 @@ HTML = r"""<!doctype html>
       .brand-copy p, .link-button { display: none; }
       .kpis { grid-template-columns: 1fr; }
       .metric-card { min-height: 104px; }
-      .mini-grid, .outcome-options, .privacy-grid { grid-template-columns: 1fr; }
+      .mini-grid, .session-hero-grid, .outcome-options, .privacy-grid { grid-template-columns: 1fr; }
       .drawer { width: 100vw; }
       .drawer-header, .drawer-content { padding-left: 16px; padding-right: 16px; }
       table { min-width: 620px; }
@@ -3555,20 +4719,20 @@ HTML = r"""<!doctype html>
 
   <nav class="product-nav" aria-label="AIWatcher Local sections">
     <button class="nav-tab active" data-view="today" onclick="showView('today')">Home</button>
-    <button class="nav-tab" data-view="prompt" onclick="showView('prompt')">Control</button>
-    <button class="nav-tab" data-view="sessions" onclick="showView('sessions')">Work</button>
-    <button class="nav-tab" data-view="receipts" onclick="showView('receipts')">Evidence</button>
-    <button class="nav-tab" data-view="insights" onclick="showView('insights')">Spend</button>
+    <button class="nav-tab" data-view="prompt" onclick="showView('prompt')">Plan / Control</button>
+    <button class="nav-tab" data-view="sessions" onclick="showView('sessions')">Watch</button>
+    <button class="nav-tab" data-view="receipts" onclick="showView('receipts')">Prove</button>
+    <button class="nav-tab" data-view="insights" onclick="showView('insights')">Improve</button>
     <button class="nav-tab" data-view="setup" onclick="showView('setup')">Settings</button>
   </nav>
 
   <section id="view-today" class="view">
     <section id="handoffBubble" class="card handoff-bubble" style="margin-bottom:14px" hidden></section>
 
-    <section class="card" style="margin-bottom:14px">
+    <section class="card home-command-card" style="margin-bottom:14px">
       <div class="section-title">
-        <div><h2>Needs action</h2><p>The highest-confidence local actions before the charts. Every row says what AIWatcher knows and what it still cannot prove.</p></div>
-        <button class="btn-quiet" onclick="showView('setup')">Check coverage</button>
+        <div><h2>What needs attention</h2><p>The few local actions most likely to save context, reduce rework, or improve proof.</p></div>
+        <button class="btn-quiet" onclick="showView('coverage')">Check coverage</button>
       </div>
       <div id="actionQueue" class="action-queue"></div>
     </section>
@@ -3579,17 +4743,9 @@ HTML = r"""<!doctype html>
         <div id="latestSession"></div>
       </div>
       <div class="card attention-card">
-        <div class="section-title"><div><h2>One thing worth changing</h2><p>The highest-signal local recommendation for your next run.</p></div></div>
+        <div class="section-title"><div><h2>One thing worth changing</h2><p>The clearest next improvement from local evidence.</p></div></div>
         <div id="todayRecommendation"></div>
       </div>
-    </section>
-
-    <section class="card" style="margin-bottom:14px">
-      <div class="section-title">
-        <div><h2>This week's digest</h2><p>A quick pulse on cost, outcomes, and what to change next.</p></div>
-        <button class="btn-quiet" onclick="showView('insights')">View full digest</button>
-      </div>
-      <div id="todayDigest"></div>
     </section>
 
     <section class="grid kpis">
@@ -3599,24 +4755,21 @@ HTML = r"""<!doctype html>
       <div class="card metric-card metric-red"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div></div>
     </section>
 
+    <section class="grid two" style="margin:14px 0">
+      <div class="card">
+        <div class="section-title"><div><h2>Context health</h2><p>Where a fresh start or narrower prompt would help.</p></div><button class="btn-quiet" onclick="showView('sessions')">Open Watch</button></div>
+        <div id="contextHealth"></div>
+      </div>
+      <div class="card">
+        <div class="section-title"><div><h2>Proof snapshot</h2><p>Latest gate and Fresh Start receipts.</p></div><button class="btn-quiet" onclick="showView('receipts')">Open Prove</button></div>
+        <div id="latestIntervention"></div>
+        <div id="latestHandoffDecision" style="margin-top:12px"></div>
+      </div>
+    </section>
+
     <section class="card" style="margin-bottom:14px">
-      <div class="section-title"><div><h2>Unbanked spend</h2><p>AI spend in this window with no commit behind it.</p></div></div>
+      <div class="section-title"><div><h2>Spend leakage</h2><p>Exploration that has not landed in commits yet.</p></div><button class="btn-quiet" onclick="showView('insights')">Open Improve</button></div>
       <div id="unbanked"></div>
-    </section>
-
-    <section class="card" style="margin-bottom:14px">
-      <div class="section-title"><div><h2>Latest intervention</h2><p>What AIWatcher changed before execution and what happened afterward.</p></div></div>
-      <div id="latestIntervention"></div>
-    </section>
-
-    <section class="card" style="margin-bottom:14px">
-      <div class="section-title"><div><h2>Latest Fresh Start receipt</h2><p>Fresh Start choices, expected replayed context, and follow-up proof.</p></div></div>
-      <div id="latestHandoffDecision"></div>
-    </section>
-
-    <section class="card" style="margin-bottom:14px">
-      <div class="section-title"><div><h2>Session health</h2><p>Context bloat, runway pressure, and Fresh Start actions for active local work.</p></div></div>
-      <div id="contextHealth"></div>
     </section>
 
     <section class="grid two">
@@ -3652,8 +4805,8 @@ HTML = r"""<!doctype html>
   <section id="view-prompt" class="view" hidden>
     <div class="prompt-shell">
       <div class="card">
-        <div class="section-title"><div><h2>Prompt Companion</h2><p>For surfaces AIWatcher cannot hook directly — Claude Desktop general chat, Codex Desktop chat, claude.ai/other browser chat. Draft here, then copy the result over yourself.</p></div></div>
-        <textarea id="promptInput" class="prompt-box" placeholder="Paste or draft a prompt here. Example: Refactor the entire codebase and delete old auth secrets"></textarea>
+        <div class="section-title"><div><h2>Plan</h2><p>Paste the prompt you are about to send. AIWatcher chooses the route before you spend context: rewrite, fork, Fresh Start, archive, or continue.</p></div></div>
+        <textarea id="promptInput" class="prompt-box" placeholder="Paste or draft the next AI prompt here. Example: Refactor every screen after reviewing the current architecture."></textarea>
         <div class="prompt-form-row">
           <select id="promptTool">
             <option value="codex">Codex</option>
@@ -3664,16 +4817,23 @@ HTML = r"""<!doctype html>
           <input id="promptCwd" class="prompt-box" style="min-height:38px;resize:none" placeholder="Working directory, optional">
         </div>
         <div class="actions">
-          <button class="btn-primary" onclick="preflightPrompt()">Preflight prompt</button>
+          <button class="btn-primary" onclick="preflightPrompt()">Plan next prompt</button>
           <button class="btn-quiet" onclick="clearPromptCompanion()">Clear</button>
         </div>
-        <p style="margin-top:12px">Claude Code CLI, Codex CLI/TUI, and Cursor already get this automatically via an installed hook — you don't need this tab for them. This is manual: nothing is sent anywhere or intercepted on your behalf, and prompt text is analyzed locally and not persisted.</p>
+        <p style="margin-top:12px">Use this when a surface does not reliably invoke hooks. Hook-capable tools can get the same local analysis automatically; this tab is the manual bridge. Nothing is sent anywhere or intercepted on your behalf, and prompt text is analyzed locally and not persisted.</p>
       </div>
       <div class="card">
-        <div class="section-title"><div><h2>Decision</h2><p>Use the brief, edit it, or paste the original unchanged.</p></div></div>
-        <div id="promptResult" class="prompt-result"><div class="empty">Run a preflight to see risk, reasoning, and a safer execution brief.</div></div>
+        <div class="section-title"><div><h2>Route</h2><p>One recommended action first, evidence second.</p></div></div>
+        <div id="promptResult" class="prompt-result"><div class="empty">Run Plan to choose the safest next route before sending the prompt.</div></div>
       </div>
     </div>
+    <section id="optimizeWorkspace" class="card" style="margin-top:14px">
+      <div class="section-title">
+        <div><h2>Optimize workspace</h2><p>Review stale chats, pending Fresh Starts, AI worktrees, and runtime clutter before carrying context forward.</p></div>
+        <span class="pill">Local evidence only</span>
+      </div>
+      <div id="optimizeWorkspaceBody"><div class="empty">Loading workspace cleanup evidence...</div></div>
+    </section>
   </section>
 
   <section id="view-projects" class="view" hidden>
@@ -3690,6 +4850,13 @@ HTML = r"""<!doctype html>
   </section>
 
   <section id="view-sessions" class="view" hidden>
+    <div class="card" style="margin-bottom:14px">
+      <div class="section-title">
+        <div><h2>Context health</h2><p>Context bloat, runway pressure, and Fresh Start actions for local work.</p></div>
+        <span class="pill">Actionable sessions</span>
+      </div>
+      <div id="sessionContextHealth"></div>
+    </div>
     <div class="card">
       <div class="section-title">
         <div><h2>Work</h2><p>Search sessions, inspect projects, review changes, and continue prior local AI work. Prompt text is shown for your own review only, never uploaded.</p></div>
@@ -3707,17 +4874,24 @@ HTML = r"""<!doctype html>
           <option value="rework">Rework</option>
           <option value="abandoned">Abandoned</option>
         </select>
-        <select id="sessionEvidenceFilter" onchange="loadSessions()">
-          <option value="">Any evidence</option>
-          <option value="useful">Evidence: likely useful</option>
-          <option value="needs_review">Evidence: needs review</option>
-          <option value="churned">Evidence: reverted/rewritten</option>
+        <select id="sessionStateFilter" onchange="loadSessions()">
+          <option value="">Any session state</option>
+          <option value="active_recent">Active or recent</option>
+          <option value="active">Active now</option>
+          <option value="history">Historical logs</option>
         </select>
         <button class="btn-quiet" onclick="clearSessionFilters()">Clear</button>
       </div>
+      <p class="receipt-note">Every row says what AIWatcher knows: active app, likely workspace, historical log, user-marked outcome, or inferred local evidence.</p>
       <p class="receipt-note" id="sessionResultsNote"></p>
       <div class="table-wrap"><table>
-        <thead><tr><th>Tool</th><th>Project</th><th>Model</th><th>Tokens</th><th></th></tr></thead>
+        <thead><tr>
+          <th><button class="sort-head" onclick="setSessionSort('tool')">Tool <span id="sort-session-tool"></span></button></th>
+          <th><button class="sort-head" onclick="setSessionSort('project')">Project <span id="sort-session-project"></span></button></th>
+          <th><button class="sort-head" onclick="setSessionSort('model')">Model <span id="sort-session-model"></span></button></th>
+          <th class="num"><button class="sort-head" onclick="setSessionSort('tokens_value')">Tokens <span id="sort-session-tokens_value"></span></button></th>
+          <th></th>
+        </tr></thead>
         <tbody id="sessionRows"></tbody>
       </table></div>
     </div>
@@ -3732,8 +4906,13 @@ HTML = r"""<!doctype html>
       <div id="changeTotals"></div>
       <div class="table-wrap"><table>
         <thead><tr>
-          <th>Commit</th><th>Project</th><th class="num">Cost</th><th class="num">Lines</th>
-          <th class="num">$/line</th><th class="num">Still standing</th><th class="num">$/surviving line</th>
+          <th><button class="sort-head" onclick="setChangeSort('committed_at')">Commit <span id="sort-change-committed_at"></span></button></th>
+          <th><button class="sort-head" onclick="setChangeSort('project')">Project <span id="sort-change-project"></span></button></th>
+          <th class="num"><button class="sort-head" onclick="setChangeSort('cost_usd')">Cost <span id="sort-change-cost_usd"></span></button></th>
+          <th class="num"><button class="sort-head" onclick="setChangeSort('lines_changed')">Lines <span id="sort-change-lines_changed"></span></button></th>
+          <th class="num"><button class="sort-head" onclick="setChangeSort('usd_per_line')">$/line <span id="sort-change-usd_per_line"></span></button></th>
+          <th class="num"><button class="sort-head" onclick="setChangeSort('survival_pct')">Still standing <span id="sort-change-survival_pct"></span></button></th>
+          <th class="num"><button class="sort-head" onclick="setChangeSort('usd_per_surviving_line')">$/surviving line <span id="sort-change-usd_per_surviving_line"></span></button></th>
         </tr></thead>
         <tbody id="changeRows"></tbody>
       </table></div>
@@ -3809,6 +4988,10 @@ HTML = r"""<!doctype html>
       <div class="actions" style="margin-bottom:12px">
         <button class="btn-quiet" data-view="coverage" onclick="showView('coverage')">Surface coverage</button>
       </div>
+      <div class="section-title">
+        <div><h2>Surface coverage</h2><p>Detected tools, hook confidence, and what AIWatcher can honestly measure.</p></div>
+      </div>
+      <div id="coverageRowsSettings" class="coverage-grid" style="margin-bottom:14px"></div>
       <div class="handoff-cta" style="margin-bottom:14px">
         <h4>Test Fresh Start with sample data</h4>
         <p>Open a seeded context-pressure case, tune the continuation brief, and verify the copy flow without waiting for a real bloated session.</p>
@@ -3818,6 +5001,32 @@ HTML = r"""<!doctype html>
     </div>
   </section>
 </main>
+<div class="ask-backdrop" id="askBackdrop" onclick="closeAskPanel()"></div>
+<section class="ask-panel" id="askPanel" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="askTitle">
+  <div class="ask-head">
+    <div>
+      <h2 id="askTitle">Ask AIWatcher</h2>
+      <p>Local answers from sessions, receipts, coverage, and workspace evidence.</p>
+    </div>
+    <button class="btn-quiet" onclick="closeAskPanel()" aria-label="Close Ask AIWatcher">Close</button>
+  </div>
+  <div class="ask-templates" aria-label="Suggested questions">
+    <button class="ask-template" onclick="askTemplate('Can I archive this chat?')">Can I archive this?</button>
+    <button class="ask-template" onclick="askTemplate('What is my context health?')">Context health</button>
+    <button class="ask-template" onclick="askTemplate('Are my prompts driving outcomes?')">Prompt outcomes</button>
+    <button class="ask-template" onclick="askTemplate('What surfaces are covered?')">Coverage</button>
+  </div>
+  <div class="ask-messages" id="askMessages">
+    <div class="ask-message aiw">
+      <strong>AIWatcher local</strong>
+      <p>Ask about archive safety, context pressure, prompt outcomes, spend, or tool coverage. I only answer from local AIWatcher evidence.</p>
+    </div>
+  </div>
+  <div class="ask-form">
+    <textarea id="askInput" placeholder="Ask: can I archive this chat, what is my context health, are my prompts driving outcomes..." onkeydown="handleAskKey(event)"></textarea>
+    <button class="btn-primary" id="askSendButton" onclick="askAIWatcher()">Ask</button>
+  </div>
+</section>
 <div class="drawer-backdrop" id="drawerBackdrop" onclick="closeDrawer()"></div>
 <aside class="drawer" id="detailDrawer" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="drawerTitle">
   <div class="drawer-header">
@@ -3897,25 +5106,28 @@ function buildActionQueue(data) {
         bubble.project || 'unknown project',
       ],
       actions: [
-        { label: bubble.primary_label || 'Open Fresh Start', primary: true, onclick: `openHandoff(${jsArg(bubble.session_id)})` },
+        { label: bubble.primary_label || 'Build Fresh Start brief', primary: true, onclick: `openHandoff(${jsArg(bubble.session_id)})` },
         { label: 'Inspect session', onclick: `selectSession(${jsArg(bubble.session_id)})` },
       ],
     });
   }
-  (data.context_health || []).slice(0, bubble ? 2 : 3).forEach(row => {
-    if (bubble && row.session_id === bubble.session_id) return;
+  const healthRows = (data.context_health || []).filter(row => !(bubble && row.session_id === bubble.session_id));
+  if (healthRows.length) {
+    const row = healthRows[0];
+    const more = healthRows.length > 1 ? `${healthRows.length - 1} more session${healthRows.length === 2 ? '' : 's'}` : '';
     items.push({
       severity: row.severity === 'critical' ? 'critical' : 'high',
       title: row.action && row.action.label ? row.action.label : 'Review context health',
-      body: row.recommendation || row.action && row.action.reason || 'AIWatcher found context or pace pressure.',
+      body: `${row.recommendation || row.action && row.action.reason || 'AIWatcher found context or pace pressure.'}${more ? ` ${more} also need review in Watch.` : ''}`,
       evidence: row.bloat_measurable ? 'measured replay' : 'observed signal',
-      meta: [row.project, row.tool, row.latest_turn_tokens ? `${row.latest_turn_tokens} latest turn` : '', row.bloat_label ? `${row.bloat_label} replay` : ''].filter(Boolean),
+      meta: [row.project, row.tool, row.latest_turn_tokens ? `${row.latest_turn_tokens} latest turn` : '', row.bloat_label ? `${row.bloat_label} replay` : '', more].filter(Boolean),
       actions: [
-        { label: row.can_handoff ? 'Open Fresh Start' : 'Review session', primary: true, onclick: row.can_handoff ? `openHandoff(${jsArg(row.session_id)})` : `selectSession(${jsArg(row.session_id)})` },
+        { label: row.can_handoff ? 'Build Fresh Start brief' : 'Review session', primary: true, onclick: row.can_handoff ? `openHandoff(${jsArg(row.session_id)})` : `selectSession(${jsArg(row.session_id)})` },
         { label: 'Inspect evidence', onclick: `selectSession(${jsArg(row.session_id)})` },
+        ...(more ? [{ label: 'View all in Watch', onclick: "showView('sessions')" }] : []),
       ],
     });
-  });
+  }
   (data.handoff_decisions || []).filter(decision => !decision.next_session_id).slice(0, 2).forEach(decision => {
     const sessionId = decision.source_session_id || decision.session_id || '';
     items.push({
@@ -3940,7 +5152,7 @@ function buildActionQueue(data) {
       actions: [{ label: 'Mark outcome', primary: true, onclick: `selectSession(${jsArg(s.session_id)})` }],
     });
   });
-  const coverageGap = (data.coverage || []).find(row => ['unverified', 'not_detected', 'unsupported'].includes(row.status));
+  const coverageGap = (data.coverage || []).find(row => row.detected && ['unverified', 'unsupported'].includes(row.status));
   if (coverageGap) {
     items.push({
       severity: coverageGap.status === 'unsupported' ? 'medium' : 'high',
@@ -3966,7 +5178,64 @@ function buildActionQueue(data) {
     return `<div class="empty">No action needed right now. AIWatcher will stay quiet until it has local evidence worth interrupting you for.</div>`;
   }
   const order = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
-  return items.sort((a, b) => (order[a.severity] ?? 4) - (order[b.severity] ?? 4)).slice(0, 5).map(actionRow).join('');
+  const topItems = items.sort((a, b) => (order[a.severity] ?? 4) - (order[b.severity] ?? 4)).slice(0, 3);
+  const footer = items.length > topItems.length
+    ? `<div class="copy-row"><button class="btn-quiet" onclick="showView('sessions')">View more in Watch</button><button class="btn-quiet" onclick="showView('receipts')">Review receipts</button></div>`
+    : '';
+  return topItems.map(actionRow).join('') + footer;
+}
+function recommendationAction(insight) {
+  const title = String((insight || {}).title || '').toLowerCase();
+  const body = String((insight || {}).body || '').toLowerCase();
+  if (insight && insight.view) return { label: insight.cta || 'Show me how', onclick: `showView(${jsArg(insight.view)})` };
+  if (insight && insight.session_id) return { label: 'Inspect session', onclick: `selectSession(${jsArg(insight.session_id)})` };
+  if (title.includes('project') || body.includes('project')) return { label: 'Show me project', onclick: "showView('projects')" };
+  if (title.includes('context') || body.includes('fresh') || body.includes('compact')) return { label: 'Show me how', onclick: "showView('sessions')" };
+  if (title.includes('cursor') || title.includes('ollama') || title.includes('coverage')) return { label: 'Check coverage', onclick: "showView('coverage')" };
+  return { label: 'Show me how', onclick: "showView('insights')" };
+}
+function renderHomeRecommendation(insight) {
+  if (!insight) {
+    return `<div class="insight"><strong>Keep the next task tight</strong><p>Nothing urgent stood out. Define the next checkpoint before sending a broad prompt.</p>
+      <div class="copy-row"><button class="btn-primary" onclick="showView('prompt')">Plan next prompt</button></div></div>`;
+  }
+  const action = recommendationAction(insight);
+  return `<div class="insight"><strong>${esc(insight.title)}</strong><p>${esc(insight.body)}</p>
+    <div class="copy-row"><button class="btn-primary" onclick="${esc(action.onclick)}">${esc(action.label)}</button><button class="btn-quiet" onclick="showView('insights')">View evidence</button></div></div>`;
+}
+function renderHomeContextHealth(rows, status = 'ready') {
+  if (status === 'pending') return '<div class="loading">Checking context health...</div>';
+  if (!rows.length) return '<div class="empty">No context pressure right now. AIWatcher will nudge when a fresh start or narrower prompt is worth it.</div>';
+  const row = rows[0];
+  return `<div class="session-summary">
+    <div class="session-title">${esc(row.project)}</div>
+    <div class="session-meta">${esc(row.tool)} · ${esc(row.latest_turn_tokens || 'unknown')} latest turn · ${esc(row.severity)}</div>
+    <p style="margin-top:8px">${esc(row.recommendation || 'Review this session before continuing.')}</p>
+    <div class="pill-row"><span class="pill">${esc(row.bloat_label ? row.bloat_label + ' replay' : 'observed signal')}</span>${rows.length > 1 ? `<span class="pill">${esc(rows.length - 1)} more</span>` : ''}</div>
+    <div class="copy-row">${row.can_handoff ? `<button class="btn-primary" onclick="openHandoff(${jsArg(row.session_id)})">Build Fresh Start brief</button>` : ''}<button class="btn-quiet" onclick="selectSession(${jsArg(row.session_id)})">Inspect session</button></div>
+  </div>`;
+}
+function renderHomeReceiptSummary(receipt) {
+  if (!receipt) return '<div class="empty">No prompt intervention recorded in this window.</div>';
+  const predicted = receipt.predicted && receipt.predicted.available ? receipt.predicted.api_value_label || receipt.predicted.tokens_label : '';
+  return `<div class="session-summary">
+    <div class="label">Latest gate</div>
+    <div class="session-title">${esc(receipt.decision_label)}</div>
+    <div class="session-meta">${esc(receipt.tool)} · ${esc(receipt.project)} · ${esc(dateLabel(receipt.created_at))}</div>
+    <div class="pill-row"><span class="pill">${esc(receipt.original_risk || 'risk')} · ${esc(receipt.original_score ?? '—')}</span>${predicted ? `<span class="pill">predicted ${esc(predicted)}</span>` : ''}</div>
+    <div class="copy-row"><button class="btn-quiet" onclick="openReceipt('${esc(receipt.id)}')">Review receipt</button></div>
+  </div>`;
+}
+function renderHomeHandoffSummary(decisions) {
+  const decision = (decisions || [])[0];
+  if (!decision) return '<div class="empty">No Fresh Start receipt yet.</div>';
+  return `<div class="session-summary">
+    <div class="label">Latest Fresh Start</div>
+    <div class="session-title">${esc(handoffDecisionLabel(decision.decision))}</div>
+    <div class="session-meta">${esc(dateLabel(decision.created_at))} · ${esc(decision.proof_status || 'Proof pending')}</div>
+    <p style="margin-top:8px">${esc(decision.proof_reason || 'AIWatcher has not linked a follow-up session yet.')}</p>
+    <div class="copy-row"><button class="btn-quiet" onclick="showView('receipts')">View receipt</button>${decision.source_session_id ? `<button class="btn-quiet" onclick="selectSession('${esc(decision.source_session_id)}')">Inspect source</button>` : ''}</div>
+  </div>`;
 }
 function renderLatestReceipt(receipt) {
   if (!receipt) return '<div class="empty">No prompt intervention recorded in this window.</div>';
@@ -4085,9 +5354,55 @@ async function copyText(value, label = 'Copied') {
     return false;
   }
 }
+async function recordOptimizeDecision(decision, project = '', impact = '', button = null) {
+  try {
+    const res = await fetch('/api/optimize-decision', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision, project, reason: decision === 'skipped' ? 'User skipped workspace cleanup nudge.' : 'User marked workspace cleanup reviewed.' }),
+    });
+    if (!res.ok) {
+      const payload = await res.json().catch(() => ({}));
+      throw new Error(payload.error || 'save failed');
+    }
+    const row = button && button.closest ? button.closest('.action-row') : null;
+    if (row) {
+      row.style.opacity = '.45';
+      row.style.pointerEvents = 'none';
+      window.setTimeout(() => row.remove(), 180);
+    }
+    const reward = document.getElementById('optimizeReward');
+    if (reward) {
+      reward.hidden = false;
+      reward.className = decision === 'skipped' ? 'verdict-card' : 'verdict-card low';
+      reward.innerHTML = `<h3>${decision === 'skipped' ? 'Nudge skipped' : 'Review saved'}</h3>
+        <p>${decision === 'skipped' ? 'AIWatcher will quiet this Optimize nudge for 3 days.' : 'AIWatcher recorded that you reviewed this item and will quiet it for 3 days.'}</p>
+        ${impact ? `<div class="pill-row"><span class="pill">${esc(impact)}</span><span class="pill">No deletion performed</span></div>` : '<div class="pill-row"><span class="pill">No deletion performed</span></div>'}`;
+      reward.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+    showToast(decision === 'skipped' ? 'Optimize nudge skipped for 3 days' : 'Optimize review saved for 3 days');
+  } catch (error) {
+    showToast(`Could not save Optimize decision: ${error.message || 'unknown error'}`, 'error');
+  }
+}
 function clearPromptCompanion() {
   document.getElementById('promptInput').value = '';
-  document.getElementById('promptResult').innerHTML = '<div class="empty">Run a preflight to see risk, reasoning, and a safer execution brief.</div>';
+  document.getElementById('promptResult').innerHTML = '<div class="empty">Run Plan to choose the safest next route before sending the prompt.</div>';
+}
+function renderPlanAction(action) {
+  const route = action || {};
+  const kind = route.kind || 'continue';
+  const primaryUrl = route.primary_url || '';
+  const primary = primaryUrl
+    ? `<button class="btn-primary" onclick="location.href='${esc(primaryUrl)}'">${esc(route.primary_label || 'Open')}</button>`
+    : `<button class="btn-primary" onclick="copyText(document.getElementById('promptBrief').value, 'Execution brief copied — paste it into your AI tool now')">${esc(route.primary_label || 'Copy brief')}</button>`;
+  return `<div class="plan-route-card ${esc(kind)}">
+    <span class="pill plan-label">${esc(route.label || 'Continue')} · ${esc(route.confidence || 'observed')}</span>
+    <h3>${esc(route.title || 'Continue in this chat')}</h3>
+    <p>${esc(route.why || 'AIWatcher did not find a reason to interrupt.')}</p>
+    <p class="plan-next-step"><strong>Next:</strong> ${esc(route.next_step || 'Continue with a scoped checkpoint.')}</p>
+    <div class="copy-row">${primary}</div>
+  </div>`;
 }
 async function preflightPrompt() {
   const prompt = document.getElementById('promptInput').value;
@@ -4098,7 +5413,7 @@ async function preflightPrompt() {
     resultNode.innerHTML = '<div class="empty">Write or paste a prompt first.</div>';
     return;
   }
-  resultNode.innerHTML = '<div class="loading">Checking cost, scope, and safety pressure...</div>';
+  resultNode.innerHTML = '<div class="loading">Choosing the safest route for this prompt...</div>';
   try {
     const res = await fetch('/api/preflight', {
       method: 'POST',
@@ -4111,7 +5426,8 @@ async function preflightPrompt() {
       return;
     }
     const riskTone = data.risk || 'low';
-    resultNode.innerHTML = `<div class="risk-card ${esc(riskTone)}">
+    resultNode.innerHTML = `${renderPlanAction(data.plan_action)}
+    <div class="risk-card ${esc(riskTone)}" style="margin-top:14px">
       <h3>Risk: ${esc(data.risk)} · score ${esc(data.score)}</h3>
       <p>${esc(data.impact_label)}</p>
       <h3 style="margin-top:14px">Findings</h3>
@@ -4120,13 +5436,13 @@ async function preflightPrompt() {
       <ul class="prompt-list">${data.suggestions.map(item => `<li>${esc(item)}</li>`).join('')}</ul>
     </div>
     <div class="detail-section">
-      <h3>Execution brief</h3>
+      <h3>Paste-ready brief</h3>
       <textarea id="promptBrief" class="brief-box">${esc(data.suggested_prompt)}</textarea>
       <div class="copy-row">
         <button class="btn-primary" onclick="copyText(document.getElementById('promptBrief').value, 'Execution brief copied — paste it into your AI tool now')">Copy brief</button>
         <button class="btn-quiet" onclick="copyText(document.getElementById('promptInput').value, 'Original prompt copied — paste it into your AI tool now')">Copy original</button>
       </div>
-      <p style="margin-top:10px">Paste whichever you choose as the first message in Claude Desktop, Codex Desktop, or your browser chat. AIWatcher cannot submit it for you on these surfaces.</p>
+      <p style="margin-top:10px">Paste whichever you choose as the next message in your AI tool. If the recommended route is Fresh Start or Fork, open that route first and paste the brief there.</p>
       <p style="margin-top:6px">${esc(data.privacy)}</p>
     </div>`;
   } catch (error) {
@@ -4140,6 +5456,83 @@ function showToast(message, kind = 'success') {
   toast.className = `toast ${kind === 'error' ? 'error' : ''} show`;
   window.clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => { toast.className = 'toast'; }, 3200);
+}
+function openAskPanel(question = '') {
+  document.getElementById('askBackdrop').classList.add('open');
+  document.getElementById('askPanel').classList.add('open');
+  document.getElementById('askPanel').setAttribute('aria-hidden', 'false');
+  const input = document.getElementById('askInput');
+  if (question) input.value = question;
+  window.setTimeout(() => input.focus(), 50);
+}
+function closeAskPanel() {
+  document.getElementById('askBackdrop').classList.remove('open');
+  document.getElementById('askPanel').classList.remove('open');
+  document.getElementById('askPanel').setAttribute('aria-hidden', 'true');
+  const params = new URLSearchParams(location.search);
+  if (params.has('ask')) {
+    params.delete('ask');
+    const query = params.toString();
+    history.replaceState(null, '', `${location.pathname}${query ? `?${query}` : ''}${location.hash || ''}`);
+  }
+}
+function appendAskMessage(kind, html) {
+  const node = document.getElementById('askMessages');
+  const item = document.createElement('div');
+  item.className = `ask-message ${kind}`;
+  item.innerHTML = html;
+  node.appendChild(item);
+  node.scrollTop = node.scrollHeight;
+}
+function renderAskResponse(data) {
+  const bullets = (data.bullets || []).length
+    ? `<ul>${data.bullets.map(item => `<li>${esc(item)}</li>`).join('')}</ul>`
+    : '';
+  const actions = (data.actions || []).length
+    ? `<div class="ask-actions">${data.actions.map(action => `<a href="${esc(action.url || '/')}" onclick="closeAskPanel()">${esc(action.label || 'Open')}</a>`).join('')}</div>`
+    : '';
+  appendAskMessage('aiw', `<strong>${esc(data.confidence || 'Local answer')}</strong><p>${esc(data.answer || 'No answer available.')}</p>${bullets}${actions}<p class="receipt-note">${esc(data.privacy || 'Local metadata only.')}</p>`);
+}
+function askTemplate(question) {
+  openAskPanel(question);
+  askAIWatcher();
+}
+function handleAskKey(event) {
+  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault();
+    askAIWatcher();
+  }
+}
+async function askAIWatcher() {
+  const input = document.getElementById('askInput');
+  const button = document.getElementById('askSendButton');
+  const question = input.value.trim();
+  if (!question) {
+    showToast('Ask a question first.', 'error');
+    return;
+  }
+  appendAskMessage('user', `<p>${esc(question)}</p>`);
+  input.value = '';
+  button.disabled = true;
+  button.textContent = 'Checking...';
+  try {
+    const res = await fetch('/api/ask-aiwatcher', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question, days: Number(document.getElementById('days').value || 7) }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      appendAskMessage('aiw', `<strong>Local answer unavailable</strong><p>${esc(data.error || 'AIWatcher could not answer from local evidence.')}</p>`);
+      return;
+    }
+    renderAskResponse(data);
+  } catch (error) {
+    appendAskMessage('aiw', '<strong>Local answer unavailable</strong><p>Could not reach the local AIWatcher server.</p>');
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Ask';
+  }
 }
 async function requestRuntimeReturn(sessionId) {
   return fetch('/api/runtime-return', {
@@ -4210,21 +5603,27 @@ function renderIdentityStrip(item, runtime, sourcePath) {
   const sessionId = item.session_id || runtime.session_id || '';
   const project = item.project || item.project_short || runtime.project_path || 'unknown';
   const surface = runtime.surface || item.surface || 'unknown surface';
-  const updated = item.updated_at || item.updated_at_label || '';
   const identityLabel = runtime.identity_label || runtime.label || 'Historical log only';
-  const identityReason = runtime.identity_reason || runtime.reason || 'AIWatcher found local session evidence, but no verified exact chat attachment.';
-  return `<div class="runtime-strip">
-    <div class="runtime-copy">
-      <strong>${esc(identityLabel)}</strong>
-      <span>${esc(item.tool || runtime.tool || 'unknown tool')} · ${esc(surface)} · ${esc(project)}</span>
+  return `<div class="session-identity-card">
+    <div class="session-identity-row">
+      <span class="confidence-chip ${esc(identityTone(runtime))}">${esc(identityLabel)}</span>
+      <div class="session-identity-main">${esc(item.tool || runtime.tool || 'unknown tool')} · ${esc(surface)} · ${esc(project)}</div>
+      <span class="session-id-chip">${esc(shortSessionId(sessionId))}</span>
     </div>
-    <span class="session-state ${identityTone(runtime)}">${esc(shortSessionId(sessionId))}</span>
-  </div>
-  <div class="runtime-source">
-    <strong>Last activity</strong><span>${esc(updated ? dateLabel(updated) : 'unknown')}</span>
-    <strong>Identity</strong><span>${esc(identityReason)}</span>
-    ${sourcePath ? `<strong>Source log</strong><span>${esc(sourcePath)}</span>` : ''}
   </div>`;
+}
+function confidenceLabel(s) {
+  if (s.outcome) return { label: 'Verified outcome', tone: 'verified' };
+  if (s.inferred_outcome) return { label: 'Inferred outcome', tone: 'inferred' };
+  if (s.evidence_captured) return { label: 'Observed evidence', tone: 'observed' };
+  return { label: 'Local metadata', tone: 'unknown' };
+}
+function contextPressure(s) {
+  const tokens = Number(s.tokens_value || s.tokens || 0);
+  if (!tokens) return { width: 8, label: 'No token pressure measured', tone: 'unknown' };
+  const width = Math.max(8, Math.min(100, Math.round(tokens / 500000 * 100)));
+  const label = tokens >= 500000 ? 'Critical context pressure' : tokens >= 150000 ? 'Elevated context pressure' : 'Normal context pressure';
+  return { width, label, tone: tokens >= 500000 ? 'verified' : tokens >= 150000 ? 'inferred' : 'observed' };
 }
 function runtimeReturnPanel(runtime, sourcePath) {
   runtime = runtime || {};
@@ -4237,17 +5636,28 @@ function runtimeReturnPanel(runtime, sourcePath) {
   const exactLabel = runtime.exact_return_label || 'Exact chat unavailable';
   const exactReason = runtime.exact_return_reason || 'Exact chat return needs a verified app window, terminal pane, or host deep link.';
   const source = sourcePath || 'unknown';
+  const identityReason = runtime.identity_reason || runtime.reason || 'AIWatcher found local session evidence, but no verified exact chat attachment.';
+  const updated = runtime.updated_at || runtime.updated_at_label || '';
   const action = available
     ? `<button class="btn-quiet" data-session="${esc(runtime.session_id || '')}" onclick="returnToRuntime(this.dataset.session)">${esc(runtime.action_label || 'Open workspace')}</button>`
     : `<button class="btn-quiet" disabled>No exact return</button>`;
   return `<section class="detail-section runtime-return">
-    <div class="section-title">
-      <div><h3>Return target</h3><p>${esc(reason)}</p></div>
-      <span class="session-state ${available ? 'active' : 'ended'}">${esc(targetLabel)}</span>
-    </div>
-    <div class="copy-row">${action}<button class="btn-quiet" data-source="${esc(source)}" onclick="copyText(this.dataset.source, 'Session log path copied')">Copy log path</button></div>
-    <div class="runtime-source"><strong>Session log</strong><span>${esc(source)}</span></div>
-    <p class="tool-link-note"><strong>${esc(exactLabel)}:</strong> ${esc(exactReason)}</p>
+    <details class="aiw-details">
+      <summary>Return, share, and source log</summary>
+      <div class="details-body">
+        <div class="section-title">
+          <div><h3>Return target</h3><p>${esc(reason)}</p></div>
+          <span class="session-state ${available ? 'active' : 'ended'}">${esc(targetLabel)}</span>
+        </div>
+        <div class="copy-row">${action}<button class="btn-quiet" data-source="${esc(source)}" onclick="copyText(this.dataset.source, 'Session log path copied')">Copy log path</button></div>
+        <div class="runtime-source">
+          <strong>Last activity</strong><span>${esc(updated ? dateLabel(updated) : 'unknown')}</span>
+          <strong>Identity</strong><span>${esc(identityReason)}</span>
+          <strong>Session log</strong><span>${esc(source)}</span>
+        </div>
+        <p class="tool-link-note"><strong>${esc(exactLabel)}:</strong> ${esc(exactReason)}</p>
+      </div>
+    </details>
   </section>`;
 }
 let watcherCommand = 'aiwatcher watch --notify --overlay --interval 60';
@@ -4362,6 +5772,61 @@ function renderVerdict(s) {
     <ul>${verdict.bullets.map(item => `<li>${esc(item)}</li>`).join('')}</ul>
   </div>`;
 }
+function renderEvidenceRail(s, costliest, meaningfulEvents) {
+  const evidence = s.outcome_evidence || {};
+  const nodes = [
+    {
+      tone: 'observed',
+      title: 'Session observed',
+      body: `${s.tool || 'AI tool'} · ${dateLabel(s.started_at || s.updated_at)} · ${s.tokens_label || s.tokens || 'unknown'} tokens`,
+    },
+  ];
+  if (costliest) {
+    nodes.push({
+      tone: 'observed',
+      title: 'Costliest step',
+      body: `${eventTypeLabel(costliest.event_type)} · ${costliest.tokens_label || 'unknown'} tokens · ${costliest.api_value || 'unknown value'}`,
+    });
+  }
+  if (evidence.inferred_outcome) {
+    nodes.push({
+      tone: 'inferred',
+      title: `Outcome inferred: ${evidence.inferred_outcome}`,
+      body: evidence.explanation || 'Based on local git/test signals. Confirm manually before treating it as value.',
+    });
+  } else if (s.outcome) {
+    nodes.push({
+      tone: 'verified',
+      title: `Outcome marked: ${s.outcome}`,
+      body: 'User-confirmed local outcome. AIWatcher can use this in value metrics.',
+    });
+  } else {
+    nodes.push({
+      tone: 'unknown',
+      title: 'Outcome not marked',
+      body: 'Mark useful, needs rework, or abandoned so value metrics are about outcomes, not raw tokens.',
+    });
+  }
+  if ((s.actions || []).some(action => action.id === 'handoff')) {
+    nodes.push({
+      tone: 'inferred',
+      title: 'Fresh Start available',
+      body: 'AIWatcher can build a continuation brief and watch for follow-up proof.',
+    });
+  }
+  nodes.push({
+    tone: meaningfulEvents && meaningfulEvents.length ? 'observed' : 'unknown',
+    title: meaningfulEvents && meaningfulEvents.length ? `${meaningfulEvents.length} meaningful events` : 'No meaningful timeline yet',
+    body: meaningfulEvents && meaningfulEvents.length ? 'Full event detail remains below for debugging.' : 'This surface may only expose history or metadata.',
+  });
+  return `<section class="detail-section">
+    <div class="section-title"><div><h3>Evidence trail</h3><p>What AIWatcher knows, and how confident it is.</p></div><span class="pill">Local only</span></div>
+    <div class="evidence-rail">${nodes.map(node => `<div class="evidence-node ${esc(node.tone)}">
+      <div class="evidence-dot" aria-hidden="true"></div>
+      <div class="evidence-copy"><strong>${esc(node.title)} <span class="confidence-chip ${esc(node.tone)}">${esc(node.tone)}</span></strong><p>${esc(node.body)}</p></div>
+    </div>`).join('')}</div>
+  </section>`;
+}
 function splitLines(value) {
   return String(value || '').split(/\n+/).map(item => item.trim().replace(/\s+/g, ' ')).filter(Boolean).slice(0, 8);
 }
@@ -4423,6 +5888,43 @@ function renderHandoffForm(capsule) {
     <div class="copy-row"><button class="btn-quiet" onclick="regenerateHandoff('${esc(capsule.session_id)}','${esc(capsule.target || 'generic')}', ${capsule.include_prompt_excerpt ? 'true' : 'false'}, ${capsule.demo ? 'true' : 'false'})">Regenerate brief</button></div>
   </div>`;
 }
+function listPreview(items, fallback) {
+  const values = (items || []).filter(Boolean);
+  if (!values.length) return esc(fallback);
+  return values.slice(0, 4).map(item => `• ${esc(item)}`).join('<br>');
+}
+function renderFreshStartPreview(capsule) {
+  const objective = capsule.objective || 'Reconstruct the current work from repo state, recent commits, changed files, and the evidence below.';
+  const decisions = (capsule.decisions || []).map(item => item.text || item).filter(Boolean);
+  return `<div class="fresh-preview">
+    <div class="fresh-preview-head">
+      <div><h3>Fresh Start brief preview</h3><p>This is the structured context the next AI session receives.</p></div>
+      <span class="confidence-chip observed">Metadata only</span>
+    </div>
+    <div class="fresh-preview-grid">
+      <div class="fresh-preview-row"><strong>Objective</strong><p>${esc(objective)}</p></div>
+      <div class="fresh-preview-row"><strong>Source of truth</strong><p>${listPreview(capsule.source_refs, 'Repository state, local session metadata, changed files, and the source log.')}</p></div>
+      <div class="fresh-preview-row"><strong>Decisions</strong><p>${listPreview(decisions, 'No explicit decisions detected yet; the next session should infer from files and recent evidence.')}</p></div>
+      <div class="fresh-preview-row"><strong>Constraints</strong><p>${listPreview(capsule.constraints, 'Do not assume access to hidden chat history. Do not invent unobserved outcomes or savings.')}</p></div>
+      <div class="fresh-preview-row"><strong>Done when</strong><p>${listPreview(capsule.acceptance_criteria, 'Identify the smallest next checkpoint and verify it with local evidence.')}</p></div>
+    </div>
+  </div>`;
+}
+function freshStartReceiptWidget({ reason = '', expected = '', copy = '', controls = '' } = {}) {
+  return `<div class="receipt-widget">
+    <div class="receipt-widget-head">
+      <div><h3>Fresh Start ready</h3><p>Fresh Start receipt saved. AIWatcher will look for the follow-up before claiming improvement.</p></div>
+      <span class="confidence-chip observed">Observed</span>
+    </div>
+    <div class="receipt-steps">
+      <div class="receipt-step"><span>1</span><div><strong>Copied brief</strong><p>${esc(reason || 'Fresh Start brief copied from local session evidence.')}</p></div></div>
+      <div class="receipt-step"><span>2</span><div><strong>Next user action</strong><p>${esc(copy || 'Open a fresh AI chat in the same workspace and paste the copied brief.')}</p></div></div>
+      <div class="receipt-step"><span>3</span><div><strong>Proof pending</strong><p>AIWatcher will not claim saved tokens until it observes a later same-project session.</p></div></div>
+    </div>
+    <div class="pill-row"><span class="pill">${esc(expected || 'context at risk')}</span><span class="pill">No saved-token claim yet</span><span class="pill">Fresh Start receipt saved</span></div>
+    ${controls ? `<div class="actions" style="margin-top:14px">${controls}</div>` : ''}
+  </div>`;
+}
 function renderHandoff(capsule) {
   const usage = capsule.usage || {};
   const evidence = capsule.evidence || {};
@@ -4431,7 +5933,7 @@ function renderHandoff(capsule) {
   const target = capsule.target || 'generic';
   const includePrompt = !!capsule.include_prompt_excerpt;
   const isDemo = !!capsule.demo;
-  const canOpenRuntime = !!runtime.available && runtime.level !== 'app';
+  const canOpenRuntime = !!runtime.available;
   const enrichment = capsule.basic
     ? '<div class="loading">Basic brief is ready. Loading timeline, git evidence, and prompt enrichment...</div>'
     : '';
@@ -4457,6 +5959,7 @@ function renderHandoff(capsule) {
         ${isDemo ? `<button class="btn-quiet" onclick="showView('sessions'); closeDrawer()">Find real sessions</button>` : `<button class="btn-quiet" onclick="selectSession('${esc(capsule.session_id)}')">Inspect source session</button>`}
       </div>
     </div>
+    ${renderFreshStartPreview(capsule)}
     ${renderHandoffForm(capsule)}
     <div class="copy-row">
       <span class="label" style="align-self:center">Format for</span>
@@ -4508,8 +6011,15 @@ async function copyFreshStartFromDrawer(sessionId, openRuntime = false, isDemo =
   }
   const status = document.getElementById('handoffStatus');
   if (status) {
-    status.innerHTML = `<h3>${esc(isDemo ? 'Demo Fresh Start copied' : 'Fresh Start ready')}</h3><p>${esc(message)}${isDemo ? '' : ' AIWatcher will link the next same-project session when it appears.'}</p>
-      <div class="copy-row" style="margin-top:12px">${isDemo ? '<button class="btn-primary" onclick="showView(\'sessions\'); closeDrawer()">Find real sessions</button>' : '<button class="btn-primary" onclick="showView(\'receipts\'); closeDrawer()">View receipt</button>'}<button class="btn-quiet" onclick="closeDrawer()">Done</button></div>`;
+    const controls = isDemo
+      ? '<button class="btn-primary" onclick="showView(\'sessions\'); closeDrawer()">Find real sessions</button><button class="btn-quiet" onclick="closeDrawer()">Done</button>'
+      : '<button class="btn-primary" onclick="showView(\'receipts\'); closeDrawer()">View receipt</button><button class="btn-quiet" onclick="closeDrawer()">Done</button>';
+    status.outerHTML = `<div id="handoffStatus">${freshStartReceiptWidget({
+      reason: isDemo ? 'Demo Fresh Start brief copied.' : 'Fresh Start brief copied from the session drawer.',
+      expected: isDemo ? 'sample context at risk' : 'proof pending',
+      copy: message,
+      controls,
+    })}</div>`;
   }
 }
 async function regenerateHandoff(sessionId, target = 'generic', includePrompt = false, isDemo = false) {
@@ -4622,7 +6132,7 @@ async function startFreshFromBubble(sessionId) {
   const bubble = handoffDecisionBubble(sessionId);
   await recordHandoffDecision(bubble, 'copy_handoff');
   const runtime = (bubble || {}).runtime_attachment || {};
-  if (runtime.available && runtime.level !== 'app') {
+  if (runtime.available) {
     try {
       const returnRes = await requestRuntimeReturn(sessionId);
       const returned = await returnRes.json();
@@ -4640,27 +6150,31 @@ async function continueFromBubble() {
   document.getElementById('handoffBubble').hidden = true;
   showToast('Fresh Start decision saved: continue here');
 }
+async function continueFromSession(sessionId) {
+  await recordHandoffDecision({
+    session_id: sessionId,
+    reason: 'User chose to keep working in the current session from the session drawer.',
+    body: 'User chose to keep working in the current session from the session drawer.',
+    expected_saved_context_tokens: null,
+  }, 'continue_here');
+  showToast('Fresh Start decision saved: continue here');
+  closeDrawer();
+  await load(false, true);
+}
 function renderHandoffCopied(bubble, sessionId) {
   const node = document.getElementById('handoffBubble');
   if (!node || !bubble) return;
   node.hidden = false;
-  node.innerHTML = `<div class="section-title">
-      <div>
-        <h2>Fresh Start ready</h2>
-        <p>Paste the copied brief into a fresh AI chat for the matching workspace. AIWatcher saved a local receipt and will watch for follow-up proof.</p>
-      </div>
-      <span class="pill">saved</span>
-    </div>
-    <div class="pill-row">
-      <span class="pill">${esc(bubble.expected_saved_context_label ? '~' + bubble.expected_saved_context_label + ' expected context at risk' : 'proof pending')}</span>
-      <span class="pill">privacy-safe metadata</span>
-      <span class="pill">Fresh Start receipt saved</span>
-    </div>
-    <div class="actions" style="margin-top:14px">
+  node.innerHTML = freshStartReceiptWidget({
+    reason: bubble.reason || bubble.body || 'Fresh Start brief copied from local evidence.',
+    expected: bubble.expected_saved_context_label ? '~' + bubble.expected_saved_context_label + ' expected context at risk' : 'proof pending',
+    copy: 'Paste the copied brief into a fresh AI chat for the matching workspace.',
+    controls: `
       <button class="btn-primary" onclick="showView('receipts')">View receipt</button>
       <button class="btn-quiet" data-session="${esc(sessionId)}" onclick="openHandoff(this.dataset.session)">Review brief</button>
       <button class="btn-quiet" onclick="document.getElementById('handoffBubble').hidden = true">Dismiss</button>
-    </div>`;
+    `,
+  });
 }
 function renderHandoffBubble(bubble) {
   const node = document.getElementById('handoffBubble');
@@ -4696,7 +6210,7 @@ function renderChangeRows(rows) {
   if (!rows.length) {
     return `<tr><td colspan="7" class="empty">No commits in this window, or git history could not be read.</td></tr>`;
   }
-  return rows.map(row => `<tr>
+  return sortedRows(rows, changeSort).map(row => `<tr>
     <td><code>${esc(row.short_sha)}</code> ${esc(row.subject)}
       <div class="session-meta">${esc(dateLabel(row.committed_at))}${row.tools.length ? ' &middot; ' + esc(row.tools.join(', ')) : ''}${row.event_count ? ' &middot; ' + esc(row.event_count) + ' model calls' : ''}${row.was_rewritten ? ' &middot; <span class="muted" title="Rebased or amended on ' + esc(dateLabel(row.rewritten_at)) + '. Cost is attributed by when the work was authored, not when it was rewritten.">rewritten</span>' : ''}</div></td>
     <td>${esc(row.project)}</td>
@@ -4708,12 +6222,14 @@ function renderChangeRows(rows) {
     <td class="num">${esc(row.usd_per_surviving_line_label)}</td>
   </tr>`).join('');
 }
-function renderChangeTotals(rows, meta) {
+function renderChangeTotals(rows, meta, unbanked) {
   if (!rows.length) return '';
   const foreign = (meta && meta.foreign_changes) || 0;
   const note = foreign
     ? `<p class="receipt-note" style="margin-top:0">${esc(foreign)} commit(s) in this window were written by someone else and
        arrived by fetch — excluded, because no spend on this machine can belong to them.</p>` : '';
+  const unbankedNote = unbanked && unbanked.available && Number(unbanked.unbanked_usd || 0) > 0
+    ? `<p class="receipt-note" style="margin-top:0">${esc(unbanked.unbanked_label)} is not shown as a commit row yet because no nearby same-repo commit exists. Check Unbanked spend for the missing attribution trail.</p>` : '';
   const attributed = rows.filter(row => !row.unattributed);
   const cost = attributed.reduce((sum, row) => sum + row.cost_usd, 0);
   const lines = attributed.reduce((sum, row) => sum + row.lines_changed, 0);
@@ -4723,10 +6239,46 @@ function renderChangeTotals(rows, meta) {
     <div class="mini"><span class="label">Attributed spend</span><strong>${esc(fmtMoney(cost))}</strong></div>
     <div class="mini"><span class="label">Lines changed</span><strong>${esc(lines.toLocaleString())}</strong></div>
     <div class="mini"><span class="label">Survival measured</span><strong>${esc(measured)} of ${esc(rows.length)}</strong></div>
-  </div>${note}`;
+  </div>${note}${unbankedNote}`;
 }
 function fmtMoney(value) {
   return '$' + (Math.round(value * 100) / 100).toFixed(2);
+}
+function renderOptimizeWorkspace(optimize) {
+  if (!optimize) return '<div class="empty">Workspace optimization evidence is still building.</div>';
+  const candidates = optimize.candidates || [];
+  const checklist = optimize.checklist || '';
+  if (!candidates.length) {
+    return `<div class="empty">${esc(optimize.summary || 'No stale chats, worktrees, or runtime cleanup opportunities stood out.')}</div>`;
+  }
+  const topImpact = optimize.impact_label || 'No savings claim';
+  return `<div id="optimizeReward" class="verdict-card" hidden></div>
+    <div class="mini-grid" style="margin-bottom:12px">
+      <div class="mini"><span class="label">Status</span><strong>${esc(optimize.title || 'Optimize')}</strong></div>
+      <div class="mini"><span class="label">Impact signal</span><strong>${esc(topImpact)}</strong></div>
+      <div class="mini"><span class="label">Evidence</span><strong>${esc(optimize.evidence_label || 'Observed')}</strong></div>
+      <div class="mini"><span class="label">Items</span><strong>${esc(candidates.length)}</strong></div>
+    </div>
+    <p class="receipt-note" style="margin-bottom:12px">AIWatcher cannot archive or delete anything for you. Review one item, act only in the owning app, then mark it reviewed to quiet the nudge for 24 hours.</p>
+    <div class="action-queue">${candidates.map(item => {
+      const itemChecklist = item.checklist || checklist;
+      return `<div class="action-row ${item.tokens_at_risk ? 'medium' : 'low'}">
+      <div>
+        <div class="action-title">${esc(item.title)} <span class="pill">${esc(item.evidence_label || 'Observed')}</span></div>
+        <p>${esc(item.why_inactive || item.summary || '')}</p>
+        <div class="action-meta"><span class="pill">${esc(item.project || 'Local machine')}</span><span class="pill">${esc(item.impact_label || 'review')}</span><span class="pill">${esc(item.updated_label || '')}</span></div>
+        <p class="receipt-note">${esc(item.evidence || '')}</p>
+      </div>
+      <div class="actions">
+        ${item.view ? `<button class="btn-primary" onclick="showView('${esc(item.view)}')">${esc(item.action_label || 'Review')}</button>` : `<button class="btn-primary" onclick="copyText(${jsArg(itemChecklist)}, 'Project review steps copied')">${esc(item.action_label || 'Copy project steps')}</button>`}
+        <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('marked_done', this.dataset.project, this.dataset.impact, this)">Reviewed</button>
+        <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('skipped', this.dataset.project, this.dataset.impact, this)">Skip</button>
+      </div>
+    </div>`;
+    }).join('')}</div>
+    <div class="copy-row" style="margin-top:12px">
+      <button class="btn-quiet" onclick="copyText(${jsArg(checklist)}, 'Global review queue copied')">Copy all review items</button>
+    </div>`;
 }
 function renderUnbanked(card) {
   if (!card || !card.available) {
@@ -4836,10 +6388,11 @@ function bars(rows, valueKey = "api_value_label", kind = "project") {
     const width = Math.max(2, Math.round(Number(row.api_value_usd || 0) / max * 100));
     const id = encodeURIComponent(row.id || row.name);
     const click = kind === "project" ? `onclick="selectProject(decodeURIComponent(this.dataset.id))" data-id="${id}"` : "";
+    const amount = row.detected_only ? (row.status_label || 'Detected') : row[valueKey];
     return `<div class="bar-row ${kind === "project" ? "clickable" : ""}" title="${esc(row.name)}" ${click}>
       <div class="bar-label">${esc(row.short_name || row.name)}${kind === "project" && row.health ? ` ${healthPill(row.health)}` : ''}</div>
       <div class="bar-shell"><div class="bar" style="width:${width}%"></div></div>
-      <div class="amount">${esc(row[valueKey])}</div>
+      <div class="amount">${esc(amount)}</div>
     </div>`;
   }).join('');
 }
@@ -4874,30 +6427,59 @@ async function selectProject(project) {
         <td>${esc(s.tool)}</td><td>${esc(s.model)}</td><td>${sessionStatePill(s.state)} ${outcomeEvidencePill(s)}</td><td>${esc(s.tokens_label)}</td><td><button class="row-action">Review</button></td>
       </tr>`).join('')}</tbody></table></div></section>`;
 }
+function renderSessionHero(s) {
+  const actions = s.actions || [];
+  const action = actions.find(item => item.primary) || actions[0] || null;
+  const runtime = s.runtime_attachment || {};
+  const returnLabel = runtime.exact_return_label || runtime.label || (runtime.available ? 'Workspace return' : 'Log only');
+  const outcomeLabel = s.outcome ? `Outcome: ${s.outcome}` : 'Outcome not marked';
+  const evidence = confidenceLabel(s);
+  const pressure = contextPressure(s);
+  const nextStep = action
+    ? `${action.label}: ${action.reason || 'Review the local evidence and choose the next step.'}`
+    : 'Review the local evidence and choose the next step.';
+  return `<section class="session-hero">
+    <h2 class="session-title">${esc(s.project_short || s.project || 'Session')}</h2>
+    <p class="session-meta">${esc(s.tool || 'unknown tool')} · ${esc(s.model || 'unknown model')}</p>
+    ${renderIdentityStrip(s, runtime, s.source_path)}
+    <div class="session-hero-grid">
+      <div class="session-hero-fact"><span>Next step</span><strong>${esc(action ? action.label : 'Review')}</strong></div>
+      <div class="session-hero-fact"><span>Context pressure</span><strong>${esc(s.tokens_label || '—')}</strong>
+        <div class="session-meter"><div class="session-meter-track"><div class="session-meter-fill" style="--meter-width:${esc(pressure.width)}%"></div></div><div class="session-meter-label"><span>${esc(pressure.label)}</span></div></div>
+      </div>
+      <div class="session-hero-fact"><span>API-equivalent</span><strong>${esc(s.api_value || '—')}</strong></div>
+      <div class="session-hero-fact"><span>Return</span><strong>${esc(returnLabel)}</strong></div>
+    </div>
+    <p>${esc(nextStep)}</p>
+    <div class="session-hero-status">${sessionStatePill(s.state)}<span class="pill">${esc(outcomeLabel)}</span><span class="confidence-chip ${esc(evidence.tone)}">${esc(evidence.label)}</span></div>
+  </section>`;
+}
 function renderSessionSummary(s, label = 'Loading detailed evidence...') {
   const actions = s.actions || [];
   const action = actions.find(item => item.primary) || actions[0] || null;
   const actionButton = action
     ? action.id === 'handoff' && action.label !== 'Inspect evidence'
-      ? `<button class="btn-primary" onclick="openHandoff('${esc(s.session_id)}')">${esc(action.label || 'Open Fresh Start')}</button>`
+      ? `<button class="btn-primary" onclick="openHandoff('${esc(s.session_id)}')">${esc(action.label || 'Build Fresh Start brief')}</button>`
       : action.id === 'review_outcome'
         ? `<button class="btn-primary" disabled>${esc(action.label || 'Review outcome')}</button>`
         : `<button class="btn-primary" disabled>${esc(action.label || 'Review session')}</button>`
     : '';
-  return `<section class="detail-section">
-    <h2 class="session-title">${esc(s.project_short || s.project || 'Session')}</h2>
-    <p class="session-meta">${esc(s.tool || 'unknown tool')} · ${esc(s.model || 'unknown model')}</p>
-    ${renderIdentityStrip(s, s.runtime_attachment, s.source_path)}
-    ${miniStats({ sessions: 1, api_value: s.api_value || '—', tokens: s.tokens_label || '—', tool_calls: s.tool_calls || 0 })}
-    <div class="pill-row">${sessionStatePill(s.state)}${outcomePill(s.outcome)}</div>
-  </section>
-  <section class="detail-section recommended-action">
+  return `<div class="session-review-shell">${renderSessionHero(s)}
+  <section class="detail-section recommended-action loading-action">
     <div class="section-title">
       <div><h3>${esc(action ? action.label : 'Review session')}</h3><p>${esc(action ? action.reason : 'AIWatcher is loading full local evidence for this session.')}</p></div>
       <span class="session-state recent">loading</span>
     </div>
-    <div class="copy-row">${actionButton}<button class="btn-quiet" disabled>${esc(label)}</button></div>
-  </section>`;
+    <div class="copy-row">${actionButton}</div>
+    <div class="ai-loading-panel" aria-live="polite">
+      <div class="ai-loading-mark">AI</div>
+      <div>
+        <strong>${esc(label)}</strong>
+        <p>Timeline, outcome, git, and prompt evidence are indexing in the background. You can use the primary action while details finish loading.</p>
+        <div class="ai-loading-bar" aria-hidden="true"></div>
+      </div>
+    </div>
+  </section></div>`;
 }
 function renderSessionActions(s) {
   const actions = s.actions || [];
@@ -4921,13 +6503,25 @@ function renderSessionActions(s) {
   const openButton = openAction.available
     ? `<button class="btn-quiet" onclick="returnToRuntime('${esc(s.session_id)}')" title="${esc(openToolNote)}">${esc(openAction.label || runtime.action_label || 'Open workspace')}</button>`
     : `<button class="btn-quiet" disabled title="${esc(openToolNote)}">${esc(openAction.label || runtime.action_label || 'No live return')}</button>`;
-  return `<section class="detail-section recommended-action"><div class="action-kicker">${sessionStatePill(s.state)}${outcomePill(s.outcome)}</div>
-    <h3>${esc(title)}</h3>
-    <p>${esc(body)}</p>
-    <div class="copy-row">
-      ${hasHandoff ? `<button class="${primaryId === 'handoff' ? 'btn-primary' : 'btn-quiet'}" onclick="${handoffAction.label === 'Inspect evidence' ? "document.getElementById('evidencePanel').scrollIntoView({ behavior: 'smooth', block: 'center' })" : `openHandoff('${esc(s.session_id)}')`}">${esc(handoffAction.label || 'Open Fresh Start')}</button>` : ''}
+  const evidenceChips = [
+    s.tokens_label ? `${s.tokens_label} tokens` : '',
+    s.calls ? `${s.calls} model calls` : '',
+    s.tool_calls ? `${s.tool_calls} tool calls` : '',
+    s.api_value ? `${s.api_value} API-equivalent` : '',
+    runtime.exact_return_available ? 'Exact return available' : (runtime.available ? 'App focus only' : 'Log only'),
+  ].filter(Boolean).slice(0, 5).map(item => `<span class="pill">${esc(item)}</span>`).join('');
+  return `<section class="detail-section recommended-action action-composer">
+    <div class="action-composer-head">
+      <h3>Needs action</h3>
+      <strong>${esc(title.replace(/^Recommended: /, ''))}</strong>
+      <p>${esc(body)}</p>
+    </div>
+    <div class="action-evidence">${evidenceChips}</div>
+    <div class="action-buttons">
+      ${hasHandoff ? `<button class="${primaryId === 'handoff' ? 'btn-primary' : 'btn-quiet'}" onclick="${handoffAction.label === 'Inspect evidence' ? "document.getElementById('evidencePanel').scrollIntoView({ behavior: 'smooth', block: 'center' })" : `openHandoff('${esc(s.session_id)}')`}">${esc(handoffAction.label || 'Build Fresh Start brief')}</button>` : ''}
       ${needsOutcome ? `<button class="${primaryId === 'review_outcome' ? 'btn-primary' : 'btn-quiet'}" onclick="document.getElementById('outcomePanel').scrollIntoView({ behavior: 'smooth', block: 'center' })">Mark outcome</button>` : ''}
       <button class="${primaryId === 'optimize_next_prompt' ? 'btn-primary' : 'btn-quiet'}" onclick="showView('prompt'); closeDrawer(); document.getElementById('promptInput').focus(); showToast('Paste the next prompt here to optimize it before sending')">Optimize next prompt</button>
+      ${hasHandoff ? `<button class="btn-quiet" onclick="continueFromSession('${esc(s.session_id)}')">Continue here</button>` : ''}
       ${openButton}
     </div>
     <p class="tool-link-note">${esc(openToolNote)}</p>
@@ -5017,11 +6611,21 @@ async function selectSession(sessionId, attempt = 0) {
     </div>`;
   const outcomeActions = s.outcome
     ? `<details id="outcomePanel" class="aiw-details outcome-control"><summary>Outcome marked: ${esc(s.outcome)} · change if needed</summary><div class="details-body">
-        <p>Changing this updates local value metrics and future cost-per-useful-change calculations.</p>
+        <p>Changing this updates local value metrics and future cost-per-useful-outcome calculations.</p>
+        <div class="outcome-help">
+          <div><strong>Useful</strong> means this session moved the work forward.</div>
+          <div><strong>Needs rework</strong> means the output helped but required correction or another pass.</div>
+          <div><strong>Abandoned</strong> means the session did not produce useful progress.</div>
+        </div>
         ${outcomeButtons}
       </div></details>`
     : `<div id="outcomePanel" class="outcome-control"><h3>Was this work useful?</h3>
         <p>Mark the result so AIWatcher can measure value instead of tokens alone.</p>
+        <div class="outcome-help">
+          <div><strong>Useful</strong> means this session moved the work forward.</div>
+          <div><strong>Needs rework</strong> means the output helped but required correction or another pass.</div>
+          <div><strong>Abandoned</strong> means the session did not produce useful progress.</div>
+        </div>
         ${outcomeButtons}
       </div>`;
   const insights = s.insights && s.insights.length
@@ -5064,17 +6668,12 @@ async function selectSession(sessionId, attempt = 0) {
         </section>`;
     promptReview = `${expensiveAsks}${coaching}<section class="detail-section"><h3>Prompt context</h3>${opener}</section>`;
   }
-  document.getElementById('detailContent').innerHTML = `<section class="detail-section">
-    <h2 class="session-title">${esc(s.project_short)}</h2>
-    <p class="session-meta">${esc(s.tool)} · ${esc(s.model)}</p>
-    ${renderIdentityStrip(s, s.runtime_attachment, s.source_path)}
-    ${miniStats({ sessions: 1, api_value: s.api_value, tokens: s.tokens_label, tool_calls: s.tool_calls })}
-    <div class="pill-row">${sessionStatePill(s.state)}${outcomePill(s.outcome)}</div>
-    </section>
-    ${runtimeReturnPanel(s.runtime_attachment, s.source_path)}
+  document.getElementById('detailContent').innerHTML = `<div class="session-review-shell">${renderSessionHero(s)}
     ${renderSessionActions(s)}
     ${outcomeActions}
     ${renderVerdict(s)}
+    ${runtimeReturnPanel(s.runtime_attachment, s.source_path)}
+    ${renderEvidenceRail(s, costliest, meaningfulEvents)}
     ${promptReview}
     <div id="evidencePanel">${renderEvidence(s.outcome_evidence)}</div>
     ${insights}
@@ -5087,7 +6686,7 @@ async function selectSession(sessionId, attempt = 0) {
         <tr><th>Privacy</th><td>${esc(s.privacy)}</td></tr>
       </tbody></table>
     </div></details></section>
-    ${timeline}`;
+    ${timeline}</div>`;
 }
 async function markOutcome(sessionId, outcome) {
   const buttons = document.querySelectorAll('.outcome-button');
@@ -5238,6 +6837,10 @@ let sessionsLoadedForDays = null;
 let reportLoadedForDays = null;
 let reportLoading = false;
 let freshStartReceiptsMarkedViewed = false;
+let sessionRowsCache = [];
+let changeRowsCache = [];
+let sessionSort = { key: 'updated_at', dir: 'desc' };
+let changeSort = { key: 'cost_usd', dir: 'desc' };
 async function markFreshStartReceiptsViewed() {
   if (freshStartReceiptsMarkedViewed) return;
   freshStartReceiptsMarkedViewed = true;
@@ -5286,19 +6889,67 @@ function debounceSessionSearch() {
 function clearSessionFilters() {
   document.getElementById('sessionSearch').value = '';
   document.getElementById('sessionOutcomeFilter').value = '';
-  document.getElementById('sessionEvidenceFilter').value = '';
+  document.getElementById('sessionStateFilter').value = '';
   loadSessions();
+}
+function compareValues(a, b, key) {
+  const av = a && a[key] !== undefined && a[key] !== null ? a[key] : '';
+  const bv = b && b[key] !== undefined && b[key] !== null ? b[key] : '';
+  if (typeof av === 'number' || typeof bv === 'number') return Number(av || 0) - Number(bv || 0);
+  const at = Date.parse(av);
+  const bt = Date.parse(bv);
+  if (!Number.isNaN(at) || !Number.isNaN(bt)) return (Number.isNaN(at) ? 0 : at) - (Number.isNaN(bt) ? 0 : bt);
+  return String(av).localeCompare(String(bv), undefined, { sensitivity: 'base' });
+}
+function sortedRows(rows, sort) {
+  return [...(rows || [])].sort((a, b) => {
+    const result = compareValues(a, b, sort.key);
+    return sort.dir === 'asc' ? result : -result;
+  });
+}
+function updateSortIndicators(prefix, sort, keys) {
+  keys.forEach(key => {
+    const node = document.getElementById(`sort-${prefix}-${key}`);
+    if (node) node.textContent = sort.key === key ? (sort.dir === 'asc' ? '▲' : '▼') : '';
+  });
+}
+function setSessionSort(key) {
+  sessionSort = { key, dir: sessionSort.key === key && sessionSort.dir === 'desc' ? 'asc' : 'desc' };
+  renderSessionRows(sessionRowsCache, Boolean(
+    document.getElementById('sessionSearch').value.trim()
+    || document.getElementById('sessionOutcomeFilter').value
+    || document.getElementById('sessionStateFilter').value
+  ));
+}
+function setChangeSort(key) {
+  changeSort = { key, dir: changeSort.key === key && changeSort.dir === 'desc' ? 'asc' : 'desc' };
+  document.getElementById('changeRows').innerHTML = renderChangeRows(changeRowsCache);
+  updateSortIndicators('change', changeSort, ['committed_at', 'project', 'cost_usd', 'lines_changed', 'usd_per_line', 'survival_pct', 'usd_per_surviving_line']);
+}
+function renderSessionRows(rows, filtered) {
+  updateSortIndicators('session', sessionSort, ['tool', 'project', 'model', 'tokens_value']);
+  document.getElementById('sessionRows').innerHTML = rows.length
+    ? sortedRows(rows, sessionSort).map(s => `<tr class="clickable" onclick="selectSession('${esc(s.session_id)}')">
+        <td>${esc(s.tool)}</td>
+        <td>${esc(s.project)}<br>${sessionStatePill(s.state)} ${s.outcome ? outcomePill(s.outcome) : outcomeEvidencePill(s)}</td>
+        <td>${esc(s.model)}</td>
+        <td class="mono num">${esc(s.tokens)}</td>
+        <td><button class="row-action">Review</button></td>
+      </tr>`).join('')
+    : `<tr><td colspan="5"><div class="empty">${filtered
+        ? 'No sessions match those filters. Try clearing the search or choosing a different session state.'
+        : 'No local sessions found for this window.'}</div></td></tr>`;
 }
 let sessionSearchToken = 0;
 async function loadSessions() {
   const days = document.getElementById('days').value;
   const search = document.getElementById('sessionSearch').value.trim();
   const outcome = document.getElementById('sessionOutcomeFilter').value;
-  const evidence = document.getElementById('sessionEvidenceFilter').value;
+  const state = document.getElementById('sessionStateFilter').value;
   const params = new URLSearchParams({ days });
   if (search) params.set('search', search);
   if (outcome) params.set('outcome', outcome);
-  if (evidence) params.set('evidence', evidence);
+  if (state) params.set('state', state);
   // A search that doesn't field-match every session in the window falls back
   // to an uncached per-session git evidence lookup (filter_sessions()'s rough
   // topic match) -- that can take several seconds, so show a visible pending
@@ -5308,21 +6959,12 @@ async function loadSessions() {
   const res = await fetch(`/api/sessions?${params.toString()}`);
   const data = await res.json();
   if (token !== sessionSearchToken) return;
-  const filtered = Boolean(search || outcome || evidence);
+  const filtered = Boolean(search || outcome || state);
   document.getElementById('sessionResultsNote').textContent = filtered
     ? `${data.total_matched} matching session${data.total_matched === 1 ? '' : 's'} of ${data.total_scanned} in this window.`
     : `${data.total_scanned} session${data.total_scanned === 1 ? '' : 's'} in this window.`;
-  document.getElementById('sessionRows').innerHTML = data.sessions.length
-    ? data.sessions.map(s => `<tr class="clickable" onclick="selectSession('${esc(s.session_id)}')">
-        <td>${esc(s.tool)}</td>
-        <td>${esc(s.project)}<br>${sessionStatePill(s.state)} ${s.outcome ? outcomePill(s.outcome) : outcomeEvidencePill(s)}</td>
-        <td>${esc(s.model)}</td>
-        <td class="mono">${esc(s.tokens)}</td>
-        <td><button class="row-action">Review</button></td>
-      </tr>`).join('')
-    : `<tr><td colspan="5"><div class="empty">${filtered
-        ? 'No sessions match those filters. Try clearing the search or a different outcome/evidence filter.'
-        : 'No local sessions found for this window.'}</div></td></tr>`;
+  sessionRowsCache = data.sessions || [];
+  renderSessionRows(sessionRowsCache, filtered);
   sessionsLoadedForDays = days;
 }
 async function loadReport() {
@@ -5334,7 +6976,8 @@ async function loadReport() {
     const reportRes = await fetch(`/api/report?days=${days}`);
     const report = await reportRes.json();
     if (document.getElementById('days').value !== days) return;
-    document.getElementById('todayDigest').innerHTML = renderTodayDigest(report.digest);
+    const todayDigest = document.getElementById('todayDigest');
+    if (todayDigest) todayDigest.innerHTML = renderTodayDigest(report.digest);
     document.getElementById('report').innerHTML = renderReport(report);
     reportLoadedForDays = days;
   } catch (error) {
@@ -5385,16 +7028,20 @@ async function load(resetDetail = true, forceRefresh = false) {
   document.getElementById('preflightDecisions').textContent = totals.preflight_decisions;
   receiptCache = data.intervention_receipts || [];
   const handoffDecisions = data.handoff_decisions || [];
-  document.getElementById('latestIntervention').innerHTML = renderLatestReceipt(receiptCache[0]);
-  document.getElementById('latestHandoffDecision').innerHTML = renderLatestHandoffDecision(handoffDecisions);
+  document.getElementById('latestIntervention').innerHTML = renderHomeReceiptSummary(receiptCache[0]);
+  document.getElementById('latestHandoffDecision').innerHTML = renderHomeHandoffSummary(handoffDecisions);
   document.getElementById('receiptRows').innerHTML = renderReceiptRows(receiptCache);
   document.getElementById('handoffDecisionRows').innerHTML = renderHandoffDecisionRows(handoffDecisions);
-  document.getElementById('contextHealth').innerHTML = renderContextHealth(data.context_health || [], data.context_health_status || 'ready');
+  document.getElementById('contextHealth').innerHTML = renderHomeContextHealth(data.context_health || [], data.context_health_status || 'ready');
+  document.getElementById('sessionContextHealth').innerHTML = renderContextHealth(data.context_health || [], data.context_health_status || 'ready');
+  document.getElementById('optimizeWorkspaceBody').innerHTML = renderOptimizeWorkspace(data.optimize || null);
   document.getElementById('unbanked').innerHTML = renderUnbanked(data.unbanked);
-  const changeRows = data.changes || [];
-  document.getElementById('changeRows').innerHTML = renderChangeRows(changeRows);
-  document.getElementById('changeTotals').innerHTML = renderChangeTotals(changeRows, data.changes_meta);
+  changeRowsCache = data.changes || [];
+  document.getElementById('changeRows').innerHTML = renderChangeRows(changeRowsCache);
+  document.getElementById('changeTotals').innerHTML = renderChangeTotals(changeRowsCache, data.changes_meta, data.unbanked);
+  updateSortIndicators('change', changeSort, ['committed_at', 'project', 'cost_usd', 'lines_changed', 'usd_per_line', 'survival_pct', 'usd_per_surviving_line']);
   document.getElementById('coverageRows').innerHTML = renderCoverage(data.coverage || []);
+  document.getElementById('coverageRowsSettings').innerHTML = renderCoverage(data.coverage || []);
   document.getElementById('setupRows').innerHTML = renderSetup(data.setup || []);
   const latest = data.recent_sessions[0];
   document.getElementById('latestSession').innerHTML = latest
@@ -5404,9 +7051,7 @@ async function load(resetDetail = true, forceRefresh = false) {
        <button data-testid="review-latest" class="btn-primary" onclick="selectSession('${esc(latest.session_id)}')">Review outcome</button></div></div>`
     : '<div class="empty">No local AI session detected yet.</div>';
   const recommendation = data.insights[0];
-  document.getElementById('todayRecommendation').innerHTML = recommendation
-    ? `<div class="insight"><strong>${esc(recommendation.title)}</strong><p>${esc(recommendation.body)}</p></div>`
-    : '<div class="empty">Nothing unusual yet. Keep the next task scoped and define a stop condition.</div>';
+  document.getElementById('todayRecommendation').innerHTML = renderHomeRecommendation(recommendation);
   document.getElementById('projects').innerHTML = bars(data.projects, "api_value_label", "project");
   document.getElementById('models').innerHTML = bars(data.models, "api_value_label", "model");
   document.getElementById('tools').innerHTML = bars(data.tools, "api_value_label", "tool");
@@ -5431,7 +7076,8 @@ async function load(resetDetail = true, forceRefresh = false) {
   document.getElementById('insightHeadline').innerHTML = renderInsightHeadline(data.totals);
   document.getElementById('insightFeed').innerHTML = renderInsightFeed(data.insights);
   if (reportLoadedForDays !== days) {
-    document.getElementById('todayDigest').innerHTML = '<div class="empty">Open Spend for the evidence-backed weekly digest.</div>';
+    const todayDigest = document.getElementById('todayDigest');
+    if (todayDigest) todayDigest.innerHTML = '<div class="empty">Open Improve for the evidence-backed weekly digest.</div>';
   }
   if (refreshButton) {
     refreshButton.disabled = false;
@@ -5451,6 +7097,13 @@ document.addEventListener('keydown', event => { if (event.key === 'Escape') clos
     if (requestedView === 'prompt') {
       document.getElementById('promptInput').focus();
     }
+  }
+  if (location.hash === '#optimizeWorkspace') {
+    showView('prompt');
+    window.setTimeout(() => document.getElementById('optimizeWorkspace').scrollIntoView({ block: 'start' }), 50);
+  }
+  if (new URLSearchParams(location.search).get('ask') === '1') {
+    openAskPanel();
   }
   // Deep link from `aiwatcher watch --notify` (issue #31): ?session=<id>
   // opens straight to that session's review instead of the overview.
@@ -5893,6 +7546,19 @@ class UIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/companion-state":
             self._send(200, json.dumps(build_companion_state()), "application/json; charset=utf-8")
             return
+        if parsed.path == "/api/companion-scan":
+            try:
+                _refresh_summary_cache(7)
+                state = build_companion_state()
+            except OSError as exc:
+                self._send(
+                    500,
+                    json.dumps({"error": f"Could not scan local AI sessions: {exc}"}),
+                    "application/json; charset=utf-8",
+                )
+                return
+            self._send(200, json.dumps({"ok": True, "state": state}), "application/json; charset=utf-8")
+            return
         if parsed.path == "/api/summary":
             params = parse_qs(parsed.query)
             try:
@@ -5915,9 +7581,18 @@ class UIHandler(BaseHTTPRequestHandler):
             evidence = params.get("evidence", [""])[0].strip() or None
             if evidence not in VALID_EVIDENCE_OUTCOMES:
                 evidence = None
+            state_filter = params.get("state", [""])[0].strip() or None
+            if state_filter not in {"active_recent", "active", "history"}:
+                state_filter = None
             self._send(
                 200,
-                json.dumps(build_session_search(days, search=search, outcome=outcome, evidence=evidence)),
+                json.dumps(build_session_search(
+                    days,
+                    search=search,
+                    outcome=outcome,
+                    evidence=evidence,
+                    state_filter=state_filter,
+                )),
                 "application/json; charset=utf-8",
             )
             return
@@ -6048,17 +7723,21 @@ class UIHandler(BaseHTTPRequestHandler):
         if parsed.path not in {
             "/api/outcome",
             "/api/preflight",
+            "/api/ask-aiwatcher",
             "/api/handoff-basic",
             "/api/handoff",
             "/api/handoff-demo",
             "/api/handoff-decision",
+            "/api/handoff-receipts-viewed",
+            "/api/optimize-decision",
+            "/api/companion-skip",
             "/api/ambient-intervention-action",
             "/api/runtime-return",
         }:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
-        if content_type != "application/json":
+        if content_type != "application/json" and parsed.path != "/api/handoff-receipts-viewed":
             self._send(415, json.dumps({"error": "Content-Type must be application/json"}), "application/json; charset=utf-8")
             return
         try:
@@ -6077,6 +7756,16 @@ class UIHandler(BaseHTTPRequestHandler):
             response = build_prompt_preflight(prompt, tool=tool, cwd=cwd)
             status = 400 if response.get("error") else 200
             self._send(status, json.dumps(response), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/ask-aiwatcher":
+            question = str(payload.get("question", "")).strip()
+            raw_days = payload.get("days", 7)
+            try:
+                days = max(1, min(90, int(raw_days)))
+            except (TypeError, ValueError):
+                days = 7
+            response = answer_local_question(question, days=days)
+            self._send(200, json.dumps(response), "application/json; charset=utf-8")
             return
         if parsed.path in {"/api/handoff-basic", "/api/handoff", "/api/handoff-demo"}:
             target = str(payload.get("target", "generic")).strip() or "generic"
@@ -6183,6 +7872,18 @@ class UIHandler(BaseHTTPRequestHandler):
                     action_channel=action_channel,
                     source_project_path=source_row.project_path if source_row else None,
                 )
+                if decision in {"continue_here", "dismissed"}:
+                    record_companion_skip(
+                        key=f"control_recommended:{session_id}",
+                        reason=f"User chose {decision} for Fresh Start.",
+                        minutes=24 * 60,
+                    )
+                    if source_row and is_reliable_project_path(source_row.project_path):
+                        record_companion_skip(
+                            key=f"control_recommended_project:{source_row.project_path}",
+                            reason=f"User chose {decision} for Fresh Start in this project.",
+                            minutes=24 * 60,
+                        )
             except ValueError as exc:
                 self._send(400, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")
                 return
@@ -6207,9 +7908,40 @@ class UIHandler(BaseHTTPRequestHandler):
                 return
             self._send(200, json.dumps({"ok": True, "updated": updated}), "application/json; charset=utf-8")
             return
+        if parsed.path == "/api/optimize-decision":
+            decision = str(payload.get("decision", "")).strip()
+            reason = str(payload.get("reason", "")).strip()
+            project = str(payload.get("project", "")).strip() or None
+            evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+            try:
+                record = record_optimize_decision(
+                    decision=decision,
+                    reason=reason,
+                    project_path=project,
+                    evidence=evidence,
+                    action_channel="dashboard",
+                )
+                record_companion_skip(
+                    key=f"optimize_workspace:{project or 'global'}",
+                    reason=f"User {decision.replace('_', ' ')} the Optimize Workspace nudge.",
+                    minutes=3 * 24 * 60,
+                )
+            except ValueError as exc:
+                self._send(400, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")
+                return
+            except OSError as exc:
+                self._send(
+                    500,
+                    json.dumps({"error": f"Could not save Optimize receipt: {exc}"}),
+                    "application/json; charset=utf-8",
+                )
+                return
+            self._send(200, json.dumps(record), "application/json; charset=utf-8")
+            return
         if parsed.path == "/api/companion-skip":
             state = str(payload.get("state", "")).strip()
             session_id = str(payload.get("session_id", "")).strip()
+            project = str(payload.get("project", "")).strip()
             if state == "prompt_gate":
                 self._send(
                     409,
@@ -6237,13 +7969,28 @@ class UIHandler(BaseHTTPRequestHandler):
                     record_companion_skip(
                         key=f"control_recommended:{session_id}",
                         reason="User skipped the Fresh Start Companion nudge.",
+                        minutes=24 * 60,
                     )
+                    if project and project != "unknown":
+                        record_companion_skip(
+                            key=f"control_recommended_project:{project}",
+                            reason="User skipped Fresh Start nudges for this project.",
+                            minutes=24 * 60,
+                        )
                     self._send(200, json.dumps({"ok": True, "record": record}), "application/json; charset=utf-8")
                     return
                 if state == "needs_review":
                     record = record_companion_skip(
                         key="needs_review",
                         reason="User skipped the needs-review Companion nudge.",
+                    )
+                    self._send(200, json.dumps({"ok": True, "record": record}), "application/json; charset=utf-8")
+                    return
+                if state == "optimize_available":
+                    record = record_companion_skip(
+                        key=f"optimize_workspace:{project or 'global'}",
+                        reason="User skipped the Optimize Workspace Companion nudge.",
+                        minutes=3 * 24 * 60,
                     )
                     self._send(200, json.dumps({"ok": True, "record": record}), "application/json; charset=utf-8")
                     return

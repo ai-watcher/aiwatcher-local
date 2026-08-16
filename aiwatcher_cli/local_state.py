@@ -168,6 +168,7 @@ def _empty_state() -> dict[str, Any]:
         "brief_tokens": [],
         "watch_notifications": [],
         "handoff_decisions": [],
+        "optimize_decisions": [],
         "companion_skips": [],
         "ambient_interventions": [],
         "sent_notification_keys": [],
@@ -236,6 +237,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("brief_tokens", [])
     data.setdefault("watch_notifications", [])
     data.setdefault("handoff_decisions", [])
+    data.setdefault("optimize_decisions", [])
     data.setdefault("companion_skips", [])
     data.setdefault("ambient_interventions", [])
     data.setdefault("sent_notification_keys", [])
@@ -396,6 +398,9 @@ def record_active_prompt_gate(
     url: str,
     expires_at: datetime,
     session_id: str | None = None,
+    workflow_mode: str | None = None,
+    workflow_label: str | None = None,
+    workflow_reward: str | None = None,
 ) -> None:
     with _locked_state():
         data = _load()
@@ -409,6 +414,10 @@ def record_active_prompt_gate(
             "score": score,
             "url": url,
             "session_id": session_id,
+            "workflow_mode": workflow_mode,
+            "workflow_label": workflow_label,
+            "workflow_reward": workflow_reward,
+            "companion_seen_at": None,
         }
         _save(data)
 
@@ -444,6 +453,22 @@ def active_prompt_gate() -> dict[str, Any] | None:
             _save(data)
             return None
         return dict(gate)
+
+
+def mark_active_prompt_gate_seen(gate_id: str) -> None:
+    with _locked_state():
+        data = _load()
+        gate = data.get("active_prompt_gate")
+        if not isinstance(gate, dict) or gate.get("id") != gate_id:
+            return
+        gate["companion_seen_at"] = datetime.now(timezone.utc).isoformat()
+        data["active_prompt_gate"] = gate
+        _save(data)
+
+
+def active_prompt_gate_seen(gate_id: str) -> bool:
+    gate = active_prompt_gate()
+    return bool(isinstance(gate, dict) and gate.get("id") == gate_id and gate.get("companion_seen_at"))
 
 
 def _prune_companion_skips(data: dict[str, Any]) -> None:
@@ -734,6 +759,7 @@ def recent_watch_notifications(limit: int = 10) -> list[dict[str, Any]]:
 
 VALID_HANDOFF_DECISIONS = {"new_chat", "continue_here", "copy_handoff", "dismissed"}
 MAX_HANDOFF_DECISIONS_STORED = 200
+MAX_OPTIMIZE_DECISIONS_STORED = 200
 
 
 def record_handoff_decision(
@@ -801,6 +827,54 @@ def recent_handoff_decisions(limit: int = 10) -> list[dict[str, Any]]:
     except OSError:
         return []
     rows = [row for row in data["handoff_decisions"] if isinstance(row, dict)]
+    return list(reversed(rows[-max(1, limit):]))
+
+
+def record_optimize_decision(
+    *,
+    decision: str,
+    reason: str,
+    project_path: str | None = None,
+    evidence: dict[str, Any] | None = None,
+    action_channel: str | None = None,
+) -> dict[str, Any]:
+    """Record a local Optimize Workspace decision without deleting anything.
+
+    Optimize is a Control-phase action for stale forks, completed Fresh Starts,
+    old AI worktrees, and orphaned runtimes. The receipt is intentionally
+    metadata-only: evidence labels, counts, and paths, never prompt/source text.
+    """
+    allowed = {"marked_done", "checklist_copied", "skipped", "reviewed"}
+    if decision not in allowed:
+        raise ValueError(f"decision must be one of: {', '.join(sorted(allowed))}")
+    payload = evidence if isinstance(evidence, dict) else {}
+    record = {
+        "id": str(uuid.uuid4()),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "phase": "control",
+        "intervention_type": "optimize_workspace",
+        "receipt_kind": "optimize_workspace",
+        "decision": decision,
+        "reason": reason.strip()[:500],
+        "project_path": project_path.strip()[:1000] if isinstance(project_path, str) else None,
+        "action_channel": (action_channel or "dashboard").strip()[:80],
+        "evidence": payload,
+    }
+    with _locked_state():
+        data = _load()
+        data["optimize_decisions"].append(record)
+        data["optimize_decisions"] = data["optimize_decisions"][-MAX_OPTIMIZE_DECISIONS_STORED:]
+        _save(data)
+    return record
+
+
+def recent_optimize_decisions(limit: int = 10) -> list[dict[str, Any]]:
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return []
+    rows = [row for row in data["optimize_decisions"] if isinstance(row, dict)]
     return list(reversed(rows[-max(1, limit):]))
 
 

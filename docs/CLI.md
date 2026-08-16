@@ -531,7 +531,7 @@ aiwatcher watch --interval 30 --notify
 Run the local runtime-nudge companion without the dashboard
 
 ```sh
-aiwatcher companion {start,status,stop,run} ...
+aiwatcher companion {start,status,stop,tray,autostart,run} ...
 ```
 
 Subcommands:
@@ -541,6 +541,8 @@ Subcommands:
 | `start` | Start the companion in the background |
 | `status` | Show companion status |
 | `stop` | Stop the companion |
+| `tray` | Inspect or start the native live Companion surface |
+| `autostart` | Manage login autostart for the Companion |
 | `run` | Run the companion in the foreground (used by companion start) |
 
 #### `aiwatcher companion start`
@@ -576,6 +578,26 @@ Stop the companion
 
 ```sh
 aiwatcher companion stop
+```
+
+Takes no arguments.
+
+#### `aiwatcher companion tray`
+
+Inspect or start the native live Companion surface
+
+```sh
+aiwatcher companion tray {status,start,install,uninstall} ...
+```
+
+Takes no arguments.
+
+#### `aiwatcher companion autostart`
+
+Manage login autostart for the Companion
+
+```sh
+aiwatcher companion autostart {install,status,uninstall} ...
 ```
 
 Takes no arguments.

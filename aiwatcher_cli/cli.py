@@ -31,12 +31,22 @@ from typing import Any, Callable, Iterable, Sequence
 from urllib.parse import quote
 
 from .correlate import link_recent_fresh_start_receipts_to_sessions, link_recent_interventions_to_sessions
-from .companion import companion_log_path, local_action_server_available, start_companion, stop_companion
+from .companion import (
+    companion_log_path,
+    install_login_autostart,
+    local_action_server_available,
+    login_autostart_status,
+    start_companion,
+    stop_companion,
+    tray_status,
+    uninstall_login_autostart,
+)
 from .evidence_capture import record_missing_evidence_snapshots
 from .local_state import (
     COMMAND_GATE_BLOCKED_DECISIONS,
     VALID_OUTCOMES,
     ambient_intervention_delivery_allowed,
+    active_prompt_gate_seen,
     clear_watcher_heartbeat,
     command_hash,
     consume_brief_token,
@@ -1385,12 +1395,19 @@ def build_execution_brief(
     sensitive_or_destructive: bool,
     vague_scope: bool,
     multiple_tasks: bool,
+    workflow_recommendation: dict[str, str] | None = None,
     plan_only: bool = False,
 ) -> str:
     """Preserve the requested outcome while adding only relevant controls."""
     lines = ["Task"]
     lines.extend(_brief_task_sections(prompt, cwd=cwd))
     lines.extend(["", "Execution approach"])
+    if workflow_recommendation:
+        lines.append(f"- Recommended workflow: {workflow_recommendation.get('label', 'Continue here')}.")
+        if workflow_recommendation.get("instruction"):
+            lines.append(f"- How to run it: {workflow_recommendation['instruction']}")
+        if workflow_recommendation.get("stop_condition"):
+            lines.append(f"- Stop condition: {workflow_recommendation['stop_condition']}")
     lines.append("- Restate the exact outcome and success criteria in one or two sentences before spending context on tools.")
     lines.append("- Make the first checkpoint explicit: what you will inspect, what you will change if needed, and where you will stop.")
     if plan_only:
@@ -1642,6 +1659,118 @@ def _apply_external_risk_review(
     return score, risk, review
 
 
+def _prompt_workflow_recommendation(
+    *,
+    prompt: str,
+    tool: str,
+    score: int,
+    risk: str,
+    broad_scope: bool,
+    vague_scope: bool,
+    multiple_tasks: bool,
+    plan_only: bool,
+    sensitive_or_destructive: bool,
+) -> dict[str, str]:
+    lower = prompt.lower()
+    explicit_subagents = any(term in lower for term in [
+        "subagent", "subagents", "parallelize", "in parallel", "separate agents", "spawn agents",
+    ])
+    parallel_domains = [
+        "ux", "ui", "frontend", "backend", "api", "database", "security", "performance",
+        "tests", "test", "docs", "documentation", "accessibility", "windows", "mac",
+        "linux", "customer experience", "functional", "usability",
+    ]
+    domain_hits = sum(1 for term in parallel_domains if re.search(rf"\b{re.escape(term)}\b", lower))
+    asks_review = any(term in lower for term in [
+        "review", "audit", "analyze", "investigate", "compare", "research", "deep dive",
+    ])
+    asks_implementation = any(term in lower for term in [
+        "implement", "fix", "change", "modify", "refactor", "delete", "migrate", "update",
+    ])
+    tool_label = tool if tool != "agent" else "your AI tool"
+
+    if explicit_subagents or (domain_hits >= 3 and (asks_review or plan_only)):
+        return {
+            "mode": "use_subagents",
+            "label": "Use subagents, then consolidate",
+            "title": "Use subagents",
+            "why": "This prompt spans independent review lanes; one chat doing all of them is likely to bloat context and blur conclusions.",
+            "instruction": "Assign each independent lane to a subagent, then have the orchestrator compare evidence, resolve conflicts, and produce one final answer.",
+            "stop_condition": "Do not implement from subagent output until the orchestrator has reconciled findings and named the smallest next action.",
+            "cta": "Run with subagents",
+        }
+
+    should_fork = (
+        tool.lower().startswith("codex")
+        and (
+            multiple_tasks
+            or (broad_scope and (score >= 3 or vague_scope))
+            or (asks_review and asks_implementation and score >= 3)
+        )
+        and not sensitive_or_destructive
+    )
+    if should_fork:
+        return {
+            "mode": "fork_task",
+            "label": "Fork this task",
+            "title": "Fork recommended",
+            "why": "This is a broad branch of work. Forking keeps the current chat stable while the new branch explores or implements the scoped brief.",
+            "instruction": "In Codex, right-click the current chat and choose Fork, then paste this execution brief into the fork. Keep this chat as the source of truth.",
+            "stop_condition": "Return to the original chat only with the final summary, files touched, verification, and unresolved questions.",
+            "cta": "Fork + paste brief",
+        }
+
+    if sensitive_or_destructive:
+        return {
+            "mode": "continue_with_confirmation",
+            "label": "Continue only after confirmation",
+            "title": "Confirm before running",
+            "why": "The prompt could delete data, weaken security, expose secrets, or change production-sensitive behavior.",
+            "instruction": f"Use {tool_label} only after confirming the exact target and non-destructive inspection step.",
+            "stop_condition": "Stop before destructive commands, credential access, force pushes, production writes, or security-control removal.",
+            "cta": "Review gate",
+        }
+
+    if broad_scope or multiple_tasks or vague_scope or score >= 3:
+        return {
+            "mode": "checkpoint_current",
+            "label": "Checkpoint before edits",
+            "title": "Plan first",
+            "why": "The task has enough ambiguity or breadth that a short plan should come before tool-heavy execution.",
+            "instruction": f"Use {tool_label} in this chat, but require a plan/checkpoint before edits.",
+            "stop_condition": "Stop after the first coherent phase and verify before expanding scope.",
+            "cta": "Use brief",
+        }
+
+    return {
+        "mode": "continue_current",
+        "label": "Continue here",
+        "title": "Continue here",
+        "why": "The prompt looks narrow enough to run in the current chat with ordinary checkpointing.",
+        "instruction": f"Use {tool_label} in this chat with the scoped execution brief.",
+        "stop_condition": "Stop when the requested outcome is verified.",
+        "cta": "Use brief",
+    }
+
+
+def _workflow_reward_label(impact: dict[str, object], workflow: dict[str, str]) -> str:
+    if impact.get("available"):
+        savings = impact.get("savings", {}) if isinstance(impact.get("savings"), dict) else {}
+        tokens = savings.get("tokens") if isinstance(savings, dict) else None
+        api_value = savings.get("api_value_usd") if isinstance(savings, dict) else None
+        token_label = _number_range_label(*tokens) if isinstance(tokens, list) and len(tokens) == 2 else ""
+        value_label = _range_label(*api_value, money) if isinstance(api_value, list) and len(api_value) == 2 else ""
+        if token_label and value_label:
+            return f"Potential avoided pressure before execution: {token_label} tokens and {value_label} API-equivalent."
+    if workflow.get("mode") == "fork_task":
+        return "Likely reward: isolates exploratory context before it pollutes the main task."
+    if workflow.get("mode") == "use_subagents":
+        return "Likely reward: parallel evidence without one giant mixed-context chat."
+    if workflow.get("mode") == "continue_with_confirmation":
+        return "Likely reward: avoids accidental destructive or security-weakening execution."
+    return "Likely reward: fewer tool calls and less rework by forcing a checkpoint before execution."
+
+
 def analyze_prompt(
     prompt: str,
     *,
@@ -1869,6 +1998,18 @@ def analyze_prompt(
             if score >= 6:
                 sensitive_or_destructive = True
 
+    workflow = _prompt_workflow_recommendation(
+        prompt=text,
+        tool=tool,
+        score=score,
+        risk=risk,
+        broad_scope=broad_scope,
+        vague_scope=vague_scope,
+        multiple_tasks=multiple_tasks,
+        plan_only=plan_only,
+        sensitive_or_destructive=sensitive_or_destructive,
+    )
+
     # text already carries its own Task/Execution approach/Completion report
     # shell (just not a *verified* one, or _is_generated_brief above would
     # have short-circuited already) -- reuse it rather than nesting a second
@@ -1881,8 +2022,15 @@ def analyze_prompt(
         sensitive_or_destructive=sensitive_or_destructive,
         vague_scope=vague_scope,
         multiple_tasks=multiple_tasks,
+        workflow_recommendation=workflow,
         plan_only=plan_only,
     )
+    estimated_impact = (
+        estimate_prompt_savings(text, risk_score=score, tool=tool, cwd=cwd)
+        if score > 0 and include_estimate
+        else {}
+    )
+    workflow = {**workflow, "reward": _workflow_reward_label(estimated_impact, workflow)}
     return {
         "risk": risk,
         "score": score,
@@ -1891,12 +2039,9 @@ def analyze_prompt(
         "suggestions": suggestions,
         "guardrails": guardrails,
         "semantic_review": semantic_review or {},
+        "workflow": workflow,
         "suggested_prompt": safer_prompt,
-        "estimated_impact": (
-            estimate_prompt_savings(text, risk_score=score, tool=tool, cwd=cwd)
-            if score > 0 and include_estimate
-            else {}
-        ),
+        "estimated_impact": estimated_impact,
     }
 
 
@@ -1905,6 +2050,7 @@ def render_preflight(result: dict[str, object]) -> str:
     original = impact.get("original", {}) if isinstance(impact.get("original"), dict) else {}
     safer = impact.get("safer", {}) if isinstance(impact.get("safer"), dict) else {}
     savings = impact.get("savings", {}) if isinstance(impact.get("savings"), dict) else {}
+    workflow = result.get("workflow") if isinstance(result.get("workflow"), dict) else {}
     lines = [
         "AIWatcher prompt preflight",
         f"Risk: {result['risk']}",
@@ -1935,6 +2081,14 @@ def render_preflight(result: dict[str, object]) -> str:
             f"Estimated savings: {_number_range_label(*savings['tokens'])} tokens | {_number_range_label(*savings['model_calls'])} model calls | {_number_range_label(*savings['tool_calls'])} tool calls | {_range_label(*savings['api_value_usd'], money)} API-equivalent",
             f"Planning confidence: {impact.get('confidence', 'low')} ({impact.get('basis', 'local history unavailable')})",
             "These are planning ranges, not guaranteed billing savings.",
+        ])
+    if workflow:
+        lines.extend([
+            "",
+            "Recommended workflow",
+            f"{workflow.get('label', 'Continue here')}: {workflow.get('why', '')}",
+            f"How to run: {workflow.get('instruction', '')}",
+            f"Reward: {workflow.get('reward', '')}",
         ])
     lines.extend(["", "Suggestions"])
     lines.extend(f"- {item}" for item in result["suggestions"])
@@ -2013,6 +2167,61 @@ def _hero_pressure_label(result: dict[str, object]) -> str | None:
     if not isinstance(tool_calls, list) or len(tool_calls) != 2:
         return None
     return f"{_number_range_label(*tokens)} tokens · {_number_range_label(*tool_calls)} tool calls avoided"
+
+
+def _prompt_gate_route(result: dict[str, object]) -> dict[str, str]:
+    workflow = result.get("workflow") if isinstance(result.get("workflow"), dict) else {}
+    mode = str(workflow.get("mode") or "")
+    risk = str(result.get("risk") or "low")
+    if mode == "fork_task":
+        return {
+            "kind": "fork",
+            "label": "Fork",
+            "title": str(workflow.get("title") or "Fork recommended"),
+            "why": str(workflow.get("why") or "This task is broad enough to isolate in a separate chat."),
+            "next_step": str(workflow.get("instruction") or "Fork the current chat or start a separate task, then paste the execution brief."),
+            "primary_label": "Copy fork brief",
+            "reward": str(workflow.get("reward") or "Likely reward: isolates exploratory context before it pollutes the main task."),
+        }
+    if mode == "use_subagents":
+        return {
+            "kind": "fork",
+            "label": "Split work",
+            "title": str(workflow.get("title") or "Use subagents"),
+            "why": str(workflow.get("why") or "This request spans independent review lanes."),
+            "next_step": str(workflow.get("instruction") or "Split the work into independent lanes, then consolidate."),
+            "primary_label": "Copy split brief",
+            "reward": str(workflow.get("reward") or "Likely reward: parallel evidence without one giant mixed-context chat."),
+        }
+    if mode == "continue_with_confirmation" or risk == "high":
+        return {
+            "kind": "prompt_change",
+            "label": "Rewrite prompt",
+            "title": str(workflow.get("title") or "Change the prompt first"),
+            "why": str(workflow.get("why") or "AIWatcher found safety, scope, or cost pressure before execution."),
+            "next_step": "Use the scoped brief or cancel. Run the original only after confirming the target and risk.",
+            "primary_label": "Add safer brief",
+            "reward": str(workflow.get("reward") or "Likely reward: avoids accidental destructive or expensive execution."),
+        }
+    if mode == "checkpoint_current":
+        return {
+            "kind": "prompt_change",
+            "label": "Plan first",
+            "title": str(workflow.get("title") or "Plan before edits"),
+            "why": str(workflow.get("why") or "The task has enough ambiguity or breadth to checkpoint before execution."),
+            "next_step": "Use the brief so the AI starts with a plan and stop condition before touching files.",
+            "primary_label": "Add scoped brief",
+            "reward": str(workflow.get("reward") or "Likely reward: fewer tool calls and less rework."),
+        }
+    return {
+        "kind": "continue",
+        "label": "Continue",
+        "title": str(workflow.get("title") or "Continue in this chat"),
+        "why": str(workflow.get("why") or "The prompt looks narrow enough to run with ordinary checkpointing."),
+        "next_step": "Use the brief for a checkpoint wrapper, or run the original unchanged.",
+        "primary_label": "Add brief",
+        "reward": str(workflow.get("reward") or "Likely reward: clearer execution with a small checkpoint."),
+    }
 
 
 _BRIEF_STATIC_SUFFIX_MARKERS = ("\n\nWorking directory\n", "\n\nCompletion report\n")
@@ -2099,6 +2308,17 @@ def _prompt_gate_html(*, tool: str, cwd: str, prompt: str, result: dict[str, obj
         if guardrail_chips
         else '<div class="guardrails"><span class="chip chip-clean">No guardrails needed — prompt looked scoped as written.</span></div>'
     )
+    route = _prompt_gate_route(result)
+    route_card = f"""
+  <section class="route-card {html.escape(route['kind'])}">
+    <div>
+      <span class="route-label">{html.escape(route['label'])}</span>
+      <h2>{html.escape(route['title'])}</h2>
+      <p>{html.escape(route['why'])}</p>
+      <p class="route-next"><strong>Next:</strong> {html.escape(route['next_step'])}</p>
+    </div>
+    <div class="route-reward">{html.escape(route['reward'])}</div>
+  </section>"""
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -2139,6 +2359,13 @@ p {{ margin: 0; color: var(--muted); line-height: 1.5; }}
 .chip {{ display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 999px; padding: 10px 16px; background: var(--panel-2); color: var(--text); font-weight: 600; font-size: 15px; }}
 .chip-icon {{ font-size: 17px; line-height: 1; }}
 .chip-clean {{ color: var(--muted); font-weight: 400; }}
+.route-card {{ display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(180px, .6fr); gap: 18px; align-items: center; border: 1px solid rgba(84,215,183,.35); border-left: 4px solid var(--accent); border-radius: 8px; padding: 18px 20px; margin: 0 0 20px; background: rgba(84,215,183,.08); }}
+.route-card.fork {{ border-left-color: var(--blue); background: rgba(117,167,255,.08); }}
+.route-card.prompt_change {{ border-left-color: var(--amber); background: rgba(247,198,107,.08); }}
+.route-card h2 {{ margin: 6px 0; }}
+.route-label {{ display: inline-flex; border: 1px solid var(--line); border-radius: 999px; padding: 5px 9px; background: rgba(8,13,20,.62); color: #dbe8f7; font-size: 13px; font-weight: 800; }}
+.route-next {{ margin-top: 8px; color: #d9f8ee; }}
+.route-reward {{ border-radius: 8px; padding: 12px; background: rgba(117,167,255,.12); color: #d7e7ff; font-weight: 800; line-height: 1.4; }}
 .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }}
 .card {{ background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.01)), var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 22px; box-shadow: 0 16px 48px rgba(0,0,0,.28); }}
 h2 {{ margin: 0 0 14px; font-size: 21px; }}
@@ -2169,7 +2396,7 @@ button:disabled {{ cursor: wait; opacity: .62; transform: none; }}
 .brief-edit textarea {{ margin-top: 8px; min-height: 220px; }}
 @media (max-width: 880px) {{
   main {{ width: min(100vw - 24px, 720px); margin: 18px auto; }}
-  .top, .grid, .actions {{ grid-template-columns: 1fr; display: grid; }}
+  .top, .grid, .actions, .route-card {{ grid-template-columns: 1fr; display: grid; }}
 }}
 </style>
 </head>
@@ -2178,7 +2405,7 @@ button:disabled {{ cursor: wait; opacity: .62; transform: none; }}
   <div class="top">
     <div>
       <h1>AIWatcher Prompt Gate</h1>
-      <p>Review the work before {tool_label} starts. Use the brief to narrow scope, keep checkpoints, and reduce avoidable cost or safety risk.</p>
+      <p>Review the route before {tool_label} starts. AIWatcher chooses whether to rewrite, fork, split, or continue before context is spent.</p>
     </div>
     <div>
       <span class="pill risk">Risk: {risk} | score {score}</span>
@@ -2190,6 +2417,7 @@ button:disabled {{ cursor: wait; opacity: .62; transform: none; }}
     </div>
   </div>
   {guardrail_row}
+  {route_card}
   <div class="grid">
     <section class="card">
       <h2>What AIWatcher noticed</h2>
@@ -2210,7 +2438,7 @@ button:disabled {{ cursor: wait; opacity: .62; transform: none; }}
     </section>
   </div>
   <div class="actions">
-    <button class="primary" onclick="sendDecision('use_brief')">Add safer brief</button>
+    <button class="primary" onclick="sendDecision('use_brief')">{html.escape(route['primary_label'])}</button>
     <button onclick="sendDecision('edit')">Add edited brief</button>
     <button onclick="sendDecision('run_original')">Run original</button>
     <button class="danger" onclick="sendDecision('cancel')">Cancel run</button>
@@ -2421,6 +2649,7 @@ def run_prompt_gate(
     thread.start()
     url = f"http://127.0.0.1:{server.server_port}/"
     try:
+        workflow = result.get("workflow") if isinstance(result.get("workflow"), dict) else {}
         record_active_prompt_gate(
             gate_id=gate_id,
             tool=tool,
@@ -2429,6 +2658,9 @@ def run_prompt_gate(
             score=int(result.get("score") or 0),
             url=url,
             expires_at=datetime.now(timezone.utc) + timedelta(seconds=max(1, timeout_seconds)),
+            workflow_mode=str(workflow.get("mode") or ""),
+            workflow_label=str(workflow.get("label") or ""),
+            workflow_reward=str(workflow.get("reward") or ""),
         )
     except OSError:
         pass
@@ -2451,6 +2683,32 @@ def run_prompt_gate(
                 except OSError:
                     pass
                 return _fallback_prompt_gate(tool=tool, prompt=prompt, result=result)
+        elif open_browser and companion_presence_pid is not None:
+            # The Companion is meant to be the user's always-visible bridge.
+            # Give it a short chance to observe and blink the active gate. If
+            # the process is stale or not polling, fall back to the classic
+            # temporary browser gate rather than leaving the hook invisible.
+            seen_by_companion = False
+            deadline = time_module.monotonic() + min(1.5, max(0.2, timeout_seconds / 4))
+            while not decision_event.is_set() and time_module.monotonic() < deadline:
+                try:
+                    if active_prompt_gate_seen(gate_id):
+                        seen_by_companion = True
+                        break
+                except OSError:
+                    break
+                time_module.sleep(0.1)
+            if not seen_by_companion and not decision_event.is_set():
+                try:
+                    opened = webbrowser.open(url)
+                except Exception:
+                    opened = False
+                if not opened:
+                    try:
+                        clear_active_prompt_gate(gate_id)
+                    except OSError:
+                        pass
+                    return _fallback_prompt_gate(tool=tool, prompt=prompt, result=result)
         if not decision_event.wait(max(1, timeout_seconds)):
             return None
         return dict(state)
@@ -2960,6 +3218,12 @@ def setup_checklist() -> list[dict[str, str]]:
             "status": "optional",
         },
         {
+            "title": "Install Companion login autostart",
+            "why": "Starts the local Companion when you log in, so AIWatcher is available during AI work without remembering a command.",
+            "command": "aiwatcher companion autostart install",
+            "status": "optional",
+        },
+        {
             "title": "Prove hook invocation",
             "why": "hook-status is the source of truth; session logs alone do not prove a prompt was intercepted.",
             "command": "aiwatcher hook-status",
@@ -3006,6 +3270,81 @@ def command_status(_args: argparse.Namespace) -> int:
 def command_companion(args: argparse.Namespace) -> int:
     action = str(args.companion_action)
     presence_requested = not bool(getattr(args, "no_presence", False))
+    if action == "tray":
+        tray_action = str(getattr(args, "tray_action", "status"))
+        status = tray_status()
+        if tray_action == "status":
+            print("AIWatcher tray/menu-bar status")
+            print(f"Mode: {status.get('label')}")
+            print(str(status.get("detail") or ""))
+            print(f"Supported: {'yes' if status.get('supported') else 'no'}")
+            tray_pid = _existing_companion_tray_pid()
+            if tray_pid:
+                print(f"Tray PID: {tray_pid}")
+            return 0 if status.get("supported") else 2
+        if tray_action == "start":
+            result = start_companion(
+                interval_seconds=getattr(args, "interval", 30),
+                presence=False,
+            )
+            if not result.get("ok"):
+                print(f"Could not start AIWatcher background companion: {result.get('message', 'unknown error')}", file=sys.stderr)
+                return 2
+            base_url = _watch_ui_base_url()
+            ok, detail = _open_native_companion_tray(base_url)
+            if not ok:
+                print(f"Could not start AIWatcher tray/menu-bar: {detail}", file=sys.stderr)
+                return 2
+            print(f"AIWatcher tray/menu-bar started ({detail}).")
+            if result.get("already_running"):
+                print(f"Background Companion already running (PID {result.get('pid')}).")
+            else:
+                print(f"Background Companion started (PID {result.get('pid')}).")
+            print(str(status.get("detail") or ""))
+            return 0
+        if tray_action == "install":
+            result = install_login_autostart(
+                interval_seconds=getattr(args, "interval", 30),
+                tray=True,
+            )
+            if not result.get("ok"):
+                print(f"Could not install tray/menu-bar login startup: {result.get('message', 'unknown error')}", file=sys.stderr)
+                return 2
+            print("AIWatcher tray/menu-bar will start at login.")
+            print(f"Installed: {result.get('path')}")
+            return 0
+        if tray_action == "uninstall":
+            result = uninstall_login_autostart()
+            print(str(result.get("message") or ("Removed login autostart." if result.get("removed") else "Login autostart is not installed.")))
+            if result.get("path"):
+                print(f"Path: {result['path']}")
+            return 0 if result.get("ok") else 2
+    if action == "autostart":
+        autostart_action = str(getattr(args, "autostart_action", "status"))
+        if autostart_action == "install":
+            result = install_login_autostart(
+                interval_seconds=getattr(args, "interval", 30),
+                presence=not bool(getattr(args, "no_presence", False)),
+                presence_position=str(getattr(args, "presence_position", "bottom-right")),
+            )
+            if not result.get("ok"):
+                print(f"Could not install login autostart: {result.get('message', 'unknown error')}", file=sys.stderr)
+                return 2
+            print("AIWatcher Companion will start at login.")
+            print(f"Installed: {result.get('path')}")
+            return 0
+        if autostart_action == "uninstall":
+            result = uninstall_login_autostart()
+            print(str(result.get("message") or ("Removed login autostart." if result.get("removed") else "Login autostart is not installed.")))
+            if result.get("path"):
+                print(f"Path: {result['path']}")
+            return 0 if result.get("ok") else 2
+        status = login_autostart_status()
+        print("AIWatcher Companion login autostart")
+        print(f"Supported: {'yes' if status.get('supported') else 'no'}")
+        print(f"Installed: {'yes' if status.get('installed') else 'no'}")
+        print(f"Path: {status.get('path')}")
+        return 0 if status.get("supported") else 2
     if action == "run":
         if not local_action_server_available():
             from .ui import serve
@@ -3075,6 +3414,7 @@ def command_companion(args: argparse.Namespace) -> int:
         return 0
     if action == "stop":
         _stop_native_companion_presence()
+        _stop_native_companion_tray()
         result = stop_companion()
         print(str(result.get("message") or "Companion stopped."))
         return 0 if result.get("ok") else 2
@@ -3084,6 +3424,9 @@ def command_companion(args: argparse.Namespace) -> int:
     print(f"Status: {status.get('status', 'unknown')}")
     if status.get("pid"):
         print(f"PID: {status['pid']}")
+    tray_pid = _existing_companion_tray_pid()
+    if tray_pid:
+        print(f"Tray PID: {tray_pid}")
     print(str(status.get("detail") or "No watcher heartbeat is available."))
     print(f"Log: {companion_log_path()}")
     return 0
@@ -4078,6 +4421,10 @@ def _companion_presence_pid_path() -> Path:
     return state_path().parent / "companion-presence.pid"
 
 
+def _companion_tray_pid_path() -> Path:
+    return state_path().parent / "companion-tray.pid"
+
+
 def _pid_is_running(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -4102,6 +4449,20 @@ def _existing_companion_presence_pid() -> int | None:
     return None
 
 
+def _existing_companion_tray_pid() -> int | None:
+    try:
+        pid = int(_companion_tray_pid_path().read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    if _pid_is_running(pid):
+        return pid
+    try:
+        _companion_tray_pid_path().unlink()
+    except OSError:
+        pass
+    return None
+
+
 def _stop_native_companion_presence() -> None:
     pid = _existing_companion_presence_pid()
     if pid is None:
@@ -4120,6 +4481,28 @@ def _stop_native_companion_presence() -> None:
         return
     try:
         _companion_presence_pid_path().unlink()
+    except OSError:
+        pass
+
+
+def _stop_native_companion_tray() -> None:
+    pid = _existing_companion_tray_pid()
+    if pid is None:
+        return
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+        else:
+            os.kill(pid, signal.SIGTERM)
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    try:
+        _companion_tray_pid_path().unlink()
     except OSError:
         pass
 
@@ -4173,6 +4556,39 @@ def _open_native_companion_presence(
     except OSError as exc:
         return False, str(exc)
     return True, "native companion presence"
+
+
+def _open_native_companion_tray(base_url: str) -> tuple[bool, str]:
+    existing_pid = _existing_companion_tray_pid()
+    if existing_pid is not None:
+        return True, f"native tray already running (PID {existing_pid})"
+    if sys.platform not in {"darwin", "win32"}:
+        return False, "native tray is implemented for macOS and Windows"
+    if sys.platform == "darwin" and not shutil.which("swift"):
+        return False, "macOS menu bar requires the Swift runtime"
+    prompt_url = f"{base_url.rstrip('/')}/?view=prompt"
+    try:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "aiwatcher_cli.native_overlay",
+                "--tray",
+                "--url",
+                base_url,
+                "--prompt-url",
+                prompt_url,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **_detached_process_kwargs(),
+        )
+        pid_path = _companion_tray_pid_path()
+        pid_path.parent.mkdir(parents=True, exist_ok=True)
+        pid_path.write_text(str(process.pid), encoding="utf-8")
+    except OSError as exc:
+        return False, str(exc)
+    return True, "native tray/menu-bar"
 
 
 def _open_handoff_overlay(
@@ -6221,14 +6637,17 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
 
 def _cli_command_for_current_file() -> str:
     executable = sys.executable
+    package_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
     if os.name == "nt":
         # Claude/Codex/Cursor invoke hook commands through a POSIX shell (Git
         # Bash) even on Windows, where backslash is an escape character. An
         # unquoted Windows path like C:\Users\... gets mangled to C:Users...,
         # so normalize to forward slashes, which Windows accepts too.
         executable = executable.replace("\\", "/")
+        package_root = package_root.replace("\\", "/")
     parts = [executable, "-m", "aiwatcher_cli"]
-    return " ".join(shlex.quote(part) for part in parts)
+    pythonpath_prefix = f"PYTHONPATH={shlex.quote(package_root + os.pathsep)}\"${{PYTHONPATH:-}}\""
+    return f"{pythonpath_prefix} " + " ".join(shlex.quote(part) for part in parts)
 
 
 def _hook_command(command: str, transport: str, *, gate: bool = False) -> str:
@@ -7063,6 +7482,60 @@ def _hook_status_diagnostics(events: list[dict[str, object]]) -> list[str]:
     return diagnostics
 
 
+def _hook_surface_verification_rows(events: list[dict[str, object]]) -> list[tuple[str, str, str]]:
+    installed = _configured_hook_tools()
+    latest_claude = _latest_hook_event_at(events, "claude")
+    latest_codex = _latest_hook_event_at(events, "codex")
+    latest_cursor = _latest_hook_event_at(events, "cursor")
+
+    def age_label(value: datetime | None) -> str:
+        if value is None:
+            return "no invocation recorded"
+        age = datetime.now(timezone.utc) - value
+        minutes = max(0, int(age.total_seconds() // 60))
+        if minutes < 1:
+            return "invoked just now"
+        if minutes < 60:
+            return f"last invoked {minutes} min ago"
+        return f"last invoked {minutes // 60}h {minutes % 60}m ago"
+
+    claude_status = age_label(latest_claude) if installed.get("claude") else "hook not installed"
+    codex_status = age_label(latest_codex) if installed.get("codex") else "hook not installed"
+    cursor_status = age_label(latest_cursor) if installed.get("cursor") else "hook not installed"
+    return [
+        (
+            "Claude Code CLI",
+            claude_status,
+            "Supported when `/hooks` shows UserPromptSubmit and the session trusts the hook.",
+        ),
+        (
+            "Claude Desktop Code tab",
+            "needs same-surface proof",
+            "Submit a Desktop Code-tab test prompt, then confirm the Claude timestamp changes here.",
+        ),
+        (
+            "Claude Desktop general chat",
+            "not automatically gated",
+            "Use Companion -> Plan / Prompt; no verified local UserPromptSubmit hook for general chat.",
+        ),
+        (
+            "Codex Desktop",
+            codex_status if latest_codex else "configured, not recently invoked",
+            "Some Desktop builds show hook config but do not invoke UserPromptSubmit; verify every build/session.",
+        ),
+        (
+            "Codex CLI/TUI",
+            codex_status,
+            "Hook-capable only when the host invokes UserPromptSubmit and the hook is trusted.",
+        ),
+        (
+            "Cursor",
+            cursor_status,
+            "Coverage depends on Cursor hook support in that local build.",
+        ),
+    ]
+
+
 def command_hook_status(_args: argparse.Namespace) -> int:
     events = recent_hook_events(limit=8)
     interventions = recent_interventions(limit=5, days=7)
@@ -7092,6 +7565,9 @@ def command_hook_status(_args: argparse.Namespace) -> int:
         print("\nCoverage diagnosis")
         for diagnostic in diagnostics:
             print(f"- {diagnostic}")
+    print("\nSurface verification")
+    for label, status, next_step in _hook_surface_verification_rows(events):
+        print(f"- {label}: {status}. {next_step}")
     if interventions:
         print("\nRecent preflight decisions")
         for row in interventions:
@@ -7462,6 +7938,30 @@ def build_parser() -> argparse.ArgumentParser:
     companion_start.set_defaults(func=command_companion)
     companion_sub.add_parser("status", help="Show companion status").set_defaults(func=command_companion)
     companion_sub.add_parser("stop", help="Stop the companion").set_defaults(func=command_companion)
+    companion_tray = companion_sub.add_parser("tray", help="Inspect or start the native live Companion surface")
+    tray_sub = companion_tray.add_subparsers(dest="tray_action", required=True)
+    tray_sub.add_parser("status", help="Show tray/menu-bar support status").set_defaults(func=command_companion)
+    tray_start = tray_sub.add_parser("start", help="Start the live Companion surface")
+    tray_start.add_argument("--interval", type=int, default=30, help="Seconds between local scans")
+    tray_start.set_defaults(func=command_companion)
+    tray_install = tray_sub.add_parser("install", help="Start the tray/menu-bar item at login")
+    tray_install.add_argument("--interval", type=int, default=30, help="Seconds between local scans")
+    tray_install.set_defaults(func=command_companion)
+    tray_sub.add_parser("uninstall", help="Remove tray/menu-bar login startup").set_defaults(func=command_companion)
+    companion_autostart = companion_sub.add_parser("autostart", help="Manage login autostart for the Companion")
+    autostart_sub = companion_autostart.add_subparsers(dest="autostart_action", required=True)
+    autostart_install = autostart_sub.add_parser("install", help="Start the Companion at login")
+    autostart_install.add_argument("--interval", type=int, default=30, help="Seconds between local scans")
+    autostart_install.add_argument("--no-presence", action="store_true", help="Autostart without the floating presence control")
+    autostart_install.add_argument(
+        "--presence-position",
+        choices=["bottom-right", "bottom-left", "top-right", "top-left"],
+        default="bottom-right",
+        help="Screen corner for the collapsed companion",
+    )
+    autostart_install.set_defaults(func=command_companion)
+    autostart_sub.add_parser("status", help="Show login autostart status").set_defaults(func=command_companion)
+    autostart_sub.add_parser("uninstall", help="Remove login autostart").set_defaults(func=command_companion)
     companion_run = companion_sub.add_parser(
         "run",
         help="Run the companion in the foreground (used by companion start)",

@@ -92,6 +92,30 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(recent[0]["expected_saved_context_tokens"], 240_000)
         self.assertNotIn("prompt", json.dumps(recent).lower())
 
+    def test_optimize_decisions_store_metadata_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                record = local_state.record_optimize_decision(
+                    decision="checklist_copied",
+                    reason="User copied cleanup checklist.",
+                    project_path="/repo/app",
+                    evidence={
+                        "impact_label": "~1.2M context at risk",
+                        "evidence_label": "Observed/inferred",
+                        "candidates": [{"kind": "session_cluster", "session_count": 3}],
+                    },
+                )
+                recent = local_state.recent_optimize_decisions()
+
+        self.assertEqual(record["phase"], "control")
+        self.assertEqual(record["intervention_type"], "optimize_workspace")
+        self.assertEqual(record["receipt_kind"], "optimize_workspace")
+        self.assertEqual(record["project_path"], "/repo/app")
+        self.assertEqual(record["evidence"]["impact_label"], "~1.2M context at risk")
+        self.assertEqual(recent[0]["id"], record["id"])
+        self.assertNotIn("prompt", json.dumps(recent).lower())
+
     def test_link_handoff_decision_next_session_keeps_source_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")
@@ -680,8 +704,16 @@ class LocalStateTests(unittest.TestCase):
                     url="http://127.0.0.1:9999/",
                     expires_at=datetime.now(timezone.utc) + timedelta(minutes=2),
                     session_id="sess-1",
+                    workflow_mode="fork_task",
+                    workflow_label="Fork this task",
+                    workflow_reward="Likely reward: isolates exploratory context.",
                 )
-                self.assertEqual(local_state.active_prompt_gate()["id"], "gate-1")
+                gate = local_state.active_prompt_gate()
+                self.assertEqual(gate["id"], "gate-1")
+                self.assertEqual(gate["workflow_label"], "Fork this task")
+                self.assertFalse(local_state.active_prompt_gate_seen("gate-1"))
+                local_state.mark_active_prompt_gate_seen("gate-1")
+                self.assertTrue(local_state.active_prompt_gate_seen("gate-1"))
                 local_state.clear_active_prompt_gate("other-gate")
                 self.assertEqual(local_state.active_prompt_gate()["id"], "gate-1")
                 local_state.clear_active_prompt_gate("gate-1")

@@ -78,6 +78,40 @@ class DashboardServeTests(unittest.TestCase):
 
         record_mock.assert_called_once_with("127.0.0.1", 8799)
 
+    def test_companion_skip_and_receipt_view_posts_are_routable(self) -> None:
+        server, thread, base = self._serve_one()
+        payload = json.dumps({"state": "proof_pending"}).encode("utf-8")
+        http_request = request.Request(
+            f"{base}/api/companion-skip",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with (
+            patch.object(ui, "mark_recent_handoff_receipts_viewed", return_value=1),
+            patch.object(ui, "record_companion_skip", return_value={}),
+        ):
+            try:
+                with request.urlopen(http_request, timeout=5) as response:
+                    self.assertEqual(response.status, 200)
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
+        server, thread, base = self._serve_one()
+        http_request = request.Request(
+            f"{base}/api/handoff-receipts-viewed",
+            data=b"",
+            method="POST",
+        )
+        with patch.object(ui, "mark_recent_handoff_receipts_viewed", return_value=1):
+            try:
+                with request.urlopen(http_request, timeout=5) as response:
+                    self.assertEqual(response.status, 200)
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
 
 class DashboardWindowTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -133,16 +167,18 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn('class="outcome-button abandoned', ui.HTML)
         self.assertIn("showToast(`Outcome saved:", ui.HTML)
         self.assertIn("Outcome evidence", ui.HTML)
-        self.assertIn('class="detail-section recommended-action"', ui.HTML)
+        self.assertIn('recommended-action action-composer', ui.HTML)
+        self.assertIn('recommended-action loading-action', ui.HTML)
+        self.assertIn('ai-loading-panel', ui.HTML)
         self.assertIn("Recommended: continue in a fresh session", ui.HTML)
-        self.assertIn("Open Fresh Start", ui.HTML)
+        self.assertIn("Build Fresh Start brief", ui.HTML)
         self.assertIn("Fresh Start", ui.HTML)
         self.assertIn("renderIdentityStrip", ui.HTML)
         self.assertIn("identity_label", ui.HTML)
         self.assertIn("Copy it into a fresh chat only after the identity below matches", ui.HTML)
         self.assertIn("copyFreshStartFromDrawer", ui.HTML)
-        self.assertIn("runtime.level !== 'app'", ui.HTML)
-        self.assertIn("runtime.available && runtime.level !== 'app'", ui.HTML)
+        self.assertIn("const canOpenRuntime = !!runtime.available", ui.HTML)
+        self.assertNotIn("runtime.available && runtime.level !== 'app'", ui.HTML)
         self.assertIn("Fresh Start receipt saved", ui.HTML)
         self.assertIn("Loading session details for", ui.HTML)
         self.assertIn("/api/session-summary", ui.HTML)
@@ -209,6 +245,8 @@ class DashboardWindowTests(unittest.TestCase):
 
         self.assertEqual(state["state"], "control_recommended")
         self.assertEqual(state["primary_label"], "Fresh Start")
+        self.assertEqual(state["primary_action"], "copy_fresh_start")
+        self.assertEqual(state["primary_session_id"], "sess-1")
         self.assertEqual(state["primary_url"], "/?session=sess-1")
         self.assertEqual(state["continue_label"], "Continue")
         self.assertEqual(state["continue_session_id"], "sess-1")
@@ -217,10 +255,85 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["skip_session_id"], "sess-1")
         self.assertEqual(state["plan_url"], "/?view=prompt")
 
+    def test_companion_allows_app_level_fresh_start_return(self) -> None:
+        with (
+            patch.object(ui, "build_summary_cached", return_value={
+                "handoff_bubble": {
+                    "session_id": "sess-1",
+                    "severity": "critical",
+                    "body": "Context is getting expensive.",
+                    "runtime_attachment": {
+                        "available": True,
+                        "level": "app",
+                        "action_label": "Open Claude",
+                    },
+                },
+                "intervention_receipts": [],
+                "handoff_decisions": [],
+                "insights": [],
+                "watcher": {"running": True},
+            }),
+            patch.object(ui, "companion_skip_active", return_value=False),
+        ):
+            state = ui.build_companion_state()
+
+        self.assertEqual(state["state"], "control_recommended")
+        self.assertTrue(state["primary_runtime_available"])
+
+    def test_companion_state_surfaces_prompt_workflow_label(self) -> None:
+        with (
+            patch.object(ui, "active_prompt_gate", return_value={
+                "tool": "codex",
+                "risk": "medium",
+                "score": 5,
+                "url": "http://127.0.0.1:5555/",
+                "workflow_label": "Fork this task",
+                "workflow_reward": "Likely reward: isolates exploratory context.",
+            }),
+            patch.object(ui, "build_summary_cached", return_value={
+                "totals": {"sessions": 1, "api_value_label": "$0.10", "tokens_label": "1.0k"},
+                "handoff_bubble": None,
+                "intervention_receipts": [],
+                "handoff_decisions": [],
+                "insights": [],
+                "watcher": {"running": True},
+            }),
+        ):
+            state = ui.build_companion_state()
+
+        self.assertEqual(state["state"], "prompt_gate")
+        self.assertEqual(state["label"], "Fork this task")
+        self.assertEqual(state["subtitle"], "Likely reward: isolates exploratory context.")
+        self.assertEqual(state["primary_label"], "Review Gate")
+
+    def test_companion_state_does_not_blink_for_generic_insights(self) -> None:
+        with (
+            patch.object(ui, "active_prompt_gate", return_value=None),
+            patch.object(ui, "build_summary_cached", return_value={
+                "totals": {"sessions": 2, "api_value_label": "$0.50", "tokens_label": "12.0k"},
+                "handoff_bubble": None,
+                "intervention_receipts": [],
+                "handoff_decisions": [],
+                "insights": [{"title": "Top project", "body": "Review this later."}],
+                "watcher": {"running": True},
+            }),
+        ):
+            state = ui.build_companion_state()
+
+        self.assertEqual(state["state"], "watching")
+        self.assertEqual(state["label"], "Watching quietly")
+        self.assertEqual(state["primary_label"], "Console")
+
     def test_companion_state_stays_quiet_when_watching(self) -> None:
         with (
             patch.object(ui, "active_prompt_gate", return_value=None),
             patch.object(ui, "build_summary_cached", return_value={
+                "totals": {
+                    "window_label": "Last 7 days",
+                    "sessions": 3,
+                    "api_value_label": "$1.25",
+                    "tokens_label": "42.0k",
+                },
                 "handoff_bubble": None,
                 "intervention_receipts": [],
                 "handoff_decisions": [],
@@ -233,15 +346,18 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["state"], "watching")
         self.assertEqual(state["label"], "Watching quietly")
         self.assertEqual(state["primary_label"], "Console")
+        self.assertEqual(state["subtitle"], "7 days: 3 sessions · $1.25 · 42.0k tokens")
 
     def test_companion_state_surfaces_active_prompt_gate(self) -> None:
         with (
             patch.object(ui, "active_prompt_gate", return_value={
+                "id": "gate-1",
                 "tool": "claude",
                 "risk": "high",
                 "score": 8,
                 "url": "http://127.0.0.1:9999/",
             }),
+            patch.object(ui, "mark_active_prompt_gate_seen") as mark_seen,
             patch.object(ui, "build_summary_cached", return_value={
                 "handoff_bubble": {
                     "session_id": "sess-1",
@@ -260,8 +376,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["label"], "Prompt Gate")
         self.assertEqual(state["primary_label"], "Review Gate")
         self.assertEqual(state["primary_url"], "http://127.0.0.1:9999/")
+        mark_seen.assert_called_once_with("gate-1")
 
-    def test_companion_state_surfaces_fresh_start_proof_pending(self) -> None:
+    def test_companion_state_surfaces_fresh_start_proof_as_passive_status(self) -> None:
         with (
             patch.object(ui, "build_summary_cached", return_value={
             "handoff_bubble": None,
@@ -278,31 +395,10 @@ class DashboardWindowTests(unittest.TestCase):
         ):
             state = ui.build_companion_state()
 
-        self.assertEqual(state["state"], "proof_pending")
-        self.assertEqual(state["primary_label"], "View receipt")
-        self.assertEqual(state["primary_url"], "/?view=receipts")
-        self.assertEqual(state["skip_label"], "Skip")
-        self.assertEqual(state["skip_state"], "proof_pending")
-
-    def test_companion_state_quiets_when_proof_pending_is_skipped(self) -> None:
-        with (
-            patch.object(ui, "build_summary_cached", return_value={
-                "handoff_bubble": None,
-                "intervention_receipts": [],
-                "handoff_decisions": [{
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                    "proof_status": "Proof pending",
-                    "proof_reason": "No later same-project local session has been observed yet.",
-                }],
-                "insights": [],
-                "watcher": {"running": True},
-            }),
-            patch.object(ui, "companion_skip_active", return_value=True),
-        ):
-            state = ui.build_companion_state()
-
         self.assertEqual(state["state"], "watching")
-        self.assertEqual(state["subtitle"], "Proof reminder skipped")
+        self.assertEqual(state["label"], "Watching proof")
+        self.assertEqual(state["primary_label"], "Console")
+        self.assertEqual(state["primary_url"], "/?view=receipts")
 
     def test_companion_state_does_not_stay_stuck_on_stale_proof_pending(self) -> None:
         with (
@@ -441,9 +537,9 @@ class DashboardWindowTests(unittest.TestCase):
         ):
             state = ui.build_companion_state()
 
-        self.assertEqual(state["state"], "proof_pending")
-        self.assertEqual(state["label"], "Proof pending")
-        self.assertEqual(state["primary_label"], "View receipt")
+        self.assertEqual(state["state"], "watching")
+        self.assertEqual(state["label"], "Watching proof")
+        self.assertEqual(state["primary_label"], "Console")
 
     def test_companion_state_quiets_viewed_fresh_start_copy_even_with_live_bubble(self) -> None:
         viewed_at = datetime.now(timezone.utc).isoformat()
@@ -470,6 +566,86 @@ class DashboardWindowTests(unittest.TestCase):
 
         self.assertEqual(state["state"], "watching")
         self.assertEqual(state["subtitle"], "Fresh Start receipt reviewed; proof still pending.")
+
+    def test_companion_state_surfaces_optimize_soft_nudge(self) -> None:
+        with (
+            patch.object(ui, "active_prompt_gate", return_value=None),
+            patch.object(ui, "companion_skip_active", return_value=False),
+            patch.object(ui, "build_summary_cached", return_value={
+                "totals": {"sessions": 4, "api_value_label": "$1.20", "tokens_label": "1.4M"},
+                "handoff_bubble": None,
+                "handoff_decisions": [],
+                "optimize": {
+                    "status": "needs_action",
+                    "summary": "1 cleanup opportunity found.",
+                    "impact_label": "~1.4M context at risk",
+                    "top": {"project_full": "/repo/app"},
+                    "candidates": [],
+                },
+                "intervention_receipts": [],
+                "insights": [],
+                "watcher": {"running": True},
+            }),
+        ):
+            state = ui.build_companion_state()
+
+        self.assertEqual(state["state"], "optimize_available")
+        self.assertEqual(state["label"], "Optimize")
+        self.assertEqual(state["primary_url"], "/?view=prompt#optimizeWorkspace")
+        self.assertEqual(state["skip_state"], "optimize_available")
+
+    def test_companion_state_exposes_ask_deep_link(self) -> None:
+        with (
+            patch.object(ui, "active_prompt_gate", return_value=None),
+            patch.object(ui, "build_summary_cached", return_value={
+                "totals": {"window_label": "Last 7 days", "sessions": 1, "api_value_label": "$0.00", "tokens_label": "12.0k"},
+                "handoff_bubble": None,
+                "handoff_decisions": [],
+                "optimize": {"status": "quiet"},
+                "watcher": {"running": True},
+            }),
+        ):
+            state = ui.build_companion_state()
+
+        self.assertEqual(state["ask_url"], "/?ask=1")
+        self.assertIn("Ask AIWatcher", ui.HTML)
+        self.assertIn("/api/ask-aiwatcher", ui.HTML)
+
+    def test_ask_aiwatcher_answers_archive_question_from_local_evidence(self) -> None:
+        with patch.object(ui, "build_summary_cached", return_value={
+            "optimize": {
+                "top": {
+                    "project_full": "/repo/app",
+                    "impact_label": "~1.4M context at risk",
+                    "summary": "4 inactive same-project sessions are carrying old context.",
+                    "session_count": 4,
+                },
+                "candidates": [],
+            },
+        }):
+            answer = ui.answer_local_question("Can I archive this chat?")
+
+        self.assertIn("archive candidate", answer["answer"])
+        self.assertTrue(any("Do not" in bullet or "cannot archive" in bullet for bullet in answer["bullets"]))
+        self.assertEqual(answer["actions"][0]["url"], "/?view=prompt#optimizeWorkspace")
+
+    def test_ask_aiwatcher_answers_context_health_from_local_evidence(self) -> None:
+        with patch.object(ui, "build_summary_cached", return_value={
+            "context_health": [{
+                "session_id": "sess-1",
+                "project": "/repo/app",
+                "tool": "codex-cli",
+                "severity": "critical",
+                "latest_turn_tokens": "203.0k",
+                "recommendation": "Build a Fresh Start brief before continuing.",
+                "can_handoff": True,
+            }],
+        }):
+            answer = ui.answer_local_question("What is my context health?")
+
+        self.assertIn("needs attention", answer["answer"])
+        self.assertIn("203.0k", " ".join(answer["bullets"]))
+        self.assertEqual(answer["actions"][0]["label"], "Build Fresh Start")
 
     def test_fresh_start_receipt_rows_show_observed_next_session_proof(self) -> None:
         now = datetime.now(timezone.utc)
@@ -540,6 +716,89 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(rows[0]["observed_followup"]["direction"], "smaller")
         self.assertIn("not a final saved-token", rows[0]["observed_followup"]["basis"])
 
+    def test_optimize_inventory_detects_stale_session_cluster(self) -> None:
+        now = datetime.now(timezone.utc)
+        rows = [
+            LocalSession(
+                session_id=f"sess-{index}",
+                tool="codex-cli",
+                project_path="/repo/app",
+                started_at=now - timedelta(hours=9 + index),
+                updated_at=now - timedelta(hours=8 + index),
+                tokens_in=240_000,
+                tokens_out=20_000,
+                cost_usd=0.15,
+                agent_calls=55,
+                tool_calls=20,
+            )
+            for index in range(3)
+        ]
+        outcomes = {"sess-0": {"outcome": "useful"}}
+        with (
+            patch.object(ui, "safe_runtime_processes", return_value=[]),
+            patch.object(ui, "_worktree_rows", return_value=[]),
+            patch.object(ui, "recent_optimize_decisions", return_value=[]),
+        ):
+            inventory = ui.build_optimize_inventory(rows, outcomes=outcomes, handoff_decisions=[])
+
+        self.assertEqual(inventory["status"], "needs_action")
+        self.assertEqual(inventory["top"]["kind"], "session_cluster")
+        self.assertEqual(inventory["top"]["tokens_at_risk"], 780_000)
+        self.assertIn("why_inactive", inventory["top"])
+        self.assertIn("Copy", inventory["top"]["action_label"])
+        self.assertIn("Do not delete", inventory["top"]["checklist"])
+        self.assertIn("/repo/app", inventory["top"]["checklist"])
+
+    def test_detected_tools_are_listed_without_measured_spend(self) -> None:
+        rows = [{
+            "name": "claude-code (desktop)",
+            "id": "claude-code (desktop)",
+            "short_name": "claude-code (desktop)",
+            "sessions": 2,
+            "tokens": 1200,
+            "tokens_label": "1.2k",
+            "api_value_usd": 1.5,
+            "api_value_label": "$1.50",
+            "calls": 3,
+            "tool_calls": 1,
+        }]
+        tools = ui._append_detected_tool_rows(rows, {"cursor": True, "ollama": True})
+
+        labels = {row["name"]: row for row in tools}
+        self.assertTrue(labels["Cursor"]["detected_only"])
+        self.assertEqual(labels["Cursor"]["status_label"], "Detected, not measured")
+        self.assertTrue(labels["Ollama"]["detected_only"])
+        self.assertEqual(labels["Ollama"]["api_value_label"], "$0.00")
+
+    def test_optimize_inventory_suppresses_recently_reviewed_project(self) -> None:
+        now = datetime.now(timezone.utc)
+        rows = [
+            LocalSession(
+                session_id=f"sess-{index}",
+                tool="codex-cli",
+                project_path="/repo/app",
+                started_at=now - timedelta(hours=9 + index),
+                updated_at=now - timedelta(hours=8 + index),
+                tokens_in=240_000,
+                tokens_out=20_000,
+                agent_calls=55,
+            )
+            for index in range(3)
+        ]
+        with (
+            patch.object(ui, "safe_runtime_processes", return_value=[]),
+            patch.object(ui, "_worktree_rows", return_value=[]),
+            patch.object(ui, "recent_optimize_decisions", return_value=[{
+                "decision": "marked_done",
+                "project_path": "/repo/app",
+                "created_at": now.isoformat(),
+            }]),
+        ):
+            inventory = ui.build_optimize_inventory(rows, outcomes={}, handoff_decisions=[])
+
+        self.assertEqual(inventory["status"], "quiet")
+        self.assertEqual(inventory["candidates"], [])
+
     def test_fresh_start_receipt_rows_wait_before_follow_up_is_observed(self) -> None:
         record_handoff_decision(
             session_id="source",
@@ -586,6 +845,53 @@ class DashboardWindowTests(unittest.TestCase):
         finally:
             os.unlink(script_path)
         self.assertEqual(completed.returncode, 0, f"Overlay inline JS has a syntax error:\n{completed.stderr}")
+
+    def test_prompt_plan_routes_broad_codex_work_to_fork(self) -> None:
+        with (
+            patch.object(ui, "build_summary_cached", return_value={"handoff_bubble": None}),
+            patch("aiwatcher_cli.cli.sessions_since", return_value=[]),
+        ):
+            result = ui.build_prompt_preflight(
+                "Refactor every screen in the app and update all routes after reviewing the current architecture",
+                tool="codex",
+                cwd="/repo",
+            )
+
+        self.assertEqual(result["plan_action"]["kind"], "fork")
+        self.assertIn("Fork", result["plan_action"]["label"])
+
+    def test_prompt_plan_routes_destructive_work_to_prompt_change(self) -> None:
+        with (
+            patch.object(ui, "build_summary_cached", return_value={"handoff_bubble": None}),
+            patch("aiwatcher_cli.cli.sessions_since", return_value=[]),
+        ):
+            result = ui.build_prompt_preflight(
+                "Delete the repo, reset all history, and force push over origin/main",
+                tool="claude",
+                cwd="/repo",
+            )
+
+        self.assertEqual(result["plan_action"]["kind"], "prompt_change")
+        self.assertEqual(result["plan_action"]["primary_label"], "Copy safer brief")
+
+    def test_prompt_plan_routes_context_pressure_to_fresh_start(self) -> None:
+        with (
+            patch.object(ui, "build_summary_cached", return_value={
+                "handoff_bubble": {
+                    "session_id": "sess-1",
+                    "body": "Context is getting expensive.",
+                }
+            }),
+            patch("aiwatcher_cli.cli.sessions_since", return_value=[]),
+        ):
+            result = ui.build_prompt_preflight(
+                "Continue implementing the next phase",
+                tool="claude",
+                cwd="/repo",
+            )
+
+        self.assertEqual(result["plan_action"]["kind"], "fresh_start")
+        self.assertEqual(result["plan_action"]["primary_url"], "/?session=sess-1")
 
     def test_summary_includes_surface_coverage_and_context_health(self) -> None:
         now = datetime.now(timezone.utc)
@@ -801,6 +1107,12 @@ class DashboardWindowTests(unittest.TestCase):
                 "tool": "codex",
                 "findings": ["Broad scope"],
                 "suggestions": ["Inspect first"],
+                "workflow": {
+                    "mode": "fork_task",
+                    "label": "Fork this task",
+                    "instruction": "Fork the current chat and paste the brief.",
+                    "reward": "Likely reward: isolates exploratory context.",
+                },
                 "suggested_prompt": "Task\nRefactor safely",
                 "estimated_impact": {"available": False, "direction": "Narrower prompt should reduce pressure."},
             },
@@ -815,6 +1127,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Narrower prompt", result["impact_label"])
         self.assertIn("not persisted", result["privacy"])
         self.assertEqual(result["suggested_prompt"], "Task\nRefactor safely")
+        self.assertEqual(result["workflow"]["mode"], "fork_task")
 
     def test_summary_respects_selected_window(self) -> None:
         now = datetime.now(timezone.utc)
@@ -1090,7 +1403,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(sum(1 for action in actions if action.get("primary")), 1)
         handoff = next(action for action in actions if action["id"] == "handoff")
         self.assertTrue(handoff["primary"])
-        self.assertEqual(handoff["label"], "Open Fresh Start")
+        self.assertEqual(handoff["label"], "Build Fresh Start brief")
         open_tool = next(action for action in actions if action["id"] == "open_tool")
         self.assertNotEqual(open_tool["level"], "exact_session")
         self.assertIn(open_tool["level"], {"workspace", "unavailable"})
@@ -1109,7 +1422,7 @@ class DashboardWindowTests(unittest.TestCase):
         actions = ui.session_actions(row, outcome=None)
         handoff = next(action for action in actions if action["id"] == "handoff")
 
-        self.assertEqual(handoff["label"], "Copy Fresh Start brief")
+        self.assertEqual(handoff["label"], "Build Fresh Start brief")
         self.assertFalse(handoff["primary"])
         self.assertIn("historical local evidence", handoff["reason"])
         self.assertTrue(next(action for action in actions if action["id"] == "review_outcome")["primary"])
@@ -1408,6 +1721,10 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(capsule["enrichment_status"], "loading")
         self.assertEqual(capsule["usage"]["tokens_label"], "128.0k")
         self.assertIn("AIWatcher Fresh Start brief", capsule["next_brief"])
+        self.assertIn("How to continue", capsule["next_brief"])
+        self.assertIn("If this is a forked chat", capsule["next_brief"])
+        self.assertIn("If this is a subagent task", capsule["next_brief"])
+        self.assertIn("First response required", capsule["next_brief"])
         self.assertIn("Detailed git, timeline, and prompt evidence is still loading", capsule["next_brief"])
 
     def test_structured_handoff_fields_shape_the_brief(self) -> None:
@@ -2073,7 +2390,7 @@ class SessionSearchTests(unittest.TestCase):
 
         self.assertEqual(result["total_matched"], 1)
         self.assertEqual(result["sessions"][0]["session_id"], "s1")
-        self.assertEqual(result["query"], {"search": "alpha", "outcome": "useful", "evidence": ""})
+        self.assertEqual(result["query"], {"search": "alpha", "outcome": "useful", "evidence": "", "state": ""})
 
     def test_session_search_no_match_returns_empty_list(self) -> None:
         rows = [self._session("s1", project_path="/repo/alpha")]
@@ -2105,6 +2422,24 @@ class SessionSearchTests(unittest.TestCase):
         self.assertIn("api_value", result["sessions"][0])
         self.assertEqual(result["sessions"][0]["state"]["status"], "recent")
         self.assertTrue(result["sessions"][0]["actions"])
+
+    def test_session_search_filters_by_actionable_session_state(self) -> None:
+        rows = [
+            self._session("active", project_path="/repo/active", hours_ago=0),
+            self._session("stale", project_path="/repo/stale", hours_ago=24 * 8),
+        ]
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(temp_dir, "state.json")}),
+            patch.object(ui, "_cached_session_rows", return_value=rows),
+            patch.object(ui, "evidence_for_sessions", return_value={}),
+            patch.object(ui, "survival_by_session", return_value={}),
+        ):
+            active = ui.build_session_search(30, state_filter="active_recent")
+            history = ui.build_session_search(30, state_filter="history")
+
+        self.assertEqual([row["session_id"] for row in active["sessions"]], ["active"])
+        self.assertEqual([row["session_id"] for row in history["sessions"]], ["stale"])
 
     def test_session_search_skips_evidence_lookup_without_evidence_filter(self) -> None:
         # evidence_for_sessions() shells out to git per session with no cache --

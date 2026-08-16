@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 from .processes import RuntimeProcess, discover_runtime_processes
 from .scanner import LocalSession, _normalize_project_path
@@ -32,6 +33,7 @@ class RuntimeAttachment:
     project_path: str | None = None
     pid: int | None = None
     app_name: str | None = None
+    deep_link: str | None = None
     exact_return_available: bool = False
     exact_return_label: str = "Exact chat unavailable"
     exact_return_reason: str = (
@@ -57,6 +59,7 @@ class RuntimeAttachment:
             "project_path": self.project_path,
             "pid": self.pid,
             "app_name": self.app_name,
+            "deep_link": self.deep_link,
             "exact_return_available": self.exact_return_available,
             "exact_return_label": self.exact_return_label,
             "exact_return_reason": self.exact_return_reason,
@@ -99,6 +102,15 @@ def _workspace_mode(tool: str, project_path: str | None) -> tuple[str, str, bool
     return "none", "Install the Cursor or VS Code command-line launcher to open this workspace from AIWatcher.", False
 
 
+def _safe_deep_link(value: str | None) -> str | None:
+    if not value:
+        return None
+    parsed = urlparse(value.strip())
+    if parsed.scheme.lower() in {"http", "https", "claude", "codex", "cursor", "vscode"}:
+        return value.strip()
+    return None
+
+
 def _matching_process(session: LocalSession, processes: list[RuntimeProcess]) -> RuntimeProcess | None:
     if not session.session_id:
         return None
@@ -119,6 +131,34 @@ def runtime_attachment_for_session(
 
     if process:
         process_project = _project_path(process.cwd) or project_path
+        deep_link = _safe_deep_link(process.deep_link)
+        if deep_link:
+            return RuntimeAttachment(
+                session_id=session.session_id,
+                level="exact_deep_link",
+                mode="deep_link",
+                label="Exact chat link captured",
+                action_label="Return to exact chat",
+                available=True,
+                confidence="verified",
+                reason=(
+                    f"Matched a live {process.tool} process (PID {process.pid}) with a host-provided deep link. "
+                    "AIWatcher can open that link without guessing."
+                ),
+                tool=session.tool,
+                surface=session.surface,
+                project_path=process_project,
+                pid=process.pid,
+                app_name=app_name,
+                deep_link=deep_link,
+                exact_return_available=True,
+                exact_return_label="Return to exact chat",
+                exact_return_reason="The host/runtime exposed a trusted deep link for this exact session.",
+                native_companion_required=False,
+                identity_level="exact_session",
+                identity_label="Exact active session",
+                identity_reason=f"Matched this AIWatcher session to a live {process.tool} process and a trusted host deep link.",
+            )
         mode, reason, available = _workspace_mode(session.tool, process_project)
         action_label = "Open workspace" if available else "No live return"
         return RuntimeAttachment(
@@ -248,6 +288,16 @@ def perform_runtime_return(attachment: RuntimeAttachment) -> dict[str, object]:
         }
 
     try:
+        if attachment.mode == "deep_link" and attachment.deep_link:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", attachment.deep_link], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            elif sys.platform == "win32":
+                os.startfile(attachment.deep_link)  # type: ignore[attr-defined]
+            elif shutil.which("xdg-open"):
+                subprocess.Popen(["xdg-open", attachment.deep_link], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                return {"ok": False, "message": "No opener is available for this exact chat link.", "attachment": attachment.to_json()}
+            return {"ok": True, "message": "Opened exact chat link.", "attachment": attachment.to_json()}
         if attachment.mode == "app" and attachment.app_name and sys.platform == "darwin":
             subprocess.Popen(["open", "-a", attachment.app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return {"ok": True, "message": f"Opened {attachment.app_name}. Exact chat return is not available yet.", "attachment": attachment.to_json()}

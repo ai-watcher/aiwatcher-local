@@ -29,6 +29,66 @@ class CompanionLifecycleTests(unittest.TestCase):
         self.assertIn("--presence-position", command)
         self.assertEqual(command[-1], "top-left")
 
+    def test_tray_command_starts_native_tray_path(self) -> None:
+        command = companion.tray_command(10)
+
+        self.assertEqual(command[1:6], ["-m", "aiwatcher_cli", "companion", "tray", "start"])
+        self.assertEqual(command[command.index("--interval") + 1], "15")
+
+    def test_login_autostart_status_uses_user_level_path(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch.object(companion.sys, "platform", "darwin"),
+            patch.object(companion.Path, "home", return_value=Path(temp_dir)),
+        ):
+            status = companion.login_autostart_status()
+
+        self.assertTrue(status["supported"])
+        self.assertFalse(status["installed"])
+        self.assertIn("LaunchAgents", status["path"])
+
+    def test_install_and_uninstall_macos_login_autostart(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch.object(companion.sys, "platform", "darwin"),
+            patch.object(companion.Path, "home", return_value=Path(temp_dir)),
+            patch.object(companion, "companion_log_path", return_value=Path(temp_dir) / "companion.log"),
+        ):
+            installed = companion.install_login_autostart(interval_seconds=10, presence_position="top-left")
+            target = Path(str(installed["path"]))
+            content = target.read_text(encoding="utf-8")
+            removed = companion.uninstall_login_autostart()
+
+        self.assertTrue(installed["ok"])
+        self.assertIn("com.aiwatcher.local.companion", content)
+        self.assertIn("top-left", content)
+        self.assertTrue(removed["ok"])
+        self.assertTrue(removed["removed"])
+
+    def test_install_macos_tray_login_autostart(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch.object(companion.sys, "platform", "darwin"),
+            patch.object(companion.Path, "home", return_value=Path(temp_dir)),
+            patch.object(companion, "companion_log_path", return_value=Path(temp_dir) / "companion.log"),
+        ):
+            installed = companion.install_login_autostart(interval_seconds=30, tray=True)
+            content = Path(str(installed["path"])).read_text(encoding="utf-8")
+
+        self.assertTrue(installed["ok"])
+        self.assertIn("companion", content)
+        self.assertIn("tray", content)
+        self.assertIn("start", content)
+
+    def test_tray_status_is_honest_packaging_boundary(self) -> None:
+        with patch.object(companion.sys, "platform", "darwin"):
+            status = companion.tray_status()
+
+        self.assertTrue(status["supported"])
+        self.assertEqual(status["mode"], "native_menu_bar")
+        self.assertIn("menu-bar", status["label"])
+        self.assertIn("Scan Now", status["detail"])
+
     def test_existing_companion_is_reused(self) -> None:
         with patch.object(
             companion,
