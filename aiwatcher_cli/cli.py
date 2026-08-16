@@ -2667,8 +2667,8 @@ def run_prompt_gate(
     try:
         if ready_callback:
             ready_callback(url)
-        companion_presence_pid = _existing_companion_presence_pid() if open_browser else None
-        if open_browser and companion_presence_pid is None:
+        companion_owns_gate = _companion_can_own_prompt_gate() if open_browser else False
+        if open_browser and not companion_owns_gate:
             try:
                 opened = webbrowser.open(url)
             except Exception:
@@ -2683,13 +2683,14 @@ def run_prompt_gate(
                 except OSError:
                     pass
                 return _fallback_prompt_gate(tool=tool, prompt=prompt, result=result)
-        elif open_browser and companion_presence_pid is not None:
+        elif open_browser and companion_owns_gate:
             # The Companion is meant to be the user's always-visible bridge.
-            # Give it a short chance to observe and blink the active gate. If
-            # the process is stale or not polling, fall back to the classic
-            # temporary browser gate rather than leaving the hook invisible.
+            # Give it a real chance to observe and blink the active gate. The
+            # presence process polls every few seconds, so an aggressive
+            # browser fallback feels like a redirect instead of a nudge.
             seen_by_companion = False
-            deadline = time_module.monotonic() + min(1.5, max(0.2, timeout_seconds / 4))
+            companion_wait_seconds = min(10.0, max(0.5, min(timeout_seconds / 2, timeout_seconds / 6)))
+            deadline = time_module.monotonic() + companion_wait_seconds
             while not decision_event.is_set() and time_module.monotonic() < deadline:
                 try:
                     if active_prompt_gate_seen(gate_id):
@@ -2699,16 +2700,10 @@ def run_prompt_gate(
                     break
                 time_module.sleep(0.1)
             if not seen_by_companion and not decision_event.is_set():
-                try:
-                    opened = webbrowser.open(url)
-                except Exception:
-                    opened = False
-                if not opened:
-                    try:
-                        clear_active_prompt_gate(gate_id)
-                    except OSError:
-                        pass
-                    return _fallback_prompt_gate(tool=tool, prompt=prompt, result=result)
+                # Companion is running, so avoid yanking the user into a
+                # temporary localhost page. If the Companion cannot observe
+                # the gate in time, the hook timeout below fails closed.
+                pass
         if not decision_event.wait(max(1, timeout_seconds)):
             return None
         return dict(state)
@@ -4522,6 +4517,46 @@ def _existing_companion_presence_pid() -> int | None:
     except OSError:
         pass
     return None
+
+
+def _companion_can_own_prompt_gate() -> bool:
+    """Return true when Companion can be the first prompt-gate surface.
+
+    The native presence PID file is the strongest signal, but users can also
+    have the background Companion heartbeat without a readable presence PID
+    after restarts or dev-process churn. In that case the prompt hook should
+    still publish an active gate for Companion before falling back to a browser.
+    """
+    if _existing_companion_presence_pid() is not None:
+        return True
+    try:
+        status = get_watcher_status(max_age_seconds=90)
+    except OSError:
+        status = {}
+    if (
+        isinstance(status, dict)
+        and status.get("running")
+        and status.get("mode") == "companion"
+    ):
+        return True
+    if isinstance(status, dict) and status.get("status") not in {None, "unknown"}:
+        return False
+    # If the main state lock is temporarily held by a scan, the normal status
+    # API can report "unknown" even though the Companion heartbeat is fresh.
+    # Prompt Gate routing is latency-sensitive and read-only here, so tolerate
+    # a best-effort direct read instead of jumping to the browser fallback.
+    try:
+        data = json.loads(state_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    heartbeat = data.get("watcher_heartbeat") if isinstance(data, dict) else None
+    if not isinstance(heartbeat, dict) or heartbeat.get("mode") != "companion":
+        return False
+    try:
+        updated = datetime.fromisoformat(str(heartbeat.get("updated_at"))).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return False
+    return (datetime.now(timezone.utc) - updated).total_seconds() <= 90
 
 
 def _existing_companion_tray_pid() -> int | None:
