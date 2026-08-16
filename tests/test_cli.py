@@ -137,6 +137,7 @@ class StartCommandCliTests(unittest.TestCase):
         with (
             patch.object(cli, "sessions_since", return_value=[session(1)]),
             patch.object(cli, "surface_coverage", return_value=coverage),
+            patch.object(cli, "_ensure_dashboard_server", return_value="http://127.0.0.1:8765/") as ensure_ui,
             patch.object(cli, "start_companion", return_value={"ok": True, "pid": 123}) as start_companion,
             patch("sys.stdout", new_callable=io.StringIO) as stdout,
         ):
@@ -145,20 +146,28 @@ class StartCommandCliTests(unittest.TestCase):
                 no_companion=False,
                 no_presence=False,
                 presence_position="bottom-right",
+                no_ui=False,
+                open_ui=False,
+                ui_host="127.0.0.1",
+                ui_port=8765,
+                ui_port_attempts=20,
             ))
 
         self.assertEqual(result, 0)
+        ensure_ui.assert_called_once_with(host="127.0.0.1", port=8765, port_attempts=20)
         start_companion.assert_called_once_with(
             interval_seconds=30,
             presence=True,
             presence_position="bottom-right",
         )
         self.assertIn("A small Companion should appear", stdout.getvalue())
+        self.assertIn("Dashboard UI: http://127.0.0.1:8765/", stdout.getvalue())
 
     def test_start_can_skip_companion(self) -> None:
         with (
             patch.object(cli, "sessions_since", return_value=[]),
             patch.object(cli, "surface_coverage", return_value=[]),
+            patch.object(cli, "_ensure_dashboard_server", return_value="http://127.0.0.1:8765/"),
             patch.object(cli, "start_companion") as start_companion,
             patch("sys.stdout", new_callable=io.StringIO),
         ):
@@ -167,10 +176,39 @@ class StartCommandCliTests(unittest.TestCase):
                 no_companion=True,
                 no_presence=False,
                 presence_position="bottom-right",
+                no_ui=False,
+                open_ui=False,
+                ui_host="127.0.0.1",
+                ui_port=8765,
+                ui_port_attempts=20,
             ))
 
         self.assertEqual(result, 0)
         start_companion.assert_not_called()
+
+    def test_start_can_skip_dashboard_ui(self) -> None:
+        with (
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "surface_coverage", return_value=[]),
+            patch.object(cli, "_ensure_dashboard_server") as ensure_ui,
+            patch.object(cli, "start_companion", return_value={"ok": True, "pid": 123}),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_start(SimpleNamespace(
+                interval=30,
+                no_companion=False,
+                no_presence=False,
+                presence_position="bottom-right",
+                no_ui=True,
+                open_ui=False,
+                ui_host="127.0.0.1",
+                ui_port=8765,
+                ui_port_attempts=20,
+            ))
+
+        self.assertEqual(result, 0)
+        ensure_ui.assert_not_called()
+        self.assertNotIn("Dashboard UI:", stdout.getvalue())
 
     def test_presence_launcher_reuses_existing_process(self) -> None:
         with (
@@ -1559,6 +1597,7 @@ class PromptPreflightTests(unittest.TestCase):
 
     def test_open_handoff_overlay_prefers_native_companion(self) -> None:
         with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=None),
             patch.object(cli, "_open_native_handoff_overlay", return_value=(True, "native desktop window")) as native,
             patch.object(cli, "webbrowser") as browser,
         ):
@@ -1583,6 +1622,7 @@ class PromptPreflightTests(unittest.TestCase):
             return True, "native desktop window"
 
         with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=None),
             patch.object(cli, "_open_native_handoff_overlay", side_effect=fake_native) as native,
             patch.object(cli, "webbrowser") as browser,
         ):
@@ -1598,6 +1638,7 @@ class PromptPreflightTests(unittest.TestCase):
 
     def test_open_handoff_overlay_falls_back_to_browser_when_native_unavailable(self) -> None:
         with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=None),
             patch.object(cli, "_open_native_handoff_overlay", return_value=(False, "native unavailable")),
             patch.object(cli.os, "name", "posix"),
             patch.object(cli.sys, "platform", "linux"),

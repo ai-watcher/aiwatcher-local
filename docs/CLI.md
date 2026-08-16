@@ -32,10 +32,12 @@ First run, detection, and health checks.
 
 ### `aiwatcher start`
 
-Detect local AI coding tools and start the local Companion
+Start AIWatcher Local: dashboard UI plus Companion
 
 ```sh
-aiwatcher start [--interval INTERVAL] [--no-companion]
+aiwatcher start [--interval INTERVAL] [--no-ui] [--open-ui]
+                [--ui-host UI_HOST] [--ui-port UI_PORT]
+                [--ui-port-attempts UI_PORT_ATTEMPTS] [--no-companion]
                 [--no-presence]
                 [--presence-position {bottom-right,bottom-left,top-right,top-left}]
 ```
@@ -43,7 +45,12 @@ aiwatcher start [--interval INTERVAL] [--no-companion]
 | Option | Accepts | Default | Description |
 | --- | --- | --- | --- |
 | `--interval` | integer | `30` | Seconds between local Companion scans |
-| `--no-companion` | flag |  | Only scan; do not start the Companion |
+| `--no-ui` | flag |  | Only scan/start Companion; do not start the dashboard UI |
+| `--open-ui` | flag |  | Open the dashboard in a browser after starting it |
+| `--ui-host` | text | `127.0.0.1` | Dashboard address to bind; stays on loopback by default |
+| `--ui-port` | integer | `8765` | Preferred dashboard port |
+| `--ui-port-attempts` | integer | `20` | How many sequential dashboard ports to try |
+| `--no-companion` | flag |  | Do not start the Companion |
 | `--no-presence` | flag |  | Start the Companion without the floating presence control |
 | `--presence-position` | `bottom-right`, `bottom-left`, `top-right`, `top-left` | `bottom-right` | Screen corner for the collapsed Companion |
 

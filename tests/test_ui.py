@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -120,6 +121,16 @@ class DashboardWindowTests(unittest.TestCase):
         env = patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(self._state_dir.name, "state.json")})
         env.start()
         self.addCleanup(env.stop)
+        self.addCleanup(self._wait_for_summary_refresh)
+
+    @staticmethod
+    def _wait_for_summary_refresh() -> None:
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            with ui._SUMMARY_CACHE_LOCK:
+                if not ui._SUMMARY_REFRESHING:
+                    return
+            time.sleep(0.01)
 
     def test_dashboard_script_is_valid_javascript(self) -> None:
         # A single unquoted/malformed token anywhere in this one large inline

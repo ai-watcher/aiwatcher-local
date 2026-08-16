@@ -3131,6 +3131,13 @@ def render_journal(days: int = 1) -> str:
 
 
 def command_start(args: argparse.Namespace) -> int:
+    ui_url: str | None = None
+    if not getattr(args, "no_ui", False):
+        ui_url = _ensure_dashboard_server(
+            host=str(getattr(args, "ui_host", "127.0.0.1")),
+            port=int(getattr(args, "ui_port", DEFAULT_UI_PORT)),
+            port_attempts=int(getattr(args, "ui_port_attempts", 20)),
+        )
     sessions = sessions_since(1)
     print("AIWatcher v0.1.0 - local mode")
     print("Read-only scan. No data leaves this machine.\n")
@@ -3163,23 +3170,91 @@ def command_start(args: argparse.Namespace) -> int:
         else:
             print(f"Companion could not start: {result.get('message', 'unknown error')}", file=sys.stderr)
             print("Run `aiwatcher companion start` manually after stopping any legacy watcher.", file=sys.stderr)
+    if ui_url:
+        print(f"Dashboard UI: {ui_url}")
+        if getattr(args, "open_ui", False):
+            try:
+                opened = webbrowser.open(ui_url)
+            except Exception:
+                opened = False
+            if opened:
+                print("Opened the dashboard in your browser.")
+            else:
+                print("Could not open the browser automatically; use the Dashboard UI URL above.", file=sys.stderr)
     print("Connect Cloud later for team spend, budget guardrails, and audit evidence.")
     return 0
+
+
+def _ensure_dashboard_server(
+    *,
+    host: str = "127.0.0.1",
+    port: int = DEFAULT_UI_PORT,
+    port_attempts: int = 20,
+) -> str | None:
+    """Start/reuse the dashboard for the one-command local experience.
+
+    `aiwatcher ui` intentionally remains a foreground debug command. `start`
+    uses a background child so the user gets both product modes without
+    managing two terminals.
+    """
+    if local_action_server_available():
+        return f"{_watch_ui_base_url()}/"
+
+    log_path = Path(tempfile.gettempdir()) / "aiwatcher-ui.log"
+    command = [
+        sys.executable,
+        "-m",
+        "aiwatcher_cli",
+        "ui",
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "--port-attempts",
+        str(max(1, port_attempts)),
+        "--no-watch",
+    ]
+    env = os.environ.copy()
+    package_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    env["PYTHONPATH"] = package_root + os.pathsep + env.get("PYTHONPATH", "")
+    try:
+        log_handle = log_path.open("a", encoding="utf-8")
+        subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=log_handle,
+            cwd=os.getcwd(),
+            env=env,
+            start_new_session=(os.name != "nt"),
+            close_fds=(os.name != "nt"),
+        )
+    except OSError as exc:
+        print(f"Dashboard UI could not start: {exc}", file=sys.stderr)
+        return None
+
+    for _ in range(30):
+        if local_action_server_available():
+            return f"{_watch_ui_base_url()}/"
+        time_module.sleep(0.1)
+
+    print(f"Dashboard UI is still starting. Log: {log_path}", file=sys.stderr)
+    return f"http://{host}:{port}/"
 
 
 def setup_checklist() -> list[dict[str, str]]:
     return [
         {
-            "title": "Start the local Companion",
-            "why": "Shows a small always-available Companion for Plan, Control, Watch, and Dashboard access while you work.",
+            "title": "Start AIWatcher Local",
+            "why": "Starts the deep dashboard plus the small always-available Companion for Plan, Control, Watch, and Dashboard access while you work.",
             "command": "aiwatcher start",
             "status": "recommended",
         },
         {
             "title": "Open the local dashboard",
-            "why": "The Dashboard is the deep console for recent work, outcomes, receipts, session health, spend, and coverage.",
+            "why": "Use this foreground command when you want to debug the dashboard server directly instead of using the one-command start.",
             "command": "aiwatcher ui",
-            "status": "recommended",
+            "status": "optional",
         },
         {
             "title": "Verify local history coverage",
@@ -7906,9 +7981,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aiwatcher", description="AIWatcher Local: private AI coding usage visibility")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    start = sub.add_parser("start", help="Detect local AI coding tools and start the local Companion")
+    start = sub.add_parser("start", help="Start AIWatcher Local: dashboard UI plus Companion")
     start.add_argument("--interval", type=int, default=30, help="Seconds between local Companion scans")
-    start.add_argument("--no-companion", action="store_true", help="Only scan; do not start the Companion")
+    start.add_argument("--no-ui", action="store_true", help="Only scan/start Companion; do not start the dashboard UI")
+    start.add_argument("--open-ui", action="store_true", help="Open the dashboard in a browser after starting it")
+    start.add_argument("--ui-host", default="127.0.0.1", help="Dashboard address to bind; stays on loopback by default")
+    start.add_argument("--ui-port", type=int, default=DEFAULT_UI_PORT, help="Preferred dashboard port")
+    start.add_argument("--ui-port-attempts", type=int, default=20, help="How many sequential dashboard ports to try")
+    start.add_argument("--no-companion", action="store_true", help="Do not start the Companion")
     start.add_argument("--no-presence", action="store_true", help="Start the Companion without the floating presence control")
     start.add_argument(
         "--presence-position",
