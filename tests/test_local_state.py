@@ -92,6 +92,30 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(recent[0]["expected_saved_context_tokens"], 240_000)
         self.assertNotIn("prompt", json.dumps(recent).lower())
 
+    def test_optimize_decisions_store_metadata_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                record = local_state.record_optimize_decision(
+                    decision="checklist_copied",
+                    reason="User copied cleanup checklist.",
+                    project_path="/repo/app",
+                    evidence={
+                        "impact_label": "~1.2M context at risk",
+                        "evidence_label": "Observed/inferred",
+                        "candidates": [{"kind": "session_cluster", "session_count": 3}],
+                    },
+                )
+                recent = local_state.recent_optimize_decisions()
+
+        self.assertEqual(record["phase"], "control")
+        self.assertEqual(record["intervention_type"], "optimize_workspace")
+        self.assertEqual(record["receipt_kind"], "optimize_workspace")
+        self.assertEqual(record["project_path"], "/repo/app")
+        self.assertEqual(record["evidence"]["impact_label"], "~1.2M context at risk")
+        self.assertEqual(recent[0]["id"], record["id"])
+        self.assertNotIn("prompt", json.dumps(recent).lower())
+
     def test_link_handoff_decision_next_session_keeps_source_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")
@@ -113,6 +137,40 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(recent[0]["source_session_id"], "source-session")
         self.assertEqual(recent[0]["next_session_id"], "next-session")
         self.assertEqual(recent[0]["next_session_correlation"]["status"], "linked")
+
+    def test_mark_recent_handoff_receipts_viewed_acknowledges_fresh_start_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_handoff_decision(
+                    session_id="source-session",
+                    decision="copy_handoff",
+                    reason="Fresh Start brief copied.",
+                )
+                local_state.record_handoff_decision(
+                    session_id="source-session",
+                    decision="continue_here",
+                    reason="User chose to continue.",
+                )
+                updated = local_state.mark_recent_handoff_receipts_viewed()
+                recent = local_state.recent_handoff_decisions(limit=2)
+
+        self.assertEqual(updated, 1)
+        fresh_start = next(row for row in recent if row["decision"] == "copy_handoff")
+        continue_here = next(row for row in recent if row["decision"] == "continue_here")
+        self.assertIn("receipt_viewed_at", fresh_start)
+        self.assertNotIn("receipt_viewed_at", continue_here)
+
+    def test_companion_skip_is_active_until_expiry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_companion_skip(key="proof_pending", reason="User quieted reminder.")
+                active = local_state.companion_skip_active("proof_pending")
+                inactive = local_state.companion_skip_active("needs_review")
+
+        self.assertTrue(active)
+        self.assertFalse(inactive)
 
     def test_intervention_stores_hashes_not_prompt_text(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -314,6 +372,37 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(rows[0]["id"], record["id"])
         self.assertEqual(rows[0]["expected_savings"]["context_tokens"], 180_000)
 
+    def test_ambient_intervention_waits_for_two_observations_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                first = local_state.upsert_ambient_intervention(
+                    session_id="sess-1",
+                    signal_kind="critical_context",
+                    action="fresh_chat",
+                    severity="critical",
+                    session_stamp="stamp-1",
+                    reason="Context pressure.",
+                    required_observations=2,
+                )
+                self.assertFalse(
+                    local_state.ambient_intervention_delivery_allowed(first["fingerprint"], channel="overlay")
+                )
+                second = local_state.upsert_ambient_intervention(
+                    session_id="sess-1",
+                    signal_kind="critical_context",
+                    action="fresh_chat",
+                    severity="critical",
+                    session_stamp="stamp-1",
+                    reason="Context pressure.",
+                    required_observations=2,
+                )
+
+                self.assertEqual(second["observation_count"], 2)
+                self.assertTrue(
+                    local_state.ambient_intervention_delivery_allowed(second["fingerprint"], channel="overlay")
+                )
+
     def test_ambient_visible_channel_can_realert_when_severity_worsens(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")
@@ -435,6 +524,7 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(before["status"], "stopped")
         self.assertTrue(after["running"])
         self.assertEqual(after["pid"], 12345)
+        self.assertEqual(after["mode"], "watch")
         self.assertTrue(after["notify"])
         self.assertTrue(after["overlay"])
 
@@ -600,6 +690,45 @@ class LocalStateTests(unittest.TestCase):
                 data = local_state._load()
 
         self.assertEqual(len(data["interventions"]), 8)
+
+    def test_active_prompt_gate_expires_and_clears(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_active_prompt_gate(
+                    gate_id="gate-1",
+                    tool="claude",
+                    cwd="/repo",
+                    risk="high",
+                    score=8,
+                    url="http://127.0.0.1:9999/",
+                    expires_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+                    session_id="sess-1",
+                    workflow_mode="fork_task",
+                    workflow_label="Fork this task",
+                    workflow_reward="Likely reward: isolates exploratory context.",
+                )
+                gate = local_state.active_prompt_gate()
+                self.assertEqual(gate["id"], "gate-1")
+                self.assertEqual(gate["workflow_label"], "Fork this task")
+                self.assertFalse(local_state.active_prompt_gate_seen("gate-1"))
+                local_state.mark_active_prompt_gate_seen("gate-1")
+                self.assertTrue(local_state.active_prompt_gate_seen("gate-1"))
+                local_state.clear_active_prompt_gate("other-gate")
+                self.assertEqual(local_state.active_prompt_gate()["id"], "gate-1")
+                local_state.clear_active_prompt_gate("gate-1")
+                self.assertIsNone(local_state.active_prompt_gate())
+
+                local_state.record_active_prompt_gate(
+                    gate_id="gate-2",
+                    tool="claude",
+                    cwd="/repo",
+                    risk="high",
+                    score=8,
+                    url="http://127.0.0.1:9999/",
+                    expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+                )
+                self.assertIsNone(local_state.active_prompt_gate())
 
     def test_stale_lockfile_left_behind_does_not_deadlock_future_writes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

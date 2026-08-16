@@ -355,16 +355,37 @@ What to check:
 - The event export should contain hashes, not prompt text or code.
 - The dashboard time-window selector should visibly update the values.
 - Project rows and recent sessions should open useful detail.
+- `start` should perform the first local scan and start the Companion by default.
+  On macOS/Windows it should attempt a floating presence control; `--no-presence`
+  should keep background watching without that control, and `--no-companion`
+  should perform only the scan.
 - The Home dashboard should show a Fresh Start companion for warning/critical context
   health with Fresh Start and continue-here choices, then save only local
   decision metadata.
 - Copying a Fresh Start brief from the Home companion should replace the recommendation
   with a clear "paste into a fresh chat" confirmation and receipt link.
-- `watch --overlay` should open the local `/overlay` companion when watch
-  recommends action, giving desktop users a dismissible Fresh Start surface outside
-  Claude/Codex/Cursor instead of requiring them to visit the full dashboard.
-  It should prefer the native always-on-top desktop bubble and fall back to the
-  browser companion when native UI is unavailable.
+- `companion start` should watch without the dashboard, confirm a signal on two
+  scans, wait for a pause, and show only the highest-value eligible session.
+- `companion start` should add a collapsed always-available Companion at the
+  chosen screen edge. It should show a clear state (`Watching quietly`, `Needs
+  review`, `Prompt Gate`, `Fresh Start`, or `Proof pending`) plus quick **Plan**,
+  current **Control**, and **Console** actions without claiming to inspect
+  another app or return to an exact chat. It should be draggable, minimizable to
+  a small **AIW** pill, and expandable without losing the current state.
+- When a hook opens Prompt Gate, the persistent Companion should switch to
+  **Review Gate** and link to that temporary localhost decision page until the
+  hook receives a decision or times out.
+- The native companion should not activate or steal focus from the host tool.
+  When the persistent Companion is running, runtime nudges should update that
+  surface rather than opening a second larger overlay. The legacy overlay may
+  still be used by explicit/manual `watch --overlay` runs when no Companion
+  presence is active.
+- Background or stale sessions should remain visible in the dashboard but must
+  not interrupt the desktop. Desktop/editor nudges require the matching host tool
+  in the foreground; CLI nudges require an attached runtime or matching workspace.
+- The same intervention should not appear simultaneously as a native panel,
+  browser companion, and OS notification. Native UI is preferred, with browser
+  fallback only when native UI is unavailable.
 - `resume`/`handoff` without `--include-prompt-excerpt` should not contain
   prompt text; with it, the brief should contain a labeled excerpt and nothing
   else in the surrounding output should change.

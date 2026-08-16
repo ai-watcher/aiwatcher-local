@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -76,6 +77,12 @@ CLINE_DIRS = _path_candidates(
 WINDSURF_DIRS = _path_candidates(
     HOME_DIR / "Library" / "Application Support" / "Windsurf",
     _env_path("APPDATA", "Windsurf"),
+)
+OLLAMA_DIRS = _path_candidates(
+    HOME_DIR / ".ollama",
+    Path("/Applications/Ollama.app"),
+    _env_path("LOCALAPPDATA", "Ollama"),
+    _env_path("APPDATA", "Ollama"),
 )
 
 AI_FILE_PATTERNS = re.compile(r"(copilot|chat|inline|ghost|predict)", re.IGNORECASE)
@@ -972,11 +979,19 @@ def _max_dt(left: datetime | None, right: datetime | None) -> datetime | None:
 
 
 def discover_tools() -> dict[str, bool]:
+    runtime_tools: set[str] = set()
+    try:
+        from .processes import discover_runtime_processes
+
+        runtime_tools = {process.tool.lower() for process in discover_runtime_processes()}
+    except OSError:
+        runtime_tools = set()
     return {
         "claude-code": any(path.exists() for path in CLAUDE_PROJECTS_DIRS),
-        "cursor": any(path.exists() for path in [*CURSOR_STATE_DIRS, *CURSOR_LOGS_DIRS]),
+        "cursor": any(path.exists() for path in [*CURSOR_STATE_DIRS, *CURSOR_LOGS_DIRS]) or "cursor" in runtime_tools,
         "codex-cli": any(path.exists() for path in [*CODEX_DB_PATHS, *CODEX_DIRS]),
         "cline": any(path.exists() for path in CLINE_DIRS),
+        "ollama": bool(shutil.which("ollama")) or any(path.exists() for path in OLLAMA_DIRS) or "ollama" in runtime_tools,
         "windsurf": any(path.exists() for path in WINDSURF_DIRS),
     }
 
@@ -1029,22 +1044,22 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
             surface_id="claude-desktop-code",
             label="Claude Desktop Code tab",
             status=(
-                "automatic" if (claude_desktop_sessions and detected.get("claude-code") and claude_hook_seen)
+                "limited" if (claude_desktop_sessions and detected.get("claude-code") and claude_hook_seen)
                 else "limited" if detected.get("claude-code")
                 else "unknown"
             ),
             status_label=(
-                "Auto gate + history" if (claude_desktop_sessions and detected.get("claude-code") and claude_hook_seen)
+                "History seen; hook unverified" if (claude_desktop_sessions and detected.get("claude-code") and claude_hook_seen)
                 else "Hook-capable, verify locally"
             ),
             detected=bool(detected.get("claude-code") or claude_desktop_sessions),
-            automatic_gate="UserPromptSubmit hook fires from both Claude Code CLI and the Desktop Code tab",
+            automatic_gate="UserPromptSubmit may fire from the Desktop Code tab, but verify this exact surface",
             history="Visible when the host writes Claude Code JSONL",
             action=(
-                "Verify with `aiwatcher hook-status`." if (claude_desktop_sessions and claude_hook_seen)
+                "Verify with `aiwatcher hook-status` after a Desktop Code-tab prompt." if (claude_desktop_sessions and claude_hook_seen)
                 else "Submit a test prompt, then run `aiwatcher hook-status`."
             ),
-            detail="The user-level hook covers both Claude Code CLI and the Desktop Code tab.",
+            detail="Claude hook events were observed somewhere on this machine; Desktop interception still needs same-surface proof.",
             session_count=claude_desktop_sessions,
         ),
         SurfaceCoverage(
@@ -1090,13 +1105,13 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
                 else "companion"
             ),
             status_label=(
-                "Hook active + history" if (codex_desktop_sessions and detected.get("codex-cli") and codex_hook_seen)
+                "History seen; hook unverified" if (codex_desktop_sessions and detected.get("codex-cli") and codex_hook_seen)
                 else "Unverified automatic gate" if codex_desktop_sessions
                 else "Companion only"
             ),
             detected=bool(codex_desktop_sessions),
             automatic_gate=(
-                "Hook fires; Desktop conversation surface may share CLI hook invocation"
+                "Do not assume Desktop conversation prompts invoke hooks; verify this exact surface"
                 if (codex_desktop_sessions and codex_hook_seen)
                 else "Do not assume Desktop conversation prompts invoke hooks"
             ),
@@ -1107,7 +1122,7 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
                 else "Use Prompt Companion unless `hook-status` proves the hook fired."
             ),
             detail=(
-                "Hook events seen for Codex; Desktop coverage verified by `hook-status`."
+                "Codex hook events were observed somewhere on this machine; Desktop interception still needs same-surface proof."
                 if (codex_desktop_sessions and codex_hook_seen)
                 else "This surface needs real-device verification before stronger claims."
             ),
@@ -1124,6 +1139,17 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
             action="Treat Cursor numbers as coverage-limited until session fixtures improve.",
             detail="AIWatcher should be honest when Cursor is installed but not measurable.",
             session_count=cursor_sessions,
+        ),
+        SurfaceCoverage(
+            surface_id="ollama",
+            label="Ollama",
+            status="limited" if detected.get("ollama") else "not_detected",
+            status_label="Runtime/local model detected" if detected.get("ollama") else "Not detected",
+            detected=bool(detected.get("ollama")),
+            automatic_gate="No verified prompt hook for Ollama surfaces",
+            history="Runtime/model presence only; no local prompt, token, or cost scanner yet",
+            action="Use Prompt Companion before expensive local-agent work; treat Ollama as detected but unmeasured.",
+            detail="Local model runtime presence is useful coverage context, but AIWatcher should not claim spend or outcome evidence without an integration.",
         ),
         SurfaceCoverage(
             surface_id="cline",

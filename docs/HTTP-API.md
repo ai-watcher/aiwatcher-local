@@ -29,10 +29,8 @@ Specifics worth knowing before you build against it:
   hosts such as `http://127.0.0.1.evil.com` are rejected. The server never
   answers with `Access-Control-Allow-Origin: *`.
 - **Methods.** `POST` is accepted only on `/api/preflight`, `/api/outcome`, and
-  the internal `/api/handoff-basic`, `/api/handoff`, `/api/handoff-demo`,
-  `/api/handoff-decision`, `/api/ambient-intervention-action`, and
-  `/api/runtime-return` routes. Any other path returns `404` before the request
-  body is read.
+  the internal dashboard/companion routes listed below. Any other path returns
+  `404` before the request body is read.
 - **Content type.** `POST` requires `Content-Type: application/json`, else `415`.
 - **Body size.** Requests larger than 64 KiB return `413`.
 
@@ -118,23 +116,32 @@ their shapes track whatever the current dashboard needs, and they are **not
 supported for external callers** — treat them as private and expect them to
 change without a deprecation period.
 
-`GET` — `/api/health`, `/api/summary`, `/api/sessions`, `/api/session`,
+`GET` — `/api/health`, `/api/summary`, `/api/companion-state`,
+`/api/companion-scan`, `/api/sessions`, `/api/session`,
 `/api/session-summary`, `/api/project`, `/api/report`, `/api/journal`,
-`/api/handoff-basic`, `/api/handoff`, `/api/handoff-demo`, `/api/context-health`,
-`/api/ambient-intervention`
+`/api/handoff-basic`, `/api/handoff`, `/api/handoff-demo`,
+`/api/context-health`, `/api/ambient-intervention`
 
 `/api/ambient-intervention` returns the content-free local signal metadata
 needed to keep the browser fallback consistent with the native companion.
+`/api/companion-state` returns the small Plan/Control/Watch state used by the
+floating Companion presence control; it is intentionally content-free and does
+not expose prompt or source text. `/api/companion-scan` forces the companion to
+refresh local watch evidence without waiting for the next polling interval.
 `/api/handoff-basic` returns a copyable Fresh Start brief without waiting for
 timeline, git, or prompt enrichment; `/api/handoff` returns the enriched drawer
 payload; `/api/handoff-demo` returns seeded demo data for the in-dashboard Fresh
 Start test flow.
 
-`POST` — `/api/handoff-basic`, `/api/handoff`, and `/api/handoff-demo` accept
-the same dashboard-only Fresh Start options as their `GET` forms.
-`/api/handoff-decision` records which action you took on a Fresh Start
-companion, and `/api/ambient-intervention-action` records the native companion
-lifecycle (`displayed`, `acted`, `snoozed`, `dismissed`, or `failed`).
+`POST` — `/api/ask-aiwatcher` answers dashboard-only local questions from
+indexed metadata. `/api/handoff-basic`, `/api/handoff`, and
+`/api/handoff-demo` accept the same dashboard-only Fresh Start options as their
+`GET` forms. `/api/handoff-decision` records which action you took on a Fresh
+Start companion, `/api/handoff-receipts-viewed` marks proof-pending receipts as
+seen, `/api/optimize-decision` records an Improve action, `/api/companion-skip`
+snoozes a non-blocking companion reminder, and
+`/api/ambient-intervention-action` records the native companion lifecycle
+(`displayed`, `acted`, `snoozed`, `dismissed`, or `failed`).
 `/api/runtime-return` asks AIWatcher to open the safest available return target
 for a local session: exact process attachment when a host exposes enough
 metadata, otherwise app/workspace return, otherwise a Fresh Start fallback.

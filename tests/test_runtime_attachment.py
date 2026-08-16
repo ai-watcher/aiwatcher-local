@@ -70,6 +70,68 @@ class RuntimeAttachmentTests(unittest.TestCase):
         self.assertEqual(attachment.identity_label, "Exact active session")
         self.assertIn("Exact terminal/chat focus needs", attachment.reason)
 
+    def test_matching_process_with_deep_link_allows_exact_return(self) -> None:
+        session = LocalSession(
+            session_id="live-session",
+            tool="codex-cli",
+            surface="desktop",
+            project_path="/repo",
+            updated_at=datetime.now(timezone.utc),
+        )
+        process = RuntimeProcess(
+            pid=123,
+            ppid=1,
+            age_seconds=60,
+            state="S",
+            tool="Codex",
+            command="codex --session-id live-session --deep-link codex://chat/live-session",
+            cwd="/repo",
+            session_id="live-session",
+            deep_link="codex://chat/live-session",
+        )
+
+        attachment = runtime_attachment_for_session(
+            session,
+            state={"status": "active"},
+            processes=[process],
+        )
+
+        self.assertEqual(attachment.level, "exact_deep_link")
+        self.assertEqual(attachment.mode, "deep_link")
+        self.assertTrue(attachment.available)
+        self.assertTrue(attachment.exact_return_available)
+        self.assertEqual(attachment.action_label, "Return to exact chat")
+        self.assertEqual(attachment.deep_link, "codex://chat/live-session")
+
+    def test_unsafe_deep_link_is_ignored(self) -> None:
+        session = LocalSession(
+            session_id="live-session",
+            tool="codex-cli",
+            surface="desktop",
+            project_path="/repo",
+            updated_at=datetime.now(timezone.utc),
+        )
+        process = RuntimeProcess(
+            pid=123,
+            ppid=1,
+            age_seconds=60,
+            state="S",
+            tool="Codex",
+            command="codex --session-id live-session --deep-link file:///etc/passwd",
+            cwd="/repo",
+            session_id="live-session",
+            deep_link="file:///etc/passwd",
+        )
+
+        attachment = runtime_attachment_for_session(
+            session,
+            state={"status": "active"},
+            processes=[process],
+        )
+
+        self.assertNotEqual(attachment.mode, "deep_link")
+        self.assertFalse(attachment.exact_return_available)
+
     def test_stale_session_uses_handoff_instead_of_live_return(self) -> None:
         session = LocalSession(session_id="old", tool="claude-code", project_path="/repo")
         attachment = runtime_attachment_for_session(
@@ -103,6 +165,40 @@ class RuntimeAttachmentTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         popen.assert_called_once()
         self.assertIn("Exact chat return is not available", result["message"])
+
+    def test_perform_runtime_return_opens_exact_deep_link(self) -> None:
+        session = LocalSession(
+            session_id="desktop-session",
+            tool="codex-cli",
+            surface="desktop",
+            project_path="/repo",
+            updated_at=datetime.now(timezone.utc),
+        )
+        process = RuntimeProcess(
+            pid=123,
+            ppid=1,
+            age_seconds=60,
+            state="S",
+            tool="Codex",
+            command="codex --session-id desktop-session --deep-link codex://chat/desktop-session",
+            cwd="/repo",
+            session_id="desktop-session",
+            deep_link="codex://chat/desktop-session",
+        )
+        with (
+            patch("aiwatcher_cli.runtime_attachment.sys.platform", "darwin"),
+            patch("aiwatcher_cli.runtime_attachment.subprocess.Popen") as popen,
+        ):
+            attachment = runtime_attachment_for_session(session, state={"status": "active"}, processes=[process])
+            result = perform_runtime_return(attachment)
+
+        self.assertTrue(result["ok"])
+        popen.assert_called_once_with(
+            ["open", "codex://chat/desktop-session"],
+            stdout=-3,
+            stderr=-3,
+        )
+        self.assertIn("exact chat", result["message"])
 
 
 if __name__ == "__main__":

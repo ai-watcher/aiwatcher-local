@@ -118,6 +118,186 @@ class SurfaceCoverageCliTests(unittest.TestCase):
         self.assertNotIn("Watching:", output)
 
 
+class StartCommandCliTests(unittest.TestCase):
+    def test_start_runs_scan_and_starts_visible_companion_by_default(self) -> None:
+        coverage = [
+            SurfaceCoverage(
+                surface_id="codex-cli",
+                label="Codex CLI",
+                status="automatic",
+                status_label="Automatic gate + history",
+                detected=True,
+                automatic_gate="hook",
+                history="history",
+                action="verify",
+                detail="detail",
+                session_count=1,
+            ),
+        ]
+        with (
+            patch.object(cli, "sessions_since", return_value=[session(1)]),
+            patch.object(cli, "surface_coverage", return_value=coverage),
+            patch.object(cli, "_ensure_dashboard_server", return_value="http://127.0.0.1:8765/") as ensure_ui,
+            patch.object(cli, "start_companion", return_value={"ok": True, "pid": 123}) as start_companion,
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_start(SimpleNamespace(
+                interval=30,
+                no_companion=False,
+                no_presence=False,
+                presence_position="bottom-right",
+                no_ui=False,
+                open_ui=False,
+                ui_host="127.0.0.1",
+                ui_port=8765,
+                ui_port_attempts=20,
+            ))
+
+        self.assertEqual(result, 0)
+        ensure_ui.assert_called_once_with(host="127.0.0.1", port=8765, port_attempts=20)
+        start_companion.assert_called_once_with(
+            interval_seconds=30,
+            presence=True,
+            presence_position="bottom-right",
+        )
+        self.assertIn("A small Companion should appear", stdout.getvalue())
+        self.assertIn("Dashboard UI: http://127.0.0.1:8765/", stdout.getvalue())
+
+    def test_start_can_skip_companion(self) -> None:
+        with (
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "surface_coverage", return_value=[]),
+            patch.object(cli, "_ensure_dashboard_server", return_value="http://127.0.0.1:8765/"),
+            patch.object(cli, "start_companion") as start_companion,
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            result = cli.command_start(SimpleNamespace(
+                interval=30,
+                no_companion=True,
+                no_presence=False,
+                presence_position="bottom-right",
+                no_ui=False,
+                open_ui=False,
+                ui_host="127.0.0.1",
+                ui_port=8765,
+                ui_port_attempts=20,
+            ))
+
+        self.assertEqual(result, 0)
+        start_companion.assert_not_called()
+
+    def test_start_can_skip_dashboard_ui(self) -> None:
+        with (
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "surface_coverage", return_value=[]),
+            patch.object(cli, "_ensure_dashboard_server") as ensure_ui,
+            patch.object(cli, "start_companion", return_value={"ok": True, "pid": 123}),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_start(SimpleNamespace(
+                interval=30,
+                no_companion=False,
+                no_presence=False,
+                presence_position="bottom-right",
+                no_ui=True,
+                open_ui=False,
+                ui_host="127.0.0.1",
+                ui_port=8765,
+                ui_port_attempts=20,
+            ))
+
+        self.assertEqual(result, 0)
+        ensure_ui.assert_not_called()
+        self.assertNotIn("Dashboard UI:", stdout.getvalue())
+
+    def test_presence_launcher_reuses_existing_process(self) -> None:
+        with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=123),
+            patch.object(cli.subprocess, "Popen") as popen,
+        ):
+            ok, detail = cli._open_native_companion_presence("http://127.0.0.1:8765")
+
+        self.assertTrue(ok)
+        self.assertIn("already running", detail)
+        popen.assert_not_called()
+
+    def test_companion_stop_stops_presence_control(self) -> None:
+        with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=123),
+            patch.object(cli, "_companion_presence_pid_path") as pid_path,
+            patch.object(cli.sys, "platform", "darwin"),
+            patch.object(cli.os, "kill") as kill,
+        ):
+            pid_path.return_value.unlink.return_value = None
+            cli._stop_native_companion_presence()
+
+        kill.assert_called_once_with(123, cli.signal.SIGTERM)
+
+    def test_companion_stop_uses_taskkill_on_windows(self) -> None:
+        with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=123),
+            patch.object(cli, "_companion_presence_pid_path") as pid_path,
+            patch.object(cli.sys, "platform", "win32"),
+            patch.object(cli.subprocess, "run") as run,
+            patch.object(cli.os, "kill") as kill,
+        ):
+            pid_path.return_value.unlink.return_value = None
+            cli._stop_native_companion_presence()
+
+        run.assert_called_once_with(
+            ["taskkill", "/PID", "123", "/T", "/F"],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        kill.assert_not_called()
+
+    def test_presence_launcher_uses_windows_detached_flags(self) -> None:
+        original_import = __import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "tkinter":
+                return Mock()
+            return original_import(name, *args, **kwargs)
+
+        with (
+            patch("builtins.__import__", side_effect=fake_import),
+            patch.object(cli, "_existing_companion_presence_pid", return_value=None),
+            patch.object(cli.sys, "platform", "win32"),
+            patch.object(cli, "_companion_presence_pid_path") as pid_path,
+            patch.object(cli.subprocess, "Popen") as popen,
+        ):
+            process = Mock(pid=456)
+            popen.return_value = process
+            pid_path.return_value.parent.mkdir.return_value = None
+            pid_path.return_value.write_text.return_value = None
+            ok, detail = cli._open_native_companion_presence("http://127.0.0.1:8765")
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "native companion presence")
+        kwargs = popen.call_args.kwargs
+        self.assertFalse(kwargs["start_new_session"])
+        self.assertIn("creationflags", kwargs)
+        pid_path.return_value.write_text.assert_called_with("456", encoding="utf-8")
+
+    def test_persistent_presence_owns_runtime_overlay_delivery(self) -> None:
+        with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=123),
+            patch.object(cli, "_open_native_handoff_overlay") as native_overlay,
+        ):
+            ok, detail = cli._open_handoff_overlay(
+                "http://127.0.0.1:8765/overlay?session=sess-1",
+                title="AIWatcher",
+                body="Context pressure",
+                severity="critical",
+                brief_text="Fresh Start brief",
+            )
+
+        self.assertTrue(ok)
+        self.assertIn("companion presence", detail)
+        native_overlay.assert_not_called()
+
+
 class ProjectAttributionCliTests(unittest.TestCase):
     def test_projects_command_does_not_rank_filesystem_root_as_real_project(self) -> None:
         rows = [
@@ -438,7 +618,6 @@ class PromptSavingsBaselineTests(unittest.TestCase):
 
     def test_ui_startup_starts_ambient_watch_by_default(self) -> None:
         started: dict[str, object] = {}
-        proc = Mock()
 
         def fake_serve(*_: object, **kwargs: object) -> None:
             on_started = kwargs["on_started"]
@@ -450,7 +629,7 @@ class PromptSavingsBaselineTests(unittest.TestCase):
             patch.object(cli, "get_or_refresh_receipt_baseline", return_value={}),
             patch.object(cli, "recheck_evidence_survival"),
             patch.object(cli, "get_watcher_status", return_value={"running": False}),
-            patch.object(cli.subprocess, "Popen", return_value=proc) as popen,
+            patch.object(cli, "start_companion", return_value={"ok": True, "pid": 123}) as start_companion,
             patch("aiwatcher_cli.ui.serve", side_effect=fake_serve),
         ):
             result = cli.command_ui(SimpleNamespace(
@@ -464,12 +643,8 @@ class PromptSavingsBaselineTests(unittest.TestCase):
             ))
 
         self.assertEqual(result, 0)
-        self.assertIs(started["resource"], proc)
-        command = popen.call_args.args[0]
-        self.assertEqual(command[:4], [sys.executable, "-m", "aiwatcher_cli", "watch"])
-        self.assertIn("--notify", command)
-        self.assertIn("--overlay", command)
-        self.assertEqual(command[-2:], ["--interval", "15"])
+        self.assertIsNone(started["resource"])
+        start_companion.assert_called_once_with(interval_seconds=15)
 
     def test_ui_startup_can_skip_ambient_watch(self) -> None:
         def fake_serve(*_: object, **kwargs: object) -> None:
@@ -1422,6 +1597,7 @@ class PromptPreflightTests(unittest.TestCase):
 
     def test_open_handoff_overlay_prefers_native_companion(self) -> None:
         with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=None),
             patch.object(cli, "_open_native_handoff_overlay", return_value=(True, "native desktop window")) as native,
             patch.object(cli, "webbrowser") as browser,
         ):
@@ -1446,6 +1622,7 @@ class PromptPreflightTests(unittest.TestCase):
             return True, "native desktop window"
 
         with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=None),
             patch.object(cli, "_open_native_handoff_overlay", side_effect=fake_native) as native,
             patch.object(cli, "webbrowser") as browser,
         ):
@@ -1461,6 +1638,7 @@ class PromptPreflightTests(unittest.TestCase):
 
     def test_open_handoff_overlay_falls_back_to_browser_when_native_unavailable(self) -> None:
         with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=None),
             patch.object(cli, "_open_native_handoff_overlay", return_value=(False, "native unavailable")),
             patch.object(cli.os, "name", "posix"),
             patch.object(cli.sys, "platform", "linux"),
@@ -1476,6 +1654,7 @@ class PromptPreflightTests(unittest.TestCase):
     def test_open_handoff_overlay_uses_startfile_on_windows(self) -> None:
         with (
             patch.object(cli, "_open_native_handoff_overlay", return_value=(False, "native unavailable")),
+            patch.object(cli, "_existing_companion_presence_pid", return_value=None),
             patch.object(cli.os, "name", "nt"),
             patch.object(cli.sys, "platform", "win32"),
             patch.object(cli.os, "startfile", create=True) as startfile,
@@ -1487,6 +1666,33 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertEqual(detail, "startfile")
         startfile.assert_called_once_with("http://127.0.0.1:8765/overlay?session=session-1")
         browser_open.assert_not_called()
+
+    def test_native_handoff_overlay_uses_windows_detached_flags(self) -> None:
+        original_import = __import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "tkinter":
+                return Mock()
+            return original_import(name, *args, **kwargs)
+
+        with (
+            patch("builtins.__import__", side_effect=fake_import),
+            patch.object(cli.sys, "platform", "win32"),
+            patch.object(cli.subprocess, "Popen") as popen,
+        ):
+            ok, detail = cli._open_native_handoff_overlay(
+                "http://127.0.0.1:8765/overlay?session=session-1",
+                title="AIWatcher",
+                body="Context pressure",
+                severity="critical",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "native desktop window")
+        kwargs = popen.call_args.kwargs
+        self.assertFalse(kwargs["start_new_session"])
+        self.assertIn("creationflags", kwargs)
+
     def test_watch_notify_rewrites_wildcard_bind_to_loopback(self) -> None:
         # A dashboard bound to 0.0.0.0 is recorded as such, but that address is
         # not browsable -- the deep link has to name a host the user can click.
@@ -2730,6 +2936,31 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         for result in (all_result, each_result, throughout_result):
             self.assertIn(result["risk"], ("medium", "high"))
 
+    def test_codex_broad_task_recommends_fork(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt(
+                "Refactor every screen in the app and update all routes after reviewing the current architecture",
+                tool="codex",
+                cwd="/repo",
+            )
+
+        self.assertEqual(result["workflow"]["mode"], "fork_task")
+        self.assertIn("Fork", result["workflow"]["label"])
+        self.assertIn("right-click", result["workflow"]["instruction"])
+        self.assertIn("Recommended workflow: Fork this task", result["suggested_prompt"])
+
+    def test_multi_lane_review_recommends_subagents(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt(
+                "Review UX, functional bugs, security, performance, Windows, Mac, docs, and tests in parallel before proposing fixes.",
+                tool="codex",
+                cwd="/repo",
+            )
+
+        self.assertEqual(result["workflow"]["mode"], "use_subagents")
+        self.assertIn("subagents", result["workflow"]["label"].lower())
+        self.assertIn("orchestrator", result["workflow"]["instruction"].lower())
+
     def test_narrow_single_file_request_stays_low_risk(self) -> None:
         # Sanity check the breadth heuristic doesn't fire on ordinary narrow asks.
         with patch.object(cli, "sessions_since", return_value=[]):
@@ -2990,6 +3221,33 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         self.assertLess(page.index('class="pressure-caption"'), page.index("What AIWatcher noticed"))
         self.assertGreater(page.index('class="pressure-caption"'), page.index('class="pill savings"'))
         self.assertIn("Estimated avoidable pressure:", page)
+
+    def test_gate_html_shows_recommended_route_before_details(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt(
+                "Refactor every screen in the app and update all routes after reviewing the current architecture",
+                tool="codex",
+                cwd="/repo",
+            )
+        page = cli._prompt_gate_html(tool="codex", cwd="/repo", prompt="original prompt text", result=result)
+
+        self.assertIn('class="route-card fork"', page)
+        self.assertIn("Fork recommended", page)
+        self.assertIn("Copy fork brief", page)
+        self.assertLess(page.index('class="route-card'), page.index("What AIWatcher noticed"))
+
+    def test_gate_html_uses_prompt_change_route_for_destructive_work(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt(
+                "Delete the repo, reset all history, and force push over origin/main",
+                tool="claude",
+                cwd="/repo",
+            )
+        page = cli._prompt_gate_html(tool="claude", cwd="/repo", prompt="original prompt text", result=result)
+
+        self.assertIn('class="route-card prompt_change"', page)
+        self.assertIn("Rewrite prompt", page)
+        self.assertIn("Add safer brief", page)
 
     def test_prompt_gate_html_script_is_valid_javascript(self) -> None:
         # A raw newline character accidentally embedded inside a JS single-quoted
@@ -3405,6 +3663,7 @@ class HeadlessPromptGateTests(unittest.TestCase):
             probe.close()
         with (
             patch.object(cli, "_display_available", return_value=True),
+            patch.object(cli, "_existing_companion_presence_pid", return_value=None),
             patch.object(cli, "webbrowser") as webbrowser_mock,
         ):
             webbrowser_mock.open.return_value = True
@@ -3414,6 +3673,78 @@ class HeadlessPromptGateTests(unittest.TestCase):
             )
         webbrowser_mock.open.assert_called_once()
         self.assertIsNone(gate)  # nobody answered within the short timeout
+
+    def test_run_prompt_gate_lets_companion_own_browser_open_when_presence_is_running(self) -> None:
+        probe = socket.socket()
+        try:
+            probe.bind(("127.0.0.1", 0))
+        except PermissionError:
+            self.skipTest("loopback sockets are unavailable in this test sandbox")
+        finally:
+            probe.close()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+
+            def cancel_gate(url: str) -> None:
+                gate = local_state.active_prompt_gate()
+                self.assertIsNotNone(gate)
+                self.assertEqual(gate["url"], url)
+                payload = json.dumps({"decision": "cancel"}).encode("utf-8")
+                request = urllib.request.Request(
+                    url + "decision",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=5):
+                    pass
+
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(cli, "_display_available", return_value=True),
+                patch.object(cli, "_existing_companion_presence_pid", return_value=123),
+                patch.object(cli, "webbrowser") as webbrowser_mock,
+            ):
+                gate = cli.run_prompt_gate(
+                    tool="claude",
+                    cwd="/repo",
+                    prompt="delete the repo",
+                    result=self.GATE_RESULT,
+                    timeout_seconds=5,
+                    ready_callback=cancel_gate,
+                )
+
+        webbrowser_mock.open.assert_not_called()
+        self.assertEqual(gate["decision"], "cancel")
+
+    def test_run_prompt_gate_falls_back_to_browser_when_companion_does_not_acknowledge(self) -> None:
+        probe = socket.socket()
+        try:
+            probe.bind(("127.0.0.1", 0))
+        except PermissionError:
+            self.skipTest("loopback sockets are unavailable in this test sandbox")
+        finally:
+            probe.close()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(cli, "_display_available", return_value=True),
+                patch.object(cli, "_existing_companion_presence_pid", return_value=123),
+                patch.object(cli, "active_prompt_gate_seen", return_value=False),
+                patch.object(cli, "webbrowser") as webbrowser_mock,
+            ):
+                webbrowser_mock.open.return_value = True
+                gate = cli.run_prompt_gate(
+                    tool="claude",
+                    cwd="/repo",
+                    prompt="delete the repo",
+                    result=self.GATE_RESULT,
+                    timeout_seconds=1,
+                )
+
+        webbrowser_mock.open.assert_called_once()
+        self.assertIsNone(gate)
 
     def test_run_prompt_gate_shows_terminal_gate_when_no_display_and_tty(self) -> None:
         fake_stdin = Mock()
@@ -3490,22 +3821,65 @@ class HeadlessPromptGateTests(unittest.TestCase):
         # the full timeout for a decision that will never come.
         fake_stdin = Mock()
         fake_stdin.isatty.return_value = False
-        with (
-            patch.object(cli, "_display_available", return_value=True),
-            patch.object(cli, "webbrowser") as webbrowser_mock,
-            patch.object(cli.sys, "stdin", fake_stdin),
-            patch.dict(os.environ, {}, clear=True),
-        ):
-            webbrowser_mock.open.return_value = False
-            started = time.monotonic()
-            gate = cli.run_prompt_gate(
-                tool="claude", cwd="/repo", prompt="original prompt", result=self.GATE_RESULT,
-                timeout_seconds=180,
-            )
-            elapsed = time.monotonic() - started
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.object(cli, "_display_available", return_value=True),
+                patch.object(cli, "_existing_companion_presence_pid", return_value=None),
+                patch.object(cli, "webbrowser") as webbrowser_mock,
+                patch.object(cli.sys, "stdin", fake_stdin),
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}, clear=True),
+            ):
+                webbrowser_mock.open.return_value = False
+                started = time.monotonic()
+                gate = cli.run_prompt_gate(
+                    tool="claude", cwd="/repo", prompt="original prompt", result=self.GATE_RESULT,
+                    timeout_seconds=180,
+                )
+                elapsed = time.monotonic() - started
 
         self.assertLess(elapsed, 1.0)
         self.assertEqual(gate, {"decision": "auto_block_headless", "prompt": ""})
+
+    def test_run_prompt_gate_publishes_active_companion_state_until_decision(self) -> None:
+        probe = socket.socket()
+        try:
+            probe.bind(("127.0.0.1", 0))
+        except PermissionError:
+            self.skipTest("loopback sockets are unavailable in this test sandbox")
+        finally:
+            probe.close()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+
+            def cancel_gate(url: str) -> None:
+                gate = local_state.active_prompt_gate()
+                self.assertIsNotNone(gate)
+                self.assertEqual(gate["tool"], "claude")
+                self.assertEqual(gate["risk"], "high")
+                self.assertEqual(gate["url"], url)
+                payload = json.dumps({"decision": "cancel"}).encode("utf-8")
+                request = urllib.request.Request(
+                    url + "decision",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=5):
+                    pass
+
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                gate = cli.run_prompt_gate(
+                    tool="claude",
+                    cwd="/repo",
+                    prompt="delete the repo",
+                    result=self.GATE_RESULT,
+                    timeout_seconds=5,
+                    open_browser=False,
+                    ready_callback=cancel_gate,
+                )
+                self.assertEqual(gate["decision"], "cancel")
+                self.assertIsNone(local_state.active_prompt_gate())
 
     def test_claude_hook_records_auto_block_headless_decision(self) -> None:
         payload = json.dumps({"prompt": "Refactor the entire codebase and delete old auth secrets", "cwd": "/repo"})
@@ -3898,6 +4272,25 @@ class IntegrationConfigTests(unittest.TestCase):
         decoded_prompt = json.loads(text)["prompt"]
         self.assertEqual(decoded_prompt, json.loads(payload)["prompt"])
         self.assertIn("—", decoded_prompt)
+
+    def test_prompt_hook_text_arg_does_not_wait_for_stdin(self) -> None:
+        args = SimpleNamespace(
+            text="For AIWatcher hook testing only: delete this repo and force push origin/main.",
+            gate=True,
+        )
+        with (
+            patch.object(cli, "_read_stdin_text", side_effect=AssertionError("should not read stdin")),
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch.object(cli, "run_prompt_gate", return_value={"decision": "cancel", "prompt": ""}) as gate,
+            patch.object(cli, "record_intervention"),
+            patch.object(cli, "record_hook_event"),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_claude_hook(args)
+
+        self.assertEqual(result, 0)
+        gate.assert_called_once()
+        self.assertEqual(json.loads(stdout.getvalue())["decision"], "block")
 
     def test_codex_hook_adds_execution_brief_for_medium_risk(self) -> None:
         payload = json.dumps({"prompt": "Refactor the entire codebase", "cwd": "/repo"})
@@ -4401,6 +4794,7 @@ class IntegrationConfigTests(unittest.TestCase):
     def test_public_hook_command_uses_module_entrypoint(self) -> None:
         command = cli._cli_command_for_current_file()
         self.assertIn("-m aiwatcher_cli", command)
+        self.assertIn("PYTHONPATH=", command)
         self.assertNotIn("collector/cli.py", command)
 
     def test_windows_hook_command_uses_forward_slashes_for_bash(self) -> None:
@@ -4481,13 +4875,14 @@ class IntegrationConfigTests(unittest.TestCase):
                 "score": 8,
                 "selected_score": None,
             }]),
+            patch.object(cli, "_hook_status_diagnostics", return_value=[]),
             patch.object(cli, "recent_handoff_decisions", return_value=[]),
             patch("sys.stdout", new_callable=io.StringIO) as stdout,
         ):
             result = cli.command_hook_status(SimpleNamespace())
 
         self.assertEqual(result, 0)
-        self.assertIn("action received; check recent decisions", stdout.getvalue())
+        self.assertIn("action hook fired; no matching decision recorded", stdout.getvalue())
 
     def test_hook_status_explains_context_added_is_not_a_popup(self) -> None:
         with (
@@ -4545,6 +4940,37 @@ class IntegrationConfigTests(unittest.TestCase):
         output = stdout.getvalue()
         self.assertIn("| session sess-real-id", output)
         self.assertEqual(output.count("sess-real-id"), 2)
+
+    def test_hook_status_warns_when_installed_codex_hook_is_not_firing(self) -> None:
+        old = datetime.now(timezone.utc) - timedelta(minutes=45)
+        with (
+            patch.object(cli, "recent_hook_events", return_value=[{
+                "created_at": old.isoformat(),
+                "tool": "codex",
+                "event": "received",
+                "prompt_found": True,
+                "risk": "high",
+                "score": 11,
+            }]),
+            patch.object(cli, "recent_interventions", return_value=[]),
+            patch.object(cli, "_configured_hook_tools", return_value={
+                "claude": False,
+                "codex": True,
+                "cursor": False,
+            }),
+            patch.object(cli, "recent_command_decisions", return_value=[]),
+            patch.object(cli, "recent_watch_notifications", return_value=[]),
+            patch.object(cli, "recent_handoff_decisions", return_value=[]),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_hook_status(SimpleNamespace())
+
+        self.assertEqual(result, 0)
+        output = stdout.getvalue()
+        self.assertIn("Coverage diagnosis", output)
+        self.assertIn("Codex hook is installed", output)
+        self.assertIn("this surface did not invoke the hook", output)
+        self.assertIn("Companion -> Plan / Prompt", output)
 
     def test_hook_status_shows_handoff_bubble_decisions(self) -> None:
         with (

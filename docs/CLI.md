@@ -21,7 +21,7 @@ anywhere. See [Privacy](../README.md#privacy) for the full contract.
 - [Daily loop](#daily-loop) -- `today`, `last`, `timeline`, `journal`, `sessions`, `changes`, `commit-receipt`, `outcome`, `report`, `tools`, `projects`
 - [Prompt review and launch](#prompt-review-and-launch) -- `preflight`, `codex`, `claude`
 - [Continuity](#continuity) -- `handoff`, `resume`, `log-decision`
-- [Monitoring](#monitoring) -- `watch`, `statusline`, `processes`, `run`
+- [Monitoring](#monitoring) -- `watch`, `companion`, `statusline`, `processes`, `run`
 - [Hooks and wrappers](#hooks-and-wrappers) -- `install-claude-hook`, `uninstall-claude-hook`, `install-claude-command-gate`, `uninstall-claude-command-gate`, `install-claude-decision-log`, `uninstall-claude-decision-log`, `install-codex-hook`, `uninstall-codex-hook`, `install-cursor-hook`, `uninstall-cursor-hook`, `install-codex-wrapper`, `uninstall-codex-wrapper`, `install-commit-hook`, `uninstall-commit-hook`, `install-statusline`, `uninstall-statusline`, `hook-status`
 - [Data and integrations](#data-and-integrations) -- `export`, `mcp`, `ui`
 - [Internal hook commands](#internal-hook-commands)
@@ -32,13 +32,27 @@ First run, detection, and health checks.
 
 ### `aiwatcher start`
 
-Detect local AI coding tools and run a one-time local scan
+Start AIWatcher Local: dashboard UI plus Companion
 
 ```sh
-aiwatcher start
+aiwatcher start [--interval INTERVAL] [--no-ui] [--open-ui]
+                [--ui-host UI_HOST] [--ui-port UI_PORT]
+                [--ui-port-attempts UI_PORT_ATTEMPTS] [--no-companion]
+                [--no-presence]
+                [--presence-position {bottom-right,bottom-left,top-right,top-left}]
 ```
 
-Takes no arguments.
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--interval` | integer | `30` | Seconds between local Companion scans |
+| `--no-ui` | flag |  | Only scan/start Companion; do not start the dashboard UI |
+| `--open-ui` | flag |  | Open the dashboard in a browser after starting it |
+| `--ui-host` | text | `127.0.0.1` | Dashboard address to bind; stays on loopback by default |
+| `--ui-port` | integer | `8765` | Preferred dashboard port |
+| `--ui-port-attempts` | integer | `20` | How many sequential dashboard ports to try |
+| `--no-companion` | flag |  | Do not start the Companion |
+| `--no-presence` | flag |  | Start the Companion without the floating presence control |
+| `--presence-position` | `bottom-right`, `bottom-left`, `top-right`, `top-left` | `bottom-right` | Screen corner for the collapsed Companion |
 
 ### `aiwatcher setup`
 
@@ -495,7 +509,7 @@ aiwatcher watch [--days DAYS] [--interval INTERVAL] [--once]
                 [--cost-threshold COST_THRESHOLD]
                 [--calls-threshold CALLS_THRESHOLD]
                 [--tokens-threshold TOKENS_THRESHOLD] [--notify]
-                [--overlay]
+                [--overlay] [--companion]
                 [--target {claude,codex,cursor,generic,vscode}]
 ```
 
@@ -516,7 +530,101 @@ aiwatcher watch --interval 30 --notify
 | `--tokens-threshold` | integer | `500000` | Flag a session above this many tokens |
 | `--notify` | flag |  | Send a best-effort local OS notification when watch recommends action, and for outcome-review signals (survival, churn, same-file re-prompt, cost-per-surviving-change) |
 | `--overlay` | flag |  | Open a local AIWatcher companion overlay when watch recommends Fresh Start or another action |
+| `--companion` | flag |  | Mark this foreground watch as the dashboard-independent companion process |
 | `--target` | `claude`, `codex`, `cursor`, `generic`, `vscode` | `generic` | Format the auto-generated CRITICAL-context Fresh Start brief for this AI tool |
+
+### `aiwatcher companion`
+
+Run the local runtime-nudge companion without the dashboard
+
+```sh
+aiwatcher companion {start,status,stop,tray,autostart,run} ...
+```
+
+Subcommands:
+
+| Subcommand | Purpose |
+| --- | --- |
+| `start` | Start the companion in the background |
+| `status` | Show companion status |
+| `stop` | Stop the companion |
+| `tray` | Inspect or start the native live Companion surface |
+| `autostart` | Manage login autostart for the Companion |
+| `run` | Run the companion in the foreground (used by companion start) |
+
+#### `aiwatcher companion start`
+
+Start the companion in the background
+
+```sh
+aiwatcher companion start [--interval INTERVAL] [--presence]
+                          [--no-presence]
+                          [--presence-position {bottom-right,bottom-left,top-right,top-left}]
+```
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--interval` | integer | `30` | Seconds between local scans |
+| `--presence` | flag |  | Show the collapsed Companion presence control (default) |
+| `--no-presence` | flag |  | Run background nudges without the floating presence control |
+| `--presence-position` | `bottom-right`, `bottom-left`, `top-right`, `top-left` | `bottom-right` | Screen corner for the collapsed companion |
+
+#### `aiwatcher companion status`
+
+Show companion status
+
+```sh
+aiwatcher companion status
+```
+
+Takes no arguments.
+
+#### `aiwatcher companion stop`
+
+Stop the companion
+
+```sh
+aiwatcher companion stop
+```
+
+Takes no arguments.
+
+#### `aiwatcher companion tray`
+
+Inspect or start the native live Companion surface
+
+```sh
+aiwatcher companion tray {status,start,install,uninstall} ...
+```
+
+Takes no arguments.
+
+#### `aiwatcher companion autostart`
+
+Manage login autostart for the Companion
+
+```sh
+aiwatcher companion autostart {install,status,uninstall} ...
+```
+
+Takes no arguments.
+
+#### `aiwatcher companion run`
+
+Run the companion in the foreground (used by companion start)
+
+```sh
+aiwatcher companion run [--interval INTERVAL] [--presence]
+                        [--no-presence]
+                        [--presence-position {bottom-right,bottom-left,top-right,top-left}]
+```
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--interval` | integer | `30` | Seconds between local scans |
+| `--presence` | flag |  | Show the collapsed Companion presence control (default) |
+| `--no-presence` | flag |  | Run background nudges without the floating presence control |
+| `--presence-position` | `bottom-right`, `bottom-left`, `top-right`, `top-left` | `bottom-right` | Screen corner for the collapsed companion |
 
 ### `aiwatcher statusline`
 

@@ -168,8 +168,11 @@ def _empty_state() -> dict[str, Any]:
         "brief_tokens": [],
         "watch_notifications": [],
         "handoff_decisions": [],
+        "optimize_decisions": [],
+        "companion_skips": [],
         "ambient_interventions": [],
         "sent_notification_keys": [],
+        "active_prompt_gate": None,
         "ui_server": None,
         "watcher_heartbeat": None,
     }
@@ -234,8 +237,11 @@ def _load() -> dict[str, Any]:
     data.setdefault("brief_tokens", [])
     data.setdefault("watch_notifications", [])
     data.setdefault("handoff_decisions", [])
+    data.setdefault("optimize_decisions", [])
+    data.setdefault("companion_skips", [])
     data.setdefault("ambient_interventions", [])
     data.setdefault("sent_notification_keys", [])
+    data.setdefault("active_prompt_gate", None)
     data.setdefault("ui_server", None)
     data.setdefault("watcher_heartbeat", None)
     return data
@@ -380,6 +386,149 @@ def record_hook_event(
         })
         data["hook_events"] = data["hook_events"][-50:]
         _save(data)
+
+
+def record_active_prompt_gate(
+    *,
+    gate_id: str,
+    tool: str,
+    cwd: str,
+    risk: str,
+    score: int,
+    url: str,
+    expires_at: datetime,
+    session_id: str | None = None,
+    workflow_mode: str | None = None,
+    workflow_label: str | None = None,
+    workflow_reward: str | None = None,
+) -> None:
+    with _locked_state():
+        data = _load()
+        data["active_prompt_gate"] = {
+            "id": gate_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "expires_at": expires_at.astimezone(timezone.utc).isoformat(),
+            "tool": tool,
+            "cwd": cwd,
+            "risk": risk,
+            "score": score,
+            "url": url,
+            "session_id": session_id,
+            "workflow_mode": workflow_mode,
+            "workflow_label": workflow_label,
+            "workflow_reward": workflow_reward,
+            "companion_seen_at": None,
+        }
+        _save(data)
+
+
+def clear_active_prompt_gate(gate_id: str | None = None) -> None:
+    with _locked_state():
+        data = _load()
+        gate = data.get("active_prompt_gate")
+        if not isinstance(gate, dict):
+            data["active_prompt_gate"] = None
+            _save(data)
+            return
+        if gate_id is not None and gate.get("id") != gate_id:
+            return
+        data["active_prompt_gate"] = None
+        _save(data)
+
+
+def active_prompt_gate() -> dict[str, Any] | None:
+    with _locked_state():
+        data = _load()
+        gate = data.get("active_prompt_gate")
+        if not isinstance(gate, dict):
+            return None
+        try:
+            expires_at = datetime.fromisoformat(str(gate.get("expires_at")))
+        except ValueError:
+            expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at.astimezone(timezone.utc) < datetime.now(timezone.utc):
+            data["active_prompt_gate"] = None
+            _save(data)
+            return None
+        return dict(gate)
+
+
+def mark_active_prompt_gate_seen(gate_id: str) -> None:
+    with _locked_state():
+        data = _load()
+        gate = data.get("active_prompt_gate")
+        if not isinstance(gate, dict) or gate.get("id") != gate_id:
+            return
+        gate["companion_seen_at"] = datetime.now(timezone.utc).isoformat()
+        data["active_prompt_gate"] = gate
+        _save(data)
+
+
+def active_prompt_gate_seen(gate_id: str) -> bool:
+    gate = active_prompt_gate()
+    return bool(isinstance(gate, dict) and gate.get("id") == gate_id and gate.get("companion_seen_at"))
+
+
+def _prune_companion_skips(data: dict[str, Any]) -> None:
+    now = datetime.now(timezone.utc)
+    kept: list[dict[str, Any]] = []
+    for row in data.get("companion_skips", []):
+        if not isinstance(row, dict):
+            continue
+        try:
+            expires_at = datetime.fromisoformat(str(row.get("expires_at")))
+        except ValueError:
+            continue
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at.astimezone(timezone.utc) > now:
+            kept.append(row)
+    data["companion_skips"] = kept[-50:]
+
+
+def record_companion_skip(
+    *,
+    key: str,
+    reason: str = "",
+    minutes: int = 60,
+) -> dict[str, Any]:
+    """Quiet a non-blocking Companion attention state without deleting evidence."""
+    key = key.strip()[:160]
+    if not key:
+        raise ValueError("key is required")
+    now = datetime.now(timezone.utc)
+    record = {
+        "id": str(uuid.uuid4()),
+        "created_at": now.isoformat(),
+        "expires_at": (now + timedelta(minutes=max(1, minutes))).isoformat(),
+        "key": key,
+        "reason": reason.strip()[:500],
+    }
+    with _locked_state():
+        data = _load()
+        _prune_companion_skips(data)
+        data["companion_skips"].append(record)
+        data["companion_skips"] = data["companion_skips"][-50:]
+        _save(data)
+    return record
+
+
+def companion_skip_active(key: str) -> bool:
+    key = key.strip()[:160]
+    if not key:
+        return False
+    try:
+        with _locked_state():
+            data = _load()
+            _prune_companion_skips(data)
+            active = any(row.get("key") == key for row in data.get("companion_skips", []) if isinstance(row, dict))
+            if active:
+                _save(data)
+            return active
+    except OSError:
+        return False
 
 
 def _prune_brief_tokens(data: dict[str, Any]) -> None:
@@ -546,13 +695,13 @@ def get_watcher_status(max_age_seconds: int = 120) -> dict[str, Any]:
             "detail": "AIWatcher could not read local state.",
         }
     heartbeat = data.get("watcher_heartbeat")
-    command = "aiwatcher watch --notify --overlay --interval 60"
+    command = "aiwatcher companion start"
     if not isinstance(heartbeat, dict):
         return {
             "running": False,
             "status": "stopped",
-            "label": "Watcher stopped",
-            "detail": "Start ambient Watch to surface handoff and outcome nudges while you work.",
+            "label": "Companion stopped",
+            "detail": "Start the local companion to surface handoff and outcome nudges while you work.",
             "command": command,
         }
     updated_at = heartbeat.get("updated_at")
@@ -562,23 +711,40 @@ def get_watcher_status(max_age_seconds: int = 120) -> dict[str, Any]:
         updated = None
     age_seconds = (datetime.now(timezone.utc) - updated).total_seconds() if updated else None
     running = age_seconds is not None and age_seconds <= max_age_seconds
+    mode = str(heartbeat.get("mode") or "watch")
+    process_label = "Companion" if mode == "companion" else "Watcher"
     return {
         "running": running,
         "status": "running" if running else "stale",
-        "label": "Watcher running" if running else "Watcher not recently seen",
+        "label": f"{process_label} running" if running else f"{process_label} not recently seen",
         "detail": (
-            "Ambient Watch is checking local sessions for context pressure and handoff opportunities."
+            f"{process_label} is checking local sessions for context pressure and handoff opportunities."
             if running
-            else "The last watcher heartbeat is stale. Restart ambient Watch to catch new session pressure."
+            else f"The last {process_label.lower()} heartbeat is stale. Restart it to catch new session pressure."
         ),
         "command": command,
         "updated_at": updated.isoformat() if updated else None,
         "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
         "pid": heartbeat.get("pid"),
+        "mode": mode,
         "notify": bool(heartbeat.get("notify")),
         "overlay": bool(heartbeat.get("overlay")),
         "interval_seconds": heartbeat.get("interval_seconds"),
     }
+
+
+def clear_watcher_heartbeat(*, pid: int | None = None) -> None:
+    """Clear the watcher heartbeat, optionally only for the matching process."""
+    try:
+        with _locked_state():
+            data = _load()
+            heartbeat = data.get("watcher_heartbeat")
+            if pid is not None and isinstance(heartbeat, dict) and heartbeat.get("pid") != pid:
+                return
+            data.pop("watcher_heartbeat", None)
+            _save(data)
+    except OSError:
+        pass
 
 
 def recent_watch_notifications(limit: int = 10) -> list[dict[str, Any]]:
@@ -593,6 +759,7 @@ def recent_watch_notifications(limit: int = 10) -> list[dict[str, Any]]:
 
 VALID_HANDOFF_DECISIONS = {"new_chat", "continue_here", "copy_handoff", "dismissed"}
 MAX_HANDOFF_DECISIONS_STORED = 200
+MAX_OPTIMIZE_DECISIONS_STORED = 200
 
 
 def record_handoff_decision(
@@ -661,6 +828,81 @@ def recent_handoff_decisions(limit: int = 10) -> list[dict[str, Any]]:
         return []
     rows = [row for row in data["handoff_decisions"] if isinstance(row, dict)]
     return list(reversed(rows[-max(1, limit):]))
+
+
+def record_optimize_decision(
+    *,
+    decision: str,
+    reason: str,
+    project_path: str | None = None,
+    evidence: dict[str, Any] | None = None,
+    action_channel: str | None = None,
+) -> dict[str, Any]:
+    """Record a local Optimize Workspace decision without deleting anything.
+
+    Optimize is a Control-phase action for stale forks, completed Fresh Starts,
+    old AI worktrees, and orphaned runtimes. The receipt is intentionally
+    metadata-only: evidence labels, counts, and paths, never prompt/source text.
+    """
+    allowed = {"marked_done", "checklist_copied", "skipped", "reviewed"}
+    if decision not in allowed:
+        raise ValueError(f"decision must be one of: {', '.join(sorted(allowed))}")
+    payload = evidence if isinstance(evidence, dict) else {}
+    record = {
+        "id": str(uuid.uuid4()),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "phase": "control",
+        "intervention_type": "optimize_workspace",
+        "receipt_kind": "optimize_workspace",
+        "decision": decision,
+        "reason": reason.strip()[:500],
+        "project_path": project_path.strip()[:1000] if isinstance(project_path, str) else None,
+        "action_channel": (action_channel or "dashboard").strip()[:80],
+        "evidence": payload,
+    }
+    with _locked_state():
+        data = _load()
+        data["optimize_decisions"].append(record)
+        data["optimize_decisions"] = data["optimize_decisions"][-MAX_OPTIMIZE_DECISIONS_STORED:]
+        _save(data)
+    return record
+
+
+def recent_optimize_decisions(limit: int = 10) -> list[dict[str, Any]]:
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return []
+    rows = [row for row in data["optimize_decisions"] if isinstance(row, dict)]
+    return list(reversed(rows[-max(1, limit):]))
+
+
+def mark_recent_handoff_receipts_viewed(limit: int = 20) -> int:
+    """Mark recent Fresh Start receipts as reviewed by the user.
+
+    A reviewed receipt can still be proof-pending; this only means the Companion
+    should stop blinking for that already-seen receipt while Evidence keeps the
+    pending proof visible.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    updated = 0
+    with _locked_state():
+        data = _load()
+        for row in reversed(data["handoff_decisions"]):
+            if updated >= max(1, limit):
+                break
+            if not isinstance(row, dict):
+                continue
+            if row.get("receipt_kind") != "fresh_start":
+                continue
+            if row.get("receipt_viewed_at"):
+                continue
+            row["receipt_viewed_at"] = now
+            updated += 1
+        if updated:
+            _save(data)
+    return updated
 
 
 def link_handoff_decision_next_session(
@@ -782,6 +1024,7 @@ def upsert_ambient_intervention(
     reason: str,
     urls: dict[str, str] | None = None,
     expected_savings: dict[str, Any] | None = None,
+    required_observations: int = 1,
 ) -> dict[str, Any] | None:
     """Create or refresh the durable record shared by notification and overlay.
 
@@ -814,9 +1057,11 @@ def upsert_ambient_intervention(
                     "state": "detected",
                     "events": [_ambient_event("detected")],
                     "channels": {},
+                    "observation_count": 1,
                 }
                 rows.append(record)
             else:
+                record["observation_count"] = max(1, int(record.get("observation_count") or 1)) + 1
                 prior_stamp = record.get("session_stamp")
                 prior_severity = record.get("severity")
                 if prior_stamp != session_stamp or prior_severity != normalized_severity:
@@ -834,6 +1079,7 @@ def upsert_ambient_intervention(
                 "reason": reason.strip()[:500],
                 "urls": _safe_ambient_urls(urls),
                 "expected_savings": _safe_expected_savings(expected_savings),
+                "required_observations": max(1, int(required_observations)),
             })
             data["ambient_interventions"] = rows[-MAX_AMBIENT_INTERVENTIONS_STORED:]
             _save(data)
@@ -873,6 +1119,8 @@ def ambient_intervention_delivery_allowed(fingerprint: str, *, channel: str) -> 
     """
     record = get_ambient_intervention(fingerprint)
     if not record:
+        return False
+    if int(record.get("observation_count") or 0) < int(record.get("required_observations") or 1):
         return False
     current_severity = record.get("severity")
 
