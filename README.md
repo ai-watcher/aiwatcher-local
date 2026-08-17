@@ -25,6 +25,7 @@ work is done.
   - [4. Install hooks so work is reviewed before it runs](#4-install-hooks-so-work-is-reviewed-before-it-runs)
     - [Prompt preflight hook](#prompt-preflight-hook)
     - [Dangerous-command gate](#dangerous-command-gate)
+- [How AIWatcher Helps While You Code](#how-aiwatcher-helps-while-you-code)
 - [Use AIWatcher Day To Day](#use-aiwatcher-day-to-day)
 - [Command Guide](#command-guide)
   - [Basic commands](#basic-commands)
@@ -198,6 +199,49 @@ python -m aiwatcher_cli uninstall-claude-command-gate --scope user
 
 See [Hook coverage by tool](#hook-coverage-by-tool) for per-tool
 setup notes and which surfaces do and do not support hooks.
+
+## How AIWatcher Helps While You Code
+
+AIWatcher Local adds a private control loop around your AI coding tools: review
+the prompt before it runs, watch for drift while work is active, and prove
+whether the session turned into useful code afterwards.
+
+```mermaid
+flowchart TB
+  subgraph before["Before Work"]
+    prompt["Prompt Gate<br/>Review broad, risky, or expensive prompts"]
+    brief["Safer Brief<br/>Add scope, checkpoint, and stop condition"]
+  end
+
+  subgraph during["During Work"]
+    companion["Companion<br/>Small live control beside your AI work"]
+    signals["Live Signals<br/>Context pressure, loops, velocity, runway"]
+    fresh["Fresh Start<br/>Continue in a new session without replaying everything"]
+  end
+
+  subgraph after["After Work"]
+    console["Console<br/>Sessions, spend, receipts, settings"]
+    receipts["Receipts<br/>What AIWatcher recommended, what you chose, what happened next"]
+    ledger["Change Ledger<br/>Cost per commit, surviving lines, unbanked spend"]
+    outcomes["Outcomes<br/>Useful, needs rework, abandoned"]
+  end
+
+  prompt --> brief --> companion
+  signals --> companion
+  companion --> fresh
+  companion --> console
+  console --> receipts
+  console --> ledger
+  console --> outcomes
+  receipts --> signals
+  ledger --> signals
+  outcomes --> signals
+
+  privacy["Local-first by default<br/>Reads local history and repo evidence. No prompt/source upload. No account required."]
+  privacy --- prompt
+  privacy --- companion
+  privacy --- console
+```
 
 ## Use AIWatcher Day To Day
 
