@@ -5,13 +5,13 @@ the ones that succeeded. Tie every session to whether the work was worth it.
 
 AIWatcher Local is a private control loop for Claude Code, Codex, Cursor, and
 other local AI coding tools. It scores prompts before they run, watches sessions
-while they do, then attributes what you spent to the commits it produced — so
+while they do, then attributes what you spent to the commits it produced, so
 "was that worth it?" has an answer instead of a token count. No account, no
 cloud upload, no LLM calls.
 
-Every other tool in this space reports on sessions that failed. The expensive
-ones usually don't. A task phrased loosely, twenty turns of drift and redirect,
-and then it works — so nobody looks, at three times the tokens it needed.
+AIWatcher focuses on the local developer experience: prompt review before work
+starts, calm nudges while work is running, and lightweight evidence after the
+work is done.
 
 ![The AIWatcher Local dashboard's Today tab: latest AI work and one thing worth changing up top; useful outcomes, preflight decisions, sessions observed, and API-equivalent value tiles; the latest receipt with proof status; projects driving usage and recent sessions below.](docs/dashboard.svg)
 
@@ -30,7 +30,7 @@ and then it works — so nobody looks, at three times the tokens it needed.
   - [Basic commands](#basic-commands)
   - [Extra commands](#extra-commands)
 - [Example Output](#example-output)
-- [Why a Loop, Not Another Usage Dashboard](#why-a-loop-not-another-usage-dashboard)
+- [Why It Helps](#why-it-helps)
 - [The Local Control Loop](#the-local-control-loop)
   - [Hook coverage by tool](#hook-coverage-by-tool)
   - [Prompt Companion for Non-Hook Surfaces](#prompt-companion-for-non-hook-surfaces)
@@ -322,8 +322,7 @@ This week: $17.21
 This month: $77.87
 ```
 
-And the ledger behind it — this one captured from AIWatcher's own repo, so the
-commit subjects are its real history:
+And the ledger behind it:
 
 ```text
 $ aiwatcher changes --days 30
@@ -331,14 +330,14 @@ Cost per change - last 30 days, ranked by spend
 
 Commit          Cost        Lines    $/line  Alive    Subject
 ----------------------------------------------------------------------------------------
-ae260330bd    $43.34      +80/-92     $0.25      -   fix(report): render line survival instea
-abdf2097a3    $37.45     +338/-48     $0.10      - ~ fix(health): measure context bloat as a
-f116b2e56e    $27.53     +425/-25     $0.06      - ~ fix(cost): count and price prompt-cache
-a4147f4544    $21.44      +136/-0     $0.16      -   fix(cost): bill each API request once, n
-68be623c8a    $21.23     +865/-33     $0.02    78% ~ feat(outcome): commit survival tracking,
-1ac0d61a58    $20.45      +814/-9     $0.02    81%   feat(watch): surface outcome-review noti
-59d7cb1520    $19.47       +52/-1     $0.37    92%   fix(prompt-gate): quote JS string escape
-be6acc01bc    $15.90     +141/-16     $0.10      8%  feat(handoff): enrich brief with commit/
+ae260330bd    $43.34      +80/-92     $0.25      -   refactor checkout flow
+abdf2097a3    $37.45     +338/-48     $0.10      - ~ improve retry handling
+f116b2e56e    $27.53     +425/-25     $0.06      - ~ update reporting view
+a4147f4544    $21.44      +136/-0     $0.16      -   add import validation
+68be623c8a    $21.23     +865/-33     $0.02    78% ~ simplify worker lifecycle
+1ac0d61a58    $20.45      +814/-9     $0.02    81%   add outcome review state
+59d7cb1520    $19.47       +52/-1     $0.37    92%   fix prompt escaping
+be6acc01bc    $15.90     +141/-16     $0.10      8%  remove unused migration path
 ...
 
 2 of 77 commits have no observed AI spend (hand-written, or committed more than 12h after the work).
@@ -348,7 +347,7 @@ Blank survival means not measured, not 'did not survive'. It is a floor either w
 
 Unbanked: $253.32 of the last 30 days (31%) has no commit behind it ($566.66 reached one).
   ~/code/payments-api                                   $141.23
-  ~/code/internal-docs                                    $0.14
+  ~/code/docs-site                                        $0.14
   Exploration that went nowhere, or work still uncommitted -- this cannot tell them apart.
 ```
 
@@ -357,27 +356,16 @@ lines it wrote are still in the tree. Nothing failed — it committed, it passed
 nobody reverted it. It just didn't last. That session is invisible to every tool
 that reports on errors.
 
-## Why a Loop, Not Another Usage Dashboard
+## Why It Helps
 
-**Usage dashboards** — `ccusage`, vendor consoles, OTel exports — tell you what
-happened after the money is gone. They are built to investigate failures, so
-they have nothing to say about the session that succeeded expensively, which is
-where the waste actually lives.
+AI coding work is often expensive when it succeeds, not only when it fails.
+AIWatcher Local helps you catch broad prompts before they run, notice context
+pressure while a session is still active, and review whether the output became
+useful work afterwards.
 
-**API gateways** block and route traffic on the one path routed through them.
-They never see the coding agent on your laptop, which is where a growing share
-of AI work now happens.
-
-**Your own vigilance** is the fallback, and it is the real control plane at most
-companies: Claude Code asks permission for every command until the prompts get
-turned off. Watching a terminal by hand defeats the point of using agents.
-
-AIWatcher Local replaces none of that and covers the gaps between them. The
-loose prompt that would have burned 3x the tokens is caught at preflight and
-rewritten into a scoped brief before the first token is spent. The week where
-spend crept up becomes a filter rather than an investigation. And "was any of it
-worth it?" gets answered by the ledger — cost per surviving change, not cost per
-token.
+It is not a proxy, gateway, or cloud dashboard. It reads local history and local
+runtime metadata, stays private by default, and labels evidence honestly when a
+signal is inferred rather than verified.
 
 ## The Local Control Loop
 

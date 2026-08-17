@@ -1,8 +1,8 @@
 """Local outcome evidence for AIWatcher sessions.
 
-This module keeps the OSS moat narrow and honest: it reads local git/test
-signals around a session and turns them into personal evidence. It does not
-upload source, prompt text, diffs, or team data.
+This module keeps the local privacy boundary narrow and honest: it reads local
+git/test signals around a session and turns them into personal evidence. It
+does not upload source, prompt text, diffs, or team data.
 """
 
 from __future__ import annotations

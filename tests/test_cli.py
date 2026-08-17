@@ -854,7 +854,7 @@ class PromptPreflightTests(unittest.TestCase):
     def test_sessions_search_filters_project_tool_model_or_id(self) -> None:
         rows = [
             session(1, project="/repo/orcha"),
-            session(2, tool="codex-cli", project="/repo/agentwatch"),
+            session(2, tool="codex-cli", project="/repo/archive-tool"),
         ]
         args = SimpleNamespace(days=7, limit=20, team=False, search="orcha", outcome=None, evidence=None)
         output = io.StringIO()
@@ -864,7 +864,7 @@ class PromptPreflightTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertIn("/repo/orcha", output.getvalue())
-        self.assertNotIn("/repo/agentwatch", output.getvalue())
+        self.assertNotIn("/repo/archive-tool", output.getvalue())
 
     def test_sessions_outcome_filter_matches_recorded_outcome_only(self) -> None:
         rows = [session(1, project="/repo/useful"), session(2, project="/repo/rework")]
@@ -912,7 +912,7 @@ class PromptPreflightTests(unittest.TestCase):
 
     def test_resume_uses_most_recent_matching_session(self) -> None:
         rows = [
-            session(1, project="/repo/agentwatch"),
+            session(1, project="/repo/archive-tool"),
             session(2, project="/repo/orcha"),
         ]
         args = SimpleNamespace(
@@ -1036,7 +1036,7 @@ class PromptPreflightTests(unittest.TestCase):
         rows = [
             session(1, project="/repo/orcha"),
             session(2, project="/repo/orcha-old"),
-            session(3, project="/repo/agentwatch"),
+            session(3, project="/repo/archive-tool"),
         ]
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")
@@ -2896,7 +2896,7 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         original = (
             "dont work on any code changes, just tell me the plan. "
             "Can you review my chat on handoff linking, slow loading session details, "
-            "and Fresh Start context handoff against the moat strategy?\n\n"
+            "and Fresh Start context handoff against the product direction?\n\n"
             + ("Quoted prior chat and transcript detail. " * 160)
         )
 
@@ -3282,6 +3282,8 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
             self.skipTest("node not available to check JS syntax")
         result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
         page = cli._prompt_gate_html(tool="claude", cwd="/repo", prompt="original prompt text", result=result)
+        self.assertIn("window.close()", page)
+        self.assertIn("Closing this local gate tab", page)
         script = re.search(r"<script>(.*?)</script>", page, re.S).group(1)
         with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as handle:
             handle.write(script)
@@ -4862,12 +4864,12 @@ class IntegrationConfigTests(unittest.TestCase):
         # to C:Users... there, so the generated command must not contain any
         # backslashes regardless of what sys.executable reports.
         with (
-            patch.object(cli.sys, "executable", r"C:\Users\tadan\Python\python.exe"),
+            patch.object(cli.sys, "executable", r"C:\Users\example\Python\python.exe"),
             patch.object(cli.os, "name", "nt"),
         ):
             command = cli._cli_command_for_current_file()
         self.assertNotIn("\\", command)
-        self.assertIn("C:/Users/tadan/Python/python.exe", command)
+        self.assertIn("C:/Users/example/Python/python.exe", command)
 
     def test_windows_hook_command_quotes_paths_with_spaces(self) -> None:
         with (

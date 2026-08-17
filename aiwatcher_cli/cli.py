@@ -849,8 +849,8 @@ def _long_prompt_topics(text: str) -> list[str]:
         topics.append("- Audit slow-loading session and Fresh Start screens: identify fast first-paint vs deferred evidence gaps.")
     if "fresh" in lower or "new session" in lower or "context" in lower:
         topics.append("- Audit Fresh Start continuation: does one action create the right brief/workspace path without extra context replay?")
-    if "moat" in lower or "strategy" in lower:
-        topics.append("- Check the recommendation against the current AIWatcher OSS moat/strategy before proposing changes.")
+    if "product direction" in lower or "strategy" in lower:
+        topics.append("- Check the recommendation against the current AIWatcher product direction before proposing changes.")
     return topics[:4]
 
 
@@ -2472,8 +2472,18 @@ async function sendDecision(decision) {{
         <h2>${{riskChange}}</h2>
         <div class="impact">${{saved.impact}}</div>
         <p style="margin-top:16px">Return to your AI tool. On Claude hooks, an accepted brief is added beside the original request; cancelling blocks the original request entirely.</p>
+        <p id="close-status" style="margin-top:16px">Closing this local gate tab…</p>
       </section>
     </main>`;
+    setTimeout(() => {{
+      window.close();
+      setTimeout(() => {{
+        const closeStatus = document.getElementById('close-status');
+        if (closeStatus) {{
+          closeStatus.textContent = 'Decision saved. Your browser did not allow AIWatcher to close this tab, so it is safe to close manually.';
+        }}
+      }}, 700);
+    }}, 900);
   }} catch (error) {{
     buttons.forEach(button => button.disabled = false);
     status.textContent = `AIWatcher could not apply this decision: ${{error.message}}. The host may have timed out; return to the AI tool and confirm before continuing.`;
@@ -2723,7 +2733,7 @@ def run_prompt_gate(
 # or Cursor expose a separate pre-tool-execution hook AIWatcher could gate
 # through. Rather than guess at an unverified schema and write untested JSON
 # into a real ~/.codex or ~/.cursor config file, this stays Claude-only until
-# that's actually confirmed -- see the docs-repo companion PR for S-19.
+# the host lifecycle API is confirmed and covered by tests.
 def _command_tokens(command: str) -> list[str]:
     try:
         return shlex.split(command, posix=(os.name != "nt"))
