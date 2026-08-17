@@ -20,21 +20,15 @@ and then it works — so nobody looks, at three times the tokens it needed.
 - [Privacy](#privacy)
 - [Quickstart](#quickstart)
   - [1. Install](#1-install)
-  - [2. See where you stand](#2-see-where-you-stand)
-  - [3. Install hooks so work is reviewed before it runs](#3-install-hooks-so-work-is-reviewed-before-it-runs)
+  - [2. Run setup](#2-run-setup)
+  - [3. Start AIWatcher Local](#3-start-aiwatcher-local)
+  - [4. Install hooks so work is reviewed before it runs](#4-install-hooks-so-work-is-reviewed-before-it-runs)
     - [Prompt preflight hook](#prompt-preflight-hook)
     - [Dangerous-command gate](#dangerous-command-gate)
-- [Try the Core Workflows](#try-the-core-workflows)
-  - [1. See today's AI work](#1-see-todays-ai-work)
-  - [2. Check a prompt by hand](#2-check-a-prompt-by-hand)
-  - [3. Use the local dashboard](#3-use-the-local-dashboard)
-  - [4. Mark whether work was useful](#4-mark-whether-work-was-useful)
-  - [5. See what each commit cost](#5-see-what-each-commit-cost)
-  - [6. Resume work without rebuilding context](#6-resume-work-without-rebuilding-context)
-  - [7. Log a decision that never became a commit](#7-log-a-decision-that-never-became-a-commit)
-  - [8. Check runtime hygiene](#8-check-runtime-hygiene)
-  - [9. Export local evidence](#9-export-local-evidence)
-- [Commands](#commands) — day-one subset; [full CLI reference](docs/CLI.md)
+- [Use AIWatcher Day To Day](#use-aiwatcher-day-to-day)
+- [Command Guide](#command-guide)
+  - [Basic commands](#basic-commands)
+  - [Extra commands](#extra-commands)
 - [Example Output](#example-output)
 - [Why a Loop, Not Another Usage Dashboard](#why-a-loop-not-another-usage-dashboard)
 - [The Local Control Loop](#the-local-control-loop)
@@ -82,62 +76,51 @@ the Python launcher (`py -m pip install -e .`).
 Examples below use `python -m aiwatcher_cli`, which works from a clone with no
 install at all. Once installed, `aiwatcher <command>` is equivalent everywhere.
 
-### 2. See where you stand
+### 2. Run setup
 
 ```sh
 python -m aiwatcher_cli setup
 ```
 
-`start` detects which AI coding tools you have, reports what history it can
-already read, and starts the local Companion:
+`setup` detects which AI coding tools AIWatcher can read on this machine,
+reports which hooks are installed, and prints the exact next steps that apply
+to your tools.
+
+### 3. Start AIWatcher Local
+
+```sh
+python -m aiwatcher_cli start --open-ui
+```
+
+This is the default startup command. It starts:
+
+- the local Console dashboard on `http://127.0.0.1:8765` or the next available
+  loopback port
+- the background Companion that watches local AI sessions
+- the small floating Companion control on macOS and Windows
+
+The Companion is the live mode: it sits near the edge of the screen, stays
+quiet during normal work, and lights up when AIWatcher sees a prompt gate,
+Fresh Start, loop, context pressure, runway, or proof action worth your
+attention. The Console is the deep mode for sessions, spend, receipts,
+evidence, settings, and history.
+
+Useful startup variants:
 
 ```sh
 python -m aiwatcher_cli start
+python -m aiwatcher_cli start --no-ui
+python -m aiwatcher_cli start --no-presence
+python -m aiwatcher_cli start --presence-visibility ai-apps
+python -m aiwatcher_cli start --presence-visibility nudges-only
 ```
 
-On macOS and Windows, a small AIWatcher Companion should appear near the screen
-edge. It stays local and quiet until a prompt, context, loop, velocity, runway,
-or receipt state needs attention. Use `--no-presence` if you want background
-watching without the floating control, or `--no-companion` if you only want the
-one-time scan.
+`--presence-visibility always` is the default. `ai-apps` shows the Companion
+only while a known AI coding app, terminal, editor, or AI site is active.
+`nudges-only` keeps it out of sight unless something needs action. Urgent local
+nudges can still appear in any mode.
 
-`setup` detects which AI coding tools you have, reports what history it can
-already read, and prints the exact next steps for your machine. Start here — it
-tells you which of the commands below will actually have data.
-
-Because AIWatcher reads history your tools have already written, these work
-immediately, before you install any integration:
-
-```sh
-python -m aiwatcher_cli today
-python -m aiwatcher_cli last
-python -m aiwatcher_cli ui
-```
-
-`ui` starts a local-only dashboard on `http://127.0.0.1:8765`. If that port is
-busy, AIWatcher Local automatically tries the next available port and prints the
-URL it picked.
-
-For ambient runtime nudges without keeping the dashboard open, start the local
-companion once for the current login session:
-
-```sh
-python -m aiwatcher_cli companion start
-```
-
-It watches local session metadata in the background and shows the Companion by
-default. The Companion has quick paths for **Plan** (Prompt Companion),
-**Control** (the strongest recommended action, such as Fresh Start), **Watch**
-(current session evidence), and **Console** (the full dashboard). It presents at
-most one actionable nudge when the matching Claude, Codex, Cursor, editor, or
-terminal runtime is active. Drag it by its handle, minimize it to the small
-**AIW** pill when it is in the way, and expand it again when you need the
-controls. When a hook opens Prompt Gate for a risky prompt, the Companion
-switches to **Review Gate** and links to that local decision page while the
-AI tool is paused. Use `companion status` or `companion stop` to inspect or stop
-it. The companion does not upload data and does not require the dashboard.
-
-### 3. Install hooks so work is reviewed before it runs
+### 4. Install hooks so work is reviewed before it runs
 
 Everything above is retrospective. Hooks are what make AIWatcher act *before*
 execution. There are two, on different lifecycle events. They are independent —
@@ -153,24 +136,16 @@ install either, or both:
 Install the one matching your tool:
 
 ```sh
-python -m aiwatcher_cli install-claude-hook --write --scope user
-python -m aiwatcher_cli install-codex-hook --write --scope user
-python -m aiwatcher_cli install-cursor-hook --write --scope user
-```
-
-Low-risk prompts pass through untouched. Medium-risk prompts get a scoped
-execution brief added alongside them. High-risk prompts pause before execution.
-
-**Add `--gate` for the interactive Prompt Gate.** This does not replace the
-behavior above — it adds a review step in front of it. A medium- or high-risk
-prompt opens a local decision screen with **Add safer brief**, **Add edited
-brief**, **Run original**, and **Cancel run**. If that screen times out or no
-display is available, AIWatcher falls back to the same deterministic policy
-described above, so nothing is skipped:
-
-```sh
 python -m aiwatcher_cli install-claude-hook --write --scope user --gate
+python -m aiwatcher_cli install-codex-hook --write --scope user --gate
+python -m aiwatcher_cli install-cursor-hook --write --scope user --gate
 ```
+
+With `--gate`, medium- or high-risk prompts pause in a local Prompt Gate before
+the AI tool spends context. The gate lets you add a safer brief, edit it, run
+the original, or cancel the run. When the floating Companion is running, it
+lights up as **Review Gate** and links to the local decision page while the AI
+tool waits.
 
 ![AIWatcher Prompt Gate: a local decision screen showing risk score, guardrail chips, findings and suggestions, the original prompt, a proposed execution brief, and the Add safer brief / Add edited brief / Run original / Cancel run actions.](docs/dashboard-prompt-gate.svg)
 
@@ -178,9 +153,9 @@ Prompt text stays transient in that local browser page: AIWatcher persists
 hashes, decisions, and predicted impact only.
 
 **Using Codex?** Some Codex builds — including the current Codex Desktop
-conversation surface — never invoke `UserPromptSubmit`, so the hook above
-installs cleanly and then does nothing. Run `hook-status` after a test prompt to
-check. If no event appears, add the shell wrapper instead:
+conversation surface on some machines — may show the hook in settings but not
+invoke `UserPromptSubmit`. Run `hook-status` after a test prompt to check. If no
+event appears, add the shell wrapper too:
 
 ```sh
 python -m aiwatcher_cli install-codex-wrapper --write
@@ -224,362 +199,100 @@ python -m aiwatcher_cli uninstall-claude-command-gate --scope user
 See [Hook coverage by tool](#hook-coverage-by-tool) for per-tool
 setup notes and which surfaces do and do not support hooks.
 
-## Try the Core Workflows
+## Use AIWatcher Day To Day
 
-### 1. See today's AI work
+AIWatcher is organized around the same loop in the Companion and Console:
 
-```sh
-python -m aiwatcher_cli today
-```
+- **Plan:** check a risky or broad prompt before you send it.
+- **Control:** accept Prompt Gate guidance, build a Fresh Start brief, continue,
+  snooze, or skip a nudge.
+- **Watch:** see live context pressure, loops, velocity, tool calls, and local
+  runtime health.
+- **Prove:** mark outcomes, review Fresh Start receipts, and connect sessions
+  to commits/tests when local evidence exists.
+- **Improve:** learn which prompts, sessions, tools, and changes were expensive
+  relative to useful outcomes.
 
-Shows local sessions, top project, tools, models, API-equivalent value, and
-subscription/limited usage notes. API-equivalent value is not always invoice
-spend; it is a normalized usage-pressure signal.
+The Companion answers "what should I do right now?" The Console answers "what
+happened, what mattered, and what should I improve next?"
 
-### 2. Check a prompt by hand
+The Console tabs are:
 
-The same risk analysis is reachable three ways: **automatically**, via the
-[hook](#prompt-preflight-hook) from the Quickstart; **by hand**, with the
-command below; and **by paste**, in the dashboard's Prompt tab for
-[surfaces that expose no hook](#prompt-companion-for-non-hook-surfaces). This is
-the by-hand version — useful for sizing up a prompt before pasting it somewhere,
-or on a machine where no hook is installed.
+- **Home:** the few actions most likely to save context, reduce rework, or
+  improve proof.
+- **Control:** prompt review, Prompt Gate decisions, and Fresh Start actions.
+- **Work:** sessions, projects, active/historical logs, and the changes ledger.
+- **Evidence:** Fresh Start receipts, prompt decisions, outcomes, and proof
+  labels.
+- **Spend:** today/week/month usage, API-equivalent value, subscription-limited
+  pressure, and cost per useful work.
+- **Settings:** setup, hooks, coverage, Companion behavior, privacy, and
+  troubleshooting.
 
-macOS/Linux:
+The mockups below use synthetic data. This README does not embed real dashboard
+screenshots, since those can expose private local paths, project names, and AI
+usage history.
 
-```sh
-python -m aiwatcher_cli preflight "Refactor the entire codebase and delete old auth secrets" --tool codex --cwd "$(pwd)"
-```
+![Work tab: a session list next to a review drawer showing Expensive asks with the costliest step highlighted, outcome buttons, outcome evidence, and a Fresh Start action.](docs/dashboard-sessions.svg)
 
-Windows PowerShell:
+![Receipts tab: a table of intervention receipts with time, tool/project, decision, risk change, result, and a review action per row.](docs/dashboard-receipts.svg)
 
-```powershell
-py -m aiwatcher_cli preflight "Refactor the entire codebase and delete old auth secrets" --tool codex --cwd (Get-Location)
-```
+![Spend tab: a stacked list of flagged suggestions — concentrated spend, a large-context session, a possible iterative loop, subscription/limited usage, and unmarked outcome evidence — next to a daily journal and weekly report, with privacy contract and enterprise path panels below.](docs/dashboard-insights.svg)
 
-AIWatcher explains risk, produces an intent-preserving execution brief, and only
-shows quantified savings after enough comparable local history exists.
+## Command Guide
 
-### 3. Use the local dashboard
-
-```sh
-python -m aiwatcher_cli ui
-```
-
-Open the printed URL. The dashboard includes:
-
-The mockups below use synthetic data — like the PR that introduced them, this
-README does not embed real dashboard screenshots, since those can expose
-private local paths, project names, and AI usage history.
-
-- **Home**: a ranked **Needs action** queue first — Fresh Start, outcome
-  review, receipt proof, coverage gaps, or spend signals — followed by latest
-  work, useful outcomes, preflight decisions, and the Fresh Start companion when
-  context is getting expensive.
-- **Control**: local Prompt Companion for surfaces AIWatcher cannot hook yet.
-- **Work**: inspect recent sessions, projects, and changes; rank every prompt in
-  a session by cost under **Expensive asks** (cost is cumulative — a short
-  prompt late in a long session can still be expensive, since it re-sends the
-  whole conversation), mark outcomes, review the changes ledger, and create a
-  Fresh Start brief to continue in a fresh session.
-
-  ![Work tab: a session list next to a review drawer showing Expensive asks with the costliest step highlighted, outcome buttons, outcome evidence, and a Fresh Start action.](docs/dashboard-sessions.svg)
-- **Evidence**: connect each Fresh Start action or preflight decision to what
-  happened next — expected replayed context at risk, observed follow-up sessions,
-  resulting usage, inferred savings labeled as estimates, risk change, and
-  developer outcome.
-
-  ![Receipts tab: a table of intervention receipts with time, tool/project, decision, risk change, result, and a review action per row.](docs/dashboard-receipts.svg)
-- **Spend**: local suggestions for waste and risk — concentrated spend,
-  large-context sessions, possible iterative loops, subscription/limited
-  usage, and unmarked outcome evidence — plus a privacy-safe daily journal
-  and weekly report.
-
-  ![Spend tab: a stacked list of flagged suggestions — concentrated spend, a large-context session, a possible iterative loop, subscription/limited usage, and unmarked outcome evidence — next to a daily journal and weekly report, with privacy contract and enterprise path panels below.](docs/dashboard-insights.svg)
-
-### 4. Mark whether work was useful
-
-```sh
-python -m aiwatcher_cli outcome useful
-```
-
-Or use the **Review outcome** button in the UI. This is how AIWatcher moves from
-token counting toward cost per useful change.
-
-For sessions with a clear costliest turn, the review drawer also retroactively
-coaches that prompt under **Prompt worth tightening** — the same findings,
-suggestions, and risk analysis preflight runs before execution, applied after
-the fact, plus a rewritten tighter version of the prompt for next time.
-
-AIWatcher also shows local outcome evidence before you mark a result: nearby
-commits, uncommitted files, and recent test artifacts. These signals stay on
-your laptop and are labeled as evidence to review, not automatic truth.
-When you inspect or confirm a session, AIWatcher also stores a local
-privacy-safe evidence snapshot: commit SHAs, hashes of file paths/test
-artifacts, confidence, and inferred outcome. It does not store source diffs,
-prompt text, commit subjects, or file contents.
-
-This persisted snapshot is separate from the one-time Fresh Start brief you copy
-elsewhere (below), which does include the real commit subject and body. A
-commit message is written by whoever made the change specifically to explain
-it to a future reader, so unlike prompt text it is not treated as private —
-just not persisted to disk beyond the hash above.
-
-### 5. See what each commit cost
-
-Marking outcomes by hand answers "was that session useful?" The change ledger
-answers the harder question without being asked: what did this commit cost, and
-is the code still there?
-
-```sh
-python -m aiwatcher_cli changes --days 30
-```
-
-A **change** is a commit, and its cost is the AI spend in that repo since the
-previous commit. That is a rule rather than a heuristic — there is no matching
-step to get wrong, and two sessions running in parallel on one repo both count
-toward the commit they preceded. Attribution is per event, not per session, so a
-long session spanning several commits splits across them at the turn the spend
-actually happened instead of dumping everything on whichever commit came last.
-
-Three numbers are doing the work:
-
-- **$/line** ranks changes by what they cost to produce.
-- **Alive** is line-level survival: of the lines a change added, how many does
-  `git blame` still attribute to it — and of the lines it deleted, how many have
-  stayed gone. Measuring both directions matters, because a change whose whole
-  job was deleting dead code adds nothing, and an additions-only measure would
-  score it 0%, exactly backwards. Survival is a **floor, not an exact figure**:
-  reformatting reattributes lines to the formatting commit. A blank means *not
-  measured*, not *did not survive*, and commits are left alone for 7 days before
-  it is measured at all.
-- **Unbanked** is spend with no commit behind it — exploration that went
-  nowhere, or work still sitting uncommitted. It is reported separately rather
-  than folded into the next commit, because it is the most direct measure of
-  waste here: money spent with nothing to show for it. It cannot tell those two
-  cases apart, and says so rather than guessing.
-
-Commits written by someone else are excluded. They arrived by fetch, so no spend
-on your machine belongs to them.
-
-For the same thing one commit at a time, printed right after you commit:
-
-```sh
-python -m aiwatcher_cli commit-receipt
-python -m aiwatcher_cli install-commit-hook --write
-```
-
-The receipt names what the change cost, its lines and $/line, and how that rate
-compares with your median over the trailing baseline — so a change that ran
-several times your usual rate says so while you still remember writing it. Its
-shape, with your own numbers in place of these:
-
-```text
-AIWatcher receipt  59d7cb1520  fix(prompt-gate): quote JS string escapes
-  This change    $19.47  |  +52/-1 lines  |  $0.37/line
-                 62 model calls  |  claude-code
-  vs baseline    $0.04/line median over 30 days (41 changes) -- this one is 9.3x your usual
-  Still unbanked $58.54 spent here in the last 7d has no commit behind it
-```
-
-To see the number while it is still moving rather than after the fact, put it in
-Claude Code's status line:
-
-```sh
-python -m aiwatcher_cli install-statusline --write
-```
-
-```text
-* $8.01 since commit | $8.01 session | 100K/turn
-```
-
-"Since commit" is unbanked spend as it accumulates — the running total of money
-that does not yet have a change behind it.
-
-### 6. Resume work without rebuilding context
-
-When a session gets stale, expensive, or you want to move from Claude to Codex,
-generate a target-ready continuation brief:
-
-```sh
-python -m aiwatcher_cli resume --search <your-project> --target codex --copy
-python -m aiwatcher_cli handoff --session-id <session-id> --target cursor
-```
-
-Replace `<your-project>` with part of your own project's name — for a repo at
-`~/code/payments-api`, `--search payments` finds it. `--search` matches a
-project path, tool, model, or session id, and falls back to a rough topic match
-over changed file names, so a fragment is usually enough.
-
-The brief opens with why AIWatcher is suggesting a Fresh Start now: degraded
-context health or a stale session, 250+ model calls, 80+ tool calls, or
-$5+ in API-equivalent value — so you know whether it's worth acting on
-before reading further.
-
-The dashboard also surfaces this as a **Fresh Start companion** on Home when active
-local work reaches warning or critical context pressure. The background
-companion carries the same intervention into the developer's current workflow,
-so the dashboard is useful for review but is not required while coding. AIWatcher
-gives the signal one primary action and **Continue here**; inspect, snooze, and
-dismiss live in the overflow menu. It
-records only local decision metadata and estimated replayed context at risk,
-not prompt or source text. When a later same-project local session appears,
-AIWatcher links it as a Fresh Start receipt and shows observed next-session
-usage/outcome without claiming a guaranteed counterfactual. Recent Fresh Start
-decisions appear in Home, Evidence, and `aiwatcher hook-status`. After you act,
-snooze, or dismiss, the same signal stays quiet across the native and browser
-companions unless severity worsens.
-
-For a lower-friction desktop flow, start the background companion directly:
-
-```bash
-python -m aiwatcher_cli companion start
-```
-
-When AIWatcher confirms an actionable signal on two consecutive scans, it opens
-one compact local companion near the edge of the screen. It waits for a pause
-between turns, requires an active runtime or matching foreground tool, and
-ignores stale/background sessions. The primary action matches the signal: copy
-a fresh-session brief for critical context, inspect a possible loop, copy a
-focused checkpoint for unusual velocity, or review a lane switch under runway
-pressure. **Continue here** keeps the current session and quiets the signal for
-15 minutes. The overflow menu contains inspect, snooze, and dismiss.
-
-For an always-available entry point, use:
-
-```bash
-python -m aiwatcher_cli companion start
-```
-
-Presence mode is the lightweight **Companion** surface: it stays near the screen
-edge with quick access to **Plan**, the current recommended **Control** action,
-and **Console**. It does not inspect other apps, read prompt text, or claim
-exact-chat return. The deeper local dashboard remains the **Dashboard** surface
-for sessions, spend, evidence, coverage, receipts, and detailed Fresh Start
-review.
-
-On macOS the companion uses a non-activating native panel; on Windows it uses a
-non-activating topmost window where the OS permits it. It deliberately avoids
-stacking a second OS notification for the same intervention. If native UI is
-unavailable, AIWatcher falls back to the local browser companion. AIWatcher does
-not inject UI into third-party apps and does not claim an exact-chat deep link
-when a host tool does not expose one.
-
-On macOS, AIWatcher deliberately does not fall back to AppleScript
-Notification Center alerts. macOS attributes those alerts to Script Editor,
-so clicking **Show** opens Script Editor instead of AIWatcher. The actionable
-native companion is used instead; `terminal-notifier` remains supported for
-standalone `--notify` use because it can open the local dashboard correctly.
-
-For foreground debugging, you can still run the watch loop directly:
-
-```bash
-python -m aiwatcher_cli watch --overlay
-```
-
-Use `watch --once --overlay` as a one-shot smoke test, and set
-`AIWATCHER_OVERLAY_MODE=browser` if you prefer the browser companion.
-
-Targets: `generic`, `claude`, `codex`, `cursor`, and `vscode`. The brief lists
-recent commit subjects/bodies and changed files for context, any decisions
-logged for the session (see below), and keeps the next run focused on one
-checkpoint. Add `--include-prompt-excerpt` to also include your own
-highest-cost prompt from the session — off by default, and labeled as a
-privacy opt-in in both the CLI and the dashboard.
-
-**Or do the whole thing in the dashboard.** Run `python -m aiwatcher_cli ui`,
-open **Work**, search for the work, click the session, then press
-**Copy Fresh Start brief**. The drawer exposes the same controls as the flags
-above: the five targets as buttons, the prompt excerpt as a checkbox, and
-**Copy Fresh Start brief** in place of `--copy`. Same capability either way — use
-whichever suits the moment.
-
-The **Home** tab also surfaces a Fresh Start button directly on sessions under
-context pressure, so you can act on one without going looking for it.
-
-### 7. Log a decision that never became a commit
-
-A commit message explains changes that shipped. It cannot explain an approach
-you seriously considered and rejected without ever writing code for it — a
-fresh session has no way to know that ground was already covered:
-
-```sh
-python -m aiwatcher_cli log-decision "Chose X over Y" --reasoning "..." --rejected "Y"
-```
-
-Logged decisions for a session are surfaced in its Fresh Start brief, explicitly
-labeled self-reported and not verified against what actually happened.
-Nothing is logged automatically. To have an AI session call this itself at
-real decision points, install a personal convention — this only ever touches
-your own machine's `~/.claude/CLAUDE.md`, never a project file shared with
-collaborators:
-
-```sh
-python -m aiwatcher_cli install-claude-decision-log --write
-```
-
-### 8. Check runtime hygiene
-
-```sh
-python -m aiwatcher_cli processes --stale-only
-```
-
-Lists local AI-related runtime processes such as Codex/Claude/Cursor-ish
-wrappers, `node_repl` kernels, and Computer Use clients. AIWatcher highlights
-likely stale or orphaned runtimes by local process signals such as PPID=1, old
-age, stopped state, missing working directories, or missing temporary kernel
-paths.
-
-This is local CPU/RAM/battery and security hygiene, not a billing claim:
-AIWatcher does not assume a stale process is still making model/API calls.
-It prints a copyable kill command for review, but never kills a process for you.
-
-### 9. Export local evidence
-
-```sh
-python -m aiwatcher_cli export --format json --days 30
-python -m aiwatcher_cli export --format json --level events --days 30
-```
-
-Exports local session summaries or privacy-safe event hashes. Prompt and source
-content are not included.
-
-## Commands
-
-Every command is read-only and runs against the history your tools already keep
-locally. Run from a clone with `python -m aiwatcher_cli <command>`, or just
+Every command is local-first and runs against the history your tools already
+keep. Run from a clone with `python -m aiwatcher_cli <command>`, or just
 `aiwatcher <command>` once installed.
 
 Cost is shown as **API-equivalent value**. AIWatcher Local separates API-priced
 tokens from subscription/plan-limited tokens so you can read the numbers
 honestly. Subscription plans may not bill this as incremental spend.
 
-These are the commands worth knowing on day one:
+### Basic commands
+
+These are enough for a normal first week:
 
 | Command | What it does |
 | --- | --- |
-| `setup` | Detect your tools and print the next steps for your machine |
-| `today` | Today's local AI usage, by tool, model, and project |
-| `last` | Inspect the most recent session in detail |
-| `sessions` | List and search recent sessions |
-| `preflight "..."` | Review a prompt for cost, scope, and safety before running it |
-| `changes` | What each commit cost, its $/line, and how much of it is still alive |
-| `commit-receipt` | What the latest commit cost, against your usual rate |
-| `outcome useful` | Mark how the last session turned out |
-| `journal` | Daily summary plus one thing to change next time |
-| `resume --target codex --copy` | Continue work in a different tool without rebuilding context |
-| `companion start` | Show the Companion, watch active local runtimes, and surface calm session-aware nudges |
-| `watch --once` | Flag expensive or loop-like work |
-| `ui` | Local-only browser dashboard |
-| `doctor` | Check tool detection and integration status |
+| `setup` | Detect tools, hook coverage, and recommended next steps |
+| `start --open-ui` | Start the Console dashboard plus the floating Companion |
+| `hook-status` | Verify whether Claude, Codex, or Cursor actually invoked AIWatcher |
+| `today` | Show today's local usage by tool, model, project, and API-equivalent value |
+| `sessions` | Search and review recent local AI sessions |
+| `preflight "..."` | Review a prompt manually before pasting or running it |
+| `outcome useful` | Mark the latest session as useful, rework, or abandoned |
+| `ui` | Run the Console dashboard in the foreground for debugging |
+| `doctor` | Check local tool detection and integration health |
 
-**[Full CLI reference →](docs/CLI.md)** — every command with all its flags,
-defaults, and examples, including the hook and wrapper installers, `export`,
-`mcp`, `handoff`, `log-decision`, `timeline`, `processes`, and `run`.
+### Extra commands
 
-That reference is generated from the CLI itself and verified by a test, so it
-cannot drift out of date. This table is the curated subset; it is not the
-complete list and does not try to be.
+Use these once the basics are working:
+
+| Area | Commands |
+| --- | --- |
+| Companion and runtime watch | `companion start`, `companion status`, `companion stop`, `watch --once`, `watch --overlay`, `processes --stale-only` |
+| Fresh Start and continuity | `handoff`, `resume --target codex --copy`, `log-decision`, `journal`, `timeline`, `last` |
+| Spend and change evidence | `changes`, `commit-receipt`, `install-commit-hook`, `install-statusline`, `statusline`, `report`, `tools`, `projects` |
+| Setup and integrations | `install-claude-hook`, `install-codex-hook`, `install-cursor-hook`, `install-claude-command-gate`, `install-codex-wrapper`, the matching uninstall commands, `mcp`, `export` |
+| Launch helpers | `codex`, `claude`, `run` |
+
+The complete generated reference is in [docs/CLI.md](docs/CLI.md). It includes
+all flags, defaults, and examples. Internal hook commands are documented there
+for transparency, but users normally install them through the installer commands
+above rather than running them by hand.
+
+For common workflows:
+
+- **Check a prompt by hand:** `preflight "Refactor this module safely" --tool codex --cwd "$(pwd)"`
+- **Open the dashboard only:** `ui`
+- **Start the Companion only:** `companion start`
+- **Stop the Companion:** `companion stop`
+- **Mark a result:** `outcome useful`, `outcome rework`, or `outcome abandoned`
+- **Build a Fresh Start brief:** `handoff --session-id <session-id> --target codex --copy`
+- **Continue older work:** `resume --search <project-fragment> --target claude --copy`
+- **Review commit cost:** `changes --days 30` or `commit-receipt`
+- **Export local evidence:** `export --format json --days 30`
 
 ## Example Output
 
@@ -698,7 +411,7 @@ predicted impact, and outcomes, not the original or suggested prompt text.
 
 Claude Code CLI, the Code tab in Claude Desktop, Codex CLI/TUI builds that
 invoke `UserPromptSubmit`, and Cursor support prompt lifecycle hooks. The
-[Quickstart](#3-install-hooks-so-work-is-reviewed-before-it-runs) covers
+[Quickstart](#4-install-hooks-so-work-is-reviewed-before-it-runs) covers
 the basic install; this section covers per-tool behavior and the surfaces where
 hooks are not available. Every installer flag is documented in the
 [CLI reference](docs/CLI.md#hooks-and-wrappers).
@@ -748,16 +461,17 @@ Desktop chat, the current Codex Desktop conversation surface, web chat, editor
 chats, or any tool AIWatcher cannot hook yet, use the local companion:
 
 ```sh
-python -m aiwatcher_cli ui
+python -m aiwatcher_cli start --open-ui
 ```
 
-Open the **Prompt** tab. Draft or paste a prompt, preflight it locally, edit the
-execution brief, then copy either the brief or the original prompt into your AI
-tool. This is also the foundation for future browser and editor extensions:
-they can call the same local `/api/preflight` endpoint without uploading prompt
-text. The experimental `browser-extension/` adapter currently supports
-`claude.ai`; `vscode-extension/` provides manual editor, clipboard, and input
-commands. Neither is described as universal editor-chat interception.
+Use **Plan** from the Companion, or open the Console's **Control** tab. Draft or
+paste a prompt, preflight it locally, edit the execution brief, then copy either
+the brief or the original prompt into your AI tool. This is also the foundation
+for future browser and editor extensions: they can call the same local
+`/api/preflight` endpoint without uploading prompt text. The experimental
+`browser-extension/` adapter currently supports `claude.ai`;
+`vscode-extension/` provides manual editor, clipboard, and input commands.
+Neither is described as universal editor-chat interception.
 
 Building your own integration? `POST /api/preflight` is a supported endpoint
 for same-machine callers, alongside `POST /api/outcome`. Request and response
