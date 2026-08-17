@@ -4623,6 +4623,8 @@ HTML = r"""<!doctype html>
     .runway-mini { display: block; width: 100%; height: 34px; }
     .bar-note { display: block; font-size: .68rem; color: var(--faint); letter-spacing: .02em; }
     .scatter-svg { display: block; width: 100%; height: auto; overflow: visible; margin-top: 10px; }
+    .scatter-hit { fill: transparent; cursor: pointer; }
+    .scatter-hit:hover { fill: var(--blue-soft); }
     .scatter-key { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--muted); display: inline-block; flex: none; }
     .scatter-key.filled { background: var(--muted); }
     .tm-legend { margin-bottom: 10px; gap: 6px 16px; }
@@ -5509,7 +5511,7 @@ HTML = r"""<!doctype html>
     </section>
     <section class="card" style="margin-bottom:14px" id="modelScatter" hidden>
       <div class="section-title">
-        <div><h2>Cost against size, one dot per session</h2><p>Both axes are logarithmic, so a dearer model sits higher rather than climbing more steeply. Look for a hollow dot high up: an expensive session that produced nothing.</p></div>
+        <div><h2>Cost against size, one dot per session</h2><p>Both axes are logarithmic, so a dearer model sits higher rather than climbing more steeply. Look for a hollow dot high up: an expensive session that produced nothing. Click any dot to open that session.</p></div>
       </div>
       <div class="bar-legend" id="modelScatterLegend"></div>
       <div data-scatter></div>
@@ -7255,7 +7257,7 @@ function drawModelScatter(node, scatter) {
   }
   chartText(svg, (plot.left + plot.right) / 2, plot.bottom + 38, 'tokens in session');
 
-  scatter.points.forEach(point => {
+  const placed = scatter.points.map(point => {
     const colour = chartToken(colourFor(point.model === 'other' ? 'other models' : point.model));
     const cx = x(Math.log10(Math.max(1, point.tokens)));
     const cy = y(Math.log10(Math.max(0.01, point.cost_usd)));
@@ -7267,6 +7269,24 @@ function drawModelScatter(node, scatter) {
       stroke: colour, 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke',
       opacity: point.landed === null ? 0.35 : 1,
     }));
+    return { point, cx, cy };
+  });
+
+  // Hit targets are drawn last so they sit above every dot, and are far larger
+  // than the 5px mark -- a scatter you have to hit dead-centre is unusable.
+  // Listeners are attached to nodes rather than written into an onclick string,
+  // so a session id never has to be escaped into markup.
+  placed.forEach(({ point, cx, cy }) => {
+    const hit = svgEl('circle', { cx: cx, cy: cy, r: 12, class: 'scatter-hit' });
+    const outcome = point.landed === null
+      ? 'no evidence recorded yet'
+      : (point.landed ? 'produced a commit still on the branch' : 'produced nothing that lasted');
+    const title = document.createElementNS(SVG_NS, 'title');
+    title.textContent =
+      `${point.project} — ${point.model_label}\n${point.tokens_label} tokens · ${point.cost_label}\n${outcome}\nClick to open this session`;
+    hit.appendChild(title);
+    hit.addEventListener('click', () => selectSession(point.session_id));
+    svg.appendChild(hit);
   });
 
   svg.appendChild(svgEl('line', {

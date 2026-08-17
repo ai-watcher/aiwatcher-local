@@ -354,6 +354,23 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIsNone(by_id["s3"]["landed"], "no snapshot means unexamined, not failed")
         self.assertEqual(scatter["unexamined"], 7)
 
+    def test_scatter_dots_open_their_session_with_a_usable_hit_target(self) -> None:
+        """A 5px mark you must hit dead-centre is not a control.
+
+        The hit circle is far larger than the dot and drawn after every mark so
+        it sits on top. The handler is attached to the node rather than written
+        into an onclick string, so a scanner-supplied session id never has to be
+        escaped into markup.
+        """
+        self.assertIn("class: 'scatter-hit'", ui.HTML)
+        self.assertIn("r: 12", ui.HTML)
+        self.assertIn("hit.addEventListener('click', () => selectSession(point.session_id));", ui.HTML)
+        # Says what a click does before it is clicked, and what the dot means.
+        self.assertIn("Click to open this session", ui.HTML)
+        self.assertIn("produced nothing that lasted", ui.HTML)
+        self.assertIn("no evidence recorded yet", ui.HTML)
+        self.assertIn(".scatter-hit { fill: transparent; cursor: pointer; }", ui.HTML)
+
     def test_model_scatter_needs_enough_points_and_more_than_one_model(self) -> None:
         now = datetime.now(timezone.utc)
         def session(i, model):
