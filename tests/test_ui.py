@@ -923,6 +923,123 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(result["plan_action"]["kind"], "fresh_start")
         self.assertEqual(result["plan_action"]["primary_url"], "/?session=sess-1")
 
+    def test_context_health_card_carries_raw_numbers_for_the_runway_chart(self) -> None:
+        """Every other figure on this card is a formatted string, which cannot be plotted.
+
+        compact_int turns 158000 into "158K" for display. A chart needs the number,
+        so the `chart` block travels alongside rather than replacing anything —
+        breaking the display fields would break the card that already ships.
+        """
+        now = datetime.now(timezone.utc)
+        session = LocalSession(
+            session_id="live",
+            tool="claude-code",
+            project_path="/repo",
+            started_at=now - timedelta(hours=2),
+            updated_at=now,
+            model="claude-sonnet-5",
+        )
+        # Climbing steadily, well short of the threshold, so a projection exists.
+        events = [
+            LocalEvent(
+                event_id=f"e{i}",
+                session_id="live",
+                tool="claude-code",
+                event_type="model_usage",
+                timestamp=now - timedelta(minutes=40 - i),
+                project_path="/repo",
+                model="claude-sonnet-5",
+                tokens_in=40_000 + 8_000 * i,
+                tokens_out=900,
+                cache_read_tokens=20_000,
+                cost_usd=0.4,
+            )
+            for i in range(8)
+        ]
+        cards = ui._context_health_cards([session], events)
+        self.assertTrue(cards, "expected a context health card for an analysable session")
+        chart = cards[0]["chart"]
+
+        self.assertEqual(chart["turn_series"], [40_000 + 8_000 * i for i in range(8)])
+        self.assertEqual(chart["latest_turn_tokens_n"], 96_000)
+        self.assertEqual(chart["pressure_tokens_n"], ui.PRESSURE_TOKENS_PER_TURN)
+        self.assertEqual(chart["critical_tokens_n"], ui.CRITICAL_TOKENS_PER_TURN)
+        self.assertEqual(chart["context_resets"], 0)
+        self.assertAlmostEqual(chart["growth_per_turn_n"], 8_000, delta=1)
+        # (200_000 - 96_000) / 8_000 = 13
+        self.assertEqual(chart["turns_to_critical"], 13)
+        # The display strings the existing card renders must be untouched.
+        self.assertEqual(cards[0]["latest_turn_tokens"], "96.0k")
+
+    def test_no_runway_chart_when_a_source_has_no_real_per_turn_numbers(self) -> None:
+        """A source exposing only a running thread total cannot be plotted per turn.
+
+        The distinction is narrow and easy to get backwards: the Codex *rollout*
+        scanner reads last_token_usage and does produce genuine per-turn prompt
+        sizes, so it is charted. The Codex *DB* scanner has only a cumulative
+        counter, declares so in its notes, and must not be — its "turns" would be
+        one number growing, plotted against a per-turn threshold.
+        """
+        now = datetime.now(timezone.utc)
+        session = LocalSession(
+            session_id="codex-db-session",
+            tool="codex-cli",
+            project_path="/repo",
+            started_at=now - timedelta(hours=2),
+            updated_at=now,
+            model="gpt-5-codex",
+            notes=["tokens_used is Codex's cumulative thread total"],
+        )
+        events = [
+            LocalEvent(
+                event_id=f"c{i}",
+                session_id="codex-db-session",
+                tool="codex-cli",
+                event_type="model_usage",
+                timestamp=now - timedelta(minutes=30 - i),
+                project_path="/repo",
+                model="gpt-5-codex",
+                tokens_in=20_000 + 500 * i,
+                tokens_out=400,
+                cost_usd=0.0,
+            )
+            for i in range(6)
+        ]
+        cards = ui._context_health_cards([session], events)
+        self.assertTrue(cards, "the health card itself should still render")
+        self.assertIsNone(cards[0]["chart"], "no runway chart without real per-turn data")
+
+    def test_runway_series_is_capped_so_the_cached_summary_cannot_grow_unbounded(self) -> None:
+        now = datetime.now(timezone.utc)
+        session = LocalSession(
+            session_id="long",
+            tool="claude-code",
+            project_path="/repo",
+            started_at=now - timedelta(hours=9),
+            updated_at=now,
+            model="claude-sonnet-5",
+        )
+        events = [
+            LocalEvent(
+                event_id=f"e{i}",
+                session_id="long",
+                tool="claude-code",
+                event_type="model_usage",
+                timestamp=now - timedelta(minutes=400 - i),
+                project_path="/repo",
+                model="claude-sonnet-5",
+                tokens_in=30_000 + 60 * i,
+                tokens_out=500,
+                cache_read_tokens=10_000,
+                cost_usd=0.1,
+            )
+            for i in range(200)
+        ]
+        chart = ui._context_health_cards([session], events)[0]["chart"]
+        self.assertEqual(len(chart["turn_series"]), ui.CONTEXT_CHART_MAX_TURNS)
+        # Keeps the most recent turns, not the oldest — the projection starts here.
+        self.assertEqual(chart["turn_series"][-1], 30_000 + 60 * 199)
+
     def test_summary_includes_surface_coverage_and_context_health(self) -> None:
         now = datetime.now(timezone.utc)
         rows = [

@@ -62,14 +62,20 @@ from .local_state import (
 )
 from .outcome_evidence import VALID_EVIDENCE_OUTCOMES, build_outcome_evidence, evidence_for_sessions
 from .ledger import Ledger, build_ledger, unbanked_summary
-from .pricing import is_subscription_model
+from .pricing import cache_read_cost, is_subscription_model
 from .runtime_attachment import (
     RuntimeAttachment,
     perform_runtime_return,
     runtime_attachment_for_session,
     safe_runtime_processes,
 )
-from .session_health import ContextHealth, analyze_all_sessions, gate_health_warning
+from .session_health import (
+    CRITICAL_TOKENS_PER_TURN,
+    PRESSURE_TOKENS_PER_TURN,
+    ContextHealth,
+    analyze_all_sessions,
+    gate_health_warning,
+)
 from .scanner import (
     clip_sessions_to_window,
     LocalEvent,
@@ -88,6 +94,10 @@ from .scanner import (
 MAX_REQUEST_BYTES = 64 * 1024
 
 MIN_DT = datetime.min.replace(tzinfo=timezone.utc)
+# Per-turn history shipped per health card. The summary is cached to disk and read
+# on every paint, so this is capped rather than unbounded; 60 turns is well past
+# where a session has already crossed the action threshold.
+CONTEXT_CHART_MAX_TURNS = 60
 SUMMARY_MEMORY_TTL_SECONDS = 45
 SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
 # Bump whenever build_summary's payload shape changes, so a cache written by an
@@ -1956,7 +1966,13 @@ def _context_action(health: ContextHealth) -> dict[str, str]:
     }
 
 
-def _context_health_card(health: ContextHealth, session: LocalSession | None, *, group: list[ContextHealth]) -> dict[str, object]:
+def _context_health_card(
+    health: ContextHealth,
+    session: LocalSession | None,
+    *,
+    group: list[ContextHealth],
+    turn_series: list[int] | None = None,
+) -> dict[str, object]:
     action = _context_action(health)
     critical_count = sum(1 for item in group if item.severity == "critical")
     warning_count = sum(1 for item in group if item.severity == "warning")
@@ -1985,6 +2001,21 @@ def _context_health_card(health: ContextHealth, session: LocalSession | None, *,
         ],
         "latest_turn_tokens": compact_int(health.latest_turn_tokens),
         "peak_turn_tokens": compact_int(max(item.peak_turn_tokens for item in group)),
+        # Chart inputs. Raw numbers, deliberately suffixed so nothing confuses them
+        # with the formatted strings above. The series is capped because the whole
+        # summary is cached to disk and read on every dashboard paint -- an
+        # uncapped per-turn history would grow without bound on long sessions.
+        "chart": None if turn_series is None else {
+            "turn_series": turn_series[-CONTEXT_CHART_MAX_TURNS:],
+            "latest_turn_tokens_n": health.latest_turn_tokens,
+            "peak_turn_tokens_n": max(item.peak_turn_tokens for item in group),
+            "growth_per_turn_n": round(health.segment_growth_rate),
+            "turns_to_critical": health.turns_to_critical,
+            "turns_since_reset": health.turns_since_reset,
+            "context_resets": health.context_resets,
+            "pressure_tokens_n": PRESSURE_TOKENS_PER_TURN,
+            "critical_tokens_n": CRITICAL_TOKENS_PER_TURN,
+        },
         "estimated_replayed_context_tokens": replayed_tokens,
         "estimated_replayed_context_label": compact_int(replayed_tokens),
         "bloat_measurable": bloat_measurable,
@@ -2018,6 +2049,14 @@ def _context_health_card(health: ContextHealth, session: LocalSession | None, *,
 
 def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) -> list[dict[str, object]]:
     sessions_by_id = {row.session_id: row for row in rows}
+    # Per-turn input, kept raw. Everything else on this card is display-formatted
+    # (compact_int turns 158000 into "158K"), which a chart cannot plot -- so the
+    # series and the projection fields below travel as numbers alongside the
+    # strings the existing card already renders, rather than replacing them.
+    turns_by_session: dict[str, list[int]] = defaultdict(list)
+    for event in sorted(events, key=lambda e: (e.timestamp or MIN_DT)):
+        if event.tokens_in > 0:
+            turns_by_session[event.session_id].append(event.tokens_in)
     grouped: dict[str, list[ContextHealth]] = defaultdict(list)
     for health in analyze_all_sessions(rows, events):
         grouped[project_key(health.project_path)].append(health)
@@ -2030,7 +2069,20 @@ def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) ->
             -item.total_input_tokens,
         ))
         representative = group[0]
-        cards.append(_context_health_card(representative, sessions_by_id.get(representative.session_id), group=group))
+        session = sessions_by_id.get(representative.session_id)
+        # Only sources with real per-turn numbers can be plotted against a per-turn
+        # threshold. The Codex DB path exposes a running thread total and nothing
+        # per turn, so its "turns" would be one growing number; the Codex rollout
+        # path reads last_token_usage and does have genuine per-turn prompt sizes,
+        # which is why it deliberately carries no cumulative note and is charted.
+        # Same exclusion _insight_feed already applies via pressure_rows.
+        plottable = session is not None and not has_cumulative_totals(session)
+        cards.append(_context_health_card(
+            representative,
+            session,
+            group=group,
+            turn_series=turns_by_session.get(representative.session_id, []) if plottable else None,
+        ))
     cards.sort(key=lambda item: (
         severity_order.get(str(item.get("severity")), 9),
         -int(item.get("estimated_replayed_context_tokens") or 0),
@@ -2695,6 +2747,39 @@ def _recent_handoff_decision_for_session(
                 pass
         return row
     return None
+
+
+def _replay_turn_chart(session_id: str, events: list[LocalEvent]) -> dict[str, object] | None:
+    """Per-turn cost for one session, split into new context and replayed history.
+
+    Priced the way replayed_context_cost prices it -- replay at the cache-read
+    rate, not face value -- so the chart and the card it sits under can never
+    quote different totals for the same session.
+
+    Returns None rather than an empty chart when the source reports no cache
+    buckets: a flat zero replay band would read as "this session replayed
+    nothing", when the truth is that nothing was measured.
+    """
+    turns = sorted(
+        (event for event in events if event.session_id == session_id and event.cost_usd > 0),
+        key=lambda event: (event.timestamp or MIN_DT),
+    )[-CONTEXT_CHART_MAX_TURNS:]
+    if len(turns) < 3 or not any(event.cache_read_tokens for event in turns):
+        return None
+
+    replayed: list[float] = []
+    fresh: list[float] = []
+    for event in turns:
+        replay_usd = cache_read_cost(event.model, event.cache_read_tokens, event.timestamp)
+        replayed.append(round(replay_usd, 6))
+        fresh.append(round(max(0.0, event.cost_usd - replay_usd), 6))
+    return {
+        "replayed_usd": replayed,
+        "fresh_usd": fresh,
+        "turns": len(turns),
+        "replayed_total_usd": round(sum(replayed), 6),
+        "session_total_usd": round(sum(replayed) + sum(fresh), 6),
+    }
 
 
 def _insight_feed(
@@ -6343,6 +6428,198 @@ function renderUnbanked(card) {
       Spend banks against the next commit in the same repo within
       ${esc(card.max_lookback_hours)}h; anything older stays unbanked rather than being misattributed.</p>`;
 }
+/* ---------------------------------------------------------------------------
+   Chart core.
+
+   Hand-rolled inline SVG, because the dashboard is one self-contained HTML
+   string with no bundler and no CDN -- adding a chart library to draw a line
+   would cost more than it returns. Everything below is shared by every chart on
+   the page, so a new one is a data shape plus a call, not another forty lines
+   of scale arithmetic.
+
+   Conventions the whole page relies on:
+   - colours come from CSS custom properties, never literals, so both themes work
+   - `vector-effect="non-scaling-stroke"` keeps a 2px line 2px after the viewBox
+     is scaled to the container
+   - every chart ships a table view; nothing is encoded in colour alone
+--------------------------------------------------------------------------- */
+const SVG_NS = 'http://www.w3.org/2000/svg';
+// Past this the projection is drawn no further and the caption says "N+". A
+// straight line forty turns out is already a stretch; a hundred is a fiction.
+const RUNWAY_MAX_PROJECTED_TURNS = 40;
+function svgEl(name, attrs) {
+  const node = document.createElementNS(SVG_NS, name);
+  for (const key in attrs) node.setAttribute(key, attrs[key]);
+  return node;
+}
+function chartToken(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+function chartScale(domainMin, domainMax, rangeMin, rangeMax) {
+  const span = (domainMax - domainMin) || 1;
+  return value => rangeMin + ((value - domainMin) / span) * (rangeMax - rangeMin);
+}
+function chartText(parent, x, y, content, opts) {
+  const options = opts || {};
+  const node = svgEl('text', {
+    x: x, y: y,
+    'text-anchor': options.anchor || 'middle',
+    fill: chartToken(options.fill || '--muted'),
+    'font-family': options.mono === false
+      ? "system-ui, -apple-system, 'Segoe UI', sans-serif"
+      : 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+    'font-size': options.size || 11,
+    'font-weight': options.weight || 400,
+  });
+  node.textContent = content;
+  parent.appendChild(node);
+  return node;
+}
+function chartGrid(parent, plot, ticks, formatValue, yScale) {
+  ticks.forEach(value => {
+    const y = yScale(value);
+    parent.appendChild(svgEl('line', {
+      x1: plot.left, y1: y, x2: plot.right, y2: y,
+      stroke: chartToken('--line'), 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke',
+    }));
+    chartText(parent, plot.left - 8, y + 4, formatValue(value), { anchor: 'end' });
+  });
+}
+function chartPath(points) {
+  return 'M' + points.map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('L');
+}
+function chartLine(parent, points, token, opts) {
+  const options = opts || {};
+  parent.appendChild(svgEl('path', {
+    d: chartPath(points),
+    fill: 'none',
+    stroke: chartToken(token),
+    'stroke-width': options.width || 2,
+    'stroke-linejoin': 'round',
+    'stroke-linecap': 'round',
+    'vector-effect': 'non-scaling-stroke',
+    ...(options.dash ? { 'stroke-dasharray': options.dash } : {}),
+    ...(options.opacity ? { opacity: options.opacity } : {}),
+  }));
+}
+
+/* Runway: how many turns before this session reaches the action threshold.
+   Two things this deliberately does NOT do. It never extrapolates across a
+   context reset -- the projection uses growth since the last one, because a
+   line drawn through a reset predicts a wall the session already stepped back
+   from. And it draws the session peak, because severity fires on `latest > X
+   OR peak > X`: a session that crossed before a reset still reads critical on
+   the card while sitting well below the line now, and hiding that makes the
+   card and the chart look like they disagree. */
+function drawRunway(node, chart) {
+  if (!node || !chart) return;
+  const series = chart.turn_series || [];
+  if (series.length < 3) return;
+
+  const W = 620, H = 190, plot = { left: 46, right: 560, top: 16, bottom: 148 };
+  const projected = chart.turns_to_critical;
+  const projectedTurns = projected === null || projected === undefined
+    ? 0 : Math.min(projected, RUNWAY_MAX_PROJECTED_TURNS);
+  const total = series.length + projectedTurns;
+  const ceiling = Math.max(chart.critical_tokens_n, chart.peak_turn_tokens_n) * 1.12;
+
+  const x = chartScale(0, Math.max(1, total - 1), plot.left, plot.right);
+  const y = chartScale(0, ceiling, plot.bottom, plot.top);
+
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'runway-svg', 'aria-hidden': 'true' });
+
+  // Status bands. These encode state, so they take status colours -- and they
+  // are named in the caption below, never left to hue alone.
+  svg.appendChild(svgEl('rect', {
+    x: plot.left, y: y(chart.critical_tokens_n), width: plot.right - plot.left,
+    height: Math.max(0, y(chart.pressure_tokens_n) - y(chart.critical_tokens_n)),
+    fill: chartToken('--amber'), opacity: 0.12,
+  }));
+  svg.appendChild(svgEl('rect', {
+    x: plot.left, y: y(ceiling), width: plot.right - plot.left,
+    height: Math.max(0, y(chart.critical_tokens_n) - y(ceiling)),
+    fill: chartToken('--red'), opacity: 0.12,
+  }));
+
+  chartGrid(svg, plot, [0, ceiling / 2, ceiling], v => Math.round(v / 1000) + 'K', y);
+
+  [[chart.pressure_tokens_n, '--amber'], [chart.critical_tokens_n, '--red']].forEach(([value, token]) => {
+    svg.appendChild(svgEl('line', {
+      x1: plot.left, y1: y(value), x2: plot.right, y2: y(value),
+      stroke: chartToken(token), 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke',
+    }));
+  });
+
+  // The peak is only worth its own line when it is meaningfully above where the
+  // session sits now -- that is the case severity reads and the chart otherwise
+  // appears to contradict. When the peak IS the current turn, the line would sit
+  // on top of the marker and "already crossed once" would describe the present.
+  const peakIsHistoric = chart.peak_turn_tokens_n > chart.latest_turn_tokens_n * 1.05;
+  if (chart.peak_turn_tokens_n > chart.critical_tokens_n && peakIsHistoric) {
+    svg.appendChild(svgEl('line', {
+      x1: plot.left, y1: y(chart.peak_turn_tokens_n), x2: plot.right, y2: y(chart.peak_turn_tokens_n),
+      stroke: chartToken('--muted'), 'stroke-width': 1, opacity: 0.6, 'vector-effect': 'non-scaling-stroke',
+    }));
+    chartText(svg, plot.left + 6, y(chart.peak_turn_tokens_n) - 6,
+      'peak ' + compactTokens(chart.peak_turn_tokens_n) + ' — already crossed once',
+      { anchor: 'start', fill: '--muted' });
+  }
+
+  chartLine(svg, series.map((v, i) => [x(i), y(v)]), '--blue');
+
+  if (projectedTurns > 0 && chart.growth_per_turn_n > 0) {
+    const from = series[series.length - 1];
+    const forward = [];
+    for (let i = 0; i <= projectedTurns; i++) {
+      forward.push([x(series.length - 1 + i), y(from + chart.growth_per_turn_n * i)]);
+    }
+    // Dashed because it is a projection -- the one thing dashing should mean.
+    chartLine(svg, forward, '--blue', { dash: '5 4', opacity: 0.5 });
+  }
+
+  svg.appendChild(svgEl('circle', {
+    cx: x(series.length - 1), cy: y(series[series.length - 1]), r: 4.5,
+    fill: chartToken('--blue'), stroke: chartToken('--surface'), 'stroke-width': 2,
+  }));
+
+  svg.appendChild(svgEl('line', {
+    x1: plot.left, y1: plot.bottom, x2: plot.right, y2: plot.bottom,
+    stroke: chartToken('--line-strong'), 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke',
+  }));
+  chartText(svg, plot.left, plot.bottom + 18, 'turn 1', { anchor: 'start' });
+  chartText(svg, x(series.length - 1), plot.bottom + 18, 'now');
+  if (projectedTurns > 0) chartText(svg, plot.right, plot.bottom + 18, 'projected', { anchor: 'end' });
+
+  node.innerHTML = '';
+  node.appendChild(svg);
+}
+
+function runwayCaption(chart) {
+  if (!chart || (chart.turn_series || []).length < 3) return '';
+  const resets = chart.context_resets
+    ? ` After ${chart.context_resets} context reset${chart.context_resets === 1 ? '' : 's'}, growth is measured from the latest one only.`
+    : '';
+  // turns_to_critical is null for two opposite reasons and they must not share a
+  // sentence: a session already past the threshold is the worst case on the page,
+  // and describing it as "not on a path to" the threshold reads as reassurance.
+  if (chart.turns_to_critical === null || chart.turns_to_critical === undefined) {
+    if (chart.latest_turn_tokens_n >= chart.critical_tokens_n) {
+      return `<p class="receipt-note"><strong>Already past the action threshold</strong> — ${compactTokens(chart.latest_turn_tokens_n)} per turn against a ${compactTokens(chart.critical_tokens_n)} limit. There is no headroom left to project.${resets}</p>`;
+    }
+    return `<p class="receipt-note">Context is not growing at present, so there is no threshold to project towards. Amber is pressure, red is where action is needed.${resets}</p>`;
+  }
+  // The drawn projection is capped, so the caption must not quote a number the
+  // chart does not reach -- and past this range the honest reading is "plenty".
+  if (chart.turns_to_critical > RUNWAY_MAX_PROJECTED_TURNS) {
+    return `<p class="receipt-note"><strong>${RUNWAY_MAX_PROJECTED_TURNS}+ turns of headroom</strong> at ${compactTokens(chart.growth_per_turn_n)}/turn. Far enough out that the exact number is noise.${resets}</p>`;
+  }
+  return `<p class="receipt-note"><strong>≈${chart.turns_to_critical} turn${chart.turns_to_critical === 1 ? '' : 's'} of headroom</strong> at ${compactTokens(chart.growth_per_turn_n)}/turn, the growth since this session last shed context. Amber is pressure, red is where action is needed.${resets}</p>`;
+}
+function compactTokens(n) {
+  if (!n) return '0';
+  return n >= 1000 ? Math.round(n / 1000) + 'K' : String(Math.round(n));
+}
+
 function renderContextHealth(rows) {
   const status = arguments.length > 1 ? arguments[1] : 'ready';
   if (status === 'pending') return '<div class="loading">Checking context health and handoff opportunities...</div>';
@@ -6358,6 +6635,8 @@ function renderContextHealth(rows) {
       <div class="mini"><span class="label">Spend on replay</span><strong>${esc(row.bloat_label)}</strong></div>
       <div class="mini"><span class="label">Replay cost</span><strong>${esc(row.replayed_cost_label)}</strong></div>
     </div>
+    <div class="runway" data-runway="${esc(row.session_id)}"></div>
+    ${runwayCaption(row.chart)}
     ${row.session_count > 1 ? `<p class="receipt-note">${esc(row.group_note || `${row.session_count} related sessions need attention.`)} ${row.critical_sessions ? `${esc(row.critical_sessions)} critical.` : ''}</p>` : ''}
     <p>${esc(row.recommendation)}</p>
     <div class="health-actions">
@@ -6863,6 +7142,91 @@ function renderInsightHeadline(totals) {
     ${split}
   </div>`;
 }
+/* Replay compounding: cost per turn, split into what bought new work and what
+   re-sent history you had already paid for. Stacked rather than two free lines,
+   because the height of the stack is the turn's real cost -- the reader needs
+   the total and the composition, and a stack gives both.
+
+   Priced at the cache-read rate upstream, which is why the band stays modest in
+   dollars even when it is most of the tokens. */
+function drawReplaySplit(node, chart) {
+  if (!node || !chart) return;
+  const fresh = chart.fresh_usd || [], replayed = chart.replayed_usd || [];
+  if (fresh.length < 3) return;
+
+  const W = 640, H = 150, plot = { left: 52, right: 596, top: 12, bottom: 112 };
+  // A cache-write turn is billed at a premium and can cost several times an
+  // ordinary one. Scaling to the maximum lets two such turns flatten every other
+  // turn into an unreadable strip along the axis, hiding the thing the chart
+  // exists to show. So the axis is clipped near the top of the ordinary range and
+  // the overflow is stated in the caption -- clipped, never silently truncated.
+  const totals = fresh.map((v, i) => v + replayed[i]);
+  const ranked = totals.slice().sort((a, b) => a - b);
+  const percentile = ranked[Math.floor(ranked.length * 0.9)] || ranked[ranked.length - 1];
+  const ceiling = Math.max(percentile * 1.25, 0.01);
+  const clipped = totals.filter(v => v > ceiling).length;
+  const x = chartScale(0, fresh.length - 1, plot.left, plot.right);
+  const y = chartScale(0, ceiling, plot.bottom, plot.top);
+  const clamp = value => Math.max(plot.top, y(value));
+
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'runway-svg', 'aria-hidden': 'true' });
+  chartGrid(svg, plot, [0, ceiling / 2, ceiling], v => '$' + v.toFixed(2), y);
+
+  const freshTop = fresh.map((v, i) => [x(i), clamp(v)]);
+  const stackTop = fresh.map((v, i) => [x(i), clamp(v + replayed[i])]);
+  // Mark every turn that runs off the top, so a clipped peak reads as clipped
+  // rather than as a turn that happened to touch the ceiling.
+  totals.forEach((value, i) => {
+    if (value <= ceiling) return;
+    svg.appendChild(svgEl('circle', {
+      cx: x(i), cy: plot.top, r: 2.5, fill: chartToken('--muted'),
+    }));
+  });
+  node.dataset.clipped = String(clipped);
+  const baseline = fresh.map((v, i) => [x(i), plot.bottom]);
+  const area = (top, bottom) =>
+    chartPath(top) + 'L' + bottom.slice().reverse().map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('L') + 'Z';
+
+  svg.appendChild(svgEl('path', { d: area(stackTop, freshTop), fill: chartToken('--amber'), opacity: 0.22 }));
+  svg.appendChild(svgEl('path', { d: area(freshTop, baseline), fill: chartToken('--blue'), opacity: 0.22 }));
+  // A 2px gap in the surface colour separates the bands -- never a border.
+  chartLine(svg, freshTop, '--surface', { width: 4 });
+  chartLine(svg, freshTop, '--blue');
+  chartLine(svg, stackTop, '--amber');
+
+  svg.appendChild(svgEl('line', {
+    x1: plot.left, y1: plot.bottom, x2: plot.right, y2: plot.bottom,
+    stroke: chartToken('--line-strong'), 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke',
+  }));
+  chartText(svg, plot.left, plot.bottom + 18, 'turn 1', { anchor: 'start' });
+  chartText(svg, plot.right, plot.bottom + 18, 'turn ' + fresh.length, { anchor: 'end' });
+
+  node.innerHTML = '';
+  node.appendChild(svg);
+}
+function replaySplitCaption(chart) {
+  if (!chart) return '';
+  // The share of the session's cost that was replay, which is the claim the card
+  // above makes -- stated here so the chart and the sentence cannot drift.
+  const share = chart.session_total_usd > 0
+    ? Math.round(100 * chart.replayed_total_usd / chart.session_total_usd) : 0;
+  return `<p class="feed-chart-note"><span class="swatch-blue"></span>New context
+    <span class="swatch-amber"></span>Replayed history —
+    <strong>${share}%</strong> of what this session cost across ${chart.turns} turns went on re-sent history.
+    <span data-clip-note></span></p>`;
+}
+/* Clipping is decided while drawing, so the note is filled in afterwards rather
+   than guessed at caption time. */
+function annotateClipping(node) {
+  if (!node) return;
+  const note = node.parentElement && node.parentElement.querySelector('[data-clip-note]');
+  const clipped = Number(node.dataset.clipped || 0);
+  if (!note) return;
+  note.textContent = clipped
+    ? `${clipped} cache-write turn${clipped === 1 ? ' runs' : 's run'} past the top of the axis.`
+    : '';
+}
+
 function renderInsightFeed(insights) {
   if (!insights || !insights.length) {
     return '<div class="empty">No notable local signals yet. Keep using AI tools and check back after a few sessions.</div>';
@@ -7078,6 +7442,17 @@ async function load(resetDetail = true, forceRefresh = false) {
   document.getElementById('contextHealth').innerHTML = renderHomeContextHealth(data.context_health || [], data.context_health_status || 'ready');
   document.getElementById('sessionContextHealth').innerHTML = renderContextHealth(data.context_health || [], data.context_health_status || 'ready');
   document.getElementById('optimizeWorkspaceBody').innerHTML = renderOptimizeWorkspace(data.optimize || null);
+  // SVG is built after the markup lands: the cards are assembled as an HTML
+  // string, and appending nodes into elements that do not exist yet silently
+  // draws nothing. Nodes are collected by attribute rather than looked up by a
+  // selector built from the session id, which is scanner-supplied and would need
+  // escaping to be safe inside one. Runs after both context-health renderers so
+  // it finds the placeholders wherever they were emitted.
+  const runwayNodes = {};
+  document.querySelectorAll('[data-runway]').forEach(node => {
+    runwayNodes[node.getAttribute('data-runway')] = node;
+  });
+  (data.context_health || []).forEach(row => drawRunway(runwayNodes[row.session_id], row.chart));
   document.getElementById('unbanked').innerHTML = renderUnbanked(data.unbanked);
   changeRowsCache = data.changes || [];
   document.getElementById('changeRows').innerHTML = renderChangeRows(changeRowsCache);
