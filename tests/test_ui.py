@@ -237,6 +237,25 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Evidence captured", ui.HTML)
         self.assertNotIn("window.alert", ui.HTML)
 
+    def test_api_equivalent_value_tile_carries_no_status_colour(self) -> None:
+        """The figure is counterfactual, so no rail may imply a loss.
+
+        API-equivalent value is what these tokens would have cost at API rates --
+        for a subscription user no money moved, and spending more is not a failure
+        in any case. The dashboard judges ratios (cost per useful change, cost per
+        surviving line), never the raw total, which is the same reason
+        pace_vs_baseline compares you to yourself rather than to a limit. Pinned
+        because a red or amber rail is the default anyone would reach for here.
+        """
+        tile = ui.HTML[ui.HTML.index('<div class="label">API-equivalent value</div>') - 200:]
+        tile = tile[:tile.index("Excludes subscription allocation")]
+        self.assertIn("metric-neutral", tile)
+        for judged in ("metric-red", "metric-amber", "metric-green"):
+            self.assertNotIn(judged, tile)
+        # The green rail on useful outcomes is the one the product has earned an
+        # opinion about, so it must survive this rule rather than be swept up by it.
+        self.assertIn('class="card metric-card metric-green"><div class="label">Useful outcomes', ui.HTML)
+
     def test_companion_state_surfaces_control_recommendation(self) -> None:
         with (
             patch.object(ui, "build_summary_cached", return_value={

@@ -4113,6 +4113,22 @@ HTML = r"""<!doctype html>
     .metric-blue { --metric: var(--blue); }
     .metric-amber { --metric: var(--amber); }
     .metric-red { --metric: var(--red); }
+    /* For a figure the product deliberately refuses to judge. API-equivalent value
+       is counterfactual -- what these tokens would have cost at API rates -- so for
+       anyone on a subscription no money moved at all, and a red rail claims a loss
+       that did not happen. Spending more is also not a failure on its own: this
+       dashboard judges cost per useful change and cost per surviving line, ratios
+       where a direction is defensible, and leaves the raw total unjudged. Same
+       reason pace_vs_baseline compares you to yourself instead of to a limit. */
+    .metric-neutral { --metric: var(--line-strong); }
+    .runway { margin: 12px 0 2px; }
+    .runway-svg { display: block; width: 100%; height: auto; overflow: visible; }
+    .feed-chart { margin: 10px 0 0; }
+    .feed-chart-note { margin: 6px 0 0; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .feed-chart-note strong { color: var(--text); }
+    .swatch-blue, .swatch-amber { width: 10px; height: 10px; border-radius: 2px; display: inline-block; flex: none; }
+    .swatch-blue { background: var(--blue); }
+    .swatch-amber { background: var(--amber); }
     .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; font-weight: 700; }
     .value { font-size: 30px; font-weight: 780; margin-top: 10px; font-variant-numeric: tabular-nums; }
     .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
@@ -4752,7 +4768,7 @@ HTML = r"""<!doctype html>
       <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub">Value per useful change: <span id="costPerUseful">-</span></div><div class="sub" id="costPerSurvivingRow" hidden>Cost per surviving line: <span id="costPerSurviving">-</span></div></div>
       <div class="card metric-card metric-amber"><div class="label">Preflight decisions</div><div class="value" id="preflightDecisions">-</div><div class="sub"><span id="windowLabel">-</span></div></div>
       <div class="card metric-card metric-blue"><div class="label">Sessions observed</div><div class="value" id="sessions">-</div><div class="sub">This machine only</div></div>
-      <div class="card metric-card metric-red"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div></div>
+      <div class="card metric-card metric-neutral"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div></div>
     </section>
 
     <section class="grid two" style="margin:14px 0">
