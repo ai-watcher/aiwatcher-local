@@ -257,6 +257,10 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("plan-based", ui.HTML)
         # A genuinely zero row gets no bar; a 2% stub would read as "a little".
         self.assertIn("const width = weight > 0 ? Math.max(2,", ui.HTML)
+        # Both numbers on a priced row. A token count alone is not something
+        # anyone can feel -- the dollar figure is the anchor -- but tokens alone
+        # is all a plan-based row has, so neither can be dropped.
+        self.assertIn('<span class="bar-note">${esc(row.tokens_label)} tokens</span>', ui.HTML)
 
     def _short_session(self, session_id: str, calls: int, cost: float = 0.2) -> LocalSession:
         now = datetime.now(timezone.utc)

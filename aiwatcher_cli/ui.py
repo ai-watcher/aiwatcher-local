@@ -6988,16 +6988,27 @@ function bars(rows, valueKey = "api_value_label", kind = "project", weightKey = 
     const width = weight > 0 ? Math.max(2, Math.round(weight / max * 100)) : 0;
     const id = encodeURIComponent(row.id || row.name);
     const click = kind === "project" ? `onclick="selectProject(decodeURIComponent(this.dataset.id))" data-id="${id}"` : "";
-    // Tokens but no dollars means plan-based, not free and not unused. Models
-    // stay measured in money -- that card is a cost breakdown -- so there the
-    // note is what stops "$0.00" reading as "never touched".
+    // Both numbers, because neither works alone. A token count is not something
+    // anyone can feel -- "354.7M" means nothing without an anchor -- so the
+    // dollar figure leads wherever there is one. Where there is not, the tokens
+    // lead and say why: plan-based, which is not the same as free or unused.
     const planBased = !row.detected_only && Number(row.tokens || 0) > 0 && Number(row.api_value_usd || 0) <= 0;
-    const secondary = planBased ? '<span class="bar-note">plan-based</span>' : '';
-    const amount = row.detected_only ? (row.status_label || 'Detected') : row[valueKey];
+    let amount;
+    if (row.detected_only) {
+      amount = row.status_label || 'Detected';
+    } else if (planBased) {
+      amount = `${esc(row.tokens_label)}<span class="bar-note">plan-based</span>`;
+    } else if (weightKey === "tokens" && row.tokens_label && row.api_value_label) {
+      amount = `${esc(row.api_value_label)}<span class="bar-note">${esc(row.tokens_label)} tokens</span>`;
+    } else {
+      amount = esc(row[valueKey]);
+    }
+    // `amount` carries markup, so it is interpolated raw below -- every value
+    // inside it is escaped individually above.
     return `<div class="bar-row ${kind === "project" ? "clickable" : ""}" title="${esc(row.name)}" ${click}>
       <div class="bar-label">${esc(row.short_name || row.name)}${kind === "project" && row.health ? ` ${healthPill(row.health)}` : ''}</div>
       <div class="bar-shell"><div class="bar" style="width:${width}%"></div></div>
-      <div class="amount">${esc(amount)}${secondary}</div>
+      <div class="amount">${amount}</div>
     </div>`;
   }).join('');
 }
