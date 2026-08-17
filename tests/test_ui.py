@@ -246,8 +246,12 @@ class DashboardWindowTests(unittest.TestCase):
         exist for every tool.
         """
         self.assertIn('bars(data.tools, "tokens_label", "tool", "tokens")', ui.HTML)
-        # Projects and models are asked about in money and stay that way.
-        self.assertIn('bars(data.projects, "api_value_label", "project")', ui.HTML)
+        # Projects too: a project worked on entirely in Codex would otherwise
+        # show $0.00 and an empty bar, which is the same defect one level up. The
+        # card is titled "AI Usage", not spend.
+        self.assertIn('bars(data.projects, "tokens_label", "project", "tokens")', ui.HTML)
+        # Models stay in money -- that card is the cost breakdown, and there the
+        # plan-based label is what stops $0.00 reading as unused.
         self.assertIn('bars(data.models, "api_value_label", "model")', ui.HTML)
         # Tokens-but-no-dollars is labelled rather than left reading as free.
         self.assertIn("plan-based", ui.HTML)

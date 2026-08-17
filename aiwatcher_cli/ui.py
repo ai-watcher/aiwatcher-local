@@ -5045,7 +5045,7 @@ HTML = r"""<!doctype html>
 
     <section class="grid two">
       <div class="card">
-        <div class="section-title"><div><h2>Projects Driving AI Usage</h2><p>Click a project to inspect local sessions, models, and tools.</p></div></div>
+        <div class="section-title"><div><h2>Projects Driving AI Usage</h2><p>Measured in tokens, so plan-based tools still count. Click a project to inspect local sessions, models, and tools.</p></div></div>
         <div id="projects"></div>
       </div>
       <div class="card">
@@ -7777,7 +7777,7 @@ async function load(resetDetail = true, forceRefresh = false) {
     : '<div class="empty">No local AI session detected yet.</div>';
   const recommendation = data.insights[0];
   document.getElementById('todayRecommendation').innerHTML = renderHomeRecommendation(recommendation);
-  document.getElementById('projects').innerHTML = bars(data.projects, "api_value_label", "project");
+  document.getElementById('projects').innerHTML = bars(data.projects, "tokens_label", "project", "tokens");
   document.getElementById('models').innerHTML = bars(data.models, "api_value_label", "model");
   document.getElementById('tools').innerHTML = bars(data.tools, "tokens_label", "tool", "tokens");
   document.getElementById('insights').innerHTML = data.insights.length
