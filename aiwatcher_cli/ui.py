@@ -2564,6 +2564,89 @@ def _composition_chart(rows: list[dict[str, object]]) -> dict[str, object] | Non
     }
 
 
+def _tool_model_breakdown(rows: list[LocalSession]) -> dict[str, object] | None:
+    """Which models each tool actually ran, as one stacked bar per tool.
+
+    The two flat lists above it -- by model, by tool -- cannot be crossed by eye.
+    Seeing that Opus is most of your spend and that Claude Code is most of your
+    tokens does not tell you whether Codex is running an expensive model or a
+    cheap one, and that is the question worth asking of a tool you did not pick
+    the model for.
+
+    Models are ranked globally and capped at the palette's three non-status
+    hues, with the rest folded into one neutral bucket. Crucially the colour map
+    is global: a model keeps the same colour in every tool's bar, so the eye can
+    follow it across rows. Colouring per row would make the same model change
+    colour between tools, which is the one thing a reader must never have to
+    second-guess.
+
+    Tokens, not dollars: a plan-based tool is priced at zero on purpose, and
+    this chart exists partly to show what such a tool is doing.
+    """
+    per_tool: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    per_model: dict[str, int] = defaultdict(int)
+    for row in rows:
+        breakdown = row.model_breakdown or {
+            (row.model or "unknown"): {"tokens_in": row.tokens_in, "tokens_out": row.tokens_out}
+        }
+        tool = _tool_surface_key(row)
+        for model_name, stats in breakdown.items():
+            tokens = int(stats.get("tokens_in", 0) or 0) + int(stats.get("tokens_out", 0) or 0)
+            if tokens <= 0:
+                continue
+            key = display_model_name(model_name or "unknown")
+            per_tool[tool][key] += tokens
+            per_model[key] += tokens
+
+    tools = {tool: models for tool, models in per_tool.items() if sum(models.values()) > 0}
+    if len(tools) < 2 and len(per_model) < 2:
+        return None
+
+    # Every tool's own leading model gets named before any runner-up elsewhere.
+    # Ranking globally instead put the three Claude models in the legend and
+    # folded Codex's model into "Other" -- so the one row whose model you did not
+    # choose yourself, which is the row worth looking at, lost its label.
+    ranked_models = sorted(per_model.items(), key=lambda item: item[1], reverse=True)
+    leaders = {max(models.items(), key=lambda item: item[1])[0] for models in tools.values()}
+    named = [model for model, _ in ranked_models if model in leaders][:COMPOSITION_SLICES]
+    for model, _ in ranked_models:
+        if len(named) >= COMPOSITION_SLICES:
+            break
+        if model not in named:
+            named.append(model)
+    tail_count = len(ranked_models) - len(named)
+    legend = [{"label": model, "kind": "item"} for model in named]
+    if tail_count > 0:
+        legend.append({"label": f"{tail_count} more", "kind": "other"})
+
+    rows_out: list[dict[str, object]] = []
+    for tool, models in sorted(tools.items(), key=lambda item: sum(item[1].values()), reverse=True):
+        total = sum(models.values())
+        segments = [
+            {"label": model, "tokens": models.get(model, 0), "kind": "item"}
+            for model in named
+        ]
+        if tail_count > 0:
+            segments.append({
+                "label": f"{tail_count} more",
+                "tokens": sum(count for model, count in models.items() if model not in named),
+                "kind": "other",
+            })
+        for segment in segments:
+            segment["pct"] = round(100.0 * int(segment["tokens"]) / total, 1) if total else 0.0
+            segment["tokens_label"] = compact_int(int(segment["tokens"]))
+        rows_out.append({
+            "tool": tool,
+            "total_tokens": total,
+            "total_label": compact_int(total),
+            "segments": segments,
+            # Named so a reader can see at a glance which tool is on which model
+            # without reading the bar, which is the whole point of crossing them.
+            "top_model": max(models.items(), key=lambda item: item[1])[0] if models else None,
+        })
+    return {"legend": legend, "tools": rows_out}
+
+
 def _unbanked_chart(ledger: Ledger) -> dict[str, object] | None:
     """Unbanked spend split by *where* it happened, not by why.
 
@@ -3388,6 +3471,7 @@ def build_summary(
         "projects_composition": _composition_chart(projects),
         "tools": tools,
         "tools_composition": _composition_chart(tools),
+        "tool_models": _tool_model_breakdown(rows),
         "models": models[:10],
         "insights": insights,
         "notes": notes[:5],
@@ -3670,6 +3754,7 @@ def _build_summary_shell(
         "projects_composition": _composition_chart(projects),
         "tools": tools,
         "tools_composition": _composition_chart(tools),
+        "tool_models": _tool_model_breakdown(rows),
         "models": models[:10],
         "insights": insights,
         "notes": sorted({note for row in rows for note in row.notes})[:5],
@@ -4450,6 +4535,15 @@ HTML = r"""<!doctype html>
     .home-runway-spark { margin-left: auto; width: 130px; flex: none; }
     .runway-mini { display: block; width: 100%; height: 34px; }
     .bar-note { display: block; font-size: .68rem; color: var(--faint); letter-spacing: .02em; }
+    .tm-legend { margin-bottom: 10px; gap: 6px 16px; }
+    .tm-row { margin-bottom: 12px; }
+    .tm-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
+    .tm-name { font-size: .82rem; }
+    .tm-total { font-size: .78rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .tm-bar { height: 14px; }
+    .tm-bar .stacked-bar { height: 14px; }
+    .tm-solid { height: 14px; border-radius: 3px; }
+    .tm-note { font-size: .7rem; color: var(--faint); margin-top: 4px; }
     .composition { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; margin: 4px 0 16px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
     .pie-host { flex: none; }
     .pie-svg { display: block; width: 132px; height: 132px; }
@@ -5157,6 +5251,9 @@ HTML = r"""<!doctype html>
           <div class="composition-legend" id="toolsCompositionLegend"></div>
         </div>
         <div id="tools"></div>
+        <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:16px 0 2px">Model mix within each tool</h3>
+        <p style="font-size:.7rem;color:var(--faint);margin:0 0 8px">Each bar is that tool's own 100%, so size means proportion, not volume — the token total is on the right.</p>
+        <div id="toolModels" hidden></div>
       </div>
       <div class="card">
         <div class="section-title"><div><h2>Privacy at a glance</h2><p>Your local trust boundary stays visible.</p></div></div>
@@ -7008,6 +7105,50 @@ function compositionLegend(chart) {
 
 /* Markup first, SVG appended after -- the same two-step every chart here uses,
    because appending into an element that does not exist yet draws nothing. */
+/* One stacked bar per tool, split by model. The colour map is built once from
+   the shared legend and reused for every row, so a model keeps its colour down
+   the whole chart -- the eye follows it across tools, which is the only reason
+   to cross these two lists in the first place. */
+function renderToolModels(breakdown) {
+  if (!breakdown || !breakdown.tools || !breakdown.tools.length) return '';
+  const colours = compositionColours(breakdown.legend);
+  const key = breakdown.legend.map((entry, index) =>
+    `<span class="bar-key"><span class="bar-swatch" style="background:var(${colours[index]})"></span>${esc(entry.label)}</span>`).join('');
+  const rows = breakdown.tools.map((tool, index) => `<div class="tm-row">
+      <div class="tm-head">
+        <span class="tm-name">${esc(tool.tool)}</span>
+        <span class="tm-total">${esc(tool.total_label)}</span>
+      </div>
+      <div class="tm-bar" data-tool-models="${index}"></div>
+      <div class="tm-note">${tool.segments.filter(s => s.tokens > 0)
+        .map(s => `${esc(s.label)} ${esc(s.pct)}%`).join(' &middot; ')}</div>
+    </div>`).join('');
+  return `<div class="bar-legend tm-legend">${key}</div>${rows}`;
+}
+function paintToolModels(breakdown) {
+  const host = document.getElementById('toolModels');
+  if (!host) return;
+  host.hidden = !breakdown || !breakdown.tools || !breakdown.tools.length;
+  host.innerHTML = renderToolModels(breakdown);
+  if (host.hidden) return;
+  const colours = compositionColours(breakdown.legend);
+  breakdown.tools.forEach((tool, index) => {
+    // Zero-token segments are dropped before drawing: a model a tool never ran
+    // should contribute no sliver and no 2px gap.
+    const segments = tool.segments.filter(segment => segment.tokens > 0);
+    const segmentColours = segments.map(segment =>
+      colours[breakdown.legend.findIndex(entry => entry.label === segment.label)]);
+    const node = host.querySelector(`[data-tool-models="${index}"]`);
+    if (segments.length === 1) {
+      // drawStackedBar needs two segments to be a stack; one model is a solid
+      // bar, which is the honest picture for a single-model tool.
+      node.innerHTML = `<div class="tm-solid" style="background:var(${segmentColours[0]})"></div>`;
+      return;
+    }
+    drawStackedBar(node, segments.map(s => ({ ...s, usd: s.tokens })), segmentColours);
+  });
+}
+
 function paintComposition(name, chart) {
   const host = document.getElementById(name + 'Composition');
   if (!host) return;
@@ -7956,6 +8097,7 @@ async function load(resetDetail = true, forceRefresh = false) {
   document.getElementById('todayRecommendation').innerHTML = renderHomeRecommendation(recommendation);
   paintComposition('projects', data.projects_composition);
   paintComposition('tools', data.tools_composition);
+  paintToolModels(data.tool_models);
   document.getElementById('projects').innerHTML = bars(data.projects, "tokens_label", "project", "tokens");
   document.getElementById('models').innerHTML = bars(data.models, "api_value_label", "model");
   document.getElementById('tools').innerHTML = bars(data.tools, "tokens_label", "tool", "tokens");

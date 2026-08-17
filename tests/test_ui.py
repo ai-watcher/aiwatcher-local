@@ -310,6 +310,60 @@ class DashboardWindowTests(unittest.TestCase):
         with patch.object(ui, "evidence_snapshots_for_sessions", return_value={}):
             self.assertIsNone(ui._false_starts_card(rows))
 
+    def _model_session(self, session_id: str, tool: str, surface: str | None, breakdown: dict) -> LocalSession:
+        now = datetime.now(timezone.utc)
+        return LocalSession(
+            session_id=session_id,
+            tool=tool,
+            surface=surface,
+            project_path="/repo",
+            started_at=now - timedelta(hours=1),
+            updated_at=now,
+            model_breakdown=breakdown,
+        )
+
+    def test_tool_model_breakdown_names_every_tool_own_leading_model(self) -> None:
+        """A minority tool's model must not vanish into "Other".
+
+        Ranking models globally put the three Claude models in the legend and
+        folded Codex's model away -- losing the label on the one row whose model
+        the user did not choose, which is the row worth looking at.
+        """
+        rows = [
+            self._model_session("a", "claude-code", "desktop", {
+                "claude-sonnet-5": {"tokens_in": 900_000, "tokens_out": 10_000},
+                "claude-opus-5": {"tokens_in": 400_000, "tokens_out": 5_000},
+                "claude-opus-4-8": {"tokens_in": 100_000, "tokens_out": 1_000},
+            }),
+            self._model_session("b", "codex-cli", "desktop", {
+                "gpt-5.2-codex": {"tokens_in": 4_000, "tokens_out": 100},
+            }),
+        ]
+        breakdown = ui._tool_model_breakdown(rows)
+        assert breakdown is not None
+        labels = [entry["label"] for entry in breakdown["legend"]]
+        self.assertIn("gpt-5.2-codex", labels, "the Codex leader must be named, not folded")
+        self.assertLessEqual(
+            len([e for e in breakdown["legend"] if e["kind"] == "item"]),
+            ui.COMPOSITION_SLICES,
+            "named models are capped at the palette's non-status hues",
+        )
+
+        by_tool = {row["tool"]: row for row in breakdown["tools"]}
+        self.assertEqual(by_tool["codex-cli (desktop)"]["top_model"], "gpt-5.2-codex")
+        codex = [s for s in by_tool["codex-cli (desktop)"]["segments"] if s["tokens"] > 0]
+        self.assertEqual([s["label"] for s in codex], ["gpt-5.2-codex"])
+        self.assertEqual(codex[0]["pct"], 100.0)
+        # Tools are ordered by volume, so the biggest is read first.
+        self.assertEqual(breakdown["tools"][0]["tool"], "claude-code (desktop)")
+
+    def test_tool_model_breakdown_needs_something_to_cross(self) -> None:
+        """One tool running one model is two facts already stated above it."""
+        rows = [self._model_session("a", "claude-code", "desktop", {
+            "claude-opus-5": {"tokens_in": 1_000, "tokens_out": 10},
+        })]
+        self.assertIsNone(ui._tool_model_breakdown(rows))
+
     def test_composition_folds_to_three_slices_plus_other(self) -> None:
         """Three is the number of hues here that do not already mean something.
 
