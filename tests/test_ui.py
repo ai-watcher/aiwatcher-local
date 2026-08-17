@@ -237,6 +237,23 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Evidence captured", ui.HTML)
         self.assertNotIn("window.alert", ui.HTML)
 
+    def test_tool_bars_are_measured_in_tokens_not_dollars(self) -> None:
+        """A plan-based tool priced at zero must not render as an unused one.
+
+        Codex is deliberately $0 -- it is a subscription product -- so sizing the
+        tool bars by api_value_usd drew it as an empty stub labelled "$0.00",
+        which is indistinguishable from a tool that was never opened. Tokens
+        exist for every tool.
+        """
+        self.assertIn('bars(data.tools, "tokens_label", "tool", "tokens")', ui.HTML)
+        # Projects and models are asked about in money and stay that way.
+        self.assertIn('bars(data.projects, "api_value_label", "project")', ui.HTML)
+        self.assertIn('bars(data.models, "api_value_label", "model")', ui.HTML)
+        # Tokens-but-no-dollars is labelled rather than left reading as free.
+        self.assertIn("plan-based", ui.HTML)
+        # A genuinely zero row gets no bar; a 2% stub would read as "a little".
+        self.assertIn("const width = weight > 0 ? Math.max(2,", ui.HTML)
+
     def _short_session(self, session_id: str, calls: int, cost: float = 0.2) -> LocalSession:
         now = datetime.now(timezone.utc)
         return LocalSession(

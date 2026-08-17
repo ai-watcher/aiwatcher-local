@@ -4370,6 +4370,7 @@ HTML = r"""<!doctype html>
     .home-runway-text span { color: var(--muted); font-size: .8rem; }
     .home-runway-spark { margin-left: auto; width: 130px; flex: none; }
     .runway-mini { display: block; width: 100%; height: 34px; }
+    .bar-note { display: block; font-size: .68rem; color: var(--faint); letter-spacing: .02em; }
     .unbanked-chart { margin-top: 14px; }
     .stacked-bar { display: block; width: 100%; height: 30px; }
     .bar-legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 10px; }
@@ -5315,8 +5316,8 @@ const HANDOFF_TYPES = [
   { id: 'investigation', label: 'Investigation continuation' },
   { id: 'general', label: 'General work continuation' },
 ];
-function maxValue(rows) {
-  return Math.max(0.000001, ...rows.map(r => Number(r.api_value_usd || 0)));
+function maxValue(rows, key = 'api_value_usd') {
+  return Math.max(0.000001, ...rows.map(r => Number(r[key] || 0)));
 }
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -6970,18 +6971,33 @@ function costliestShare(event, session) {
   const pct = Math.round(part / total * 100);
   return pct >= 1 ? ` · ${pct}% of session cost` : '';
 }
-function bars(rows, valueKey = "api_value_label", kind = "project") {
+/* `weightKey` decides what the bar length means. Projects and models are asked
+   about in money, so they stay on api_value_usd. Tools cannot be: a plan-based
+   tool is priced at zero by design, so sizing its bar by dollars draws Codex and
+   Cursor as empty stubs labelled $0.00 -- indistinguishable from a tool that was
+   never opened, when the truth is that it was used and simply has no invoice.
+   Tokens exist for every tool, so the tool bars are measured in those and show
+   the dollar figure alongside rather than as the length. */
+function bars(rows, valueKey = "api_value_label", kind = "project", weightKey = "api_value_usd") {
   if (!rows.length) return '<div class="empty">No local usage found for this window.</div>';
-  const max = maxValue(rows);
+  const max = maxValue(rows, weightKey);
   return rows.map(row => {
-    const width = Math.max(2, Math.round(Number(row.api_value_usd || 0) / max * 100));
+    const weight = Number(row[weightKey] || 0);
+    // Zero gets no bar at all. A 2% stub for something genuinely unused reads as
+    // a small amount rather than as none.
+    const width = weight > 0 ? Math.max(2, Math.round(weight / max * 100)) : 0;
     const id = encodeURIComponent(row.id || row.name);
     const click = kind === "project" ? `onclick="selectProject(decodeURIComponent(this.dataset.id))" data-id="${id}"` : "";
+    // Tokens but no dollars means plan-based, not free and not unused. Models
+    // stay measured in money -- that card is a cost breakdown -- so there the
+    // note is what stops "$0.00" reading as "never touched".
+    const planBased = !row.detected_only && Number(row.tokens || 0) > 0 && Number(row.api_value_usd || 0) <= 0;
+    const secondary = planBased ? '<span class="bar-note">plan-based</span>' : '';
     const amount = row.detected_only ? (row.status_label || 'Detected') : row[valueKey];
     return `<div class="bar-row ${kind === "project" ? "clickable" : ""}" title="${esc(row.name)}" ${click}>
       <div class="bar-label">${esc(row.short_name || row.name)}${kind === "project" && row.health ? ` ${healthPill(row.health)}` : ''}</div>
       <div class="bar-shell"><div class="bar" style="width:${width}%"></div></div>
-      <div class="amount">${esc(amount)}</div>
+      <div class="amount">${esc(amount)}${secondary}</div>
     </div>`;
   }).join('');
 }
@@ -7763,7 +7779,7 @@ async function load(resetDetail = true, forceRefresh = false) {
   document.getElementById('todayRecommendation').innerHTML = renderHomeRecommendation(recommendation);
   document.getElementById('projects').innerHTML = bars(data.projects, "api_value_label", "project");
   document.getElementById('models').innerHTML = bars(data.models, "api_value_label", "model");
-  document.getElementById('tools').innerHTML = bars(data.tools, "api_value_label", "tool");
+  document.getElementById('tools').innerHTML = bars(data.tools, "tokens_label", "tool", "tokens");
   document.getElementById('insights').innerHTML = data.insights.length
     ? data.insights.map(i => `<div class="insight"><strong>${esc(i.title)}</strong><p>${esc(i.body)}</p></div>`).join('')
     : '<div class="empty">No notable local signals yet.</div>';
