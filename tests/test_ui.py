@@ -237,6 +237,54 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Evidence captured", ui.HTML)
         self.assertNotIn("window.alert", ui.HTML)
 
+    def _short_session(self, session_id: str, calls: int, cost: float = 0.2) -> LocalSession:
+        now = datetime.now(timezone.utc)
+        return LocalSession(
+            session_id=session_id,
+            tool="claude-code",
+            project_path="/repo",
+            started_at=now - timedelta(hours=2),
+            updated_at=now,
+            agent_calls=calls,
+            cost_usd=cost,
+        )
+
+    def test_false_starts_card_counts_short_sessions_that_left_nothing(self) -> None:
+        rows = [self._short_session(f"empty{i}", 5) for i in range(6)]
+        rows += [self._short_session(f"landed{i}", 8) for i in range(2)]
+        rows += [self._short_session("long-empty", 400)]  # too long to count
+        snapshots = {row.session_id: {"commit_shas": []} for row in rows}
+        for i in range(2):
+            snapshots[f"landed{i}"] = {"commit_shas": ["abc"]}
+
+        with patch.object(ui, "evidence_snapshots_for_sessions", return_value=snapshots):
+            card = ui._false_starts_card(rows)
+
+        assert card is not None
+        self.assertEqual(card["id"], "false-starts")
+        self.assertIn("6 short sessions", card["title"])
+        # 6 of 8 short sessions; the 400-call one is not short and must not count.
+        self.assertIn("Of 8 sessions", card["body"])
+        self.assertIn("75%", card["body"])
+        # No dollar figure: the money is not recoverable, so ranking it among the
+        # dollar findings would promise a saving that does not exist.
+        self.assertIsNone(card["impact_usd"])
+        # Says plainly what it cannot distinguish, like the unbanked card does.
+        self.assertIn("answered a question worth asking", card["body"])
+
+    def test_false_starts_card_stays_silent_below_the_pattern_threshold(self) -> None:
+        """Three of four is a coin flip, not a habit."""
+        rows = [self._short_session(f"s{i}", 5) for i in range(4)]
+        snapshots = {row.session_id: {"commit_shas": []} for row in rows}
+        with patch.object(ui, "evidence_snapshots_for_sessions", return_value=snapshots):
+            self.assertIsNone(ui._false_starts_card(rows))
+
+    def test_false_starts_card_skips_sessions_with_no_stored_evidence(self) -> None:
+        """No snapshot is "not looked at", which is not "produced nothing"."""
+        rows = [self._short_session(f"s{i}", 5) for i in range(8)]
+        with patch.object(ui, "evidence_snapshots_for_sessions", return_value={}):
+            self.assertIsNone(ui._false_starts_card(rows))
+
     def test_unbanked_chart_splits_by_where_and_places_every_dollar(self) -> None:
         """Segments must sum to the headline, or the bar quietly contradicts it."""
         ledger = ui.Ledger()

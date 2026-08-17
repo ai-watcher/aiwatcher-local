@@ -2475,6 +2475,14 @@ def _window_ledger(events: list[LocalEvent], days: int) -> Ledger | None:
         return None
 
 
+# A short session, in model calls. Set at the top of the shortest length bucket
+# measured locally, which is where the share of sessions producing nothing was
+# highest -- longer sessions land work more often, not less.
+FALSE_START_MAX_CALLS = 15
+# Enough of them to be a habit rather than a bad week. Below this the card stays
+# silent: "3 of 4 were false starts" is a coin flip dressed as a pattern.
+FALSE_START_MIN_SESSIONS = 5
+
 # Capped at the number of non-status hues this palette has. Past that the tail
 # folds into one neutral segment rather than reusing amber or red, which mean
 # something else on every other surface here.
@@ -2808,6 +2816,66 @@ def _recent_handoff_decision_for_session(
     return None
 
 
+def _false_starts_card(all_rows: list[LocalSession]) -> dict[str, object] | None:
+    """Short sessions that produced no commit at all.
+
+    Surfaced because a length chart showed it and then failed to earn a place:
+    across local history the share of sessions that land work does not fall with
+    length, it rises, and the shortest bucket lands least often. The cliff was
+    not the finding; this was.
+
+    Read over all history rather than the selected window. A week holds a
+    handful of sessions, and "3 of 4 were false starts" is a coin flip wearing
+    the clothes of a pattern.
+
+    Deliberately not called waste. A short session with no commit is often a
+    question that was answered, and nothing local can tell that apart from a
+    start that went nowhere -- the same limit the unbanked card states about
+    uncommitted work. The card reports the count and the money and leaves the
+    judgement where it belongs.
+    """
+    try:
+        snapshots = evidence_snapshots_for_sessions({row.session_id for row in all_rows})
+    except OSError:
+        return None
+    if not snapshots:
+        return None
+
+    short = [
+        row for row in all_rows
+        if 0 < row.agent_calls <= FALSE_START_MAX_CALLS
+        and isinstance(snapshots.get(row.session_id), dict)
+    ]
+    if len(short) < FALSE_START_MIN_SESSIONS:
+        return None
+    empty = [row for row in short if not snapshots[row.session_id].get("commit_shas")]
+    if len(empty) < FALSE_START_MIN_SESSIONS:
+        return None
+
+    share = round(100.0 * len(empty) / len(short))
+    spent = sum(row.cost_usd for row in empty)
+    costliest = max(empty, key=lambda row: row.cost_usd, default=None)
+    return {
+        "id": "false-starts",
+        "title": f"{len(empty)} short sessions produced no commit at all",
+        "body": (
+            f"Of {len(short)} sessions running {FALSE_START_MAX_CALLS} model calls or fewer across "
+            f"your recent history, {share}% left nothing behind — {money(spent)} of spend, which is "
+            "small. The count is the point, not the money: some of these answered a question worth "
+            "asking, and nothing local tells that apart from a start that went nowhere. A run of "
+            "them usually means opening in the wrong repo, or asking before scoping."
+        ),
+        # No dollar figure, for the same reason model-mix carries none: the money
+        # is not recoverable. Some of these sessions answered a question worth
+        # asking, so ranking this among the dollar findings would promise a saving
+        # that does not exist -- and short sessions are cheap enough that it would
+        # rank last anyway, reading as trivial when the count is the finding.
+        "impact_usd": None,
+        "session_id": costliest.session_id if costliest else None,
+        "severity": "info",
+    }
+
+
 def _replay_turn_chart(session_id: str, events: list[LocalEvent]) -> dict[str, object] | None:
     """Per-turn cost for one session, split into new context and replayed history.
 
@@ -2940,6 +3008,10 @@ def _insight_feed(
             "session_id": None,
             "severity": "info",
         })
+
+    false_starts = _false_starts_card(all_rows)
+    if false_starts:
+        cards.append(false_starts)
 
     if churned:
         cards.append({
