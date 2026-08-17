@@ -3695,6 +3695,9 @@ def build_companion_state() -> dict[str, object]:
             "primary_label": "Review Gate",
             "primary_action": "open_prompt_gate",
             "primary_url": str(gate.get("url") or "/?view=prompt"),
+            "continue_label": "Continue",
+            "continue_action": "run_original_prompt",
+            "continue_url": str(gate.get("url") or ""),
             "control_url": str(gate.get("url") or "/?view=prompt"),
             "detail": "A hook paused this prompt locally. Review it before the AI tool continues.",
         }

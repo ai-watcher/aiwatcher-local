@@ -64,13 +64,12 @@ tabs, lifecycle coverage, filters, search, and expandable test cases. Because
 this repository is public, the workflow does not publish the HTML through
 GitHub Pages or public workflow artifacts.
 
-To make the HTML suite owner-only, create a private docs repo such as
-`ai-watcher/aiwatcher-internal-docs` and configure these Actions secrets on
-this public repo:
+To make the HTML suite owner-only, create a private docs repo or private docs
+workspace and configure these Actions secrets on this public repo:
 
 | Secret | Purpose |
 | --- | --- |
-| `AIWATCHER_PRIVATE_DOCS_REPO` | Private destination repo, for example `ai-watcher/aiwatcher-internal-docs`. |
+| `AIWATCHER_PRIVATE_DOCS_REPO` | Private destination repo for generated owner-only docs. |
 | `AIWATCHER_PRIVATE_DOCS_TOKEN` | Fine-grained token with read/write contents access to that private repo. |
 
 When configured, every pushed commit reads
