@@ -10,7 +10,7 @@ import tempfile
 import threading
 import time
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePath
 from types import SimpleNamespace
@@ -102,7 +102,7 @@ SUMMARY_MEMORY_TTL_SECONDS = 45
 SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
 # Bump whenever build_summary's payload shape changes, so a cache written by an
 # older build is discarded instead of rendering blank sections in a newer UI.
-SUMMARY_CACHE_SCHEMA_VERSION = 6
+SUMMARY_CACHE_SCHEMA_VERSION = 7
 SESSION_SNAPSHOT_SCHEMA_VERSION = 1
 SUMMARY_BACKGROUND_COOLDOWN_SECONDS = 8
 SUMMARY_WINDOWS = (1, 7, 30)
@@ -3293,6 +3293,159 @@ def _insight_feed(
     return [*with_impact, *without_impact]
 
 
+# A sparkline is only worth its ink once there are a few days to compare. Below
+# this the "trend" is one spike and a flat line, which reads as a shape without
+# being one.
+TILE_SPARK_MIN_ACTIVE_DAYS = 3
+
+
+def _tile_trend_days(since: datetime, now: datetime) -> list[date]:
+    """Every day in the window, including the empty ones.
+
+    Gaps have to be present as zeroes rather than absent: a quiet Sunday that is
+    simply missing from the array pulls Monday left and draws the week shorter
+    than it was.
+    """
+    start, end = since.date(), now.date()
+    return [start + timedelta(days=offset) for offset in range((end - start).days + 1)]
+
+
+def _tile_trends(
+    rows: list[LocalSession],
+    all_events: list[LocalEvent],
+    window_outcomes: dict[str, dict[str, object]],
+    interventions: list[dict[str, Any]],
+    since: datetime,
+    now: datetime,
+) -> dict[str, object] | None:
+    """Daily series behind the four Home metric tiles.
+
+    Bucketed by event timestamp, not by session.started_at. Sessions are clipped
+    to the window for their spend but keep their original start date, so a
+    session opened last month and worked on today would post today's dollars to
+    last month -- off the left edge of the chart entirely. Events carry their own
+    timestamp and their costs sum to the session's, which is the same property
+    clip_sessions_to_window relies on.
+
+    Sessions and outcomes count on the day of their first in-window event, so
+    each session lands on exactly one day and the bars sum to the tile above
+    them. Counting a three-day session on all three days would make the
+    sparkline total more than the number it sits under.
+
+    Outcomes are NOT bucketed by recorded_at. An outcome is stamped when you
+    marked it, so a weekend spent reviewing a fortnight of work would draw a
+    spike on the weekend and empty days across the fortnight -- a chart of
+    reviewing habits wearing the label of a chart of results.
+    """
+    days = _tile_trend_days(since, now)
+    if len(days) < TILE_SPARK_MIN_ACTIVE_DAYS:
+        return None
+    index = {day: position for position, day in enumerate(days)}
+
+    def blank() -> list[float]:
+        return [0.0 for _ in days]
+
+    def slot(moment: datetime | None) -> int | None:
+        """Bucket a timestamp, or None if it falls outside the window.
+
+        The lower bound is compared as a timestamp, not as a date. `since` is a
+        moment mid-morning, so testing only that the date is in range lets in
+        everything that happened earlier on that first day -- spend the tile
+        above has already clipped away, which made the sparkline sum to more
+        than the number it sits under. Day zero stays a part-day in both.
+        """
+        if moment is None:
+            return None
+        stamp = moment.astimezone()
+        if stamp < since:
+            return None
+        return index.get(stamp.date())
+
+    api_value = blank()
+    first_day: dict[str, date] = {}
+    for event in all_events:
+        position = slot(event.timestamp)
+        if position is None:
+            continue
+        api_value[position] += event.cost_usd
+        day = days[position]
+        if event.session_id not in first_day or day < first_day[event.session_id]:
+            first_day[event.session_id] = day
+
+    sessions, useful, judged = blank(), blank(), blank()
+    for row in rows:
+        day = first_day.get(row.session_id)
+        if day is None:
+            # Cursor and the Codex sqlite path emit no per-turn events, so these
+            # rows have nothing to bucket by and would silently vanish from a
+            # chart that sums to the tile. They already carry CLIP_FALLBACK_NOTE
+            # for the same imprecision; fall back to the session's own clock.
+            position = slot(row.started_at) if slot(row.started_at) is not None else slot(row.updated_at)
+            if position is None:
+                continue
+            day = days[position]
+        position = index[day]
+        sessions[position] += 1
+        outcome = (window_outcomes.get(row.session_id) or {}).get("outcome")
+        if outcome:
+            judged[position] += 1
+        if outcome == "useful":
+            useful[position] += 1
+
+    preflight = blank()
+    for row in interventions:
+        try:
+            created = datetime.fromisoformat(str(row.get("created_at", "")))
+        except (TypeError, ValueError):
+            continue
+        position = slot(created)
+        if position is not None:
+            preflight[position] += 1
+
+    # An unjudged session is not a session that produced nothing. Everything
+    # after the last day with a verdict is withheld rather than drawn: a line
+    # falling to zero across the recent tail reads as work that stopped landing,
+    # when it is only work nobody has marked yet. Same call the cost-per-
+    # surviving-line chart makes about its own too-recent tail.
+    judged_through = max((position for position, count in enumerate(judged) if count), default=None)
+
+    def active(values: list[float]) -> int:
+        return sum(1 for value in values if value > 0)
+
+    series: dict[str, object] = {}
+    if active(api_value) >= TILE_SPARK_MIN_ACTIVE_DAYS:
+        series["apiValue"] = {
+            "values": [round(value, 6) for value in api_value],
+            "labels": [money(value) for value in api_value],
+        }
+    if active(sessions) >= TILE_SPARK_MIN_ACTIVE_DAYS:
+        series["sessions"] = {
+            "values": [int(value) for value in sessions],
+            "labels": [f"{int(value)} session{'' if value == 1 else 's'}" for value in sessions],
+        }
+    if active(preflight) >= TILE_SPARK_MIN_ACTIVE_DAYS:
+        series["preflightDecisions"] = {
+            "values": [int(value) for value in preflight],
+            "labels": [f"{int(value)} decision{'' if value == 1 else 's'}" for value in preflight],
+        }
+    if judged_through is not None and active(useful[: judged_through + 1]) >= TILE_SPARK_MIN_ACTIVE_DAYS:
+        entry: dict[str, object] = {
+            "values": [int(value) for value in useful],
+            "labels": [f"{int(value)} useful" for value in useful],
+            "judged_through": judged_through,
+        }
+        if judged_through < len(days) - 1:
+            unjudged = len(days) - 1 - judged_through
+            entry["caveat"] = (
+                f"{unjudged} more recent day{'' if unjudged == 1 else 's'} not judged yet, so not drawn."
+            )
+        series["usefulOutcomes"] = entry
+
+    if not series:
+        return None
+    return {"days": [day.isoformat() for day in days], "series": series}
+
+
 def build_summary(
     days: int = 7,
     *,
@@ -3542,6 +3695,14 @@ def build_summary(
             "preflight_decisions": len(interventions),
             "cost_per_useful_change": money(cost_per_useful) if cost_per_useful is not None else "—",
         },
+        # Daily shape behind the four tiles. Absent from the shell payload
+        # below, which never scans events -- the tiles paint their numbers
+        # immediately and grow sparklines when the full refresh lands, rather
+        # than drawing an approximation from session start dates that would
+        # disagree with the real one a second later.
+        "tile_trends": _tile_trends(
+            rows, all_events, window_outcomes, interventions, since, now,
+        ),
         "survival": survival_summary,
         "unbanked": unbanked,
         "changes": changes,
@@ -4610,6 +4771,16 @@ HTML = r"""<!doctype html>
        where a direction is defensible, and leaves the raw total unjudged. Same
        reason pace_vs_baseline compares you to yourself instead of to a limit. */
     .metric-neutral { --metric: var(--line-strong); }
+    /* The stroke inherits the tile's own --metric through currentColor rather
+       than choosing a hue. Each sparkline is alone in its card, so there is no
+       sibling series for a colour to distinguish it from, and picking one would
+       either duplicate a token that already means something or invent a fourth. */
+    .metric-spark { color: var(--metric, var(--blue)); margin-top: 10px; margin-bottom: 2px; }
+    .metric-spark svg { display: block; width: 100%; height: 28px; }
+    .metric-spark-caveat { color: var(--muted); font-size: 11px; margin-top: 2px; }
+    /* The decorative rule is pinned to the card's bottom edge and would cut
+       straight through a sparkline placed there. */
+    .metric-card:has(.metric-spark)::after { display: none; }
     .runway { margin: 12px 0 2px; }
     .runway-svg { display: block; width: 100%; height: auto; overflow: visible; }
     .home-runway { display: flex; align-items: center; gap: 14px; margin-top: 10px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface-raised); border-left-width: 3px; }
@@ -5291,10 +5462,10 @@ HTML = r"""<!doctype html>
     </section>
 
     <section class="grid kpis">
-      <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub">Value per useful change: <span id="costPerUseful">-</span></div><div class="sub" id="costPerSurvivingRow" hidden>Cost per surviving line: <span id="costPerSurviving">-</span></div></div>
-      <div class="card metric-card metric-amber"><div class="label">Preflight decisions</div><div class="value" id="preflightDecisions">-</div><div class="sub"><span id="windowLabel">-</span></div></div>
-      <div class="card metric-card metric-blue"><div class="label">Sessions observed</div><div class="value" id="sessions">-</div><div class="sub">This machine only</div></div>
-      <div class="card metric-card metric-neutral"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div></div>
+      <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub">Value per useful change: <span id="costPerUseful">-</span></div><div class="sub" id="costPerSurvivingRow" hidden>Cost per surviving line: <span id="costPerSurviving">-</span></div><div class="metric-spark" data-tile-spark="usefulOutcomes" hidden></div></div>
+      <div class="card metric-card metric-amber"><div class="label">Preflight decisions</div><div class="value" id="preflightDecisions">-</div><div class="sub"><span id="windowLabel">-</span></div><div class="metric-spark" data-tile-spark="preflightDecisions" hidden></div></div>
+      <div class="card metric-card metric-blue"><div class="label">Sessions observed</div><div class="value" id="sessions">-</div><div class="sub">This machine only</div><div class="metric-spark" data-tile-spark="sessions" hidden></div></div>
+      <div class="card metric-card metric-neutral"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div><div class="metric-spark" data-tile-spark="apiValue" hidden></div></div>
     </section>
 
     <section class="grid two" style="margin:14px 0">
@@ -7133,6 +7304,80 @@ function drawRunwayMini(node, chart) {
   node.innerHTML = '';
   node.appendChild(svg);
 }
+/* Daily shape under a metric tile. Deliberately unlabelled: there are no axes,
+   no ticks and no gridlines, because the tile already carries the number and
+   the only question left is which way it has been going.
+
+   Colour is inherited (currentColor) from the card's --metric, so the series
+   never picks a token of its own -- see .metric-spark.
+
+   A series may stop short of the right edge. Outcomes only exist for sessions
+   somebody has judged, and drawing a line through the unjudged tail would state
+   that recent work produced nothing when the truth is that nobody has looked at
+   it yet. The tail is shaded and left empty instead, and the caveat says so in
+   words rather than relying on the shading being noticed. */
+function drawTileSpark(node, series, days) {
+  if (!node || !series) return;
+  const values = series.values || [];
+  if (values.length < 3) return;
+  const W = 240, H = 28, pad = 3;
+  // Drawn only as far as there is a verdict; the rest of the axis is still laid
+  // out, so the shaded gap is visibly a gap rather than a shorter chart.
+  const through = Number.isInteger(series.judged_through) ? series.judged_through : values.length - 1;
+  const drawn = values.slice(0, through + 1);
+  if (drawn.length < 2) return;
+  const peak = Math.max(...drawn);
+  if (!(peak > 0)) return;
+
+  const x = chartScale(0, values.length - 1, pad, W - pad);
+  const y = chartScale(0, peak, H - pad, pad);
+  const svg = svgEl('svg', {
+    viewBox: `0 0 ${W} ${H}`, class: 'metric-spark-svg',
+    preserveAspectRatio: 'none', role: 'img',
+  });
+
+  if (through < values.length - 1) {
+    svg.appendChild(svgEl('rect', {
+      x: x(through), y: 0, width: (W - pad) - x(through), height: H,
+      fill: chartToken('--line'), opacity: 0.35,
+    }));
+  }
+
+  const points = drawn.map((value, index) => [x(index), y(value)]);
+  const area = chartPath(points)
+    + `L${x(through).toFixed(1)},${y(0).toFixed(1)}`
+    + `L${x(0).toFixed(1)},${y(0).toFixed(1)}Z`;
+  svg.appendChild(svgEl('path', { d: area, fill: 'currentColor', opacity: 0.16, stroke: 'none' }));
+  svg.appendChild(svgEl('path', {
+    d: chartPath(points), fill: 'none', stroke: 'currentColor',
+    'stroke-width': 1.75, 'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+    'vector-effect': 'non-scaling-stroke',
+  }));
+  svg.appendChild(svgEl('circle', {
+    cx: points[points.length - 1][0], cy: points[points.length - 1][1], r: 2.4,
+    fill: 'currentColor', stroke: chartToken('--surface'), 'stroke-width': 1.5,
+  }));
+
+  // The text alternative, so nothing here is carried by the drawing alone.
+  const labels = series.labels || [];
+  const peakIndex = drawn.indexOf(peak);
+  const summary = `Peak ${labels[peakIndex] || peak} on ${(days || [])[peakIndex] || 'the busiest day'}`
+    + `, ${labels[through] || drawn[drawn.length - 1]} on ${(days || [])[through] || 'the last day drawn'}.`;
+  svg.setAttribute('aria-label', summary);
+  const title = svgEl('title', {});
+  title.textContent = summary;
+  svg.appendChild(title);
+
+  node.innerHTML = '';
+  node.appendChild(svg);
+  if (series.caveat) {
+    const note = document.createElement('div');
+    note.className = 'metric-spark-caveat';
+    note.textContent = series.caveat;
+    node.appendChild(note);
+  }
+  node.hidden = false;
+}
 function compactTokens(n) {
   if (!n) return '0';
   // Carries past thousands: the scatter's decade ticks reach hundreds of
@@ -8245,6 +8490,19 @@ async function load(resetDetail = true, forceRefresh = false) {
     survivalRow.hidden = true;
   }
   document.getElementById('preflightDecisions').textContent = totals.preflight_decisions;
+  // Same two-step contract as the runway charts: the tiles' numbers are set
+  // first, then SVG is appended into nodes collected by attribute. Absent on
+  // the fast shell payload, so every tile is reset rather than left showing the
+  // previous window's shape while the full refresh is still running.
+  const tileTrends = data.tile_trends || null;
+  document.querySelectorAll('[data-tile-spark]').forEach(node => {
+    node.innerHTML = '';
+    node.hidden = true;
+    const series = tileTrends && tileTrends.series
+      ? tileTrends.series[node.getAttribute('data-tile-spark')]
+      : null;
+    if (series) drawTileSpark(node, series, tileTrends.days);
+  });
   receiptCache = data.intervention_receipts || [];
   const handoffDecisions = data.handoff_decisions || [];
   document.getElementById('latestIntervention').innerHTML = renderHomeReceiptSummary(receiptCache[0]);

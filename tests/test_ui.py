@@ -487,6 +487,195 @@ class DashboardWindowTests(unittest.TestCase):
         # Rows with no tokens at all cannot form a share of anything.
         self.assertIsNone(ui._composition_chart([{"name": "a", "tokens": 0}, {"name": "b", "tokens": 0}]))
 
+    # ------------------------------------------------------------------
+    # Tile sparklines
+    # ------------------------------------------------------------------
+    def _trend_fixture(self):
+        """A window with a session that started before it and ran on into it."""
+        now = datetime.now().astimezone().replace(hour=12, minute=0, second=0, microsecond=0)
+        since = now - timedelta(days=4)
+
+        # Afternoon by default: the window opens at midday on day zero, so a
+        # morning timestamp there is legitimately outside it.
+        def day(offset: int, hour: int = 15) -> datetime:
+            return (since + timedelta(days=offset)).replace(hour=hour)
+
+        rows = [
+            # Opened well before the window; the spend below happens inside it.
+            LocalSession(session_id="old", tool="claude-code", project_path="/repo",
+                         started_at=since - timedelta(days=20), updated_at=now, cost_usd=30.0),
+            LocalSession(session_id="new", tool="claude-code", project_path="/repo",
+                         started_at=day(2), updated_at=day(2, 18), cost_usd=5.0),
+            LocalSession(session_id="last", tool="claude-code", project_path="/repo",
+                         started_at=day(4), updated_at=now, cost_usd=4.0),
+        ]
+        events = [
+            LocalEvent(event_id="e0", session_id="old", tool="claude-code",
+                       event_type="assistant", timestamp=day(1), cost_usd=10.0),
+            LocalEvent(event_id="e1", session_id="old", tool="claude-code",
+                       event_type="assistant", timestamp=day(3), cost_usd=20.0),
+            LocalEvent(event_id="e2", session_id="new", tool="claude-code",
+                       event_type="assistant", timestamp=day(2), cost_usd=5.0),
+            LocalEvent(event_id="e3", session_id="last", tool="claude-code",
+                       event_type="assistant", timestamp=day(4), cost_usd=4.0),
+        ]
+        return rows, events, since, now
+
+    def test_tile_trends_bucket_spend_by_event_not_session_start(self) -> None:
+        """A session outlives the day it was opened, and its money does not.
+
+        Sessions keep their original started_at through clipping, so bucketing by
+        it posts every dollar to the day the session was opened -- for a session
+        older than the window, off the left edge entirely, where the chart would
+        quietly lose it while the tile above still counted it.
+        """
+        rows, events, since, now = self._trend_fixture()
+        trends = ui._tile_trends(rows, events, {}, [], since, now)
+
+        assert trends is not None
+        spend = trends["series"]["apiValue"]["values"]
+        self.assertEqual(len(spend), len(trends["days"]))
+        self.assertAlmostEqual(sum(spend), 39.0, places=6)
+        # Day 1 and day 3 carry the older session's two turns; nothing lands on
+        # its own start date, which is three weeks outside this window.
+        self.assertAlmostEqual(spend[1], 10.0, places=6)
+        self.assertAlmostEqual(spend[3], 20.0, places=6)
+        self.assertAlmostEqual(spend[0], 0.0, places=6)
+
+    def test_tile_trends_keep_empty_days_as_zero(self) -> None:
+        """A missing day is not an absent day -- it drags the rest of the week left."""
+        rows, events, since, now = self._trend_fixture()
+        trends = ui._tile_trends(rows, events, {}, [], since, now)
+
+        assert trends is not None
+        self.assertEqual(trends["days"], sorted(trends["days"]))
+        self.assertEqual(len(trends["days"]), 5)
+        for series in trends["series"].values():
+            self.assertEqual(len(series["values"]), 5)
+
+    def test_tile_trends_count_each_session_once_so_bars_sum_to_the_tile(self) -> None:
+        """A three-day session counted on all three days outnumbers its own tile."""
+        rows, events, since, now = self._trend_fixture()
+        trends = ui._tile_trends(rows, events, {}, [], since, now)
+
+        assert trends is not None
+        sessions = trends["series"]["sessions"]["values"]
+        self.assertEqual(sum(sessions), len(rows))
+        # The long session lands on its first in-window turn, not on every day
+        # it happened to be running.
+        self.assertEqual(sessions[1], 1)
+        self.assertEqual(sessions[3], 0)
+
+    def test_tile_trends_exclude_spend_from_before_the_window_opened(self) -> None:
+        """The window opens at a moment, not at midnight.
+
+        Matching on the date alone lets in everything earlier that same morning
+        -- spend the tile has already clipped away, which made the sparkline sum
+        to more than the number printed above it.
+        """
+        rows, events, since, now = self._trend_fixture()
+        events = [*events, LocalEvent(
+            event_id="early", session_id="old", tool="claude-code", event_type="assistant",
+            timestamp=since - timedelta(hours=3), cost_usd=99.0,
+        )]
+        trends = ui._tile_trends(rows, events, {}, [], since, now)
+
+        assert trends is not None
+        self.assertAlmostEqual(sum(trends["series"]["apiValue"]["values"]), 39.0, places=6)
+
+    def test_tile_trends_place_outcomes_on_the_work_not_on_the_review(self) -> None:
+        """Outcomes are stamped when you marked them, which is not when they happened.
+
+        A weekend spent judging a fortnight of sessions would draw one spike on
+        the weekend and an empty fortnight -- a chart of reviewing habits under a
+        label promising a chart of results.
+        """
+        rows, events, since, now = self._trend_fixture()
+        outcomes = {
+            "old": {"outcome": "useful", "recorded_at": now.isoformat()},
+            "new": {"outcome": "useful", "recorded_at": now.isoformat()},
+        }
+        with patch.object(ui, "TILE_SPARK_MIN_ACTIVE_DAYS", 2):
+            trends = ui._tile_trends(rows, events, outcomes, [], since, now)
+
+        assert trends is not None
+        useful = trends["series"]["usefulOutcomes"]["values"]
+        self.assertEqual(sum(useful), 2)
+        # Both were recorded today; they are drawn on the days the work ran.
+        self.assertEqual(useful[1], 1)
+        self.assertEqual(useful[2], 1)
+        self.assertEqual(useful[-1], 0)
+
+    def test_tile_trends_withhold_the_unjudged_tail_rather_than_drawing_zero(self) -> None:
+        """An unjudged session is not a session that produced nothing.
+
+        Drawing the line on through days nobody has reviewed makes it fall to
+        zero and read as work that stopped landing.
+        """
+        rows, events, since, now = self._trend_fixture()
+        outcomes = {"old": {"outcome": "useful"}, "new": {"outcome": "useful"}}
+        with patch.object(ui, "TILE_SPARK_MIN_ACTIVE_DAYS", 2):
+            trends = ui._tile_trends(rows, events, outcomes, [], since, now)
+
+        assert trends is not None
+        useful = trends["series"]["usefulOutcomes"]
+        # Judged coverage ends on day 2; days 3 and 4 hold no verdict at all.
+        self.assertEqual(useful["judged_through"], 2)
+        self.assertIn("not judged yet", useful["caveat"])
+        # Spend needs no verdict, so it is still drawn to the right edge.
+        self.assertNotIn("judged_through", trends["series"]["apiValue"])
+
+    def test_tile_trends_withhold_outcomes_entirely_when_nothing_is_judged(self) -> None:
+        rows, events, since, now = self._trend_fixture()
+        trends = ui._tile_trends(rows, events, {}, [], since, now)
+
+        assert trends is not None
+        self.assertNotIn("usefulOutcomes", trends["series"])
+
+    def test_tile_trends_withhold_a_series_too_sparse_to_have_a_shape(self) -> None:
+        """One spike and a flat line is not a trend."""
+        rows, events, since, now = self._trend_fixture()
+        trends = ui._tile_trends(rows, events, {}, [], since, now)
+
+        assert trends is not None
+        # A single turn leaves one active day, under the three-day floor.
+        sparse = ui._tile_trends(rows, events[:1], {}, [], since, now)
+        self.assertNotIn("apiValue", (sparse or {"series": {}})["series"])
+        # Preflight had no decisions at all in this fixture.
+        self.assertNotIn("preflightDecisions", trends["series"])
+
+    def test_tile_trends_keep_sessions_that_emit_no_events(self) -> None:
+        """Cursor and the Codex sqlite path have no turns to bucket by.
+
+        Dropped, they would vanish from a chart that is supposed to sum to the
+        tile counting them.
+        """
+        rows, events, since, now = self._trend_fixture()
+        rows = [*rows, LocalSession(
+            session_id="cursor", tool="cursor", project_path="/repo",
+            started_at=(since + timedelta(days=0)).replace(hour=16),
+            updated_at=now, cost_usd=1.0,
+        )]
+        trends = ui._tile_trends(rows, events, {}, [], since, now)
+
+        assert trends is not None
+        self.assertEqual(sum(trends["series"]["sessions"]["values"]), 4)
+        # Bucketed by its own clock, since it has no turns to be placed by.
+        self.assertEqual(trends["series"]["sessions"]["values"][0], 1)
+
+    def test_tile_trends_bucket_preflight_by_when_the_decision_was_made(self) -> None:
+        rows, events, since, now = self._trend_fixture()
+        interventions = [
+            {"created_at": (since + timedelta(days=index)).replace(hour=16).isoformat()}
+            for index in (0, 1, 1, 3)
+        ]
+        trends = ui._tile_trends(rows, events, {}, interventions, since, now)
+
+        assert trends is not None
+        preflight = trends["series"]["preflightDecisions"]["values"]
+        self.assertEqual(preflight, [1, 2, 0, 1, 0])
+        self.assertEqual(sum(preflight), len(interventions))
+
     def test_unbanked_chart_splits_by_where_and_places_every_dollar(self) -> None:
         """Segments must sum to the headline, or the bar quietly contradicts it."""
         ledger = ui.Ledger()
