@@ -3143,25 +3143,32 @@ def command_start(args: argparse.Namespace) -> int:
     print(f"\nCollected {len(sessions)} sessions from the last 24 hours.")
     print("Run `aiwatcher today` or `python -m aiwatcher_cli today` to see your usage.")
     if not getattr(args, "no_companion", False):
+        presence_requested = not getattr(args, "no_presence", False)
         result = start_companion(
             interval_seconds=getattr(args, "interval", 30),
-            presence=not getattr(args, "no_presence", False),
+            presence=presence_requested,
             presence_position=str(getattr(args, "presence_position", "bottom-right")),
+            presence_visibility=str(getattr(args, "presence_visibility", "always")),
         )
         if result.get("ok"):
             if result.get("already_running"):
                 print(f"Companion already running (PID {result.get('pid')}).")
-                if not getattr(args, "no_presence", False):
-                    ok, detail = _open_native_companion_presence(
-                        _watch_ui_base_url(),
-                        position=str(getattr(args, "presence_position", "bottom-right")),
-                    )
-                    if ok:
-                        print(f"Companion presence opened ({detail}).")
             else:
                 print(f"Companion started (PID {result.get('pid')}).")
-                if not getattr(args, "no_presence", False):
-                    print("A small Companion should appear near the screen edge.")
+            if presence_requested:
+                ok, detail = _open_native_companion_presence(
+                    _watch_ui_base_url(),
+                    position=str(getattr(args, "presence_position", "bottom-right")),
+                    visibility=str(getattr(args, "presence_visibility", "always")),
+                )
+                if ok:
+                    print(f"Companion entry point opened ({detail}).")
+                else:
+                    print(
+                        f"Companion entry point could not open: {detail}. "
+                        "Use the Dashboard UI until the native Companion is available.",
+                        file=sys.stderr,
+                    )
         else:
             print(f"Companion could not start: {result.get('message', 'unknown error')}", file=sys.stderr)
             print("Run `aiwatcher companion start` manually after stopping any legacy watcher.", file=sys.stderr)
@@ -3396,6 +3403,7 @@ def command_companion(args: argparse.Namespace) -> int:
                 interval_seconds=getattr(args, "interval", 30),
                 presence=not bool(getattr(args, "no_presence", False)),
                 presence_position=str(getattr(args, "presence_position", "bottom-right")),
+                presence_visibility=str(getattr(args, "presence_visibility", "always")),
             )
             if not result.get("ok"):
                 print(f"Could not install login autostart: {result.get('message', 'unknown error')}", file=sys.stderr)
@@ -3434,6 +3442,7 @@ def command_companion(args: argparse.Namespace) -> int:
             ok, detail = _open_native_companion_presence(
                 base_url,
                 position=str(getattr(args, "presence_position", "bottom-right")),
+                visibility=str(getattr(args, "presence_visibility", "always")),
             )
             if ok:
                 print(f"AIWatcher companion presence started ({detail}).")
@@ -3457,6 +3466,7 @@ def command_companion(args: argparse.Namespace) -> int:
             interval_seconds=args.interval,
             presence=presence_requested,
             presence_position=str(getattr(args, "presence_position", "bottom-right")),
+            presence_visibility=str(getattr(args, "presence_visibility", "always")),
         )
         if not result.get("ok"):
             print(f"Could not start AIWatcher companion: {result.get('message', 'unknown error')}", file=sys.stderr)
@@ -3469,6 +3479,7 @@ def command_companion(args: argparse.Namespace) -> int:
                 ok, detail = _open_native_companion_presence(
                     _watch_ui_base_url(),
                     position=str(getattr(args, "presence_position", "bottom-right")),
+                    visibility=str(getattr(args, "presence_visibility", "always")),
                 )
                 if ok:
                     presence_available = True
@@ -4501,6 +4512,10 @@ def _pid_is_running(pid: int) -> bool:
     try:
         os.kill(pid, 0)
         return True
+    except PermissionError:
+        # The process exists but this process cannot signal it. Treat it as
+        # alive so Companion stop/start does not orphan visible overlay windows.
+        return True
     except (OSError, ProcessLookupError):
         return False
 
@@ -4621,6 +4636,7 @@ def _open_native_companion_presence(
     base_url: str,
     *,
     position: str = "bottom-right",
+    visibility: str = "always",
 ) -> tuple[bool, str]:
     """Launch the collapsed always-available companion entry point."""
     existing_pid = _existing_companion_presence_pid()
@@ -4655,6 +4671,8 @@ def _open_native_companion_presence(
                 prompt_url,
                 "--position",
                 position,
+                "--visibility",
+                visibility,
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -4665,7 +4683,17 @@ def _open_native_companion_presence(
         pid_path.write_text(str(process.pid), encoding="utf-8")
     except OSError as exc:
         return False, str(exc)
-    return True, "native companion presence"
+    for _ in range(10):
+        if process.poll() is not None:
+            try:
+                pid_path.unlink()
+            except OSError:
+                pass
+            return False, "native companion presence exited immediately"
+        if _pid_is_running(process.pid):
+            return True, f"native companion presence PID {process.pid}"
+        time_module.sleep(0.1)
+    return False, "native companion presence did not stay reachable"
 
 
 def _open_native_companion_tray(base_url: str) -> tuple[bool, str]:
@@ -8085,6 +8113,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="bottom-right",
         help="Screen corner for the collapsed Companion",
     )
+    start.add_argument(
+        "--presence-visibility",
+        choices=("always", "ai-apps", "nudges-only"),
+        default="always",
+        help="When the Companion is visible: always, only during AI app work, or only for nudges",
+    )
     start.set_defaults(func=command_start)
     sub.add_parser("setup", help="Show first-run setup, hook, coverage, and ambient watch steps").set_defaults(func=command_setup)
     sub.add_parser("status", help="Show detected tools and local AIWatcher status").set_defaults(func=command_status)
@@ -8103,6 +8137,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("bottom-right", "bottom-left", "top-right", "top-left"),
         default="bottom-right",
         help="Screen corner for the collapsed companion",
+    )
+    companion_start.add_argument(
+        "--presence-visibility",
+        choices=("always", "ai-apps", "nudges-only"),
+        default="always",
+        help="When the Companion is visible: always, only during AI app work, or only for nudges",
     )
     companion_start.set_defaults(func=command_companion)
     companion_sub.add_parser("status", help="Show companion status").set_defaults(func=command_companion)
@@ -8128,6 +8168,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="bottom-right",
         help="Screen corner for the collapsed companion",
     )
+    autostart_install.add_argument(
+        "--presence-visibility",
+        choices=("always", "ai-apps", "nudges-only"),
+        default="always",
+        help="When the Companion is visible after login: always, only during AI app work, or only for nudges",
+    )
     autostart_install.set_defaults(func=command_companion)
     autostart_sub.add_parser("status", help="Show login autostart status").set_defaults(func=command_companion)
     autostart_sub.add_parser("uninstall", help="Remove login autostart").set_defaults(func=command_companion)
@@ -8143,6 +8189,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("bottom-right", "bottom-left", "top-right", "top-left"),
         default="bottom-right",
         help="Screen corner for the collapsed companion",
+    )
+    companion_run.add_argument(
+        "--presence-visibility",
+        choices=("always", "ai-apps", "nudges-only"),
+        default="always",
+        help="When the Companion is visible: always, only during AI app work, or only for nudges",
     )
     companion_run.set_defaults(func=command_companion)
     sub.add_parser("today", help="Show today's local AI usage").set_defaults(func=command_today)

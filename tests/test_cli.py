@@ -139,6 +139,7 @@ class StartCommandCliTests(unittest.TestCase):
             patch.object(cli, "surface_coverage", return_value=coverage),
             patch.object(cli, "_ensure_dashboard_server", return_value="http://127.0.0.1:8765/") as ensure_ui,
             patch.object(cli, "start_companion", return_value={"ok": True, "pid": 123}) as start_companion,
+            patch.object(cli, "_open_native_companion_presence", return_value=(True, "native companion presence PID 456")) as open_presence,
             patch("sys.stdout", new_callable=io.StringIO) as stdout,
         ):
             result = cli.command_start(SimpleNamespace(
@@ -146,6 +147,7 @@ class StartCommandCliTests(unittest.TestCase):
                 no_companion=False,
                 no_presence=False,
                 presence_position="bottom-right",
+                presence_visibility="always",
                 no_ui=False,
                 open_ui=False,
                 ui_host="127.0.0.1",
@@ -159,8 +161,14 @@ class StartCommandCliTests(unittest.TestCase):
             interval_seconds=30,
             presence=True,
             presence_position="bottom-right",
+            presence_visibility="always",
         )
-        self.assertIn("A small Companion should appear", stdout.getvalue())
+        open_presence.assert_called_once_with(
+            cli._watch_ui_base_url(),
+            position="bottom-right",
+            visibility="always",
+        )
+        self.assertIn("Companion entry point opened", stdout.getvalue())
         self.assertIn("Dashboard UI: http://127.0.0.1:8765/", stdout.getvalue())
 
     def test_start_can_skip_companion(self) -> None:
@@ -176,6 +184,7 @@ class StartCommandCliTests(unittest.TestCase):
                 no_companion=True,
                 no_presence=False,
                 presence_position="bottom-right",
+                presence_visibility="always",
                 no_ui=False,
                 open_ui=False,
                 ui_host="127.0.0.1",
@@ -192,6 +201,7 @@ class StartCommandCliTests(unittest.TestCase):
             patch.object(cli, "surface_coverage", return_value=[]),
             patch.object(cli, "_ensure_dashboard_server") as ensure_ui,
             patch.object(cli, "start_companion", return_value={"ok": True, "pid": 123}),
+            patch.object(cli, "_open_native_companion_presence", return_value=(True, "native companion presence PID 456")),
             patch("sys.stdout", new_callable=io.StringIO) as stdout,
         ):
             result = cli.command_start(SimpleNamespace(
@@ -199,6 +209,7 @@ class StartCommandCliTests(unittest.TestCase):
                 no_companion=False,
                 no_presence=False,
                 presence_position="bottom-right",
+                presence_visibility="always",
                 no_ui=True,
                 open_ui=False,
                 ui_host="127.0.0.1",
@@ -215,11 +226,15 @@ class StartCommandCliTests(unittest.TestCase):
             patch.object(cli, "_existing_companion_presence_pid", return_value=123),
             patch.object(cli.subprocess, "Popen") as popen,
         ):
-            ok, detail = cli._open_native_companion_presence("http://127.0.0.1:8765")
+            ok, detail = cli._open_native_companion_presence("http://127.0.0.1:8765", visibility="ai-apps")
 
         self.assertTrue(ok)
         self.assertIn("already running", detail)
         popen.assert_not_called()
+
+    def test_pid_probe_treats_permission_error_as_running(self) -> None:
+        with patch.object(cli.os, "kill", side_effect=PermissionError("denied")):
+            self.assertTrue(cli._pid_is_running(12345))
 
     def test_companion_stop_stops_presence_control(self) -> None:
         with (
@@ -265,16 +280,21 @@ class StartCommandCliTests(unittest.TestCase):
             patch.object(cli, "_existing_companion_presence_pid", return_value=None),
             patch.object(cli.sys, "platform", "win32"),
             patch.object(cli, "_companion_presence_pid_path") as pid_path,
+            patch.object(cli, "_pid_is_running", return_value=True),
             patch.object(cli.subprocess, "Popen") as popen,
         ):
             process = Mock(pid=456)
+            process.poll.return_value = None
             popen.return_value = process
             pid_path.return_value.parent.mkdir.return_value = None
             pid_path.return_value.write_text.return_value = None
-            ok, detail = cli._open_native_companion_presence("http://127.0.0.1:8765")
+            ok, detail = cli._open_native_companion_presence("http://127.0.0.1:8765", visibility="ai-apps")
 
         self.assertTrue(ok)
-        self.assertEqual(detail, "native companion presence")
+        self.assertEqual(detail, "native companion presence PID 456")
+        launched = popen.call_args.args[0]
+        self.assertIn("--visibility", launched)
+        self.assertEqual(launched[launched.index("--visibility") + 1], "ai-apps")
         kwargs = popen.call_args.kwargs
         self.assertFalse(kwargs["start_new_session"])
         self.assertIn("creationflags", kwargs)

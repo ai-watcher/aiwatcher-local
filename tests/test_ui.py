@@ -387,6 +387,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["label"], "Prompt Gate")
         self.assertEqual(state["primary_label"], "Review Gate")
         self.assertEqual(state["primary_url"], "http://127.0.0.1:9999/")
+        self.assertEqual(state["continue_label"], "Continue")
+        self.assertEqual(state["continue_action"], "run_original_prompt")
+        self.assertEqual(state["continue_url"], "http://127.0.0.1:9999/")
         mark_seen.assert_called_once_with("gate-1")
 
     def test_companion_state_surfaces_fresh_start_proof_as_passive_status(self) -> None:

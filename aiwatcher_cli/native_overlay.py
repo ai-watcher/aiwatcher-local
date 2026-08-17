@@ -396,6 +396,7 @@ let args = CommandLine.arguments
 let dashboardURL = args.count > 1 ? args[1] : "http://127.0.0.1:8765"
 let promptURL = args.count > 2 ? args[2] : dashboardURL
 let position = args.count > 3 ? args[3] : "bottom-right"
+let visibilityMode = args.count > 4 ? args[4] : "always"
 
 func withoutTrailingSlash(_ value: String) -> String {
     var output = value
@@ -416,6 +417,32 @@ func openURL(_ value: String) {
 func absoluteURL(_ value: String) -> String {
     if value.hasPrefix("http://") || value.hasPrefix("https://") { return value }
     return dashboardBaseURL + value
+}
+
+let foregroundAIHints = [
+    "codex",
+    "claude",
+    "chatgpt",
+    "openai",
+    "cursor",
+    "visual studio code",
+    "vscode",
+    "code",
+    "terminal",
+    "iterm",
+    "warp",
+    "wezterm",
+    "hyper",
+    "ghostty",
+    "powershell"
+]
+
+func foregroundLooksLikeAIWork() -> Bool {
+    guard let app = NSWorkspace.shared.frontmostApplication else { return false }
+    let bundle = app.bundleIdentifier?.lowercased() ?? ""
+    let name = app.localizedName?.lowercased() ?? ""
+    let combined = "\(bundle) \(name)"
+    return foregroundAIHints.contains { combined.contains($0) }
 }
 
 final class DragView: NSView {
@@ -442,6 +469,8 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var primaryAction = "open_url"
     var primarySessionID = ""
     var primaryRuntimeAvailable = false
+    var continueAction = ""
+    var continueURL = ""
     var continueSessionID = ""
     var continueReason = ""
     var continueExpectedTokens = 0
@@ -762,6 +791,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func continueHere() {
+        if stateName == "prompt_gate" && continueAction == "run_original_prompt" && !continueURL.isEmpty {
+            continuePromptGate()
+            return
+        }
         guard !continueSessionID.isEmpty,
               let url = URL(string: dashboardBaseURL + "/api/handoff-decision") else {
             return
@@ -794,6 +827,42 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                 } else {
                     self.titleLabel.stringValue = "Still pending"
                     self.subtitleLabel.stringValue = "Could not save Continue"
+                }
+                self.updateAppearance()
+                if ok { self.scheduleAutoCollapse(after: 1.2) }
+            }
+        }.resume()
+    }
+
+    func continuePromptGate() {
+        guard var components = URLComponents(string: continueURL) else {
+            openURL(primaryURL)
+            return
+        }
+        let basePath = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        components.path = basePath.isEmpty ? "/decision" : "/" + basePath + "/decision"
+        guard let url = components.url else {
+            openURL(primaryURL)
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["decision": "run_original"])
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            DispatchQueue.main.async {
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 500
+                let ok = error == nil && status >= 200 && status < 300
+                if ok {
+                    self.stateName = "watching"
+                    self.titleLabel.stringValue = "Continuing"
+                    self.subtitleLabel.stringValue = "Original prompt released"
+                    self.primaryURL = dashboardURL
+                    self.continueAction = ""
+                    self.continueURL = ""
+                } else {
+                    self.titleLabel.stringValue = "Still paused"
+                    self.subtitleLabel.stringValue = "Open Review Gate to continue"
                 }
                 self.updateAppearance()
                 if ok { self.scheduleAutoCollapse(after: 1.2) }
@@ -872,6 +941,33 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         return ["prompt_gate", "control_recommended", "optimize_available", "clipboard_confirm"].contains(stateName)
     }
 
+    func needsAttentionState() -> Bool {
+        return ["prompt_gate", "control_recommended", "optimize_available", "clipboard_confirm"].contains(stateName)
+    }
+
+    func shouldShowWindow() -> Bool {
+        if needsAttentionState() {
+            return true
+        }
+        if visibilityMode == "nudges-only" {
+            return false
+        }
+        if visibilityMode == "ai-apps" {
+            return foregroundLooksLikeAIWork()
+        }
+        return true
+    }
+
+    func applyWindowVisibility() {
+        if shouldShowWindow() {
+            if !window.isVisible {
+                window.orderFrontRegardless()
+            }
+        } else if window.isVisible {
+            window.orderOut(nil)
+        }
+    }
+
     func applyVisibility() {
         if collapsed {
             for view in [dragHandle, dotLabel, titleLabel, subtitleLabel, primaryButton, continueButton, skipButton, planButton, askButton, scanButton, consoleButton, collapseButton] {
@@ -891,7 +987,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         consoleButton.isHidden = false
         collapseButton.isHidden = false
         expandButton.isHidden = true
-        let showContinue = !continueSessionID.isEmpty && stateName == "control_recommended"
+        let showContinue = (
+            (!continueSessionID.isEmpty && stateName == "control_recommended") ||
+            (stateName == "prompt_gate" && continueAction == "run_original_prompt" && !continueURL.isEmpty)
+        )
         let showSkip = !skipState.isEmpty && stateName != "prompt_gate"
         primaryButton.isHidden = !showPrimary
         continueButton.isHidden = !showContinue
@@ -928,7 +1027,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
     func updateAppearance() {
         applyVisibility()
-        let needsAttention = ["prompt_gate", "control_recommended", "optimize_available", "clipboard_confirm"].contains(stateName)
+        let needsAttention = needsAttentionState()
         let dark = NSColor(calibratedRed: 0.035, green: 0.052, blue: 0.078, alpha: 0.94).cgColor
         let quietCollapsed = NSColor(calibratedRed: 0.91, green: 0.96, blue: 1.00, alpha: 0.88).cgColor
         let orangeColor = pulseOn
@@ -951,6 +1050,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         expandButton.contentTintColor = needsAttention
             ? NSColor.white
             : NSColor(calibratedRed: 0.05, green: 0.15, blue: 0.20, alpha: 1.0)
+        applyWindowVisibility()
     }
 
     func schedulePulse() {
@@ -1001,6 +1101,8 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         self.primaryRuntimeAvailable = json["primary_runtime_available"] as? Bool ?? false
         self.primaryURL = absoluteURL(json["primary_url"] as? String ?? "/")
         self.continueButton.title = String((json["continue_label"] as? String ?? "Continue").prefix(10))
+        self.continueAction = json["continue_action"] as? String ?? ""
+        self.continueURL = absoluteURL(json["continue_url"] as? String ?? "")
         self.continueSessionID = json["continue_session_id"] as? String ?? ""
         self.continueReason = json["continue_reason"] as? String ?? ""
         self.continueExpectedTokens = json["continue_expected_saved_context_tokens"] as? Int ?? 0
@@ -1232,7 +1334,7 @@ def _run_macos_swift_overlay(
         return 2
 
 
-def _run_macos_swift_presence(url: str, prompt_url: str, position: str) -> int:
+def _run_macos_swift_presence(url: str, prompt_url: str, position: str, visibility: str) -> int:
     swift = shutil.which("swift")
     if sys.platform != "darwin" or not swift:
         return 2
@@ -1241,7 +1343,7 @@ def _run_macos_swift_presence(url: str, prompt_url: str, position: str) -> int:
         with open(script_path, "w", encoding="utf-8") as handle:
             handle.write(MACOS_SWIFT_PRESENCE)
         completed = subprocess.run(
-            [swift, script_path, url, prompt_url, position],
+            [swift, script_path, url, prompt_url, position, visibility],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -1419,16 +1521,78 @@ def run_native_tray(url: str, *, prompt_url: str | None = None) -> int:
     return 2
 
 
+_AI_WORK_TEXT_HINTS = (
+    "codex",
+    "claude",
+    "chatgpt",
+    "openai",
+    "cursor",
+    "visual studio code",
+    "vscode",
+    "code.exe",
+    "terminal",
+    "iterm",
+    "warp",
+    "wezterm",
+    "hyper",
+    "ghostty",
+    "powershell",
+    "pwsh",
+    "cmd.exe",
+    "windowsterminal",
+    "claude.ai",
+    "chat.openai.com",
+)
+
+
+def _windows_foreground_text() -> str:
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return ""
+        title = ctypes.create_unicode_buffer(512)
+        user32.GetWindowTextW(hwnd, title, 512)
+        pid = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        process = ""
+        if pid.value:
+            try:
+                output = subprocess.check_output(
+                    ["tasklist", "/FI", f"PID eq {int(pid.value)}", "/FO", "CSV", "/NH"],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                    timeout=0.6,
+                )
+                process = output.split(",", 1)[0].strip().strip('"')
+            except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                process = ""
+        return f"{title.value} {process}"
+    except (AttributeError, OSError, ValueError):
+        return ""
+
+
+def _foreground_looks_like_ai_work() -> bool:
+    if sys.platform == "win32":
+        haystack = _windows_foreground_text().lower()
+        return bool(haystack) and any(hint in haystack for hint in _AI_WORK_TEXT_HINTS)
+    return True
+
+
 def run_native_presence(
     url: str,
     *,
     prompt_url: str | None = None,
     position: str = "bottom-right",
+    visibility: str = "always",
 ) -> int:
     """Run the collapsed always-available local companion entry point."""
     prompt_url = prompt_url or f"{url.rstrip('/')}/?view=prompt"
+    visibility = visibility if visibility in {"always", "ai-apps", "nudges-only"} else "always"
     if sys.platform == "darwin" and shutil.which("swift"):
-        return _run_macos_swift_presence(url, prompt_url, position)
+        return _run_macos_swift_presence(url, prompt_url, position, visibility)
     try:
         import tkinter as tk
         from tkinter import ttk
@@ -1484,6 +1648,8 @@ def run_native_presence(
     primary_runtime_available_var = tk.BooleanVar(value=False)
     primary_url_var = tk.StringVar(value=url)
     continue_label_var = tk.StringVar(value="Continue")
+    continue_action_var = tk.StringVar(value="")
+    continue_url_var = tk.StringVar(value="")
     continue_session_id_var = tk.StringVar(value="")
     continue_reason_var = tk.StringVar(value="")
     continue_expected_tokens_var = tk.IntVar(value=0)
@@ -1546,6 +1712,13 @@ def run_native_presence(
         primary_path = str(payload.get("primary_url") or "/")
         primary_url_var.set(primary_path if primary_path.startswith("http") else f"{url.rstrip('/')}{primary_path}")
         continue_label_var.set(str(payload.get("continue_label") or "Continue")[:10])
+        continue_action_var.set(str(payload.get("continue_action") or ""))
+        continue_path = str(payload.get("continue_url") or "")
+        continue_url_var.set(
+            continue_path
+            if continue_path.startswith("http")
+            else (f"{url.rstrip('/')}{continue_path}" if continue_path else "")
+        )
         continue_session_id_var.set(str(payload.get("continue_session_id") or ""))
         continue_reason_var.set(str(payload.get("continue_reason") or ""))
         skip_label_var.set(str(payload.get("skip_label") or "Skip")[:8])
@@ -1683,6 +1856,38 @@ def run_native_presence(
             webbrowser.open(primary_url_var.get() or url)
 
     def continue_here() -> None:
+        if (
+            state_var.get() == "prompt_gate"
+            and continue_action_var.get() == "run_original_prompt"
+            and continue_url_var.get().strip()
+        ):
+            gate_url = continue_url_var.get().strip().rstrip("/")
+            request = urllib.request.Request(
+                f"{gate_url}/decision",
+                data=json.dumps({"decision": "run_original"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            released = False
+            try:
+                with urllib.request.urlopen(request, timeout=1.5):
+                    released = True
+            except (OSError, urllib.error.URLError):
+                pass
+            if not released:
+                title_var.set("Still paused")
+                subtitle_var.set("Open Review Gate to continue")
+                update_attention_style()
+                return
+            state_var.set("watching")
+            title_var.set("Continuing")
+            subtitle_var.set("Original prompt released")
+            continue_action_var.set("")
+            continue_url_var.set("")
+            primary_url_var.set(url)
+            update_attention_style()
+            schedule_auto_collapse(1200)
+            return
         session_id = continue_session_id_var.get().strip()
         if not session_id:
             return
@@ -1790,6 +1995,25 @@ def run_native_presence(
     def has_primary_action() -> bool:
         return state_var.get() in {"prompt_gate", "control_recommended", "optimize_available", "clipboard_confirm"}
 
+    def should_show_window() -> bool:
+        if has_primary_action():
+            return True
+        if visibility == "nudges-only":
+            return False
+        if visibility == "ai-apps":
+            return _foreground_looks_like_ai_work()
+        return True
+
+    def apply_window_visibility() -> None:
+        try:
+            if should_show_window():
+                root.deiconify()
+                root.attributes("-topmost", True)
+            else:
+                root.withdraw()
+        except tk.TclError:
+            pass
+
     def schedule_auto_collapse(delay_ms: int = 6000) -> None:
         if collapsed.get():
             return
@@ -1874,7 +2098,17 @@ def run_native_presence(
         elif not should_show_primary and primary_packed.get():
             primary_button.pack_forget()
             primary_packed.set(False)
-        should_show_continue = bool(continue_session_id_var.get().strip()) and not collapsed.get()
+        should_show_continue = (
+            (
+                bool(continue_session_id_var.get().strip())
+                or (
+                    state_var.get() == "prompt_gate"
+                    and continue_action_var.get() == "run_original_prompt"
+                    and bool(continue_url_var.get().strip())
+                )
+            )
+            and not collapsed.get()
+        )
         if should_show_continue and not continue_packed.get():
             continue_button.pack(side="left", padx=(0, 4), before=skip_button if skip_packed.get() else console_button)
             continue_packed.set(True)
@@ -1888,6 +2122,7 @@ def run_native_presence(
         elif not should_show_skip and skip_packed.get():
             skip_button.pack_forget()
             skip_packed.set(False)
+        apply_window_visibility()
 
     def pulse_attention() -> None:
         pulse_var.set(not pulse_var.get())
@@ -2140,6 +2375,12 @@ def main(argv: list[str] | None = None) -> int:
         choices=("bottom-right", "bottom-left", "top-right", "top-left"),
         default="bottom-right",
     )
+    parser.add_argument(
+        "--visibility",
+        choices=("always", "ai-apps", "nudges-only"),
+        default="always",
+        help="When the Companion presence is visible",
+    )
     parser.add_argument("--title", default="Start a fresh AI session")
     parser.add_argument("--body", default="")
     parser.add_argument("--severity", default="warning")
@@ -2153,7 +2394,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.tray:
         return run_native_tray(args.url, prompt_url=args.prompt_url)
     if args.presence:
-        return run_native_presence(args.url, prompt_url=args.prompt_url, position=args.position)
+        return run_native_presence(args.url, prompt_url=args.prompt_url, position=args.position, visibility=args.visibility)
     return run_native_overlay(
         args.url,
         args.title,
