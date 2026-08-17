@@ -2338,6 +2338,28 @@ class WeeklyDigestTests(unittest.TestCase):
         self.assertEqual(top[1]["outcome"], "useful")
         self.assertEqual(top[0]["session_id"], "expensive-unmarked")
         self.assertTrue(all(s["session_id"] for s in top), "top_sessions must carry session_id for UI drill-down links")
+        # The list is capped at DIGEST_CANDIDATE_LIMIT, so without a share the reader
+        # cannot tell a top five worth most of the window from one worth a tenth of it.
+        self.assertEqual([s["share_pct"] for s in top], [83.3, 15.0, 1.7])
+        self.assertEqual(digest["top_sessions_share_pct"], 100.0)
+        self.assertEqual(digest["top_sessions_window_total_label"], "$60.00")
+
+    def test_digest_top_session_shares_are_none_when_window_has_no_priced_spend(self) -> None:
+        """A plan-only window is "not measurable here", which is not a claim of 0%."""
+        rows = [self._session("plan-only", cost_usd=0.0)]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all", return_value=rows),
+                patch.object(ui, "scan_all_events", return_value=[]),
+                patch.object(ui, "evidence_for_sessions", return_value={}),
+                patch.object(ui, "survival_by_session", return_value={}),
+            ):
+                digest = ui.build_weekly_digest(7)
+
+        self.assertIsNone(digest["top_sessions"][0]["share_pct"])
+        self.assertIsNone(digest["top_sessions_share_pct"])
 
     def test_digest_recommendation_prioritizes_blocked_commands(self) -> None:
         rows = [self._session("s1")]

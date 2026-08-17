@@ -1774,7 +1774,18 @@ def build_weekly_digest(days: int = 7) -> dict[str, object]:
     useful_rows = [row for row in rows if (window_outcomes.get(row.session_id) or {}).get("outcome") == "useful"]
     highest_cost_useful = max(useful_rows, key=lambda row: row.cost_usd, default=None)
 
+    # DIGEST_CANDIDATE_LIMIT is a fixed cap, so the list reads identically whether
+    # these five sessions are most of the window or a rounding error on it -- and the
+    # right next move is opposite in those two cases. Each row carries its share of
+    # window spend, and the panel reports what the five together cover, so the reader
+    # gets the denominator the ranking cannot supply.
+    window_cost = sum(row.cost_usd for row in rows)
     top_sessions = sorted(rows, key=lambda row: row.cost_usd, reverse=True)[:DIGEST_CANDIDATE_LIMIT]
+    top_sessions_share_pct = (
+        round(100.0 * sum(row.cost_usd for row in top_sessions) / window_cost, 1)
+        if window_cost > 0
+        else None
+    )
 
     events_by_session = _events_by_session(rows)
     loop_candidates: list[dict[str, object]] = []
@@ -1849,10 +1860,17 @@ def build_weekly_digest(days: int = 7) -> dict[str, object]:
                 "tool": row.tool,
                 "model": row.model or "unknown",
                 "api_value_label": money(row.cost_usd),
+                # None rather than 0 when the window has no priced spend: a plan-only
+                # window is "not measurable here", which is not the same claim as 0%.
+                "share_pct": (
+                    round(100.0 * row.cost_usd / window_cost, 1) if window_cost > 0 else None
+                ),
                 "outcome": (window_outcomes.get(row.session_id) or {}).get("outcome"),
             }
             for row in top_sessions
         ],
+        "top_sessions_share_pct": top_sessions_share_pct,
+        "top_sessions_window_total_label": money(window_cost),
         "loop_candidates": loop_candidates[:DIGEST_CANDIDATE_LIMIT],
         "velocity_candidates": velocity_candidates[:DIGEST_CANDIDATE_LIMIT],
         "command_gate": {
@@ -6777,11 +6795,20 @@ function renderReport(report) {
     </div>`);
   }
   if (digest.top_sessions && digest.top_sessions.length) {
+    // The share is what turns a ranking into a decision: a top five worth most of
+    // the window means reviewing five sessions is the whole job, and a top five
+    // worth a tenth of it means the money is spread out and this list is the wrong
+    // place to look. Same five rows either way, so the number has to be on screen.
+    const share = digest.top_sessions_share_pct;
+    const cover = share === null || share === undefined
+      ? ''
+      : `<p class="muted">These ${digest.top_sessions.length} cover ${share}% of the ${esc(digest.top_sessions_window_total_label)} spent this window.</p>`;
     sections.push(`<div class="detail-section">
       <h2>Costliest sessions</h2>
+      ${cover}
       ${digest.top_sessions.map(s => `<div class="digest-row${s.session_id ? ' clickable' : ''}" ${s.session_id ? `onclick="selectSession('${esc(s.session_id)}')"` : ''}>
         <span class="digest-row-label">${esc(s.project)} &middot; ${esc(s.tool)} &middot; ${esc(s.model)}</span>
-        <span class="mono">${esc(s.api_value_label)}</span>
+        <span class="mono">${esc(s.api_value_label)}${s.share_pct === null || s.share_pct === undefined ? '' : ` &middot; ${s.share_pct}%`}</span>
         ${s.outcome ? `<span class="outcome-pill ${esc(s.outcome)}">${esc(s.outcome)}</span>` : '<span class="pill">unreviewed</span>'}
       </div>`).join('')}
     </div>`);
