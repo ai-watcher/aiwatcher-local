@@ -4230,6 +4230,15 @@ HTML = r"""<!doctype html>
     .metric-neutral { --metric: var(--line-strong); }
     .runway { margin: 12px 0 2px; }
     .runway-svg { display: block; width: 100%; height: auto; overflow: visible; }
+    .home-runway { display: flex; align-items: center; gap: 14px; margin-top: 10px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface-raised); border-left-width: 3px; }
+    .home-runway.critical { border-left-color: var(--red); }
+    .home-runway.warning { border-left-color: var(--amber); }
+    .home-runway.healthy { border-left-color: var(--green); }
+    .home-runway-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .home-runway-text strong { font-size: .95rem; }
+    .home-runway-text span { color: var(--muted); font-size: .8rem; }
+    .home-runway-spark { margin-left: auto; width: 130px; flex: none; }
+    .runway-mini { display: block; width: 100%; height: 34px; }
     .feed-chart { margin: 10px 0 0; }
     .feed-chart-note { margin: 6px 0 0; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
     .feed-chart-note strong { color: var(--text); }
@@ -5330,9 +5339,23 @@ function renderHomeContextHealth(rows, status = 'ready') {
   if (status === 'pending') return '<div class="loading">Checking context health...</div>';
   if (!rows.length) return '<div class="empty">No context pressure right now. AIWatcher will nudge when a fresh start or narrower prompt is worth it.</div>';
   const row = rows[0];
+  // Home is the "what now" surface, so it leads with how long you have rather
+  // than how heavy the session is. "Heavy" describes a state; a deadline is the
+  // only form of this anyone acts on, and the full card is two tabs away.
+  const verdict = runwayVerdict(row.chart);
+  const runway = verdict
+    ? `<div class="home-runway ${esc(verdict.severity)}">
+         <div class="home-runway-text">
+           <strong>${esc(verdict.headline)}</strong>
+           <span>${esc(verdict.detail)}</span>
+         </div>
+         <div class="home-runway-spark" data-runway-mini="${esc(row.session_id)}"></div>
+       </div>`
+    : '';
   return `<div class="session-summary">
     <div class="session-title">${esc(row.project)}</div>
     <div class="session-meta">${esc(row.tool)} · ${esc(row.latest_turn_tokens || 'unknown')} latest turn · ${esc(row.severity)}</div>
+    ${runway}
     <p style="margin-top:8px">${esc(row.recommendation || 'Review this session before continuing.')}</p>
     <div class="pill-row"><span class="pill">${esc(row.bloat_label ? row.bloat_label + ' replay' : 'observed signal')}</span>${rows.length > 1 ? `<span class="pill">${esc(rows.length - 1)} more</span>` : ''}</div>
     <div class="copy-row">${row.can_handoff ? `<button class="btn-primary" onclick="openHandoff(${jsArg(row.session_id)})">Build Fresh Start brief</button>` : ''}<button class="btn-quiet" onclick="selectSession(${jsArg(row.session_id)})">Inspect session</button></div>
@@ -6598,26 +6621,78 @@ function drawRunway(node, chart) {
   node.appendChild(svg);
 }
 
-function runwayCaption(chart) {
-  if (!chart || (chart.turn_series || []).length < 3) return '';
-  const resets = chart.context_resets
-    ? ` After ${chart.context_resets} context reset${chart.context_resets === 1 ? '' : 's'}, growth is measured from the latest one only.`
-    : '';
+/* The runway verdict as {headline, detail, severity}, so Home and the full card
+   render the same judgement from one place. Two surfaces computing "how long
+   have I got" independently is how they end up disagreeing. */
+function runwayVerdict(chart) {
+  if (!chart || (chart.turn_series || []).length < 3) return null;
   // turns_to_critical is null for two opposite reasons and they must not share a
   // sentence: a session already past the threshold is the worst case on the page,
   // and describing it as "not on a path to" the threshold reads as reassurance.
   if (chart.turns_to_critical === null || chart.turns_to_critical === undefined) {
     if (chart.latest_turn_tokens_n >= chart.critical_tokens_n) {
-      return `<p class="receipt-note"><strong>Already past the action threshold</strong> — ${compactTokens(chart.latest_turn_tokens_n)} per turn against a ${compactTokens(chart.critical_tokens_n)} limit. There is no headroom left to project.${resets}</p>`;
+      return {
+        severity: 'critical',
+        headline: 'Already past the action threshold',
+        detail: `${compactTokens(chart.latest_turn_tokens_n)} per turn against a ${compactTokens(chart.critical_tokens_n)} limit. There is no headroom left to project.`,
+      };
     }
-    return `<p class="receipt-note">Context is not growing at present, so there is no threshold to project towards. Amber is pressure, red is where action is needed.${resets}</p>`;
+    return {
+      severity: 'healthy',
+      headline: 'Not growing right now',
+      detail: 'Context is flat, so there is no threshold to project towards.',
+    };
   }
-  // The drawn projection is capped, so the caption must not quote a number the
-  // chart does not reach -- and past this range the honest reading is "plenty".
+  // The drawn projection is capped, so nothing may quote a number the chart does
+  // not reach -- and past this range the honest reading is "plenty".
   if (chart.turns_to_critical > RUNWAY_MAX_PROJECTED_TURNS) {
-    return `<p class="receipt-note"><strong>${RUNWAY_MAX_PROJECTED_TURNS}+ turns of headroom</strong> at ${compactTokens(chart.growth_per_turn_n)}/turn. Far enough out that the exact number is noise.${resets}</p>`;
+    return {
+      severity: 'healthy',
+      headline: `${RUNWAY_MAX_PROJECTED_TURNS}+ turns of headroom`,
+      detail: `At ${compactTokens(chart.growth_per_turn_n)}/turn. Far enough out that the exact number is noise.`,
+    };
   }
-  return `<p class="receipt-note"><strong>≈${chart.turns_to_critical} turn${chart.turns_to_critical === 1 ? '' : 's'} of headroom</strong> at ${compactTokens(chart.growth_per_turn_n)}/turn, the growth since this session last shed context. Amber is pressure, red is where action is needed.${resets}</p>`;
+  return {
+    severity: chart.turns_to_critical <= 10 ? 'critical' : 'warning',
+    headline: `≈${chart.turns_to_critical} turn${chart.turns_to_critical === 1 ? '' : 's'} of headroom`,
+    detail: `At ${compactTokens(chart.growth_per_turn_n)}/turn, the growth since this session last shed context.`,
+  };
+}
+function runwayCaption(chart) {
+  const verdict = runwayVerdict(chart);
+  if (!verdict) return '';
+  const resets = chart.context_resets
+    ? ` After ${chart.context_resets} context reset${chart.context_resets === 1 ? '' : 's'}, growth is measured from the latest one only.`
+    : '';
+  const bands = verdict.severity === 'critical' && chart.turns_to_critical == null
+    ? '' : ' Amber is pressure, red is where action is needed.';
+  return `<p class="receipt-note"><strong>${esc(verdict.headline)}</strong> — ${esc(verdict.detail)}${bands}${resets}</p>`;
+}
+
+/* Home's summary is one row, so this is the curve and the threshold and nothing
+   else: no axes, no projection, no labels. It exists to show the shape and let
+   the headline carry the number. */
+function drawRunwayMini(node, chart) {
+  if (!node || !chart) return;
+  const series = chart.turn_series || [];
+  if (series.length < 3) return;
+  const W = 220, H = 34, pad = 2;
+  const ceiling = Math.max(chart.critical_tokens_n, ...series) * 1.05;
+  const x = chartScale(0, series.length - 1, pad, W - pad);
+  const y = chartScale(0, ceiling, H - pad, pad);
+
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'runway-mini', preserveAspectRatio: 'none', 'aria-hidden': 'true' });
+  svg.appendChild(svgEl('line', {
+    x1: pad, y1: y(chart.critical_tokens_n), x2: W - pad, y2: y(chart.critical_tokens_n),
+    stroke: chartToken('--red'), 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke',
+  }));
+  chartLine(svg, series.map((v, i) => [x(i), y(v)]), '--blue', { width: 1.75 });
+  svg.appendChild(svgEl('circle', {
+    cx: x(series.length - 1), cy: y(series[series.length - 1]), r: 2.5,
+    fill: chartToken('--blue'), stroke: chartToken('--surface'), 'stroke-width': 1.5,
+  }));
+  node.innerHTML = '';
+  node.appendChild(svg);
 }
 function compactTokens(n) {
   if (!n) return '0';
@@ -7457,7 +7532,14 @@ async function load(resetDetail = true, forceRefresh = false) {
   document.querySelectorAll('[data-runway]').forEach(node => {
     runwayNodes[node.getAttribute('data-runway')] = node;
   });
-  (data.context_health || []).forEach(row => drawRunway(runwayNodes[row.session_id], row.chart));
+  const runwayMiniNodes = {};
+  document.querySelectorAll('[data-runway-mini]').forEach(node => {
+    runwayMiniNodes[node.getAttribute('data-runway-mini')] = node;
+  });
+  (data.context_health || []).forEach(row => {
+    drawRunway(runwayNodes[row.session_id], row.chart);
+    drawRunwayMini(runwayMiniNodes[row.session_id], row.chart);
+  });
   document.getElementById('unbanked').innerHTML = renderUnbanked(data.unbanked);
   changeRowsCache = data.changes || [];
   document.getElementById('changeRows').innerHTML = renderChangeRows(changeRowsCache);

@@ -237,6 +237,26 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Evidence captured", ui.HTML)
         self.assertNotIn("window.alert", ui.HTML)
 
+    def test_home_leads_context_health_with_the_runway_verdict(self) -> None:
+        """Home is the "what now" surface, so it must carry the deadline.
+
+        The full runway card lives in the Watch view. Home showing only "heavy"
+        describes a state and leaves the urgency to the reader, which is the gap
+        this closes. Both surfaces read runwayVerdict() so they cannot disagree
+        about how long a session has.
+        """
+        self.assertIn("function runwayVerdict(chart)", ui.HTML)
+        self.assertIn("home-runway", ui.HTML)
+        self.assertIn("data-runway-mini", ui.HTML)
+        self.assertIn("drawRunwayMini", ui.HTML)
+        # runwayCaption must be derived from the same verdict rather than
+        # recomputing it -- two surfaces computing this independently is how they
+        # end up quoting different numbers for one session.
+        self.assertIn("const verdict = runwayVerdict(chart);", ui.HTML)
+        # The two opposite null cases stay distinguishable on Home too.
+        self.assertIn("Already past the action threshold", ui.HTML)
+        self.assertIn("Not growing right now", ui.HTML)
+
     def test_api_equivalent_value_tile_carries_no_status_colour(self) -> None:
         """The figure is counterfactual, so no rail may imply a loss.
 
