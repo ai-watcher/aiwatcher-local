@@ -2827,6 +2827,10 @@ def _insight_feed(
             "impact_usd": replay["total_replayed_usd"],
             "session_id": top["session_id"],
             "severity": "high" if share >= 40 else "medium",
+            # Per-turn split for the worst session. The card's own numbers are
+            # session totals, which cannot show the one thing that matters here:
+            # replay is not a flat overhead, it compounds turn by turn.
+            "chart": _replay_turn_chart(top["session_id"], all_events),
         })
 
     pace = pace_vs_baseline(all_events, days=days)
@@ -7236,6 +7240,7 @@ function renderInsightFeed(insights) {
       <div class="feed-main">
         <strong>${esc(card.title)}</strong>
         <p>${esc(card.body)}</p>
+        ${card.chart ? `<div class="feed-chart" data-feed-chart="${esc(card.id)}"></div>${replaySplitCaption(card.chart)}` : ''}
       </div>
       ${card.impact_label ? `<span class="feed-impact mono">${esc(card.impact_label)}</span>` : ''}
     </div>`).join('');
@@ -7493,6 +7498,17 @@ async function load(resetDetail = true, forceRefresh = false) {
     : '<tr><td colspan="6"><div class="empty">No local project usage found for this window.</div></td></tr>';
   document.getElementById('insightHeadline').innerHTML = renderInsightHeadline(data.totals);
   document.getElementById('insightFeed').innerHTML = renderInsightFeed(data.insights);
+  // Same two-step as the runway charts: markup first, SVG appended after, and
+  // nodes collected by attribute rather than by a selector built from data.
+  const feedChartNodes = {};
+  document.querySelectorAll('[data-feed-chart]').forEach(node => {
+    feedChartNodes[node.getAttribute('data-feed-chart')] = node;
+  });
+  (data.insights || []).forEach(card => {
+    if (!card.chart) return;
+    drawReplaySplit(feedChartNodes[card.id], card.chart);
+    annotateClipping(feedChartNodes[card.id]);
+  });
   if (reportLoadedForDays !== days) {
     const todayDigest = document.getElementById('todayDigest');
     if (todayDigest) todayDigest.innerHTML = '<div class="empty">Open Improve for the evidence-backed weekly digest.</div>';
