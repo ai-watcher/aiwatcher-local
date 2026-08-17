@@ -61,7 +61,7 @@ from .local_state import (
     state_path,
 )
 from .outcome_evidence import VALID_EVIDENCE_OUTCOMES, build_outcome_evidence, evidence_for_sessions
-from .ledger import Ledger, build_ledger, unbanked_summary
+from .ledger import UNBANKED_OUTSIDE_REPO, Ledger, build_ledger, unbanked_summary
 from .pricing import cache_read_cost, is_subscription_model
 from .runtime_attachment import (
     RuntimeAttachment,
@@ -2475,12 +2475,71 @@ def _window_ledger(events: list[LocalEvent], days: int) -> Ledger | None:
         return None
 
 
+# Capped at the number of non-status hues this palette has. Past that the tail
+# folds into one neutral segment rather than reusing amber or red, which mean
+# something else on every other surface here.
+UNBANKED_CHART_REPOS = 3
+
+
+def _unbanked_chart(ledger: Ledger) -> dict[str, object] | None:
+    """Unbanked spend split by *where* it happened, not by why.
+
+    The by-reason split is only ever two buckets, and the card already states
+    both as a headline percentage -- a two-piece bar tells a reader nothing the
+    sentence did not. Splitting by repo grows a segment for every project worked
+    in, and points at something actionable: which repo is accumulating work that
+    never landed.
+
+    Spend outside any repo is a segment rather than a footnote, because it is the
+    one piece with a different fix -- a session started in the wrong directory,
+    not exploration that went nowhere. Every dollar of unbanked_usd is placed, so
+    the segments sum to the headline rather than to some subset of it.
+    """
+    outside = float(ledger.unbanked_by_reason.get(UNBANKED_OUTSIDE_REPO, 0.0) or 0.0)
+    ranked = sorted(ledger.unbanked_by_repo.items(), key=lambda item: item[1], reverse=True)
+    if not ranked and outside <= 0:
+        return None
+
+    # Legend labels are the repo's own name, not its path. A stacked bar's legend
+    # is read sideways at a glance, and three full paths sharing a parent
+    # directory differ only in their last few characters -- exactly the part that
+    # gets truncated. The full path stays available as the row's title.
+    segments: list[dict[str, object]] = [
+        {
+            "label": Path(str(repo)).name or short_path(str(repo)),
+            "title": short_path(str(repo)),
+            "usd": round(spend, 6),
+            "kind": "repo",
+        }
+        for repo, spend in ranked[:UNBANKED_CHART_REPOS]
+        if spend > 0
+    ]
+    tail = sum(spend for _, spend in ranked[UNBANKED_CHART_REPOS:])
+    if tail > 0:
+        segments.append({
+            "label": f"{len(ranked) - UNBANKED_CHART_REPOS} more repos",
+            "usd": round(tail, 6),
+            "kind": "other",
+        })
+    if outside > 0:
+        segments.append({"label": "Outside any repo", "usd": round(outside, 6), "kind": "outside"})
+    if len(segments) < 2:
+        # One segment is a stat, not a chart; the headline already carries it.
+        return None
+    total = sum(float(item["usd"]) for item in segments)
+    for item in segments:
+        item["pct"] = round(100.0 * float(item["usd"]) / total, 1) if total > 0 else 0.0
+        item["label_usd"] = money(float(item["usd"]))
+    return {"segments": segments, "total_usd": round(total, 6), "total_label": money(total)}
+
+
 def _unbanked_card(ledger: Ledger | None) -> dict[str, object]:
     """Spend in this window with no commit behind it."""
     if ledger is None:
         return {"available": False, "reason": "Could not read git history for the active repos."}
 
     card = dict(unbanked_summary(ledger))
+    card["chart"] = _unbanked_chart(ledger)
     card["unbanked_label"] = money(float(card.get("unbanked_usd") or 0))
     card["banked_label"] = money(float(card.get("banked_usd") or 0))
     card["unresolved_label"] = money(float(card.get("unresolved_usd") or 0))
@@ -4239,6 +4298,13 @@ HTML = r"""<!doctype html>
     .home-runway-text span { color: var(--muted); font-size: .8rem; }
     .home-runway-spark { margin-left: auto; width: 130px; flex: none; }
     .runway-mini { display: block; width: 100%; height: 34px; }
+    .unbanked-chart { margin-top: 14px; }
+    .stacked-bar { display: block; width: 100%; height: 30px; }
+    .bar-legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 10px; }
+    .bar-key { display: inline-flex; align-items: center; gap: 7px; font-size: .82rem; color: var(--muted); }
+    .bar-key strong { color: var(--text); font-variant-numeric: tabular-nums; }
+    .bar-swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+    .bar-pct { color: var(--faint); font-variant-numeric: tabular-nums; }
     .feed-chart { margin: 10px 0 0; }
     .feed-chart-note { margin: 6px 0 0; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
     .feed-chart-note strong { color: var(--text); }
@@ -6438,10 +6504,20 @@ function renderUnbanked(card) {
   // headline, so the headline would otherwise silently shrink without saying why.
   const unresolved = card.unresolved_usd > 0
     ? `<span class="pill">${esc(card.unresolved_label)} unresolved (git could not read ${esc((card.unresolved_repos || []).length)} repo(s))</span>` : '';
+  // Where the unbanked money went, not why it is unbanked. The why is two
+  // buckets and the headline above already states it; the where grows a segment
+  // per project and is the part you can act on.
+  const chart = card.chart
+    ? `<div class="unbanked-chart">
+         <div class="bar-host" data-unbanked-bar></div>
+         <div class="bar-legend">${stackedBarLegend(card.chart.segments, unbankedColours(card.chart.segments))}</div>
+       </div>`
+    : '';
   return `<div class="headline">
       <span class="headline-figure">${esc(card.unbanked_label)}</span>
       <span class="headline-sub">${esc(card.unbanked_pct)}% of the last ${esc(card.window_days)} days had no commit behind it</span>
     </div>
+    ${chart}
     <div class="mini-grid" style="margin-top:12px">
       <div class="mini"><span class="label">Reached a commit</span><strong>${esc(card.banked_label)}</strong></div>
       <div class="mini"><span class="label">Never did</span><strong>${esc(card.unbanked_label)}</strong></div>
@@ -6697,6 +6773,55 @@ function drawRunwayMini(node, chart) {
 function compactTokens(n) {
   if (!n) return '0';
   return n >= 1000 ? Math.round(n / 1000) + 'K' : String(Math.round(n));
+}
+
+/* One horizontal bar split by category, with the legend carrying exact values.
+   Shared rather than local to the unbanked card because it is the same object
+   any part-to-whole question needs. Segment colours come from the caller so
+   identity stays with the entity, never with its rank in the list. */
+function drawStackedBar(node, segments, colours) {
+  if (!node || !segments || segments.length < 2) return;
+  const W = 720, H = 30, gap = 2, radius = 3;
+  const total = segments.reduce((sum, item) => sum + item.usd, 0);
+  if (total <= 0) return;
+
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'stacked-bar', preserveAspectRatio: 'none', 'aria-hidden': 'true' });
+  let x = 0;
+  segments.forEach((segment, index) => {
+    const full = (segment.usd / total) * W;
+    // A 2px surface gap separates segments; never a border, which would read as
+    // part of the data at this height.
+    const width = Math.max(0, full - (index < segments.length - 1 ? gap : 0));
+    svg.appendChild(svgEl('rect', {
+      x: x, y: 0, width: width, height: H, rx: radius,
+      fill: chartToken(colours[index]),
+    }));
+    x += full;
+  });
+  node.innerHTML = '';
+  node.appendChild(svg);
+}
+function stackedBarLegend(segments, colours) {
+  return segments.map((segment, index) => `<span class="bar-key"${segment.title ? ` title="${esc(segment.title)}"` : ''}>
+      <span class="bar-swatch" style="background:var(${colours[index]})"></span>
+      ${esc(segment.label)} <strong>${esc(segment.label_usd)}</strong>
+      <span class="bar-pct">${esc(segment.pct)}%</span>
+    </span>`).join('');
+}
+/* Colour follows what a segment *is*, not where it landed in the list, so a
+   quiet week that drops a repo cannot repaint the survivors. Repos take the
+   three non-status hues in order; the tail is neutral because it is a leftover
+   rather than a project; "outside any repo" takes amber because it is the one
+   segment with a different fix -- a session started in the wrong directory,
+   not exploration that went nowhere. */
+const UNBANKED_REPO_COLOURS = ['--blue', '--cyan', '--green'];
+function unbankedColours(segments) {
+  let repo = 0;
+  return segments.map(segment => {
+    if (segment.kind === 'outside') return '--amber';
+    if (segment.kind === 'other') return '--faint';
+    return UNBANKED_REPO_COLOURS[repo++ % UNBANKED_REPO_COLOURS.length];
+  });
 }
 
 function renderContextHealth(rows) {
@@ -7541,6 +7666,13 @@ async function load(resetDetail = true, forceRefresh = false) {
     drawRunwayMini(runwayMiniNodes[row.session_id], row.chart);
   });
   document.getElementById('unbanked').innerHTML = renderUnbanked(data.unbanked);
+  if (data.unbanked && data.unbanked.chart) {
+    drawStackedBar(
+      document.querySelector('[data-unbanked-bar]'),
+      data.unbanked.chart.segments,
+      unbankedColours(data.unbanked.chart.segments),
+    );
+  }
   changeRowsCache = data.changes || [];
   document.getElementById('changeRows').innerHTML = renderChangeRows(changeRowsCache);
   document.getElementById('changeTotals').innerHTML = renderChangeTotals(changeRowsCache, data.changes_meta, data.unbanked);

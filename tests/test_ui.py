@@ -237,6 +237,51 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Evidence captured", ui.HTML)
         self.assertNotIn("window.alert", ui.HTML)
 
+    def test_unbanked_chart_splits_by_where_and_places_every_dollar(self) -> None:
+        """Segments must sum to the headline, or the bar quietly contradicts it."""
+        ledger = ui.Ledger()
+        ledger.unbanked_by_repo = {
+            "/home/dev/alpha": 60.0,
+            "/home/dev/beta": 25.0,
+            "/home/dev/gamma": 10.0,
+            "/home/dev/delta": 4.0,
+            "/home/dev/epsilon": 1.0,
+        }
+        ledger.unbanked_by_reason = {ui.UNBANKED_OUTSIDE_REPO: 20.0}
+
+        chart = ui._unbanked_chart(ledger)
+        assert chart is not None
+        labels = [segment["label"] for segment in chart["segments"]]
+        kinds = [segment["kind"] for segment in chart["segments"]]
+
+        # Top three repos by name, the rest folded, then outside-any-repo last.
+        self.assertEqual(labels, ["alpha", "beta", "gamma", "2 more repos", "Outside any repo"])
+        self.assertEqual(kinds, ["repo", "repo", "repo", "other", "outside"])
+        # 60 + 25 + 10 + (4 + 1) + 20
+        self.assertAlmostEqual(chart["total_usd"], 120.0)
+        self.assertAlmostEqual(sum(s["usd"] for s in chart["segments"]), 120.0)
+        # Labels are repo names; the full path stays reachable as a title.
+        self.assertEqual(chart["segments"][0]["title"], ui.short_path("/home/dev/alpha"))
+
+    def test_unbanked_chart_is_withheld_when_it_would_be_a_single_block(self) -> None:
+        """One segment is a stat, not a chart -- the headline already says it."""
+        ledger = ui.Ledger()
+        ledger.unbanked_by_repo = {"/home/dev/only": 90.0}
+        ledger.unbanked_by_reason = {}
+        self.assertIsNone(ui._unbanked_chart(ledger))
+
+        empty = ui.Ledger()
+        self.assertIsNone(ui._unbanked_chart(empty))
+
+    def test_unbanked_colours_follow_segment_kind_not_position(self) -> None:
+        """Colour follows what a segment is, so a quiet week cannot repaint it."""
+        self.assertIn("function unbankedColours(segments)", ui.HTML)
+        self.assertIn("if (segment.kind === 'outside') return '--amber';", ui.HTML)
+        self.assertIn("if (segment.kind === 'other') return '--faint';", ui.HTML)
+        # Status hues are reserved elsewhere in this dashboard, so repos never
+        # take red; the repo ramp is the non-status hues only.
+        self.assertIn("const UNBANKED_REPO_COLOURS = ['--blue', '--cyan', '--green'];", ui.HTML)
+
     def test_home_leads_context_health_with_the_runway_verdict(self) -> None:
         """Home is the "what now" surface, so it must carry the deadline.
 
