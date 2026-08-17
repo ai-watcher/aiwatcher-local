@@ -12,7 +12,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePath
 from types import SimpleNamespace
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
@@ -2488,6 +2488,81 @@ FALSE_START_MIN_SESSIONS = 5
 # something else on every other surface here.
 UNBANKED_CHART_REPOS = 3
 
+# Slices before the tail folds into "Other". A hard limit, not taste: this
+# palette has exactly three hues that do not already mean something -- amber and
+# red are warning and error everywhere else here -- and past about five slices a
+# pie stops being readable regardless of colour.
+COMPOSITION_SLICES = 3
+# One slice this size makes the chart a number in disguise.
+COMPOSITION_DOMINANT_PCT = 95.0
+# Off for now: the chart renders with a caveat instead of withholding itself, so
+# the degenerate case can be reviewed rather than guessed at. Flip to True to
+# have it hide, which is the behaviour the rest of this dashboard prefers.
+COMPOSITION_HIDE_WHEN_DOMINANT = False
+
+
+def _composition_chart(rows: list[dict[str, object]]) -> dict[str, object] | None:
+    """Share of total tokens, for a pie beside the ranked bars.
+
+    The bars answer "which is biggest" -- each is sized against the largest, not
+    against the total -- so they cannot say "this one is 79% of everything".
+    That is the only question this adds.
+
+    Measured in tokens for the same reason the bars are: a plan-based tool is
+    priced at zero on purpose, and a share-of-spend view would draw it as absent.
+    """
+    weighted = [row for row in rows if int(row.get("tokens") or 0) > 0]
+    total = sum(int(row.get("tokens") or 0) for row in weighted)
+    if len(weighted) < 2 or total <= 0:
+        return None
+
+    ranked = sorted(weighted, key=lambda row: int(row.get("tokens") or 0), reverse=True)
+    def _legend_label(row: dict[str, object]) -> str:
+        # A legend is read sideways at a glance. Project rows are paths that
+        # share a parent directory, so they differ only in the last few
+        # characters -- exactly what truncation eats. Tool rows are already
+        # names like "claude-code (desktop)" and are left alone.
+        name = str(row.get("name") or row.get("short_name") or "unknown")
+        if "/" in name or "\\" in name:
+            return PurePath(name.replace("\\", "/")).name or name
+        return str(row.get("short_name") or name)
+
+    segments: list[dict[str, object]] = [
+        {
+            "label": _legend_label(row),
+            "title": str(row.get("name") or ""),
+            "tokens": int(row.get("tokens") or 0),
+            "kind": "item",
+        }
+        for row in ranked[:COMPOSITION_SLICES]
+    ]
+    tail = ranked[COMPOSITION_SLICES:]
+    if tail:
+        segments.append({
+            "label": f"{len(tail)} more",
+            "title": ", ".join(str(row.get("short_name") or "") for row in tail[:6]),
+            "tokens": sum(int(row.get("tokens") or 0) for row in tail),
+            "kind": "other",
+        })
+    segments = [segment for segment in segments if int(segment["tokens"]) > 0]
+    if len(segments) < 2:
+        return None
+
+    for segment in segments:
+        segment["pct"] = round(100.0 * int(segment["tokens"]) / total, 1)
+        segment["tokens_label"] = compact_int(int(segment["tokens"]))
+    top = max(float(segment["pct"]) for segment in segments)
+    return {
+        "segments": segments,
+        "total_tokens": total,
+        "total_label": compact_int(total),
+        # Reported rather than acted on, so the caller decides whether a
+        # single-slice chart is withheld or shown with a caveat.
+        "dominant": top >= COMPOSITION_DOMINANT_PCT,
+        "dominant_pct": top,
+        "hide_when_dominant": COMPOSITION_HIDE_WHEN_DOMINANT,
+    }
+
 
 def _unbanked_chart(ledger: Ledger) -> dict[str, object] | None:
     """Unbanked spend split by *where* it happened, not by why.
@@ -3310,7 +3385,9 @@ def build_summary(
         "changes": changes,
         "changes_meta": changes_meta,
         "projects": projects[:10],
+        "projects_composition": _composition_chart(projects),
         "tools": tools,
+        "tools_composition": _composition_chart(tools),
         "models": models[:10],
         "insights": insights,
         "notes": notes[:5],
@@ -3590,7 +3667,9 @@ def _build_summary_shell(
         },
         "survival": {"available": False, "reason": "Background evidence refresh pending."},
         "projects": projects[:10],
+        "projects_composition": _composition_chart(projects),
         "tools": tools,
+        "tools_composition": _composition_chart(tools),
         "models": models[:10],
         "insights": insights,
         "notes": sorted({note for row in rows for note in row.notes})[:5],
@@ -4371,6 +4450,12 @@ HTML = r"""<!doctype html>
     .home-runway-spark { margin-left: auto; width: 130px; flex: none; }
     .runway-mini { display: block; width: 100%; height: 34px; }
     .bar-note { display: block; font-size: .68rem; color: var(--faint); letter-spacing: .02em; }
+    .composition { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; margin: 4px 0 16px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+    .pie-host { flex: none; }
+    .pie-svg { display: block; width: 132px; height: 132px; }
+    .composition-legend { flex: 1 1 200px; min-width: 0; }
+    .composition-legend .bar-legend { display: flex; flex-direction: column; gap: 7px; margin: 0; }
+    .composition-legend .receipt-note { margin-top: 10px; }
     .unbanked-chart { margin-top: 14px; }
     .stacked-bar { display: block; width: 100%; height: 30px; }
     .bar-legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 10px; }
@@ -5046,6 +5131,10 @@ HTML = r"""<!doctype html>
     <section class="grid two">
       <div class="card">
         <div class="section-title"><div><h2>Projects Driving AI Usage</h2><p>Measured in tokens, so plan-based tools still count. Click a project to inspect local sessions, models, and tools.</p></div></div>
+        <div class="composition" id="projectsComposition" hidden>
+          <div class="pie-host" data-pie="projects"></div>
+          <div class="composition-legend" id="projectsCompositionLegend"></div>
+        </div>
         <div id="projects"></div>
       </div>
       <div class="card">
@@ -5063,6 +5152,10 @@ HTML = r"""<!doctype html>
         <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 4px">By model</h3>
         <div id="models"></div>
         <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:14px 0 4px">By tool</h3>
+        <div class="composition" id="toolsComposition" hidden>
+          <div class="pie-host" data-pie="tools"></div>
+          <div class="composition-legend" id="toolsCompositionLegend"></div>
+        </div>
         <div id="tools"></div>
       </div>
       <div class="card">
@@ -6852,6 +6945,79 @@ function compactTokens(n) {
    Shared rather than local to the unbanked card because it is the same object
    any part-to-whole question needs. Segment colours come from the caller so
    identity stays with the entity, never with its rank in the list. */
+/* Share of a whole, which the ranked bars beside it cannot show -- each of those
+   is sized against the largest row, not against the total.
+
+   Slices are separated by a stroke in the surface colour rather than a border,
+   and only slices wide enough to hold one get a label inside; the rest rely on
+   the legend, which carries every value in full. */
+const COMPOSITION_COLOURS = ['--blue', '--cyan', '--green'];
+function compositionColours(segments) {
+  let index = 0;
+  return segments.map(segment =>
+    segment.kind === 'other' ? '--faint' : COMPOSITION_COLOURS[index++ % COMPOSITION_COLOURS.length]);
+}
+function drawPie(node, chart) {
+  if (!node || !chart || !chart.segments || chart.segments.length < 2) return;
+  const colours = compositionColours(chart.segments);
+  const size = 132, r = 62, cx = size / 2, cy = size / 2;
+  const svg = svgEl('svg', { viewBox: `0 0 ${size} ${size}`, class: 'pie-svg', 'aria-hidden': 'true' });
+  let angle = -Math.PI / 2;
+
+  chart.segments.forEach((segment, index) => {
+    const sweep = (segment.pct / 100) * Math.PI * 2;
+    const end = angle + sweep;
+    const large = sweep > Math.PI ? 1 : 0;
+    const x1 = cx + r * Math.cos(angle), y1 = cy + r * Math.sin(angle);
+    const x2 = cx + r * Math.cos(end), y2 = cy + r * Math.sin(end);
+    // A single slice covering the whole circle has identical start and end
+    // points, which collapses the arc to nothing -- draw the circle instead.
+    const path = sweep >= Math.PI * 2 - 0.0001
+      ? svgEl('circle', { cx: cx, cy: cy, r: r, fill: chartToken(colours[index]) })
+      : svgEl('path', {
+          d: `M${cx},${cy}L${x1.toFixed(2)},${y1.toFixed(2)}A${r},${r} 0 ${large} 1 ${x2.toFixed(2)},${y2.toFixed(2)}Z`,
+          fill: chartToken(colours[index]),
+          stroke: chartToken('--surface'), 'stroke-width': 2,
+        });
+    svg.appendChild(path);
+    if (sweep > 0.55) {
+      const mid = angle + sweep / 2;
+      chartText(svg, cx + r * 0.62 * Math.cos(mid), cy + r * 0.62 * Math.sin(mid) + 4,
+        Math.round(segment.pct) + '%', { fill: '--surface', weight: 700, size: 12 });
+    }
+    angle = end;
+  });
+  node.innerHTML = '';
+  node.appendChild(svg);
+}
+function compositionLegend(chart) {
+  if (!chart) return '';
+  const colours = compositionColours(chart.segments);
+  const rows = chart.segments.map((segment, index) => `<span class="bar-key"${segment.title ? ` title="${esc(segment.title)}"` : ''}>
+      <span class="bar-swatch" style="background:var(${colours[index]})"></span>
+      ${esc(segment.label)} <strong>${esc(segment.pct)}%</strong>
+      <span class="bar-pct">${esc(segment.tokens_label)}</span>
+    </span>`).join('');
+  // Said rather than hidden: a chart that is one colour is a number, and the
+  // reader should be told that instead of squinting at it.
+  const caveat = chart.dominant
+    ? `<p class="receipt-note">One slice is ${esc(chart.dominant_pct)}% of the total, so this is really a single figure rather than a breakdown.</p>`
+    : '';
+  return `<div class="bar-legend">${rows}</div>${caveat}`;
+}
+
+/* Markup first, SVG appended after -- the same two-step every chart here uses,
+   because appending into an element that does not exist yet draws nothing. */
+function paintComposition(name, chart) {
+  const host = document.getElementById(name + 'Composition');
+  if (!host) return;
+  const withhold = !chart || (chart.dominant && chart.hide_when_dominant);
+  host.hidden = withhold;
+  if (withhold) return;
+  document.getElementById(name + 'CompositionLegend').innerHTML = compositionLegend(chart);
+  drawPie(host.querySelector('[data-pie]'), chart);
+}
+
 function drawStackedBar(node, segments, colours) {
   if (!node || !segments || segments.length < 2) return;
   const W = 720, H = 30, gap = 2, radius = 3;
@@ -7788,6 +7954,8 @@ async function load(resetDetail = true, forceRefresh = false) {
     : '<div class="empty">No local AI session detected yet.</div>';
   const recommendation = data.insights[0];
   document.getElementById('todayRecommendation').innerHTML = renderHomeRecommendation(recommendation);
+  paintComposition('projects', data.projects_composition);
+  paintComposition('tools', data.tools_composition);
   document.getElementById('projects').innerHTML = bars(data.projects, "tokens_label", "project", "tokens");
   document.getElementById('models').innerHTML = bars(data.models, "api_value_label", "model");
   document.getElementById('tools').innerHTML = bars(data.tools, "tokens_label", "tool", "tokens");

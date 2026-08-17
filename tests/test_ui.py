@@ -310,6 +310,66 @@ class DashboardWindowTests(unittest.TestCase):
         with patch.object(ui, "evidence_snapshots_for_sessions", return_value={}):
             self.assertIsNone(ui._false_starts_card(rows))
 
+    def test_composition_folds_to_three_slices_plus_other(self) -> None:
+        """Three is the number of hues here that do not already mean something.
+
+        Amber and red are warning and error on every other surface, so a project
+        cannot borrow one; the tail folds into a single neutral slice instead.
+        """
+        rows = [
+            {"name": "/home/dev/alpha", "short_name": "alpha", "tokens": 500},
+            {"name": "/home/dev/beta", "short_name": "beta", "tokens": 300},
+            {"name": "/home/dev/gamma", "short_name": "gamma", "tokens": 100},
+            {"name": "/home/dev/delta", "short_name": "delta", "tokens": 60},
+            {"name": "/home/dev/epsilon", "short_name": "epsilon", "tokens": 40},
+        ]
+        chart = ui._composition_chart(rows)
+        assert chart is not None
+        self.assertEqual([s["label"] for s in chart["segments"]], ["alpha", "beta", "gamma", "2 more"])
+        self.assertEqual([s["pct"] for s in chart["segments"]], [50.0, 30.0, 10.0, 10.0])
+        self.assertEqual(chart["total_tokens"], 1000)
+        self.assertFalse(chart["dominant"])
+
+    def test_composition_reports_a_dominant_slice_without_hiding_it(self) -> None:
+        """The degenerate case is stated, not withheld -- for now.
+
+        A chart that is one colour is a number in disguise, and this dashboard
+        usually stays silent rather than showing one. Here it renders with a
+        caveat so the case can be reviewed; COMPOSITION_HIDE_WHEN_DOMINANT flips
+        that without touching anything else.
+        """
+        rows = [
+            {"name": "claude-code", "short_name": "claude-code", "tokens": 999_000},
+            {"name": "codex-cli", "short_name": "codex-cli", "tokens": 1_000},
+        ]
+        chart = ui._composition_chart(rows)
+        assert chart is not None
+        self.assertTrue(chart["dominant"])
+        self.assertEqual(chart["dominant_pct"], 99.9)
+        self.assertFalse(chart["hide_when_dominant"], "shown with a caveat while under review")
+        self.assertEqual([s["label"] for s in chart["segments"]], ["claude-code", "codex-cli"])
+
+    def test_composition_labels_projects_by_name_not_full_path(self) -> None:
+        """Paths sharing a parent differ only where truncation bites."""
+        rows = [
+            {"name": r"C:\Users\dev\Downloads\AgentWatch\aiwatcher-local-public", "short_name": "...ocal-public", "tokens": 900},
+            {"name": "/home/dev/AgentWatch/aiwatcher-local-pr46", "short_name": "...local-pr46", "tokens": 100},
+        ]
+        chart = ui._composition_chart(rows)
+        assert chart is not None
+        self.assertEqual(
+            [s["label"] for s in chart["segments"]],
+            ["aiwatcher-local-public", "aiwatcher-local-pr46"],
+        )
+        # The full path stays reachable rather than being thrown away.
+        self.assertEqual(chart["segments"][0]["title"], r"C:\Users\dev\Downloads\AgentWatch\aiwatcher-local-public")
+
+    def test_composition_is_withheld_when_there_is_nothing_to_compare(self) -> None:
+        self.assertIsNone(ui._composition_chart([]))
+        self.assertIsNone(ui._composition_chart([{"name": "solo", "tokens": 100}]))
+        # Rows with no tokens at all cannot form a share of anything.
+        self.assertIsNone(ui._composition_chart([{"name": "a", "tokens": 0}, {"name": "b", "tokens": 0}]))
+
     def test_unbanked_chart_splits_by_where_and_places_every_dollar(self) -> None:
         """Segments must sum to the headline, or the bar quietly contradicts it."""
         ledger = ui.Ledger()
