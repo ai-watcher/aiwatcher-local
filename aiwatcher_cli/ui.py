@@ -2499,6 +2499,8 @@ COMPOSITION_DOMINANT_PCT = 95.0
 # the degenerate case can be reviewed rather than guessed at. Flip to True to
 # have it hide, which is the behaviour the rest of this dashboard prefers.
 COMPOSITION_HIDE_WHEN_DOMINANT = False
+# Below this a scatter is a handful of dots and any pattern in it is imagined.
+MODEL_SCATTER_MIN_POINTS = 8
 
 
 def _composition_chart(rows: list[dict[str, object]]) -> dict[str, object] | None:
@@ -2561,6 +2563,83 @@ def _composition_chart(rows: list[dict[str, object]]) -> dict[str, object] | Non
         "dominant": top >= COMPOSITION_DOMINANT_PCT,
         "dominant_pct": top,
         "hide_when_dominant": COMPOSITION_HIDE_WHEN_DOMINANT,
+    }
+
+
+def _model_scatter(rows: list[LocalSession]) -> dict[str, object] | None:
+    """One dot per session: tokens against cost, coloured by model.
+
+    The model-mix card spends three prose branches explaining whether a model
+    costs more per token or is simply pointed at bigger jobs. Plotted, that
+    distinction is geometric and needs no explaining.
+
+    Axes are logarithmic because the data is: locally, sessions span 33K to 382M
+    tokens and six cents to $258. On linear axes every session but the largest
+    collapses into one corner. The trade is that price per token reads as
+    vertical offset rather than slope -- same rate means the same diagonal, and
+    a dearer model sits above a cheaper one rather than climbing more steeply.
+
+    Whether the work landed rides a second channel -- filled or hollow -- rather
+    than colour, which is already carrying model identity. The thing to look for
+    is a hollow dot high up: an expensive session that produced nothing,
+    whichever model ran it.
+
+    Deliberately not a verdict on which model is better value. If the dear model
+    gets the hard problems, it will land less often for reasons that have
+    nothing to do with the model, and nothing local can separate those.
+    """
+    try:
+        snapshots = evidence_snapshots_for_sessions({row.session_id for row in rows})
+    except OSError:
+        snapshots = {}
+
+    priced = [
+        row for row in rows
+        if row.cost_usd > 0 and (row.tokens_in + row.tokens_out) > 0
+    ]
+    if len(priced) < MODEL_SCATTER_MIN_POINTS:
+        return None
+
+    by_model: dict[str, int] = defaultdict(int)
+    for row in priced:
+        by_model[display_model_name(row.model or "unknown")] += 1
+    if len(by_model) < 2:
+        return None
+    named = [
+        model for model, _ in
+        sorted(by_model.items(), key=lambda item: item[1], reverse=True)[:COMPOSITION_SLICES]
+    ]
+
+    points: list[dict[str, object]] = []
+    for row in priced:
+        model = display_model_name(row.model or "unknown")
+        snapshot = snapshots.get(row.session_id)
+        landed = (
+            isinstance(snapshot, dict)
+            and bool(snapshot.get("commit_shas"))
+            and snapshot.get("inferred_outcome") != "churned"
+        )
+        points.append({
+            "session_id": row.session_id,
+            "model": model if model in named else "other",
+            "model_label": model,
+            "project": project_label(row.project_path),
+            "tokens": row.tokens_in + row.tokens_out,
+            "cost_usd": round(row.cost_usd, 6),
+            "cost_label": money(row.cost_usd),
+            "tokens_label": compact_int(row.tokens_in + row.tokens_out),
+            # None rather than False where nothing was ever looked at, so
+            # "unexamined" cannot be drawn as "produced nothing".
+            "landed": landed if isinstance(snapshot, dict) else None,
+        })
+
+    legend = [{"label": model, "kind": "item"} for model in named]
+    if any(point["model"] == "other" for point in points):
+        legend.append({"label": "other models", "kind": "other"})
+    return {
+        "points": points,
+        "legend": legend,
+        "unexamined": sum(1 for point in points if point["landed"] is None),
     }
 
 
@@ -3472,6 +3551,10 @@ def build_summary(
         "tools": tools,
         "tools_composition": _composition_chart(tools),
         "tool_models": _tool_model_breakdown(rows),
+        # all_rows, not the clipped window: how a model behaves is a question
+        # about your history, and a seven-day slice held too few priced sessions
+        # to plot. Same reason the false-starts card reads all history.
+        "model_scatter": _model_scatter(all_rows),
         "models": models[:10],
         "insights": insights,
         "notes": notes[:5],
@@ -3755,6 +3838,10 @@ def _build_summary_shell(
         "tools": tools,
         "tools_composition": _composition_chart(tools),
         "tool_models": _tool_model_breakdown(rows),
+        # all_rows, not the clipped window: how a model behaves is a question
+        # about your history, and a seven-day slice held too few priced sessions
+        # to plot. Same reason the false-starts card reads all history.
+        "model_scatter": _model_scatter(all_rows),
         "models": models[:10],
         "insights": insights,
         "notes": sorted({note for row in rows for note in row.notes})[:5],
@@ -4535,6 +4622,9 @@ HTML = r"""<!doctype html>
     .home-runway-spark { margin-left: auto; width: 130px; flex: none; }
     .runway-mini { display: block; width: 100%; height: 34px; }
     .bar-note { display: block; font-size: .68rem; color: var(--faint); letter-spacing: .02em; }
+    .scatter-svg { display: block; width: 100%; height: auto; overflow: visible; margin-top: 10px; }
+    .scatter-key { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--muted); display: inline-block; flex: none; }
+    .scatter-key.filled { background: var(--muted); }
     .tm-legend { margin-bottom: 10px; gap: 6px 16px; }
     .tm-row { margin-bottom: 12px; }
     .tm-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
@@ -5416,6 +5506,14 @@ HTML = r"""<!doctype html>
       </div>
       <div id="insightHeadline"></div>
       <div id="insightFeed"></div>
+    </section>
+    <section class="card" style="margin-bottom:14px" id="modelScatter" hidden>
+      <div class="section-title">
+        <div><h2>Cost against size, one dot per session</h2><p>Both axes are logarithmic, so a dearer model sits higher rather than climbing more steeply. Look for a hollow dot high up: an expensive session that produced nothing.</p></div>
+      </div>
+      <div class="bar-legend" id="modelScatterLegend"></div>
+      <div data-scatter></div>
+      <p class="receipt-note">Not a verdict on which model is better value. If the dear model gets the hard problems it will land less often for reasons that have nothing to do with the model, and nothing local separates those.</p>
     </section>
     <section class="card" style="margin-bottom:14px">
       <div class="section-title">
@@ -7035,7 +7133,12 @@ function drawRunwayMini(node, chart) {
 }
 function compactTokens(n) {
   if (!n) return '0';
-  return n >= 1000 ? Math.round(n / 1000) + 'K' : String(Math.round(n));
+  // Carries past thousands: the scatter's decade ticks reach hundreds of
+  // millions, and "100000K" is not a number anyone reads.
+  if (n >= 1e9) return +(n / 1e9).toFixed(n >= 1e10 ? 0 : 1) + 'B';
+  if (n >= 1e6) return +(n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M';
+  if (n >= 1000) return Math.round(n / 1000) + 'K';
+  return String(Math.round(n));
 }
 
 /* One horizontal bar split by category, with the legend carrying exact values.
@@ -7109,6 +7212,84 @@ function compositionLegend(chart) {
    the shared legend and reused for every row, so a model keeps its colour down
    the whole chart -- the eye follows it across tools, which is the only reason
    to cross these two lists in the first place. */
+/* Sessions as dots: tokens across, cost up, model by colour, landed by fill.
+
+   Both axes are logarithmic because the data spans four orders of magnitude and
+   would otherwise pile into one corner. The consequence worth knowing while
+   reading it: price per token is a vertical offset here, not a slope. Two models
+   at the same rate lie on the same diagonal; a dearer one sits above a cheaper
+   one rather than climbing faster. */
+function drawModelScatter(node, scatter) {
+  if (!node || !scatter || !scatter.points || !scatter.points.length) return;
+  const colours = compositionColours(scatter.legend);
+  const colourFor = model => {
+    const index = scatter.legend.findIndex(entry => entry.label === model);
+    return colours[index < 0 ? scatter.legend.length - 1 : index];
+  };
+
+  const W = 720, H = 300, plot = { left: 54, right: 700, top: 18, bottom: 236 };
+  const xs = scatter.points.map(p => Math.log10(Math.max(1, p.tokens)));
+  const ys = scatter.points.map(p => Math.log10(Math.max(0.01, p.cost_usd)));
+  const pad = 0.15;
+  const x = chartScale(Math.min(...xs) - pad, Math.max(...xs) + pad, plot.left, plot.right);
+  const y = chartScale(Math.min(...ys) - pad, Math.max(...ys) + pad, plot.bottom, plot.top);
+
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'scatter-svg', 'aria-hidden': 'true' });
+
+  // Decade gridlines, so the log scale is visible rather than implied.
+  for (let decade = Math.ceil(Math.min(...ys)); decade <= Math.floor(Math.max(...ys)); decade++) {
+    const yy = y(decade);
+    svg.appendChild(svgEl('line', {
+      x1: plot.left, y1: yy, x2: plot.right, y2: yy,
+      stroke: chartToken('--line'), 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke',
+    }));
+    chartText(svg, plot.left - 8, yy + 4, '$' + (decade < 0 ? Math.pow(10, decade).toFixed(2) : Math.pow(10, decade)), { anchor: 'end' });
+  }
+  for (let decade = Math.ceil(Math.min(...xs)); decade <= Math.floor(Math.max(...xs)); decade++) {
+    const xx = x(decade);
+    svg.appendChild(svgEl('line', {
+      x1: xx, y1: plot.top, x2: xx, y2: plot.bottom,
+      stroke: chartToken('--line'), 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke',
+    }));
+    chartText(svg, xx, plot.bottom + 18, compactTokens(Math.pow(10, decade)));
+  }
+  chartText(svg, (plot.left + plot.right) / 2, plot.bottom + 38, 'tokens in session');
+
+  scatter.points.forEach(point => {
+    const colour = chartToken(colourFor(point.model === 'other' ? 'other models' : point.model));
+    const cx = x(Math.log10(Math.max(1, point.tokens)));
+    const cy = y(Math.log10(Math.max(0.01, point.cost_usd)));
+    // Filled means the work landed. Hollow is deliberately the same size, so
+    // the eye reads outcome and not magnitude from the difference.
+    svg.appendChild(svgEl('circle', {
+      cx: cx, cy: cy, r: 5,
+      fill: point.landed ? colour : 'none',
+      stroke: colour, 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke',
+      opacity: point.landed === null ? 0.35 : 1,
+    }));
+  });
+
+  svg.appendChild(svgEl('line', {
+    x1: plot.left, y1: plot.bottom, x2: plot.right, y2: plot.bottom,
+    stroke: chartToken('--line-strong'), 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke',
+  }));
+  node.innerHTML = '';
+  node.appendChild(svg);
+}
+function paintModelScatter(scatter) {
+  const host = document.getElementById('modelScatter');
+  if (!host) return;
+  host.hidden = !scatter;
+  if (!scatter) return;
+  const colours = compositionColours(scatter.legend);
+  document.getElementById('modelScatterLegend').innerHTML =
+    scatter.legend.map((entry, index) =>
+      `<span class="bar-key"><span class="bar-swatch" style="background:var(${colours[index]})"></span>${esc(entry.label)}</span>`).join('')
+    + '<span class="bar-key"><span class="scatter-key filled"></span>work landed</span>'
+    + '<span class="bar-key"><span class="scatter-key"></span>did not</span>';
+  drawModelScatter(host.querySelector('[data-scatter]'), scatter);
+}
+
 function renderToolModels(breakdown) {
   if (!breakdown || !breakdown.tools || !breakdown.tools.length) return '';
   const colours = compositionColours(breakdown.legend);
@@ -8098,6 +8279,7 @@ async function load(resetDetail = true, forceRefresh = false) {
   paintComposition('projects', data.projects_composition);
   paintComposition('tools', data.tools_composition);
   paintToolModels(data.tool_models);
+  paintModelScatter(data.model_scatter);
   document.getElementById('projects').innerHTML = bars(data.projects, "tokens_label", "project", "tokens");
   document.getElementById('models').innerHTML = bars(data.models, "api_value_label", "model");
   document.getElementById('tools').innerHTML = bars(data.tools, "tokens_label", "tool", "tokens");

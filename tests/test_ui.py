@@ -322,6 +322,52 @@ class DashboardWindowTests(unittest.TestCase):
             model_breakdown=breakdown,
         )
 
+    def test_model_scatter_marks_landed_separately_from_unexamined(self) -> None:
+        """Filled, hollow and faded are three states, not two.
+
+        A session nobody has looked at must not be drawn as one that produced
+        nothing -- that is the same conflation the cliff chart had to avoid.
+        """
+        now = datetime.now(timezone.utc)
+        rows = [
+            LocalSession(
+                session_id=f"s{i}", tool="claude-code", project_path="/repo",
+                started_at=now - timedelta(hours=2), updated_at=now,
+                model="claude-sonnet-5" if i % 2 else "claude-opus-5",
+                tokens_in=10_000 * (i + 1), tokens_out=500, cost_usd=1.5 * (i + 1),
+            )
+            for i in range(10)
+        ]
+        snapshots = {
+            "s0": {"commit_shas": ["a"], "inferred_outcome": "useful"},
+            "s1": {"commit_shas": [], "inferred_outcome": None},
+            "s2": {"commit_shas": ["b"], "inferred_outcome": "churned"},
+        }
+        with patch.object(ui, "evidence_snapshots_for_sessions", return_value=snapshots):
+            scatter = ui._model_scatter(rows)
+
+        assert scatter is not None
+        by_id = {point["session_id"]: point for point in scatter["points"]}
+        self.assertIs(by_id["s0"]["landed"], True)
+        self.assertIs(by_id["s1"]["landed"], False, "a snapshot with no commits did not land")
+        self.assertIs(by_id["s2"]["landed"], False, "churned is not landed")
+        self.assertIsNone(by_id["s3"]["landed"], "no snapshot means unexamined, not failed")
+        self.assertEqual(scatter["unexamined"], 7)
+
+    def test_model_scatter_needs_enough_points_and_more_than_one_model(self) -> None:
+        now = datetime.now(timezone.utc)
+        def session(i, model):
+            return LocalSession(
+                session_id=f"x{i}", tool="claude-code", project_path="/repo",
+                started_at=now, updated_at=now, model=model,
+                tokens_in=1000, tokens_out=10, cost_usd=0.5,
+            )
+        with patch.object(ui, "evidence_snapshots_for_sessions", return_value={}):
+            # Too few points for a pattern to be anything but imagined.
+            self.assertIsNone(ui._model_scatter([session(i, "claude-opus-5") for i in range(4)]))
+            # Enough points, but one model is a single cloud, not a comparison.
+            self.assertIsNone(ui._model_scatter([session(i, "claude-opus-5") for i in range(12)]))
+
     def test_tool_model_breakdown_names_every_tool_own_leading_model(self) -> None:
         """A minority tool's model must not vanish into "Other".
 
