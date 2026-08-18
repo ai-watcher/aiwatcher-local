@@ -3173,10 +3173,17 @@ def _replay_turn_chart(session_id: str, events: list[LocalEvent]) -> dict[str, o
     buckets: a flat zero replay band would read as "this session replayed
     nothing", when the truth is that nothing was measured.
     """
-    turns = sorted(
+    priced = sorted(
         (event for event in events if event.session_id == session_id and event.cost_usd > 0),
         key=lambda event: (event.timestamp or MIN_DT),
-    )[-CONTEXT_CHART_MAX_TURNS:]
+    )
+    turns = priced[-CONTEXT_CHART_MAX_TURNS:]
+    # Where the drawn window sits in the session. The axis used to read "turn 1"
+    # for whatever the clip happened to start at, which on this repo's worst
+    # session meant labelling turn 852 as the first one. LocalEvent.turn is no
+    # help -- it repeats across a session rather than counting up -- so position
+    # in the priced sequence is what there is.
+    first_turn_no = len(priced) - len(turns) + 1
     if len(turns) < 3 or not any(event.cache_read_tokens for event in turns):
         return None
 
@@ -3226,6 +3233,8 @@ def _replay_turn_chart(session_id: str, events: list[LocalEvent]) -> dict[str, o
         "written_usd": written,
         "fresh_usd": fresh,
         "turns": len(turns),
+        "first_turn_no": first_turn_no,
+        "session_turns": len(priced),
         "replayed_total_usd": round(sum(replayed), 6),
         "written_total_usd": round(sum(written), 6),
         "session_total_usd": round(sum(replayed) + sum(written) + sum(fresh), 6),
@@ -8783,8 +8792,12 @@ function drawReplaySplit(node, chart) {
     x1: plot.left, y1: plot.bottom, x2: plot.right, y2: plot.bottom,
     stroke: chartToken('--line-strong'), 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke',
   }));
-  chartText(svg, plot.left, plot.bottom + 18, 'turn 1', { anchor: 'start' });
-  chartText(svg, plot.right, plot.bottom + 18, 'turn ' + fresh.length, { anchor: 'end' });
+  // Numbered where they actually fall in the session, not from 1. The clip keeps
+  // the most recent turns, so a session of 911 was labelling its 852nd turn as
+  // its first -- and then the caption below had to contradict the axis.
+  const firstNo = chart.first_turn_no || 1;
+  chartText(svg, plot.left, plot.bottom + 18, 'turn ' + firstNo, { anchor: 'start' });
+  chartText(svg, plot.right, plot.bottom + 18, 'turn ' + (firstNo + fresh.length - 1), { anchor: 'end' });
 
   // One hover column per turn, transparent and added last so it takes the
   // pointer. The bands are a couple of pixels tall on an ordinary turn, which is
@@ -8803,7 +8816,8 @@ function drawReplaySplit(node, chart) {
       class: 'spend-hit',
     });
     const times = chart.turn_times || [];
-    const lines = [`Turn ${index + 1}${times[index] ? ' · ' + times[index] : ''}`];
+    const turnNo = (chart.first_turn_no || 1) + index;
+    const lines = [`Turn ${turnNo}${times[index] ? ' · ' + times[index] : ''}`];
     if ((chart.write_labels || [])[index]) {
       // The one turn nobody can read off the chart. It looks like a burst of
       // work and is the conversation being stored, so later turns can read it
@@ -8849,7 +8863,8 @@ function replaySplitCaption(chart) {
     <span class="swatch-cyan"></span>Written to cache
     <span class="swatch-amber"></span>Read back —
     <span class="feed-chart-sentence"><strong>${share}%</strong> of what this session cost across ${chart.turns} turns
-    went on re-sent history.${writeNote} These are the last ${chart.turns} turns, not the whole session.
+    went on re-sent history.${writeNote} ${chart.session_turns > chart.turns
+      ? `Showing the last ${chart.turns} of this session's ${chart.session_turns} turns.` : ''}
     <span data-clip-note></span></span></p>`;
 }
 /* Clipping is decided while drawing, so the note is filled in afterwards rather
