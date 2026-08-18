@@ -62,7 +62,7 @@ from .local_state import (
 )
 from .outcome_evidence import VALID_EVIDENCE_OUTCOMES, build_outcome_evidence, evidence_for_sessions
 from .ledger import UNBANKED_OUTSIDE_REPO, Ledger, build_ledger, unbanked_summary
-from .pricing import cache_read_cost, is_subscription_model
+from .pricing import cache_read_cost, estimate_cost, is_subscription_model
 from .runtime_attachment import (
     RuntimeAttachment,
     perform_runtime_return,
@@ -3181,11 +3181,27 @@ def _replay_turn_chart(session_id: str, events: list[LocalEvent]) -> dict[str, o
         return None
 
     replayed: list[float] = []
+    written: list[float] = []
     fresh: list[float] = []
     for event in turns:
         replay_usd = cache_read_cost(event.model, event.cache_read_tokens, event.timestamp)
+        # Writing the conversation to cache is not new context, and folding it
+        # into the fresh band said it was: the worst turn here showed $7.54 of
+        # "new context" against $0.05 of actual new work, out by a factor of 140.
+        #
+        # Priced as a residual rather than from the token count. A write is
+        # billed at 1.25x or 2x the input rate depending on its lifetime, and the
+        # event only carries the two buckets added together, so repricing the
+        # tokens would have to guess which. Everything else in the turn can be
+        # priced exactly, and what is left over is the write -- which also keeps
+        # the three bands summing to the turn's actual cost rather than to an
+        # estimate of it.
+        plain_input = max(0, event.tokens_in - event.cache_read_tokens - event.cache_write_tokens)
+        fresh_usd = estimate_cost(event.model, plain_input, event.tokens_out, when=event.timestamp)
+        write_usd = max(0.0, event.cost_usd - replay_usd - fresh_usd)
         replayed.append(round(replay_usd, 6))
-        fresh.append(round(max(0.0, event.cost_usd - replay_usd), 6))
+        written.append(round(write_usd, 6))
+        fresh.append(round(max(0.0, fresh_usd), 6))
 
     # Per-turn hover text. Three decimals rather than money(): turns here sit
     # around forty cents and differ by fractions of one, so two decimals renders
@@ -3207,10 +3223,12 @@ def _replay_turn_chart(session_id: str, events: list[LocalEvent]) -> dict[str, o
 
     return {
         "replayed_usd": replayed,
+        "written_usd": written,
         "fresh_usd": fresh,
         "turns": len(turns),
         "replayed_total_usd": round(sum(replayed), 6),
-        "session_total_usd": round(sum(replayed) + sum(fresh), 6),
+        "written_total_usd": round(sum(written), 6),
+        "session_total_usd": round(sum(replayed) + sum(written) + sum(fresh), 6),
         "turn_times": [
             event.timestamp.astimezone().strftime("%H:%M") if event.timestamp else ""
             for event in turns
@@ -8718,7 +8736,8 @@ function drawReplaySplit(node, chart) {
   // turn into an unreadable strip along the axis, hiding the thing the chart
   // exists to show. So the axis is clipped near the top of the ordinary range and
   // the overflow is stated in the caption -- clipped, never silently truncated.
-  const totals = fresh.map((v, i) => v + replayed[i]);
+  const written = chart.written_usd || fresh.map(() => 0);
+  const totals = fresh.map((v, i) => v + written[i] + replayed[i]);
   const ranked = totals.slice().sort((a, b) => a - b);
   const percentile = ranked[Math.floor(ranked.length * 0.9)] || ranked[ranked.length - 1];
   const ceiling = Math.max(percentile * 1.25, 0.01);
@@ -8731,7 +8750,8 @@ function drawReplaySplit(node, chart) {
   chartGrid(svg, plot, [0, ceiling / 2, ceiling], v => '$' + v.toFixed(2), y);
 
   const freshTop = fresh.map((v, i) => [x(i), clamp(v)]);
-  const stackTop = fresh.map((v, i) => [x(i), clamp(v + replayed[i])]);
+  const writeTop = fresh.map((v, i) => [x(i), clamp(v + written[i])]);
+  const stackTop = fresh.map((v, i) => [x(i), clamp(v + written[i] + replayed[i])]);
   // Mark every turn that runs off the top, so a clipped peak reads as clipped
   // rather than as a turn that happened to touch the ceiling.
   totals.forEach((value, i) => {
@@ -8745,11 +8765,18 @@ function drawReplaySplit(node, chart) {
   const area = (top, bottom) =>
     chartPath(top) + 'L' + bottom.slice().reverse().map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('L') + 'Z';
 
-  svg.appendChild(svgEl('path', { d: area(stackTop, freshTop), fill: chartToken('--amber'), opacity: 0.22 }));
+  // Three bands now, bottom to top: work actually done, the conversation being
+  // written to cache, and the conversation being read back. Only the first is
+  // new -- the other two are the same history paid for twice over, which is the
+  // claim this card makes and could not previously show.
+  svg.appendChild(svgEl('path', { d: area(stackTop, writeTop), fill: chartToken('--amber'), opacity: 0.22 }));
+  svg.appendChild(svgEl('path', { d: area(writeTop, freshTop), fill: chartToken('--cyan'), opacity: 0.22 }));
   svg.appendChild(svgEl('path', { d: area(freshTop, baseline), fill: chartToken('--blue'), opacity: 0.22 }));
   // A 2px gap in the surface colour separates the bands -- never a border.
   chartLine(svg, freshTop, '--surface', { width: 4 });
   chartLine(svg, freshTop, '--blue');
+  chartLine(svg, writeTop, '--surface', { width: 4 });
+  chartLine(svg, writeTop, '--cyan');
   chartLine(svg, stackTop, '--amber');
 
   svg.appendChild(svgEl('line', {
@@ -8810,10 +8837,20 @@ function replaySplitCaption(chart) {
   // above makes -- stated here so the chart and the sentence cannot drift.
   const share = chart.session_total_usd > 0
     ? Math.round(100 * chart.replayed_total_usd / chart.session_total_usd) : 0;
+  const written = chart.session_total_usd > 0
+    ? Math.round(100 * (chart.written_total_usd || 0) / chart.session_total_usd) : 0;
+  // Writes are stated separately rather than folded into the replay figure. Both
+  // are the same conversation being paid for again, but one is storing it and
+  // one is reading it back, and they behave differently: writes are a few large
+  // spikes, reads are every single turn.
+  const writeNote = written >= 1
+    ? ` A further <strong>${written}%</strong> went on writing it to cache.` : '';
   return `<p class="feed-chart-note"><span class="swatch-blue"></span>New context
-    <span class="swatch-amber"></span>Replayed history —
-    <strong>${share}%</strong> of what this session cost across ${chart.turns} turns went on re-sent history.
-    <span data-clip-note></span></p>`;
+    <span class="swatch-cyan"></span>Written to cache
+    <span class="swatch-amber"></span>Read back —
+    <span class="feed-chart-sentence"><strong>${share}%</strong> of what this session cost across ${chart.turns} turns
+    went on re-sent history.${writeNote} These are the last ${chart.turns} turns, not the whole session.
+    <span data-clip-note></span></span></p>`;
 }
 /* Clipping is decided while drawing, so the note is filled in afterwards rather
    than guessed at caption time. */

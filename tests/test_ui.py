@@ -16,6 +16,8 @@ from urllib import error, request
 from unittest.mock import Mock, patch
 
 from aiwatcher_cli import ui
+from aiwatcher_cli.pricing import estimate_cost
+from aiwatcher_cli.ui import money
 from aiwatcher_cli.local_state import (
     link_handoff_decision_next_session,
     recent_handoff_decisions,
@@ -931,6 +933,88 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(len(cards), 1)
         self.assertEqual(cards[0]["session_id"], "critical-gone")
         self.assertEqual(cards[0]["severity"], "critical")
+
+    def _replay_turns(self, count=6, *, write_turn=None):
+        """Turns that mostly read cache, with one optionally writing it."""
+        now = datetime.now(timezone.utc)
+        events = []
+        for index in range(count):
+            writing = index == write_turn
+            events.append(LocalEvent(
+                event_id=f"t{index}", session_id="s", tool="claude-code",
+                event_type="assistant", timestamp=now - timedelta(minutes=count - index),
+                model="claude-opus-5", project_path="/repo",
+                # tokens_in is all billed input; the cache counters are a subset.
+                tokens_in=(40_000 if writing else 800_000),
+                tokens_out=500,
+                cache_read_tokens=(2_000 if writing else 780_000),
+                cache_write_tokens=(700_000 if writing else 400),
+            ))
+        for event in events:
+            event.cost_usd = estimate_cost(
+                event.model,
+                max(0, event.tokens_in - event.cache_read_tokens - event.cache_write_tokens),
+                event.tokens_out,
+                cache_write_1h=event.cache_write_tokens,
+                cache_read=event.cache_read_tokens,
+                when=event.timestamp,
+            )
+        return events
+
+    def test_replay_chart_bands_sum_to_what_the_turn_actually_cost(self) -> None:
+        """Three bands, and nothing may fall between them.
+
+        The write cost is a residual, so if it were computed wrongly the error
+        would land silently in one of the other two rather than showing up.
+        """
+        events = self._replay_turns(write_turn=2)
+        chart = ui._replay_turn_chart("s", events)
+
+        assert chart is not None
+        for index, event in enumerate(events):
+            banded = (
+                chart["fresh_usd"][index]
+                + chart["written_usd"][index]
+                + chart["replayed_usd"][index]
+            )
+            self.assertAlmostEqual(banded, event.cost_usd, places=5)
+        self.assertAlmostEqual(
+            chart["session_total_usd"], sum(e.cost_usd for e in events), places=5,
+        )
+
+    def test_replay_chart_does_not_call_a_cache_write_new_context(self) -> None:
+        """Writing the conversation down is not new work being done.
+
+        Folded into the fresh band it read as a burst of work: on this repo's own
+        history the worst turn showed $7.54 of "new context" against $0.05 of
+        actual new work.
+        """
+        events = self._replay_turns(write_turn=2)
+        chart = ui._replay_turn_chart("s", events)
+
+        assert chart is not None
+        self.assertGreater(chart["written_usd"][2], chart["fresh_usd"][2] * 10)
+        # And the ordinary turns are not suddenly full of writes either.
+        self.assertLess(chart["written_usd"][0], chart["replayed_usd"][0])
+
+    def test_replay_chart_flags_only_real_cache_writes_in_hover_text(self) -> None:
+        """Every turn tops the cache up by a few hundred tokens."""
+        events = self._replay_turns(write_turn=2)
+        chart = ui._replay_turn_chart("s", events)
+
+        assert chart is not None
+        flagged = [index for index, label in enumerate(chart["write_labels"]) if label]
+        self.assertEqual(flagged, [2])
+
+    def test_replay_chart_counts_what_replay_is_still_ahead(self) -> None:
+        """Measured, not modelled: what the later turns did go on to spend."""
+        events = self._replay_turns()
+        chart = ui._replay_turn_chart("s", events)
+
+        assert chart is not None
+        self.assertEqual(len(chart["replay_ahead_labels"]), len(events))
+        # Nothing follows the last turn.
+        self.assertEqual(chart["replay_ahead_labels"][-1], money(0.0))
 
     def test_unbanked_chart_splits_by_where_and_places_every_dollar(self) -> None:
         """Segments must sum to the headline, or the bar quietly contradicts it."""
