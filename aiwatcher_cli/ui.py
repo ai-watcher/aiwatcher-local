@@ -98,6 +98,9 @@ MIN_DT = datetime.min.replace(tzinfo=timezone.utc)
 # on every paint, so this is capped rather than unbounded; 60 turns is well past
 # where a session has already crossed the action threshold.
 CONTEXT_CHART_MAX_TURNS = 60
+# A turn writes the conversation to cache, rather than just topping it up, at
+# roughly this size. Below it every ordinary turn would read as a cache write.
+CACHE_WRITE_TURN_TOKENS = 10_000
 SUMMARY_MEMORY_TTL_SECONDS = 45
 SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
 # Bump whenever build_summary's payload shape changes, so a cache written by an
@@ -3183,12 +3186,48 @@ def _replay_turn_chart(session_id: str, events: list[LocalEvent]) -> dict[str, o
         replay_usd = cache_read_cost(event.model, event.cache_read_tokens, event.timestamp)
         replayed.append(round(replay_usd, 6))
         fresh.append(round(max(0.0, event.cost_usd - replay_usd), 6))
+
+    # Per-turn hover text. Three decimals rather than money(): turns here sit
+    # around forty cents and differ by fractions of one, so two decimals renders
+    # the total and its replayed part as the same number.
+    def turn_money(value: float) -> str:
+        return f"${value:,.3f}"
+
+    # What the remaining turns went on to spend re-sending history. Measured, not
+    # modelled: it is what did happen after that point, which is the ceiling on
+    # what stopping there could have saved. A figure for what compacting would
+    # actually have cost instead would need a guess at the compacted size, and
+    # this dashboard does not draw counterfactuals it cannot measure.
+    replay_ahead: list[float] = []
+    running = 0.0
+    for value in reversed(replayed):
+        replay_ahead.append(running)
+        running += value
+    replay_ahead.reverse()
+
     return {
         "replayed_usd": replayed,
         "fresh_usd": fresh,
         "turns": len(turns),
         "replayed_total_usd": round(sum(replayed), 6),
         "session_total_usd": round(sum(replayed) + sum(fresh), 6),
+        "turn_times": [
+            event.timestamp.astimezone().strftime("%H:%M") if event.timestamp else ""
+            for event in turns
+        ],
+        "total_labels": [turn_money(event.cost_usd) for event in turns],
+        "replayed_labels": [turn_money(value) for value in replayed],
+        "resent_labels": [compact_int(event.cache_read_tokens) for event in turns],
+        # Every turn writes a few hundred tokens back to cache; only a turn that
+        # writes the conversation is worth calling a cache write, and that is
+        # three orders of magnitude larger. Below the threshold this is None and
+        # the hover text says nothing about it.
+        "write_labels": [
+            compact_int(event.cache_write_tokens)
+            if event.cache_write_tokens >= CACHE_WRITE_TURN_TOKENS else None
+            for event in turns
+        ],
+        "replay_ahead_labels": [money(value) for value in replay_ahead],
     }
 
 
@@ -8719,6 +8758,44 @@ function drawReplaySplit(node, chart) {
   }));
   chartText(svg, plot.left, plot.bottom + 18, 'turn 1', { anchor: 'start' });
   chartText(svg, plot.right, plot.bottom + 18, 'turn ' + fresh.length, { anchor: 'end' });
+
+  // One hover column per turn, transparent and added last so it takes the
+  // pointer. The bands are a couple of pixels tall on an ordinary turn, which is
+  // nothing to aim at.
+  //
+  // What the text says was chosen by what the data turned out to hold. The share
+  // of a turn that is replay is deliberately absent: across sixty turns here it
+  // runs 87-99% with a median of 96, so per turn it restates the headline rather
+  // than adding to it. The token count is present, because that is what makes
+  // the money mean something -- the same eight hundred thousand tokens of
+  // conversation, sent again, every turn.
+  const step = (plot.right - plot.left) / Math.max(1, fresh.length - 1);
+  fresh.forEach((_, index) => {
+    const hit = svgEl('rect', {
+      x: x(index) - step / 2, y: plot.top, width: step, height: plot.bottom - plot.top,
+      class: 'spend-hit',
+    });
+    const times = chart.turn_times || [];
+    const lines = [`Turn ${index + 1}${times[index] ? ' · ' + times[index] : ''}`];
+    if ((chart.write_labels || [])[index]) {
+      // The one turn nobody can read off the chart. It looks like a burst of
+      // work and is the conversation being stored, so later turns can read it
+      // back cheaply -- which is why the spike is followed by the flat stretch.
+      lines.push(`${chart.total_labels[index]} — writing ${chart.write_labels[index]} tokens to cache`);
+      lines.push('Storing the conversation so later turns read it back cheaply, not new work being done');
+    } else {
+      lines.push(`${chart.total_labels[index]}, of which ${chart.replayed_labels[index]} re-sent history`);
+      lines.push(`${chart.resent_labels[index]} tokens of conversation re-sent`);
+    }
+    const ahead = (chart.replay_ahead_labels || [])[index];
+    if (ahead && index < fresh.length - 1) {
+      lines.push(`${ahead} more on replay over the ${fresh.length - 1 - index} turns shown after this`);
+    }
+    const title = document.createElementNS(SVG_NS, 'title');
+    title.textContent = lines.join(String.fromCharCode(10));
+    hit.appendChild(title);
+    svg.appendChild(hit);
+  });
 
   node.innerHTML = '';
   node.appendChild(svg);
