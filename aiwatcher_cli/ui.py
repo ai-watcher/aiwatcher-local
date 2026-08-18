@@ -5012,8 +5012,16 @@ HTML = r"""<!doctype html>
        class to outrank that later rule, not just to restate display. */
     .feed-main .feed-chart-note strong { color: var(--text); display: inline; }
     .feed-chart-sentence { flex: 1 1 100%; }
-    .swatch-blue, .swatch-amber, .swatch-cyan, .swatch-line { width: 10px; height: 10px; border-radius: 2px; display: inline-block; flex: none; }
+    .swatch-blue, .swatch-amber, .swatch-cyan, .swatch-line, .swatch-red, .swatch-dash, .swatch-peak { width: 10px; height: 10px; border-radius: 2px; display: inline-block; flex: none; }
     .swatch-cyan { background: var(--cyan); }
+    .swatch-red { background: var(--red); }
+    /* Dashed, because that is what the projection is drawn as. A solid chip
+       beside the word "projected" would be the one thing the chart is careful
+       not to say. */
+    .swatch-dash { height: 3px; border-radius: 0; align-self: center;
+      background: repeating-linear-gradient(90deg, var(--blue) 0 3px, transparent 3px 6px); }
+    .swatch-peak { height: 2px; border-radius: 0; align-self: center; background: var(--muted); opacity: .6; }
+    .runway-legend { margin-top: 4px; }
     .swatch-line { background: var(--line); }
     .swatch-blue { background: var(--blue); }
     .swatch-amber { background: var(--amber); }
@@ -7459,15 +7467,41 @@ function runwayVerdict(chart) {
     detail: `At ${compactTokens(chart.growth_per_turn_n)}/turn, the growth since this session last shed context.`,
   };
 }
+/* Names every line on the runway chart. The caption used to carry "Amber is
+   pressure, red is where action is needed" inside a conditional that dropped it
+   on critical cards with no projection left -- so the explanation vanished from
+   exactly the sessions in the worst state, which are the ones a reader most
+   needs to be able to read. Blue was never named anywhere at all.
+
+   Only lines that were actually drawn are listed: drawRunway omits the
+   projection when there is no headroom left, and the peak line when the peak is
+   the current turn, and a legend naming an absent line sends you hunting for it. */
+function runwayLegend(chart) {
+  if (!chart || (chart.turn_series || []).length < 3) return '';
+  const items = [
+    ['swatch-blue', 'Context per turn'],
+    ['swatch-amber', 'Pressure'],
+    ['swatch-red', 'Action needed'],
+  ];
+  if (chart.turns_to_critical > 0 && chart.growth_per_turn_n > 0) {
+    items.push(['swatch-dash', 'Projected']);
+  }
+  const peakIsHistoric = chart.peak_turn_tokens_n > chart.latest_turn_tokens_n * 1.05;
+  if (chart.peak_turn_tokens_n > chart.critical_tokens_n && peakIsHistoric) {
+    items.push(['swatch-peak', 'Earlier peak']);
+  }
+  return `<p class="feed-chart-note runway-legend">${items
+    .map(([cls, label]) => `<span class="${cls}"></span>${label}`).join(' ')}</p>`;
+}
 function runwayCaption(chart) {
   const verdict = runwayVerdict(chart);
   if (!verdict) return '';
   const resets = chart.context_resets
     ? ` After ${chart.context_resets} context reset${chart.context_resets === 1 ? '' : 's'}, growth is measured from the latest one only.`
     : '';
-  const bands = verdict.severity === 'critical' && chart.turns_to_critical == null
-    ? '' : ' Amber is pressure, red is where action is needed.';
-  return `<p class="receipt-note"><strong>${esc(verdict.headline)}</strong> — ${esc(verdict.detail)}${bands}${resets}</p>`;
+  // The colours are named by runwayLegend now, unconditionally, so the caption
+  // is free to be only the verdict.
+  return `<p class="receipt-note"><strong>${esc(verdict.headline)}</strong> — ${esc(verdict.detail)}${resets}</p>`;
 }
 
 /* Home's summary is one row, so this is the curve and the threshold and nothing
@@ -7857,6 +7891,7 @@ function renderContextHealth(rows) {
       <div class="mini"><span class="label">Replay cost</span><strong>${esc(row.replayed_cost_label)}</strong></div>
     </div>
     <div class="runway" data-runway="${esc(row.session_id)}"></div>
+    ${runwayLegend(row.chart)}
     ${runwayCaption(row.chart)}
     ${row.session_count > 1 ? `<p class="receipt-note">${esc(row.group_note || `${row.session_count} related sessions need attention.`)} ${row.critical_sessions ? `${esc(row.critical_sessions)} critical.` : ''}</p>` : ''}
     <p>${esc(row.recommendation)}</p>
