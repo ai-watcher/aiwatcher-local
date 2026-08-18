@@ -3226,13 +3226,36 @@ def _insight_feed(
         top = replay["sessions"][0]
         window_cost = sum(row.cost_usd for row in rows)
         share = (replay["total_replayed_usd"] / window_cost * 100) if window_cost > 0 else 0
+        # The chart is one session's turns, and the card never said which. Naming
+        # it also decides what the closing advice can honestly be: "compact this"
+        # is an instruction, and an instruction aimed at a session someone left
+        # hours ago cannot be carried out.
+        #
+        # The session itself is still the worst one, not the worst still-active
+        # one. The money claim above rests on it being the worst, and swapping in
+        # a smaller session to make the advice actionable would leave the
+        # headline resting on a session the card no longer shows.
+        top_session = next((row for row in rows if row.session_id == top["session_id"]), None)
+        top_state = session_state(top_session) if top_session else {}
+        top_live = str(top_state.get("status") or "") in {"active", "recent"}
+        quiet_hours = float(top_state.get("age_seconds") or 0) / 3600
+        quiet_label = f"{quiet_hours / 24:.1f}d" if quiet_hours >= 24 else f"{quiet_hours:.0f}h"
+        closing = (
+            "It is still going, so compacting now is what buys the rest back."
+            if top_live
+            else f"It has been quiet for {quiet_label}, so this is what compacting earlier would have saved."
+        )
         cards.append({
             "id": "replayed-context",
             "title": f"{share:.0f}% of your spend went on re-sending conversation history",
             "body": (
                 f"{money(replay['total_replayed_usd'])} of {money(window_cost)} this window. The worst session replayed "
                 f"{top['replayed_pct']:.0f}% of its context, {money(top['replayed_usd'])} of its "
-                f"{money(top['session_usd'])}. Compacting or starting fresh earlier is what this buys back."
+                f"{money(top['session_usd'])}. {closing}"
+            ),
+            "session_label": (
+                f"{short_path(project_key(top.get('project_path')))} · {top.get('tool') or 'session'}"
+                if top.get("project_path") else str(top.get("tool") or "session")
             ),
             "impact_usd": replay["total_replayed_usd"],
             "session_id": top["session_id"],
@@ -5050,6 +5073,7 @@ HTML = r"""<!doctype html>
     .bar-key strong { color: var(--text); font-variant-numeric: tabular-nums; }
     .bar-swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
     .bar-pct { color: var(--faint); font-variant-numeric: tabular-nums; }
+    .feed-session { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
     .feed-chart { margin: 10px 0 0; }
     .feed-chart-note { margin: 6px 0 0; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
     /* The feed card's title is a <strong>, and `.feed-main strong` blocks it out
@@ -8735,6 +8759,7 @@ function renderInsightFeed(insights) {
       <div class="feed-main">
         <strong>${esc(card.title)}</strong>
         <p>${esc(card.body)}</p>
+        ${card.session_id && card.session_label ? `<p class="feed-session">Charted: <button class="link-inline" data-session="${esc(card.session_id)}" onclick="event.stopPropagation(); selectSession(this.dataset.session)">${esc(card.session_label)}</button></p>` : ''}
         ${card.chart ? `<div class="feed-chart" data-feed-chart="${esc(card.id)}"></div>${feedChartCaption(card.chart)}` : ''}
       </div>
       ${card.impact_label ? `<span class="feed-impact mono">${esc(card.impact_label)}</span>` : ''}
