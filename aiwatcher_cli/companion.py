@@ -201,6 +201,7 @@ def _terminate_pid(pid: int, *, force: bool = False) -> bool:
                 capture_output=True,
                 timeout=5,
                 check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             return True
         except (OSError, subprocess.TimeoutExpired):

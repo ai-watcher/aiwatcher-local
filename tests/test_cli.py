@@ -233,8 +233,29 @@ class StartCommandCliTests(unittest.TestCase):
         popen.assert_not_called()
 
     def test_pid_probe_treats_permission_error_as_running(self) -> None:
-        with patch.object(cli.os, "kill", side_effect=PermissionError("denied")):
+        with (
+            patch.object(cli.sys, "platform", "linux"),
+            patch.object(cli.os, "kill", side_effect=PermissionError("denied")),
+        ):
             self.assertTrue(cli._pid_is_running(12345))
+
+    def test_pid_probe_does_not_signal_on_windows(self) -> None:
+        # signal.CTRL_C_EVENT is 0, so os.kill(pid, 0) on Windows sends a
+        # console event instead of probing. The console-less companion daemon
+        # always failed that call and read every live overlay as dead.
+        with (
+            patch.object(cli.sys, "platform", "win32"),
+            patch.object(cli.os, "kill") as kill,
+            patch.object(cli, "_windows_pid_is_running", return_value=True) as probe,
+        ):
+            self.assertTrue(cli._pid_is_running(12345))
+        kill.assert_not_called()
+        probe.assert_called_once_with(12345)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows process probe")
+    def test_windows_pid_probe_matches_reality(self) -> None:
+        self.assertTrue(cli._pid_is_running(os.getpid()))
+        self.assertFalse(cli._pid_is_running(0x7FFFFFF0))
 
     def test_companion_stop_stops_presence_control(self) -> None:
         with (
