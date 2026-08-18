@@ -8663,6 +8663,15 @@ function showView(view) {
   document.querySelectorAll('.view').forEach(node => {
     node.hidden = node.id !== `view-${view}`;
   });
+  // Views swap in place while the window keeps its scroll offset, so arriving
+  // from a card partway down one page dropped you the same distance into the
+  // next one -- "Open Watch" sits well down Home and landed 774px past the
+  // Context health section it was pointing at. Every caller here is a
+  // navigation, and a navigation starts at the top of where it went.
+  // Instant rather than smooth: this is a page change, not a scroll, and
+  // animating a thousand pixels of a page the user never asked to see is worse
+  // than simply being there.
+  window.scrollTo(0, 0);
   const activeView = ({ projects: 'sessions', changes: 'sessions', coverage: 'setup' })[view] || view;
   document.querySelectorAll('.nav-tab').forEach(node => {
     node.classList.toggle('active', node.dataset.view === activeView);
