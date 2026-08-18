@@ -146,6 +146,11 @@ def _windows_foreground_app() -> str | None:
             text=True,
             timeout=1,
             check=False,
+            # The companion runs detached with no console of its own. Without
+            # this flag Windows allocates a fresh console for tasklist, which
+            # the default host renders as a real terminal window blinking on
+            # screen every nudge tick.
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         ).stdout.strip()
     except (AttributeError, OSError):
         return None

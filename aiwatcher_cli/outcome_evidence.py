@@ -64,6 +64,7 @@ def _run_git(repo: str, args: list[str]) -> subprocess.CompletedProcess[str] | N
             capture_output=True,
             text=True,
             timeout=GIT_TIMEOUT_SECONDS,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None

@@ -3689,6 +3689,7 @@ def _post_commit_hook_path(repo: str) -> str | None:
     result = subprocess.run(
         ["git", "-C", repo, "rev-parse", "--git-dir"],
         check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if result.returncode != 0:
         return None
@@ -3715,6 +3716,7 @@ def command_commit_receipt(args: argparse.Namespace) -> int:
             result = subprocess.run(
                 ["git", "-C", repo, "rev-parse", "HEAD"],
                 check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             if result.returncode != 0:
                 if not args.quiet_if_empty:
@@ -4287,7 +4289,10 @@ def _copy_to_clipboard(text: str) -> tuple[bool, str]:
         if not shutil.which(command[0]):
             continue
         try:
-            subprocess.run(command, input=text, text=True, check=True, timeout=3)
+            subprocess.run(
+                command, input=text, text=True, check=True, timeout=3,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
             return True, command[0]
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
             continue
@@ -4609,6 +4614,7 @@ def _stop_native_companion_presence() -> None:
                 capture_output=True,
                 timeout=5,
                 check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         else:
             os.kill(pid, signal.SIGTERM)
@@ -4631,6 +4637,7 @@ def _stop_native_companion_tray() -> None:
                 capture_output=True,
                 timeout=5,
                 check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         else:
             os.kill(pid, signal.SIGTERM)

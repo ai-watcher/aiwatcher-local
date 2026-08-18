@@ -264,6 +264,9 @@ class StartCommandCliTests(unittest.TestCase):
             capture_output=True,
             timeout=5,
             check=False,
+            # Suppressed console: the companion has none of its own, so an
+            # unflagged taskkill would flash a real terminal window.
+            creationflags=getattr(cli.subprocess, "CREATE_NO_WINDOW", 0),
         )
         kill.assert_not_called()
 
