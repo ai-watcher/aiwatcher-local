@@ -1972,6 +1972,7 @@ def _context_health_card(
     *,
     group: list[ContextHealth],
     turn_series: list[int] | None = None,
+    charted_because_live: bool = False,
 ) -> dict[str, object]:
     action = _context_action(health)
     critical_count = sum(1 for item in group if item.severity == "critical")
@@ -1980,7 +1981,16 @@ def _context_health_card(
     replayed_cost = sum(item.replayed_cost_usd for item in group if item.bloat_measurable)
     analyzed_cost = sum(item.analyzed_cost_usd for item in group if item.bloat_measurable)
     bloat_measurable = any(item.bloat_measurable for item in group)
+    # When a session is charted for being reachable rather than for being the
+    # worst, the bigger one still exists and the card would otherwise be the only
+    # place it could have been mentioned. Naming it keeps the swap honest:
+    # "here is the one you can act on, and yes, a larger one is sitting there
+    # finished."
+    heaviest = max((item.latest_turn_tokens for item in group), default=0)
+    bigger_elsewhere = heaviest > health.latest_turn_tokens
     return {
+        "charted_because_live": charted_because_live,
+        "bigger_ended_label": compact_int(heaviest) if bigger_elsewhere else None,
         "session_id": health.session_id,
         "tool": health.tool,
         "project": project_label(health.project_path),
@@ -2000,7 +2010,13 @@ def _context_health_card(
             for item in group[:5]
         ],
         "latest_turn_tokens": compact_int(health.latest_turn_tokens),
-        "peak_turn_tokens": compact_int(max(item.peak_turn_tokens for item in group)),
+        # The charted session's own peak, not the project's. These two sit side
+        # by side and the chart draws a "peak N -- already crossed once" line
+        # from it, so a group maximum here claims this session reached a number
+        # another one did. Harmless while the representative was always the
+        # largest session; wrong the moment it is chosen for being reachable
+        # instead. The project-wide view is the session count and the group note.
+        "peak_turn_tokens": compact_int(health.peak_turn_tokens),
         # Chart inputs. Raw numbers, deliberately suffixed so nothing confuses them
         # with the formatted strings above. The series is capped because the whole
         # summary is cached to disk and read on every dashboard paint -- an
@@ -2008,7 +2024,7 @@ def _context_health_card(
         "chart": None if turn_series is None else {
             "turn_series": turn_series[-CONTEXT_CHART_MAX_TURNS:],
             "latest_turn_tokens_n": health.latest_turn_tokens,
-            "peak_turn_tokens_n": max(item.peak_turn_tokens for item in group),
+            "peak_turn_tokens_n": health.peak_turn_tokens,
             "growth_per_turn_n": round(health.segment_growth_rate),
             "turns_to_critical": health.turns_to_critical,
             "turns_since_reset": health.turns_since_reset,
@@ -2099,6 +2115,7 @@ def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) ->
             session,
             group=group,
             turn_series=turns_by_session.get(representative.session_id, []) if plottable else None,
+            charted_because_live=_still_reachable(representative),
         ))
     cards.sort(key=lambda item: (
         severity_order.get(str(item.get("severity")), 9),
@@ -7923,7 +7940,9 @@ function renderContextHealth(rows) {
   return `<div class="coverage-grid">${rows.map(row => `<div class="health-card">
     <div class="health-head">
       <div><h3>${esc(row.project)}</h3><p>${row.session_count > 1
-        ? `${esc(row.session_count)} sessions here · charted below: <button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">the one under most pressure</button> (${esc(row.tool)} · last active ${esc(row.age_label)} ago)`
+        ? `${esc(row.session_count)} sessions here · charted below: <button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${row.charted_because_live
+            ? 'the worst one still open' : 'the one under most pressure'}</button> (${esc(row.tool)} · last active ${esc(row.age_label)} ago)${row.bigger_ended_label
+            ? ` — a larger one, ${esc(row.bigger_ended_label)}, has already ended` : ''}`
         : `<button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.tool)} session</button> · last active ${esc(row.age_label)} ago`}</p></div>
       <span class="health-severity ${esc(row.severity)}">${esc(row.severity)}</span>
     </div>
