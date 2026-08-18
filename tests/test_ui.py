@@ -820,6 +820,30 @@ class DashboardWindowTests(unittest.TestCase):
             "history beyond the cap cannot prop up a baseline",
         )
 
+    def test_daily_spend_labels_every_day_including_the_ones_with_no_bar(self) -> None:
+        """The hover text is per day, so every day needs its strings.
+
+        A day with no spend and a day before the baseline exists are the two
+        that most need explaining, and both are exactly the days a chart tends
+        to leave without anything to point at.
+        """
+        now = datetime.now().astimezone().replace(hour=12, minute=0, second=0, microsecond=0)
+        since = now - timedelta(days=6)
+        spend = {offset: 10.0 for offset in range(-8, 7)}
+        del spend[3]  # a day off, inside the window
+        chart = ui._daily_spend_chart(self._spend_events(spend, since=since), since, now)
+
+        assert chart is not None
+        count = len(chart["days"])
+        for key in ("day_labels", "band_labels", "labels", "values", "active", "spikes"):
+            self.assertEqual(len(chart[key]), count, f"{key} must cover every plotted day")
+        self.assertFalse(chart["active"][3])
+        self.assertTrue(chart["day_labels"][3], "a day off still needs a date to show")
+        # Formatted strings ride alongside the raw numbers, never replace them.
+        self.assertIsNone(chart["band_labels"][0], "no band means no band label")
+        self.assertIsNone(chart["band_low"][0])
+        self.assertIn(" to ", chart["band_labels"][-1])
+
     def test_daily_spend_band_is_a_percentile_range_not_mean_plus_deviation(self) -> None:
         """Daily spend is skewed enough that mean minus a deviation goes negative.
 

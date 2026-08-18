@@ -3577,11 +3577,17 @@ def _daily_spend_chart(
 
     today = now.date()
     values, labels, lows, mids, highs, active, spikes = [], [], [], [], [], [], []
+    # Formatted alongside the raw numbers rather than instead of them: the chart
+    # plots the figures and the hover text reads the strings, and neither can be
+    # derived from the other on the client without reimplementing money().
+    day_labels, band_labels = [], []
     for day in plotted:
         spend = by_day.get(day, 0.0)
         band = band_for(day)
         values.append(round(spend, 6))
         labels.append(money(spend))
+        day_labels.append(day.strftime("%a %d %b"))
+        band_labels.append(f"{money(band[0])} to {money(band[2])}" if band else None)
         active.append(spend > 0)
         lows.append(round(band[0], 6) if band else None)
         mids.append(round(band[1], 6) if band else None)
@@ -3603,8 +3609,10 @@ def _daily_spend_chart(
     return {
         "kind": "daily_spend",
         "days": [day.isoformat() for day in plotted],
+        "day_labels": day_labels,
         "values": values,
         "labels": labels,
+        "band_labels": band_labels,
         "band_low": lows,
         "band_mid": mids,
         "band_high": highs,
@@ -4968,6 +4976,8 @@ HTML = r"""<!doctype html>
     .runway-mini { display: block; width: 100%; height: 34px; }
     .bar-note { display: block; font-size: .68rem; color: var(--faint); letter-spacing: .02em; }
     .scatter-svg { display: block; width: 100%; height: auto; overflow: visible; margin-top: 10px; }
+    .spend-hit { fill: transparent; }
+    .spend-hit:hover { fill: var(--blue-soft); }
     .scatter-hit { fill: transparent; cursor: pointer; }
     .scatter-hit:hover { fill: var(--blue-soft); }
     .scatter-key { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--muted); display: inline-block; flex: none; }
@@ -8456,6 +8466,36 @@ function drawDailySpend(node, chart) {
         cx: x(index + 0.5), cy: y(value) - 6, r: 2.2, fill: chartToken('--cyan'),
       }));
     }
+  });
+
+  // A full-height column per day, transparent, added last so it takes the
+  // pointer. Same reasoning as the scatter's oversized hit circles: a 6px bar
+  // you must hit dead-centre is not a target, and a day with no bar at all has
+  // nothing to aim at otherwise -- which is exactly the day whose tooltip has
+  // something worth saying.
+  values.forEach((value, index) => {
+    const hit = svgEl('rect', {
+      x: x(index), y: plot.top, width: x(1) - x(0), height: plot.bottom - plot.top,
+      class: 'spend-hit',
+    });
+    const lines = [chart.day_labels[index]];
+    if (!chart.active[index]) {
+      lines.push('No recorded activity');
+    } else if (index === chart.partial_index) {
+      lines.push(`${chart.labels[index]} so far — today is still in progress`);
+    } else {
+      lines.push(chart.labels[index]);
+    }
+    lines.push(chart.band_labels[index]
+      ? `Usual for you then: ${chart.band_labels[index]}`
+      : 'Not enough history yet to say what was usual');
+    if (chart.spikes[index]) {
+      lines.push(`At least ${chart.spike_multiple}x past the top of that`);
+    }
+    const title = document.createElementNS(SVG_NS, 'title');
+    title.textContent = lines.join('\n');
+    hit.appendChild(title);
+    svg.appendChild(hit);
   });
 
   // Ends only. A tick under every day turns into a smear at thirty.
