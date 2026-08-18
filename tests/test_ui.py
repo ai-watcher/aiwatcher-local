@@ -861,6 +861,77 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertLessEqual(chart["band_low"][-1], chart["band_mid"][-1])
         self.assertLessEqual(chart["band_mid"][-1], chart["band_high"][-1])
 
+    def _pressure_session(self, session_id: str, *, minutes_idle: float, turn_tokens: int):
+        """A session over the critical line, last touched `minutes_idle` ago."""
+        now = datetime.now(timezone.utc)
+        updated = now - timedelta(minutes=minutes_idle)
+        session = LocalSession(
+            session_id=session_id, tool="claude-code", project_path="/repo",
+            started_at=updated - timedelta(hours=6), updated_at=updated,
+            tokens_in=turn_tokens * 3, tokens_out=1000, cost_usd=5.0,
+        )
+        events = [
+            LocalEvent(
+                event_id=f"{session_id}-{index}", session_id=session_id, tool="claude-code",
+                event_type="assistant", timestamp=updated - timedelta(minutes=index),
+                tokens_in=turn_tokens, tokens_out=200, cost_usd=1.0, project_path="/repo",
+            )
+            for index in range(4)
+        ]
+        return session, events
+
+    def test_health_card_charts_a_session_you_can_still_act_on(self) -> None:
+        """The buttons are instructions to do something in the charted session.
+
+        Ranking on size alone charted the biggest number in the project whether
+        or not anyone was still in it -- a session abandoned hours ago at 824K
+        outranked the one running right now at 343K, which was also critical and
+        never appeared. None of start fresh, hand off or copy a compact prompt
+        can be carried out in a session that has ended.
+        """
+        big_but_gone, gone_events = self._pressure_session(
+            "abandoned", minutes_idle=6 * 60, turn_tokens=824_000,
+        )
+        smaller_but_live, live_events = self._pressure_session(
+            "live", minutes_idle=1, turn_tokens=343_000,
+        )
+        cards = ui._context_health_cards(
+            [big_but_gone, smaller_but_live], [*gone_events, *live_events],
+        )
+
+        self.assertEqual(len(cards), 1, "both sessions are in one project")
+        self.assertEqual(cards[0]["session_id"], "live")
+        self.assertEqual(cards[0]["session_count"], 2)
+
+    def test_health_card_falls_back_to_the_worst_when_nothing_is_live(self) -> None:
+        """With no session still reachable, size decides as it always did."""
+        big, big_events = self._pressure_session(
+            "big", minutes_idle=48 * 60, turn_tokens=824_000,
+        )
+        small, small_events = self._pressure_session(
+            "small", minutes_idle=30 * 60, turn_tokens=343_000,
+        )
+        cards = ui._context_health_cards([big, small], [*big_events, *small_events])
+
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0]["session_id"], "big")
+
+    def test_health_card_does_not_let_a_live_session_outrank_a_worse_severity(self) -> None:
+        """Being reachable breaks ties inside a severity, it does not jump them."""
+        critical, critical_events = self._pressure_session(
+            "critical-gone", minutes_idle=6 * 60, turn_tokens=824_000,
+        )
+        healthy, healthy_events = self._pressure_session(
+            "healthy-live", minutes_idle=1, turn_tokens=2_000,
+        )
+        cards = ui._context_health_cards(
+            [critical, healthy], [*critical_events, *healthy_events],
+        )
+
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0]["session_id"], "critical-gone")
+        self.assertEqual(cards[0]["severity"], "critical")
+
     def test_unbanked_chart_splits_by_where_and_places_every_dollar(self) -> None:
         """Segments must sum to the headline, or the bar quietly contradicts it."""
         ledger = ui.Ledger()

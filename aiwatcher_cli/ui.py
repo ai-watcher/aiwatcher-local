@@ -2062,9 +2062,26 @@ def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) ->
         grouped[project_key(health.project_path)].append(health)
     severity_order = {"critical": 0, "warning": 1, "healthy": 2}
     cards: list[dict[str, object]] = []
+    def _still_reachable(item: ContextHealth) -> bool:
+        """Is this a session you could still act on, or one you have left?"""
+        session = sessions_by_id.get(item.session_id)
+        if session is None:
+            return False
+        return str(session_state(session).get("status")) in {"active", "recent"}
+
     for group in grouped.values():
+        # Severity first, then whether the session is still live, and only then
+        # size. Ranking on size alone charted the biggest number in the project
+        # regardless of whether anyone was still in it: a session left six hours
+        # earlier at 824K outranked the one running right now at 343K, which was
+        # also critical and never appeared. Every button on this card -- start
+        # fresh, hand off, copy a compact prompt -- is an instruction to do
+        # something in that session, and none of them can be carried out in one
+        # that has ended, so the worst *reachable* session is the useful pick.
+        # With nothing live the order is unchanged and the biggest still wins.
         group.sort(key=lambda item: (
             severity_order.get(item.severity, 9),
+            0 if _still_reachable(item) else 1,
             -int(item.latest_turn_tokens * item.bloat_ratio),
             -item.total_input_tokens,
         ))
