@@ -356,6 +356,96 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIsNone(by_id["s3"]["landed"], "no snapshot means unexamined, not failed")
         self.assertEqual(scatter["unexamined"], 7)
 
+    def test_model_scatter_counts_the_plan_based_sessions_it_cannot_plot(self) -> None:
+        """A card headed "one dot per session" must own the sessions it drops.
+
+        A plan-based tool is priced at zero on purpose, so it cannot go on a
+        logarithmic cost axis -- and drawn at the floor it would claim the work
+        was nearly free, which is a stronger and wronger claim than "unpriced".
+        Withholding is right; withholding silently is what the replay chart's
+        clipped turns already cost us.
+        """
+        now = datetime.now(timezone.utc)
+        rows = [
+            LocalSession(
+                session_id=f"s{i}", tool="claude-code", project_path="/repo",
+                started_at=now - timedelta(hours=2), updated_at=now,
+                model="claude-sonnet-5" if i % 2 else "claude-opus-5",
+                tokens_in=10_000 * (i + 1), tokens_out=500, cost_usd=1.5 * (i + 1),
+            )
+            for i in range(10)
+        ]
+        rows += [
+            LocalSession(
+                session_id=f"codex{i}", tool="codex", project_path="/repo",
+                started_at=now - timedelta(hours=2), updated_at=now,
+                model="gpt-5.6-terra", tokens_in=20_000, tokens_out=1_000, cost_usd=0.0,
+            )
+            for i in range(3)
+        ]
+        # Real tokens, no cost: this is the one that must be counted.
+        rows.append(LocalSession(
+            session_id="empty", tool="cursor", project_path="/repo",
+            started_at=now, updated_at=now, model="claude-opus-5",
+            tokens_in=0, tokens_out=0, cost_usd=0.0,
+        ))
+        with patch.object(ui, "evidence_snapshots_for_sessions", return_value={}):
+            scatter = ui._model_scatter(rows)
+
+        assert scatter is not None
+        drawn = {point["session_id"] for point in scatter["points"]}
+        self.assertEqual(len(drawn), 10, "only the priced sessions can be placed")
+        self.assertNotIn("codex0", drawn)
+
+        unpriced = scatter["unpriced"]
+        self.assertEqual(unpriced["sessions"], 3)
+        self.assertEqual(unpriced["tokens"], 63_000)
+        self.assertEqual(unpriced["tools"], ["codex"])
+        # A session with no tokens did no work to withhold, so it is not counted
+        # as work the chart is hiding.
+        self.assertNotIn("cursor", unpriced["tools"])
+
+    def test_model_scatter_says_nothing_when_every_session_is_priced(self) -> None:
+        """The note is a disclosure, not a permanent fixture."""
+        now = datetime.now(timezone.utc)
+        rows = [
+            LocalSession(
+                session_id=f"s{i}", tool="claude-code", project_path="/repo",
+                started_at=now, updated_at=now,
+                model="claude-sonnet-5" if i % 2 else "claude-opus-5",
+                tokens_in=10_000, tokens_out=500, cost_usd=1.5,
+            )
+            for i in range(10)
+        ]
+        with patch.object(ui, "evidence_snapshots_for_sessions", return_value={}):
+            scatter = ui._model_scatter(rows)
+        assert scatter is not None
+        self.assertEqual(scatter["unpriced"]["sessions"], 0)
+        self.assertEqual(scatter["unpriced"]["tools"], [])
+
+    def test_scatter_legend_names_the_state_the_faded_dot_is_drawn_in(self) -> None:
+        """Three states are drawn, so three are named.
+
+        The payload has always separated "not judged" from "did not land", and
+        the dot has always been drawn faded -- but the legend offered two keys,
+        so a faded dot read as a failed one, and the card copy told the reader
+        to hunt for exactly that misreading.
+        """
+        self.assertIn("not judged yet", ui.HTML)
+        self.assertIn("scatter-key unexamined", ui.HTML)
+        # The key is withheld when nothing on the chart is faded.
+        self.assertIn("scatter.unexamined > 0", ui.HTML)
+        self.assertIn(".scatter-key.unexamined { opacity: 0.35; }", ui.HTML)
+        # Card copy no longer lets "hollow" absorb the faded case.
+        self.assertIn("A faded dot is one nobody has judged yet", ui.HTML)
+
+    def test_scatter_withheld_note_is_written_as_text_not_markup(self) -> None:
+        """Tool names come from a scan; they go through textContent, not innerHTML."""
+        self.assertIn("function renderScatterWithheld(unpriced)", ui.HTML)
+        self.assertIn("note.textContent =", ui.HTML)
+        self.assertNotIn("modelScatterWithheld').innerHTML", ui.HTML)
+        self.assertIn("billed by a plan rather than per token", ui.HTML)
+
     def test_scatter_dots_open_their_session_with_a_usable_hit_target(self) -> None:
         """A 5px mark you must hit dead-centre is not a control.
 

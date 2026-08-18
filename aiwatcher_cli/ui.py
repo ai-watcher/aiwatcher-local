@@ -2658,6 +2658,21 @@ def _model_scatter(rows: list[LocalSession]) -> dict[str, object] | None:
     if len(priced) < MODEL_SCATTER_MIN_POINTS:
         return None
 
+    # A plan-based session did real work at a cost local logs cannot know, and a
+    # log axis has no room for zero. Both facts argue against plotting it: put it
+    # on the floor and the chart says the work was nearly free, which is a
+    # stronger claim than "unpriced" and the wrong one. So it is withheld -- and
+    # counted, because a card headed "one dot per session" that quietly draws
+    # fewer is the same silence the replay chart's clipped turns were.
+    unpriced = [
+        row for row in rows
+        if row.cost_usd <= 0 and (row.tokens_in + row.tokens_out) > 0
+    ]
+    unpriced_tokens = sum(row.tokens_in + row.tokens_out for row in unpriced)
+    unpriced_tools: dict[str, int] = defaultdict(int)
+    for row in unpriced:
+        unpriced_tools[_tool_surface_key(row)] += 1
+
     by_model: dict[str, int] = defaultdict(int)
     for row in priced:
         by_model[display_model_name(row.model or "unknown")] += 1
@@ -2698,6 +2713,15 @@ def _model_scatter(rows: list[LocalSession]) -> dict[str, object] | None:
         "points": points,
         "legend": legend,
         "unexamined": sum(1 for point in points if point["landed"] is None),
+        "unpriced": {
+            "sessions": len(unpriced),
+            "tokens": unpriced_tokens,
+            "tokens_label": compact_int(unpriced_tokens),
+            "tools": [
+                tool for tool, _ in
+                sorted(unpriced_tools.items(), key=lambda item: item[1], reverse=True)
+            ],
+        },
     }
 
 
@@ -5122,6 +5146,8 @@ HTML = r"""<!doctype html>
     .scatter-hit:hover { fill: var(--blue-soft); }
     .scatter-key { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--muted); display: inline-block; flex: none; }
     .scatter-key.filled { background: var(--muted); }
+    /* Same 0.35 the unexamined dot is drawn at, so the key looks like the mark. */
+    .scatter-key.unexamined { opacity: 0.35; }
     .tm-legend { margin-bottom: 10px; gap: 6px 16px; }
     .tm-row { margin-bottom: 12px; }
     .tm-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
@@ -6028,10 +6054,11 @@ HTML = r"""<!doctype html>
     </section>
     <section class="card" style="margin-bottom:14px" id="modelScatter" hidden>
       <div class="section-title">
-        <div><h2>Cost against size, one dot per session</h2><p>Both axes are logarithmic, so a dearer model sits higher rather than climbing more steeply. Look for a hollow dot high up: an expensive session that produced nothing. Click any dot to open that session.</p></div>
+        <div><h2>Cost against size, one dot per session</h2><p>Both axes are logarithmic, so a dearer model sits higher rather than climbing more steeply. Look for a hollow dot high up: an expensive session that produced nothing. A faded dot is one nobody has judged yet, which is not the same as one that failed. Click any dot to open that session.</p></div>
       </div>
       <div class="bar-legend" id="modelScatterLegend"></div>
       <div data-scatter></div>
+      <p class="receipt-note" id="modelScatterWithheld" hidden></p>
       <p class="receipt-note">Not a verdict on which model is better value. If the dear model gets the hard problems it will land less often for reasons that have nothing to do with the model, and nothing local separates those.</p>
     </section>
     <section class="card" style="margin-bottom:14px">
@@ -7937,12 +7964,42 @@ function paintModelScatter(scatter) {
   host.hidden = !scatter;
   if (!scatter) return;
   const colours = compositionColours(scatter.legend);
+  // Three outcome states are drawn, so three are named. The faded key only
+  // appears when something is actually faded -- a key for a mark that is not on
+  // the chart invites the reader to hunt for one.
+  const unexamined = scatter.unexamined > 0
+    ? '<span class="bar-key"><span class="scatter-key unexamined"></span>not judged yet</span>'
+    : '';
   document.getElementById('modelScatterLegend').innerHTML =
     scatter.legend.map((entry, index) =>
       `<span class="bar-key"><span class="bar-swatch" style="background:var(${colours[index]})"></span>${esc(entry.label)}</span>`).join('')
     + '<span class="bar-key"><span class="scatter-key filled"></span>work landed</span>'
-    + '<span class="bar-key"><span class="scatter-key"></span>did not</span>';
+    + '<span class="bar-key"><span class="scatter-key"></span>did not</span>'
+    + unexamined;
+  renderScatterWithheld(scatter.unpriced);
   drawModelScatter(host.querySelector('[data-scatter]'), scatter);
+}
+
+// Says what the chart is not showing, in the chart's own terms: how many
+// sessions, whose, and how much work they did. Tokens rather than dollars
+// because the dollars are exactly what is missing.
+function renderScatterWithheld(unpriced) {
+  const note = document.getElementById('modelScatterWithheld');
+  if (!note) return;
+  const count = unpriced && unpriced.sessions ? unpriced.sessions : 0;
+  note.hidden = count === 0;
+  if (!count) { note.textContent = ''; return; }
+  // No esc(): this is written with textContent, which escapes for us. Passing
+  // esc'd text through it would print the entities themselves.
+  const tools = unpriced.tools || [];
+  const whose = tools.length
+    ? (tools.length === 1 ? tools[0] : tools.slice(0, -1).join(', ') + ' and ' + tools[tools.length - 1])
+    : 'plan-based tools';
+  note.textContent =
+    `${count} ${count === 1 ? 'session' : 'sessions'} not drawn — ${unpriced.tokens_label} tokens on `
+    + `${whose}, billed by a plan rather than per token. Local logs cannot price them, and a `
+    + `logarithmic cost axis has no floor to put them on; drawn at the bottom they would read as `
+    + `nearly free work rather than unpriced work.`;
 }
 
 function renderToolModels(breakdown) {
