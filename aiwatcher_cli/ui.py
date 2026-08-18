@@ -1983,14 +1983,26 @@ def _context_health_card(
     bloat_measurable = any(item.bloat_measurable for item in group)
     # When a session is charted for being reachable rather than for being the
     # worst, the bigger one still exists and the card would otherwise be the only
-    # place it could have been mentioned. Naming it keeps the swap honest:
-    # "here is the one you can act on, and yes, a larger one is sitting there
-    # finished."
-    heaviest = max((item.latest_turn_tokens for item in group), default=0)
-    bigger_elsewhere = heaviest > health.latest_turn_tokens
+    # place it could have been mentioned. Naming it keeps the swap honest.
+    #
+    # Reported as silence, not as an ending. Nothing local can tell a finished
+    # session from one sitting in a tab the user will return to after lunch --
+    # all that was observed is a log that stopped changing, and a session can be
+    # picked up again at any time. So the card says how long it has been quiet
+    # and lets the reader decide what that means.
+    heaviest_item = max(group, key=lambda item: item.latest_turn_tokens, default=None)
+    bigger = (
+        heaviest_item
+        if heaviest_item is not None and heaviest_item.latest_turn_tokens > health.latest_turn_tokens
+        else None
+    )
     return {
         "charted_because_live": charted_because_live,
-        "bigger_ended_label": compact_int(heaviest) if bigger_elsewhere else None,
+        "bigger_idle_label": compact_int(bigger.latest_turn_tokens) if bigger else None,
+        "bigger_idle_age_label": (
+            (f"{bigger.age_days:.1f}d" if bigger.age_days >= 1 else f"{bigger.age_hours:.0f}h")
+            if bigger else None
+        ),
         "session_id": health.session_id,
         "tool": health.tool,
         "project": project_label(health.project_path),
@@ -7941,8 +7953,8 @@ function renderContextHealth(rows) {
     <div class="health-head">
       <div><h3>${esc(row.project)}</h3><p>${row.session_count > 1
         ? `${esc(row.session_count)} sessions here · charted below: <button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${row.charted_because_live
-            ? 'the worst one still open' : 'the one under most pressure'}</button> (${esc(row.tool)} · last active ${esc(row.age_label)} ago)${row.bigger_ended_label
-            ? ` — a larger one, ${esc(row.bigger_ended_label)}, has already ended` : ''}`
+            ? 'the worst recently active one' : 'the one under most pressure'}</button> (${esc(row.tool)} · last active ${esc(row.age_label)} ago)${row.bigger_idle_label
+            ? ` — a larger one, ${esc(row.bigger_idle_label)}, has been quiet for ${esc(row.bigger_idle_age_label)}` : ''}`
         : `<button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.tool)} session</button> · last active ${esc(row.age_label)} ago`}</p></div>
       <span class="health-severity ${esc(row.severity)}">${esc(row.severity)}</span>
     </div>
