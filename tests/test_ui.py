@@ -997,24 +997,46 @@ class DashboardWindowTests(unittest.TestCase):
         # And the ordinary turns are not suddenly full of writes either.
         self.assertLess(chart["written_usd"][0], chart["replayed_usd"][0])
 
-    def test_replay_chart_flags_only_real_cache_writes_in_hover_text(self) -> None:
-        """Every turn tops the cache up by a few hundred tokens."""
+    def test_replay_chart_flags_only_real_cache_writes(self) -> None:
+        """Every turn tops the cache up by a few hundred tokens.
+
+        Listed as their own short list rather than a mostly-zero column per turn:
+        they are about one turn in seventy of a long session.
+        """
         events = self._replay_turns(write_turn=2)
         chart = ui._replay_turn_chart("s", events)
 
         assert chart is not None
-        flagged = [index for index, label in enumerate(chart["write_labels"]) if label]
-        self.assertEqual(flagged, [2])
+        self.assertEqual([write["i"] for write in chart["write_turns"]], [2])
+        self.assertEqual(chart["write_turns"][0]["tokens"], events[2].cache_write_tokens)
 
-    def test_replay_chart_counts_what_replay_is_still_ahead(self) -> None:
-        """Measured, not modelled: what the later turns did go on to spend."""
+    def test_replay_chart_carries_turn_times_as_offsets_not_strings(self) -> None:
+        """One start plus a seconds offset each, not 900 formatted timestamps."""
         events = self._replay_turns()
         chart = ui._replay_turn_chart("s", events)
 
         assert chart is not None
-        self.assertEqual(len(chart["replay_ahead_labels"]), len(events))
-        # Nothing follows the last turn.
-        self.assertEqual(chart["replay_ahead_labels"][-1], money(0.0))
+        self.assertIsNotNone(chart["started_at"])
+        self.assertEqual(len(chart["second_offsets"]), len(events))
+        self.assertEqual(chart["second_offsets"][0], 0)
+        self.assertEqual(chart["second_offsets"], sorted(chart["second_offsets"]))
+        # Everything a hover needs is derivable client-side from raw numbers.
+        for key in ("resent_tokens", "fresh_usd", "written_usd", "replayed_usd"):
+            self.assertEqual(len(chart[key]), len(events))
+
+    def test_replay_chart_keeps_a_long_session_whole(self) -> None:
+        """The compounding is in the early turns, so the tail alone cannot show it.
+
+        Still bounded, though -- the summary is cached to disk and read on every
+        paint, and no chart should be the reason that grows without limit.
+        """
+        events = self._replay_turns(count=300)
+        chart = ui._replay_turn_chart("s", events)
+
+        assert chart is not None
+        self.assertEqual(chart["turns"], 300)
+        self.assertEqual(chart["first_turn_no"], 1)
+        self.assertLessEqual(chart["turns"], ui.REPLAY_CHART_MAX_TURNS)
 
     def test_unbanked_chart_splits_by_where_and_places_every_dollar(self) -> None:
         """Segments must sum to the headline, or the bar quietly contradicts it."""
