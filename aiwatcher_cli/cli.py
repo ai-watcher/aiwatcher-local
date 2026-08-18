@@ -3689,6 +3689,7 @@ def _post_commit_hook_path(repo: str) -> str | None:
     result = subprocess.run(
         ["git", "-C", repo, "rev-parse", "--git-dir"],
         check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if result.returncode != 0:
         return None
@@ -3715,6 +3716,7 @@ def command_commit_receipt(args: argparse.Namespace) -> int:
             result = subprocess.run(
                 ["git", "-C", repo, "rev-parse", "HEAD"],
                 check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             if result.returncode != 0:
                 if not args.quiet_if_empty:
@@ -4287,7 +4289,10 @@ def _copy_to_clipboard(text: str) -> tuple[bool, str]:
         if not shutil.which(command[0]):
             continue
         try:
-            subprocess.run(command, input=text, text=True, check=True, timeout=3)
+            subprocess.run(
+                command, input=text, text=True, check=True, timeout=3,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
             return True, command[0]
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
             continue
@@ -4516,9 +4521,49 @@ def _companion_tray_pid_path() -> Path:
     return state_path().parent / "companion-tray.pid"
 
 
+# Windows has no signal 0. signal.CTRL_C_EVENT *is* 0, so os.kill(pid, 0)
+# there does not probe for the process -- it asks the console to deliver a
+# Ctrl+C event. The companion daemon runs detached with no console at all, so
+# the call always failed with ERROR_INVALID_HANDLE and every live overlay
+# looked dead. Ask the kernel about the process directly instead.
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_SYNCHRONIZE = 0x00100000
+_WAIT_TIMEOUT = 0x00000102
+_ERROR_ACCESS_DENIED = 5
+
+
+def _windows_pid_is_running(pid: int) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    # Without explicit signatures ctypes truncates the 64-bit handle to an int.
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    handle = kernel32.OpenProcess(
+        _PROCESS_QUERY_LIMITED_INFORMATION | _SYNCHRONIZE, False, pid
+    )
+    if not handle:
+        # The process exists but this process cannot open it. Treat it as
+        # alive so Companion stop/start does not orphan visible overlay windows.
+        return ctypes.get_last_error() == _ERROR_ACCESS_DENIED
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == _WAIT_TIMEOUT
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _pid_is_running(pid: int) -> bool:
     if pid <= 0:
         return False
+    if sys.platform == "win32":
+        try:
+            return _windows_pid_is_running(pid)
+        except (OSError, AttributeError, ValueError):
+            return False
     try:
         os.kill(pid, 0)
         return True
@@ -4609,6 +4654,7 @@ def _stop_native_companion_presence() -> None:
                 capture_output=True,
                 timeout=5,
                 check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         else:
             os.kill(pid, signal.SIGTERM)
@@ -4631,6 +4677,7 @@ def _stop_native_companion_tray() -> None:
                 capture_output=True,
                 timeout=5,
                 check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         else:
             os.kill(pid, signal.SIGTERM)
@@ -5763,11 +5810,7 @@ def command_watch(args: argparse.Namespace) -> int:
         current = get_watcher_status(max_age_seconds=max(30, int(getattr(args, "interval", 60)) * 2))
         current_pid = current.get("pid") if isinstance(current, dict) else None
         if current.get("running") and isinstance(current_pid, int) and current_pid != os.getpid():
-            try:
-                os.kill(current_pid, 0)
-            except (OSError, ProcessLookupError):
-                pass
-            else:
+            if _pid_is_running(current_pid):
                 print(
                     f"AIWatcher ambient Watch is already running (PID {current_pid}). "
                     "Use the existing companion or stop that process before starting another."

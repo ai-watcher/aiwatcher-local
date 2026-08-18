@@ -212,6 +212,7 @@ def _git(repo: str, args: list[str]) -> subprocess.CompletedProcess[str] | None:
             encoding="utf-8",
             errors="replace",
             timeout=GIT_TIMEOUT_SECONDS,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None

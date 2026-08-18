@@ -520,6 +520,7 @@ def _worktree_rows(projects: set[str]) -> list[dict[str, object]]:
                 capture_output=True,
                 text=True,
                 timeout=3,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except (OSError, subprocess.TimeoutExpired):
             continue

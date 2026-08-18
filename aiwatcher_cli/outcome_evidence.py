@@ -18,6 +18,17 @@ from .scanner import LocalSession
 
 
 GIT_TIMEOUT_SECONDS = 2
+
+# Repo root for a given path does not change while the process lives, but the
+# companion re-derives it for every session on every scan tick -- which meant a
+# git process spawned several times a second in a long-running daemon. scanner
+# caches the same lookup for the same reason.
+_REPO_ROOT_CACHE: dict[str, str | None] = {}
+
+# A commit's file list cannot change once the commit exists, but the companion
+# re-derives it for every session on every scan tick -- ten `git show` processes
+# per tick, forever, all returning the same answer. Keyed by (repo, sha).
+_COMMIT_FILES_CACHE: dict[tuple[str, str], list[str]] = {}
 COMMIT_LOOKAHEAD_HOURS = 24
 REPROMPT_WINDOW_HOURS = 72.0  # a later session touching the same file(s) within this window is a rework signal
 
@@ -64,6 +75,7 @@ def _run_git(repo: str, args: list[str]) -> subprocess.CompletedProcess[str] | N
             capture_output=True,
             text=True,
             timeout=GIT_TIMEOUT_SECONDS,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -72,6 +84,8 @@ def _run_git(repo: str, args: list[str]) -> subprocess.CompletedProcess[str] | N
 def _repo_root(path: str | None) -> str | None:
     if not path:
         return None
+    if path in _REPO_ROOT_CACHE:
+        return _REPO_ROOT_CACHE[path]
     candidate = Path(path).expanduser()
     if not candidate.exists():
         return None
@@ -79,9 +93,16 @@ def _repo_root(path: str | None) -> str | None:
         candidate = candidate.parent
     result = _run_git(str(candidate), ["rev-parse", "--show-toplevel"])
     if not result or result.returncode != 0:
+        # A timeout or a transient git failure is not cached: the next tick
+        # should be free to ask again rather than mark the repo dead for the
+        # life of the daemon.
+        if result is None:
+            return None
+        _REPO_ROOT_CACHE[path] = None
         return None
-    root = result.stdout.strip()
-    return root or None
+    root = result.stdout.strip() or None
+    _REPO_ROOT_CACHE[path] = root
+    return root
 
 
 def _session_window(session: LocalSession) -> tuple[datetime | None, datetime | None]:
@@ -142,10 +163,17 @@ def _recent_commits(repo: str, session: LocalSession) -> list[dict[str, Any]]:
 def _files_in_commit(repo: str, sha: str) -> list[str]:
     """Paths touched by one commit. Empty for a merge commit, which
     `git show --name-only` reports no files for."""
+    key = (repo, sha)
+    if key in _COMMIT_FILES_CACHE:
+        return list(_COMMIT_FILES_CACHE[key])
     result = _run_git(repo, ["show", "--name-only", "--format=", sha])
     if not result or result.returncode != 0:
+        # Not cached: a timeout or transient git failure should not pin an
+        # empty file list to a commit for the life of the daemon.
         return []
-    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    files = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    _COMMIT_FILES_CACHE[key] = files
+    return list(files)
 
 
 def _files_touched(repo: str, commits: list[dict[str, Any]]) -> list[str]:
