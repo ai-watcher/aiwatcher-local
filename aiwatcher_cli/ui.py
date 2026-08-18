@@ -5191,6 +5191,12 @@ HTML = r"""<!doctype html>
         rgba(11,17,24,.82);
       padding: 14px;
     }
+    /* A link inside a sentence, not a control beside one. The card already
+       carries three buttons; a fourth would read as a fourth action rather than
+       as "this phrase refers to something you can open". */
+    .link-inline { background: none; border: 0; padding: 0; font: inherit; color: var(--blue);
+      text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+    .link-inline:hover { color: var(--text); }
     .coverage-head, .health-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
     .coverage-status, .health-severity { border-radius: 999px; border: 1px solid var(--line); padding: 4px 8px; font-size: 11px; font-weight: 800; white-space: nowrap; }
     .coverage-status.automatic, .health-severity.healthy { color: #bff5df; border-color: rgba(53,211,153,.45); background: var(--green-soft); }
@@ -7900,8 +7906,8 @@ function renderContextHealth(rows) {
   return `<div class="coverage-grid">${rows.map(row => `<div class="health-card">
     <div class="health-head">
       <div><h3>${esc(row.project)}</h3><p>${row.session_count > 1
-        ? `${esc(row.session_count)} sessions here · charted below: the one under most pressure (${esc(row.tool)} · ${esc(row.age_label)})`
-        : `${esc(row.tool)} · ${esc(row.age_label)}`}</p></div>
+        ? `${esc(row.session_count)} sessions here · charted below: <button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">the one under most pressure</button> (${esc(row.tool)} · last active ${esc(row.age_label)} ago)`
+        : `<button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.tool)} session</button> · last active ${esc(row.age_label)} ago`}</p></div>
       <span class="health-severity ${esc(row.severity)}">${esc(row.severity)}</span>
     </div>
     <div class="mini-grid">
