@@ -7386,6 +7386,24 @@ function drawRunway(node, chart) {
     }));
   });
 
+  // Say what crossing each line means, on the line. A legend tells you which
+  // colour is which; it cannot tell you which way is bad, and the y-axis is in
+  // tokens, where "more" is not obviously worse to anyone who has not been told
+  // that context accumulates. Labelled in place, a data line sitting above both
+  // needs no explaining at all.
+  //
+  // The pressure label is dropped when the two lines are too close to hold
+  // separate text -- on a session running four times the limit they are 7px
+  // apart, and two labels there overlap into one unreadable smear. The action
+  // line is the one that keeps its label, being the one that asks for anything.
+  const labelGap = y(chart.pressure_tokens_n) - y(chart.critical_tokens_n);
+  chartText(svg, plot.left + 6, y(chart.critical_tokens_n) - 5,
+    compactTokens(chart.critical_tokens_n) + ' — act now', { anchor: 'start', fill: '--red', size: 10 });
+  if (labelGap >= 16) {
+    chartText(svg, plot.left + 6, y(chart.pressure_tokens_n) - 5,
+      compactTokens(chart.pressure_tokens_n) + ' — pressure builds', { anchor: 'start', fill: '--amber', size: 10 });
+  }
+
   // The peak is only worth its own line when it is meaningfully above where the
   // session sits now -- that is the case severity reads and the chart otherwise
   // appears to contradict. When the peak IS the current turn, the line would sit
@@ -7479,7 +7497,7 @@ function runwayVerdict(chart) {
 function runwayLegend(chart) {
   if (!chart || (chart.turn_series || []).length < 3) return '';
   const items = [
-    ['swatch-blue', 'Context per turn'],
+    ['swatch-blue', 'Context per turn (higher is worse)'],
     ['swatch-amber', 'Pressure'],
     ['swatch-red', 'Action needed'],
   ];
@@ -7881,7 +7899,9 @@ function renderContextHealth(rows) {
   if (!rows.length) return '<div class="empty">No active context-health warnings. AIWatcher will surface bloat, stale sessions, and handoff opportunities here.</div>';
   return `<div class="coverage-grid">${rows.map(row => `<div class="health-card">
     <div class="health-head">
-      <div><h3>${esc(row.project)}</h3><p>${esc(row.tool)} · ${esc(row.age_label)}${row.session_count > 1 ? ` · ${esc(row.session_count)} sessions` : ''}</p></div>
+      <div><h3>${esc(row.project)}</h3><p>${row.session_count > 1
+        ? `${esc(row.session_count)} sessions here · charted below: the one under most pressure (${esc(row.tool)} · ${esc(row.age_label)})`
+        : `${esc(row.tool)} · ${esc(row.age_label)}`}</p></div>
       <span class="health-severity ${esc(row.severity)}">${esc(row.severity)}</span>
     </div>
     <div class="mini-grid">
@@ -7900,7 +7920,9 @@ function renderContextHealth(rows) {
       ${row.can_handoff ? `<button class="btn-quiet" data-session="${esc(row.session_id)}" onclick="openHandoff(this.dataset.session)">${esc(row.action.secondary_label)}</button>` : ''}
       <button class="btn-quiet" data-compact="${esc(row.compact_prompt || '/compact')}" onclick="copyText(this.dataset.compact, 'Compact prompt copied')">Copy compact prompt</button>
     </div>
-    <p class="receipt-note">${esc(row.action.reason)}</p>
+    <p class="receipt-note">${esc(row.action.reason)}${row.session_count > 1
+      ? ' These act on that one session, not on all ' + esc(row.session_count) + ' in the project.'
+      : ''}</p>
   </div>`).join('')}</div>`;
 }
 function renderCoverage(rows) {
