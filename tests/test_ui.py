@@ -676,6 +676,167 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(preflight, [1, 2, 0, 1, 0])
         self.assertEqual(sum(preflight), len(interventions))
 
+    # ------------------------------------------------------------------
+    # Daily spend against a trailing band
+    # ------------------------------------------------------------------
+    def _spend_events(self, spend_by_offset, *, since, hour=15):
+        """One event per day, offset 0 being the first day of the window."""
+        return [
+            LocalEvent(
+                event_id=f"e{offset}-{index}", session_id="s", tool="claude-code",
+                event_type="assistant",
+                timestamp=(since + timedelta(days=offset)).replace(hour=hour),
+                cost_usd=amount,
+            )
+            for index, (offset, amount) in enumerate(sorted(spend_by_offset.items()))
+        ]
+
+    def _spend_fixture(self, window_days=5, history_days=20, daily=10.0):
+        """A window preceded by enough steady history to earn a baseline."""
+        now = datetime.now().astimezone().replace(hour=12, minute=0, second=0, microsecond=0)
+        since = now - timedelta(days=window_days - 1)
+        history = {-(offset + 1): daily for offset in range(history_days)}
+        return now, since, history
+
+    def test_daily_spend_needs_enough_active_days_before_it_will_draw(self) -> None:
+        """A band from a handful of days is a guess wearing a reference's clothes.
+
+        Below the floor a bootstrap of this distribution calls roughly one
+        ordinary day in eight a spike -- a new user's first fortnight peppered
+        with false alarms about a tool they are still learning to trust.
+        """
+        window_days = 3
+        now, since, _ = self._spend_fixture(window_days=window_days)
+        window = {offset: 10.0 for offset in range(window_days)}
+        # The latest day is the one that has to qualify, and the window's own
+        # earlier days count towards its history too.
+        in_window_before_latest = window_days - 1
+
+        def prior(count):
+            return {-(offset + 1): 10.0 for offset in range(count)}
+
+        thin = prior(ui.SPEND_BASELINE_MIN_ACTIVE_DAYS - in_window_before_latest - 1)
+        self.assertIsNone(ui._daily_spend_chart(
+            self._spend_events({**thin, **window}, since=since), since, now,
+        ))
+
+        enough = prior(ui.SPEND_BASELINE_MIN_ACTIVE_DAYS - in_window_before_latest)
+        chart = ui._daily_spend_chart(
+            self._spend_events({**enough, **window}, since=since), since, now,
+        )
+        assert chart is not None
+        self.assertEqual(chart["kind"], "daily_spend")
+
+    def test_daily_spend_baseline_trails_so_growth_is_not_read_as_anomaly(self) -> None:
+        """A fixed baseline turns "you use this more than you used to" into an alarm.
+
+        Computed once over all history, the reference is whatever the user was
+        doing when they started, and every later day reads as excessive.
+        """
+        now, since, history = self._spend_fixture(window_days=5, history_days=20, daily=1.0)
+        # Spend steps up tenfold and then holds there for the whole window.
+        window = {offset: 10.0 for offset in range(5)}
+        chart = ui._daily_spend_chart(
+            self._spend_events({**history, **window}, since=since), since, now,
+        )
+        assert chart is not None
+        # The band climbs to meet the new normal, so the later days stop being
+        # remarkable even though they are ten times the original history.
+        self.assertGreater(chart["band_high"][-1], chart["band_high"][0])
+        self.assertFalse(chart["spikes"][-1], "a sustained new level is a new normal, not a spike")
+
+    def test_daily_spend_marks_only_days_well_past_the_edge(self) -> None:
+        """The edge is not precise enough to support a finer call.
+
+        Resampling moves it by about half the band's own width, so a day sitting
+        just above it is inside the uncertainty of where "just above" is.
+        """
+        now, since, history = self._spend_fixture(window_days=4, history_days=20, daily=10.0)
+        window = {0: 10.0, 1: 11.0, 2: 60.0, 3: 10.0}
+        chart = ui._daily_spend_chart(
+            self._spend_events({**history, **window}, since=since), since, now,
+        )
+        assert chart is not None
+        edge = chart["band_high"][1]
+        self.assertFalse(chart["spikes"][1], f"${window[1]} is barely over an edge at ${edge}")
+        self.assertTrue(chart["spikes"][2], "6x the edge is past any reasonable doubt")
+        self.assertEqual(chart["spike_count"], 1)
+
+    def test_daily_spend_never_marks_a_day_for_being_low(self) -> None:
+        """A quiet day may be a day off, or a day that is not over yet."""
+        now, since, history = self._spend_fixture(window_days=4, history_days=20, daily=10.0)
+        window = {0: 10.0, 1: 0.01, 2: 10.0, 3: 10.0}
+        chart = ui._daily_spend_chart(
+            self._spend_events({**history, **window}, since=since), since, now,
+        )
+        assert chart is not None
+        self.assertEqual(chart["spike_count"], 0)
+        self.assertNotIn(True, chart["spikes"])
+
+    def test_daily_spend_holds_quiet_days_apart_from_cheap_ones(self) -> None:
+        """Drawn as zero, a day off sits below the band and reads as restraint.
+
+        Same call pace_vs_baseline makes when it drops inactive windows rather
+        than averaging them in.
+        """
+        now, since, history = self._spend_fixture(window_days=4, history_days=20, daily=10.0)
+        window = {0: 10.0, 2: 10.0, 3: 10.0}  # day 1 never happened
+        chart = ui._daily_spend_chart(
+            self._spend_events({**history, **window}, since=since), since, now,
+        )
+        assert chart is not None
+        self.assertEqual(chart["active"], [True, False, True, True])
+        self.assertEqual(chart["quiet_days"], 1)
+        self.assertEqual(chart["values"][1], 0)
+        self.assertFalse(chart["spikes"][1])
+
+    def test_daily_spend_leaves_the_band_undrawn_where_it_cannot_be_computed(self) -> None:
+        """Better a gap than a backdrop borrowed from a later day."""
+        now = datetime.now().astimezone().replace(hour=12, minute=0, second=0, microsecond=0)
+        since = now - timedelta(days=6)
+        # History begins partway through the window, so the earliest plotted days
+        # have nothing behind them to form a band from.
+        # Eight prior days: too few for the first plotted day to have a band, but
+        # once the window's own days are added, enough for the last one.
+        spend = {offset: 10.0 for offset in range(-8, 7)}
+        chart = ui._daily_spend_chart(self._spend_events(spend, since=since), since, now)
+        assert chart is not None
+        self.assertIsNone(chart["band_high"][0], "no history behind the first day")
+        self.assertIsNotNone(chart["band_high"][-1], "the latest day must have a band")
+
+    def test_daily_spend_ignores_history_older_than_the_recency_cap(self) -> None:
+        """A returning user is not measured against habits from a quarter ago."""
+        now = datetime.now().astimezone().replace(hour=12, minute=0, second=0, microsecond=0)
+        since = now - timedelta(days=2)
+        stale = {
+            -(ui.SPEND_BASELINE_MAX_AGE_DAYS + offset + 5): 10.0
+            for offset in range(ui.SPEND_BASELINE_MIN_ACTIVE_DAYS + 4)
+        }
+        stale[0] = 10.0
+        stale[1] = 10.0
+        stale[2] = 10.0
+        self.assertIsNone(
+            ui._daily_spend_chart(self._spend_events(stale, since=since), since, now),
+            "history beyond the cap cannot prop up a baseline",
+        )
+
+    def test_daily_spend_band_is_a_percentile_range_not_mean_plus_deviation(self) -> None:
+        """Daily spend is skewed enough that mean minus a deviation goes negative.
+
+        There is no drawing a band whose floor is below zero dollars.
+        """
+        now, since, _ = self._spend_fixture(window_days=3)
+        # A long tail: mostly small days with a few very large ones.
+        history = {-(offset + 1): (200.0 if offset % 7 == 0 else 3.0) for offset in range(21)}
+        window = {0: 5.0, 1: 5.0, 2: 5.0}
+        chart = ui._daily_spend_chart(
+            self._spend_events({**history, **window}, since=since), since, now,
+        )
+        assert chart is not None
+        self.assertGreaterEqual(chart["band_low"][-1], 0.0)
+        self.assertLessEqual(chart["band_low"][-1], chart["band_mid"][-1])
+        self.assertLessEqual(chart["band_mid"][-1], chart["band_high"][-1])
+
     def test_unbanked_chart_splits_by_where_and_places_every_dollar(self) -> None:
         """Segments must sum to the headline, or the bar quietly contradicts it."""
         ledger = ui.Ledger()

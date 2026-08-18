@@ -3214,6 +3214,42 @@ def _insight_feed(
             "severity": "medium" if pace["ratio"] < 2 else "high",
         })
 
+    feed_now = datetime.now().astimezone()
+    daily_spend = _daily_spend_chart(all_events, feed_now - timedelta(days=days), feed_now)
+    if daily_spend:
+        spikes = daily_spend["spike_count"]
+        # Deliberately unjudged in both title and severity. This dashboard
+        # refuses to call raw spend a failure -- spending more is not a fault on
+        # its own, which is why the API-value tile carries a neutral rail rather
+        # than a red one. The card reports shape, and leaves the verdict on
+        # whether that shape is a problem to the person who spent it.
+        body = (
+            f"Your typical day over the last {daily_spend['baseline_days']} active days ran "
+            f"{daily_spend['band_label']}, around {daily_spend['median_label']}. "
+        )
+        if spikes:
+            body += (
+                f"{spikes} day{'' if spikes == 1 else 's'} in this window went at least "
+                f"{daily_spend['spike_multiple']:g}x past the top of that range. "
+            )
+        else:
+            body += "No day in this window went clearly past it. "
+        body += (
+            "The band is the middle half of your own days, not a budget -- half of any "
+            "stretch falls outside it by definition."
+        )
+        cards.append({
+            "id": "daily_spend",
+            "title": "Where the spend actually landed",
+            "body": body,
+            # None, not 0.0: this card describes shape and claims no saving, and
+            # a "$0.00" beside it reads as a savings estimate that came out empty.
+            "impact_usd": None,
+            "session_id": None,
+            "severity": "info",
+            "chart": daily_spend,
+        })
+
     models = model_cost_comparison(all_rows)
     if models["available"]:
         dear = models["by_session"]["dearest"]
@@ -3444,6 +3480,144 @@ def _tile_trends(
     if not series:
         return None
     return {"days": [day.isoformat() for day in days], "series": series}
+
+
+# How many trailing active days form the band, and the floor below which the
+# whole chart is withheld.
+#
+# 12 is where the false-alarm rate falls under 3%. Bootstrapping a band from
+# this repo's own daily spend, a genuinely big day (1.5x the upper edge) is
+# caught 95% of the time at 12 days and 92% at 6 -- but at 6 days one ordinary
+# day in eight is wrongly called a spike. That is the worst failure available
+# here: a new user's first fortnight peppered with false alarms about a tool
+# they are still deciding whether to trust. Past 12 the gain is two points of
+# detection for weeks more waiting.
+SPEND_BASELINE_MIN_ACTIVE_DAYS = 12
+SPEND_BASELINE_TRAILING_DAYS = 14
+# A returning user should not be measured against habits from a quarter ago.
+SPEND_BASELINE_MAX_AGE_DAYS = 60
+# Only days this far past the upper edge are marked. The edge itself is not
+# precise enough to support a finer call: resampling moves it by about half the
+# band's own width even with a month of history, so a day sitting just above it
+# is inside the uncertainty of where "just above" is. At 1.5x the verdict holds
+# 95%+ of the time, which is the whole reason this multiple exists.
+SPEND_SPIKE_MULTIPLE = 1.5
+
+
+def _percentile(values: list[float], fraction: float) -> float:
+    ordered = sorted(values)
+    if not ordered:
+        return 0.0
+    position = (len(ordered) - 1) * fraction
+    low = int(position)
+    high = min(low + 1, len(ordered) - 1)
+    return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
+
+
+def _daily_spend_chart(
+    all_events: list[LocalEvent],
+    since: datetime,
+    now: datetime,
+) -> dict[str, object] | None:
+    """Daily spend against a trailing band of your own recent days.
+
+    Answers the question the window total cannot: which days drove it. Spend is
+    bucketed from events, so a session running across three days contributes to
+    the day each turn actually happened on.
+
+    The band is a percentile range, never mean +/- a standard deviation. Daily
+    spend is heavily skewed -- on this repo's history the mean is $33.71 against
+    a median of $18.20, with a standard deviation of $37.54, which puts the
+    lower edge of such a band at *minus* $3.84. There is no drawing that.
+
+    The band trails rather than being fixed, so it follows drift. Computed once
+    over the whole history, the reference is whatever the user was doing when
+    they started: on a 30-day view here that produced a band centred on $1.28
+    and flagged 10 of 30 days, which is not anomaly detection but the discovery
+    that they use the tool more now than in their first week. A trailing band
+    climbs with them and flags 8, all genuinely large.
+
+    Days with no activity are held apart from days with little. Drawn as zero
+    they would sit below the band and read as restraint where there was only a
+    weekend -- the same reason pace_vs_baseline drops inactive windows instead
+    of averaging them in.
+    """
+    by_day: dict[date, float] = defaultdict(float)
+    for event in all_events:
+        if event.cost_usd <= 0 or not event.timestamp:
+            continue
+        by_day[event.timestamp.astimezone().date()] += event.cost_usd
+
+    active_days = sorted(day for day, spend in by_day.items() if spend > 0)
+    if not active_days:
+        return None
+    plotted = _tile_trend_days(since, now)
+    if len(plotted) < 3:
+        return None
+
+    def band_for(day: date) -> tuple[float, float, float] | None:
+        history = [
+            by_day[past] for past in active_days
+            if past < day and (day - past).days <= SPEND_BASELINE_MAX_AGE_DAYS
+        ][-SPEND_BASELINE_TRAILING_DAYS:]
+        if len(history) < SPEND_BASELINE_MIN_ACTIVE_DAYS:
+            return None
+        return (
+            _percentile(history, 0.25),
+            _percentile(history, 0.50),
+            _percentile(history, 0.75),
+        )
+
+    # The most recent day is the test of whether there is enough history at all.
+    # Without a band there the chart has nothing to say about now, which is what
+    # anyone opening it is asking about.
+    latest = band_for(plotted[-1])
+    if latest is None:
+        return None
+
+    today = now.date()
+    values, labels, lows, mids, highs, active, spikes = [], [], [], [], [], [], []
+    for day in plotted:
+        spend = by_day.get(day, 0.0)
+        band = band_for(day)
+        values.append(round(spend, 6))
+        labels.append(money(spend))
+        active.append(spend > 0)
+        lows.append(round(band[0], 6) if band else None)
+        mids.append(round(band[1], 6) if band else None)
+        highs.append(round(band[2], 6) if band else None)
+        # Today is still being spent -- by midday a median day has landed under
+        # half its eventual total. That bias runs one way only: the total can
+        # only climb, so a day already past the threshold is past it for good,
+        # while a day that looks quiet may simply be early. Marking a spike on
+        # the partial day is therefore safe; concluding anything from a low one
+        # is not, which is why nothing is ever marked for being below the band.
+        spikes.append(bool(
+            band and spend > 0 and spend >= band[2] * SPEND_SPIKE_MULTIPLE
+        ))
+
+    history_for_latest = [
+        past for past in active_days
+        if past < plotted[-1] and (plotted[-1] - past).days <= SPEND_BASELINE_MAX_AGE_DAYS
+    ][-SPEND_BASELINE_TRAILING_DAYS:]
+    return {
+        "kind": "daily_spend",
+        "days": [day.isoformat() for day in plotted],
+        "values": values,
+        "labels": labels,
+        "band_low": lows,
+        "band_mid": mids,
+        "band_high": highs,
+        "active": active,
+        "spikes": spikes,
+        "spike_count": sum(spikes),
+        "quiet_days": sum(1 for flag in active if not flag),
+        "baseline_days": len(history_for_latest),
+        "spike_multiple": SPEND_SPIKE_MULTIPLE,
+        "partial_index": plotted.index(today) if today in plotted else None,
+        "band_label": f"{money(latest[0])} to {money(latest[2])}",
+        "median_label": money(latest[1]),
+    }
 
 
 def build_summary(
@@ -4822,8 +4996,15 @@ HTML = r"""<!doctype html>
     .bar-pct { color: var(--faint); font-variant-numeric: tabular-nums; }
     .feed-chart { margin: 10px 0 0; }
     .feed-chart-note { margin: 6px 0 0; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-    .feed-chart-note strong { color: var(--text); }
-    .swatch-blue, .swatch-amber { width: 10px; height: 10px; border-radius: 2px; display: inline-block; flex: none; }
+    /* The feed card's title is a <strong>, and `.feed-main strong` blocks it out
+       further down this sheet. A <strong> inside a caption sentence is not a
+       title: left blockified it breaks the sentence around it. Needs the extra
+       class to outrank that later rule, not just to restate display. */
+    .feed-main .feed-chart-note strong { color: var(--text); display: inline; }
+    .feed-chart-sentence { flex: 1 1 100%; }
+    .swatch-blue, .swatch-amber, .swatch-cyan, .swatch-line { width: 10px; height: 10px; border-radius: 2px; display: inline-block; flex: none; }
+    .swatch-cyan { background: var(--cyan); }
+    .swatch-line { background: var(--line); }
     .swatch-blue { background: var(--blue); }
     .swatch-amber { background: var(--amber); }
     .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; font-weight: 700; }
@@ -8205,6 +8386,113 @@ function renderInsightHeadline(totals) {
 
    Priced at the cache-read rate upstream, which is why the band stays modest in
    dollars even when it is most of the tokens. */
+/* Daily spend against a trailing band of the user's own recent days.
+
+   The band's edges are drawn soft, and that is not decoration. Resampling this
+   distribution moves an edge by roughly half the band's own width even with a
+   month of history -- daily AI spend is erratic enough that no realistic amount
+   of data pins a quartile down. A crisp boundary would claim a precision that
+   does not exist and invite reading "just above the line" as a finding.
+
+   For the same reason nothing is marked for merely clearing the edge. Only days
+   at least spike_multiple past it are flagged, which is the point where the
+   verdict survives resampling 95%+ of the time. Nothing is ever marked for
+   falling *below* the band: a low day may be a quiet day, a day off, or simply
+   a day that is not over yet.
+
+   Bars rather than a line, because a line has to pass through days with no
+   activity at some height, and there is no honest height for a day that did not
+   happen. A missing bar is the only mark that means "nothing here". */
+function drawDailySpend(node, chart) {
+  if (!node || !chart) return;
+  const values = chart.values || [];
+  if (values.length < 3) return;
+  const W = 640, H = 190, padL = 52, padR = 12, padT = 12, padB = 26;
+  const plot = { left: padL, right: W - padR, top: padT, bottom: H - padB };
+
+  const ceiling = Math.max(...values, ...chart.band_high.filter(v => v != null)) * 1.08 || 1;
+  const x = chartScale(0, values.length, plot.left, plot.right);
+  const y = chartScale(0, ceiling, plot.bottom, plot.top);
+  const svg = svgEl('svg', {
+    viewBox: `0 0 ${W} ${H}`, class: 'runway-svg', role: 'img',
+  });
+
+  chartGrid(svg, plot, [0, ceiling / 2, ceiling], v => '$' + Math.round(v), y);
+
+  // The band, as a soft ribbon. Segments are broken wherever the baseline is
+  // unavailable, so the earliest days of a window simply have no backdrop
+  // rather than borrowing a later one.
+  let run = [];
+  const flushBand = () => {
+    if (run.length > 1) {
+      const top = run.map(i => [x(i + 0.5), y(chart.band_high[i])]);
+      const bottom = run.map(i => [x(i + 0.5), y(chart.band_low[i])]).reverse();
+      svg.appendChild(svgEl('path', {
+        d: chartPath(top) + 'L' + bottom.map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('L') + 'Z',
+        fill: chartToken('--line'), opacity: 0.55, stroke: 'none',
+      }));
+      chartLine(svg, run.map(i => [x(i + 0.5), y(chart.band_mid[i])]),'--line-strong', { width: 1, dash: '3 3' });
+    }
+    run = [];
+  };
+  values.forEach((_, index) => {
+    if (chart.band_high[index] == null) flushBand();
+    else run.push(index);
+  });
+  flushBand();
+
+  const barWidth = Math.max(2, (x(1) - x(0)) * 0.62);
+  values.forEach((value, index) => {
+    if (!chart.active[index]) return;
+    const height = Math.max(1, y(0) - y(value));
+    svg.appendChild(svgEl('rect', {
+      x: x(index + 0.5) - barWidth / 2, y: y(value), width: barWidth, height: height,
+      fill: chartToken(chart.spikes[index] ? '--cyan' : '--blue'),
+      opacity: index === chart.partial_index ? 0.55 : 1,
+      rx: 1,
+    }));
+    if (chart.spikes[index]) {
+      svg.appendChild(svgEl('circle', {
+        cx: x(index + 0.5), cy: y(value) - 6, r: 2.2, fill: chartToken('--cyan'),
+      }));
+    }
+  });
+
+  // Ends only. A tick under every day turns into a smear at thirty.
+  const first = (chart.days[0] || '').slice(5);
+  const last = (chart.days[chart.days.length - 1] || '').slice(5);
+  chartText(svg, x(0.5), plot.bottom + 16, first, { anchor: 'start' });
+  chartText(svg, x(values.length - 0.5), plot.bottom + 16, last, { anchor: 'end' });
+
+  const summary = `Daily spend over ${values.length} days against a typical range of `
+    + `${chart.band_label}. ${chart.spike_count} day${chart.spike_count === 1 ? '' : 's'} `
+    + `at least ${chart.spike_multiple}x past the top of it.`;
+  svg.setAttribute('aria-label', summary);
+  const title = svgEl('title', {});
+  title.textContent = summary;
+  svg.appendChild(title);
+
+  node.innerHTML = '';
+  node.appendChild(svg);
+}
+function dailySpendCaption(chart) {
+  if (!chart) return '';
+  const parts = [];
+  if (chart.spike_count) {
+    parts.push(`<strong>${chart.spike_count}</strong> day${chart.spike_count === 1 ? '' : 's'} ran at least ${chart.spike_multiple}x past the top of your usual range`);
+  }
+  if (chart.quiet_days) {
+    parts.push(`${chart.quiet_days} day${chart.quiet_days === 1 ? '' : 's'} had no recorded activity, drawn as a gap rather than a zero`);
+  }
+  if (chart.partial_index != null) parts.push('today is still in progress');
+  // One span for the whole sentence: .feed-chart-note is a flex row, so loose
+  // text either side of a <strong> would wrap as separate blocks.
+  return `<p class="feed-chart-note"><span class="swatch-blue"></span>Daily spend
+    <span class="swatch-cyan"></span>Well past your usual
+    <span class="swatch-line"></span>Your middle half
+    <span class="feed-chart-sentence">${esc(chart.band_label)} a day, around ${esc(chart.median_label)}${parts.length ? ' — ' + parts.join('; ') : ''}. The band describes your habits, not a budget.</span></p>`;
+}
+
 function drawReplaySplit(node, chart) {
   if (!node || !chart) return;
   const fresh = chart.fresh_usd || [], replayed = chart.replayed_usd || [];
@@ -8260,6 +8548,10 @@ function drawReplaySplit(node, chart) {
   node.innerHTML = '';
   node.appendChild(svg);
 }
+function feedChartCaption(chart) {
+  if (!chart) return '';
+  return chart.kind === 'daily_spend' ? dailySpendCaption(chart) : replaySplitCaption(chart);
+}
 function replaySplitCaption(chart) {
   if (!chart) return '';
   // The share of the session's cost that was replay, which is the claim the card
@@ -8292,7 +8584,7 @@ function renderInsightFeed(insights) {
       <div class="feed-main">
         <strong>${esc(card.title)}</strong>
         <p>${esc(card.body)}</p>
-        ${card.chart ? `<div class="feed-chart" data-feed-chart="${esc(card.id)}"></div>${replaySplitCaption(card.chart)}` : ''}
+        ${card.chart ? `<div class="feed-chart" data-feed-chart="${esc(card.id)}"></div>${feedChartCaption(card.chart)}` : ''}
       </div>
       ${card.impact_label ? `<span class="feed-impact mono">${esc(card.impact_label)}</span>` : ''}
     </div>`).join('');
@@ -8589,6 +8881,12 @@ async function load(resetDetail = true, forceRefresh = false) {
   });
   (data.insights || []).forEach(card => {
     if (!card.chart) return;
+    // Dispatch on the chart's own kind. The replay chart predates the field and
+    // carries none, so an absent kind still means that one.
+    if (card.chart.kind === 'daily_spend') {
+      drawDailySpend(feedChartNodes[card.id], card.chart);
+      return;
+    }
     drawReplaySplit(feedChartNodes[card.id], card.chart);
     annotateClipping(feedChartNodes[card.id]);
   });
