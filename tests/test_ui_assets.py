@@ -297,5 +297,45 @@ class TrimmedHomeTest(unittest.TestCase):
         self.assertEqual(sorted(looked_up - ids - built_at_runtime), [])
 
 
+class SessionDrawerTest(unittest.TestCase):
+    """The drawer is a 619px column, so its order matters more than a full-width
+    page's would: what is open is what gets read. Three things stay open -- who
+    this session is, what needs doing, and the prompt worth tightening -- and the
+    supporting evidence sits behind summaries."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        start = cls.js.index("document.getElementById('detailContent').innerHTML = `<div class=\"session-review-shell\">")
+        cls.composition = cls.js[start:cls.js.index("`;", start)]
+
+    def test_the_conclusion_comes_before_its_evidence(self):
+        # renderVerdict says what to do and promptReview says why; the evidence
+        # rail and the asks table are what those conclusions rest on.
+        order = [self.composition.index(part) for part in
+                 ("renderVerdict(s)", "promptReview", "renderEvidenceRail")]
+        self.assertEqual(order, sorted(order),
+                         "the drawer should reach its conclusion before its evidence")
+
+    def test_supporting_sections_are_collapsed(self):
+        for summary in ("Expensive asks", "Outcome evidence", "Evidence trail",
+                        "What to check next", "Cost by event type"):
+            with self.subTest(section=summary):
+                self.assertIn("<summary>%s" % summary, self.js)
+
+    def test_hero_does_not_restate_sections_below_it(self):
+        # It used to carry Next step, API-equivalent and Return as a fact grid,
+        # each of which has its own section immediately underneath.
+        hero = self.js[self.js.index("function renderSessionHero("):]
+        hero = hero[:hero.index("\nfunction ")]
+        self.assertNotIn("session-hero-grid", hero)
+        self.assertNotIn("Next step", hero)
+        self.assertIn("session-hero-pressure", hero)
+
+    def test_nothing_is_only_reachable_by_scrolling_past_it(self):
+        # Collapsing must not become hiding: every summary has a body.
+        self.assertNotIn("<summary></summary>", self.js)
+
+
 if __name__ == "__main__":
     unittest.main()

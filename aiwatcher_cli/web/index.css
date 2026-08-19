@@ -687,6 +687,28 @@
     .session-identity-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
     .session-identity-main { min-width: 0; flex: 1; color: #d8e4f4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .session-id-chip { font: 700 12px/1.1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #f7dd9c; border: 1px solid rgba(246,189,96,.42); background: rgba(246,189,96,.12); border-radius: 999px; padding: 6px 9px; white-space: nowrap; }
+    /* Replaces the four-fact hero grid: only context pressure varies enough to
+       earn the space, and the rest each had their own section directly below. */
+    .session-hero-pressure {
+      display: flex;
+      align-items: baseline;
+      flex-wrap: wrap;
+      gap: 4px 10px;
+      margin: 10px 0 4px;
+    }
+    .session-hero-pressure > span {
+      font-size: 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: var(--faint);
+    }
+    .session-hero-pressure > strong {
+      font-size: 18px;
+      font-weight: 650;
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }
+    .session-hero-pressure .session-meter { flex: 1 1 190px; min-width: 150px; }
     .session-hero-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 14px 0 12px; }
     .session-hero-fact {
       border: 1px solid var(--drawer-line);
@@ -716,6 +738,11 @@
     .verdict-card.useful { border-left-color: var(--green); background: rgba(53,211,153,.06); }
     .verdict-card h3 { font-size: 15px; margin: 0 0 8px; }
     .verdict-card ul { margin: 10px 0 0; padding-left: 18px; color: #d9e4f2; line-height: 1.45; }
+    /* A section whose only content is a collapsed summary is a one-line control,
+       so it should not also carry a full section's padding -- nine of them at
+       full height was most of a screen of nothing but summaries. */
+    .detail-section:has(> details.aiw-details:only-child:not([open])) { padding: 8px 0; }
+    .detail-section > details.aiw-details:only-child { margin-top: 0; }
     details.aiw-details { border: 1px solid var(--drawer-line); border-radius: 8px; background: rgba(5,9,14,.22); margin-top: 12px; }
     details.aiw-details summary { cursor: pointer; padding: 12px 14px; color: #dce6f6; font-weight: 750; }
     details.aiw-details[open] summary { border-bottom: 1px solid var(--drawer-line); }

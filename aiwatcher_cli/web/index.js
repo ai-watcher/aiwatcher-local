@@ -489,7 +489,7 @@ function renderEvidence(evidence) {
   const tests = evidence.tests || [];
   const reasons = evidence.reasons || [];
   const survival = survivalLabel(evidence.survival);
-  return `<section class="detail-section"><h3>Outcome evidence</h3>
+  return `<section class="detail-section"><details class="aiw-details"><summary>Outcome evidence</summary><div class="details-body">
     <p>Local git/test signals. AIWatcher stores metadata, not source diffs.</p>
     <div class="mini-grid">
       <div class="mini"><span class="label">Inferred outcome</span><strong>${esc(evidence.inferred_outcome || 'not enough evidence')}</strong></div>
@@ -503,7 +503,7 @@ function renderEvidence(evidence) {
     ${reasons.length ? `<ul class="insight-list">${reasons.map(reason => `<li>${esc(reason)}</li>`).join('')}</ul>` : ''}
     ${commits.length ? `<div class="pill-row">${commits.slice(0, 4).map(commit => `<span class="pill">commit ${esc(commit.sha)}</span>`).join('')}</div>` : ''}
     ${files.length ? `<details class="aiw-details"><summary>${esc(files.length)} changed file${files.length === 1 ? '' : 's'}</summary><div class="details-body"><div class="pill-row">${files.slice(0, 12).map(file => `<span class="pill">${esc(file)}</span>`).join('')}</div></div></details>` : ''}
-  </section>`;
+  </div></details></section>`;
 }
 function eventTypeLabel(type) {
   const labels = {
@@ -602,12 +602,12 @@ function renderEvidenceRail(s, costliest, meaningfulEvents) {
     body: meaningfulEvents && meaningfulEvents.length ? 'Full event detail remains below for debugging.' : 'This surface may only expose history or metadata.',
   });
   return `<section class="detail-section">
-    <div class="section-title"><div><h3>Evidence trail</h3><p>What AIWatcher knows, and how confident it is.</p></div><span class="pill">Local only</span></div>
+    <details class="aiw-details"><summary>Evidence trail &mdash; what AIWatcher knows, and how confident it is</summary><div class="details-body">
     <div class="evidence-rail">${nodes.map(node => `<div class="evidence-node ${esc(node.tone)}">
       <div class="evidence-dot" aria-hidden="true"></div>
       <div class="evidence-copy"><strong>${esc(node.title)} <span class="confidence-chip ${esc(node.tone)}">${esc(node.tone)}</span></strong><p>${esc(node.body)}</p></div>
     </div>`).join('')}</div>
-  </section>`;
+  </div></details></section>`;
 }
 function splitLines(value) {
   return String(value || '').split(/\n+/).map(item => item.trim().replace(/\s+/g, ' ')).filter(Boolean).slice(0, 8);
@@ -1834,26 +1834,21 @@ function renderSessionHero(s) {
   const actions = s.actions || [];
   const action = actions.find(item => item.primary) || actions[0] || null;
   const runtime = s.runtime_attachment || {};
-  const returnLabel = runtime.exact_return_label || runtime.label || (runtime.available ? 'Workspace return' : 'Log only');
   const outcomeLabel = s.outcome ? `Outcome: ${s.outcome}` : 'Outcome not marked';
   const evidence = confidenceLabel(s);
   const pressure = contextPressure(s);
-  const nextStep = action
-    ? `${action.label}: ${action.reason || 'Review the local evidence and choose the next step.'}`
-    : 'Review the local evidence and choose the next step.';
+  // The hero used to restate the next step, the API-equivalent value and the
+  // return target, all of which have their own section immediately below it --
+  // three-quarters of a screen of letterhead before the drawer said anything.
+  // What is left is the identity and the one number that varies: context pressure.
   return `<section class="session-hero">
     <h2 class="session-title">${esc(s.project_short || s.project || 'Session')}</h2>
-    <p class="session-meta">${esc(s.tool || 'unknown tool')} · ${esc(s.model || 'unknown model')}</p>
+    <p class="session-meta">${esc(s.tool || 'unknown tool')} · ${esc(s.model || 'unknown model')} · ${esc(s.api_value || '—')}</p>
     ${renderIdentityStrip(s, runtime, s.source_path)}
-    <div class="session-hero-grid">
-      <div class="session-hero-fact"><span>Next step</span><strong>${esc(action ? action.label : 'Review')}</strong></div>
-      <div class="session-hero-fact"><span>Context pressure</span><strong>${esc(s.tokens_label || '—')}</strong>
-        <div class="session-meter"><div class="session-meter-track"><div class="session-meter-fill" style="--meter-width:${esc(pressure.width)}%"></div></div><div class="session-meter-label"><span>${esc(pressure.label)}</span></div></div>
-      </div>
-      <div class="session-hero-fact"><span>API-equivalent</span><strong>${esc(s.api_value || '—')}</strong></div>
-      <div class="session-hero-fact"><span>Return</span><strong>${esc(returnLabel)}</strong></div>
+    <div class="session-hero-pressure">
+      <span>Context pressure</span><strong>${esc(s.tokens_label || '—')}</strong>
+      <div class="session-meter"><div class="session-meter-track"><div class="session-meter-fill" style="--meter-width:${esc(pressure.width)}%"></div></div><div class="session-meter-label"><span>${esc(pressure.label)}</span></div></div>
     </div>
-    <p>${esc(nextStep)}</p>
     <div class="session-hero-status">${sessionStatePill(s.state)}<span class="pill">${esc(outcomeLabel)}</span><span class="confidence-chip ${esc(evidence.tone)}">${esc(evidence.label)}</span></div>
   </section>`;
 }
@@ -1977,10 +1972,10 @@ async function selectSession(sessionId, attempt = 0) {
   const costRows = (summary.cost_by_type || []).filter(r => r.api_value_usd > 0)
     .map(r => ({ ...r, name: eventTypeLabel(r.event_type), short_name: eventTypeLabel(r.event_type) }));
   const costBreakdown = costRows.length
-    ? `<section class="detail-section"><h3>Cost by event type</h3>
-        <p>Where this session's API-equivalent value actually went.</p>
-        ${bars(costRows, "label", "type")}
-      </section>`
+    ? `<section class="detail-section"><details class="aiw-details"><summary>Cost by event type</summary>
+        <div class="details-body"><p>Where this session's API-equivalent value actually went.</p>
+        ${bars(costRows, "label", "type")}</div>
+      </details></section>`
     : '';
   const repeats = summary.repeats || {};
   const wasteNote = repeats.duplicate_events > 0
@@ -2031,12 +2026,15 @@ async function selectSession(sessionId, attempt = 0) {
         </div>
         ${outcomeButtons}
       </div>`;
+  // These are threshold trips phrased as guidance ("High API-equivalent value:
+  // $61.16"), sitting one section away from the coaching block that names the
+  // actual turn and says what to change. Kept, because occasionally one is not a
+  // restatement, but collapsed so it stops competing with the real advice.
   const insights = s.insights && s.insights.length
-    ? `<section class="detail-section"><h3>What to check next</h3>
-        <ul class="insight-list">${s.insights.map(i => `<li>${esc(i)}</li>`).join('')}</ul>
-      </section>`
-    : `<section class="detail-section"><h3>What to check next</h3>
-        <p>Nothing unusual in this session summary.</p></section>`;
+    ? `<section class="detail-section"><details class="aiw-details"><summary>What to check next (${esc(s.insights.length)})</summary>
+        <div class="details-body"><ul class="insight-list">${s.insights.map(i => `<li>${esc(i)}</li>`).join('')}</ul></div>
+      </details></section>`
+    : '';
   const pa = s.prompt_analysis;
   let promptReview = '';
   if (pa) {
@@ -2048,11 +2046,11 @@ async function selectSession(sessionId, attempt = 0) {
         <td class="ask-cost">${esc(a.api_value)}<span class="ask-share">${esc(a.share_pct)}%</span></td>
       </tr>`).join('');
     const expensiveAsks = (pa.expensive_asks && pa.expensive_asks.length)
-      ? `<section class="detail-section"><h3>Expensive asks</h3>
+      ? `<section class="detail-section"><details class="aiw-details"><summary>Expensive asks (${esc((pa.expensive_asks || []).length)} turns)</summary><div class="details-body">
           <p>Which prompts drove the cost, by turn. Cost is cumulative — later turns re-send the whole conversation, so a short prompt late in a long session can still be expensive.</p>
           <div class="table-wrap"><table class="asks-table"><thead><tr><th>Turn</th><th>Prompt</th><th>Tools</th><th>Cost</th></tr></thead>
             <tbody>${asksRows}</tbody></table></div>
-        </section>`
+        </div></details></section>`
       : '';
     const c = pa.coaching;
     const coaching = c
@@ -2069,18 +2067,20 @@ async function selectSession(sessionId, attempt = 0) {
       : `<section class="detail-section"><h3>Prompt worth tightening</h3>
           <p>No single prompt stood out as under-specified — cost accumulated across ${esc(pa.turns)} turns. For work this long, checkpoint or start a fresh session between chunks to keep context (and cost) from compounding.</p>
         </section>`;
-    promptReview = `${expensiveAsks}${coaching}<section class="detail-section"><h3>Prompt context</h3>${opener}</section>`;
+    // Coaching first: it names the turn, quotes the prompt and says what to
+    // change. The asks table is the evidence for that conclusion, so it follows.
+    promptReview = `${coaching}${expensiveAsks}<section class="detail-section"><h3>Prompt context</h3>${opener}</section>`;
   }
   document.getElementById('detailContent').innerHTML = `<div class="session-review-shell">${renderSessionHero(s)}
     ${renderSessionActions(s)}
-    ${outcomeActions}
     ${renderVerdict(s)}
-    ${runtimeReturnPanel(s.runtime_attachment, s.source_path)}
-    ${renderEvidenceRail(s, costliest, meaningfulEvents)}
+    ${outcomeActions}
     ${promptReview}
     <div id="evidencePanel">${renderEvidence(s.outcome_evidence)}</div>
+    ${renderEvidenceRail(s, costliest, meaningfulEvents)}
     ${insights}
     ${costBreakdown}
+    ${runtimeReturnPanel(s.runtime_attachment, s.source_path)}
     <section class="detail-section"><details class="aiw-details"><summary>Session metadata</summary><div class="details-body">
       <table><tbody>
         <tr><th>Started</th><td>${esc(dateLabel(s.started_at))}</td></tr>
