@@ -57,6 +57,53 @@ class HandoffTests(unittest.TestCase):
         self.assertIn("Usage pressure", capsule["next_brief"])
         self.assertNotIn("source diff", rendered.lower())
 
+    def test_handoff_brief_separates_source_session_identity_from_workspace_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            run(["git", "init"], temp_dir)
+            (repo / "api").mkdir()
+            (repo / "api" / "index.js").write_text("export default function handler() {}\n", encoding="utf-8")
+            run(["git", "add", "-N", "api/index.js"], temp_dir)
+            session = LocalSession(
+                session_id="01a00644-0f16-7291-b259-144420adaed1",
+                tool="codex-cli",
+                surface="desktop",
+                project_path=temp_dir,
+                source_path="/Users/example/.codex/sessions/rollout.jsonl",
+                updated_at=datetime(2026, 8, 15, 17, 4, tzinfo=timezone.utc),
+                model="gpt-5.5",
+                tokens_in=210_464,
+                tokens_out=12_000,
+                agent_calls=18,
+            )
+
+            capsule = build_handoff_capsule(
+                session,
+                [],
+                runtime_attachment={
+                    "identity_label": "Likely workspace",
+                    "identity_reason": "AIWatcher can identify the workspace, but not the exact running AI chat.",
+                    "exact_return_label": "Workspace only",
+                    "exact_return_reason": "Exact chat return is unavailable without a live process/window attachment.",
+                    "confidence": "medium",
+                    "surface": "desktop",
+                    "app_name": "Codex",
+                },
+                same_project_session_count=4,
+            )
+
+        brief = capsule["next_brief"]
+        self.assertIn("Source session identity", brief)
+        self.assertIn("Identity confidence: Likely workspace (medium)", brief)
+        self.assertIn("01a00644-0f16-7291-b259-144420adaed1", brief)
+        self.assertIn("Same-project sessions observed: 4", brief)
+        self.assertIn("AIWatcher has not verified the exact active chat", brief)
+        self.assertIn("Workspace evidence to inspect (not guaranteed source-session evidence)", brief)
+        self.assertIn("Changed file: api/index.js", brief)
+        self.assertIn("Changed files are workspace evidence, not proof that the source AI session created those edits.", brief)
+        self.assertIn("not proof from this source session", brief)
+        self.assertNotIn("treat them as in-progress work.", brief)
+
     def test_handoff_never_uses_filesystem_root_as_project(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")

@@ -84,6 +84,72 @@ def _safe_project_path(path: str | None) -> tuple[str, bool]:
     return str(resolved), True
 
 
+def _short_session_id(session_id: str | None) -> str:
+    if not session_id:
+        return "unknown"
+    value = str(session_id)
+    if len(value) <= 16:
+        return value
+    return f"{value[:8]}...{value[-4:]}"
+
+
+def _runtime_identity_lines(
+    session: LocalSession,
+    runtime_attachment: dict[str, object] | None,
+) -> tuple[list[str], str, str]:
+    """Return user-facing identity lines for a Fresh Start prompt.
+
+    The Fresh Start brief is pasted into a different chat, so it must lead with
+    what AIWatcher can and cannot prove about the source session. Git evidence
+    is valuable, but the session identity is the thing the user is trying to
+    preserve.
+    """
+    attachment = runtime_attachment or {}
+    identity_label = str(attachment.get("identity_label") or "Historical log only")
+    identity_reason = str(
+        attachment.get("identity_reason")
+        or "AIWatcher found a local session log, but has not verified a live AI chat for this source session."
+    )
+    exact_return_label = str(attachment.get("exact_return_label") or "Exact chat unavailable")
+    exact_return_reason = str(
+        attachment.get("exact_return_reason")
+        or "No verified app window, terminal pane, or host deep link is available for this exact session."
+    )
+    confidence = str(attachment.get("confidence") or "low")
+    surface = str(attachment.get("surface") or session.surface or "unknown")
+    app_name = str(attachment.get("app_name") or "").strip()
+    pid = attachment.get("pid")
+
+    lines = [
+        f"- Identity confidence: {identity_label} ({confidence})",
+        f"- Source session id: {session.session_id} ({_short_session_id(session.session_id)})",
+        f"- Source tool/surface: {session.tool} / {surface}",
+        f"- Source model: {session.model or 'unknown'}",
+        f"- Last observed activity: {_stamp(session)}",
+        f"- Identity note: {identity_reason}",
+        f"- Return capability: {exact_return_label}",
+        f"- Return note: {exact_return_reason}",
+    ]
+    if app_name:
+        lines.append(f"- App/workspace hint: {app_name}")
+    if isinstance(pid, int):
+        lines.append(f"- Matched process id: {pid}")
+    return lines, identity_label, exact_return_label
+
+
+def _usage_pressure_label(session: LocalSession) -> str:
+    tokens = session.tokens_in + session.tokens_out
+    value = _money(session.cost_usd)
+    if tokens > 0 and session.cost_usd == 0:
+        value = f"{value} API-equivalent value (subscription-limited, local, or unavailable pricing)"
+    else:
+        value = f"{value} API-equivalent value"
+    return (
+        f"{_compact_int(tokens)} tokens, {session.agent_calls} model calls, "
+        f"{session.tool_calls} tool calls, {value}"
+    )
+
+
 HandoffTarget = Literal["generic", "claude", "codex", "cursor", "vscode"]
 HandoffType = Literal["coding", "product", "review", "bugbash", "investigation", "general"]
 
@@ -112,11 +178,11 @@ TYPE_PROFILES: dict[str, dict[str, object]] = {
         "session_label": "AI coding session",
         "purpose": [
             "Preserve momentum from the previous session without replaying its bloated context.",
-            "Reconstruct the work from disk, recent commits, changed files, decisions, and the evidence below.",
+            "Reconstruct the work from disk, recent commits, changed files, decisions, and the evidence below after confirming the source session identity.",
             "Pick one smallest safe next checkpoint and continue only that checkpoint.",
         ],
         "checkpoint": [
-            "Run `git status --short` and inspect only the files listed in Local evidence first.",
+            "Run `git status --short` and inspect only the files listed in workspace evidence first.",
             "Summarize what appears done, what remains uncertain, and propose one smallest next checkpoint.",
             "Continue only after that checkpoint is clear; do not replay broad exploration from the old session.",
         ],
@@ -254,6 +320,8 @@ def build_handoff_capsule(
     acceptance_criteria: Sequence[str] | None = None,
     extra_warnings: Sequence[str] | None = None,
     related_workspaces: Sequence[str] | None = None,
+    runtime_attachment: dict[str, object] | None = None,
+    same_project_session_count: int = 1,
 ) -> dict[str, object]:
     """Build a structured handoff capsule for UI/API rendering.
 
@@ -300,6 +368,10 @@ def build_handoff_capsule(
     profile = _handoff_profile(handoff_type)
     target_guidance = _target_guidance(target)
     project_label, project_reliable = _safe_project_path(session.project_path)
+    source_identity_lines, source_identity_label, exact_return_label = _runtime_identity_lines(
+        session,
+        runtime_attachment,
+    )
     objective_text = _short(objective, 420) if objective else None
     source_ref_lines = _clean_user_items(source_refs)
     constraint_lines = _clean_user_items(constraints)
@@ -333,9 +405,13 @@ def build_handoff_capsule(
         evidence_lines.append(f"- Suggested check: git show {evidence.commits[0].get('sha')} --stat")
     evidence_lines.append("- Suggested check: git status --short")
     evidence_lines.append("- Suggested check: git diff --stat")
+    if evidence.changed_files:
+        evidence_lines.append(
+            "- Changed files are workspace evidence, not proof that the source AI session created those edits."
+        )
     if not evidence.commits and evidence.changed_files:
         evidence_lines.append(
-            "- No nearby commit evidence was found; treat this as in-progress work and avoid overwriting local edits."
+            "- No nearby commit evidence was found; treat these edits as in-progress work and avoid overwriting local edits or changes."
         )
     if not project_reliable:
         evidence_lines.append(
@@ -391,7 +467,7 @@ def build_handoff_capsule(
             done_lines.append("- Recent commit evidence exists; inspect git log before continuing.")
     if evidence.changed_files:
         done_lines.append(
-            f"- There are {len(evidence.changed_files)} changed file(s) on disk; treat them as in-progress work."
+            f"- The workspace has {len(evidence.changed_files)} changed file(s) on disk; treat them as possible in-progress context, not proof from this source session."
         )
     if decisions:
         done_lines.append("- Local decision notes exist; review them before changing direction.")
@@ -401,9 +477,21 @@ def build_handoff_capsule(
     uncertainty_lines = [
         "- The previous chat is intentionally not available in this fresh session.",
     ]
+    if source_identity_label != "Exact active session":
+        uncertainty_lines.append(
+            "- AIWatcher has not verified the exact active chat. Confirm this source session matches the work the user intended before editing."
+        )
+    if same_project_session_count > 1:
+        uncertainty_lines.append(
+            f"- AIWatcher saw {same_project_session_count} recent session(s) for this same project; repository evidence may include work from another chat or manual edits."
+        )
     if related:
         uncertainty_lines.append(
             "- Other active AIWatcher sessions are in related workspaces; confirm which repo owns the next checkpoint."
+        )
+    if evidence.changed_files:
+        uncertainty_lines.append(
+            "- Git working-tree changes may come from another AI chat or manual edits in the same repository."
         )
     if not project_reliable:
         uncertainty_lines.append("- AIWatcher could not confidently identify the project path.")
@@ -413,6 +501,7 @@ def build_handoff_capsule(
         uncertainty_lines.append("- No nearby test artifact was detected; choose a narrow verification step after inspection.")
 
     checkpoint_lines = [
+        "- First verify that the source session identity above matches the work the user meant to continue.",
         "- Continue in the same workspace/repository unless the user explicitly asks for a duplicate checkout or new worktree.",
         *[f"- {item}" for item in profile["checkpoint"]],
     ]
@@ -447,9 +536,20 @@ def build_handoff_capsule(
         "AIWatcher Fresh Start brief",
         "",
         f"You are starting a fresh {profile['session_label']}. Do not assume access to the previous chat.",
-        "Continue from repository state and local evidence, not from hidden conversation history.",
+        "Continue from source-session metadata and workspace state, not from hidden conversation history.",
         f"Target tool: {TARGET_LABELS[target]}.",
         f"Continuation type: {HANDOFF_TYPE_LABELS[handoff_type]}.",
+        "",
+        "Source session identity",
+        *source_identity_lines,
+        *(
+            [
+                f"- Same-project sessions observed: {same_project_session_count}",
+                "- If this is not the intended source chat, stop and ask the user which session to continue.",
+            ]
+            if same_project_session_count > 1
+            else []
+        ),
         "",
         "Goal",
         *([f"- User objective: {objective_text}"] if objective_text else []),
@@ -478,17 +578,16 @@ def build_handoff_capsule(
         "Recommended next checkpoint",
         *checkpoint_lines,
         "",
-        "Previous session signals",
-        f"- Previous tool/model: {session.tool} / {session.model or 'unknown'}",
-        f"- Usage pressure: {_compact_int(session.tokens_in + session.tokens_out)} tokens, "
-        f"{session.agent_calls} model calls, {session.tool_calls} tool calls, "
-        f"{_money(session.cost_usd)} API-equivalent value",
+        "Source session signals",
+        f"- Source tool/model: {session.tool} / {session.model or 'unknown'}",
+        f"- Usage pressure: {_usage_pressure_label(session)}",
+        f"- Return capability: {exact_return_label}",
         f"- Outcome status: {outcome or evidence.inferred_outcome or 'not confirmed'}",
         "",
         "Why AIWatcher suggested Fresh Start",
         *warning_lines,
         "",
-        "Local evidence to inspect",
+        "Workspace evidence to inspect (not guaranteed source-session evidence)",
         *evidence_lines,
         *commit_message_lines,
         *decision_lines,
@@ -496,6 +595,7 @@ def build_handoff_capsule(
         "",
         "Fresh-session instructions",
         *[f"- {item}" for item in target_guidance],
+        "- If the source session identity does not match the user's intended work, stop and ask before editing.",
         "- First reply with what appears done, what remains uncertain, and the smallest next checkpoint.",
         "- State which files or commands you will inspect before editing.",
         "- Implement only the smallest checkpoint after the plan is clear.",
@@ -540,6 +640,9 @@ def build_handoff_capsule(
         "costliest_prompt": costliest_prompt,
         "decisions": decisions,
         "related_workspaces": related[:3],
+        "runtime_attachment": runtime_attachment or {},
+        "source_identity_label": source_identity_label,
+        "same_project_session_count": max(1, int(same_project_session_count or 1)),
         "next_brief": next_brief,
     }
 

@@ -1361,6 +1361,21 @@ def _related_active_workspaces(row: LocalSession, *, limit: int = 3) -> list[str
     return workspaces
 
 
+def _same_project_session_count(row: LocalSession) -> int:
+    current = project_key(row.project_path)
+    if current == UNATTRIBUTED_PROJECT:
+        return 1
+    with _SUMMARY_CACHE_LOCK:
+        candidates = list(_SESSION_INDEX.values())
+    session_ids = {
+        candidate.session_id
+        for candidate in candidates
+        if candidate.session_id and project_key(candidate.project_path) == current
+    }
+    session_ids.add(row.session_id)
+    return max(1, len(session_ids))
+
+
 def build_basic_handoff_detail(
     session_id: str,
     days: int = 30,
@@ -1384,6 +1399,7 @@ def build_basic_handoff_detail(
     handoff_type = handoff_type if handoff_type in HANDOFF_TYPE_LABELS else "coding"
     state = session_state(row)
     attachment = runtime_attachment_for_session(row, state=state, processes=safe_runtime_processes())
+    same_project_count = _same_project_session_count(row)
     project = row.project_path if is_reliable_project_path(row.project_path) else "unknown"
     usage = _usage_summary(row)
     warnings = [
@@ -1395,16 +1411,34 @@ def build_basic_handoff_detail(
         "Detailed git, timeline, and prompt evidence is still loading; inspect the repository before editing.",
     ]
     objective_text = objective.strip() if objective and objective.strip() else (
-        "Continue the same user goal from the source workspace, but reconstruct it from local evidence first."
+        "Continue the same user goal from the source workspace, but verify the source session identity before editing."
     )
     next_brief = "\n".join([
         "AIWatcher Fresh Start brief",
         "",
         "You are starting a fresh AI work session from an AIWatcher handoff.",
         "Do not assume access to the previous chat, hidden memory, or unstated decisions.",
-        "Continue from repository state on disk and the source-of-truth evidence below.",
+        "Continue from source-session metadata and workspace state, not from hidden conversation history.",
         f"Target tool: {TARGET_LABELS[target]}.",
         f"Continuation type: {HANDOFF_TYPE_LABELS[handoff_type]}.",
+        "",
+        "Source session identity",
+        f"- Identity confidence: {attachment.identity_label} ({attachment.confidence})",
+        f"- Source session id: {session_id}",
+        f"- Source tool/surface: {row.tool} / {row.surface or 'unknown'}",
+        f"- Source model: {row.model or 'unknown'}",
+        f"- Last observed activity: {row.updated_at.isoformat() if row.updated_at else 'unknown'}",
+        f"- Identity note: {attachment.identity_reason}",
+        f"- Return capability: {attachment.exact_return_label}",
+        f"- Return note: {attachment.exact_return_reason}",
+        *(
+            [
+                f"- Same-project sessions observed: {same_project_count}",
+                "- If this is not the intended source chat, stop and ask the user which session to continue.",
+            ]
+            if same_project_count > 1
+            else []
+        ),
         "",
         "Goal",
         f"- User objective: {objective_text}",
@@ -1434,8 +1468,16 @@ def build_basic_handoff_detail(
         "",
         "Workspace",
         f"- Project: {project}",
-        f"- Source session: {session_id}",
         f"- Source tool/model: {row.tool} / {row.model or 'unknown'}",
+        "",
+        "What remains uncertain",
+        "- Detailed git, timeline, and prompt evidence is still loading.",
+        "- Working-tree files may come from another AI chat or manual edits in the same repository.",
+        *(
+            ["- AIWatcher has not verified the exact active chat. Confirm this handoff matches the intended work before editing."]
+            if attachment.identity_label != "Exact active session"
+            else []
+        ),
         "",
         "Why start fresh",
         *[f"- {item}" for item in warnings],
@@ -1447,7 +1489,9 @@ def build_basic_handoff_detail(
         "- Propose one smallest next checkpoint and wait if the scope is ambiguous or risky.",
         "",
         "Immediate next checkpoint",
+        "- First verify that the source session identity above matches the work the user meant to continue.",
         "- Run `git status --short`.",
+        "- Treat changed files as workspace evidence, not guaranteed proof from this source session.",
         "- Inspect changed files and any source-of-truth files listed above before editing.",
         "- Continue only after that checkpoint is clear; do not replay broad exploration from the old session.",
         "",
@@ -1483,6 +1527,7 @@ def build_basic_handoff_detail(
         "costliest_prompt": None,
         "decisions": [],
         "related_workspaces": [],
+        "same_project_session_count": same_project_count,
         "next_brief": next_brief,
         "runtime_attachment": attachment.to_json(),
         "basic": True,
@@ -1512,6 +1557,7 @@ def build_handoff_detail(
         outcome = get_outcome(session_id)
     except OSError:
         outcome = None
+    attachment = runtime_attachment_for_session(row, state=session_state(row), processes=safe_runtime_processes())
     capsule = build_handoff_capsule(
         row,
         events,
@@ -1524,9 +1570,9 @@ def build_handoff_detail(
         constraints=constraints or [],
         acceptance_criteria=acceptance_criteria or [],
         related_workspaces=_related_active_workspaces(row),
+        runtime_attachment=attachment.to_json(),
+        same_project_session_count=_same_project_session_count(row),
     )
-    attachment = runtime_attachment_for_session(row, state=session_state(row), processes=safe_runtime_processes())
-    capsule["runtime_attachment"] = attachment.to_json()
     return capsule
 
 
