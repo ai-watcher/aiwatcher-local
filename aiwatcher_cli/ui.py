@@ -75,6 +75,7 @@ from .session_health import (
     PRESSURE_TOKENS_PER_TURN,
     ContextHealth,
     analyze_all_sessions,
+    analyze_session_health,
     gate_health_warning,
 )
 from .scanner import (
@@ -1303,6 +1304,59 @@ def build_prompt_analysis(
 EVENT_DISPLAY_LIMIT = 5000
 
 
+# Above this share of a session's bill going on re-sent history, the session is
+# called expensive. Picked, not derived: local projects run 40-70%, so 60 flags
+# the worst of them and leaves the rest alone. It is a stopgap -- the honest
+# version compares a session against the owner's own history, the way
+# pace_vs_baseline already does, rather than against a fixed line.
+REPLAY_SHARE_HIGH_PCT = 60.0
+
+
+def _session_verdict_inputs(row: LocalSession, events: list[LocalEvent]) -> dict[str, object]:
+    """The three things a session can be judged on, and whether each is knowable yet.
+
+    They are deliberately separate. "How much room is left" is answerable now and
+    is the only urgent one; "did it cost more than it needed to" is answerable
+    once the session stops; "was it worth it" needs commits to age past
+    survival.MIN_AGE_DAYS before it means anything. Collapsing them into a single
+    verdict is what made the old one unable to say anything -- an absolute token
+    threshold stood in for all three and fired for two sessions in three.
+    """
+    health = analyze_session_health(row, events)
+    pressure: dict[str, object] = {"measurable": False}
+    if health:
+        pressure = {
+            "measurable": True,
+            "latest_turn_tokens": health.latest_turn_tokens,
+            "latest_turn_label": compact_int(health.latest_turn_tokens),
+            "peak_turn_tokens": health.peak_turn_tokens,
+            "peak_turn_label": compact_int(health.peak_turn_tokens),
+            "pressure_tokens": PRESSURE_TOKENS_PER_TURN,
+            "critical_tokens": CRITICAL_TOKENS_PER_TURN,
+            "turns_to_critical": health.turns_to_critical,
+            "turns_since_reset": health.turns_since_reset,
+            "severity": health.severity,
+        }
+
+    # Share of *spend*, not of tokens. The token-share reading is ~98% for every
+    # session because cache reads dominate the count, so it separates nothing;
+    # weighted by what was actually billed it runs 40-70% and discriminates.
+    replay: dict[str, object] = {
+        "measurable": bool(health and health.bloat_measurable),
+        "reason": None if (health and health.bloat_measurable)
+        else "This tool is plan-based, so there is no per-session bill to apportion.",
+    }
+    if health and health.bloat_measurable:
+        replay.update({
+            "share_pct": round(health.bloat_ratio * 100, 1),
+            "share_label": f"{health.bloat_ratio * 100:.0f}%",
+            "replayed_cost_label": money(health.replayed_cost_usd),
+            "high": health.bloat_ratio * 100 >= REPLAY_SHARE_HIGH_PCT,
+            "threshold_pct": REPLAY_SHARE_HIGH_PCT,
+        })
+    return {"pressure": pressure, "replay": replay}
+
+
 def build_session_detail(session_id: str, days: int = 30, *, allow_pending: bool = False) -> dict[str, object]:
     row = _find_session_row(session_id, days=days)
     if not row:
@@ -1337,6 +1391,7 @@ def build_session_detail(session_id: str, days: int = 30, *, allow_pending: bool
     return {
         **session_json(row),
         "privacy": "Prompt text is shown only when you inspect this local session; it is not uploaded or persisted in summaries.",
+        "verdict": _session_verdict_inputs(row, events),
         "insights": session_insights(row),
         "prompt_analysis": build_prompt_analysis(row, segments),
         "outcome_evidence": evidence.to_json(),

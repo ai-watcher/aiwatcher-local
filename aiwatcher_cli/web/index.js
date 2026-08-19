@@ -513,48 +513,73 @@ function compactText(value, limit = 420) {
   const text = String(value || '');
   return text.length > limit ? `${text.slice(0, limit)}...` : text;
 }
-function sessionVerdict(s) {
-  const evidence = s.outcome_evidence || s.evidence || {};
-  const tokens = Number(s.tokens || 0);
-  const cost = Number(s.api_value_usd || 0);
-  const toolCalls = Number(s.tool_calls || 0);
-  const churned = !s.outcome && evidence.inferred_outcome === 'churned';
-  const likelyUseful = !s.outcome && evidence.inferred_outcome === 'useful';
-  const highCost = cost >= 5 || tokens >= 500000 || toolCalls >= 250;
-  let title = 'Review this AI work';
-  if (s.outcome) title = `Marked ${s.outcome}`;
-  else if (churned) title = 'Looked useful, but its commit left the branch';
-  else if (likelyUseful && highCost) title = 'Likely useful, but expensive';
-  else if (likelyUseful) title = 'Likely useful, needs confirmation';
-  else if (highCost) title = 'High-cost session, needs review';
-  const bullets = [];
-  if (churned) bullets.push('The commit this session produced is no longer reachable from HEAD -- rebased, reset or amended away. That is not the same as the work being undone: a revert would leave the commit in place and not show here.');
-  if (likelyUseful) bullets.push('A nearby commit or test signal suggests this produced useful work.');
-  if (evidence.same_file_reprompt) bullets.push('A later session touched the same file(s) again soon after -- this attempt may not have fully resolved the task.');
-  if (cost >= 5) bullets.push(`${s.api_value} API-equivalent value is high for one local session.`);
-  if (tokens >= 500000) bullets.push(`${s.tokens_label} tokens indicates heavy context pressure.`);
-  if (toolCalls >= 250) bullets.push(`${s.tool_calls} tool calls suggests broad search, retries, or loop-like work.`);
-  if (!bullets.length) bullets.push('No urgent cost or outcome signal was detected.');
-  return { title, tone: churned ? 'high' : likelyUseful ? 'useful' : highCost ? 'high' : '', bullets };
+// A session gets judged on three separate questions, because they become
+// answerable at different times and collapsing them is what broke the old
+// verdict. "How much room is left" is knowable now and is the only urgent one.
+// "Did it cost more than it needed to" is knowable once the session stops.
+// "Was it worth it" needs its commits to age seven days before survival means
+// anything (see survival.py's MIN_AGE_DAYS -- a commit from this morning scores
+// ~100% because nothing has had time to touch it, not because it stuck).
+//
+// The old rule answered all three with one absolute token threshold, which fired
+// for two sessions in three and so distinguished nothing.
+function verdictLines(s) {
+  const v = s.verdict || {};
+  const lines = [];
+
+  const p = v.pressure || {};
+  if (p.measurable) {
+    const critical = compactTokens(p.critical_tokens).replace(/K$/, 'k');
+    const pressure = compactTokens(p.pressure_tokens).replace(/K$/, 'k');
+    let body;
+    if (p.turns_to_critical === null || p.turns_to_critical === undefined) {
+      body = p.latest_turn_tokens >= p.critical_tokens
+        ? `${p.latest_turn_label} per turn, past the ${critical} mark. No headroom left to project.`
+        : `${p.latest_turn_label} per turn. Not enough turns yet to project a trend.`;
+    } else {
+      body = `${p.latest_turn_label} per turn. About ${p.turns_to_critical} turn${p.turns_to_critical === 1 ? '' : 's'} of headroom at this rate.`;
+    }
+    lines.push({ key: 'room', label: 'Room left', tone: p.severity, body });
+  }
+
+  const r = v.replay || {};
+  if (r.measurable) {
+    lines.push({
+      key: 'cost',
+      label: 'Cost to run',
+      tone: r.high ? 'warning' : 'healthy',
+      body: r.high
+        ? `${r.share_label} of what this cost went on re-sending history, ${r.replayed_cost_label} of it. Above the ${r.threshold_pct}% mark.`
+        : `${r.share_label} of what this cost went on re-sending history, which is the normal range.`,
+    });
+  } else if (r.reason) {
+    lines.push({ key: 'cost', label: 'Cost to run', tone: 'unknown', body: r.reason });
+  }
+
+  const evidence = s.outcome_evidence || {};
+  const commits = evidence.commits || [];
+  const survived = survivalLabel(evidence.survival);
+  let worth;
+  if (!commits.length) {
+    worth = 'No commit has landed near this session yet, so there is nothing to judge it by.';
+  } else if (survived) {
+    worth = `${commits.length} commit${commits.length === 1 ? '' : 's'} landed near this session — ${survived}.`;
+  } else {
+    worth = `${commits.length} commit${commits.length === 1 ? '' : 's'} landed near this session. Whether the work stuck is judged after 7 days.`;
+  }
+  lines.push({ key: 'worth', label: 'Was it worth it', tone: survived ? 'healthy' : 'unknown', body: worth });
+
+  return lines;
 }
 function renderVerdict(s) {
-  const verdict = sessionVerdict(s);
-  const subtitle = s.outcome
-    ? 'Saved locally. Use the recommended action above if you are continuing from this session.'
-    : 'Confirm the outcome, then use the expensive asks below to improve the next run.';
-  // The bullets are the session's own numbers read back as reasons -- "$71.34
-  // API-equivalent value is high", "99.5M tokens indicates heavy context
-  // pressure" -- and every one of those figures is already on screen above them.
-  // The verdict itself is the useful part, so it stays open and they fold.
-  const reasons = verdict.bullets.length
-    ? `<details class="aiw-details"><summary>Why this verdict (${esc(verdict.bullets.length)})</summary>
-        <div class="details-body"><ul>${verdict.bullets.map(item => `<li>${esc(item)}</li>`).join('')}</ul></div>
-      </details>`
-    : '';
-  return `<div class="verdict-card ${esc(verdict.tone)}"><h3>${esc(verdict.title)}</h3>
-    <p>${esc(subtitle)}</p>
-    ${reasons}
-  </div>`;
+  const lines = verdictLines(s);
+  if (!lines.length) return '';
+  return `<section class="detail-section verdict-lines">
+    ${lines.map(line => `<div class="verdict-line tone-${esc(line.tone || 'unknown')}">
+      <span class="verdict-label">${esc(line.label)}</span>
+      <p>${esc(line.body)}</p>
+    </div>`).join('')}
+  </section>`;
 }
 function renderEvidenceRail(s, costliest, meaningfulEvents) {
   const evidence = s.outcome_evidence || {};

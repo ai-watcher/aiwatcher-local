@@ -732,6 +732,30 @@
     .confidence-chip.inferred::before { background: var(--amber); }
     .confidence-chip.predicted::before, .confidence-chip.unknown::before { background: var(--faint); }
     .outcome-help { display: grid; gap: 6px; margin-top: 10px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    /* Three statements, not one verdict. Each is a separate row so an unknown
+       one reads as "not yet" rather than dragging the other two down with it. */
+    .verdict-lines { display: flex; flex-direction: column; gap: 10px; }
+    .verdict-line {
+      display: grid;
+      grid-template-columns: 116px minmax(0, 1fr);
+      gap: 4px 14px;
+      align-items: baseline;
+      padding-left: 12px;
+      border-left: 2px solid var(--line-strong);
+    }
+    @media (max-width: 620px) { .verdict-line { grid-template-columns: 1fr; } }
+    .verdict-line .verdict-label {
+      font-size: 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: var(--faint);
+    }
+    .verdict-line p { margin: 0; color: var(--text); font-size: 14px; line-height: 1.5; }
+    .verdict-line.tone-critical { border-left-color: var(--red); }
+    .verdict-line.tone-warning { border-left-color: var(--amber); }
+    .verdict-line.tone-healthy { border-left-color: var(--green); }
+    .verdict-line.tone-unknown p { color: var(--muted); }
+
     .verdict-card { border: 1px solid var(--drawer-line); border-left: 3px solid var(--blue); border-radius: 8px; padding: 14px; background: rgba(112,167,255,.055); margin-top: 12px; }
     .verdict-card.high { border-left-color: var(--amber); background: rgba(246,189,96,.06); }
     .verdict-card.useful { border-left-color: var(--green); background: rgba(53,211,153,.06); }

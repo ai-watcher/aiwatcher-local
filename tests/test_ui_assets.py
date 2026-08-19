@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import re
 import unittest
 
@@ -354,13 +355,47 @@ class SessionDrawerTest(unittest.TestCase):
         hero = hero[:hero.index(NEXT_FUNCTION)]
         self.assertNotIn("s.api_value", hero)
 
-    def test_the_verdict_keeps_its_conclusion_open(self):
-        # The bullets read the session's own numbers back as reasons, so they
-        # fold; the verdict and its actions are the part worth reading.
-        verdict = self.js[self.js.index("function renderVerdict("):]
+    def test_the_verdict_is_three_separate_judgements(self):
+        """One verdict answered three questions at once with a single token
+        threshold, so it could not say anything. They are now separate lines,
+        because they become answerable at different times: room left is knowable
+        now, cost when the session stops, worth only after its commits age."""
+        verdict = self.js[self.js.index("function verdictLines("):]
         verdict = verdict[:verdict.index(NEXT_FUNCTION)]
-        self.assertIn("<summary>Why this verdict", verdict)
-        self.assertIn("esc(verdict.title)", verdict)
+        for key in ("'room'", "'cost'", "'worth'"):
+            with self.subTest(line=key):
+                self.assertIn("key: %s" % key, verdict)
+
+    def test_an_unknown_line_does_not_condemn_the_others(self):
+        # The worth line is unknowable for about a week. It must render as a
+        # not-yet rather than suppress the two that are knowable now.
+        verdict = self.js[self.js.index("function verdictLines("):]
+        verdict = verdict[:verdict.index(NEXT_FUNCTION)]
+        self.assertIn("judged after 7 days", verdict)
+        self.assertIn("tone: 'unknown'", verdict)
+
+    def test_the_broken_token_threshold_is_gone(self):
+        # 500,000 was a per-turn figure applied to a session's cumulative total,
+        # so it fired for 65% of real sessions and the bar sat at their 35th
+        # percentile. Nothing in the drawer may judge on it again.
+        self.assertNotIn("function sessionVerdict(", self.js)
+        self.assertNotIn("tokens >= 500000", self.js)
+
+    def test_replay_share_comes_from_spend_not_tokens(self):
+        # The token-weighted reading is ~98% for every session because cache
+        # reads dominate the count; weighted by what was billed it discriminates.
+        server = inspect.getsource(ui._session_verdict_inputs)
+        self.assertIn("bloat_ratio", server)
+        self.assertIn("bloat_measurable", server)
+        self.assertNotIn("replayed_share_pct", server)
+
+    def test_the_chosen_threshold_is_marked_as_chosen(self):
+        # It is picked, not derived. The comment saying so is the only thing
+        # stopping it becoming another 500,000.
+        self.assertTrue(hasattr(ui, "REPLAY_SHARE_HIGH_PCT"))
+        source = inspect.getsource(ui)
+        marker = source[source.index("REPLAY_SHARE_HIGH_PCT") - 500:source.index("REPLAY_SHARE_HIGH_PCT")]
+        self.assertIn("Picked, not derived", marker)
 
     def test_nothing_is_only_reachable_by_scrolling_past_it(self):
         # Collapsing must not become hiding: every summary has a body.
