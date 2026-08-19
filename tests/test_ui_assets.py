@@ -366,6 +366,20 @@ class SessionDrawerTest(unittest.TestCase):
             with self.subTest(line=key):
                 self.assertIn("key: %s" % key, verdict)
 
+    def test_a_non_answer_is_not_coloured_as_a_pass(self):
+        """survivalLabel renders a string for every status, "unknown" included,
+        so testing whether a label exists treated "the check could not tell" as
+        "the work stuck" -- a green bar next to the word unknown. The four cases
+        are distinct: survived, churned, checked-but-inconclusive, too-early."""
+        verdict = self.js[self.js.index("function verdictLines("):]
+        verdict = verdict[:verdict.index(NEXT_FUNCTION)]
+        self.assertIn("survivalStatus(", verdict)
+        self.assertNotIn("survivalLabel(", verdict)
+        self.assertIn("could not tell whether the work stuck", verdict)
+        for status in ("'survived'", "'churned'"):
+            with self.subTest(status=status):
+                self.assertIn(status, verdict)
+
     def test_an_unknown_line_does_not_condemn_the_others(self):
         # The worth line is unknowable for about a week. It must render as a
         # not-yet rather than suppress the two that are knowable now.

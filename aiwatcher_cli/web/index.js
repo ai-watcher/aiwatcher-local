@@ -464,6 +464,16 @@ function renderCacheStatus(cache) {
 function copyWatcherCommand() {
   copyText(watcherCommand, 'Watcher command copied — paste it in a terminal to enable ambient nudges');
 }
+function survivalStatus(survival) {
+  // The status itself, not a rendered label: "survived" | "churned" | "unknown"
+  // for the earliest bucket that has run. Callers need to tell an answer from a
+  // non-answer, and "unknown (7-day check)" is a non-answer.
+  if (!survival) return null;
+  for (const bucket of ['7', '14', '30']) {
+    if (survival[bucket]) return { status: survival[bucket], bucket };
+  }
+  return null;
+}
 function survivalLabel(survival) {
   // evidence.survival is {bucket: "survived"|"churned"|"unknown"} -- already
   // flattened server-side (see ui.py's _survival_for_session), not the raw
@@ -558,16 +568,26 @@ function verdictLines(s) {
 
   const evidence = s.outcome_evidence || {};
   const commits = evidence.commits || [];
-  const survived = survivalLabel(evidence.survival);
+  const checked = survivalStatus(evidence.survival);
+  const plural = commits.length === 1 ? '' : 's';
   let worth;
+  let tone = 'unknown';
   if (!commits.length) {
     worth = 'No commit has landed near this session yet, so there is nothing to judge it by.';
-  } else if (survived) {
-    worth = `${commits.length} commit${commits.length === 1 ? '' : 's'} landed near this session — ${survived}.`;
+  } else if (checked && checked.status === 'survived') {
+    tone = 'healthy';
+    worth = `${commits.length} commit${plural} landed, and the work was still standing at the ${checked.bucket}-day check.`;
+  } else if (checked && checked.status === 'churned') {
+    tone = 'warning';
+    worth = `${commits.length} commit${plural} landed, but the work was gone by the ${checked.bucket}-day check.`;
+  } else if (checked) {
+    // The check ran and could not tell. That is not a pass, and colouring it as
+    // one is how a non-answer starts reading like an answer.
+    worth = `${commits.length} commit${plural} landed. The ${checked.bucket}-day check could not tell whether the work stuck.`;
   } else {
-    worth = `${commits.length} commit${commits.length === 1 ? '' : 's'} landed near this session. Whether the work stuck is judged after 7 days.`;
+    worth = `${commits.length} commit${plural} landed near this session. Whether the work stuck is judged after 7 days.`;
   }
-  lines.push({ key: 'worth', label: 'Was it worth it', tone: survived ? 'healthy' : 'unknown', body: worth });
+  lines.push({ key: 'worth', label: 'Was it worth it', tone, body: worth });
 
   return lines;
 }
