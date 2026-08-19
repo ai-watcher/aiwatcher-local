@@ -1883,16 +1883,18 @@ function renderSessionHero(s) {
   const runtime = s.runtime_attachment || {};
   const outcomeLabel = s.outcome ? `Outcome: ${s.outcome}` : 'Outcome not marked';
   const evidence = confidenceLabel(s);
-  // The hero used to restate the next step, the API-equivalent value and the
-  // return target, all of which have their own section immediately below it --
-  // three-quarters of a screen of letterhead before the drawer said anything.
-  // What is left is the identity and the one number that varies: context pressure.
+  // The hero used to be a four-fact grid restating the next step, the return
+  // target and more, each of which has its own section below it -- three
+  // quarters of a screen of letterhead before the drawer said anything. What is
+  // left is the identity and the pair of numbers that are read together: how
+  // much this session used, and what that came to.
   return `<section class="session-hero">
     <h2 class="session-title">${esc(s.project_short || s.project || 'Session')}</h2>
     <p class="session-meta">${esc(s.tool || 'unknown tool')} · ${esc(s.model || 'unknown model')}</p>
     ${renderIdentityStrip(s, runtime, s.source_path)}
     <div class="session-hero-pressure">
       <span>Tokens</span><strong>${esc(s.tokens_label || '—')}</strong>
+      <em>${esc(s.api_value || '—')} API-equivalent</em>
     </div>
     <div class="session-hero-status">${sessionStatePill(s.state)}<span class="pill">${esc(outcomeLabel)}</span><span class="confidence-chip ${esc(evidence.tone)}">${esc(evidence.label)}</span></div>
   </section>`;
@@ -1947,10 +1949,8 @@ function renderSessionActions(s) {
     ? `<button class="btn-quiet" onclick="returnToRuntime('${esc(s.session_id)}')" title="${esc(openToolNote)}">${esc(openAction.label || runtime.action_label || 'Open workspace')}</button>`
     : `<button class="btn-quiet" disabled title="${esc(openToolNote)}">${esc(openAction.label || runtime.action_label || 'No live return')}</button>`;
   const evidenceChips = [
-    s.tokens_label ? `${s.tokens_label} tokens` : '',
     s.calls ? `${s.calls} model calls` : '',
     s.tool_calls ? `${s.tool_calls} tool calls` : '',
-    s.api_value ? `${s.api_value} API-equivalent` : '',
     runtime.exact_return_available ? 'Exact return available' : (runtime.available ? 'App focus only' : 'Log only'),
   ].filter(Boolean).slice(0, 5).map(item => `<span class="pill">${esc(item)}</span>`).join('');
   return `<section class="detail-section recommended-action action-composer">
@@ -1970,16 +1970,29 @@ function renderSessionActions(s) {
     <p class="tool-link-note">${esc(openToolNote)}</p>
   </section>`;
 }
-async function selectSession(sessionId, attempt = 0) {
+// A session that has just started may not be in the index yet, so a miss is
+// retried -- but each attempt is a full round trip, so three is the ceiling.
+const SESSION_LOOKUP_ATTEMPTS = 3;
+let sessionSelectToken = 0;
+async function selectSession(sessionId, attempt = 0, token = null) {
+  // Opening a second session while the first was still loading -- or still
+  // retrying -- left whichever finished last on screen, including a retry for a
+  // session you had already navigated away from. Each selection claims a token
+  // and stale continuations stop writing.
+  if (token === null) token = ++sessionSelectToken;
+  const isCurrent = () => token === sessionSelectToken;
   openDrawer('Session review');
   document.getElementById('drawerTitle').textContent = 'Session review';
   const node = document.getElementById('detailContent');
-  node.innerHTML = `<div class="loading">Loading session identity for ${esc(sessionId)}...</div>`;
+  node.innerHTML = attempt
+    ? `<div class="loading">Still looking for this session (attempt ${attempt + 1} of ${SESSION_LOOKUP_ATTEMPTS})...</div>`
+    : `<div class="loading">Loading session identity for ${esc(sessionId)}...</div>`;
   const summaryPromise = fetch(`/api/session-summary?id=${encodeURIComponent(sessionId)}`)
     .then(res => res.json())
     .catch(() => null);
   const detailPromise = fetch(`/api/session?id=${encodeURIComponent(sessionId)}`);
   const fastSummary = await summaryPromise;
+  if (!isCurrent()) return;
   if (fastSummary && !fastSummary.error) {
     node.innerHTML = renderSessionSummary(fastSummary);
   } else {
@@ -1987,10 +2000,15 @@ async function selectSession(sessionId, attempt = 0) {
   }
   const res = await detailPromise;
   const s = await res.json();
+  if (!isCurrent()) return;
   if (s.error) {
-    if (attempt < 5) {
-      node.innerHTML = `<div class="loading">Still indexing this session. Retrying...</div>`;
-      window.setTimeout(() => selectSession(sessionId, attempt + 1), 1400);
+    // Retried because a session that started moments ago may not be indexed yet.
+    // Each attempt costs a full round trip, so this is deliberately short: past
+    // that, "not found" is the answer rather than a delay.
+    if (attempt + 1 < SESSION_LOOKUP_ATTEMPTS) {
+      window.setTimeout(() => {
+        if (isCurrent()) selectSession(sessionId, attempt + 1, token);
+      }, 1400);
       return;
     }
     node.innerHTML = `<div class="empty">${esc(s.error)}</div>`;

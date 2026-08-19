@@ -214,7 +214,10 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("renderSessionSummary", ui.HTML)
         self.assertIn("Loading session identity for", ui.HTML)
         self.assertIn("Building Fresh Start brief", ui.HTML)
-        self.assertIn("Still indexing this session. Retrying", ui.HTML)
+        # Retries now name themselves and count down, because re-entering
+        # selectSession reset the message and made a retry look like a freeze.
+        self.assertIn("Still looking for this session", ui.HTML)
+        self.assertIn("SESSION_LOOKUP_ATTEMPTS", ui.HTML)
         self.assertIn("returnToRuntime", ui.HTML)
         self.assertIn("requestRuntimeReturn", ui.HTML)
         self.assertIn("/api/runtime-return", ui.HTML)

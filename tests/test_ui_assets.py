@@ -9,6 +9,18 @@ from aiwatcher_cli import ui
 
 NEXT_FUNCTION = chr(10) + "function "
 
+
+def js_function_source(js, name):
+    """The source of one JS function, from its definition to the next top-level
+    declaration. Slicing on a bare newline-plus-"function" is not enough: a
+    function followed by `let` or by `async function` would run past its own end
+    and pick up matches from the rest of the file.
+    """
+    start = js.index("function %s(" % name)
+    boundary = re.compile(r"^(?:async function |function |let |const |class )", re.M)
+    match = boundary.search(js, js.index(chr(123), start))
+    return js[start:match.start()] if match else js[start:]
+
 WEB_FILES = (
     "index.html",
     "index.css",
@@ -341,38 +353,54 @@ class SessionDrawerTest(unittest.TestCase):
         # against a per-turn threshold -- so it read "critical" and sat full for
         # every real session. Context pressure means tokens per turn elsewhere in
         # the product, and the session payload has no per-turn figure.
-        hero = self.js[self.js.index("function renderSessionHero("):]
-        hero = hero[:hero.index(NEXT_FUNCTION)]
+        hero = js_function_source(self.js, "renderSessionHero")
         self.assertIn("<span>Tokens</span>", hero)
         self.assertNotIn("Context pressure", hero)
         self.assertNotIn("session-meter", hero)
         self.assertNotIn("function contextPressure(", self.js)
 
-    def test_the_session_value_is_stated_once(self):
-        # It appeared in the hero, the action card and the verdict bullets --
-        # three times above the fold, all of the same figure.
-        hero = self.js[self.js.index("function renderSessionHero("):]
-        hero = hero[:hero.index(NEXT_FUNCTION)]
-        self.assertNotIn("s.api_value", hero)
+    def test_the_session_value_is_stated_once_above_the_fold(self):
+        """It appeared three times above the fold. It now sits in the hero beside
+        the token count -- the two are read together -- and nowhere else that is
+        visible without opening something."""
+        hero = js_function_source(self.js, "renderSessionHero")
+        self.assertIn("s.api_value", hero)
+        actions = js_function_source(self.js, "renderSessionActions")
+        self.assertNotIn("API-equivalent", actions)
+        self.assertNotIn("s.tokens_label", actions)
 
     def test_the_verdict_is_three_separate_judgements(self):
         """One verdict answered three questions at once with a single token
         threshold, so it could not say anything. They are now separate lines,
         because they become answerable at different times: room left is knowable
         now, cost when the session stops, worth only after its commits age."""
-        verdict = self.js[self.js.index("function verdictLines("):]
-        verdict = verdict[:verdict.index(NEXT_FUNCTION)]
+        verdict = js_function_source(self.js, "verdictLines")
         for key in ("'room'", "'cost'", "'worth'"):
             with self.subTest(line=key):
                 self.assertIn("key: %s" % key, verdict)
+
+    def test_opening_a_second_session_cannot_be_undone_by_the_first(self):
+        """A retry scheduled for one session used to fire after you had opened
+        another, overwriting the good render with the old one's loading message.
+        Each selection claims a token; stale continuations stop writing."""
+        source = js_function_source(self.js, "selectSession")
+        self.assertIn("sessionSelectToken", source)
+        self.assertEqual(source.count("if (!isCurrent()) return;"), 2)
+        self.assertIn("if (isCurrent()) selectSession(sessionId, attempt + 1, token)", source)
+
+    def test_a_retry_says_that_it_is_retrying(self):
+        # Re-entering selectSession reset the message to "Loading session
+        # identity", so five retries at a round trip each read as a freeze.
+        source = js_function_source(self.js, "selectSession")
+        self.assertIn("Still looking for this session", source)
+        self.assertIn("SESSION_LOOKUP_ATTEMPTS", source)
 
     def test_a_non_answer_is_not_coloured_as_a_pass(self):
         """survivalLabel renders a string for every status, "unknown" included,
         so testing whether a label exists treated "the check could not tell" as
         "the work stuck" -- a green bar next to the word unknown. The four cases
         are distinct: survived, churned, checked-but-inconclusive, too-early."""
-        verdict = self.js[self.js.index("function verdictLines("):]
-        verdict = verdict[:verdict.index(NEXT_FUNCTION)]
+        verdict = js_function_source(self.js, "verdictLines")
         self.assertIn("survivalStatus(", verdict)
         self.assertNotIn("survivalLabel(", verdict)
         self.assertIn("could not tell whether the work stuck", verdict)
@@ -383,8 +411,7 @@ class SessionDrawerTest(unittest.TestCase):
     def test_an_unknown_line_does_not_condemn_the_others(self):
         # The worth line is unknowable for about a week. It must render as a
         # not-yet rather than suppress the two that are knowable now.
-        verdict = self.js[self.js.index("function verdictLines("):]
-        verdict = verdict[:verdict.index(NEXT_FUNCTION)]
+        verdict = js_function_source(self.js, "verdictLines")
         self.assertIn("judged after 7 days", verdict)
         self.assertIn("tone: 'unknown'", verdict)
 
