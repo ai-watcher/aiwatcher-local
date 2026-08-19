@@ -4,6 +4,10 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>AIWatcher Local</title>
+  <!-- Replaced at runtime with a state-coloured data: URI (see renderTabState).
+       A link element has to exist for that swap to have somewhere to land, and
+       the inline default keeps the page self-contained with no second request. -->
+  <link id="favicon" rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23070b11'/%3E%3Ccircle cx='16' cy='16' r='7' fill='%2378869a'/%3E%3C/svg%3E" />
   <style>@@INCLUDE:index.css@@</style>
 </head>
 <body>
@@ -34,6 +38,7 @@
     <div class="runtime-copy">
       <span id="watcherPill" class="cache-pill building">Watcher unknown</span>
       <span id="cacheStatus">Loading local index...</span>
+      <span id="freshness" class="freshness" aria-live="off"></span>
     </div>
     <button id="watcherCommandButton" class="btn-quiet" onclick="copyWatcherCommand()" hidden>Copy watcher command</button>
   </section>

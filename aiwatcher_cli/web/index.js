@@ -3012,7 +3012,132 @@ async function loadReport() {
     reportLoading = false;
   }
 }
+// ---------------------------------------------------------------------------
+// Live state.
+//
+// The dashboard is meant to sit open in a tab while you code, which means it
+// spends most of its life as a favicon and a truncated title behind other tabs.
+// So the tab is updated first and the page second.
+//
+// Context per turn only moves when a turn completes -- every thirty seconds to
+// several minutes in real work -- so polling faster than that just re-renders an
+// identical number. Browsers also throttle background timers to roughly one wake
+// a minute, and the background case is the case that matters here, so 60s is
+// chosen rather than inherited. Switching to the tab refreshes immediately:
+// without that, the first thing you see after switching is always up to a minute
+// old, which is exactly when being wrong is most expensive.
+// ---------------------------------------------------------------------------
+const REFRESH_VISIBLE_MS = 10000;
+const REFRESH_HIDDEN_MS = 60000;
+const REFRESH_CATCHUP_MS = 1800;   // first poll after the watcher starts rebuilding
+const REFRESH_CATCHUP_FACTOR = 1.5;
+
+const TAB_COLOURS = { critical: '#f2778f', warning: '#f2bf6b', healthy: '#43d9a3', idle: '#78869a' };
+
+let refreshTimer = null;
+let freshnessTimer = null;
+let loadInFlight = false;
+let lastLoadedAt = null;
+let catchupDelay = REFRESH_CATCHUP_MS;
+
+function scheduleRefresh(ms) {
+  window.clearTimeout(refreshTimer);
+  refreshTimer = window.setTimeout(refreshTick, ms);
+}
+
+function refreshTick() {
+  // A scheduled tick never stacks on a load that is still running -- it waits and
+  // tries again. User-initiated loads are not gated by this.
+  if (loadInFlight) { scheduleRefresh(REFRESH_CATCHUP_MS); return; }
+  load(false, false);
+}
+
+function nextRefreshDelay(data, forceRefresh) {
+  const idle = document.hidden ? REFRESH_HIDDEN_MS : REFRESH_VISIBLE_MS;
+  if (data && data.cache && data.cache.refreshing && !forceRefresh) {
+    // Poll quickly at first so a rebuild that finishes in a second or two shows
+    // up immediately, then back off to the idle cadence. A flat 1.8s here meant
+    // a long rebuild fired a request every 1.8s for as long as it ran.
+    const delay = Math.min(catchupDelay, idle);
+    catchupDelay = Math.min(catchupDelay * REFRESH_CATCHUP_FACTOR, idle);
+    return delay;
+  }
+  catchupDelay = REFRESH_CATCHUP_MS;
+  return idle;
+}
+
+function faviconFor(state) {
+  const colour = TAB_COLOURS[state] || TAB_COLOURS.idle;
+  const svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>"
+    + "<rect width='32' height='32' rx='7' fill='#070b11'/>"
+    + "<circle cx='16' cy='16' r='7' fill='" + colour + "'/></svg>";
+  return 'data:image/svg+xml,' + encodeURIComponent(svg);
+}
+
+function liveHealthCard(data) {
+  const cards = data.context_health || [];
+  return cards.find(card => card.charted_because_live) || null;
+}
+
+function tabStateFor(data) {
+  // Severity comes from the handoff bubble when there is one, because that is the
+  // same judgement the page itself leads with -- the tab must never disagree with
+  // the surface behind it.
+  const live = liveHealthCard(data);
+  const severity = (data.handoff_bubble && data.handoff_bubble.severity)
+    || (live && live.severity) || null;
+  if (severity === 'critical') return 'critical';
+  if (severity === 'warning' || severity === 'warn') return 'warning';
+  return live ? 'healthy' : 'idle';
+}
+
+function renderTabState(data) {
+  const state = tabStateFor(data);
+  const live = liveHealthCard(data);
+  const totals = data.totals || {};
+  let title;
+  if (live && live.latest_turn_tokens) {
+    const mark = state === 'critical' ? '⚠ ' : '';
+    title = mark + live.latest_turn_tokens + '/turn · AIWatcher';
+  } else if (totals.api_value_label) {
+    title = 'AIWatcher · ' + totals.api_value_label + ' ' + (totals.window_label || '');
+  } else {
+    title = 'AIWatcher Local';
+  }
+  document.title = title.trim();
+  const icon = document.getElementById('favicon');
+  if (icon) icon.setAttribute('href', faviconFor(state));
+}
+
+function freshnessLabel(millis) {
+  // Coarse buckets on purpose. A counter that ticks every second is motion in the
+  // corner of your eye, which is the thing an always-open tool must not be.
+  const seconds = Math.round(millis / 1000);
+  if (seconds < 10) return 'updated just now';
+  if (seconds < 60) return 'updated ' + (Math.floor(seconds / 10) * 10) + 's ago';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return 'updated ' + minutes + 'm ago';
+  return 'updated ' + Math.floor(minutes / 60) + 'h ago';
+}
+
+function renderFreshness() {
+  const node = document.getElementById('freshness');
+  if (!node) return;
+  if (!lastLoadedAt) { node.textContent = ''; return; }
+  node.textContent = freshnessLabel(Date.now() - lastLoadedAt);
+}
+
+function startLiveRefresh() {
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { scheduleRefresh(REFRESH_HIDDEN_MS); return; }
+    refreshTick();
+  });
+  window.clearInterval(freshnessTimer);
+  freshnessTimer = window.setInterval(renderFreshness, 5000);
+}
+
 async function load(resetDetail = true, forceRefresh = false) {
+  loadInFlight = true;
   const days = document.getElementById('days').value;
   const refreshButton = document.getElementById('refreshButton');
   const previousRefreshText = refreshButton ? refreshButton.textContent : '';
@@ -3030,6 +3155,10 @@ async function load(resetDetail = true, forceRefresh = false) {
       refreshButton.disabled = false;
       refreshButton.textContent = previousRefreshText || 'Refresh data';
     }
+    // Keep trying on the normal cadence: a dashboard that gives up after one
+    // failed poll looks identical to one showing current data.
+    loadInFlight = false;
+    scheduleRefresh(nextRefreshDelay(null, forceRefresh));
     return;
   }
   renderWatcher(data.watcher || null);
@@ -3169,12 +3298,15 @@ async function load(resetDetail = true, forceRefresh = false) {
     refreshButton.textContent = previousRefreshText || 'Refresh data';
   }
   if (resetDetail && document.getElementById('detailDrawer').classList.contains('open')) closeDrawer();
-  if (data.cache && data.cache.refreshing && !forceRefresh) {
-    window.setTimeout(() => load(false, false), 1800);
-  }
+  renderTabState(data);
+  lastLoadedAt = Date.now();
+  renderFreshness();
+  loadInFlight = false;
+  scheduleRefresh(nextRefreshDelay(data, forceRefresh));
 }
 document.addEventListener('keydown', event => { if (event.key === 'Escape') closeDrawer(); });
 (async () => {
+  startLiveRefresh();
   await load();
   const requestedView = new URLSearchParams(location.search).get('view');
   if (requestedView && ['today','prompt','sessions','projects','changes','receipts','insights','setup','coverage'].includes(requestedView)) {
