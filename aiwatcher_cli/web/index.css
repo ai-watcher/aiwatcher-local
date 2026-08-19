@@ -239,6 +239,24 @@
       color: #b6c2d2; font-size: 13px;
       white-space: nowrap;
     }
+    /* Nested under Watch: these are views within a section, not peers of it, so
+       they read as subordinate rather than taking the top level to eight items. */
+    .nav-sub {
+      min-height: 34px;
+      padding-left: 26px;
+      font-size: 12.5px;
+      color: var(--faint);
+    }
+    .nav-sub::before {
+      content: "";
+      position: absolute;
+      left: 14px;
+      width: 5px;
+      height: 1px;
+      background: var(--line-strong);
+    }
+    .nav-sub { position: relative; }
+    .nav-sub.active { color: white; }
     .nav-tab:hover { background: rgba(255,255,255,.035); border-color: rgba(148,163,184,.10); }
     .nav-tab.active {
       background:

@@ -47,6 +47,8 @@
     <button class="nav-tab active" data-view="today" onclick="showView('today')">Home</button>
     <button class="nav-tab" data-view="prompt" onclick="showView('prompt')">Plan / Control</button>
     <button class="nav-tab" data-view="sessions" onclick="showView('sessions')">Watch</button>
+    <button class="nav-tab nav-sub" data-view="projects" onclick="showView('projects')">Projects</button>
+    <button class="nav-tab nav-sub" data-view="changes" onclick="showView('changes')">Changes ledger</button>
     <button class="nav-tab" data-view="receipts" onclick="showView('receipts')">Prove</button>
     <button class="nav-tab" data-view="insights" onclick="showView('insights')">Improve</button>
     <button class="nav-tab" data-view="setup" onclick="showView('setup')">Settings</button>
@@ -204,10 +206,6 @@
       <div class="section-title">
         <div><h2>Work</h2><p>Search sessions, inspect projects, review changes, and continue prior local AI work. Prompt text is shown for your own review only, never uploaded.</p></div>
         <span class="pill">Local machine only</span>
-      </div>
-      <div class="actions" style="margin-bottom:12px">
-        <button class="btn-quiet" data-view="projects" onclick="showView('projects')">Projects</button>
-        <button class="btn-quiet" data-view="changes" onclick="showView('changes')">Changes ledger</button>
       </div>
       <div class="session-filters">
         <input id="sessionSearch" type="text" placeholder="Search project, tool, model, session id, or a file/topic keyword" oninput="debounceSessionSearch()">

@@ -189,5 +189,48 @@ class AmbientSurfaceTest(unittest.TestCase):
                 self.assertIn(rule, self.css)
 
 
+class NavigationTest(unittest.TestCase):
+    """Three views used to be reachable only from buttons inside other pages, and
+    the sidebar highlighted a section you were not in when you landed on them."""
+
+    # Coverage is reached from inside Settings and its content also lives there,
+    # so it deliberately borrows that highlight rather than owning an entry.
+    BORROWS_HIGHLIGHT = {"coverage": "setup"}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.views = set(re.findall(r'<section id="view-([\w-]+)"', cls.html))
+        nav = re.search(r'<nav class="product-nav".*?</nav>', cls.html, re.S).group(0)
+        cls.nav_views = set(re.findall(r'data-view="([\w-]+)"', nav))
+
+    def test_every_view_is_reachable_from_the_nav(self):
+        unreachable = self.views - self.nav_views - set(self.BORROWS_HIGHLIGHT)
+        self.assertEqual(
+            unreachable, set(),
+            "these views have no nav entry, so they are reachable only from "
+            "buttons inside other pages: %s" % sorted(unreachable))
+
+    def test_nav_entries_all_point_at_real_views(self):
+        self.assertEqual(self.nav_views - self.views, set())
+
+    def test_the_highlight_does_not_lie(self):
+        # Anything remapped here highlights a section other than the one you are
+        # in; only the documented exception may do that.
+        remap = re.search(r"const activeView = \(\{([^}]*)\}\)", self.js).group(1)
+        remapped = set(re.findall(r"(\w+):", remap))
+        self.assertEqual(remapped, set(self.BORROWS_HIGHLIGHT))
+
+    def test_subviews_are_nested_not_promoted(self):
+        # The top level stays six verb-named destinations; Projects and the
+        # Changes ledger read as views within Watch.
+        for view in ("projects", "changes"):
+            with self.subTest(view=view):
+                self.assertRegex(
+                    self.html,
+                    r'class="nav-tab nav-sub" data-view="%s"' % view)
+
+
 if __name__ == "__main__":
     unittest.main()

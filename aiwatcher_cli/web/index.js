@@ -2893,7 +2893,10 @@ function showView(view) {
   // animating a thousand pixels of a page the user never asked to see is worse
   // than simply being there.
   window.scrollTo(0, 0);
-  const activeView = ({ projects: 'sessions', changes: 'sessions', coverage: 'setup' })[view] || view;
+  // Projects and the Changes ledger have their own nav entries now, so they
+  // highlight themselves. Coverage is still reached from inside Settings, where
+  // its content also lives, so it keeps borrowing that highlight.
+  const activeView = ({ coverage: 'setup' })[view] || view;
   document.querySelectorAll('.nav-tab').forEach(node => {
     node.classList.toggle('active', node.dataset.view === activeView);
   });
