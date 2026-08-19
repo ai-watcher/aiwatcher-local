@@ -400,13 +400,6 @@ function confidenceLabel(s) {
   if (s.evidence_captured) return { label: 'Observed evidence', tone: 'observed' };
   return { label: 'Local metadata', tone: 'unknown' };
 }
-function contextPressure(s) {
-  const tokens = Number(s.tokens_value || s.tokens || 0);
-  if (!tokens) return { width: 8, label: 'No token pressure measured', tone: 'unknown' };
-  const width = Math.max(8, Math.min(100, Math.round(tokens / 500000 * 100)));
-  const label = tokens >= 500000 ? 'Critical context pressure' : tokens >= 150000 ? 'Elevated context pressure' : 'Normal context pressure';
-  return { width, label, tone: tokens >= 500000 ? 'verified' : tokens >= 150000 ? 'inferred' : 'observed' };
-}
 function runtimeReturnPanel(runtime, sourcePath) {
   runtime = runtime || {};
   const available = !!runtime.available;
@@ -549,9 +542,18 @@ function renderVerdict(s) {
   const subtitle = s.outcome
     ? 'Saved locally. Use the recommended action above if you are continuing from this session.'
     : 'Confirm the outcome, then use the expensive asks below to improve the next run.';
+  // The bullets are the session's own numbers read back as reasons -- "$71.34
+  // API-equivalent value is high", "99.5M tokens indicates heavy context
+  // pressure" -- and every one of those figures is already on screen above them.
+  // The verdict itself is the useful part, so it stays open and they fold.
+  const reasons = verdict.bullets.length
+    ? `<details class="aiw-details"><summary>Why this verdict (${esc(verdict.bullets.length)})</summary>
+        <div class="details-body"><ul>${verdict.bullets.map(item => `<li>${esc(item)}</li>`).join('')}</ul></div>
+      </details>`
+    : '';
   return `<div class="verdict-card ${esc(verdict.tone)}"><h3>${esc(verdict.title)}</h3>
     <p>${esc(subtitle)}</p>
-    <ul>${verdict.bullets.map(item => `<li>${esc(item)}</li>`).join('')}</ul>
+    ${reasons}
   </div>`;
 }
 function renderEvidenceRail(s, costliest, meaningfulEvents) {
@@ -1836,18 +1838,16 @@ function renderSessionHero(s) {
   const runtime = s.runtime_attachment || {};
   const outcomeLabel = s.outcome ? `Outcome: ${s.outcome}` : 'Outcome not marked';
   const evidence = confidenceLabel(s);
-  const pressure = contextPressure(s);
   // The hero used to restate the next step, the API-equivalent value and the
   // return target, all of which have their own section immediately below it --
   // three-quarters of a screen of letterhead before the drawer said anything.
   // What is left is the identity and the one number that varies: context pressure.
   return `<section class="session-hero">
     <h2 class="session-title">${esc(s.project_short || s.project || 'Session')}</h2>
-    <p class="session-meta">${esc(s.tool || 'unknown tool')} · ${esc(s.model || 'unknown model')} · ${esc(s.api_value || '—')}</p>
+    <p class="session-meta">${esc(s.tool || 'unknown tool')} · ${esc(s.model || 'unknown model')}</p>
     ${renderIdentityStrip(s, runtime, s.source_path)}
     <div class="session-hero-pressure">
-      <span>Context pressure</span><strong>${esc(s.tokens_label || '—')}</strong>
-      <div class="session-meter"><div class="session-meter-track"><div class="session-meter-fill" style="--meter-width:${esc(pressure.width)}%"></div></div><div class="session-meter-label"><span>${esc(pressure.label)}</span></div></div>
+      <span>Tokens</span><strong>${esc(s.tokens_label || '—')}</strong>
     </div>
     <div class="session-hero-status">${sessionStatePill(s.state)}<span class="pill">${esc(outcomeLabel)}</span><span class="confidence-chip ${esc(evidence.tone)}">${esc(evidence.label)}</span></div>
   </section>`;

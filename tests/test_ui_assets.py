@@ -6,6 +6,8 @@ import unittest
 from aiwatcher_cli import ui
 
 
+NEXT_FUNCTION = chr(10) + "function "
+
 WEB_FILES = (
     "index.html",
     "index.css",
@@ -331,6 +333,34 @@ class SessionDrawerTest(unittest.TestCase):
         self.assertNotIn("session-hero-grid", hero)
         self.assertNotIn("Next step", hero)
         self.assertIn("session-hero-pressure", hero)
+
+    def test_the_hero_number_is_named_for_what_it_measures(self):
+        # It was labelled "Context pressure" while carrying the session's
+        # cumulative token total, and the meter beside it compared that total
+        # against a per-turn threshold -- so it read "critical" and sat full for
+        # every real session. Context pressure means tokens per turn elsewhere in
+        # the product, and the session payload has no per-turn figure.
+        hero = self.js[self.js.index("function renderSessionHero("):]
+        hero = hero[:hero.index(NEXT_FUNCTION)]
+        self.assertIn("<span>Tokens</span>", hero)
+        self.assertNotIn("Context pressure", hero)
+        self.assertNotIn("session-meter", hero)
+        self.assertNotIn("function contextPressure(", self.js)
+
+    def test_the_session_value_is_stated_once(self):
+        # It appeared in the hero, the action card and the verdict bullets --
+        # three times above the fold, all of the same figure.
+        hero = self.js[self.js.index("function renderSessionHero("):]
+        hero = hero[:hero.index(NEXT_FUNCTION)]
+        self.assertNotIn("s.api_value", hero)
+
+    def test_the_verdict_keeps_its_conclusion_open(self):
+        # The bullets read the session's own numbers back as reasons, so they
+        # fold; the verdict and its actions are the part worth reading.
+        verdict = self.js[self.js.index("function renderVerdict("):]
+        verdict = verdict[:verdict.index(NEXT_FUNCTION)]
+        self.assertIn("<summary>Why this verdict", verdict)
+        self.assertIn("esc(verdict.title)", verdict)
 
     def test_nothing_is_only_reachable_by_scrolling_past_it(self):
         # Collapsing must not become hiding: every summary has a body.

@@ -708,7 +708,6 @@
       color: var(--text);
       font-variant-numeric: tabular-nums;
     }
-    .session-hero-pressure .session-meter { flex: 1 1 190px; min-width: 150px; }
     .session-hero-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 14px 0 12px; }
     .session-hero-fact {
       border: 1px solid var(--drawer-line);
