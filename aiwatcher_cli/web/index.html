@@ -61,90 +61,10 @@
          starts or ends -- peripheral vision notices movement, not content. -->
     <section id="ambient" class="ambient" aria-live="polite" hidden></section>
 
-    <section id="handoffBubble" class="card handoff-bubble" style="margin-bottom:14px" hidden></section>
-
-    <section class="card home-command-card" style="margin-bottom:14px">
-      <div class="section-title">
-        <div><h2>What needs attention</h2><p>The few local actions most likely to save context, reduce rework, or improve proof.</p></div>
-        <button class="btn-quiet" onclick="showView('coverage')">Check coverage</button>
-      </div>
-      <div id="actionQueue" class="action-queue"></div>
-    </section>
-
-    <section class="grid two" style="margin-bottom:14px">
-      <div class="card hero-card">
-        <div class="section-title"><div><h2>Latest AI work</h2><p>Your most recent local session and its outcome.</p></div></div>
-        <div id="latestSession"></div>
-      </div>
-      <div class="card attention-card">
-        <div class="section-title"><div><h2>One thing worth changing</h2><p>The clearest next improvement from local evidence.</p></div></div>
-        <div id="todayRecommendation"></div>
-      </div>
-    </section>
-
-    <section class="grid kpis">
-      <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub">Value per useful change: <span id="costPerUseful">-</span></div><div class="sub" id="costPerSurvivingRow" hidden>Cost per surviving line: <span id="costPerSurviving">-</span></div><div class="metric-spark" data-tile-spark="usefulOutcomes" hidden></div></div>
-      <div class="card metric-card metric-amber"><div class="label">Preflight decisions</div><div class="value" id="preflightDecisions">-</div><div class="sub"><span id="windowLabel">-</span></div><div class="metric-spark" data-tile-spark="preflightDecisions" hidden></div></div>
-      <div class="card metric-card metric-blue"><div class="label">Sessions observed</div><div class="value" id="sessions">-</div><div class="sub">This machine only</div><div class="metric-spark" data-tile-spark="sessions" hidden></div></div>
-      <div class="card metric-card metric-neutral"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div><div class="metric-spark" data-tile-spark="apiValue" hidden></div></div>
-    </section>
-
-    <section class="grid two" style="margin:14px 0">
-      <div class="card">
-        <div class="section-title"><div><h2>Context health</h2><p>Where a fresh start or narrower prompt would help.</p></div><button class="btn-quiet" onclick="showView('sessions')">Open Watch</button></div>
-        <div id="contextHealth"></div>
-      </div>
-      <div class="card">
-        <div class="section-title"><div><h2>Proof snapshot</h2><p>Latest gate and Fresh Start receipts.</p></div><button class="btn-quiet" onclick="showView('receipts')">Open Prove</button></div>
-        <div id="latestIntervention"></div>
-        <div id="latestHandoffDecision" style="margin-top:12px"></div>
-      </div>
-    </section>
-
-    <section class="card" style="margin-bottom:14px">
-      <div class="section-title"><div><h2>Spend leakage</h2><p>Exploration that has not landed in commits yet.</p></div><button class="btn-quiet" onclick="showView('insights')">Open Improve</button></div>
-      <div id="unbanked"></div>
-    </section>
-
-    <section class="grid two">
-      <div class="card">
-        <div class="section-title"><div><h2>Projects Driving AI Usage</h2><p>Measured in tokens, so plan-based tools still count. Click a project to inspect local sessions, models, and tools.</p></div></div>
-        <div class="composition" id="projectsComposition" hidden>
-          <div class="pie-host" data-pie="projects"></div>
-          <div class="composition-legend" id="projectsCompositionLegend"></div>
-        </div>
-        <div id="projects"></div>
-      </div>
-      <div class="card">
-        <div class="section-title"><div><h2>Recent sessions</h2><p>Review work and record whether it was useful.</p></div></div>
-        <div class="table-wrap"><table>
-          <thead><tr><th>Tool</th><th>Project</th><th>Tokens</th><th></th></tr></thead>
-          <tbody id="recent"></tbody>
-        </table></div>
-      </div>
-    </section>
-
-    <section class="grid two" style="margin-top:14px">
-      <div class="card">
-        <h2>Models and Tools</h2>
-        <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 4px">By model</h3>
-        <div id="models"></div>
-        <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:14px 0 4px">By tool</h3>
-        <div class="composition" id="toolsComposition" hidden>
-          <div class="pie-host" data-pie="tools"></div>
-          <div class="composition-legend" id="toolsCompositionLegend"></div>
-        </div>
-        <div id="tools"></div>
-        <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:16px 0 2px">Model mix within each tool</h3>
-        <p style="font-size:.7rem;color:var(--faint);margin:0 0 8px">Each bar is that tool's own 100%, so size means proportion, not volume — the token total is on the right.</p>
-        <div id="toolModels" hidden></div>
-      </div>
-      <div class="card">
-        <div class="section-title"><div><h2>Privacy at a glance</h2><p>Your local trust boundary stays visible.</p></div></div>
-        <div class="privacy-grid" id="privacy"></div>
-        <div id="insights" hidden></div>
-      </div>
-    </section>
+    <!-- Receipt only, and hidden until you act. The alert this element used to
+         carry was the same critical-context message the ambient surface now
+         states once; what remains is the proof shown after copying a brief. -->
+    <section id="handoffBubble" class="card handoff-bubble" style="margin-top:14px" hidden></section>
   </section>
 
   <section id="view-prompt" class="view" hidden>
@@ -266,6 +186,10 @@
   </section>
 
   <section id="view-receipts" class="view" hidden>
+    <section class="grid kpis" style="margin-bottom:14px">
+      <div class="card metric-card metric-amber"><div class="label">Preflight decisions</div><div class="value" id="preflightDecisions">-</div><div class="sub"><span id="windowLabel">-</span></div><div class="metric-spark" data-tile-spark="preflightDecisions" hidden></div></div>
+    </section>
+
     <div class="card" style="margin-bottom:14px">
       <div class="section-title">
         <div><h2>Fresh Start receipts</h2><p>When AIWatcher suggested a fresh session, what you chose, and whether a follow-up session was observed.</p></div>
@@ -316,6 +240,19 @@
       Read-only local scan &middot; no LLM calls &middot; no source or prompt content in summaries &middot;
       nothing leaves this machine unless you connect Cloud.
     </p>
+    <section class="card" style="margin-top:14px">
+      <div class="section-title"><div><h2>Models and Tools</h2><p>Where the spend went, by model and by tool.</p></div></div>
+        <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 4px">By model</h3>
+        <div id="models"></div>
+        <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:14px 0 4px">By tool</h3>
+        <div class="composition" id="toolsComposition" hidden>
+          <div class="pie-host" data-pie="tools"></div>
+          <div class="composition-legend" id="toolsCompositionLegend"></div>
+          <div id="tools"></div>
+        <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:16px 0 2px">Model mix within each tool</h3>
+        <p style="font-size:.7rem;color:var(--faint);margin:0 0 8px">Each bar is that tool's own 100%, so size means proportion, not volume &mdash; the token total is on the right.</p>
+        <div id="toolModels" hidden></div>
+    </section>
   </section>
 
   <section id="view-coverage" class="view" hidden>
@@ -329,6 +266,11 @@
   </section>
 
   <section id="view-setup" class="view" hidden>
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title"><div><h2>Privacy at a glance</h2><p>Your local trust boundary stays visible.</p></div></div>
+      <div class="privacy-grid" id="privacy"></div>
+    </section>
+
     <div class="card">
       <div class="section-title">
         <div><h2>Settings</h2><p>Setup, coverage, privacy, and local companion behavior.</p></div>

@@ -232,5 +232,70 @@ class NavigationTest(unittest.TestCase):
                     r'class="nav-tab nav-sub" data-view="%s"' % view)
 
 
+class TrimmedHomeTest(unittest.TestCase):
+    """Home was nine sections and 5.2 screens, and stated the same thing about
+    context pressure in five of them. It is now the ambient surface, plus a
+    receipt slot that stays hidden until you act."""
+
+    # Each of these lived on Home and now lives somewhere it is not repeated.
+    MOVED = {
+        "Models and Tools": "view-insights",
+        "Privacy at a glance": "view-setup",
+        "Preflight decisions": "view-receipts",
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+        cls.html = html
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        start = html.index('<section id="view-today"')
+        cls.home = html[start:html.index('<section id="view-prompt"')]
+
+    def test_home_is_the_ambient_surface(self):
+        self.assertIn('id="ambient"', self.home)
+        # The bubble is a receipt slot now: hidden until a Fresh Start is copied,
+        # never an alert. The alert it used to carry is what the ambient surface
+        # says once instead of five times.
+        self.assertIn('id="handoffBubble"', self.home)
+        self.assertIn("hidden", self.home)
+        self.assertNotIn("renderHandoffBubble", self.js)
+
+    def test_the_cut_sections_stay_cut(self):
+        for heading in ("What needs attention", "Latest AI work",
+                        "One thing worth changing", "Context health",
+                        "Proof snapshot", "Spend leakage",
+                        "Projects Driving AI Usage", "Recent sessions"):
+            with self.subTest(section=heading):
+                self.assertNotIn(heading, self.home)
+
+    def test_moved_sections_landed_inside_their_new_view(self):
+        # A section spliced between two views renders on every tab. This asserts
+        # each one is inside the view that now owns it.
+        for heading, view in self.MOVED.items():
+            with self.subTest(section=heading):
+                start = self.html.index('<section id="%s"' % view)
+                nxt = self.html.find('<section id="view-', start + 1)
+                end = nxt if nxt != -1 else len(self.html)   # view-setup is last
+                self.assertIn(heading, self.html[start:end])
+
+    def test_moved_sections_are_not_left_on_home(self):
+        for heading in self.MOVED:
+            with self.subTest(section=heading):
+                self.assertNotIn(heading, self.home)
+
+    def test_no_render_targets_a_deleted_element(self):
+        # load() writes by id; a lookup with no element throws and stops the whole
+        # dashboard rendering, which is the way this change could break quietly.
+        built_at_runtime = {
+            "evidencePanel", "handoffAcceptance", "handoffBrief", "handoffConstraints",
+            "handoffObjective", "handoffSources", "handoffStatus", "handoffType",
+            "optimizeReward", "outcomePanel", "promptBrief", "todayDigest",
+        }
+        ids = set(re.findall(r'id="([\w-]+)"', self.html))
+        looked_up = set(re.findall(r"""getElementById\(['"]([\w-]+)['"]\)""", self.js))
+        self.assertEqual(sorted(looked_up - ids - built_at_runtime), [])
+
+
 if __name__ == "__main__":
     unittest.main()

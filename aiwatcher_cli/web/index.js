@@ -53,99 +53,6 @@ function actionRow(item) {
     <div class="actions">${(item.actions || []).map(action => `<button class="${esc(action.primary ? 'btn-primary' : 'btn-quiet')}" onclick="${esc(action.onclick)}">${esc(action.label)}</button>`).join('')}</div>
   </div>`;
 }
-function buildActionQueue(data) {
-  const items = [];
-  const bubble = data.handoff_bubble;
-  if (bubble && bubble.session_id) {
-    items.push({
-      severity: bubble.severity === 'critical' ? 'critical' : 'high',
-      title: bubble.title || 'Fresh Start recommended',
-      body: bubble.body || bubble.reason || 'Context pressure is elevated in a local session.',
-      evidence: 'observed local session',
-      meta: [
-        bubble.expected_saved_context_label ? `~${bubble.expected_saved_context_label} context at risk` : 'proof pending',
-        bubble.tool || 'unknown tool',
-        bubble.project || 'unknown project',
-      ],
-      actions: [
-        { label: bubble.primary_label || 'Build Fresh Start brief', primary: true, onclick: `openHandoff(${jsArg(bubble.session_id)})` },
-        { label: 'Inspect session', onclick: `selectSession(${jsArg(bubble.session_id)})` },
-      ],
-    });
-  }
-  const healthRows = (data.context_health || []).filter(row => !(bubble && row.session_id === bubble.session_id));
-  if (healthRows.length) {
-    const row = healthRows[0];
-    const more = healthRows.length > 1 ? `${healthRows.length - 1} more session${healthRows.length === 2 ? '' : 's'}` : '';
-    items.push({
-      severity: row.severity === 'critical' ? 'critical' : 'high',
-      title: row.action && row.action.label ? row.action.label : 'Review context health',
-      body: `${row.recommendation || row.action && row.action.reason || 'AIWatcher found context or pace pressure.'}${more ? ` ${more} also need review in Watch.` : ''}`,
-      evidence: row.bloat_measurable ? 'measured replay' : 'observed signal',
-      meta: [row.project, row.tool, row.latest_turn_tokens ? `${row.latest_turn_tokens} latest turn` : '', row.bloat_label ? `${row.bloat_label} replay` : '', more].filter(Boolean),
-      actions: [
-        { label: row.can_handoff ? 'Build Fresh Start brief' : 'Review session', primary: true, onclick: row.can_handoff ? `openHandoff(${jsArg(row.session_id)})` : `selectSession(${jsArg(row.session_id)})` },
-        { label: 'Inspect evidence', onclick: `selectSession(${jsArg(row.session_id)})` },
-        ...(more ? [{ label: 'View all in Watch', onclick: "showView('sessions')" }] : []),
-      ],
-    });
-  }
-  (data.handoff_decisions || []).filter(decision => !decision.next_session_id).slice(0, 2).forEach(decision => {
-    const sessionId = decision.source_session_id || decision.session_id || '';
-    items.push({
-      severity: 'medium',
-      title: 'Fresh Start proof pending',
-      body: decision.proof_reason || 'A brief was copied, but AIWatcher has not linked a follow-up session yet.',
-      evidence: 'receipt pending',
-      meta: [decision.expected_saved_context_label ? `~${decision.expected_saved_context_label} context at risk` : 'no savings claim yet', sessionId ? `source ${shortSessionId(sessionId)}` : 'source unknown'].filter(Boolean),
-      actions: [
-        { label: sessionId ? 'Inspect source' : 'View Evidence', primary: false, onclick: sessionId ? `selectSession(${jsArg(sessionId)})` : "showView('receipts')" },
-        { label: 'View receipts', primary: true, onclick: "showView('receipts')" },
-      ],
-    });
-  });
-  (data.recent_sessions || []).filter(s => !s.outcome && ['useful', 'needs_review', 'churned'].includes(s.inferred_outcome)).slice(0, 3).forEach(s => {
-    items.push({
-      severity: s.inferred_outcome === 'churned' ? 'high' : 'medium',
-      title: s.inferred_outcome === 'useful' ? 'Confirm likely useful work' : s.inferred_outcome === 'churned' ? 'Review rewritten work' : 'Review unconfirmed outcome',
-      body: 'AIWatcher found local code/test evidence, but your outcome confirmation is what makes value metrics trustworthy.',
-      evidence: `inferred: ${s.inferred_outcome}`,
-      meta: [s.project, s.tool, s.api_value || s.tokens],
-      actions: [{ label: 'Mark outcome', primary: true, onclick: `selectSession(${jsArg(s.session_id)})` }],
-    });
-  });
-  const coverageGap = (data.coverage || []).find(row => row.detected && ['unverified', 'unsupported'].includes(row.status));
-  if (coverageGap) {
-    items.push({
-      severity: coverageGap.status === 'unsupported' ? 'medium' : 'high',
-      title: `Verify ${coverageGap.label} coverage`,
-      body: coverageGap.action || 'Coverage is not automatic yet. Verify whether this surface is protected, companion-only, or history-only.',
-      evidence: 'coverage state',
-      meta: [coverageGap.status_label, coverageGap.history, coverageGap.automatic_gate],
-      actions: [{ label: 'Open Settings', primary: true, onclick: "showView('setup')" }],
-    });
-  }
-  if (!items.length && data.insights && data.insights.length) {
-    const insight = data.insights[0];
-    items.push({
-      severity: insight.severity || 'low',
-      title: insight.title,
-      body: insight.body,
-      evidence: insight.impact_label ? 'cost signal' : 'local signal',
-      meta: [insight.impact_label || 'no urgent intervention'],
-      actions: insight.session_id ? [{ label: 'Inspect session', primary: true, onclick: `selectSession(${jsArg(insight.session_id)})` }] : [{ label: 'Open Spend', primary: true, onclick: "showView('insights')" }],
-    });
-  }
-  if (!items.length) {
-    return `<div class="empty">No action needed right now. AIWatcher will stay quiet until it has local evidence worth interrupting you for.</div>`;
-  }
-  const order = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
-  const topItems = items.sort((a, b) => (order[a.severity] ?? 4) - (order[b.severity] ?? 4)).slice(0, 3);
-  const footer = items.length > topItems.length
-    ? `<div class="copy-row"><button class="btn-quiet" onclick="showView('sessions')">View more in Watch</button><button class="btn-quiet" onclick="showView('receipts')">Review receipts</button></div>`
-    : '';
-  return topItems.map(actionRow).join('') + footer;
-}
 function recommendationAction(insight) {
   const title = String((insight || {}).title || '').toLowerCase();
   const body = String((insight || {}).body || '').toLowerCase();
@@ -155,73 +62,6 @@ function recommendationAction(insight) {
   if (title.includes('context') || body.includes('fresh') || body.includes('compact')) return { label: 'Show me how', onclick: "showView('sessions')" };
   if (title.includes('cursor') || title.includes('ollama') || title.includes('coverage')) return { label: 'Check coverage', onclick: "showView('coverage')" };
   return { label: 'Show me how', onclick: "showView('insights')" };
-}
-function renderHomeRecommendation(insight) {
-  if (!insight) {
-    return `<div class="insight"><strong>Keep the next task tight</strong><p>Nothing urgent stood out. Define the next checkpoint before sending a broad prompt.</p>
-      <div class="copy-row"><button class="btn-primary" onclick="showView('prompt')">Plan next prompt</button></div></div>`;
-  }
-  const action = recommendationAction(insight);
-  return `<div class="insight"><strong>${esc(insight.title)}</strong><p>${esc(insight.body)}</p>
-    <div class="copy-row"><button class="btn-primary" onclick="${esc(action.onclick)}">${esc(action.label)}</button><button class="btn-quiet" onclick="showView('insights')">View evidence</button></div></div>`;
-}
-function renderHomeContextHealth(rows, status = 'ready') {
-  if (status === 'pending') return '<div class="loading">Checking context health...</div>';
-  if (!rows.length) return '<div class="empty">No context pressure right now. AIWatcher will nudge when a fresh start or narrower prompt is worth it.</div>';
-  const row = rows[0];
-  // Home is the "what now" surface, so it leads with how long you have rather
-  // than how heavy the session is. "Heavy" describes a state; a deadline is the
-  // only form of this anyone acts on, and the full card is two tabs away.
-  const verdict = runwayVerdict(row.chart);
-  const runway = verdict
-    ? `<div class="home-runway ${esc(verdict.severity)}">
-         <div class="home-runway-text">
-           <strong>${esc(verdict.headline)}</strong>
-           <span>${esc(verdict.detail)}</span>
-         </div>
-         <div class="home-runway-spark" data-runway-mini="${esc(row.session_id)}"></div>
-       </div>`
-    : '';
-  return `<div class="session-summary">
-    <div class="session-title">${esc(row.project)}</div>
-    <div class="session-meta">${esc(row.tool)} · ${esc(row.latest_turn_tokens || 'unknown')} latest turn · ${esc(row.severity)}</div>
-    ${runway}
-    <p style="margin-top:8px">${esc(row.recommendation || 'Review this session before continuing.')}</p>
-    <div class="pill-row"><span class="pill">${esc(row.bloat_label ? row.bloat_label + ' replay' : 'observed signal')}</span>${rows.length > 1 ? `<span class="pill">${esc(rows.length - 1)} more</span>` : ''}</div>
-    <div class="copy-row">${row.can_handoff ? `<button class="btn-primary" onclick="openHandoff(${jsArg(row.session_id)})">Build Fresh Start brief</button>` : ''}<button class="btn-quiet" onclick="selectSession(${jsArg(row.session_id)})">Inspect session</button></div>
-  </div>`;
-}
-function renderHomeReceiptSummary(receipt) {
-  if (!receipt) return '<div class="empty">No prompt intervention recorded in this window.</div>';
-  const predicted = receipt.predicted && receipt.predicted.available ? receipt.predicted.api_value_label || receipt.predicted.tokens_label : '';
-  return `<div class="session-summary">
-    <div class="label">Latest gate</div>
-    <div class="session-title">${esc(receipt.decision_label)}</div>
-    <div class="session-meta">${esc(receipt.tool)} · ${esc(receipt.project)} · ${esc(dateLabel(receipt.created_at))}</div>
-    <div class="pill-row"><span class="pill">${esc(receipt.original_risk || 'risk')} · ${esc(receipt.original_score ?? '—')}</span>${predicted ? `<span class="pill">predicted ${esc(predicted)}</span>` : ''}</div>
-    <div class="copy-row"><button class="btn-quiet" onclick="openReceipt('${esc(receipt.id)}')">Review receipt</button></div>
-  </div>`;
-}
-function renderHomeHandoffSummary(decisions) {
-  const decision = (decisions || [])[0];
-  if (!decision) return '<div class="empty">No Fresh Start receipt yet.</div>';
-  return `<div class="session-summary">
-    <div class="label">Latest Fresh Start</div>
-    <div class="session-title">${esc(handoffDecisionLabel(decision.decision))}</div>
-    <div class="session-meta">${esc(dateLabel(decision.created_at))} · ${esc(decision.proof_status || 'Proof pending')}</div>
-    <p style="margin-top:8px">${esc(decision.proof_reason || 'AIWatcher has not linked a follow-up session yet.')}</p>
-    <div class="copy-row"><button class="btn-quiet" onclick="showView('receipts')">View receipt</button>${decision.source_session_id ? `<button class="btn-quiet" onclick="selectSession('${esc(decision.source_session_id)}')">Inspect source</button>` : ''}</div>
-  </div>`;
-}
-function renderLatestReceipt(receipt) {
-  if (!receipt) return '<div class="empty">No prompt intervention recorded in this window.</div>';
-  return `<div class="receipt-summary"><div>
-    <div class="session-title">${esc(receipt.decision_label)}</div>
-    <div class="session-meta">${esc(receipt.tool)} · ${esc(receipt.project)} · ${esc(dateLabel(receipt.created_at))}</div>
-    ${riskFlow(receipt)}
-    ${predictedStats(receipt)}
-    <div class="pill-row"><span class="pill">${esc(receipt.session_status)}</span>${outcomePill(receipt.outcome)}</div>
-  </div><button class="btn-primary" onclick="openReceipt('${esc(receipt.id)}')">Review receipt</button></div>`;
 }
 function renderReceiptRows(receipts) {
   if (!receipts.length) return '<tr><td colspan="6"><div class="empty">No interventions recorded in this window.</div></td></tr>';
@@ -242,40 +82,6 @@ function handoffDecisionLabel(value) {
     dismissed: 'Dismissed'
   };
   return labels[value] || value || 'unknown';
-}
-function renderLatestHandoffDecision(decisions) {
-  const decision = (decisions || [])[0];
-  if (!decision) return '<div class="empty">No Fresh Start decisions recorded yet.</div>';
-  const saved = decision.expected_saved_context_label
-    ? `<span class="pill">~${esc(decision.expected_saved_context_label)} expected context at risk</span>`
-    : '';
-  const usage = decision.next_usage
-    ? `<span class="pill">${esc(decision.next_usage.tokens_label)} next-session tokens</span><span class="pill">${esc(decision.next_usage.api_value_label)} next-session value</span><span class="pill">${esc(decision.next_usage.model_calls)} model calls</span>`
-    : '';
-  const outcome = decision.outcome || decision.inferred_outcome
-    ? `<span class="pill">${esc(decision.outcome ? `outcome: ${decision.outcome}` : `evidence: ${decision.inferred_outcome}`)}</span>`
-    : '';
-  const observed = decision.observed_followup
-    ? `<span class="pill">${esc(decision.observed_followup.source_tokens_label)} → ${esc(decision.observed_followup.next_tokens_label)} tokens</span><span class="pill">${esc(decision.observed_followup.source_api_value_label)} → ${esc(decision.observed_followup.next_api_value_label)}</span><span class="pill">${esc(decision.observed_followup.label)}</span>`
-    : '';
-  const evidence = decision.proof_evidence
-    ? `<span class="pill">${esc(decision.proof_evidence.label)} evidence</span><span class="pill">${esc(decision.proof_evidence.commits)} commits</span><span class="pill">${esc(decision.proof_evidence.tests)} tests</span>`
-    : '';
-  const observedNote = decision.observed_followup
-    ? `<p class="receipt-note">${esc(decision.observed_followup.basis)}</p>`
-    : `<p class="receipt-note">Proof pending means the brief was copied, but no follow-up session has been linked yet. AIWatcher records expected context at risk, not saved tokens.</p>`;
-  const perCall = decision.observed_followup
-    ? `<p class="receipt-note">Per model call: ${esc(decision.observed_followup.source_tokens_per_model_call_label)} tokens / ${esc(decision.observed_followup.source_cost_per_model_call_label)} source → ${esc(decision.observed_followup.next_tokens_per_model_call_label)} tokens / ${esc(decision.observed_followup.next_cost_per_model_call_label)} follow-up.</p>`
-    : '';
-  return `<div class="receipt-summary"><div>
-    <div class="session-title">${esc(handoffDecisionLabel(decision.decision))}</div>
-    <div class="session-meta">${esc(dateLabel(decision.created_at))} · source ${esc(decision.source_session_id || decision.session_id || 'unknown')}${decision.next_session_id ? ` → next ${esc(decision.next_session_id)}` : ''}</div>
-    <p>${esc(decision.reason || 'AIWatcher recommended a Fresh Start because local context health crossed a threshold.')}</p>
-    <p class="receipt-note"><strong>${esc(decision.proof_status || 'Proof pending')}</strong> · ${esc(decision.proof_reason || 'AIWatcher has not observed a follow-up session yet.')}</p>
-    ${observedNote}
-    ${perCall}
-    <div class="pill-row"><span class="pill">Fresh Start receipt</span>${saved}${usage}${outcome}${observed}${evidence}</div>
-  </div>${decision.next_session_id ? `<button class="btn-primary" onclick="selectSession('${esc(decision.next_session_id)}')">Inspect next session</button>` : decision.source_session_id ? `<button class="btn-quiet" onclick="selectSession('${esc(decision.source_session_id)}')">Inspect source</button>` : ''}</div>`;
 }
 function renderHandoffDecisionRows(decisions) {
   if (!decisions.length) return '<tr><td colspan="6"><div class="empty">No Fresh Start receipts recorded yet.</div></td></tr>';
@@ -1054,20 +860,6 @@ async function openHandoff(sessionId, target = 'generic', includePrompt = false,
   }
   node.innerHTML = renderHandoff(capsule);
 }
-async function copyHandoffFromBubble(sessionId) {
-  const res = await fetch(`/api/handoff-basic?id=${encodeURIComponent(sessionId)}&target=generic`);
-  const capsule = await res.json();
-  if (capsule.error) {
-    showToast(capsule.error, 'error');
-    return;
-  }
-  const copied = await copyText(capsule.next_brief || '', 'Fresh Start brief copied — paste it into a fresh AI chat');
-  if (copied) {
-    const bubble = handoffDecisionBubble(sessionId);
-    await recordHandoffDecision(bubble, 'copy_handoff');
-    renderHandoffCopied(bubble, sessionId);
-  }
-}
 function handoffDecisionBubble(sessionId) {
   const current = window.currentHandoffBubble || {};
   if (current.session_id === sessionId) return current;
@@ -1121,11 +913,6 @@ async function startFreshFromBubble(sessionId) {
   }
   renderHandoffCopied(bubble, sessionId);
 }
-async function continueFromBubble() {
-  if (window.currentHandoffBubble) await recordHandoffDecision(window.currentHandoffBubble, 'continue_here');
-  document.getElementById('handoffBubble').hidden = true;
-  showToast('Fresh Start decision saved: continue here');
-}
 async function continueFromSession(sessionId) {
   await recordHandoffDecision({
     session_id: sessionId,
@@ -1151,31 +938,6 @@ function renderHandoffCopied(bubble, sessionId) {
       <button class="btn-quiet" onclick="document.getElementById('handoffBubble').hidden = true">Dismiss</button>
     `,
   });
-}
-function renderHandoffBubble(bubble) {
-  const node = document.getElementById('handoffBubble');
-  window.currentHandoffBubble = bubble || null;
-  if (!bubble) {
-    node.hidden = true;
-    node.innerHTML = '';
-    return;
-  }
-  const runtime = bubble.runtime_attachment || {};
-  node.hidden = false;
-  node.innerHTML = `<div class="section-title">
-      <div>
-        <h2>${esc(bubble.title)}</h2>
-        <p>${esc(bubble.body)}</p>
-      </div>
-      <span class="pill">${esc(bubble.severity)}</span>
-    </div>
-    ${renderIdentityStrip(bubble, runtime, bubble.source_path)}
-    <div class="pill-row">${(bubble.tags || []).map(tag => `<span class="pill">${esc(tag)}</span>`).join('')}</div>
-    <div class="actions" style="margin-top:14px">
-      <button class="btn-primary" data-session="${esc(bubble.session_id)}" onclick="startFreshFromBubble(this.dataset.session)">${esc(bubble.primary_label || 'Copy Fresh Start brief')}</button>
-      <button class="btn-quiet" onclick="continueFromBubble()">${esc(bubble.continue_label || 'Continue here')}</button>
-      <button class="btn-quiet" data-session="${esc(bubble.session_id)}" onclick="selectSession(this.dataset.session)">Inspect session</button>
-    </div>`;
 }
 function dateLabel(value) {
   if (!value) return 'unknown';
@@ -1255,45 +1017,6 @@ function renderOptimizeWorkspace(optimize) {
     <div class="copy-row" style="margin-top:12px">
       <button class="btn-quiet" onclick="copyText(${jsArg(checklist)}, 'Global review queue copied')">Copy all review items</button>
     </div>`;
-}
-function renderUnbanked(card) {
-  if (!card || !card.available) {
-    return `<div class="empty">${esc((card && card.reason) || 'Not measured for this window.')}</div>`;
-  }
-  const repos = (card.top_repos || []).map(entry =>
-    `<li>${esc(entry.short_name)} &middot; <strong>${esc(entry.unbanked_label)}</strong></li>`).join('');
-  const outside = card.outside_repo_usd > 0
-    ? `<span class="pill">${esc(card.outside_repo_label)} outside any repo</span>` : '';
-  // Surfaced, not hidden: spend git could not answer for is excluded from the
-  // headline, so the headline would otherwise silently shrink without saying why.
-  const unresolved = card.unresolved_usd > 0
-    ? `<span class="pill">${esc(card.unresolved_label)} unresolved (git could not read ${esc((card.unresolved_repos || []).length)} repo(s))</span>` : '';
-  // Where the unbanked money went, not why it is unbanked. The why is two
-  // buckets and the headline above already states it; the where grows a segment
-  // per project and is the part you can act on.
-  const chart = card.chart
-    ? `<div class="unbanked-chart">
-         <div class="bar-host" data-unbanked-bar></div>
-         <div class="bar-legend">${stackedBarLegend(card.chart.segments, unbankedColours(card.chart.segments))}</div>
-       </div>`
-    : '';
-  return `<div class="headline">
-      <span class="headline-figure">${esc(card.unbanked_label)}</span>
-      <span class="headline-sub">${esc(card.unbanked_pct)}% of the last ${esc(card.window_days)} days had no commit behind it</span>
-    </div>
-    ${chart}
-    <div class="mini-grid" style="margin-top:12px">
-      <div class="mini"><span class="label">Reached a commit</span><strong>${esc(card.banked_label)}</strong></div>
-      <div class="mini"><span class="label">Never did</span><strong>${esc(card.unbanked_label)}</strong></div>
-      <div class="mini"><span class="label">Commits in window</span><strong>${esc(card.changes)}</strong></div>
-      <div class="mini"><span class="label">Model calls unbanked</span><strong>${esc(card.unbanked_events)}</strong></div>
-    </div>
-    ${repos ? `<p class="receipt-note" style="margin-bottom:4px">Where it went:</p>
-      <ul style="margin:0 0 10px 18px;padding:0">${repos}</ul>` : ''}
-    <div class="pill-row">${outside}${unresolved}</div>
-    <p class="receipt-note">${esc(card.caption)}
-      Spend banks against the next commit in the same repo within
-      ${esc(card.max_lookback_hours)}h; anything older stays unbanked rather than being misattributed.</p>`;
 }
 /* ---------------------------------------------------------------------------
    Chart core.
@@ -3349,23 +3072,8 @@ async function load(resetDetail = true, forceRefresh = false) {
   }
   renderWatcher(data.watcher || null);
   renderCacheStatus(data.cache || null);
-  renderHandoffBubble(data.handoff_bubble || null);
-  document.getElementById('actionQueue').innerHTML = buildActionQueue(data);
   const totals = data.totals;
-  document.getElementById('apiValue').textContent = totals.api_value_label;
   document.getElementById('windowLabel').textContent = totals.window_label;
-  document.getElementById('sessions').textContent = totals.sessions;
-  document.getElementById('usefulOutcomes').textContent = totals.useful_outcomes;
-  document.getElementById('costPerUseful').textContent = `${totals.cost_per_useful_change}${totals.inferred_useful_outcomes ? ` · ${totals.inferred_useful_outcomes} to confirm` : ''}`;
-  const survival = data.survival || {};
-  const survivalRow = document.getElementById('costPerSurvivingRow');
-  if (survival.available) {
-    survivalRow.hidden = false;
-    document.getElementById('costPerSurviving').textContent =
-      `${survival.cost_per_surviving_line_label} per surviving line (${survival.survival_pct}% of ${survival.lines_touched} lines still standing)`;
-  } else {
-    survivalRow.hidden = true;
-  }
   document.getElementById('preflightDecisions').textContent = totals.preflight_decisions;
   // Same two-step contract as the runway charts: the tiles' numbers are set
   // first, then SVG is appended into nodes collected by attribute. Absent on
@@ -3382,11 +3090,8 @@ async function load(resetDetail = true, forceRefresh = false) {
   });
   receiptCache = data.intervention_receipts || [];
   const handoffDecisions = data.handoff_decisions || [];
-  document.getElementById('latestIntervention').innerHTML = renderHomeReceiptSummary(receiptCache[0]);
-  document.getElementById('latestHandoffDecision').innerHTML = renderHomeHandoffSummary(handoffDecisions);
   document.getElementById('receiptRows').innerHTML = renderReceiptRows(receiptCache);
   document.getElementById('handoffDecisionRows').innerHTML = renderHandoffDecisionRows(handoffDecisions);
-  document.getElementById('contextHealth').innerHTML = renderHomeContextHealth(data.context_health || [], data.context_health_status || 'ready');
   document.getElementById('sessionContextHealth').innerHTML = renderContextHealth(data.context_health || [], data.context_health_status || 'ready');
   document.getElementById('optimizeWorkspaceBody').innerHTML = renderOptimizeWorkspace(data.optimize || null);
   // SVG is built after the markup lands: the cards are assembled as an HTML
@@ -3407,14 +3112,6 @@ async function load(resetDetail = true, forceRefresh = false) {
     drawRunway(runwayNodes[row.session_id], row.chart);
     drawRunwayMini(runwayMiniNodes[row.session_id], row.chart);
   });
-  document.getElementById('unbanked').innerHTML = renderUnbanked(data.unbanked);
-  if (data.unbanked && data.unbanked.chart) {
-    drawStackedBar(
-      document.querySelector('[data-unbanked-bar]'),
-      data.unbanked.chart.segments,
-      unbankedColours(data.unbanked.chart.segments),
-    );
-  }
   changeRowsCache = data.changes || [];
   document.getElementById('changeRows').innerHTML = renderChangeRows(changeRowsCache);
   document.getElementById('changeTotals').innerHTML = renderChangeTotals(changeRowsCache, data.changes_meta, data.unbanked);
@@ -3422,29 +3119,12 @@ async function load(resetDetail = true, forceRefresh = false) {
   document.getElementById('coverageRows').innerHTML = renderCoverage(data.coverage || []);
   document.getElementById('coverageRowsSettings').innerHTML = renderCoverage(data.coverage || []);
   document.getElementById('setupRows').innerHTML = renderSetup(data.setup || []);
-  const latest = data.recent_sessions[0];
-  document.getElementById('latestSession').innerHTML = latest
-    ? `<div class="session-summary"><div class="session-title">${esc(latest.project)}</div>
-       <div class="session-meta">${esc(latest.tool)} · ${esc(latest.model)} · ${esc(latest.tokens)} tokens · ${esc(latest.api_value)}</div>
-       <div class="session-actions">${sessionStatePill(latest.state)}${outcomePill(latest.outcome)}${outcomeEvidencePill(latest)}
-       <button data-testid="review-latest" class="btn-primary" onclick="selectSession('${esc(latest.session_id)}')">Review outcome</button></div></div>`
-    : '<div class="empty">No local AI session detected yet.</div>';
-  const recommendation = data.insights[0];
-  document.getElementById('todayRecommendation').innerHTML = renderHomeRecommendation(recommendation);
-  paintComposition('projects', data.projects_composition);
   paintComposition('tools', data.tools_composition);
   paintToolModels(data.tool_models);
   paintModelScatter(data.model_scatter);
-  document.getElementById('projects').innerHTML = bars(data.projects, "tokens_label", "project", "tokens");
   document.getElementById('models').innerHTML = bars(data.models, "api_value_label", "model");
   document.getElementById('tools').innerHTML = bars(data.tools, "tokens_label", "tool", "tokens");
-  document.getElementById('insights').innerHTML = data.insights.length
-    ? data.insights.map(i => `<div class="insight"><strong>${esc(i.title)}</strong><p>${esc(i.body)}</p></div>`).join('')
-    : '<div class="empty">No notable local signals yet.</div>';
   document.getElementById('privacy').innerHTML = data.privacy.map(p => `<div class="privacy-item"><span class="privacy-check">&#10003;</span><span>${esc(p)}</span></div>`).join('');
-  document.getElementById('recent').innerHTML = data.recent_sessions.slice(0, 6).map(s => `<tr class="clickable" onclick="selectSession('${s.session_id}')">
-    <td>${esc(s.tool)}</td><td>${esc(s.project)}<br>${sessionStatePill(s.state)} ${outcomeEvidencePill(s)}</td><td>${esc(s.tokens)}</td><td><button class="row-action">Review</button></td>
-  </tr>`).join('');
   document.getElementById('projectWindow').textContent = totals.window_label;
   document.getElementById('projectRows').innerHTML = data.projects.length
     ? data.projects.map(p => `<tr class="clickable" onclick="selectProject(decodeURIComponent(this.dataset.id))" data-id="${encodeURIComponent(p.id)}">
