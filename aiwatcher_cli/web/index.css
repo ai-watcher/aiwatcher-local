@@ -84,6 +84,87 @@
       padding: 11px 13px; margin: -2px 0 18px;
       box-shadow: inset 0 1px 0 rgba(255,255,255,.035), 0 18px 44px rgba(0,0,0,.10);
     }
+    /* ---- ambient surface ---------------------------------------------------
+       Five slots in a fixed order. The two states share them, so nothing moves
+       when a session starts or ends. Sizes are set on the container rather than
+       per-slot so the running and quiet states measure identically. */
+    .ambient {
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 20px 22px 22px;
+      margin-bottom: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .ambient[data-state="critical"] { border-color: rgba(242, 119, 143, .38); }
+    .ambient[data-state="warning"] { border-color: rgba(242, 191, 107, .34); }
+    .ambient[data-state="healthy"] { border-color: rgba(67, 217, 163, .28); }
+    .ambient-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 16px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--faint);
+    }
+    .ambient-top b { color: var(--muted); font-weight: 400; }
+    .ambient-hero {
+      font-size: 46px;
+      font-weight: 650;
+      line-height: 1;
+      letter-spacing: -.03em;
+      color: var(--text);
+    }
+    .ambient-hero u {
+      text-decoration: none;
+      font-size: 15px;
+      font-weight: 500;
+      letter-spacing: 0;
+      color: var(--muted);
+      margin-left: 10px;
+    }
+    .ambient-meter-wrap { display: flex; flex-direction: column; gap: 6px; }
+    .ambient-meter { width: 100%; height: 34px; display: block; }
+    .ambient-scale {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 18px;
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+    .ambient-scale .amber { color: var(--amber); }
+    .ambient-scale .red { color: var(--red); }
+    .ambient-scale .green { color: var(--green); }
+    .ambient-scale .muted { color: var(--faint); }
+    .ambient-say {
+      margin: 0;
+      font-size: 15px;
+      line-height: 1.5;
+      color: var(--muted);
+      max-width: 62ch;
+    }
+    .ambient-say b { color: var(--text); font-weight: 600; }
+    .ambient-acts { display: flex; flex-wrap: wrap; gap: 8px; }
+    .ambient-facts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 22px;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+      font-family: var(--mono);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      color: var(--faint);
+    }
+    .ambient-facts b { color: var(--text); font-weight: 500; }
+    @media (max-width: 560px) {
+      .ambient { padding: 16px; }
+      .ambient-hero { font-size: 36px; }
+    }
+
     .freshness {
       color: var(--faint);
       font-size: 12px;

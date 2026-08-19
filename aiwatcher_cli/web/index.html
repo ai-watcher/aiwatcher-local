@@ -53,6 +53,12 @@
   </nav>
 
   <section id="view-today" class="view">
+    <!-- The ambient surface. Five slots, in a fixed order, filled by renderAmbient:
+         hero number, meter, one sentence, one action, fact row. The running and
+         quiet states use the same five so the layout never reflows when a session
+         starts or ends -- peripheral vision notices movement, not content. -->
+    <section id="ambient" class="ambient" aria-live="polite" hidden></section>
+
     <section id="handoffBubble" class="card handoff-bubble" style="margin-bottom:14px" hidden></section>
 
     <section class="card home-command-card" style="margin-bottom:14px">

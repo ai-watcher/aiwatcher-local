@@ -128,5 +128,66 @@ class LiveRefreshTest(unittest.TestCase):
         self.assertTrue(link.group(1).startswith("data:image/svg+xml,"))
 
 
+class AmbientSurfaceTest(unittest.TestCase):
+    """The ambient surface is the one screen the dashboard is meant to be glanced
+    at. Its two states share five slots so the layout never reflows; these guard
+    the parts of that contract visible in the source. The measured equality of the
+    two states was checked in a browser against live data."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+
+    def test_surface_exists(self):
+        self.assertIn('id="ambient"', self.html)
+        self.assertIn("function renderAmbient(", self.js)
+
+    def test_both_states_are_built(self):
+        self.assertIn("function ambientRunning(", self.js)
+        self.assertIn("function ambientQuiet(", self.js)
+
+    def _ambient_source(self):
+        """Just the ambient renderers, so assertions here cannot be satisfied --
+        or tripped -- by unrelated code elsewhere in the file."""
+        start = self.js.index("function ambientRunning(")
+        end = self.js.index("function renderAmbient(")
+        return self.js[start:end]
+
+    def test_thresholds_are_not_hardcoded(self):
+        # They come from the same payload the runway chart uses, so the two
+        # surfaces cannot disagree about where "act now" sits.
+        source = self._ambient_source()
+        self.assertIn("chart.pressure_tokens_n", source)
+        self.assertIn("chart.critical_tokens_n", source)
+        for literal in ("150000", "200000"):
+            with self.subTest(literal=literal):
+                self.assertNotIn(literal, source)
+
+    def test_meter_track_is_dynamic(self):
+        # A session at 354k against a 200k limit would push its own fill off the
+        # end of a fixed track.
+        self.assertIn("trackMax", self.js)
+
+    def test_no_headroom_claimed_once_past_the_threshold(self):
+        # turns_to_critical is null when a session is already over; claiming
+        # headroom there would be a lie the rest of the product does not tell.
+        self.assertIn("turns_to_critical", self.js)
+        self.assertIn("no headroom left to project", self.js)
+
+    def test_dom_is_not_rewritten_when_nothing_changed(self):
+        # It re-renders every 10s. Rewriting unconditionally would drop focus from
+        # the buttons and repaint for no reason.
+        self.assertIn("ambientMarkup", self.js)
+        self.assertIn("if (markup === ambientMarkup) return;", self.js)
+
+    def test_slots_are_styled_on_the_container(self):
+        for rule in (".ambient-hero", ".ambient-meter", ".ambient-say",
+                     ".ambient-acts", ".ambient-facts"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, self.css)
+
+
 if __name__ == "__main__":
     unittest.main()

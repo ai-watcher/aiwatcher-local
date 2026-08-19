@@ -3013,6 +3013,188 @@ async function loadReport() {
   }
 }
 // ---------------------------------------------------------------------------
+// The ambient surface.
+//
+// Five slots in a fixed order: hero number, meter, one sentence, one action, a
+// fact row. There are two states -- a session is running, or nothing is -- and
+// they deliberately use the same five slots. A surface that relaid itself out
+// every time you started or stopped coding would catch your eye every time, and
+// catching your eye is the one thing an always-open tool must not do.
+//
+// Every number here is server-computed. The thresholds in particular come from
+// chart.pressure_tokens_n / chart.critical_tokens_n rather than being repeated
+// as constants, so this surface cannot disagree with the runway chart below it.
+// ---------------------------------------------------------------------------
+let ambientMarkup = null;
+
+function meterSvg(segments, marks, trackMax) {
+  // One track, drawn to a caller-supplied maximum. The maximum has to be dynamic:
+  // a session well past the critical threshold (334k against a 200k limit) would
+  // otherwise push its own fill and peak marker off the end of the track.
+  const W = 1000, H = 34, y = 8, h = 14;
+  const at = value => Math.max(0, Math.min(1, value / trackMax)) * W;
+  const parts = ['<rect x="0" y="' + y + '" width="' + W + '" height="' + h + '" rx="7" fill="var(--surface)"/>'];
+  let cursor = 0;
+  segments.forEach(seg => {
+    const width = at(seg.value);
+    if (width > 2) {
+      // 2px surface gap between touching fills, rather than a stroke around them.
+      parts.push('<rect x="' + cursor.toFixed(1) + '" y="' + y + '" width="' + (width - 2).toFixed(1)
+        + '" height="' + h + '" rx="7" fill="' + seg.colour + '"/>');
+    }
+    cursor += width;
+  });
+  marks.forEach(mark => {
+    const x = at(mark.value);
+    if (mark.dot) {
+      parts.push('<circle cx="' + x.toFixed(1) + '" cy="' + (y + h / 2) + '" r="5" fill="' + mark.colour
+        + '" stroke="var(--bg)" stroke-width="2"/>');
+    } else {
+      parts.push('<line x1="' + x.toFixed(1) + '" x2="' + x.toFixed(1) + '" y1="2" y2="' + (H - 2)
+        + '" stroke="' + mark.colour + '" stroke-width="2"/>');
+    }
+  });
+  return '<svg class="ambient-meter" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none"'
+    + ' role="img" aria-hidden="true">' + parts.join('') + '</svg>';
+}
+
+function ambientScaleLabels(items) {
+  return '<div class="ambient-scale">'
+    + items.map(item => '<span class="' + item.tone + '">' + esc(item.label) + '</span>').join('')
+    + '</div>';
+}
+
+function ambientRunning(card) {
+  const chart = card.chart || {};
+  const latest = chart.latest_turn_tokens_n || 0;
+  const peak = chart.peak_turn_tokens_n || latest;
+  const pressure = chart.pressure_tokens_n || 0;
+  const critical = chart.critical_tokens_n || 0;
+  const trackMax = Math.max(critical, peak, latest) * 1.08 || 1;
+  const severity = card.severity === 'critical' ? 'critical'
+    : (latest >= pressure ? 'warning' : 'healthy');
+  const tone = { critical: 'var(--red)', warning: 'var(--amber)', healthy: 'var(--green)' }[severity];
+
+  const marks = [];
+  if (pressure) marks.push({ value: pressure, colour: 'var(--amber)' });
+  if (critical) marks.push({ value: critical, colour: 'var(--red)' });
+  if (peak > latest) marks.push({ value: peak, colour: 'var(--red)', dot: true });
+
+  // compactTokens returns "200K"; the server's turn labels are "350.2k". Match the
+  // hero rather than the other chart, so this component is internally consistent.
+  const scaleLabel = value => compactTokens(value).replace(/K$/, 'k');
+  const scale = [];
+  if (pressure) scale.push({ label: scaleLabel(pressure) + ' pressure', tone: 'amber' });
+  if (critical) scale.push({ label: scaleLabel(critical) + ' act now', tone: 'red' });
+  if (peak > latest) scale.push({ label: 'peaked ' + card.peak_turn_tokens, tone: 'muted' });
+
+  // Runway wording follows the data: turns_to_critical is null once a session is
+  // already past the threshold, and claiming headroom there would be a lie.
+  const runway = chart.turns_to_critical === null || chart.turns_to_critical === undefined
+    ? (latest >= critical && critical
+        ? 'It is already past the ' + compactTokens(critical).replace(/K$/, 'k') + ' threshold, so there is no headroom left to project.'
+        : '')
+    : 'About <b>' + chart.turns_to_critical + ' turns</b> of headroom at the current rate.';
+  const bloat = card.bloat_measurable && card.bloat_label
+    ? ' <b>' + esc(card.bloat_label) + '</b> of what it has cost went on re-sending history'
+      + (card.replayed_cost_label ? ', ' + esc(card.replayed_cost_label) + ' so far.' : '.')
+    : '';
+
+  return {
+    state: severity,
+    hero: esc(card.latest_turn_tokens || ''),
+    heroUnit: 'tokens / turn',
+    context: esc(card.project || '') + (card.tool ? ' &middot; <b>' + esc(card.tool) + '</b>' : ''),
+    meter: meterSvg([{ value: latest, colour: tone }], marks, trackMax) + ambientScaleLabels(scale),
+    sentence: runway + bloat,
+    actions: (card.can_handoff
+      ? '<button class="btn-primary" onclick="startFreshFromBubble(\'' + esc(card.session_id) + '\')">Copy Fresh Start brief</button>'
+      : '')
+      + '<button class="btn-quiet" onclick="selectSession(\'' + esc(card.session_id) + '\')">Inspect session</button>',
+    facts: [
+      peak > latest && card.peak_turn_tokens ? ['peak', card.peak_turn_tokens] : null,
+      chart.turns_since_reset ? ['turns', String(chart.turns_since_reset)] : null,
+      card.session_count ? ['sessions here', String(card.session_count)] : null,
+      card.efficiency_label ? ['new context', card.efficiency_label] : null,
+      card.replayed_cost_label ? ['on replay', card.replayed_cost_label] : null,
+    ],
+  };
+}
+
+function ambientQuiet(data) {
+  const totals = data.totals || {};
+  const replayed = Number(totals.replayed_share_pct);
+  const hasSplit = !Number.isNaN(replayed) && replayed > 0;
+  const needsReview = Number(totals.needs_review_outcomes) || 0;
+
+  const segments = hasSplit
+    ? [{ value: replayed, colour: 'var(--amber)' }, { value: 100 - replayed, colour: 'var(--green)' }]
+    : [];
+  const scale = hasSplit
+    ? [{ label: Math.round(replayed) + '% replayed', tone: 'amber' },
+       { label: (100 - Math.round(replayed)) + '% new', tone: 'green' }]
+    : [];
+
+  const sessions = Number(totals.sessions) || 0;
+  let sentence = sessions
+    ? '<b>' + sessions + '</b> session' + (sessions === 1 ? '' : 's') + ' in this window.'
+    : 'No local sessions in this window yet.';
+  if (hasSplit) {
+    sentence += ' <b>' + Math.round(replayed) + '%</b> of what they cost went on re-sending history.';
+  }
+  if (needsReview) {
+    sentence += ' <b>' + needsReview + '</b> ' + (needsReview === 1 ? 'is' : 'are')
+      + ' still waiting on you to say whether the work was useful.';
+  }
+
+  return {
+    state: 'idle',
+    hero: esc(totals.api_value_label || '-'),
+    heroUnit: 'API-equivalent, ' + esc(totals.window_label || 'this window'),
+    context: 'no session running',
+    meter: segments.length ? meterSvg(segments, [], 100) + ambientScaleLabels(scale) : '',
+    sentence: sentence,
+    actions: (needsReview
+      ? '<button class="btn-primary" onclick="showView(\'sessions\')">Review ' + needsReview + ' outcome'
+        + (needsReview === 1 ? '' : 's') + '</button>'
+      : '')
+      + '<button class="btn-quiet" onclick="showView(\'insights\')">Open Improve</button>',
+    facts: [
+      totals.sessions ? ['sessions', String(totals.sessions)] : null,
+      totals.tokens_label ? ['tokens', totals.tokens_label] : null,
+      totals.useful_outcomes ? ['useful', String(totals.useful_outcomes)] : null,
+      totals.projected_month_label ? ['projected month', totals.projected_month_label] : null,
+    ],
+  };
+}
+
+function renderAmbient(data) {
+  const node = document.getElementById('ambient');
+  if (!node) return;
+  const live = liveHealthCard(data);
+  const model = live ? ambientRunning(live) : ambientQuiet(data);
+  const facts = (model.facts || []).filter(Boolean)
+    .map(pair => '<span>' + esc(pair[0]) + ' <b>' + esc(pair[1]) + '</b></span>').join('');
+
+  const markup = '<div class="ambient-top"><span>' + model.context + '</span>'
+      + '<span id="ambientFreshness"></span></div>'
+    + '<div class="ambient-hero">' + model.hero
+      + '<u>' + model.heroUnit + '</u></div>'
+    + (model.meter ? '<div class="ambient-meter-wrap">' + model.meter + '</div>' : '')
+    + (model.sentence ? '<p class="ambient-say">' + model.sentence + '</p>' : '')
+    + '<div class="ambient-acts">' + model.actions + '</div>'
+    + (facts ? '<div class="ambient-facts">' + facts + '</div>' : '');
+
+  // Only touch the DOM when something actually changed. Rewriting every ten
+  // seconds would blow away focus on the buttons and repaint for no reason.
+  if (markup === ambientMarkup) return;
+  ambientMarkup = markup;
+  node.dataset.state = model.state;
+  node.innerHTML = markup;
+  node.hidden = false;
+}
+
+// ---------------------------------------------------------------------------
 // Live state.
 //
 // The dashboard is meant to sit open in a tab while you code, which means it
@@ -3121,10 +3303,11 @@ function freshnessLabel(millis) {
 }
 
 function renderFreshness() {
-  const node = document.getElementById('freshness');
-  if (!node) return;
-  if (!lastLoadedAt) { node.textContent = ''; return; }
-  node.textContent = freshnessLabel(Date.now() - lastLoadedAt);
+  const label = lastLoadedAt ? freshnessLabel(Date.now() - lastLoadedAt) : '';
+  ['freshness', 'ambientFreshness'].forEach(id => {
+    const node = document.getElementById(id);
+    if (node) node.textContent = label;
+  });
 }
 
 function startLiveRefresh() {
@@ -3298,6 +3481,7 @@ async function load(resetDetail = true, forceRefresh = false) {
     refreshButton.textContent = previousRefreshText || 'Refresh data';
   }
   if (resetDetail && document.getElementById('detailDrawer').classList.contains('open')) closeDrawer();
+  renderAmbient(data);
   renderTabState(data);
   lastLoadedAt = Date.now();
   renderFreshness();
