@@ -501,7 +501,7 @@ def build_handoff_capsule(
         uncertainty_lines.append("- No nearby test artifact was detected; choose a narrow verification step after inspection.")
 
     checkpoint_lines = [
-        "- First verify that the source session identity below matches the work the user meant to continue.",
+        "- First verify that the source session identity above matches the work the user meant to continue.",
         "- Continue in the same workspace/repository unless the user explicitly asks for a duplicate checkout or new worktree.",
         *[f"- {item}" for item in profile["checkpoint"]],
     ]
