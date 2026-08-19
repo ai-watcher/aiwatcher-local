@@ -4868,6 +4868,14 @@ def command_handoff(args: argparse.Namespace) -> int:
             return 0
 
     outcome = get_outcome(session.session_id)
+    project = project_key(session.project_path)
+    same_project_session_count = 1
+    if project != UNATTRIBUTED_PROJECT:
+        same_project_session_count = max(
+            1,
+            len({row.session_id for row in rows if row.session_id and project_key(row.project_path) == project}),
+        )
+    attachment = runtime_attachment_for_session(session, processes=safe_runtime_processes())
     capsule = build_handoff_capsule(
         session,
         events_for_session(session.session_id, days=args.days),
@@ -4879,6 +4887,8 @@ def command_handoff(args: argparse.Namespace) -> int:
         source_refs=getattr(args, "source", []),
         constraints=getattr(args, "constraint", []),
         acceptance_criteria=getattr(args, "acceptance", []),
+        runtime_attachment=attachment.to_json(),
+        same_project_session_count=same_project_session_count,
     )
     if args.format == "json":
         rendered = json.dumps(capsule, indent=2)
