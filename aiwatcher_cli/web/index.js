@@ -53,16 +53,6 @@ function actionRow(item) {
     <div class="actions">${(item.actions || []).map(action => `<button class="${esc(action.primary ? 'btn-primary' : 'btn-quiet')}" onclick="${esc(action.onclick)}">${esc(action.label)}</button>`).join('')}</div>
   </div>`;
 }
-function recommendationAction(insight) {
-  const title = String((insight || {}).title || '').toLowerCase();
-  const body = String((insight || {}).body || '').toLowerCase();
-  if (insight && insight.view) return { label: insight.cta || 'Show me how', onclick: `showView(${jsArg(insight.view)})` };
-  if (insight && insight.session_id) return { label: 'Inspect session', onclick: `selectSession(${jsArg(insight.session_id)})` };
-  if (title.includes('project') || body.includes('project')) return { label: 'Show me project', onclick: "showView('projects')" };
-  if (title.includes('context') || body.includes('fresh') || body.includes('compact')) return { label: 'Show me how', onclick: "showView('sessions')" };
-  if (title.includes('cursor') || title.includes('ollama') || title.includes('coverage')) return { label: 'Check coverage', onclick: "showView('coverage')" };
-  return { label: 'Show me how', onclick: "showView('insights')" };
-}
 function renderReceiptRows(receipts) {
   if (!receipts.length) return '<tr><td colspan="6"><div class="empty">No interventions recorded in this window.</div></td></tr>';
   return receipts.map(receipt => `<tr class="clickable" onclick="openReceipt('${esc(receipt.id)}')">
@@ -2679,10 +2669,10 @@ function showView(view) {
   // animating a thousand pixels of a page the user never asked to see is worse
   // than simply being there.
   window.scrollTo(0, 0);
-  // Projects and the Changes ledger have their own nav entries now, so they
-  // highlight themselves. Coverage is still reached from inside Settings, where
-  // its content also lives, so it keeps borrowing that highlight.
-  const activeView = ({ coverage: 'setup' })[view] || view;
+  // Every view has its own nav entry, so each highlights itself. Coverage used
+  // to borrow this one -- it was a separate page duplicating what Settings
+  // already showed, and it is gone.
+  const activeView = view;
   document.querySelectorAll('.nav-tab').forEach(node => {
     node.classList.toggle('active', node.dataset.view === activeView);
   });
@@ -3188,9 +3178,26 @@ async function load(resetDetail = true, forceRefresh = false) {
   document.getElementById('changeRows').innerHTML = renderChangeRows(changeRowsCache);
   document.getElementById('changeTotals').innerHTML = renderChangeTotals(changeRowsCache, data.changes_meta, data.unbanked);
   updateSortIndicators('change', changeSort, ['committed_at', 'project', 'cost_usd', 'lines_changed', 'usd_per_line', 'survival_pct', 'usd_per_surviving_line']);
-  document.getElementById('coverageRows').innerHTML = renderCoverage(data.coverage || []);
-  document.getElementById('coverageRowsSettings').innerHTML = renderCoverage(data.coverage || []);
-  document.getElementById('setupRows').innerHTML = renderSetup(data.setup || []);
+  const coverage = data.coverage || [];
+  document.getElementById('coverageRowsSettings').innerHTML = renderCoverage(coverage);
+  // Counts on the summaries: a folded section with a bare title hides whether
+  // there is anything inside, and these two are the whole of Settings.
+  const gated = coverage.filter(row => row.status === 'automatic').length;
+  const coverageSummary = document.getElementById('coverageSummary');
+  if (coverageSummary) {
+    coverageSummary.textContent = coverage.length
+      ? `Surface coverage (${gated} of ${coverage.length} gated automatically)`
+      : 'Surface coverage';
+  }
+  const setup = data.setup || [];
+  document.getElementById('setupRows').innerHTML = renderSetup(setup);
+  const recommended = setup.filter(step => step.status === 'recommended').length;
+  const setupSummary = document.getElementById('setupSummary');
+  if (setupSummary) {
+    setupSummary.textContent = recommended
+      ? `Setup steps (${recommended} recommended, ${setup.length - recommended} optional)`
+      : 'Setup steps';
+  }
   paintComposition('tools', data.tools_composition);
   paintToolModels(data.tool_models);
   paintModelScatter(data.model_scatter);
@@ -3248,7 +3255,7 @@ document.addEventListener('keydown', event => { if (event.key === 'Escape') clos
   startLiveRefresh();
   await load();
   const requestedView = new URLSearchParams(location.search).get('view');
-  if (requestedView && ['today','prompt','sessions','projects','changes','receipts','insights','setup','coverage'].includes(requestedView)) {
+  if (requestedView && ['today','prompt','sessions','projects','changes','receipts','insights','setup'].includes(requestedView)) {
     showView(requestedView);
     if (requestedView === 'prompt') {
       document.getElementById('promptInput').focus();

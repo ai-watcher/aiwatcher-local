@@ -261,16 +261,6 @@
     </section>
   </section>
 
-  <section id="view-coverage" class="view" hidden>
-    <div class="card">
-      <div class="section-title">
-        <div><h2>Surface Coverage</h2><p>What AIWatcher can gate, scan, or only help with manually on this machine.</p></div>
-        <span class="pill">Verified locally</span>
-      </div>
-      <div id="coverageRows" class="coverage-grid"></div>
-    </div>
-  </section>
-
   <section id="view-setup" class="view" hidden>
     <section class="card" style="margin-bottom:14px">
       <div class="section-title"><div><h2>Privacy at a glance</h2><p>Your local trust boundary stays visible.</p></div></div>
@@ -283,19 +273,25 @@
         <span class="pill">Local only</span>
       </div>
       <p class="receipt-note">Ambient Watch starts with the dashboard by default. For standalone mode, run <code>aiwatcher watch --notify --overlay --interval 60</code>.</p>
-      <div class="actions" style="margin-bottom:12px">
-        <button class="btn-quiet" data-view="coverage" onclick="showView('coverage')">Surface coverage</button>
-      </div>
-      <div class="section-title">
-        <div><h2>Surface coverage</h2><p>Detected tools, hook confidence, and what AIWatcher can honestly measure.</p></div>
-      </div>
-      <div id="coverageRowsSettings" class="coverage-grid" style="margin-bottom:14px"></div>
-      <div class="handoff-cta" style="margin-bottom:14px">
+      <details class="aiw-details">
+        <summary><span id="coverageSummary">Surface coverage</span></summary>
+        <div class="details-body">
+          <p class="optimize-lede">Detected tools, hook confidence, and what AIWatcher can honestly measure.</p>
+          <div id="coverageRowsSettings" class="coverage-grid"></div>
+        </div>
+      </details>
+      <details class="aiw-details">
+        <summary><span id="setupSummary">Setup steps</span></summary>
+        <div class="details-body">
+          <p class="optimize-lede">What AIWatcher needs installed to gate prompts and prove what it caught. These are recommendations, not a checklist &mdash; nothing here tracks completion.</p>
+          <div id="setupRows" class="coverage-grid"></div>
+        </div>
+      </details>
+      <div class="handoff-cta" style="margin-top:14px">
         <h4>Test Fresh Start with sample data</h4>
         <p>Open a seeded context-pressure case, tune the continuation brief, and verify the copy flow without waiting for a real bloated session.</p>
         <button class="btn-primary" onclick="openDemoHandoff()">Try Fresh Start demo</button>
       </div>
-      <div id="setupRows" class="coverage-grid"></div>
     </div>
   </section>
 </main>

@@ -208,9 +208,11 @@ class NavigationTest(unittest.TestCase):
     """Three views used to be reachable only from buttons inside other pages, and
     the sidebar highlighted a section you were not in when you landed on them."""
 
-    # Coverage is reached from inside Settings and its content also lives there,
-    # so it deliberately borrows that highlight rather than owning an entry.
-    BORROWS_HIGHLIGHT = {"coverage": "setup"}
+    # Every view now owns its nav entry. Coverage used to borrow this one: it was
+    # a separate page duplicating 36 of its 38 sentences from Settings, and its
+    # only way in was a button inside Settings pointing at content two lines
+    # further down the same page.
+    BORROWS_HIGHLIGHT: dict[str, str] = {}
 
     @classmethod
     def setUpClass(cls):
@@ -233,7 +235,10 @@ class NavigationTest(unittest.TestCase):
     def test_the_highlight_does_not_lie(self):
         # Anything remapped here highlights a section other than the one you are
         # in; only the documented exception may do that.
-        remap = re.search(r"const activeView = \(\{([^}]*)\}\)", self.js).group(1)
+        remap = re.search(r"const activeView = ([^;]*);", self.js).group(1).strip()
+        if remap == "view":
+            self.assertEqual(self.BORROWS_HIGHLIGHT, {})
+            return
         remapped = set(re.findall(r"(\w+):", remap))
         self.assertEqual(remapped, set(self.BORROWS_HIGHLIGHT))
 
@@ -477,6 +482,47 @@ class PlanControlTest(unittest.TestCase):
         server = inspect.getsource(ui.build_optimize_inventory)
         self.assertNotIn('else "context at risk"', server)
         self.assertNotIn("item.impact_label || 'review'", self.js)
+
+
+class SettingsTest(unittest.TestCase):
+    """Settings was 4.2 screens, most of it a nine-tool table and an eleven-step
+    guide -- reference material you consult rather than read. It also embedded a
+    full copy of a separate Coverage view."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+
+    def test_the_duplicate_coverage_view_is_gone(self):
+        # 36 of its 38 sentences were already in Settings, and its only entry
+        # point was a button inside Settings pointing at content two lines
+        # further down the same page.
+        self.assertNotIn('id="view-coverage"', self.html)
+        self.assertNotIn('id="coverageRows"', self.html)
+        self.assertNotIn("showView('coverage')", self.html)
+        self.assertNotIn("showView('coverage')", self.js)
+
+    def test_reference_material_opens_on_demand(self):
+        for anchor in ("coverageSummary", "setupSummary"):
+            with self.subTest(section=anchor):
+                self.assertIn(anchor, self.html)
+                self.assertIn(anchor, self.js)
+
+    def test_summaries_count_what_the_payload_actually_carries(self):
+        """Guessed field names reported "0 of 10 gated" and "0 of 11 done" --
+        both wrong, and the second doubly so: setup steps are recommended or
+        optional and carry no completion state at all, so nothing could ever be
+        counted done."""
+        self.assertIn("row.status === 'automatic'", self.js)
+        self.assertIn("step.status === 'recommended'", self.js)
+        self.assertNotIn("step.status === 'done'", self.js)
+        self.assertNotIn("tools gated)", self.js)
+
+    def test_the_setup_list_is_not_called_a_checklist(self):
+        # Nothing tracks completion, so calling it a checklist promises a state
+        # the data does not have.
+        self.assertNotIn("Setup checklist", self.html)
 
 
 if __name__ == "__main__":
