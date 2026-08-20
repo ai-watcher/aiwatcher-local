@@ -981,6 +981,23 @@ function dateLabel(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
+// survival.py will not judge a change younger than this: 95% of lines from the
+// last three days are still standing simply because nothing has had time to
+// touch them, so a fresh commit would score as a pass it has not earned.
+const SURVIVAL_MIN_AGE_DAYS = 7;
+
+function tooYoungToJudge(row) {
+  const at = Date.parse(row.committed_at || '');
+  if (Number.isNaN(at)) return false;
+  return (Date.now() - at) < SURVIVAL_MIN_AGE_DAYS * 86400000;
+}
+
+function repoLabel(row) {
+  const full = String(row.repo || row.project || '');
+  const leaf = full.split(/[\/]/).filter(Boolean).pop();
+  return leaf || full;
+}
+
 function renderChangeRows(rows) {
   if (!rows.length) {
     return `<tr><td colspan="7" class="empty">No commits in this window, or git history could not be read.</td></tr>`;
@@ -988,33 +1005,44 @@ function renderChangeRows(rows) {
   return sortedRows(rows, changeSort).map(row => `<tr>
     <td><code>${esc(row.short_sha)}</code> ${esc(row.subject)}
       <div class="session-meta">${esc(dateLabel(row.committed_at))}${row.tools.length ? ' &middot; ' + esc(row.tools.join(', ')) : ''}${row.event_count ? ' &middot; ' + esc(row.event_count) + ' model calls' : ''}${row.was_rewritten ? ' &middot; <span class="muted" title="Rebased or amended on ' + esc(dateLabel(row.rewritten_at)) + '. Cost is attributed by when the work was authored, not when it was rewritten.">rewritten</span>' : ''}</div></td>
-    <td>${esc(row.project)}</td>
+    <td title="${esc(row.repo || row.project)}">${esc(repoLabel(row))}</td>
     <td class="num">${row.unattributed ? '<span class="muted">no spend observed</span>' : esc(row.cost_label)}</td>
     <td class="num">+${esc(row.lines_added)} / -${esc(row.lines_removed)}
       <div class="session-meta">${esc(row.files_changed)} file(s)</div></td>
     <td class="num">${row.unattributed ? '—' : esc(row.usd_per_line_label)}</td>
-    <td class="num">${esc(row.survival_label)}</td>
-    <td class="num">${esc(row.usd_per_surviving_line_label)}</td>
+    <td class="num">${row.survival_pct === null || row.survival_pct === undefined
+      ? `<span class="muted">${tooYoungToJudge(row) ? 'too new' : '—'}</span>`
+      : esc(row.survival_label)}</td>
+    <td class="num">${row.survival_pct === null || row.survival_pct === undefined
+      ? '<span class="muted">—</span>'
+      : esc(row.usd_per_surviving_line_label)}</td>
   </tr>`).join('');
 }
 function renderChangeTotals(rows, meta, unbanked) {
   if (!rows.length) return '';
   const foreign = (meta && meta.foreign_changes) || 0;
-  const note = foreign
-    ? `<p class="receipt-note" style="margin-top:0">${esc(foreign)} commit(s) in this window were written by someone else and
-       arrived by fetch — excluded, because no spend on this machine can belong to them.</p>` : '';
-  const unbankedNote = unbanked && unbanked.available && Number(unbanked.unbanked_usd || 0) > 0
-    ? `<p class="receipt-note" style="margin-top:0">${esc(unbanked.unbanked_label)} is not shown as a commit row yet because no nearby same-repo commit exists. Check Unbanked spend for the missing attribution trail.</p>` : '';
   const attributed = rows.filter(row => !row.unattributed);
   const cost = attributed.reduce((sum, row) => sum + row.cost_usd, 0);
   const lines = attributed.reduce((sum, row) => sum + row.lines_changed, 0);
-  const measured = rows.filter(row => row.survival_pct !== null).length;
+  const measured = rows.filter(row => row.survival_pct !== null && row.survival_pct !== undefined).length;
+  const tooYoung = rows.filter(row => (row.survival_pct === null || row.survival_pct === undefined) && tooYoungToJudge(row)).length;
+  const survivalDetail = measured
+    ? `${measured} of ${rows.length}`
+    : tooYoung
+      ? `none yet`
+      : `0 of ${rows.length}`;
+  const survivalNote = !measured && tooYoung
+    ? `<span class="mini-note">every commit here is under ${SURVIVAL_MIN_AGE_DAYS} days old</span>`
+    : '';
+  const unbankedUsd = unbanked && unbanked.available ? Number(unbanked.unbanked_usd || 0) : 0;
   return `<div class="mini-grid" style="margin-bottom:12px">
-    <div class="mini"><span class="label">Commits</span><strong>${esc(rows.length)}</strong></div>
-    <div class="mini"><span class="label">Attributed spend</span><strong>${esc(fmtMoney(cost))}</strong></div>
+    <div class="mini"><span class="label">Commits</span><strong>${esc(rows.length)}</strong>${foreign
+      ? `<span class="mini-note">${esc(foreign)} more by other authors, excluded</span>` : ''}</div>
+    <div class="mini"><span class="label">Attributed spend</span><strong>${esc(fmtMoney(cost))}</strong>${unbankedUsd > 0
+      ? `<span class="mini-note">${esc(unbanked.unbanked_label)} has no commit to attach to</span>` : ''}</div>
     <div class="mini"><span class="label">Lines changed</span><strong>${esc(lines.toLocaleString())}</strong></div>
-    <div class="mini"><span class="label">Survival measured</span><strong>${esc(measured)} of ${esc(rows.length)}</strong></div>
-  </div>${note}${unbankedNote}`;
+    <div class="mini"><span class="label">Survival measured</span><strong>${esc(survivalDetail)}</strong>${survivalNote}</div>
+  </div>`;
 }
 function fmtMoney(value) {
   return '$' + (Math.round(value * 100) / 100).toFixed(2);

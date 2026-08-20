@@ -525,5 +525,46 @@ class SettingsTest(unittest.TestCase):
         self.assertNotIn("Setup checklist", self.html)
 
 
+class ChangesLedgerTest(unittest.TestCase):
+    """The ledger's widest column held a value identical on 47 of 49 rows, and
+    two more columns are structurally empty in the default window because
+    survival needs a commit to be seven days old before it means anything."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+
+    def test_empty_survival_says_why(self):
+        """A bare dash reads as missing data. In a seven-day window every commit
+        is younger than survival.MIN_AGE_DAYS, so all 49 cells were dashes and
+        the column looked broken rather than young -- it fooled the audit."""
+        rows = js_function_source(self.js, "renderChangeRows")
+        self.assertIn("tooYoungToJudge(row)", rows)
+        self.assertIn("too new", rows)
+
+    def test_the_age_rule_matches_the_server(self):
+        # If these drift, the table explains an emptiness the server did not
+        # cause. survival.py owns the real number.
+        from aiwatcher_cli import survival
+        self.assertIn(
+            "const SURVIVAL_MIN_AGE_DAYS = %d;" % survival.MIN_AGE_DAYS, self.js)
+
+    def test_the_project_column_is_a_name_not_a_path(self):
+        # It was the widest column in the table, holding a left-truncated path
+        # that was the same on nearly every row.
+        rows = js_function_source(self.js, "renderChangeRows")
+        self.assertIn("repoLabel(row)", rows)
+        self.assertNotIn("esc(row.project)}</td>", rows)
+
+    def test_coverage_caveats_sit_on_the_counts_they_qualify(self):
+        """Two sentences under the table were the only way to learn it covers
+        about two thirds of what happened. They are counts, so they belong on
+        the counts."""
+        totals = js_function_source(self.js, "renderChangeTotals")
+        self.assertIn("by other authors, excluded", totals)
+        self.assertIn("has no commit to attach to", totals)
+        self.assertNotIn("receipt-note", totals)
+
+
 if __name__ == "__main__":
     unittest.main()
