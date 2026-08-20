@@ -1713,6 +1713,20 @@ function healthFacts(row) {
   ].filter(Boolean).join(' \u00b7 ');
 }
 
+// A health-card button goes where its label says. The kind comes from
+// _context_action alongside the label, so the two cannot be changed apart.
+// Falls back to the review when a handoff is not available for this row,
+// rather than offering "Start fresh" and doing nothing.
+function healthActionButton(row, className, label, kind) {
+  const effective = (kind === 'handoff' && !row.can_handoff) ? 'review' : kind;
+  const text = effective === kind ? label : 'Review session';
+  return `<button class="${className}" data-session="${esc(row.session_id)}" data-kind="${esc(effective)}" onclick="runHealthAction(this.dataset.kind, this.dataset.session)">${esc(text)}</button>`;
+}
+
+function runHealthAction(kind, sessionId) {
+  return kind === 'handoff' ? openHandoff(sessionId) : selectSession(sessionId);
+}
+
 function healthLeadCard(row) {
   const verdict = runwayVerdict(row.chart);
   const room = headroomLabel(row.chart);
@@ -1732,8 +1746,8 @@ function healthLeadCard(row) {
     <div class="trend-host" data-trend="${esc(row.session_id)}"></div>
     <p class="health-facts">${esc(healthFacts(row))}</p>
     <div class="health-actions">
-      <button class="btn-primary" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.action.label)}</button>
-      ${row.can_handoff ? `<button class="btn-quiet" data-session="${esc(row.session_id)}" onclick="openHandoff(this.dataset.session)">${esc(row.action.secondary_label)}</button>` : ''}
+      ${healthActionButton(row, 'btn-primary', row.action.label, row.action.kind)}
+      ${row.can_handoff ? healthActionButton(row, 'btn-quiet', row.action.secondary_label, row.action.secondary_kind) : ''}
       <button class="btn-quiet" data-compact="${esc(row.compact_prompt || '/compact')}" onclick="copyText(this.dataset.compact, 'Compact prompt copied')">Copy compact prompt</button>
     </div>
     <p class="receipt-note">${esc(row.action.reason)}${row.session_count > 1

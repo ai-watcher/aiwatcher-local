@@ -709,5 +709,72 @@ class RefreshRecoveryTest(unittest.TestCase):
         self.assertIn(r"/\[object \w+\]/", self.js)
 
 
+class HealthCardActionTest(unittest.TestCase):
+    """A button on a health card has to go where its label says.
+
+    The label used to be advice from _context_action ("Compact", "Keep going")
+    while the handler was hardcoded in index.js to open the session review, so
+    the two drifted. "Compact" was the sharpest case -- it reads as an
+    instruction the button carries out, and the control that actually compacts
+    sits beside it -- and in the healthy state the two labels were swapped
+    outright. The review filed this as "five buttons do nothing"; every one of
+    them fired, they just went somewhere else."""
+
+    class _Health:
+        def __init__(self, severity="healthy", pressure=False, bloat=False, stale=False):
+            self.severity = severity
+            self.is_context_pressure = pressure
+            self.is_high_bloat = bloat
+            self.is_stale = stale
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+
+    def _states(self):
+        return {
+            "critical": self._Health(severity="critical"),
+            "pressure": self._Health(pressure=True),
+            "bloat": self._Health(bloat=True),
+            "stale": self._Health(stale=True),
+            "healthy": self._Health(),
+        }
+
+    def test_every_label_names_its_destination(self):
+        allowed = {"Start fresh": "handoff", "Review session": "review"}
+        for name, health in self._states().items():
+            action = ui._context_action(health)
+            with self.subTest(state=name):
+                self.assertEqual(allowed.get(action["label"]), action["kind"])
+                self.assertEqual(allowed.get(action["secondary_label"]), action["secondary_kind"])
+                # Two buttons must not both go to the same place.
+                self.assertNotEqual(action["kind"], action["secondary_kind"])
+
+    def test_pressure_leads_with_the_fresh_start(self):
+        for name in ("critical", "pressure", "bloat"):
+            with self.subTest(state=name):
+                self.assertEqual(ui._context_action(self._states()[name])["kind"], "handoff")
+        for name in ("stale", "healthy"):
+            with self.subTest(state=name):
+                self.assertEqual(ui._context_action(self._states()[name])["kind"], "review")
+
+    def test_advice_is_no_longer_wearing_a_button(self):
+        for name, health in self._states().items():
+            with self.subTest(state=name):
+                action = ui._context_action(health)
+                for label in (action["label"], action["secondary_label"]):
+                    self.assertNotIn(label, {"Compact", "Keep going", "Fresh Start",
+                                             "Prepare Fresh Start", "Fresh session", "Review"})
+                # The advice still exists, just not as a control.
+                self.assertTrue(action["reason"])
+
+    def test_the_button_dispatches_on_the_kind_it_was_given(self):
+        self.assertIn("function runHealthAction", self.js)
+        self.assertNotIn('onclick="selectSession(this.dataset.session)">${esc(row.action.label)}', self.js)
+        button = js_function_source(self.js, "healthActionButton")
+        # Offering "Start fresh" where no handoff exists would be the same bug again.
+        self.assertIn("row.can_handoff", button)
+
+
 if __name__ == "__main__":
     unittest.main()

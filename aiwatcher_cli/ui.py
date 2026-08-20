@@ -2080,29 +2080,44 @@ def build_journal(days: int = 1) -> dict[str, object]:
     }
 
 
+# The two destinations a health card can send you to. A button names one of
+# these and nothing else, so its label cannot drift from what it does.
+_ACTION_REVIEW = ("Review session", "review")
+_ACTION_FRESH = ("Start fresh", "handoff")
+
+
 def _context_action(health: ContextHealth) -> dict[str, str]:
+    """What the two buttons on a health card say, and where each one goes.
+
+    Label and behaviour used to be decided in different files. This function
+    returned advice -- "Compact", "Keep going" -- as the primary label, while
+    the primary button's handler was hardcoded to open the session review. So
+    three of these four states shipped a button that promised something it did
+    not do. "Compact" was the worst of them: it reads as an instruction the
+    button will carry out, and the control that actually compacts sits directly
+    beside it. In the healthy state the two labels were outright swapped.
+
+    The advice still exists -- it is `reason`, rendered under the buttons. What
+    changed is that it is no longer wearing a button.
+    """
     if health.severity == "critical":
-        return {
-            "label": "Start fresh",
-            "secondary_label": "Fresh Start",
-            "reason": "Critical context pressure is likely to waste turns or miss details.",
-        }
-    if health.is_context_pressure or health.is_high_bloat:
-        return {
-            "label": "Compact",
-            "secondary_label": "Prepare Fresh Start",
-            "reason": "Context is growing; compact before it compounds further.",
-        }
-    if health.is_stale:
-        return {
-            "label": "Review",
-            "secondary_label": "Fresh session",
-            "reason": "The session is old enough that a focused restart may be cleaner.",
-        }
+        primary, secondary = _ACTION_FRESH, _ACTION_REVIEW
+        reason = "Critical context pressure is likely to waste turns or miss details."
+    elif health.is_context_pressure or health.is_high_bloat:
+        primary, secondary = _ACTION_FRESH, _ACTION_REVIEW
+        reason = "Context is growing; compact before it compounds further."
+    elif health.is_stale:
+        primary, secondary = _ACTION_REVIEW, _ACTION_FRESH
+        reason = "The session is old enough that a focused restart may be cleaner."
+    else:
+        primary, secondary = _ACTION_REVIEW, _ACTION_FRESH
+        reason = "Context looks healthy."
     return {
-        "label": "Keep going",
-        "secondary_label": "Review",
-        "reason": "Context looks healthy.",
+        "label": primary[0],
+        "kind": primary[1],
+        "secondary_label": secondary[0],
+        "secondary_kind": secondary[1],
+        "reason": reason,
     }
 
 
