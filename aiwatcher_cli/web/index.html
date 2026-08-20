@@ -61,6 +61,17 @@
          starts or ends -- peripheral vision notices movement, not content. -->
     <section id="ambient" class="ambient" aria-live="polite" hidden></section>
 
+    <!-- A standing summary of the window, under the panel about right now. Cut
+         with the rest of Home on the grounds that each number appears elsewhere,
+         which was true and missed the point: four numbers in four places is not
+         the same as four numbers in one glance. Three, not four -- preflight
+         decisions moved to Prove and duplicating it back would undo that. -->
+    <section class="grid kpis" style="margin-top:14px">
+      <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub">Value per useful change: <span id="costPerUseful">-</span></div><div class="sub" id="costPerSurvivingRow" hidden>Cost per surviving line: <span id="costPerSurviving">-</span></div><div class="metric-spark" data-tile-spark="usefulOutcomes" hidden></div></div>
+      <div class="card metric-card metric-blue"><div class="label">Sessions observed</div><div class="value" id="sessions">-</div><div class="sub">This machine only</div><div class="metric-spark" data-tile-spark="sessions" hidden></div></div>
+      <div class="card metric-card metric-neutral"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div><div class="metric-spark" data-tile-spark="apiValue" hidden></div></div>
+    </section>
+
     <!-- Receipt only, and hidden until you act. The alert this element used to
          carry was the same critical-context message the ambient surface now
          states once; what remains is the proof shown after copying a brief. -->

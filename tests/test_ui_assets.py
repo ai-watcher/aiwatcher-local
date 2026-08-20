@@ -618,5 +618,48 @@ class WatchTest(unittest.TestCase):
         self.assertIn("healthProjectName(row)", card)
 
 
+class WindowSummaryTest(unittest.TestCase):
+    """Home carries a standing summary of the window under the panel about right
+    now. It was cut on the grounds that each number appears elsewhere -- true,
+    and beside the point: four numbers in four places is not four numbers in one
+    glance."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+        start = cls.html.index('<section id="view-today"')
+        cls.home = cls.html[start:cls.html.index('<section id="view-prompt"')]
+
+    def test_home_carries_three_tiles(self):
+        for tile in ("usefulOutcomes", "sessions", "apiValue"):
+            with self.subTest(tile=tile):
+                self.assertIn('id="%s"' % tile, self.home)
+
+    def test_preflight_stays_where_it_moved(self):
+        # It was the one tile with no equivalent elsewhere, so it went to Prove.
+        # Bringing it back here would undo that move.
+        self.assertNotIn('id="preflightDecisions"', self.home)
+        self.assertIn('id="preflightDecisions"', self.html)
+
+    def test_the_quiet_panel_does_not_repeat_the_tiles(self):
+        """The quiet hero was the window's API-equivalent value, which is now a
+        tile a few pixels below it -- the same figure twice. The panel answers
+        "right now", so it leads with the session that just finished."""
+        quiet = js_function_source(self.js, "ambientQuiet")
+        self.assertIn("recent_sessions", quiet)
+        self.assertNotIn("hero: esc(totals.api_value_label", quiet)
+
+    def test_cost_copy_uses_the_spend_weighted_share(self):
+        """"of what they cost" has to read the money figure. The token-weighted
+        one is ~98% on every window, because replayed context is billed at the
+        cache-read rate, and it made that sentence wrong by thirty points --
+        while the Improve card, computing it properly, said 70%."""
+        quiet = js_function_source(self.js, "ambientQuiet")
+        self.assertIn("totals.replayed_spend_share_pct", quiet)
+        self.assertNotIn("totals.replayed_share_pct", quiet)
+        self.assertIn("replayed_spend_share_pct", inspect.getsource(ui))
+
+
 if __name__ == "__main__":
     unittest.main()

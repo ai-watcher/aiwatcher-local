@@ -2881,7 +2881,10 @@ function ambientRunning(card) {
 
 function ambientQuiet(data) {
   const totals = data.totals || {};
-  const replayed = Number(totals.replayed_share_pct);
+  // Spend-weighted, because the sentence below says "of what they cost". The
+  // token-weighted figure reads ~98% for every window and would make that
+  // sentence wrong by about thirty points.
+  const replayed = Number(totals.replayed_spend_share_pct);
   const hasSplit = !Number.isNaN(replayed) && replayed > 0;
   const needsReview = Number(totals.needs_review_outcomes) || 0;
 
@@ -2905,11 +2908,14 @@ function ambientQuiet(data) {
       + ' still waiting on you to say whether the work was useful.';
   }
 
+  const last = (data.recent_sessions || [])[0] || null;
   return {
     state: 'idle',
-    hero: esc(totals.api_value_label || '-'),
-    heroUnit: 'API-equivalent, ' + esc(totals.window_label || 'this window'),
-    context: 'no session running',
+    hero: last ? esc(last.tokens) : esc(totals.tokens_label || '-'),
+    heroUnit: last ? 'tokens in the last session' : 'tokens this window',
+    context: last
+      ? 'no session running · last was ' + esc(last.tool || 'a local tool')
+      : 'no session running',
     meter: segments.length ? meterSvg(segments, [], 100) + ambientScaleLabels(scale) : '',
     sentence: sentence,
     actions: (needsReview
@@ -3106,6 +3112,19 @@ async function load(resetDetail = true, forceRefresh = false) {
   renderCacheStatus(data.cache || null);
   const totals = data.totals;
   document.getElementById('windowLabel').textContent = totals.window_label;
+  document.getElementById('apiValue').textContent = totals.api_value_label;
+  document.getElementById('sessions').textContent = totals.sessions;
+  document.getElementById('usefulOutcomes').textContent = totals.useful_outcomes;
+  document.getElementById('costPerUseful').textContent = `${totals.cost_per_useful_change}${totals.inferred_useful_outcomes ? ` · ${totals.inferred_useful_outcomes} to confirm` : ''}`;
+  const survival = data.survival || {};
+  const survivalRow = document.getElementById('costPerSurvivingRow');
+  if (survival.available) {
+    survivalRow.hidden = false;
+    document.getElementById('costPerSurviving').textContent =
+      `${survival.cost_per_surviving_line_label} per surviving line (${survival.survival_pct}% of ${survival.lines_touched} lines still standing)`;
+  } else {
+    survivalRow.hidden = true;
+  }
   document.getElementById('preflightDecisions').textContent = totals.preflight_decisions;
   // Same two-step contract as the runway charts: the tiles' numbers are set
   // first, then SVG is appended into nodes collected by attribute. Absent on

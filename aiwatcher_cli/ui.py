@@ -4089,6 +4089,16 @@ def build_summary(
     useful_cost = sum(row.cost_usd for row in useful_rows)
     cost_per_useful = useful_cost / len(useful_rows) if useful_rows else None
     handoff_decisions = _handoff_decision_rows(limit=10, sessions=all_rows)
+    # Replay share weighted by money rather than tokens. The two answers differ
+    # enormously on the same window -- about 98% against 70% -- because replayed
+    # context is billed at the cache-read rate, so counting tokens says nearly
+    # everything was replay while counting spend says what it actually cost.
+    _replay_cost = replayed_context_cost(rows)
+    _window_cost = sum(row.cost_usd for row in rows)
+    replayed_spend_share = (
+        round(100.0 * float(_replay_cost["total_replayed_usd"]) / _window_cost, 1)
+        if _replay_cost.get("available") and _window_cost > 0 else None
+    )
     return {
         "generated_at": now.isoformat(),
         "cache_schema_version": SUMMARY_CACHE_SCHEMA_VERSION,
@@ -4118,6 +4128,9 @@ def build_summary(
                 round(100.0 * replayed_tokens / int(stats["tokens"]), 1)
                 if int(stats["tokens"]) > 0 else 0.0
             ),
+            # Copy that says "of what this cost" must read this one, not the
+            # token-weighted figure above it.
+            "replayed_spend_share_pct": replayed_spend_share,
             "api_priced_tokens_label": compact_int(split["api_priced"]),
             "plan_limited_tokens_label": compact_int(split["plan_limited"]),
             "calls": stats["calls"],
