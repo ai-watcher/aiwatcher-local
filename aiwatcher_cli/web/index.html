@@ -4,6 +4,10 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>AIWatcher Local</title>
+  <!-- Replaced at runtime with a state-coloured data: URI (see renderTabState).
+       A link element has to exist for that swap to have somewhere to land, and
+       the inline default keeps the page self-contained with no second request. -->
+  <link id="favicon" rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23070b11'/%3E%3Ccircle cx='16' cy='16' r='7' fill='%2378869a'/%3E%3C/svg%3E" />
   <style>@@INCLUDE:index.css@@</style>
 </head>
 <body>
@@ -34,6 +38,7 @@
     <div class="runtime-copy">
       <span id="watcherPill" class="cache-pill building">Watcher unknown</span>
       <span id="cacheStatus">Loading local index...</span>
+      <span id="freshness" class="freshness" aria-live="off"></span>
     </div>
     <button id="watcherCommandButton" class="btn-quiet" onclick="copyWatcherCommand()" hidden>Copy watcher command</button>
   </section>
@@ -42,96 +47,35 @@
     <button class="nav-tab active" data-view="today" onclick="showView('today')">Home</button>
     <button class="nav-tab" data-view="prompt" onclick="showView('prompt')">Plan / Control</button>
     <button class="nav-tab" data-view="sessions" onclick="showView('sessions')">Watch</button>
+    <button class="nav-tab nav-sub" data-view="projects" onclick="showView('projects')">Projects</button>
+    <button class="nav-tab nav-sub" data-view="changes" onclick="showView('changes')">Changes ledger</button>
     <button class="nav-tab" data-view="receipts" onclick="showView('receipts')">Prove</button>
     <button class="nav-tab" data-view="insights" onclick="showView('insights')">Improve</button>
     <button class="nav-tab" data-view="setup" onclick="showView('setup')">Settings</button>
   </nav>
 
   <section id="view-today" class="view">
-    <section id="handoffBubble" class="card handoff-bubble" style="margin-bottom:14px" hidden></section>
+    <!-- The ambient surface. Five slots, in a fixed order, filled by renderAmbient:
+         hero number, meter, one sentence, one action, fact row. The running and
+         quiet states use the same five so the layout never reflows when a session
+         starts or ends -- peripheral vision notices movement, not content. -->
+    <section id="ambient" class="ambient" aria-live="polite" hidden></section>
 
-    <section class="card home-command-card" style="margin-bottom:14px">
-      <div class="section-title">
-        <div><h2>What needs attention</h2><p>The few local actions most likely to save context, reduce rework, or improve proof.</p></div>
-        <button class="btn-quiet" onclick="showView('coverage')">Check coverage</button>
-      </div>
-      <div id="actionQueue" class="action-queue"></div>
-    </section>
-
-    <section class="grid two" style="margin-bottom:14px">
-      <div class="card hero-card">
-        <div class="section-title"><div><h2>Latest AI work</h2><p>Your most recent local session and its outcome.</p></div></div>
-        <div id="latestSession"></div>
-      </div>
-      <div class="card attention-card">
-        <div class="section-title"><div><h2>One thing worth changing</h2><p>The clearest next improvement from local evidence.</p></div></div>
-        <div id="todayRecommendation"></div>
-      </div>
-    </section>
-
-    <section class="grid kpis">
+    <!-- A standing summary of the window, under the panel about right now. Cut
+         with the rest of Home on the grounds that each number appears elsewhere,
+         which was true and missed the point: four numbers in four places is not
+         the same as four numbers in one glance. Three, not four -- preflight
+         decisions moved to Prove and duplicating it back would undo that. -->
+    <section class="grid kpis" style="margin-top:14px">
       <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub">Value per useful change: <span id="costPerUseful">-</span></div><div class="sub" id="costPerSurvivingRow" hidden>Cost per surviving line: <span id="costPerSurviving">-</span></div><div class="metric-spark" data-tile-spark="usefulOutcomes" hidden></div></div>
-      <div class="card metric-card metric-amber"><div class="label">Preflight decisions</div><div class="value" id="preflightDecisions">-</div><div class="sub"><span id="windowLabel">-</span></div><div class="metric-spark" data-tile-spark="preflightDecisions" hidden></div></div>
       <div class="card metric-card metric-blue"><div class="label">Sessions observed</div><div class="value" id="sessions">-</div><div class="sub">This machine only</div><div class="metric-spark" data-tile-spark="sessions" hidden></div></div>
       <div class="card metric-card metric-neutral"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div><div class="metric-spark" data-tile-spark="apiValue" hidden></div></div>
     </section>
 
-    <section class="grid two" style="margin:14px 0">
-      <div class="card">
-        <div class="section-title"><div><h2>Context health</h2><p>Where a fresh start or narrower prompt would help.</p></div><button class="btn-quiet" onclick="showView('sessions')">Open Watch</button></div>
-        <div id="contextHealth"></div>
-      </div>
-      <div class="card">
-        <div class="section-title"><div><h2>Proof snapshot</h2><p>Latest gate and Fresh Start receipts.</p></div><button class="btn-quiet" onclick="showView('receipts')">Open Prove</button></div>
-        <div id="latestIntervention"></div>
-        <div id="latestHandoffDecision" style="margin-top:12px"></div>
-      </div>
-    </section>
-
-    <section class="card" style="margin-bottom:14px">
-      <div class="section-title"><div><h2>Spend leakage</h2><p>Exploration that has not landed in commits yet.</p></div><button class="btn-quiet" onclick="showView('insights')">Open Improve</button></div>
-      <div id="unbanked"></div>
-    </section>
-
-    <section class="grid two">
-      <div class="card">
-        <div class="section-title"><div><h2>Projects Driving AI Usage</h2><p>Measured in tokens, so plan-based tools still count. Click a project to inspect local sessions, models, and tools.</p></div></div>
-        <div class="composition" id="projectsComposition" hidden>
-          <div class="pie-host" data-pie="projects"></div>
-          <div class="composition-legend" id="projectsCompositionLegend"></div>
-        </div>
-        <div id="projects"></div>
-      </div>
-      <div class="card">
-        <div class="section-title"><div><h2>Recent sessions</h2><p>Review work and record whether it was useful.</p></div></div>
-        <div class="table-wrap"><table>
-          <thead><tr><th>Tool</th><th>Project</th><th>Tokens</th><th></th></tr></thead>
-          <tbody id="recent"></tbody>
-        </table></div>
-      </div>
-    </section>
-
-    <section class="grid two" style="margin-top:14px">
-      <div class="card">
-        <h2>Models and Tools</h2>
-        <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 4px">By model</h3>
-        <div id="models"></div>
-        <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:14px 0 4px">By tool</h3>
-        <div class="composition" id="toolsComposition" hidden>
-          <div class="pie-host" data-pie="tools"></div>
-          <div class="composition-legend" id="toolsCompositionLegend"></div>
-        </div>
-        <div id="tools"></div>
-        <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:16px 0 2px">Model mix within each tool</h3>
-        <p style="font-size:.7rem;color:var(--faint);margin:0 0 8px">Each bar is that tool's own 100%, so size means proportion, not volume — the token total is on the right.</p>
-        <div id="toolModels" hidden></div>
-      </div>
-      <div class="card">
-        <div class="section-title"><div><h2>Privacy at a glance</h2><p>Your local trust boundary stays visible.</p></div></div>
-        <div class="privacy-grid" id="privacy"></div>
-        <div id="insights" hidden></div>
-      </div>
-    </section>
+    <!-- Receipt only, and hidden until you act. The alert this element used to
+         carry was the same critical-context message the ambient surface now
+         states once; what remains is the proof shown after copying a brief. -->
+    <section id="handoffBubble" class="card handoff-bubble" style="margin-top:14px" hidden></section>
   </section>
 
   <section id="view-prompt" class="view" hidden>
@@ -159,12 +103,18 @@
         <div id="promptResult" class="prompt-result"><div class="empty">Run Plan to choose the safest next route before sending the prompt.</div></div>
       </div>
     </div>
+    <!-- Housekeeping, not planning. It was 64% of this tab, above the tool the
+         tab is named for, so it now opens on demand with its count in the
+         summary. The link to planning is real -- you clear clutter before
+         carrying context forward -- but it is the preamble, not the point. -->
     <section id="optimizeWorkspace" class="card" style="margin-top:14px">
-      <div class="section-title">
-        <div><h2>Optimize workspace</h2><p>Review stale chats, pending Fresh Starts, AI worktrees, and runtime clutter before carrying context forward.</p></div>
-        <span class="pill">Local evidence only</span>
-      </div>
-      <div id="optimizeWorkspaceBody"><div class="empty">Loading workspace cleanup evidence...</div></div>
+      <details class="aiw-details">
+        <summary><span id="optimizeWorkspaceSummary">Optimize workspace</span></summary>
+        <div class="details-body">
+          <p class="optimize-lede">Review stale chats, pending Fresh Starts, AI worktrees, and runtime clutter before carrying context forward. <span class="pill">Local evidence only</span></p>
+          <div id="optimizeWorkspaceBody"><div class="empty">Loading workspace cleanup evidence...</div></div>
+        </div>
+      </details>
     </section>
   </section>
 
@@ -193,10 +143,6 @@
       <div class="section-title">
         <div><h2>Work</h2><p>Search sessions, inspect projects, review changes, and continue prior local AI work. Prompt text is shown for your own review only, never uploaded.</p></div>
         <span class="pill">Local machine only</span>
-      </div>
-      <div class="actions" style="margin-bottom:12px">
-        <button class="btn-quiet" data-view="projects" onclick="showView('projects')">Projects</button>
-        <button class="btn-quiet" data-view="changes" onclick="showView('changes')">Changes ledger</button>
       </div>
       <div class="session-filters">
         <input id="sessionSearch" type="text" placeholder="Search project, tool, model, session id, or a file/topic keyword" oninput="debounceSessionSearch()">
@@ -257,6 +203,10 @@
   </section>
 
   <section id="view-receipts" class="view" hidden>
+    <section class="grid kpis" style="margin-bottom:14px">
+      <div class="card metric-card metric-amber"><div class="label">Preflight decisions</div><div class="value" id="preflightDecisions">-</div><div class="sub"><span id="windowLabel">-</span></div><div class="metric-spark" data-tile-spark="preflightDecisions" hidden></div></div>
+    </section>
+
     <div class="card" style="margin-bottom:14px">
       <div class="section-title">
         <div><h2>Fresh Start receipts</h2><p>When AIWatcher suggested a fresh session, what you chose, and whether a follow-up session was observed.</p></div>
@@ -307,38 +257,52 @@
       Read-only local scan &middot; no LLM calls &middot; no source or prompt content in summaries &middot;
       nothing leaves this machine unless you connect Cloud.
     </p>
-  </section>
-
-  <section id="view-coverage" class="view" hidden>
-    <div class="card">
-      <div class="section-title">
-        <div><h2>Surface Coverage</h2><p>What AIWatcher can gate, scan, or only help with manually on this machine.</p></div>
-        <span class="pill">Verified locally</span>
-      </div>
-      <div id="coverageRows" class="coverage-grid"></div>
-    </div>
+    <section class="card" style="margin-top:14px">
+      <div class="section-title"><div><h2>Models and Tools</h2><p>Where the spend went, by model and by tool.</p></div></div>
+        <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 4px">By model</h3>
+        <div id="models"></div>
+        <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:14px 0 4px">By tool</h3>
+        <div class="composition" id="toolsComposition" hidden>
+          <div class="pie-host" data-pie="tools"></div>
+          <div class="composition-legend" id="toolsCompositionLegend"></div>
+          <div id="tools"></div>
+        <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:16px 0 2px">Model mix within each tool</h3>
+        <p style="font-size:.7rem;color:var(--faint);margin:0 0 8px">Each bar is that tool's own 100%, so size means proportion, not volume &mdash; the token total is on the right.</p>
+        <div id="toolModels" hidden></div>
+    </section>
   </section>
 
   <section id="view-setup" class="view" hidden>
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title"><div><h2>Privacy at a glance</h2><p>Your local trust boundary stays visible.</p></div></div>
+      <div class="privacy-grid" id="privacy"></div>
+    </section>
+
     <div class="card">
       <div class="section-title">
         <div><h2>Settings</h2><p>Setup, coverage, privacy, and local companion behavior.</p></div>
         <span class="pill">Local only</span>
       </div>
       <p class="receipt-note">Ambient Watch starts with the dashboard by default. For standalone mode, run <code>aiwatcher watch --notify --overlay --interval 60</code>.</p>
-      <div class="actions" style="margin-bottom:12px">
-        <button class="btn-quiet" data-view="coverage" onclick="showView('coverage')">Surface coverage</button>
-      </div>
-      <div class="section-title">
-        <div><h2>Surface coverage</h2><p>Detected tools, hook confidence, and what AIWatcher can honestly measure.</p></div>
-      </div>
-      <div id="coverageRowsSettings" class="coverage-grid" style="margin-bottom:14px"></div>
-      <div class="handoff-cta" style="margin-bottom:14px">
+      <details class="aiw-details">
+        <summary><span id="coverageSummary">Surface coverage</span></summary>
+        <div class="details-body">
+          <p class="optimize-lede">Detected tools, hook confidence, and what AIWatcher can honestly measure.</p>
+          <div id="coverageRowsSettings" class="coverage-grid"></div>
+        </div>
+      </details>
+      <details class="aiw-details">
+        <summary><span id="setupSummary">Setup steps</span></summary>
+        <div class="details-body">
+          <p class="optimize-lede">What AIWatcher needs installed to gate prompts and prove what it caught. These are recommendations, not a checklist &mdash; nothing here tracks completion.</p>
+          <div id="setupRows" class="coverage-grid"></div>
+        </div>
+      </details>
+      <div class="handoff-cta" style="margin-top:14px">
         <h4>Test Fresh Start with sample data</h4>
         <p>Open a seeded context-pressure case, tune the continuation brief, and verify the copy flow without waiting for a real bloated session.</p>
         <button class="btn-primary" onclick="openDemoHandoff()">Try Fresh Start demo</button>
       </div>
-      <div id="setupRows" class="coverage-grid"></div>
     </div>
   </section>
 </main>

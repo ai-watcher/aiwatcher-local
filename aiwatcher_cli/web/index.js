@@ -53,176 +53,6 @@ function actionRow(item) {
     <div class="actions">${(item.actions || []).map(action => `<button class="${esc(action.primary ? 'btn-primary' : 'btn-quiet')}" onclick="${esc(action.onclick)}">${esc(action.label)}</button>`).join('')}</div>
   </div>`;
 }
-function buildActionQueue(data) {
-  const items = [];
-  const bubble = data.handoff_bubble;
-  if (bubble && bubble.session_id) {
-    items.push({
-      severity: bubble.severity === 'critical' ? 'critical' : 'high',
-      title: bubble.title || 'Fresh Start recommended',
-      body: bubble.body || bubble.reason || 'Context pressure is elevated in a local session.',
-      evidence: 'observed local session',
-      meta: [
-        bubble.expected_saved_context_label ? `~${bubble.expected_saved_context_label} context at risk` : 'proof pending',
-        bubble.tool || 'unknown tool',
-        bubble.project || 'unknown project',
-      ],
-      actions: [
-        { label: bubble.primary_label || 'Build Fresh Start brief', primary: true, onclick: `openHandoff(${jsArg(bubble.session_id)})` },
-        { label: 'Inspect session', onclick: `selectSession(${jsArg(bubble.session_id)})` },
-      ],
-    });
-  }
-  const healthRows = (data.context_health || []).filter(row => !(bubble && row.session_id === bubble.session_id));
-  if (healthRows.length) {
-    const row = healthRows[0];
-    const more = healthRows.length > 1 ? `${healthRows.length - 1} more session${healthRows.length === 2 ? '' : 's'}` : '';
-    items.push({
-      severity: row.severity === 'critical' ? 'critical' : 'high',
-      title: row.action && row.action.label ? row.action.label : 'Review context health',
-      body: `${row.recommendation || row.action && row.action.reason || 'AIWatcher found context or pace pressure.'}${more ? ` ${more} also need review in Watch.` : ''}`,
-      evidence: row.bloat_measurable ? 'measured replay' : 'observed signal',
-      meta: [row.project, row.tool, row.latest_turn_tokens ? `${row.latest_turn_tokens} latest turn` : '', row.bloat_label ? `${row.bloat_label} replay` : '', more].filter(Boolean),
-      actions: [
-        { label: row.can_handoff ? 'Build Fresh Start brief' : 'Review session', primary: true, onclick: row.can_handoff ? `openHandoff(${jsArg(row.session_id)})` : `selectSession(${jsArg(row.session_id)})` },
-        { label: 'Inspect evidence', onclick: `selectSession(${jsArg(row.session_id)})` },
-        ...(more ? [{ label: 'View all in Watch', onclick: "showView('sessions')" }] : []),
-      ],
-    });
-  }
-  (data.handoff_decisions || []).filter(decision => !decision.next_session_id).slice(0, 2).forEach(decision => {
-    const sessionId = decision.source_session_id || decision.session_id || '';
-    items.push({
-      severity: 'medium',
-      title: 'Fresh Start proof pending',
-      body: decision.proof_reason || 'A brief was copied, but AIWatcher has not linked a follow-up session yet.',
-      evidence: 'receipt pending',
-      meta: [decision.expected_saved_context_label ? `~${decision.expected_saved_context_label} context at risk` : 'no savings claim yet', sessionId ? `source ${shortSessionId(sessionId)}` : 'source unknown'].filter(Boolean),
-      actions: [
-        { label: sessionId ? 'Inspect source' : 'View Evidence', primary: false, onclick: sessionId ? `selectSession(${jsArg(sessionId)})` : "showView('receipts')" },
-        { label: 'View receipts', primary: true, onclick: "showView('receipts')" },
-      ],
-    });
-  });
-  (data.recent_sessions || []).filter(s => !s.outcome && ['useful', 'needs_review', 'churned'].includes(s.inferred_outcome)).slice(0, 3).forEach(s => {
-    items.push({
-      severity: s.inferred_outcome === 'churned' ? 'high' : 'medium',
-      title: s.inferred_outcome === 'useful' ? 'Confirm likely useful work' : s.inferred_outcome === 'churned' ? 'Review rewritten work' : 'Review unconfirmed outcome',
-      body: 'AIWatcher found local code/test evidence, but your outcome confirmation is what makes value metrics trustworthy.',
-      evidence: `inferred: ${s.inferred_outcome}`,
-      meta: [s.project, s.tool, s.api_value || s.tokens],
-      actions: [{ label: 'Mark outcome', primary: true, onclick: `selectSession(${jsArg(s.session_id)})` }],
-    });
-  });
-  const coverageGap = (data.coverage || []).find(row => row.detected && ['unverified', 'unsupported'].includes(row.status));
-  if (coverageGap) {
-    items.push({
-      severity: coverageGap.status === 'unsupported' ? 'medium' : 'high',
-      title: `Verify ${coverageGap.label} coverage`,
-      body: coverageGap.action || 'Coverage is not automatic yet. Verify whether this surface is protected, companion-only, or history-only.',
-      evidence: 'coverage state',
-      meta: [coverageGap.status_label, coverageGap.history, coverageGap.automatic_gate],
-      actions: [{ label: 'Open Settings', primary: true, onclick: "showView('setup')" }],
-    });
-  }
-  if (!items.length && data.insights && data.insights.length) {
-    const insight = data.insights[0];
-    items.push({
-      severity: insight.severity || 'low',
-      title: insight.title,
-      body: insight.body,
-      evidence: insight.impact_label ? 'cost signal' : 'local signal',
-      meta: [insight.impact_label || 'no urgent intervention'],
-      actions: insight.session_id ? [{ label: 'Inspect session', primary: true, onclick: `selectSession(${jsArg(insight.session_id)})` }] : [{ label: 'Open Spend', primary: true, onclick: "showView('insights')" }],
-    });
-  }
-  if (!items.length) {
-    return `<div class="empty">No action needed right now. AIWatcher will stay quiet until it has local evidence worth interrupting you for.</div>`;
-  }
-  const order = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
-  const topItems = items.sort((a, b) => (order[a.severity] ?? 4) - (order[b.severity] ?? 4)).slice(0, 3);
-  const footer = items.length > topItems.length
-    ? `<div class="copy-row"><button class="btn-quiet" onclick="showView('sessions')">View more in Watch</button><button class="btn-quiet" onclick="showView('receipts')">Review receipts</button></div>`
-    : '';
-  return topItems.map(actionRow).join('') + footer;
-}
-function recommendationAction(insight) {
-  const title = String((insight || {}).title || '').toLowerCase();
-  const body = String((insight || {}).body || '').toLowerCase();
-  if (insight && insight.view) return { label: insight.cta || 'Show me how', onclick: `showView(${jsArg(insight.view)})` };
-  if (insight && insight.session_id) return { label: 'Inspect session', onclick: `selectSession(${jsArg(insight.session_id)})` };
-  if (title.includes('project') || body.includes('project')) return { label: 'Show me project', onclick: "showView('projects')" };
-  if (title.includes('context') || body.includes('fresh') || body.includes('compact')) return { label: 'Show me how', onclick: "showView('sessions')" };
-  if (title.includes('cursor') || title.includes('ollama') || title.includes('coverage')) return { label: 'Check coverage', onclick: "showView('coverage')" };
-  return { label: 'Show me how', onclick: "showView('insights')" };
-}
-function renderHomeRecommendation(insight) {
-  if (!insight) {
-    return `<div class="insight"><strong>Keep the next task tight</strong><p>Nothing urgent stood out. Define the next checkpoint before sending a broad prompt.</p>
-      <div class="copy-row"><button class="btn-primary" onclick="showView('prompt')">Plan next prompt</button></div></div>`;
-  }
-  const action = recommendationAction(insight);
-  return `<div class="insight"><strong>${esc(insight.title)}</strong><p>${esc(insight.body)}</p>
-    <div class="copy-row"><button class="btn-primary" onclick="${esc(action.onclick)}">${esc(action.label)}</button><button class="btn-quiet" onclick="showView('insights')">View evidence</button></div></div>`;
-}
-function renderHomeContextHealth(rows, status = 'ready') {
-  if (status === 'pending') return '<div class="loading">Checking context health...</div>';
-  if (!rows.length) return '<div class="empty">No context pressure right now. AIWatcher will nudge when a fresh start or narrower prompt is worth it.</div>';
-  const row = rows[0];
-  // Home is the "what now" surface, so it leads with how long you have rather
-  // than how heavy the session is. "Heavy" describes a state; a deadline is the
-  // only form of this anyone acts on, and the full card is two tabs away.
-  const verdict = runwayVerdict(row.chart);
-  const runway = verdict
-    ? `<div class="home-runway ${esc(verdict.severity)}">
-         <div class="home-runway-text">
-           <strong>${esc(verdict.headline)}</strong>
-           <span>${esc(verdict.detail)}</span>
-         </div>
-         <div class="home-runway-spark" data-runway-mini="${esc(row.session_id)}"></div>
-       </div>`
-    : '';
-  return `<div class="session-summary">
-    <div class="session-title">${esc(row.project)}</div>
-    <div class="session-meta">${esc(row.tool)} · ${esc(row.latest_turn_tokens || 'unknown')} latest turn · ${esc(row.severity)}</div>
-    ${runway}
-    <p style="margin-top:8px">${esc(row.recommendation || 'Review this session before continuing.')}</p>
-    <div class="pill-row"><span class="pill">${esc(row.bloat_label ? row.bloat_label + ' replay' : 'observed signal')}</span>${rows.length > 1 ? `<span class="pill">${esc(rows.length - 1)} more</span>` : ''}</div>
-    <div class="copy-row">${row.can_handoff ? `<button class="btn-primary" onclick="openHandoff(${jsArg(row.session_id)})">Build Fresh Start brief</button>` : ''}<button class="btn-quiet" onclick="selectSession(${jsArg(row.session_id)})">Inspect session</button></div>
-  </div>`;
-}
-function renderHomeReceiptSummary(receipt) {
-  if (!receipt) return '<div class="empty">No prompt intervention recorded in this window.</div>';
-  const predicted = receipt.predicted && receipt.predicted.available ? receipt.predicted.api_value_label || receipt.predicted.tokens_label : '';
-  return `<div class="session-summary">
-    <div class="label">Latest gate</div>
-    <div class="session-title">${esc(receipt.decision_label)}</div>
-    <div class="session-meta">${esc(receipt.tool)} · ${esc(receipt.project)} · ${esc(dateLabel(receipt.created_at))}</div>
-    <div class="pill-row"><span class="pill">${esc(receipt.original_risk || 'risk')} · ${esc(receipt.original_score ?? '—')}</span>${predicted ? `<span class="pill">predicted ${esc(predicted)}</span>` : ''}</div>
-    <div class="copy-row"><button class="btn-quiet" onclick="openReceipt('${esc(receipt.id)}')">Review receipt</button></div>
-  </div>`;
-}
-function renderHomeHandoffSummary(decisions) {
-  const decision = (decisions || [])[0];
-  if (!decision) return '<div class="empty">No Fresh Start receipt yet.</div>';
-  return `<div class="session-summary">
-    <div class="label">Latest Fresh Start</div>
-    <div class="session-title">${esc(handoffDecisionLabel(decision.decision))}</div>
-    <div class="session-meta">${esc(dateLabel(decision.created_at))} · ${esc(decision.proof_status || 'Proof pending')}</div>
-    <p style="margin-top:8px">${esc(decision.proof_reason || 'AIWatcher has not linked a follow-up session yet.')}</p>
-    <div class="copy-row"><button class="btn-quiet" onclick="showView('receipts')">View receipt</button>${decision.source_session_id ? `<button class="btn-quiet" onclick="selectSession('${esc(decision.source_session_id)}')">Inspect source</button>` : ''}</div>
-  </div>`;
-}
-function renderLatestReceipt(receipt) {
-  if (!receipt) return '<div class="empty">No prompt intervention recorded in this window.</div>';
-  return `<div class="receipt-summary"><div>
-    <div class="session-title">${esc(receipt.decision_label)}</div>
-    <div class="session-meta">${esc(receipt.tool)} · ${esc(receipt.project)} · ${esc(dateLabel(receipt.created_at))}</div>
-    ${riskFlow(receipt)}
-    ${predictedStats(receipt)}
-    <div class="pill-row"><span class="pill">${esc(receipt.session_status)}</span>${outcomePill(receipt.outcome)}</div>
-  </div><button class="btn-primary" onclick="openReceipt('${esc(receipt.id)}')">Review receipt</button></div>`;
-}
 function renderReceiptRows(receipts) {
   if (!receipts.length) return '<tr><td colspan="6"><div class="empty">No interventions recorded in this window.</div></td></tr>';
   return receipts.map(receipt => `<tr class="clickable" onclick="openReceipt('${esc(receipt.id)}')">
@@ -242,40 +72,6 @@ function handoffDecisionLabel(value) {
     dismissed: 'Dismissed'
   };
   return labels[value] || value || 'unknown';
-}
-function renderLatestHandoffDecision(decisions) {
-  const decision = (decisions || [])[0];
-  if (!decision) return '<div class="empty">No Fresh Start decisions recorded yet.</div>';
-  const saved = decision.expected_saved_context_label
-    ? `<span class="pill">~${esc(decision.expected_saved_context_label)} expected context at risk</span>`
-    : '';
-  const usage = decision.next_usage
-    ? `<span class="pill">${esc(decision.next_usage.tokens_label)} next-session tokens</span><span class="pill">${esc(decision.next_usage.api_value_label)} next-session value</span><span class="pill">${esc(decision.next_usage.model_calls)} model calls</span>`
-    : '';
-  const outcome = decision.outcome || decision.inferred_outcome
-    ? `<span class="pill">${esc(decision.outcome ? `outcome: ${decision.outcome}` : `evidence: ${decision.inferred_outcome}`)}</span>`
-    : '';
-  const observed = decision.observed_followup
-    ? `<span class="pill">${esc(decision.observed_followup.source_tokens_label)} → ${esc(decision.observed_followup.next_tokens_label)} tokens</span><span class="pill">${esc(decision.observed_followup.source_api_value_label)} → ${esc(decision.observed_followup.next_api_value_label)}</span><span class="pill">${esc(decision.observed_followup.label)}</span>`
-    : '';
-  const evidence = decision.proof_evidence
-    ? `<span class="pill">${esc(decision.proof_evidence.label)} evidence</span><span class="pill">${esc(decision.proof_evidence.commits)} commits</span><span class="pill">${esc(decision.proof_evidence.tests)} tests</span>`
-    : '';
-  const observedNote = decision.observed_followup
-    ? `<p class="receipt-note">${esc(decision.observed_followup.basis)}</p>`
-    : `<p class="receipt-note">Proof pending means the brief was copied, but no follow-up session has been linked yet. AIWatcher records expected context at risk, not saved tokens.</p>`;
-  const perCall = decision.observed_followup
-    ? `<p class="receipt-note">Per model call: ${esc(decision.observed_followup.source_tokens_per_model_call_label)} tokens / ${esc(decision.observed_followup.source_cost_per_model_call_label)} source → ${esc(decision.observed_followup.next_tokens_per_model_call_label)} tokens / ${esc(decision.observed_followup.next_cost_per_model_call_label)} follow-up.</p>`
-    : '';
-  return `<div class="receipt-summary"><div>
-    <div class="session-title">${esc(handoffDecisionLabel(decision.decision))}</div>
-    <div class="session-meta">${esc(dateLabel(decision.created_at))} · source ${esc(decision.source_session_id || decision.session_id || 'unknown')}${decision.next_session_id ? ` → next ${esc(decision.next_session_id)}` : ''}</div>
-    <p>${esc(decision.reason || 'AIWatcher recommended a Fresh Start because local context health crossed a threshold.')}</p>
-    <p class="receipt-note"><strong>${esc(decision.proof_status || 'Proof pending')}</strong> · ${esc(decision.proof_reason || 'AIWatcher has not observed a follow-up session yet.')}</p>
-    ${observedNote}
-    ${perCall}
-    <div class="pill-row"><span class="pill">Fresh Start receipt</span>${saved}${usage}${outcome}${observed}${evidence}</div>
-  </div>${decision.next_session_id ? `<button class="btn-primary" onclick="selectSession('${esc(decision.next_session_id)}')">Inspect next session</button>` : decision.source_session_id ? `<button class="btn-quiet" onclick="selectSession('${esc(decision.source_session_id)}')">Inspect source</button>` : ''}</div>`;
 }
 function renderHandoffDecisionRows(decisions) {
   if (!decisions.length) return '<tr><td colspan="6"><div class="empty">No Fresh Start receipts recorded yet.</div></td></tr>';
@@ -594,13 +390,6 @@ function confidenceLabel(s) {
   if (s.evidence_captured) return { label: 'Observed evidence', tone: 'observed' };
   return { label: 'Local metadata', tone: 'unknown' };
 }
-function contextPressure(s) {
-  const tokens = Number(s.tokens_value || s.tokens || 0);
-  if (!tokens) return { width: 8, label: 'No token pressure measured', tone: 'unknown' };
-  const width = Math.max(8, Math.min(100, Math.round(tokens / 500000 * 100)));
-  const label = tokens >= 500000 ? 'Critical context pressure' : tokens >= 150000 ? 'Elevated context pressure' : 'Normal context pressure';
-  return { width, label, tone: tokens >= 500000 ? 'verified' : tokens >= 150000 ? 'inferred' : 'observed' };
-}
 function runtimeReturnPanel(runtime, sourcePath) {
   runtime = runtime || {};
   const available = !!runtime.available;
@@ -665,6 +454,16 @@ function renderCacheStatus(cache) {
 function copyWatcherCommand() {
   copyText(watcherCommand, 'Watcher command copied — paste it in a terminal to enable ambient nudges');
 }
+function survivalStatus(survival) {
+  // The status itself, not a rendered label: "survived" | "churned" | "unknown"
+  // for the earliest bucket that has run. Callers need to tell an answer from a
+  // non-answer, and "unknown (7-day check)" is a non-answer.
+  if (!survival) return null;
+  for (const bucket of ['7', '14', '30']) {
+    if (survival[bucket]) return { status: survival[bucket], bucket };
+  }
+  return null;
+}
 function survivalLabel(survival) {
   // evidence.survival is {bucket: "survived"|"churned"|"unknown"} -- already
   // flattened server-side (see ui.py's _survival_for_session), not the raw
@@ -683,7 +482,7 @@ function renderEvidence(evidence) {
   const tests = evidence.tests || [];
   const reasons = evidence.reasons || [];
   const survival = survivalLabel(evidence.survival);
-  return `<section class="detail-section"><h3>Outcome evidence</h3>
+  return `<section class="detail-section"><details class="aiw-details"><summary>Outcome evidence</summary><div class="details-body">
     <p>Local git/test signals. AIWatcher stores metadata, not source diffs.</p>
     <div class="mini-grid">
       <div class="mini"><span class="label">Inferred outcome</span><strong>${esc(evidence.inferred_outcome || 'not enough evidence')}</strong></div>
@@ -697,7 +496,7 @@ function renderEvidence(evidence) {
     ${reasons.length ? `<ul class="insight-list">${reasons.map(reason => `<li>${esc(reason)}</li>`).join('')}</ul>` : ''}
     ${commits.length ? `<div class="pill-row">${commits.slice(0, 4).map(commit => `<span class="pill">commit ${esc(commit.sha)}</span>`).join('')}</div>` : ''}
     ${files.length ? `<details class="aiw-details"><summary>${esc(files.length)} changed file${files.length === 1 ? '' : 's'}</summary><div class="details-body"><div class="pill-row">${files.slice(0, 12).map(file => `<span class="pill">${esc(file)}</span>`).join('')}</div></div></details>` : ''}
-  </section>`;
+  </div></details></section>`;
 }
 function eventTypeLabel(type) {
   const labels = {
@@ -714,39 +513,83 @@ function compactText(value, limit = 420) {
   const text = String(value || '');
   return text.length > limit ? `${text.slice(0, limit)}...` : text;
 }
-function sessionVerdict(s) {
-  const evidence = s.outcome_evidence || s.evidence || {};
-  const tokens = Number(s.tokens || 0);
-  const cost = Number(s.api_value_usd || 0);
-  const toolCalls = Number(s.tool_calls || 0);
-  const churned = !s.outcome && evidence.inferred_outcome === 'churned';
-  const likelyUseful = !s.outcome && evidence.inferred_outcome === 'useful';
-  const highCost = cost >= 5 || tokens >= 500000 || toolCalls >= 250;
-  let title = 'Review this AI work';
-  if (s.outcome) title = `Marked ${s.outcome}`;
-  else if (churned) title = 'Looked useful, but its commit left the branch';
-  else if (likelyUseful && highCost) title = 'Likely useful, but expensive';
-  else if (likelyUseful) title = 'Likely useful, needs confirmation';
-  else if (highCost) title = 'High-cost session, needs review';
-  const bullets = [];
-  if (churned) bullets.push('The commit this session produced is no longer reachable from HEAD -- rebased, reset or amended away. That is not the same as the work being undone: a revert would leave the commit in place and not show here.');
-  if (likelyUseful) bullets.push('A nearby commit or test signal suggests this produced useful work.');
-  if (evidence.same_file_reprompt) bullets.push('A later session touched the same file(s) again soon after -- this attempt may not have fully resolved the task.');
-  if (cost >= 5) bullets.push(`${s.api_value} API-equivalent value is high for one local session.`);
-  if (tokens >= 500000) bullets.push(`${s.tokens_label} tokens indicates heavy context pressure.`);
-  if (toolCalls >= 250) bullets.push(`${s.tool_calls} tool calls suggests broad search, retries, or loop-like work.`);
-  if (!bullets.length) bullets.push('No urgent cost or outcome signal was detected.');
-  return { title, tone: churned ? 'high' : likelyUseful ? 'useful' : highCost ? 'high' : '', bullets };
+// A session gets judged on three separate questions, because they become
+// answerable at different times and collapsing them is what broke the old
+// verdict. "How much room is left" is knowable now and is the only urgent one.
+// "Did it cost more than it needed to" is knowable once the session stops.
+// "Was it worth it" needs its commits to age seven days before survival means
+// anything (see survival.py's MIN_AGE_DAYS -- a commit from this morning scores
+// ~100% because nothing has had time to touch it, not because it stuck).
+//
+// The old rule answered all three with one absolute token threshold, which fired
+// for two sessions in three and so distinguished nothing.
+function verdictLines(s) {
+  const v = s.verdict || {};
+  const lines = [];
+
+  const p = v.pressure || {};
+  if (p.measurable) {
+    const critical = compactTokens(p.critical_tokens).replace(/K$/, 'k');
+    const pressure = compactTokens(p.pressure_tokens).replace(/K$/, 'k');
+    let body;
+    if (p.turns_to_critical === null || p.turns_to_critical === undefined) {
+      body = p.latest_turn_tokens >= p.critical_tokens
+        ? `${p.latest_turn_label} per turn, past the ${critical} mark. No headroom left to project.`
+        : `${p.latest_turn_label} per turn. Not enough turns yet to project a trend.`;
+    } else {
+      body = `${p.latest_turn_label} per turn. About ${p.turns_to_critical} turn${p.turns_to_critical === 1 ? '' : 's'} of headroom at this rate.`;
+    }
+    lines.push({ key: 'room', label: 'Room left', tone: p.severity, body });
+  }
+
+  const r = v.replay || {};
+  if (r.measurable) {
+    lines.push({
+      key: 'cost',
+      label: 'Cost to run',
+      tone: r.high ? 'warning' : 'healthy',
+      body: r.high
+        ? `${r.share_label} of what this cost went on re-sending history, ${r.replayed_cost_label} of it. Above the ${r.threshold_pct}% mark.`
+        : `${r.share_label} of what this cost went on re-sending history, which is the normal range.`,
+    });
+  } else if (r.reason) {
+    lines.push({ key: 'cost', label: 'Cost to run', tone: 'unknown', body: r.reason });
+  }
+
+  const evidence = s.outcome_evidence || {};
+  const commits = evidence.commits || [];
+  const checked = survivalStatus(evidence.survival);
+  const plural = commits.length === 1 ? '' : 's';
+  let worth;
+  let tone = 'unknown';
+  if (!commits.length) {
+    worth = 'No commit has landed near this session yet, so there is nothing to judge it by.';
+  } else if (checked && checked.status === 'survived') {
+    tone = 'healthy';
+    worth = `${commits.length} commit${plural} landed, and the work was still standing at the ${checked.bucket}-day check.`;
+  } else if (checked && checked.status === 'churned') {
+    tone = 'warning';
+    worth = `${commits.length} commit${plural} landed, but the work was gone by the ${checked.bucket}-day check.`;
+  } else if (checked) {
+    // The check ran and could not tell. That is not a pass, and colouring it as
+    // one is how a non-answer starts reading like an answer.
+    worth = `${commits.length} commit${plural} landed. The ${checked.bucket}-day check could not tell whether the work stuck.`;
+  } else {
+    worth = `${commits.length} commit${plural} landed near this session. Whether the work stuck is judged after 7 days.`;
+  }
+  lines.push({ key: 'worth', label: 'Was it worth it', tone, body: worth });
+
+  return lines;
 }
 function renderVerdict(s) {
-  const verdict = sessionVerdict(s);
-  const subtitle = s.outcome
-    ? 'Saved locally. Use the recommended action above if you are continuing from this session.'
-    : 'Confirm the outcome, then use the expensive asks below to improve the next run.';
-  return `<div class="verdict-card ${esc(verdict.tone)}"><h3>${esc(verdict.title)}</h3>
-    <p>${esc(subtitle)}</p>
-    <ul>${verdict.bullets.map(item => `<li>${esc(item)}</li>`).join('')}</ul>
-  </div>`;
+  const lines = verdictLines(s);
+  if (!lines.length) return '';
+  return `<section class="detail-section verdict-lines">
+    ${lines.map(line => `<div class="verdict-line tone-${esc(line.tone || 'unknown')}">
+      <span class="verdict-label">${esc(line.label)}</span>
+      <p>${esc(line.body)}</p>
+    </div>`).join('')}
+  </section>`;
 }
 function renderEvidenceRail(s, costliest, meaningfulEvents) {
   const evidence = s.outcome_evidence || {};
@@ -796,12 +639,12 @@ function renderEvidenceRail(s, costliest, meaningfulEvents) {
     body: meaningfulEvents && meaningfulEvents.length ? 'Full event detail remains below for debugging.' : 'This surface may only expose history or metadata.',
   });
   return `<section class="detail-section">
-    <div class="section-title"><div><h3>Evidence trail</h3><p>What AIWatcher knows, and how confident it is.</p></div><span class="pill">Local only</span></div>
+    <details class="aiw-details"><summary>Evidence trail &mdash; what AIWatcher knows, and how confident it is</summary><div class="details-body">
     <div class="evidence-rail">${nodes.map(node => `<div class="evidence-node ${esc(node.tone)}">
       <div class="evidence-dot" aria-hidden="true"></div>
       <div class="evidence-copy"><strong>${esc(node.title)} <span class="confidence-chip ${esc(node.tone)}">${esc(node.tone)}</span></strong><p>${esc(node.body)}</p></div>
     </div>`).join('')}</div>
-  </section>`;
+  </div></details></section>`;
 }
 function splitLines(value) {
   return String(value || '').split(/\n+/).map(item => item.trim().replace(/\s+/g, ' ')).filter(Boolean).slice(0, 8);
@@ -1054,20 +897,6 @@ async function openHandoff(sessionId, target = 'generic', includePrompt = false,
   }
   node.innerHTML = renderHandoff(capsule);
 }
-async function copyHandoffFromBubble(sessionId) {
-  const res = await fetch(`/api/handoff-basic?id=${encodeURIComponent(sessionId)}&target=generic`);
-  const capsule = await res.json();
-  if (capsule.error) {
-    showToast(capsule.error, 'error');
-    return;
-  }
-  const copied = await copyText(capsule.next_brief || '', 'Fresh Start brief copied — paste it into a fresh AI chat');
-  if (copied) {
-    const bubble = handoffDecisionBubble(sessionId);
-    await recordHandoffDecision(bubble, 'copy_handoff');
-    renderHandoffCopied(bubble, sessionId);
-  }
-}
 function handoffDecisionBubble(sessionId) {
   const current = window.currentHandoffBubble || {};
   if (current.session_id === sessionId) return current;
@@ -1121,11 +950,6 @@ async function startFreshFromBubble(sessionId) {
   }
   renderHandoffCopied(bubble, sessionId);
 }
-async function continueFromBubble() {
-  if (window.currentHandoffBubble) await recordHandoffDecision(window.currentHandoffBubble, 'continue_here');
-  document.getElementById('handoffBubble').hidden = true;
-  showToast('Fresh Start decision saved: continue here');
-}
 async function continueFromSession(sessionId) {
   await recordHandoffDecision({
     session_id: sessionId,
@@ -1152,36 +976,28 @@ function renderHandoffCopied(bubble, sessionId) {
     `,
   });
 }
-function renderHandoffBubble(bubble) {
-  const node = document.getElementById('handoffBubble');
-  window.currentHandoffBubble = bubble || null;
-  if (!bubble) {
-    node.hidden = true;
-    node.innerHTML = '';
-    return;
-  }
-  const runtime = bubble.runtime_attachment || {};
-  node.hidden = false;
-  node.innerHTML = `<div class="section-title">
-      <div>
-        <h2>${esc(bubble.title)}</h2>
-        <p>${esc(bubble.body)}</p>
-      </div>
-      <span class="pill">${esc(bubble.severity)}</span>
-    </div>
-    ${renderIdentityStrip(bubble, runtime, bubble.source_path)}
-    <div class="pill-row">${(bubble.tags || []).map(tag => `<span class="pill">${esc(tag)}</span>`).join('')}</div>
-    <div class="actions" style="margin-top:14px">
-      <button class="btn-primary" data-session="${esc(bubble.session_id)}" onclick="startFreshFromBubble(this.dataset.session)">${esc(bubble.primary_label || 'Copy Fresh Start brief')}</button>
-      <button class="btn-quiet" onclick="continueFromBubble()">${esc(bubble.continue_label || 'Continue here')}</button>
-      <button class="btn-quiet" data-session="${esc(bubble.session_id)}" onclick="selectSession(this.dataset.session)">Inspect session</button>
-    </div>`;
-}
 function dateLabel(value) {
   if (!value) return 'unknown';
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
+// survival.py will not judge a change younger than this: 95% of lines from the
+// last three days are still standing simply because nothing has had time to
+// touch them, so a fresh commit would score as a pass it has not earned.
+const SURVIVAL_MIN_AGE_DAYS = 7;
+
+function tooYoungToJudge(row) {
+  const at = Date.parse(row.committed_at || '');
+  if (Number.isNaN(at)) return false;
+  return (Date.now() - at) < SURVIVAL_MIN_AGE_DAYS * 86400000;
+}
+
+function repoLabel(row) {
+  const full = String(row.repo || row.project || '');
+  const leaf = full.split(/[\/]/).filter(Boolean).pop();
+  return leaf || full;
+}
+
 function renderChangeRows(rows) {
   if (!rows.length) {
     return `<tr><td colspan="7" class="empty">No commits in this window, or git history could not be read.</td></tr>`;
@@ -1189,33 +1005,44 @@ function renderChangeRows(rows) {
   return sortedRows(rows, changeSort).map(row => `<tr>
     <td><code>${esc(row.short_sha)}</code> ${esc(row.subject)}
       <div class="session-meta">${esc(dateLabel(row.committed_at))}${row.tools.length ? ' &middot; ' + esc(row.tools.join(', ')) : ''}${row.event_count ? ' &middot; ' + esc(row.event_count) + ' model calls' : ''}${row.was_rewritten ? ' &middot; <span class="muted" title="Rebased or amended on ' + esc(dateLabel(row.rewritten_at)) + '. Cost is attributed by when the work was authored, not when it was rewritten.">rewritten</span>' : ''}</div></td>
-    <td>${esc(row.project)}</td>
+    <td title="${esc(row.repo || row.project)}">${esc(repoLabel(row))}</td>
     <td class="num">${row.unattributed ? '<span class="muted">no spend observed</span>' : esc(row.cost_label)}</td>
     <td class="num">+${esc(row.lines_added)} / -${esc(row.lines_removed)}
       <div class="session-meta">${esc(row.files_changed)} file(s)</div></td>
     <td class="num">${row.unattributed ? '—' : esc(row.usd_per_line_label)}</td>
-    <td class="num">${esc(row.survival_label)}</td>
-    <td class="num">${esc(row.usd_per_surviving_line_label)}</td>
+    <td class="num">${row.survival_pct === null || row.survival_pct === undefined
+      ? `<span class="muted">${tooYoungToJudge(row) ? 'too new' : '—'}</span>`
+      : esc(row.survival_label)}</td>
+    <td class="num">${row.survival_pct === null || row.survival_pct === undefined
+      ? '<span class="muted">—</span>'
+      : esc(row.usd_per_surviving_line_label)}</td>
   </tr>`).join('');
 }
 function renderChangeTotals(rows, meta, unbanked) {
   if (!rows.length) return '';
   const foreign = (meta && meta.foreign_changes) || 0;
-  const note = foreign
-    ? `<p class="receipt-note" style="margin-top:0">${esc(foreign)} commit(s) in this window were written by someone else and
-       arrived by fetch — excluded, because no spend on this machine can belong to them.</p>` : '';
-  const unbankedNote = unbanked && unbanked.available && Number(unbanked.unbanked_usd || 0) > 0
-    ? `<p class="receipt-note" style="margin-top:0">${esc(unbanked.unbanked_label)} is not shown as a commit row yet because no nearby same-repo commit exists. Check Unbanked spend for the missing attribution trail.</p>` : '';
   const attributed = rows.filter(row => !row.unattributed);
   const cost = attributed.reduce((sum, row) => sum + row.cost_usd, 0);
   const lines = attributed.reduce((sum, row) => sum + row.lines_changed, 0);
-  const measured = rows.filter(row => row.survival_pct !== null).length;
+  const measured = rows.filter(row => row.survival_pct !== null && row.survival_pct !== undefined).length;
+  const tooYoung = rows.filter(row => (row.survival_pct === null || row.survival_pct === undefined) && tooYoungToJudge(row)).length;
+  const survivalDetail = measured
+    ? `${measured} of ${rows.length}`
+    : tooYoung
+      ? `none yet`
+      : `0 of ${rows.length}`;
+  const survivalNote = !measured && tooYoung
+    ? `<span class="mini-note">every commit here is under ${SURVIVAL_MIN_AGE_DAYS} days old</span>`
+    : '';
+  const unbankedUsd = unbanked && unbanked.available ? Number(unbanked.unbanked_usd || 0) : 0;
   return `<div class="mini-grid" style="margin-bottom:12px">
-    <div class="mini"><span class="label">Commits</span><strong>${esc(rows.length)}</strong></div>
-    <div class="mini"><span class="label">Attributed spend</span><strong>${esc(fmtMoney(cost))}</strong></div>
+    <div class="mini"><span class="label">Commits</span><strong>${esc(rows.length)}</strong>${foreign
+      ? `<span class="mini-note">${esc(foreign)} more by other authors, excluded</span>` : ''}</div>
+    <div class="mini"><span class="label">Attributed spend</span><strong>${esc(fmtMoney(cost))}</strong>${unbankedUsd > 0
+      ? `<span class="mini-note">${esc(unbanked.unbanked_label)} has no commit to attach to</span>` : ''}</div>
     <div class="mini"><span class="label">Lines changed</span><strong>${esc(lines.toLocaleString())}</strong></div>
-    <div class="mini"><span class="label">Survival measured</span><strong>${esc(measured)} of ${esc(rows.length)}</strong></div>
-  </div>${note}${unbankedNote}`;
+    <div class="mini"><span class="label">Survival measured</span><strong>${esc(survivalDetail)}</strong>${survivalNote}</div>
+  </div>`;
 }
 function fmtMoney(value) {
   return '$' + (Math.round(value * 100) / 100).toFixed(2);
@@ -1242,7 +1069,7 @@ function renderOptimizeWorkspace(optimize) {
       <div>
         <div class="action-title">${esc(item.title)} <span class="pill">${esc(item.evidence_label || 'Observed')}</span></div>
         <p>${esc(item.why_inactive || item.summary || '')}</p>
-        <div class="action-meta"><span class="pill">${esc(item.project || 'Local machine')}</span><span class="pill">${esc(item.impact_label || 'review')}</span><span class="pill">${esc(item.updated_label || '')}</span></div>
+        <div class="action-meta"><span class="pill">${esc(item.project || 'Local machine')}</span>${item.impact_label ? `<span class="pill">${esc(item.impact_label)}</span>` : ''}<span class="pill">${esc(item.updated_label || '')}</span></div>
         <p class="receipt-note">${esc(item.evidence || '')}</p>
       </div>
       <div class="actions">
@@ -1255,45 +1082,6 @@ function renderOptimizeWorkspace(optimize) {
     <div class="copy-row" style="margin-top:12px">
       <button class="btn-quiet" onclick="copyText(${jsArg(checklist)}, 'Global review queue copied')">Copy all review items</button>
     </div>`;
-}
-function renderUnbanked(card) {
-  if (!card || !card.available) {
-    return `<div class="empty">${esc((card && card.reason) || 'Not measured for this window.')}</div>`;
-  }
-  const repos = (card.top_repos || []).map(entry =>
-    `<li>${esc(entry.short_name)} &middot; <strong>${esc(entry.unbanked_label)}</strong></li>`).join('');
-  const outside = card.outside_repo_usd > 0
-    ? `<span class="pill">${esc(card.outside_repo_label)} outside any repo</span>` : '';
-  // Surfaced, not hidden: spend git could not answer for is excluded from the
-  // headline, so the headline would otherwise silently shrink without saying why.
-  const unresolved = card.unresolved_usd > 0
-    ? `<span class="pill">${esc(card.unresolved_label)} unresolved (git could not read ${esc((card.unresolved_repos || []).length)} repo(s))</span>` : '';
-  // Where the unbanked money went, not why it is unbanked. The why is two
-  // buckets and the headline above already states it; the where grows a segment
-  // per project and is the part you can act on.
-  const chart = card.chart
-    ? `<div class="unbanked-chart">
-         <div class="bar-host" data-unbanked-bar></div>
-         <div class="bar-legend">${stackedBarLegend(card.chart.segments, unbankedColours(card.chart.segments))}</div>
-       </div>`
-    : '';
-  return `<div class="headline">
-      <span class="headline-figure">${esc(card.unbanked_label)}</span>
-      <span class="headline-sub">${esc(card.unbanked_pct)}% of the last ${esc(card.window_days)} days had no commit behind it</span>
-    </div>
-    ${chart}
-    <div class="mini-grid" style="margin-top:12px">
-      <div class="mini"><span class="label">Reached a commit</span><strong>${esc(card.banked_label)}</strong></div>
-      <div class="mini"><span class="label">Never did</span><strong>${esc(card.unbanked_label)}</strong></div>
-      <div class="mini"><span class="label">Commits in window</span><strong>${esc(card.changes)}</strong></div>
-      <div class="mini"><span class="label">Model calls unbanked</span><strong>${esc(card.unbanked_events)}</strong></div>
-    </div>
-    ${repos ? `<p class="receipt-note" style="margin-bottom:4px">Where it went:</p>
-      <ul style="margin:0 0 10px 18px;padding:0">${repos}</ul>` : ''}
-    <div class="pill-row">${outside}${unresolved}</div>
-    <p class="receipt-note">${esc(card.caption)}
-      Spend banks against the next commit in the same repo within
-      ${esc(card.max_lookback_hours)}h; anything older stays unbanked rather than being misattributed.</p>`;
 }
 /* ---------------------------------------------------------------------------
    Chart core.
@@ -1378,105 +1166,54 @@ function chartLine(parent, points, token, opts) {
    OR peak > X`: a session that crossed before a reset still reads critical on
    the card while sitting well below the line now, and hiding that makes the
    card and the chart look like they disagree. */
-function drawRunway(node, chart) {
+/* Position and shape are two questions, and one chart answers them badly.
+   Forcing a common y-axis across projects -- so the limit sits on one row and the
+   column can be scanned -- flattened three of four series to under 5px of travel,
+   because a project 690k deep barely moves in relative terms. So they split: the
+   meter carries position on a scale every card shares, and the trend keeps its
+   own scale, where the slope is legible. */
+function drawMeter(node, chart) {
+  if (!node || !chart) return;
+  const critical = chart.critical_tokens_n || 0;
+  const pressure = chart.pressure_tokens_n || 0;
+  const latest = chart.latest_turn_tokens_n || 0;
+  if (!critical) return;
+  const W = 1000, H = 20, track = critical * 1.25;
+  const at = value => Math.min(1, value / track) * W;
+  const tone = latest >= critical ? 'var(--red)' : latest >= pressure ? 'var(--amber)' : 'var(--green)';
+  const parts = [
+    `<rect x="0" y="6" width="${W}" height="9" rx="4.5" fill="var(--surface)"/>`,
+    `<rect x="0" y="6" width="${at(Math.min(latest, critical)).toFixed(1)}" height="9" rx="4.5" fill="${tone}"/>`,
+    `<line x1="${at(pressure).toFixed(1)}" x2="${at(pressure).toFixed(1)}" y1="1" y2="19" stroke="var(--amber)" stroke-width="2"/>`,
+    `<line x1="${at(critical).toFixed(1)}" x2="${at(critical).toFixed(1)}" y1="1" y2="19" stroke="var(--red)" stroke-width="2"/>`,
+  ];
+  node.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="meter-svg" role="img"
+    aria-label="${esc(compactTokens(latest))} per turn against a ${esc(compactTokens(critical))} limit">${parts.join('')}</svg>`;
+  node.setAttribute('data-over', latest > critical ? (latest / critical).toFixed(1) : '');
+}
+
+function drawTrend(node, chart) {
   if (!node || !chart) return;
   const series = chart.turn_series || [];
-  if (series.length < 3) return;
-
-  const W = 620, H = 190, plot = { left: 46, right: 560, top: 16, bottom: 148 };
-  const projected = chart.turns_to_critical;
-  const projectedTurns = projected === null || projected === undefined
-    ? 0 : Math.min(projected, RUNWAY_MAX_PROJECTED_TURNS);
-  const total = series.length + projectedTurns;
-  const ceiling = Math.max(chart.critical_tokens_n, chart.peak_turn_tokens_n) * 1.12;
-
-  const x = chartScale(0, Math.max(1, total - 1), plot.left, plot.right);
-  const y = chartScale(0, ceiling, plot.bottom, plot.top);
-
-  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'runway-svg', 'aria-hidden': 'true' });
-
-  // Status bands. These encode state, so they take status colours -- and they
-  // are named in the caption below, never left to hue alone.
-  svg.appendChild(svgEl('rect', {
-    x: plot.left, y: y(chart.critical_tokens_n), width: plot.right - plot.left,
-    height: Math.max(0, y(chart.pressure_tokens_n) - y(chart.critical_tokens_n)),
-    fill: chartToken('--amber'), opacity: 0.12,
-  }));
-  svg.appendChild(svgEl('rect', {
-    x: plot.left, y: y(ceiling), width: plot.right - plot.left,
-    height: Math.max(0, y(chart.critical_tokens_n) - y(ceiling)),
-    fill: chartToken('--red'), opacity: 0.12,
-  }));
-
-  chartGrid(svg, plot, [0, ceiling / 2, ceiling], v => Math.round(v / 1000) + 'K', y);
-
-  [[chart.pressure_tokens_n, '--amber'], [chart.critical_tokens_n, '--red']].forEach(([value, token]) => {
-    svg.appendChild(svgEl('line', {
-      x1: plot.left, y1: y(value), x2: plot.right, y2: y(value),
-      stroke: chartToken(token), 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke',
-    }));
-  });
-
-  // Say what crossing each line means, on the line. A legend tells you which
-  // colour is which; it cannot tell you which way is bad, and the y-axis is in
-  // tokens, where "more" is not obviously worse to anyone who has not been told
-  // that context accumulates. Labelled in place, a data line sitting above both
-  // needs no explaining at all.
-  //
-  // The pressure label is dropped when the two lines are too close to hold
-  // separate text -- on a session running four times the limit they are 7px
-  // apart, and two labels there overlap into one unreadable smear. The action
-  // line is the one that keeps its label, being the one that asks for anything.
-  const labelGap = y(chart.pressure_tokens_n) - y(chart.critical_tokens_n);
-  chartText(svg, plot.left + 6, y(chart.critical_tokens_n) - 5,
-    compactTokens(chart.critical_tokens_n) + ' — act now', { anchor: 'start', fill: '--red', size: 10 });
-  if (labelGap >= 16) {
-    chartText(svg, plot.left + 6, y(chart.pressure_tokens_n) - 5,
-      compactTokens(chart.pressure_tokens_n) + ' — pressure builds', { anchor: 'start', fill: '--amber', size: 10 });
-  }
-
-  // The peak is only worth its own line when it is meaningfully above where the
-  // session sits now -- that is the case severity reads and the chart otherwise
-  // appears to contradict. When the peak IS the current turn, the line would sit
-  // on top of the marker and "already crossed once" would describe the present.
-  const peakIsHistoric = chart.peak_turn_tokens_n > chart.latest_turn_tokens_n * 1.05;
-  if (chart.peak_turn_tokens_n > chart.critical_tokens_n && peakIsHistoric) {
-    svg.appendChild(svgEl('line', {
-      x1: plot.left, y1: y(chart.peak_turn_tokens_n), x2: plot.right, y2: y(chart.peak_turn_tokens_n),
-      stroke: chartToken('--muted'), 'stroke-width': 1, opacity: 0.6, 'vector-effect': 'non-scaling-stroke',
-    }));
-    chartText(svg, plot.left + 6, y(chart.peak_turn_tokens_n) - 6,
-      'peak ' + compactTokens(chart.peak_turn_tokens_n) + ' — already crossed once',
-      { anchor: 'start', fill: '--muted' });
-  }
-
-  chartLine(svg, series.map((v, i) => [x(i), y(v)]), '--blue');
-
-  if (projectedTurns > 0 && chart.growth_per_turn_n > 0) {
-    const from = series[series.length - 1];
-    const forward = [];
-    for (let i = 0; i <= projectedTurns; i++) {
-      forward.push([x(series.length - 1 + i), y(from + chart.growth_per_turn_n * i)]);
-    }
-    // Dashed because it is a projection -- the one thing dashing should mean.
-    chartLine(svg, forward, '--blue', { dash: '5 4', opacity: 0.5 });
-  }
-
-  svg.appendChild(svgEl('circle', {
-    cx: x(series.length - 1), cy: y(series[series.length - 1]), r: 4.5,
-    fill: chartToken('--blue'), stroke: chartToken('--surface'), 'stroke-width': 2,
-  }));
-
-  svg.appendChild(svgEl('line', {
-    x1: plot.left, y1: plot.bottom, x2: plot.right, y2: plot.bottom,
-    stroke: chartToken('--line-strong'), 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke',
-  }));
-  chartText(svg, plot.left, plot.bottom + 18, 'turn 1', { anchor: 'start' });
-  chartText(svg, x(series.length - 1), plot.bottom + 18, 'now');
-  if (projectedTurns > 0) chartText(svg, plot.right, plot.bottom + 18, 'projected', { anchor: 'end' });
-
-  node.innerHTML = '';
-  node.appendChild(svg);
+  if (series.length < 2) return;
+  const W = 1000, H = 60, pad = 6;
+  const lo = Math.min(...series), hi = Math.max(...series);
+  const span = Math.max(1, hi - lo);
+  const x = i => (i / (series.length - 1)) * W;
+  const y = v => pad + (1 - (v - lo) / span) * (H - pad * 2 - 12);
+  const latest = chart.latest_turn_tokens_n || series[series.length - 1];
+  const tone = latest >= (chart.critical_tokens_n || Infinity) ? 'var(--red)'
+    : latest >= (chart.pressure_tokens_n || Infinity) ? 'var(--amber)' : 'var(--green)';
+  const points = series.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const delta = series[series.length - 1] - series[0];
+  node.innerHTML = `<svg viewBox="0 0 ${W} ${H}" class="trend-svg" role="img"
+    aria-label="context per turn across ${series.length} turns, ${delta >= 0 ? 'up' : 'down'} ${esc(compactTokens(Math.abs(delta)))}">
+    <polyline points="${points}" fill="none" stroke="${tone}" stroke-width="2.5" stroke-linejoin="round"/>
+    <circle cx="${x(series.length - 1).toFixed(1)}" cy="${y(series[series.length - 1]).toFixed(1)}" r="5"
+      fill="${tone}" stroke="var(--bg)" stroke-width="3"/>
+  </svg>`;
+  node.setAttribute('data-turns', series.length);
+  node.setAttribute('data-delta', `${delta >= 0 ? '+' : '-'}${compactTokens(Math.abs(delta))} across these turns`);
 }
 
 /* The runway verdict as {headline, detail, severity}, so Home and the full card
@@ -1525,59 +1262,7 @@ function runwayVerdict(chart) {
    Only lines that were actually drawn are listed: drawRunway omits the
    projection when there is no headroom left, and the peak line when the peak is
    the current turn, and a legend naming an absent line sends you hunting for it. */
-function runwayLegend(chart) {
-  if (!chart || (chart.turn_series || []).length < 3) return '';
-  const items = [
-    ['swatch-blue', 'Context per turn (higher is worse)'],
-    ['swatch-amber', 'Pressure'],
-    ['swatch-red', 'Action needed'],
-  ];
-  if (chart.turns_to_critical > 0 && chart.growth_per_turn_n > 0) {
-    items.push(['swatch-dash', 'Projected']);
-  }
-  const peakIsHistoric = chart.peak_turn_tokens_n > chart.latest_turn_tokens_n * 1.05;
-  if (chart.peak_turn_tokens_n > chart.critical_tokens_n && peakIsHistoric) {
-    items.push(['swatch-peak', 'Earlier peak']);
-  }
-  return `<p class="feed-chart-note runway-legend">${items
-    .map(([cls, label]) => `<span class="${cls}"></span>${label}`).join(' ')}</p>`;
-}
-function runwayCaption(chart) {
-  const verdict = runwayVerdict(chart);
-  if (!verdict) return '';
-  const resets = chart.context_resets
-    ? ` After ${chart.context_resets} context reset${chart.context_resets === 1 ? '' : 's'}, growth is measured from the latest one only.`
-    : '';
-  // The colours are named by runwayLegend now, unconditionally, so the caption
-  // is free to be only the verdict.
-  return `<p class="receipt-note"><strong>${esc(verdict.headline)}</strong> — ${esc(verdict.detail)}${resets}</p>`;
-}
 
-/* Home's summary is one row, so this is the curve and the threshold and nothing
-   else: no axes, no projection, no labels. It exists to show the shape and let
-   the headline carry the number. */
-function drawRunwayMini(node, chart) {
-  if (!node || !chart) return;
-  const series = chart.turn_series || [];
-  if (series.length < 3) return;
-  const W = 220, H = 34, pad = 2;
-  const ceiling = Math.max(chart.critical_tokens_n, ...series) * 1.05;
-  const x = chartScale(0, series.length - 1, pad, W - pad);
-  const y = chartScale(0, ceiling, H - pad, pad);
-
-  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'runway-mini', preserveAspectRatio: 'none', 'aria-hidden': 'true' });
-  svg.appendChild(svgEl('line', {
-    x1: pad, y1: y(chart.critical_tokens_n), x2: W - pad, y2: y(chart.critical_tokens_n),
-    stroke: chartToken('--red'), 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke',
-  }));
-  chartLine(svg, series.map((v, i) => [x(i), y(v)]), '--blue', { width: 1.75 });
-  svg.appendChild(svgEl('circle', {
-    cx: x(series.length - 1), cy: y(series[series.length - 1]), r: 2.5,
-    fill: chartToken('--blue'), stroke: chartToken('--surface'), 'stroke-width': 1.5,
-  }));
-  node.innerHTML = '';
-  node.appendChild(svg);
-}
 /* Daily shape under a metric tile. Deliberately unlabelled: there are no axes,
    no ticks and no gridlines, because the tile already carries the number and
    the only question left is which way it has been going.
@@ -1954,30 +1639,59 @@ function unbankedColours(segments) {
   });
 }
 
-function renderContextHealth(rows) {
-  const status = arguments.length > 1 ? arguments[1] : 'ready';
-  if (status === 'pending') return '<div class="loading">Checking context health and handoff opportunities...</div>';
-  if (!rows.length) return '<div class="empty">No active context-health warnings. AIWatcher will surface bloat, stale sessions, and handoff opportunities here.</div>';
-  return `<div class="coverage-grid">${rows.map(row => `<div class="health-card">
+function healthProjectName(row) {
+  const full = String(row.project_full || row.project || '');
+  const leaf = full.split(/[\/]/).filter(Boolean).pop();
+  return leaf || full;
+}
+
+function healthRank(row) {
+  // Worst first: anything past the limit outranks anything below it, and within
+  // each group the bigger per-turn number leads.
+  const chart = row.chart || {};
+  const critical = chart.critical_tokens_n || Infinity;
+  const latest = chart.latest_turn_tokens_n || 0;
+  return [latest >= critical ? 1 : 0, latest];
+}
+
+function headroomLabel(chart) {
+  const turns = chart && chart.turns_to_critical;
+  if (turns === null || turns === undefined) {
+    return { big: 'No headroom', sub: 'already past the limit' };
+  }
+  return { big: `${turns} turn${turns === 1 ? '' : 's'}`, sub: 'of headroom at this rate' };
+}
+
+function healthFacts(row) {
+  const chart = row.chart || {};
+  const peakIsHistoric = chart.peak_turn_tokens_n > chart.latest_turn_tokens_n * 1.05;
+  return [
+    peakIsHistoric ? `peak ${row.peak_turn_tokens}` : '',
+    row.bloat_measurable ? `${row.bloat_label} replay` : '',
+    row.bloat_measurable ? `${row.replayed_cost_label} on replay` : '',
+    `${row.session_count} session${row.session_count === 1 ? '' : 's'}`,
+    row.critical_sessions ? `${row.critical_sessions} critical` : '',
+  ].filter(Boolean).join(' \u00b7 ');
+}
+
+function healthLeadCard(row) {
+  const verdict = runwayVerdict(row.chart);
+  const room = headroomLabel(row.chart);
+  return `<div class="health-card lead">
     <div class="health-head">
-      <div><h3>${esc(row.project)}</h3><p>${row.session_count > 1
-        ? `${esc(row.session_count)} sessions here · charted below: <button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${row.charted_because_live
-            ? 'the worst recently active one' : 'the one under most pressure'}</button> (${esc(row.tool)} · last active ${esc(row.age_label)} ago)${row.bigger_idle_label
-            ? ` — a larger one, ${esc(row.bigger_idle_label)}, has been quiet for ${esc(row.bigger_idle_age_label)}` : ''}`
-        : `<button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.tool)} session</button> · last active ${esc(row.age_label)} ago`}</p></div>
+      <div><h3 title="${esc(row.project_full || row.project)}">${esc(healthProjectName(row))}</h3><p>${row.session_count > 1
+        ? `${esc(row.session_count)} sessions here \u00b7 charted below: <button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${row.charted_because_live
+            ? 'the worst recently active one' : 'the one under most pressure'}</button> (${esc(row.tool)} \u00b7 last active ${esc(row.age_label)} ago)${row.bigger_idle_label
+            ? ` \u2014 a larger one, ${esc(row.bigger_idle_label)}, has been quiet for ${esc(row.bigger_idle_age_label)}` : ''}`
+        : `<button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.tool)} session</button> \u00b7 last active ${esc(row.age_label)} ago`}</p></div>
       <span class="health-severity ${esc(row.severity)}">${esc(row.severity)}</span>
     </div>
-    <div class="mini-grid">
-      <div class="mini"><span class="label">Latest turn</span><strong>${esc(row.latest_turn_tokens)}</strong></div>
-      <div class="mini"><span class="label">Peak turn</span><strong>${esc(row.peak_turn_tokens)}</strong></div>
-      <div class="mini"><span class="label">Spend on replay</span><strong>${esc(row.bloat_label)}</strong></div>
-      <div class="mini"><span class="label">Replay cost</span><strong>${esc(row.replayed_cost_label)}</strong></div>
-    </div>
-    <div class="runway" data-runway="${esc(row.session_id)}"></div>
-    ${runwayLegend(row.chart)}
-    ${runwayCaption(row.chart)}
-    ${row.session_count > 1 ? `<p class="receipt-note">${esc(row.group_note || `${row.session_count} related sessions need attention.`)} ${row.critical_sessions ? `${esc(row.critical_sessions)} critical.` : ''}</p>` : ''}
-    <p>${esc(row.recommendation)}</p>
+    ${verdict ? `<p class="health-verdict"><strong>${esc(verdict.headline)}</strong> \u2014 ${esc(verdict.detail)}</p>` : ''}
+    <div class="health-hero"><b>${esc(room.big)}</b><u>${esc(room.sub)}</u>
+      <span class="health-now">${esc(row.latest_turn_tokens)} per turn</span></div>
+    <div class="meter-host" data-meter="${esc(row.session_id)}"></div>
+    <div class="trend-host" data-trend="${esc(row.session_id)}"></div>
+    <p class="health-facts">${esc(healthFacts(row))}</p>
     <div class="health-actions">
       <button class="btn-primary" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.action.label)}</button>
       ${row.can_handoff ? `<button class="btn-quiet" data-session="${esc(row.session_id)}" onclick="openHandoff(this.dataset.session)">${esc(row.action.secondary_label)}</button>` : ''}
@@ -1986,7 +1700,32 @@ function renderContextHealth(rows) {
     <p class="receipt-note">${esc(row.action.reason)}${row.session_count > 1
       ? ' These act on that one session, not on all ' + esc(row.session_count) + ' in the project.'
       : ''}</p>
-  </div>`).join('')}</div>`;
+  </div>`;
+}
+
+function healthQuietRow(row) {
+  const room = headroomLabel(row.chart);
+  return `<button class="health-row" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">
+    <span class="health-row-name" title="${esc(row.project_full || row.project)}">${esc(healthProjectName(row))}</span>
+    <span class="health-row-trend" data-trend="${esc(row.session_id)}"></span>
+    <span class="health-row-now">${esc(row.latest_turn_tokens)}</span>
+    <span class="health-row-room">${esc(room.big)}</span>
+    <span class="health-severity ${esc(row.severity)}">${esc(row.severity)}</span>
+  </button>`;
+}
+
+function renderContextHealth(rows) {
+  const status = arguments.length > 1 ? arguments[1] : 'ready';
+  if (status === 'pending') return '<div class="loading">Checking context health and handoff opportunities...</div>';
+  if (!rows.length) return '<div class="empty">No active context-health warnings. AIWatcher will surface bloat, stale sessions, and handoff opportunities here.</div>';
+  // One project is worth acting on; the rest are worth knowing about. Four cards
+  // of equal weight gave the eye nowhere to start.
+  const ranked = rows.slice().sort((a, b) => {
+    const [ac, av] = healthRank(a), [bc, bv] = healthRank(b);
+    return bc - ac || bv - av;
+  });
+  const [lead, ...rest] = ranked;
+  return `<div class="health-stack">${healthLeadCard(lead)}${rest.map(healthQuietRow).join('')}</div>`;
 }
 function renderCoverage(rows) {
   if (!rows.length) return '<div class="empty">Coverage could not be determined on this machine.</div>';
@@ -2111,26 +1850,21 @@ function renderSessionHero(s) {
   const actions = s.actions || [];
   const action = actions.find(item => item.primary) || actions[0] || null;
   const runtime = s.runtime_attachment || {};
-  const returnLabel = runtime.exact_return_label || runtime.label || (runtime.available ? 'Workspace return' : 'Log only');
   const outcomeLabel = s.outcome ? `Outcome: ${s.outcome}` : 'Outcome not marked';
   const evidence = confidenceLabel(s);
-  const pressure = contextPressure(s);
-  const nextStep = action
-    ? `${action.label}: ${action.reason || 'Review the local evidence and choose the next step.'}`
-    : 'Review the local evidence and choose the next step.';
+  // The hero used to be a four-fact grid restating the next step, the return
+  // target and more, each of which has its own section below it -- three
+  // quarters of a screen of letterhead before the drawer said anything. What is
+  // left is the identity and the pair of numbers that are read together: how
+  // much this session used, and what that came to.
   return `<section class="session-hero">
     <h2 class="session-title">${esc(s.project_short || s.project || 'Session')}</h2>
     <p class="session-meta">${esc(s.tool || 'unknown tool')} · ${esc(s.model || 'unknown model')}</p>
     ${renderIdentityStrip(s, runtime, s.source_path)}
-    <div class="session-hero-grid">
-      <div class="session-hero-fact"><span>Next step</span><strong>${esc(action ? action.label : 'Review')}</strong></div>
-      <div class="session-hero-fact"><span>Context pressure</span><strong>${esc(s.tokens_label || '—')}</strong>
-        <div class="session-meter"><div class="session-meter-track"><div class="session-meter-fill" style="--meter-width:${esc(pressure.width)}%"></div></div><div class="session-meter-label"><span>${esc(pressure.label)}</span></div></div>
-      </div>
-      <div class="session-hero-fact"><span>API-equivalent</span><strong>${esc(s.api_value || '—')}</strong></div>
-      <div class="session-hero-fact"><span>Return</span><strong>${esc(returnLabel)}</strong></div>
+    <div class="session-hero-pressure">
+      <span>Tokens</span><strong>${esc(s.tokens_label || '—')}</strong>
+      <em>${esc(s.api_value || '—')} API-equivalent</em>
     </div>
-    <p>${esc(nextStep)}</p>
     <div class="session-hero-status">${sessionStatePill(s.state)}<span class="pill">${esc(outcomeLabel)}</span><span class="confidence-chip ${esc(evidence.tone)}">${esc(evidence.label)}</span></div>
   </section>`;
 }
@@ -2184,10 +1918,8 @@ function renderSessionActions(s) {
     ? `<button class="btn-quiet" onclick="returnToRuntime('${esc(s.session_id)}')" title="${esc(openToolNote)}">${esc(openAction.label || runtime.action_label || 'Open workspace')}</button>`
     : `<button class="btn-quiet" disabled title="${esc(openToolNote)}">${esc(openAction.label || runtime.action_label || 'No live return')}</button>`;
   const evidenceChips = [
-    s.tokens_label ? `${s.tokens_label} tokens` : '',
     s.calls ? `${s.calls} model calls` : '',
     s.tool_calls ? `${s.tool_calls} tool calls` : '',
-    s.api_value ? `${s.api_value} API-equivalent` : '',
     runtime.exact_return_available ? 'Exact return available' : (runtime.available ? 'App focus only' : 'Log only'),
   ].filter(Boolean).slice(0, 5).map(item => `<span class="pill">${esc(item)}</span>`).join('');
   return `<section class="detail-section recommended-action action-composer">
@@ -2207,16 +1939,29 @@ function renderSessionActions(s) {
     <p class="tool-link-note">${esc(openToolNote)}</p>
   </section>`;
 }
-async function selectSession(sessionId, attempt = 0) {
+// A session that has just started may not be in the index yet, so a miss is
+// retried -- but each attempt is a full round trip, so three is the ceiling.
+const SESSION_LOOKUP_ATTEMPTS = 3;
+let sessionSelectToken = 0;
+async function selectSession(sessionId, attempt = 0, token = null) {
+  // Opening a second session while the first was still loading -- or still
+  // retrying -- left whichever finished last on screen, including a retry for a
+  // session you had already navigated away from. Each selection claims a token
+  // and stale continuations stop writing.
+  if (token === null) token = ++sessionSelectToken;
+  const isCurrent = () => token === sessionSelectToken;
   openDrawer('Session review');
   document.getElementById('drawerTitle').textContent = 'Session review';
   const node = document.getElementById('detailContent');
-  node.innerHTML = `<div class="loading">Loading session identity for ${esc(sessionId)}...</div>`;
+  node.innerHTML = attempt
+    ? `<div class="loading">Still looking for this session (attempt ${attempt + 1} of ${SESSION_LOOKUP_ATTEMPTS})...</div>`
+    : `<div class="loading">Loading session identity for ${esc(sessionId)}...</div>`;
   const summaryPromise = fetch(`/api/session-summary?id=${encodeURIComponent(sessionId)}`)
     .then(res => res.json())
     .catch(() => null);
   const detailPromise = fetch(`/api/session?id=${encodeURIComponent(sessionId)}`);
   const fastSummary = await summaryPromise;
+  if (!isCurrent()) return;
   if (fastSummary && !fastSummary.error) {
     node.innerHTML = renderSessionSummary(fastSummary);
   } else {
@@ -2224,10 +1969,15 @@ async function selectSession(sessionId, attempt = 0) {
   }
   const res = await detailPromise;
   const s = await res.json();
+  if (!isCurrent()) return;
   if (s.error) {
-    if (attempt < 5) {
-      node.innerHTML = `<div class="loading">Still indexing this session. Retrying...</div>`;
-      window.setTimeout(() => selectSession(sessionId, attempt + 1), 1400);
+    // Retried because a session that started moments ago may not be indexed yet.
+    // Each attempt costs a full round trip, so this is deliberately short: past
+    // that, "not found" is the answer rather than a delay.
+    if (attempt + 1 < SESSION_LOOKUP_ATTEMPTS) {
+      window.setTimeout(() => {
+        if (isCurrent()) selectSession(sessionId, attempt + 1, token);
+      }, 1400);
       return;
     }
     node.innerHTML = `<div class="empty">${esc(s.error)}</div>`;
@@ -2254,10 +2004,10 @@ async function selectSession(sessionId, attempt = 0) {
   const costRows = (summary.cost_by_type || []).filter(r => r.api_value_usd > 0)
     .map(r => ({ ...r, name: eventTypeLabel(r.event_type), short_name: eventTypeLabel(r.event_type) }));
   const costBreakdown = costRows.length
-    ? `<section class="detail-section"><h3>Cost by event type</h3>
-        <p>Where this session's API-equivalent value actually went.</p>
-        ${bars(costRows, "label", "type")}
-      </section>`
+    ? `<section class="detail-section"><details class="aiw-details"><summary>Cost by event type</summary>
+        <div class="details-body"><p>Where this session's API-equivalent value actually went.</p>
+        ${bars(costRows, "label", "type")}</div>
+      </details></section>`
     : '';
   const repeats = summary.repeats || {};
   const wasteNote = repeats.duplicate_events > 0
@@ -2308,12 +2058,15 @@ async function selectSession(sessionId, attempt = 0) {
         </div>
         ${outcomeButtons}
       </div>`;
+  // These are threshold trips phrased as guidance ("High API-equivalent value:
+  // $61.16"), sitting one section away from the coaching block that names the
+  // actual turn and says what to change. Kept, because occasionally one is not a
+  // restatement, but collapsed so it stops competing with the real advice.
   const insights = s.insights && s.insights.length
-    ? `<section class="detail-section"><h3>What to check next</h3>
-        <ul class="insight-list">${s.insights.map(i => `<li>${esc(i)}</li>`).join('')}</ul>
-      </section>`
-    : `<section class="detail-section"><h3>What to check next</h3>
-        <p>Nothing unusual in this session summary.</p></section>`;
+    ? `<section class="detail-section"><details class="aiw-details"><summary>What to check next (${esc(s.insights.length)})</summary>
+        <div class="details-body"><ul class="insight-list">${s.insights.map(i => `<li>${esc(i)}</li>`).join('')}</ul></div>
+      </details></section>`
+    : '';
   const pa = s.prompt_analysis;
   let promptReview = '';
   if (pa) {
@@ -2325,11 +2078,11 @@ async function selectSession(sessionId, attempt = 0) {
         <td class="ask-cost">${esc(a.api_value)}<span class="ask-share">${esc(a.share_pct)}%</span></td>
       </tr>`).join('');
     const expensiveAsks = (pa.expensive_asks && pa.expensive_asks.length)
-      ? `<section class="detail-section"><h3>Expensive asks</h3>
+      ? `<section class="detail-section"><details class="aiw-details"><summary>Expensive asks (${esc((pa.expensive_asks || []).length)} turns)</summary><div class="details-body">
           <p>Which prompts drove the cost, by turn. Cost is cumulative — later turns re-send the whole conversation, so a short prompt late in a long session can still be expensive.</p>
           <div class="table-wrap"><table class="asks-table"><thead><tr><th>Turn</th><th>Prompt</th><th>Tools</th><th>Cost</th></tr></thead>
             <tbody>${asksRows}</tbody></table></div>
-        </section>`
+        </div></details></section>`
       : '';
     const c = pa.coaching;
     const coaching = c
@@ -2346,18 +2099,20 @@ async function selectSession(sessionId, attempt = 0) {
       : `<section class="detail-section"><h3>Prompt worth tightening</h3>
           <p>No single prompt stood out as under-specified — cost accumulated across ${esc(pa.turns)} turns. For work this long, checkpoint or start a fresh session between chunks to keep context (and cost) from compounding.</p>
         </section>`;
-    promptReview = `${expensiveAsks}${coaching}<section class="detail-section"><h3>Prompt context</h3>${opener}</section>`;
+    // Coaching first: it names the turn, quotes the prompt and says what to
+    // change. The asks table is the evidence for that conclusion, so it follows.
+    promptReview = `${coaching}${expensiveAsks}<section class="detail-section"><h3>Prompt context</h3>${opener}</section>`;
   }
   document.getElementById('detailContent').innerHTML = `<div class="session-review-shell">${renderSessionHero(s)}
     ${renderSessionActions(s)}
-    ${outcomeActions}
     ${renderVerdict(s)}
-    ${runtimeReturnPanel(s.runtime_attachment, s.source_path)}
-    ${renderEvidenceRail(s, costliest, meaningfulEvents)}
+    ${outcomeActions}
     ${promptReview}
     <div id="evidencePanel">${renderEvidence(s.outcome_evidence)}</div>
+    ${renderEvidenceRail(s, costliest, meaningfulEvents)}
     ${insights}
     ${costBreakdown}
+    ${runtimeReturnPanel(s.runtime_attachment, s.source_path)}
     <section class="detail-section"><details class="aiw-details"><summary>Session metadata</summary><div class="details-body">
       <table><tbody>
         <tr><th>Started</th><td>${esc(dateLabel(s.started_at))}</td></tr>
@@ -2893,7 +2648,10 @@ function showView(view) {
   // animating a thousand pixels of a page the user never asked to see is worse
   // than simply being there.
   window.scrollTo(0, 0);
-  const activeView = ({ projects: 'sessions', changes: 'sessions', coverage: 'setup' })[view] || view;
+  // Every view has its own nav entry, so each highlights itself. Coverage used
+  // to borrow this one -- it was a separate page duplicating what Settings
+  // already showed, and it is gone.
+  const activeView = view;
   document.querySelectorAll('.nav-tab').forEach(node => {
     node.classList.toggle('active', node.dataset.view === activeView);
   });
@@ -3012,7 +2770,321 @@ async function loadReport() {
     reportLoading = false;
   }
 }
+// ---------------------------------------------------------------------------
+// The ambient surface.
+//
+// Five slots in a fixed order: hero number, meter, one sentence, one action, a
+// fact row. There are two states -- a session is running, or nothing is -- and
+// they deliberately use the same five slots. A surface that relaid itself out
+// every time you started or stopped coding would catch your eye every time, and
+// catching your eye is the one thing an always-open tool must not do.
+//
+// Every number here is server-computed. The thresholds in particular come from
+// chart.pressure_tokens_n / chart.critical_tokens_n rather than being repeated
+// as constants, so this surface cannot disagree with the runway chart below it.
+// ---------------------------------------------------------------------------
+let ambientMarkup = null;
+
+function meterSvg(segments, marks, trackMax) {
+  // One track, drawn to a caller-supplied maximum. The maximum has to be dynamic:
+  // a session well past the critical threshold (334k against a 200k limit) would
+  // otherwise push its own fill and peak marker off the end of the track.
+  const W = 1000, H = 34, y = 8, h = 14;
+  const at = value => Math.max(0, Math.min(1, value / trackMax)) * W;
+  const parts = ['<rect x="0" y="' + y + '" width="' + W + '" height="' + h + '" rx="7" fill="var(--surface)"/>'];
+  let cursor = 0;
+  segments.forEach(seg => {
+    const width = at(seg.value);
+    if (width > 2) {
+      // 2px surface gap between touching fills, rather than a stroke around them.
+      parts.push('<rect x="' + cursor.toFixed(1) + '" y="' + y + '" width="' + (width - 2).toFixed(1)
+        + '" height="' + h + '" rx="7" fill="' + seg.colour + '"/>');
+    }
+    cursor += width;
+  });
+  marks.forEach(mark => {
+    const x = at(mark.value);
+    if (mark.dot) {
+      parts.push('<circle cx="' + x.toFixed(1) + '" cy="' + (y + h / 2) + '" r="5" fill="' + mark.colour
+        + '" stroke="var(--bg)" stroke-width="2"/>');
+    } else {
+      parts.push('<line x1="' + x.toFixed(1) + '" x2="' + x.toFixed(1) + '" y1="2" y2="' + (H - 2)
+        + '" stroke="' + mark.colour + '" stroke-width="2"/>');
+    }
+  });
+  return '<svg class="ambient-meter" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none"'
+    + ' role="img" aria-hidden="true">' + parts.join('') + '</svg>';
+}
+
+function ambientScaleLabels(items) {
+  return '<div class="ambient-scale">'
+    + items.map(item => '<span class="' + item.tone + '">' + esc(item.label) + '</span>').join('')
+    + '</div>';
+}
+
+function ambientRunning(card) {
+  const chart = card.chart || {};
+  const latest = chart.latest_turn_tokens_n || 0;
+  const peak = chart.peak_turn_tokens_n || latest;
+  const pressure = chart.pressure_tokens_n || 0;
+  const critical = chart.critical_tokens_n || 0;
+  const trackMax = Math.max(critical, peak, latest) * 1.08 || 1;
+  const severity = card.severity === 'critical' ? 'critical'
+    : (latest >= pressure ? 'warning' : 'healthy');
+  const tone = { critical: 'var(--red)', warning: 'var(--amber)', healthy: 'var(--green)' }[severity];
+
+  const marks = [];
+  if (pressure) marks.push({ value: pressure, colour: 'var(--amber)' });
+  if (critical) marks.push({ value: critical, colour: 'var(--red)' });
+  if (peak > latest) marks.push({ value: peak, colour: 'var(--red)', dot: true });
+
+  // compactTokens returns "200K"; the server's turn labels are "350.2k". Match the
+  // hero rather than the other chart, so this component is internally consistent.
+  const scaleLabel = value => compactTokens(value).replace(/K$/, 'k');
+  const scale = [];
+  if (pressure) scale.push({ label: scaleLabel(pressure) + ' pressure', tone: 'amber' });
+  if (critical) scale.push({ label: scaleLabel(critical) + ' act now', tone: 'red' });
+  if (peak > latest) scale.push({ label: 'peaked ' + card.peak_turn_tokens, tone: 'muted' });
+
+  // Runway wording follows the data: turns_to_critical is null once a session is
+  // already past the threshold, and claiming headroom there would be a lie.
+  const runway = chart.turns_to_critical === null || chart.turns_to_critical === undefined
+    ? (latest >= critical && critical
+        ? 'It is already past the ' + compactTokens(critical).replace(/K$/, 'k') + ' threshold, so there is no headroom left to project.'
+        : '')
+    : 'About <b>' + chart.turns_to_critical + ' turns</b> of headroom at the current rate.';
+  const bloat = card.bloat_measurable && card.bloat_label
+    ? ' <b>' + esc(card.bloat_label) + '</b> of what it has cost went on re-sending history'
+      + (card.replayed_cost_label ? ', ' + esc(card.replayed_cost_label) + ' so far.' : '.')
+    : '';
+
+  return {
+    state: severity,
+    hero: esc(card.latest_turn_tokens || ''),
+    heroUnit: 'tokens / turn',
+    context: esc(card.project || '') + (card.tool ? ' &middot; <b>' + esc(card.tool) + '</b>' : ''),
+    meter: meterSvg([{ value: latest, colour: tone }], marks, trackMax) + ambientScaleLabels(scale),
+    sentence: runway + bloat,
+    actions: (card.can_handoff
+      ? '<button class="btn-primary" onclick="startFreshFromBubble(\'' + esc(card.session_id) + '\')">Copy Fresh Start brief</button>'
+      : '')
+      + '<button class="btn-quiet" onclick="selectSession(\'' + esc(card.session_id) + '\')">Inspect session</button>',
+    facts: [
+      peak > latest && card.peak_turn_tokens ? ['peak', card.peak_turn_tokens] : null,
+      chart.turns_since_reset ? ['turns', String(chart.turns_since_reset)] : null,
+      card.session_count ? ['sessions here', String(card.session_count)] : null,
+      card.efficiency_label ? ['new context', card.efficiency_label] : null,
+      card.replayed_cost_label ? ['on replay', card.replayed_cost_label] : null,
+    ],
+  };
+}
+
+function ambientQuiet(data) {
+  const totals = data.totals || {};
+  // Spend-weighted, because the sentence below says "of what they cost". The
+  // token-weighted figure reads ~98% for every window and would make that
+  // sentence wrong by about thirty points.
+  const replayed = Number(totals.replayed_spend_share_pct);
+  const hasSplit = !Number.isNaN(replayed) && replayed > 0;
+  const needsReview = Number(totals.needs_review_outcomes) || 0;
+
+  const segments = hasSplit
+    ? [{ value: replayed, colour: 'var(--amber)' }, { value: 100 - replayed, colour: 'var(--green)' }]
+    : [];
+  const scale = hasSplit
+    ? [{ label: Math.round(replayed) + '% replayed', tone: 'amber' },
+       { label: (100 - Math.round(replayed)) + '% new', tone: 'green' }]
+    : [];
+
+  const sessions = Number(totals.sessions) || 0;
+  let sentence = sessions
+    ? '<b>' + sessions + '</b> session' + (sessions === 1 ? '' : 's') + ' in this window.'
+    : 'No local sessions in this window yet.';
+  if (hasSplit) {
+    sentence += ' <b>' + Math.round(replayed) + '%</b> of what they cost went on re-sending history.';
+  }
+  if (needsReview) {
+    sentence += ' <b>' + needsReview + '</b> ' + (needsReview === 1 ? 'is' : 'are')
+      + ' still waiting on you to say whether the work was useful.';
+  }
+
+  const last = (data.recent_sessions || [])[0] || null;
+  return {
+    state: 'idle',
+    hero: last ? esc(last.tokens) : esc(totals.tokens_label || '-'),
+    heroUnit: last ? 'tokens in the last session' : 'tokens this window',
+    context: last
+      ? 'no session running · last was ' + esc(last.tool || 'a local tool')
+      : 'no session running',
+    meter: segments.length ? meterSvg(segments, [], 100) + ambientScaleLabels(scale) : '',
+    sentence: sentence,
+    actions: (needsReview
+      ? '<button class="btn-primary" onclick="showView(\'sessions\')">Review ' + needsReview + ' outcome'
+        + (needsReview === 1 ? '' : 's') + '</button>'
+      : '')
+      + '<button class="btn-quiet" onclick="showView(\'insights\')">Open Improve</button>',
+    facts: [
+      totals.sessions ? ['sessions', String(totals.sessions)] : null,
+      totals.tokens_label ? ['tokens', totals.tokens_label] : null,
+      totals.useful_outcomes ? ['useful', String(totals.useful_outcomes)] : null,
+      totals.projected_month_label ? ['projected month', totals.projected_month_label] : null,
+    ],
+  };
+}
+
+function renderAmbient(data) {
+  const node = document.getElementById('ambient');
+  if (!node) return;
+  const live = liveHealthCard(data);
+  const model = live ? ambientRunning(live) : ambientQuiet(data);
+  const facts = (model.facts || []).filter(Boolean)
+    .map(pair => '<span>' + esc(pair[0]) + ' <b>' + esc(pair[1]) + '</b></span>').join('');
+
+  const markup = '<div class="ambient-top"><span>' + model.context + '</span>'
+      + '<span id="ambientFreshness"></span></div>'
+    + '<div class="ambient-hero">' + model.hero
+      + '<u>' + model.heroUnit + '</u></div>'
+    + (model.meter ? '<div class="ambient-meter-wrap">' + model.meter + '</div>' : '')
+    + (model.sentence ? '<p class="ambient-say">' + model.sentence + '</p>' : '')
+    + '<div class="ambient-acts">' + model.actions + '</div>'
+    + (facts ? '<div class="ambient-facts">' + facts + '</div>' : '');
+
+  // Only touch the DOM when something actually changed. Rewriting every ten
+  // seconds would blow away focus on the buttons and repaint for no reason.
+  if (markup === ambientMarkup) return;
+  ambientMarkup = markup;
+  node.dataset.state = model.state;
+  node.innerHTML = markup;
+  node.hidden = false;
+}
+
+// ---------------------------------------------------------------------------
+// Live state.
+//
+// The dashboard is meant to sit open in a tab while you code, which means it
+// spends most of its life as a favicon and a truncated title behind other tabs.
+// So the tab is updated first and the page second.
+//
+// Context per turn only moves when a turn completes -- every thirty seconds to
+// several minutes in real work -- so polling faster than that just re-renders an
+// identical number. Browsers also throttle background timers to roughly one wake
+// a minute, and the background case is the case that matters here, so 60s is
+// chosen rather than inherited. Switching to the tab refreshes immediately:
+// without that, the first thing you see after switching is always up to a minute
+// old, which is exactly when being wrong is most expensive.
+// ---------------------------------------------------------------------------
+const REFRESH_VISIBLE_MS = 10000;
+const REFRESH_HIDDEN_MS = 60000;
+const REFRESH_CATCHUP_MS = 1800;   // first poll after the watcher starts rebuilding
+const REFRESH_CATCHUP_FACTOR = 1.5;
+
+const TAB_COLOURS = { critical: '#f2778f', warning: '#f2bf6b', healthy: '#43d9a3', idle: '#78869a' };
+
+let refreshTimer = null;
+let freshnessTimer = null;
+let loadInFlight = false;
+let lastLoadedAt = null;
+let catchupDelay = REFRESH_CATCHUP_MS;
+
+function scheduleRefresh(ms) {
+  window.clearTimeout(refreshTimer);
+  refreshTimer = window.setTimeout(refreshTick, ms);
+}
+
+function refreshTick() {
+  // A scheduled tick never stacks on a load that is still running -- it waits and
+  // tries again. User-initiated loads are not gated by this.
+  if (loadInFlight) { scheduleRefresh(REFRESH_CATCHUP_MS); return; }
+  load(false, false);
+}
+
+function nextRefreshDelay(data, forceRefresh) {
+  const idle = document.hidden ? REFRESH_HIDDEN_MS : REFRESH_VISIBLE_MS;
+  if (data && data.cache && data.cache.refreshing && !forceRefresh) {
+    // Poll quickly at first so a rebuild that finishes in a second or two shows
+    // up immediately, then back off to the idle cadence. A flat 1.8s here meant
+    // a long rebuild fired a request every 1.8s for as long as it ran.
+    const delay = Math.min(catchupDelay, idle);
+    catchupDelay = Math.min(catchupDelay * REFRESH_CATCHUP_FACTOR, idle);
+    return delay;
+  }
+  catchupDelay = REFRESH_CATCHUP_MS;
+  return idle;
+}
+
+function faviconFor(state) {
+  const colour = TAB_COLOURS[state] || TAB_COLOURS.idle;
+  const svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>"
+    + "<rect width='32' height='32' rx='7' fill='#070b11'/>"
+    + "<circle cx='16' cy='16' r='7' fill='" + colour + "'/></svg>";
+  return 'data:image/svg+xml,' + encodeURIComponent(svg);
+}
+
+function liveHealthCard(data) {
+  const cards = data.context_health || [];
+  return cards.find(card => card.charted_because_live) || null;
+}
+
+function tabStateFor(data) {
+  // Severity comes from the handoff bubble when there is one, because that is the
+  // same judgement the page itself leads with -- the tab must never disagree with
+  // the surface behind it.
+  const live = liveHealthCard(data);
+  const severity = (data.handoff_bubble && data.handoff_bubble.severity)
+    || (live && live.severity) || null;
+  if (severity === 'critical') return 'critical';
+  if (severity === 'warning' || severity === 'warn') return 'warning';
+  return live ? 'healthy' : 'idle';
+}
+
+function renderTabState(data) {
+  const state = tabStateFor(data);
+  const live = liveHealthCard(data);
+  const totals = data.totals || {};
+  let title;
+  if (live && live.latest_turn_tokens) {
+    const mark = state === 'critical' ? '⚠ ' : '';
+    title = mark + live.latest_turn_tokens + '/turn · AIWatcher';
+  } else if (totals.api_value_label) {
+    title = 'AIWatcher · ' + totals.api_value_label + ' ' + (totals.window_label || '');
+  } else {
+    title = 'AIWatcher Local';
+  }
+  document.title = title.trim();
+  const icon = document.getElementById('favicon');
+  if (icon) icon.setAttribute('href', faviconFor(state));
+}
+
+function freshnessLabel(millis) {
+  // Coarse buckets on purpose. A counter that ticks every second is motion in the
+  // corner of your eye, which is the thing an always-open tool must not be.
+  const seconds = Math.round(millis / 1000);
+  if (seconds < 10) return 'updated just now';
+  if (seconds < 60) return 'updated ' + (Math.floor(seconds / 10) * 10) + 's ago';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return 'updated ' + minutes + 'm ago';
+  return 'updated ' + Math.floor(minutes / 60) + 'h ago';
+}
+
+function renderFreshness() {
+  const label = lastLoadedAt ? freshnessLabel(Date.now() - lastLoadedAt) : '';
+  ['freshness', 'ambientFreshness'].forEach(id => {
+    const node = document.getElementById(id);
+    if (node) node.textContent = label;
+  });
+}
+
+function startLiveRefresh() {
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { scheduleRefresh(REFRESH_HIDDEN_MS); return; }
+    refreshTick();
+  });
+  window.clearInterval(freshnessTimer);
+  freshnessTimer = window.setInterval(renderFreshness, 5000);
+}
+
 async function load(resetDetail = true, forceRefresh = false) {
+  loadInFlight = true;
   const days = document.getElementById('days').value;
   const refreshButton = document.getElementById('refreshButton');
   const previousRefreshText = refreshButton ? refreshButton.textContent : '';
@@ -3030,15 +3102,17 @@ async function load(resetDetail = true, forceRefresh = false) {
       refreshButton.disabled = false;
       refreshButton.textContent = previousRefreshText || 'Refresh data';
     }
+    // Keep trying on the normal cadence: a dashboard that gives up after one
+    // failed poll looks identical to one showing current data.
+    loadInFlight = false;
+    scheduleRefresh(nextRefreshDelay(null, forceRefresh));
     return;
   }
   renderWatcher(data.watcher || null);
   renderCacheStatus(data.cache || null);
-  renderHandoffBubble(data.handoff_bubble || null);
-  document.getElementById('actionQueue').innerHTML = buildActionQueue(data);
   const totals = data.totals;
-  document.getElementById('apiValue').textContent = totals.api_value_label;
   document.getElementById('windowLabel').textContent = totals.window_label;
+  document.getElementById('apiValue').textContent = totals.api_value_label;
   document.getElementById('sessions').textContent = totals.sessions;
   document.getElementById('usefulOutcomes').textContent = totals.useful_outcomes;
   document.getElementById('costPerUseful').textContent = `${totals.cost_per_useful_change}${totals.inferred_useful_outcomes ? ` · ${totals.inferred_useful_outcomes} to confirm` : ''}`;
@@ -3067,69 +3141,67 @@ async function load(resetDetail = true, forceRefresh = false) {
   });
   receiptCache = data.intervention_receipts || [];
   const handoffDecisions = data.handoff_decisions || [];
-  document.getElementById('latestIntervention').innerHTML = renderHomeReceiptSummary(receiptCache[0]);
-  document.getElementById('latestHandoffDecision').innerHTML = renderHomeHandoffSummary(handoffDecisions);
   document.getElementById('receiptRows').innerHTML = renderReceiptRows(receiptCache);
   document.getElementById('handoffDecisionRows').innerHTML = renderHandoffDecisionRows(handoffDecisions);
-  document.getElementById('contextHealth').innerHTML = renderHomeContextHealth(data.context_health || [], data.context_health_status || 'ready');
   document.getElementById('sessionContextHealth').innerHTML = renderContextHealth(data.context_health || [], data.context_health_status || 'ready');
   document.getElementById('optimizeWorkspaceBody').innerHTML = renderOptimizeWorkspace(data.optimize || null);
+  // The summary has to carry the count, or a collapsed card hides the fact that
+  // there is anything in it at all.
+  const optimizeSummary = document.getElementById('optimizeWorkspaceSummary');
+  if (optimizeSummary) {
+    const pending = ((data.optimize || {}).candidates || []).length;
+    optimizeSummary.textContent = pending
+      ? `Optimize workspace (${pending} to review)`
+      : 'Optimize workspace';
+  }
   // SVG is built after the markup lands: the cards are assembled as an HTML
   // string, and appending nodes into elements that do not exist yet silently
   // draws nothing. Nodes are collected by attribute rather than looked up by a
   // selector built from the session id, which is scanner-supplied and would need
   // escaping to be safe inside one. Runs after both context-health renderers so
   // it finds the placeholders wherever they were emitted.
-  const runwayNodes = {};
-  document.querySelectorAll('[data-runway]').forEach(node => {
-    runwayNodes[node.getAttribute('data-runway')] = node;
+  const meterNodes = {};
+  document.querySelectorAll('[data-meter]').forEach(node => {
+    meterNodes[node.getAttribute('data-meter')] = node;
   });
-  const runwayMiniNodes = {};
-  document.querySelectorAll('[data-runway-mini]').forEach(node => {
-    runwayMiniNodes[node.getAttribute('data-runway-mini')] = node;
+  const trendNodes = {};
+  document.querySelectorAll('[data-trend]').forEach(node => {
+    trendNodes[node.getAttribute('data-trend')] = node;
   });
   (data.context_health || []).forEach(row => {
-    drawRunway(runwayNodes[row.session_id], row.chart);
-    drawRunwayMini(runwayMiniNodes[row.session_id], row.chart);
+    drawMeter(meterNodes[row.session_id], row.chart);
+    drawTrend(trendNodes[row.session_id], row.chart);
   });
-  document.getElementById('unbanked').innerHTML = renderUnbanked(data.unbanked);
-  if (data.unbanked && data.unbanked.chart) {
-    drawStackedBar(
-      document.querySelector('[data-unbanked-bar]'),
-      data.unbanked.chart.segments,
-      unbankedColours(data.unbanked.chart.segments),
-    );
-  }
   changeRowsCache = data.changes || [];
   document.getElementById('changeRows').innerHTML = renderChangeRows(changeRowsCache);
   document.getElementById('changeTotals').innerHTML = renderChangeTotals(changeRowsCache, data.changes_meta, data.unbanked);
   updateSortIndicators('change', changeSort, ['committed_at', 'project', 'cost_usd', 'lines_changed', 'usd_per_line', 'survival_pct', 'usd_per_surviving_line']);
-  document.getElementById('coverageRows').innerHTML = renderCoverage(data.coverage || []);
-  document.getElementById('coverageRowsSettings').innerHTML = renderCoverage(data.coverage || []);
-  document.getElementById('setupRows').innerHTML = renderSetup(data.setup || []);
-  const latest = data.recent_sessions[0];
-  document.getElementById('latestSession').innerHTML = latest
-    ? `<div class="session-summary"><div class="session-title">${esc(latest.project)}</div>
-       <div class="session-meta">${esc(latest.tool)} · ${esc(latest.model)} · ${esc(latest.tokens)} tokens · ${esc(latest.api_value)}</div>
-       <div class="session-actions">${sessionStatePill(latest.state)}${outcomePill(latest.outcome)}${outcomeEvidencePill(latest)}
-       <button data-testid="review-latest" class="btn-primary" onclick="selectSession('${esc(latest.session_id)}')">Review outcome</button></div></div>`
-    : '<div class="empty">No local AI session detected yet.</div>';
-  const recommendation = data.insights[0];
-  document.getElementById('todayRecommendation').innerHTML = renderHomeRecommendation(recommendation);
-  paintComposition('projects', data.projects_composition);
+  const coverage = data.coverage || [];
+  document.getElementById('coverageRowsSettings').innerHTML = renderCoverage(coverage);
+  // Counts on the summaries: a folded section with a bare title hides whether
+  // there is anything inside, and these two are the whole of Settings.
+  const gated = coverage.filter(row => row.status === 'automatic').length;
+  const coverageSummary = document.getElementById('coverageSummary');
+  if (coverageSummary) {
+    coverageSummary.textContent = coverage.length
+      ? `Surface coverage (${gated} of ${coverage.length} gated automatically)`
+      : 'Surface coverage';
+  }
+  const setup = data.setup || [];
+  document.getElementById('setupRows').innerHTML = renderSetup(setup);
+  const recommended = setup.filter(step => step.status === 'recommended').length;
+  const setupSummary = document.getElementById('setupSummary');
+  if (setupSummary) {
+    setupSummary.textContent = recommended
+      ? `Setup steps (${recommended} recommended, ${setup.length - recommended} optional)`
+      : 'Setup steps';
+  }
   paintComposition('tools', data.tools_composition);
   paintToolModels(data.tool_models);
   paintModelScatter(data.model_scatter);
-  document.getElementById('projects').innerHTML = bars(data.projects, "tokens_label", "project", "tokens");
   document.getElementById('models').innerHTML = bars(data.models, "api_value_label", "model");
   document.getElementById('tools').innerHTML = bars(data.tools, "tokens_label", "tool", "tokens");
-  document.getElementById('insights').innerHTML = data.insights.length
-    ? data.insights.map(i => `<div class="insight"><strong>${esc(i.title)}</strong><p>${esc(i.body)}</p></div>`).join('')
-    : '<div class="empty">No notable local signals yet.</div>';
   document.getElementById('privacy').innerHTML = data.privacy.map(p => `<div class="privacy-item"><span class="privacy-check">&#10003;</span><span>${esc(p)}</span></div>`).join('');
-  document.getElementById('recent').innerHTML = data.recent_sessions.slice(0, 6).map(s => `<tr class="clickable" onclick="selectSession('${s.session_id}')">
-    <td>${esc(s.tool)}</td><td>${esc(s.project)}<br>${sessionStatePill(s.state)} ${outcomeEvidencePill(s)}</td><td>${esc(s.tokens)}</td><td><button class="row-action">Review</button></td>
-  </tr>`).join('');
   document.getElementById('projectWindow').textContent = totals.window_label;
   document.getElementById('projectRows').innerHTML = data.projects.length
     ? data.projects.map(p => `<tr class="clickable" onclick="selectProject(decodeURIComponent(this.dataset.id))" data-id="${encodeURIComponent(p.id)}">
@@ -3169,15 +3241,19 @@ async function load(resetDetail = true, forceRefresh = false) {
     refreshButton.textContent = previousRefreshText || 'Refresh data';
   }
   if (resetDetail && document.getElementById('detailDrawer').classList.contains('open')) closeDrawer();
-  if (data.cache && data.cache.refreshing && !forceRefresh) {
-    window.setTimeout(() => load(false, false), 1800);
-  }
+  renderAmbient(data);
+  renderTabState(data);
+  lastLoadedAt = Date.now();
+  renderFreshness();
+  loadInFlight = false;
+  scheduleRefresh(nextRefreshDelay(data, forceRefresh));
 }
 document.addEventListener('keydown', event => { if (event.key === 'Escape') closeDrawer(); });
 (async () => {
+  startLiveRefresh();
   await load();
   const requestedView = new URLSearchParams(location.search).get('view');
-  if (requestedView && ['today','prompt','sessions','projects','changes','receipts','insights','setup','coverage'].includes(requestedView)) {
+  if (requestedView && ['today','prompt','sessions','projects','changes','receipts','insights','setup'].includes(requestedView)) {
     showView(requestedView);
     if (requestedView === 'prompt') {
       document.getElementById('promptInput').focus();

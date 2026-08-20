@@ -84,6 +84,93 @@
       padding: 11px 13px; margin: -2px 0 18px;
       box-shadow: inset 0 1px 0 rgba(255,255,255,.035), 0 18px 44px rgba(0,0,0,.10);
     }
+    /* ---- ambient surface ---------------------------------------------------
+       Five slots in a fixed order. The two states share them, so nothing moves
+       when a session starts or ends. Sizes are set on the container rather than
+       per-slot so the running and quiet states measure identically. */
+    .ambient {
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 20px 22px 22px;
+      margin-bottom: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .ambient[data-state="critical"] { border-color: rgba(242, 119, 143, .38); }
+    .ambient[data-state="warning"] { border-color: rgba(242, 191, 107, .34); }
+    .ambient[data-state="healthy"] { border-color: rgba(67, 217, 163, .28); }
+    .ambient-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 16px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--faint);
+    }
+    .ambient-top b { color: var(--muted); font-weight: 400; }
+    .ambient-hero {
+      font-size: 46px;
+      font-weight: 650;
+      line-height: 1;
+      letter-spacing: -.03em;
+      color: var(--text);
+    }
+    .ambient-hero u {
+      text-decoration: none;
+      font-size: 15px;
+      font-weight: 500;
+      letter-spacing: 0;
+      color: var(--muted);
+      margin-left: 10px;
+    }
+    .ambient-meter-wrap { display: flex; flex-direction: column; gap: 6px; }
+    .ambient-meter { width: 100%; height: 34px; display: block; }
+    .ambient-scale {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 18px;
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+    .ambient-scale .amber { color: var(--amber); }
+    .ambient-scale .red { color: var(--red); }
+    .ambient-scale .green { color: var(--green); }
+    .ambient-scale .muted { color: var(--faint); }
+    .ambient-say {
+      margin: 0;
+      font-size: 15px;
+      line-height: 1.5;
+      color: var(--muted);
+      max-width: 62ch;
+    }
+    .ambient-say b { color: var(--text); font-weight: 600; }
+    .ambient-acts { display: flex; flex-wrap: wrap; gap: 8px; }
+    .ambient-facts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 22px;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+      font-family: var(--mono);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      color: var(--faint);
+    }
+    .ambient-facts b { color: var(--text); font-weight: 500; }
+    @media (max-width: 560px) {
+      .ambient { padding: 16px; }
+      .ambient-hero { font-size: 36px; }
+    }
+
+    .freshness {
+      color: var(--faint);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
     .runtime-copy { display: flex; align-items: center; gap: 9px; min-width: 0; }
     .runtime-copy strong { white-space: nowrap; }
     .runtime-copy span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -152,6 +239,24 @@
       color: #b6c2d2; font-size: 13px;
       white-space: nowrap;
     }
+    /* Nested under Watch: these are views within a section, not peers of it, so
+       they read as subordinate rather than taking the top level to eight items. */
+    .nav-sub {
+      min-height: 34px;
+      padding-left: 26px;
+      font-size: 12.5px;
+      color: var(--faint);
+    }
+    .nav-sub::before {
+      content: "";
+      position: absolute;
+      left: 14px;
+      width: 5px;
+      height: 1px;
+      background: var(--line-strong);
+    }
+    .nav-sub { position: relative; }
+    .nav-sub.active { color: white; }
     .nav-tab:hover { background: rgba(255,255,255,.035); border-color: rgba(148,163,184,.10); }
     .nav-tab.active {
       background:
@@ -461,6 +566,52 @@
     .action-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
     .action-row .actions { justify-content: flex-end; }
     .coverage-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    /* ---- Watch: one project expanded, the rest as rows -------------------
+       Four cards of equal weight gave the eye nowhere to start. */
+    .health-stack { display: flex; flex-direction: column; gap: 10px; }
+    .health-card.lead { border-color: rgba(242, 119, 143, .30); }
+    .health-verdict { margin: 0; font-size: 14px; line-height: 1.5; color: var(--text); max-width: 62ch; }
+    .health-hero { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; margin: 2px 0; }
+    .health-hero b { font-size: 26px; font-weight: 650; letter-spacing: -.02em; color: var(--text); }
+    .health-hero u { text-decoration: none; font-size: 13px; color: var(--muted); }
+    .health-now { margin-left: auto; font-family: var(--mono); font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+    /* the meter is comparable across projects; the trend deliberately is not */
+    .meter-host { position: relative; }
+    .meter-svg { width: 100%; height: 20px; display: block; }
+    .meter-host[data-over]:not([data-over=""])::after {
+      content: attr(data-over) "x over"; position: absolute; right: 0; top: -2px;
+      font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--red);
+    }
+    .trend-host { position: relative; padding-bottom: 14px; }
+    .trend-svg { width: 100%; height: 60px; display: block; }
+    .trend-host::before {
+      content: attr(data-turns) " turns"; position: absolute; left: 0; bottom: 0;
+      font-family: var(--mono); font-size: 10.5px; color: var(--faint);
+    }
+    .trend-host::after {
+      content: attr(data-delta); position: absolute; right: 0; bottom: 0;
+      font-family: var(--mono); font-size: 10.5px; color: var(--faint);
+    }
+    .health-facts { margin: 0; font-family: var(--mono); font-size: 11.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+
+    .health-row {
+      display: grid; grid-template-columns: minmax(0, 1fr) 130px 72px 104px 78px;
+      align-items: center; gap: 12px; width: 100%; text-align: left;
+      padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px;
+      background: var(--surface); color: var(--text);
+    }
+    .health-row:hover { background: var(--surface-hover); }
+    .health-row-name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .health-row-trend { display: block; }
+    .health-row-trend .trend-svg { height: 26px; }
+    .health-row-now, .health-row-room { font-family: var(--mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .health-row-now { text-align: right; color: var(--text); }
+    @media (max-width: 860px) {
+      .health-row { grid-template-columns: minmax(0, 1fr) 72px 78px; }
+      .health-row-trend, .health-row-room { display: none; }
+    }
+
     .coverage-card, .health-card {
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -582,6 +733,33 @@
     .session-identity-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
     .session-identity-main { min-width: 0; flex: 1; color: #d8e4f4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .session-id-chip { font: 700 12px/1.1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #f7dd9c; border: 1px solid rgba(246,189,96,.42); background: rgba(246,189,96,.12); border-radius: 999px; padding: 6px 9px; white-space: nowrap; }
+    /* Replaces the four-fact hero grid: only context pressure varies enough to
+       earn the space, and the rest each had their own section directly below. */
+    .session-hero-pressure {
+      display: flex;
+      align-items: baseline;
+      flex-wrap: wrap;
+      gap: 4px 10px;
+      margin: 10px 0 4px;
+    }
+    .session-hero-pressure > span {
+      font-size: 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: var(--faint);
+    }
+    .session-hero-pressure > strong {
+      font-size: 18px;
+      font-weight: 650;
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }
+    .session-hero-pressure > em {
+      font-style: normal;
+      font-size: 13px;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
     .session-hero-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 14px 0 12px; }
     .session-hero-fact {
       border: 1px solid var(--drawer-line);
@@ -606,11 +784,50 @@
     .confidence-chip.inferred::before { background: var(--amber); }
     .confidence-chip.predicted::before, .confidence-chip.unknown::before { background: var(--faint); }
     .outcome-help { display: grid; gap: 6px; margin-top: 10px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    /* Three statements, not one verdict. Each is a separate row so an unknown
+       one reads as "not yet" rather than dragging the other two down with it. */
+    .verdict-lines { display: flex; flex-direction: column; gap: 10px; }
+    .verdict-line {
+      display: grid;
+      grid-template-columns: 116px minmax(0, 1fr);
+      gap: 4px 14px;
+      align-items: baseline;
+      padding-left: 12px;
+      border-left: 2px solid var(--line-strong);
+    }
+    @media (max-width: 620px) { .verdict-line { grid-template-columns: 1fr; } }
+    .verdict-line .verdict-label {
+      font-size: 11px;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: var(--faint);
+    }
+    .verdict-line p {
+      margin: 0;
+      color: var(--text);
+      font-size: 16px;
+      font-weight: 500;
+      line-height: 1.45;
+      letter-spacing: -.005em;
+    }
+    .verdict-line.tone-critical { border-left-color: var(--red); }
+    .verdict-line.tone-warning { border-left-color: var(--amber); }
+    .verdict-line.tone-healthy { border-left-color: var(--green); }
+    .verdict-line.tone-unknown p { color: var(--muted); }
+
     .verdict-card { border: 1px solid var(--drawer-line); border-left: 3px solid var(--blue); border-radius: 8px; padding: 14px; background: rgba(112,167,255,.055); margin-top: 12px; }
     .verdict-card.high { border-left-color: var(--amber); background: rgba(246,189,96,.06); }
     .verdict-card.useful { border-left-color: var(--green); background: rgba(53,211,153,.06); }
     .verdict-card h3 { font-size: 15px; margin: 0 0 8px; }
     .verdict-card ul { margin: 10px 0 0; padding-left: 18px; color: #d9e4f2; line-height: 1.45; }
+    /* A section whose only content is a collapsed summary is a one-line control,
+       so it should not also carry a full section's padding -- nine of them at
+       full height was most of a screen of nothing but summaries. */
+    .detail-section:has(> details.aiw-details:only-child:not([open])) { padding: 8px 0; }
+    .detail-section > details.aiw-details:only-child { margin-top: 0; }
+    .optimize-lede { margin: 0 0 12px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+    #optimizeWorkspace { padding: 8px 0; }
+    #optimizeWorkspace > details.aiw-details { margin-top: 0; }
     details.aiw-details { border: 1px solid var(--drawer-line); border-radius: 8px; background: rgba(5,9,14,.22); margin-top: 12px; }
     details.aiw-details summary { cursor: pointer; padding: 12px 14px; color: #dce6f6; font-weight: 750; }
     details.aiw-details[open] summary { border-bottom: 1px solid var(--drawer-line); }
@@ -622,13 +839,13 @@
     .costliest-share { text-transform: none; letter-spacing: 0; font-weight: 600; color: var(--text, inherit); }
     .costliest-body { margin-top: 6px; font-size: 14px; overflow-wrap: anywhere; }
     .waste-note { margin: 12px 0; padding: 10px 14px; border: 1px solid var(--line-strong); border-left: 3px solid #e0a800; border-radius: 8px; background: var(--surface-raised); font-size: 13px; line-height: 1.45; }
-    .prompt-text, .prompt-suggested { margin: 8px 0 4px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow-y: auto; }
+    .prompt-text, .prompt-suggested, .prompt-opener { margin: 8px 0 4px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow-y: auto; }
     .prompt-suggested { border-left: 3px solid var(--metric-green, #2e9e5b); }
     .risk-tag { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; padding: 2px 8px; border-radius: 999px; vertical-align: middle; margin-left: 8px; border: 1px solid var(--line-strong); }
     .risk-high { color: #d9534f; border-color: #d9534f; }
     .risk-medium { color: #e0a800; border-color: #e0a800; }
     .risk-low { color: var(--muted); }
-    .prompt-opener { margin: 6px 0 0; line-height: 1.5; }
+    .prompt-opener { font-family: var(--mono); font-size: 12.5px; }
     .prompt-opener-label { display: inline-block; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-right: 6px; }
     .asks-table td { vertical-align: top; }
     .asks-table .ask-turn { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -638,6 +855,13 @@
     .asks-table .ask-share { display: block; font-size: 11px; color: var(--muted); }
     .evt-turn { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
     .timeline-note { margin: 4px 0 8px; font-size: 12px; color: var(--muted); }
+    .mini-note {
+      display: block;
+      margin-top: 4px;
+      font-size: 11px;
+      line-height: 1.4;
+      color: var(--faint);
+    }
     .mini-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 10px 0 12px; }
     .mini { border-left: 2px solid var(--line-strong); padding: 5px 10px; min-width: 0; }
     .mini strong { display: block; font-size: 16px; margin-top: 4px; overflow-wrap: anywhere; }

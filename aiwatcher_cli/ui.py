@@ -75,6 +75,7 @@ from .session_health import (
     PRESSURE_TOKENS_PER_TURN,
     ContextHealth,
     analyze_all_sessions,
+    analyze_session_health,
     gate_health_warning,
 )
 from .scanner import (
@@ -655,6 +656,38 @@ def _optimize_checklist(candidates: list[dict[str, object]]) -> str:
     return "\n".join(lines)
 
 
+def _group_pending_fresh_starts(candidates: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Collapse pending Fresh Start rows that nothing on screen distinguishes.
+
+    One row per project, carrying the count. They differ only by the decision id
+    and, sometimes, by how long ago it was -- neither of which is rendered, so
+    three of them read as the same item repeated.
+    """
+    grouped: dict[str, dict[str, object]] = {}
+    out: list[dict[str, object]] = []
+    for candidate in candidates:
+        if candidate.get("kind") != "fresh_start_pending":
+            out.append(candidate)
+            continue
+        key = str(candidate.get("project_full") or candidate.get("project") or "")
+        first = grouped.get(key)
+        if first is None:
+            grouped[key] = candidate
+            out.append(candidate)
+            continue
+        first["session_count"] = int(first.get("session_count") or 1) + 1
+        tokens = int(first.get("tokens_at_risk") or 0) + int(candidate.get("tokens_at_risk") or 0)
+        first["tokens_at_risk"] = tokens
+        first["impact_label"] = f"~{compact_int(tokens)} context at risk" if tokens else None
+        count = first["session_count"]
+        first["title"] = f"Finish Fresh Start cleanup ({count} decisions)"
+        first["summary"] = (
+            f"{count} Fresh Start briefs were copied without a linked follow-up session. "
+            "Mark the old chats done, or paste each brief into its new chat."
+        )
+    return out
+
+
 def build_optimize_inventory(
     rows: list[LocalSession],
     *,
@@ -749,7 +782,7 @@ def build_optimize_inventory(
             "why_inactive": "AIWatcher saw a Fresh Start decision but has not linked a later same-project session yet.",
             "evidence_label": "Observed",
             "evidence": "Observed from AIWatcher Fresh Start receipt metadata.",
-            "impact_label": f"~{compact_int(tokens)} context at risk" if tokens else "context at risk",
+            "impact_label": f"~{compact_int(tokens)} context at risk" if tokens else None,
             "tokens_at_risk": tokens,
             "session_count": 1,
             "updated_label": _elapsed_label(created_at, now=now),
@@ -810,6 +843,7 @@ def build_optimize_inventory(
             "action_label": "Copy cleanup checklist",
         })
 
+    candidates = _group_pending_fresh_starts(candidates)
     candidates.sort(key=lambda item: (int(item.get("tokens_at_risk") or 0), int(item.get("session_count") or 0)), reverse=True)
     for item in candidates:
         item["checklist"] = _optimize_candidate_checklist(item)
@@ -1304,6 +1338,59 @@ def build_prompt_analysis(
 EVENT_DISPLAY_LIMIT = 5000
 
 
+# Above this share of a session's bill going on re-sent history, the session is
+# called expensive. Picked, not derived: local projects run 40-70%, so 60 flags
+# the worst of them and leaves the rest alone. It is a stopgap -- the honest
+# version compares a session against the owner's own history, the way
+# pace_vs_baseline already does, rather than against a fixed line.
+REPLAY_SHARE_HIGH_PCT = 60.0
+
+
+def _session_verdict_inputs(row: LocalSession, events: list[LocalEvent]) -> dict[str, object]:
+    """The three things a session can be judged on, and whether each is knowable yet.
+
+    They are deliberately separate. "How much room is left" is answerable now and
+    is the only urgent one; "did it cost more than it needed to" is answerable
+    once the session stops; "was it worth it" needs commits to age past
+    survival.MIN_AGE_DAYS before it means anything. Collapsing them into a single
+    verdict is what made the old one unable to say anything -- an absolute token
+    threshold stood in for all three and fired for two sessions in three.
+    """
+    health = analyze_session_health(row, events)
+    pressure: dict[str, object] = {"measurable": False}
+    if health:
+        pressure = {
+            "measurable": True,
+            "latest_turn_tokens": health.latest_turn_tokens,
+            "latest_turn_label": compact_int(health.latest_turn_tokens),
+            "peak_turn_tokens": health.peak_turn_tokens,
+            "peak_turn_label": compact_int(health.peak_turn_tokens),
+            "pressure_tokens": PRESSURE_TOKENS_PER_TURN,
+            "critical_tokens": CRITICAL_TOKENS_PER_TURN,
+            "turns_to_critical": health.turns_to_critical,
+            "turns_since_reset": health.turns_since_reset,
+            "severity": health.severity,
+        }
+
+    # Share of *spend*, not of tokens. The token-share reading is ~98% for every
+    # session because cache reads dominate the count, so it separates nothing;
+    # weighted by what was actually billed it runs 40-70% and discriminates.
+    replay: dict[str, object] = {
+        "measurable": bool(health and health.bloat_measurable),
+        "reason": None if (health and health.bloat_measurable)
+        else "This tool is plan-based, so there is no per-session bill to apportion.",
+    }
+    if health and health.bloat_measurable:
+        replay.update({
+            "share_pct": round(health.bloat_ratio * 100, 1),
+            "share_label": f"{health.bloat_ratio * 100:.0f}%",
+            "replayed_cost_label": money(health.replayed_cost_usd),
+            "high": health.bloat_ratio * 100 >= REPLAY_SHARE_HIGH_PCT,
+            "threshold_pct": REPLAY_SHARE_HIGH_PCT,
+        })
+    return {"pressure": pressure, "replay": replay}
+
+
 def build_session_detail(session_id: str, days: int = 30, *, allow_pending: bool = False) -> dict[str, object]:
     row = _find_session_row(session_id, days=days)
     if not row:
@@ -1338,6 +1425,7 @@ def build_session_detail(session_id: str, days: int = 30, *, allow_pending: bool
     return {
         **session_json(row),
         "privacy": "Prompt text is shown only when you inspect this local session; it is not uploaded or persisted in summaries.",
+        "verdict": _session_verdict_inputs(row, events),
         "insights": session_insights(row),
         "prompt_analysis": build_prompt_analysis(row, segments),
         "outcome_evidence": evidence.to_json(),
@@ -4048,6 +4136,16 @@ def build_summary(
     useful_cost = sum(row.cost_usd for row in useful_rows)
     cost_per_useful = useful_cost / len(useful_rows) if useful_rows else None
     handoff_decisions = _handoff_decision_rows(limit=10, sessions=all_rows)
+    # Replay share weighted by money rather than tokens. The two answers differ
+    # enormously on the same window -- about 98% against 70% -- because replayed
+    # context is billed at the cache-read rate, so counting tokens says nearly
+    # everything was replay while counting spend says what it actually cost.
+    _replay_cost = replayed_context_cost(rows)
+    _window_cost = sum(row.cost_usd for row in rows)
+    replayed_spend_share = (
+        round(100.0 * float(_replay_cost["total_replayed_usd"]) / _window_cost, 1)
+        if _replay_cost.get("available") and _window_cost > 0 else None
+    )
     return {
         "generated_at": now.isoformat(),
         "cache_schema_version": SUMMARY_CACHE_SCHEMA_VERSION,
@@ -4077,6 +4175,9 @@ def build_summary(
                 round(100.0 * replayed_tokens / int(stats["tokens"]), 1)
                 if int(stats["tokens"]) > 0 else 0.0
             ),
+            # Copy that says "of what this cost" must read this one, not the
+            # token-weighted figure above it.
+            "replayed_spend_share_pct": replayed_spend_share,
             "api_priced_tokens_label": compact_int(split["api_priced"]),
             "plan_limited_tokens_label": compact_int(split["plan_limited"]),
             "calls": stats["calls"],
