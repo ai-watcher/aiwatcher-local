@@ -20,7 +20,7 @@ built on it would inherit that error.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from statistics import median
+from statistics import median, quantiles
 from typing import Any, Sequence
 
 from .pricing import CACHE_READ_MULTIPLIER, is_subscription_model, lookup
@@ -31,6 +31,11 @@ from .scanner import LocalEvent, LocalSession, display_model_name
 MIN_SESSIONS_PER_MODEL = 4
 MIN_BASELINE_WEEKS = 2
 MIN_REPLAYED_TOKENS = 50_000  # under this the dollar figure rounds to noise
+
+# Enough prior sessions for a quartile to describe a distribution rather than
+# just naming one of its members. Below this there is no baseline, and the
+# honest answer is that the question cannot be answered yet.
+MIN_BASELINE_SESSIONS = 8
 
 
 def _unavailable(reason: str, **extra: Any) -> dict[str, Any]:
@@ -222,6 +227,65 @@ def pace_vs_baseline(
         "ratio": round(current / baseline, 2),
         "delta_pct": round((current / baseline - 1) * 100, 1),
         "direction": "above" if current > baseline else "below",
+    }
+
+
+def replay_share_vs_baseline(
+    share_pct: float,
+    baseline_shares_pct: Sequence[float],
+    *,
+    min_sessions: int = MIN_BASELINE_SESSIONS,
+) -> dict[str, Any]:
+    """One session's replay share against the shares of the owner's own sessions.
+
+    Compares you to yourself, for the same reason pace_vs_baseline does: there
+    is no external number that says what fraction of a bill *should* go on
+    re-sent history. It depends on the tool, the model's cache pricing and how
+    the owner works, so a fixed line cannot be right for everyone.
+
+    This replaces a picked constant of 60%. Measured against the local corpus
+    that line fired for 47% of sessions and sat within a point of the owner's
+    own median (58.8%) -- it called a typical session expensive, which is the
+    same defect as judging a cumulative total against a per-turn threshold.
+
+    "Unusual" is defined as the top quartile of the owner's own history rather
+    than as a multiple of their average. A multiple would need its own picked
+    number, and an average is dragged around by the long sessions that make
+    replay expensive in the first place. A quantile also moves with the owner:
+    if they get cheaper across the board, the line follows them down.
+
+    *share_pct* is excluded from *baseline_shares_pct* by the caller -- a
+    session compared against a set containing itself pulls the baseline toward
+    its own value, which matters most for exactly the outliers this is meant
+    to catch.
+    """
+    baseline = sorted(
+        float(value) for value in baseline_shares_pct
+        if value is not None and value == value  # drop NaN
+    )
+    if len(baseline) < min_sessions:
+        return _unavailable(
+            f"Need {min_sessions}+ other sessions with a measurable replay share "
+            "to say what is normal for you.",
+            baseline_sessions=len(baseline),
+        )
+
+    # quantiles() needs at least n data points for n cut points; min_sessions
+    # keeps us well clear of that.
+    high_water = quantiles(baseline, n=4)[2]
+    below = sum(1 for value in baseline if value < share_pct)
+    rank_pct = below / len(baseline) * 100
+
+    return {
+        "available": True,
+        "reason": None,
+        "share_pct": round(share_pct, 1),
+        "baseline_sessions": len(baseline),
+        "baseline_median_pct": round(median(baseline), 1),
+        "high_water_pct": round(high_water, 1),
+        "rank_pct": round(rank_pct, 1),
+        "high": share_pct >= high_water,
+        "direction": "above" if share_pct > median(baseline) else "below",
     }
 
 

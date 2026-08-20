@@ -544,14 +544,24 @@ function verdictLines(s) {
 
   const r = v.replay || {};
   if (r.measurable) {
-    lines.push({
-      key: 'cost',
-      label: 'Cost to run',
-      tone: r.high ? 'warning' : 'healthy',
-      body: r.high
-        ? `${r.share_label} of what this cost went on re-sending history, ${r.replayed_cost_label} of it. Above the ${r.threshold_pct}% mark.`
-        : `${r.share_label} of what this cost went on re-sending history, which is the normal range.`,
-    });
+    // "High" is a claim about this owner's own history, not about a fixed line,
+    // so with no baseline the honest answer is that we cannot tell yet -- drawn
+    // as unknown rather than as the healthy branch.
+    const c = r.comparison || {};
+    const spent = `${r.share_label} of what this cost went on re-sending history, ${r.replayed_cost_label} of it.`;
+    let tone;
+    let body;
+    if (!c.available) {
+      tone = 'unknown';
+      body = `${spent} ${c.reason || 'There is no baseline to compare it against yet.'}`;
+    } else if (r.high) {
+      tone = 'warning';
+      body = `${spent} That is higher than ${Math.round(c.rank_pct)}% of your other sessions, which usually run at ${Math.round(c.baseline_median_pct)}%.`;
+    } else {
+      tone = 'healthy';
+      body = `${spent} Your sessions usually run at ${Math.round(c.baseline_median_pct)}%, so this is ordinary for you.`;
+    }
+    lines.push({ key: 'cost', label: 'Cost to run', tone, body });
   } else if (r.reason) {
     lines.push({ key: 'cost', label: 'Cost to run', tone: 'unknown', body: r.reason });
   }

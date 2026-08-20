@@ -4,8 +4,10 @@ import unittest
 from datetime import datetime, timedelta
 
 from aiwatcher_cli.metrics import (
+    MIN_BASELINE_SESSIONS,
     model_cost_comparison,
     pace_vs_baseline,
+    replay_share_vs_baseline,
     replayed_context_cost,
 )
 from aiwatcher_cli.pricing import CACHE_READ_MULTIPLIER, cache_read_cost
@@ -165,6 +167,63 @@ class PaceVsBaselineTests(unittest.TestCase):
         ]
         self.assertAlmostEqual(pace_vs_baseline(events)["current_usd"], 10.0, places=6)
 
+
+
+class ReplayShareVsBaselineTests(unittest.TestCase):
+    """The replay share is judged against the owner's own sessions.
+
+    It replaced a fixed 60% line that, measured over the local corpus, fired for
+    47% of sessions and sat within a point of that owner's median -- it called a
+    typical session expensive, which is the defect this whole metric family
+    exists to avoid.
+    """
+
+    def test_needs_enough_other_sessions_to_have_a_baseline(self) -> None:
+        result = replay_share_vs_baseline(80.0, [40.0, 45.0, 50.0])
+        self.assertFalse(result["available"])
+        self.assertEqual(result["baseline_sessions"], 3)
+        self.assertIn("other sessions", result["reason"])
+
+    def test_thin_history_is_not_reported_as_normal(self) -> None:
+        # The failure mode being pinned: an extreme session slipping through as
+        # "fine" because there was nothing to compare it against.
+        result = replay_share_vs_baseline(99.0, [50.0] * (MIN_BASELINE_SESSIONS - 1))
+        self.assertFalse(result["available"])
+        self.assertNotIn("high", result)
+
+    def test_top_quartile_of_your_own_history_reads_high(self) -> None:
+        baseline = [float(v) for v in range(20, 100, 10)]  # 20..90, eight sessions
+        result = replay_share_vs_baseline(88.0, baseline)
+
+        self.assertTrue(result["available"])
+        self.assertTrue(result["high"])
+        self.assertEqual(result["baseline_sessions"], 8)
+        self.assertEqual(result["direction"], "above")
+        self.assertGreater(result["rank_pct"], 75.0)
+
+    def test_a_typical_session_does_not_read_high(self) -> None:
+        baseline = [float(v) for v in range(20, 100, 10)]
+        result = replay_share_vs_baseline(55.0, baseline)
+
+        self.assertTrue(result["available"])
+        self.assertFalse(result["high"])
+        self.assertAlmostEqual(result["baseline_median_pct"], 55.0, places=1)
+
+    def test_the_line_moves_with_the_owner(self) -> None:
+        # Same 65% session: unremarkable for someone who runs hot, high for
+        # someone who does not. A fixed threshold cannot express this, and it is
+        # the whole reason for the change.
+        heavy = [float(v) for v in (60, 62, 65, 68, 70, 72, 75, 80)]
+        light = [float(v) for v in (10, 12, 15, 18, 20, 22, 25, 30)]
+
+        self.assertFalse(replay_share_vs_baseline(65.0, heavy)["high"])
+        self.assertTrue(replay_share_vs_baseline(65.0, light)["high"])
+
+    def test_rank_says_how_many_of_your_sessions_it_beats(self) -> None:
+        baseline = [float(v) for v in range(10, 90, 10)]  # 10..80
+        result = replay_share_vs_baseline(45.0, baseline)
+        # Four of the eight (10, 20, 30, 40) sit below it.
+        self.assertAlmostEqual(result["rank_pct"], 50.0, places=1)
 
 class ReplayedContextCostTests(unittest.TestCase):
     def test_unavailable_without_meaningful_replay(self) -> None:

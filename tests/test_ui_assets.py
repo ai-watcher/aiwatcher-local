@@ -435,13 +435,17 @@ class SessionDrawerTest(unittest.TestCase):
         self.assertIn("bloat_measurable", server)
         self.assertNotIn("replayed_share_pct", server)
 
-    def test_the_chosen_threshold_is_marked_as_chosen(self):
-        # It is picked, not derived. The comment saying so is the only thing
-        # stopping it becoming another 500,000.
-        self.assertTrue(hasattr(ui, "REPLAY_SHARE_HIGH_PCT"))
-        source = inspect.getsource(ui)
-        marker = source[source.index("REPLAY_SHARE_HIGH_PCT") - 500:source.index("REPLAY_SHARE_HIGH_PCT")]
-        self.assertIn("Picked, not derived", marker)
+    def test_no_fixed_line_decides_whether_replay_is_high(self):
+        # The 60% constant that used to live here fired for 47% of the local
+        # corpus and sat within a point of the owner's own median, so it called
+        # a typical session expensive. Replaced by a comparison against the
+        # owner's own sessions, the way pace_vs_baseline works.
+        self.assertFalse(hasattr(ui, "REPLAY_SHARE_HIGH_PCT"))
+        server = inspect.getsource(ui._session_verdict_inputs)
+        self.assertIn("replay_share_vs_baseline", server)
+        # No baseline must not collapse into "fine".
+        self.assertNotIn("threshold_pct", self.js)
+        self.assertIn("c.available", self.js)
 
     def test_nothing_is_only_reachable_by_scrolling_past_it(self):
         # Collapsing must not become hiding: every summary has a body.
