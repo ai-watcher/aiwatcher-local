@@ -717,14 +717,43 @@ function renderHandoffForm(capsule) {
     <div class="copy-row"><button class="btn-quiet" onclick="regenerateHandoff('${esc(capsule.session_id)}','${esc(capsule.target || 'generic')}', ${capsule.include_prompt_excerpt ? 'true' : 'false'}, ${capsule.demo ? 'true' : 'false'})">Regenerate brief</button></div>
   </div>`;
 }
+// Everything rendered into the brief preview has to be a string first.
+// Decision records are objects ({summary, reasoning, alternatives_rejected}),
+// and the old `item.text || item` fell through to the object itself, so the
+// preview showed "• [object Object]" where the reasoning should be. The copied
+// brief was never affected -- handoff.py reads .summary correctly -- but the
+// preview is what the user judges the artefact by.
+function briefText(item) {
+  if (item == null) return '';
+  if (typeof item === 'string') return item;
+  if (typeof item === 'object') {
+    const text = item.summary || item.text || item.label || '';
+    if (!text) {
+      // Drop it rather than render a placeholder. A missing bullet is
+      // recoverable; a bullet reading "[object Object]" is not.
+      console.error('AIWatcher: no renderable text on a brief item', item);
+    }
+    return text;
+  }
+  return String(item);
+}
+
 function listPreview(items, fallback) {
-  const values = (items || []).filter(Boolean);
+  const values = (items || []).map(briefText).filter(Boolean).filter(value => {
+    // Backstop for anything stringified before it reached us, so this class of
+    // bug cannot ship silently again.
+    if (/\[object \w+\]/.test(value)) {
+      console.error('AIWatcher: an object was stringified into the brief', value);
+      return false;
+    }
+    return true;
+  });
   if (!values.length) return esc(fallback);
   return values.slice(0, 4).map(item => `• ${esc(item)}`).join('<br>');
 }
 function renderFreshStartPreview(capsule) {
   const objective = capsule.objective || 'Reconstruct the current work from repo state, recent commits, changed files, and the evidence below.';
-  const decisions = (capsule.decisions || []).map(item => item.text || item).filter(Boolean);
+  const decisions = capsule.decisions || [];
   return `<div class="fresh-preview">
     <div class="fresh-preview-head">
       <div><h3>Fresh Start brief preview</h3><p>This is the structured context the next AI session receives.</p></div>
@@ -3093,30 +3122,22 @@ function startLiveRefresh() {
   freshnessTimer = window.setInterval(renderFreshness, 5000);
 }
 
-async function load(resetDetail = true, forceRefresh = false) {
-  loadInFlight = true;
+// The button label, the in-flight flag and the next scheduled poll are restored
+// by load()'s finally, never in here. Everything below this line is allowed to
+// throw: one bad field used to leave the button stuck on "Updating...",
+// loadInFlight pinned true, and no refresh ever scheduled again -- an ambient
+// dashboard silently frozen on stale data with no visible error.
+async function loadOnce(resetDetail, forceRefresh) {
   const days = document.getElementById('days').value;
-  const refreshButton = document.getElementById('refreshButton');
-  const previousRefreshText = refreshButton ? refreshButton.textContent : '';
-  if (refreshButton) {
-    refreshButton.disabled = true;
-    refreshButton.textContent = forceRefresh ? 'Refreshing...' : 'Updating...';
-  }
   let data;
   try {
     const summaryRes = await fetch(`/api/summary?days=${days}${forceRefresh ? '&refresh=1' : ''}`);
     data = await summaryRes.json();
   } catch (error) {
-    showToast('Could not load local AIWatcher data.', 'error');
-    if (refreshButton) {
-      refreshButton.disabled = false;
-      refreshButton.textContent = previousRefreshText || 'Refresh data';
-    }
     // Keep trying on the normal cadence: a dashboard that gives up after one
     // failed poll looks identical to one showing current data.
-    loadInFlight = false;
-    scheduleRefresh(nextRefreshDelay(null, forceRefresh));
-    return;
+    showToast('Could not load local AIWatcher data.', 'error');
+    return null;
   }
   renderWatcher(data.watcher || null);
   renderCacheStatus(data.cache || null);
@@ -3246,17 +3267,40 @@ async function load(resetDetail = true, forceRefresh = false) {
     const todayDigest = document.getElementById('todayDigest');
     if (todayDigest) todayDigest.innerHTML = '<div class="empty">Open Improve for the evidence-backed weekly digest.</div>';
   }
-  if (refreshButton) {
-    refreshButton.disabled = false;
-    refreshButton.textContent = previousRefreshText || 'Refresh data';
-  }
   if (resetDetail && document.getElementById('detailDrawer').classList.contains('open')) closeDrawer();
   renderAmbient(data);
   renderTabState(data);
   lastLoadedAt = Date.now();
   renderFreshness();
-  loadInFlight = false;
-  scheduleRefresh(nextRefreshDelay(data, forceRefresh));
+  return data;
+}
+
+async function load(resetDetail = true, forceRefresh = false) {
+  const refreshButton = document.getElementById('refreshButton');
+  if (refreshButton) {
+    refreshButton.disabled = true;
+    refreshButton.textContent = forceRefresh ? 'Refreshing...' : 'Updating...';
+  }
+  loadInFlight = true;
+  let data = null;
+  try {
+    data = await loadOnce(resetDetail, forceRefresh);
+  } catch (error) {
+    // A render fault must not read as fresh data. Say the screen is stale, and
+    // put the reason somewhere a developer can find it.
+    console.error('AIWatcher: could not render the dashboard', error);
+    showToast('Refresh failed. Showing the data already on screen.', 'error');
+  } finally {
+    if (refreshButton) {
+      refreshButton.disabled = false;
+      // Restored to a literal, never to whatever the label happened to say. The
+      // 10s poll also drives this button: capturing the current text meant a
+      // tick landing mid-refresh saved "Updating..." and restored that forever.
+      refreshButton.textContent = 'Refresh data';
+    }
+    loadInFlight = false;
+    scheduleRefresh(nextRefreshDelay(data, forceRefresh));
+  }
 }
 document.addEventListener('keydown', event => { if (event.key === 'Escape') closeDrawer(); });
 (async () => {

@@ -665,5 +665,49 @@ class WindowSummaryTest(unittest.TestCase):
         self.assertIn("replayed_spend_share_pct", inspect.getsource(ui))
 
 
+class RefreshRecoveryTest(unittest.TestCase):
+    """The dashboard is ambient, so the worst failure is not an error message --
+    it is freezing on stale data while still looking live. Both bugs pinned here
+    did exactly that and were found by clicking, not by reading the diff."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+
+    def test_cleanup_runs_even_when_a_render_throws(self):
+        # The button restore, loadInFlight and the next poll all used to sit at
+        # the end of the happy path with ~140 lines of rendering above them. One
+        # bad field skipped all three: the button stuck disabled on "Updating...",
+        # loadInFlight pinned true, and refreshTick then rescheduled itself
+        # forever without ever loading again.
+        load = js_function_source(self.js, "load")
+        self.assertIn("finally", load)
+        for restored in ("refreshButton.disabled = false",
+                         "loadInFlight = false",
+                         "scheduleRefresh("):
+            with self.subTest(restored=restored):
+                after_finally = load[load.index("finally"):]
+                self.assertIn(restored, after_finally)
+
+    def test_the_label_is_restored_to_a_literal(self):
+        # It used to be restored to whatever the button happened to say. The 10s
+        # poll drives the same button, so a tick landing mid-refresh captured
+        # "Updating..." and restored that -- permanently, and self-sustaining.
+        self.assertNotIn("previousRefreshText", self.js)
+        load = js_function_source(self.js, "load")
+        self.assertIn("refreshButton.textContent = 'Refresh data'", load)
+
+    def test_no_object_can_reach_the_brief_preview(self):
+        # Decision records are dicts with a `summary` key and no `text` key, so
+        # `item.text || item` fell through to the dict and the preview rendered
+        # "[object Object]". The copied brief was always correct -- handoff.py
+        # reads .summary -- but the preview is what the artefact is judged by.
+        self.assertNotIn("map(item => item.text || item)", self.js)
+        brief = js_function_source(self.js, "briefText")
+        self.assertIn("item.summary", brief)
+        # And a backstop, so this class of bug cannot ship silently again.
+        self.assertIn(r"/\[object \w+\]/", self.js)
+
+
 if __name__ == "__main__":
     unittest.main()
