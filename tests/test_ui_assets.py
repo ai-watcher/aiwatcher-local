@@ -822,5 +822,52 @@ class FalseAffordanceTest(unittest.TestCase):
         self.assertNotIn("ambient nudges", self.js)
 
 
+class ScopeAndScaleTest(unittest.TestCase):
+    """P1: figures that were true but did not say what they measured."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+
+    def test_the_risk_scale_is_named_not_invented(self):
+        # The score is an unbounded sum of penalty points; cli.py's
+        # _risk_for_score bands it and nothing caps the total. The review asked
+        # for "n of 5" -- there is no 5, and printing one would be a made-up
+        # denominator dressed as a fact.
+        from aiwatcher_cli import cli
+        self.assertEqual(cli._risk_for_score(cli_medium := 3), "medium")
+        self.assertEqual(cli._risk_for_score(cli_high := 6), "high")
+        self.assertEqual(cli._risk_for_score(cli_medium - 1), "low")
+        self.assertEqual(cli._risk_for_score(cli_high - 1), "medium")
+        # The front end states those same two bands, so they cannot drift apart.
+        self.assertIn(f"RISK_MEDIUM_AT = {cli_medium}", self.js)
+        self.assertIn(f"RISK_HIGH_AT = {cli_high}", self.js)
+        self.assertNotIn("score ${esc(data.score)}", self.js)
+
+    def test_project_scoped_figures_say_so(self):
+        # Home's fact row carried three session figures and one project figure
+        # with nothing to tell them apart, and "sessions here" left "here"
+        # undefined.
+        self.assertNotIn("'sessions here'", self.js)
+        self.assertIn("'project sessions'", self.js)
+        # turns_since_reset diverges from the session total after a /compact.
+        self.assertNotIn("['turns', String(chart.turns_since_reset)]", self.js)
+
+    def test_watch_separates_the_session_from_the_project(self):
+        facts = js_function_source(self.js, "healthFacts")
+        self.assertIn("this session:", facts)
+        self.assertIn("this project:", facts)
+
+    def test_survival_names_its_own_window(self):
+        # survival ignores the date picker: cli.py fixes it at
+        # SURVIVAL_WINDOW_DAYS because a commit must age past MIN_AGE_DAYS
+        # before survival means anything. It sat under the picker never moving.
+        from aiwatcher_cli import cli
+        self.assertEqual(cli.SURVIVAL_WINDOW_DAYS, 30)
+        self.assertIn("not the selected range", self.js)
+        # And counts get separators rather than reading "12206".
+        self.assertIn("formatCount(survival.lines_touched)", self.js)
+
+
 if __name__ == "__main__":
     unittest.main()

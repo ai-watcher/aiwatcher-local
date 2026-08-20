@@ -28,9 +28,9 @@ function jsArg(value) {
 }
 let receiptCache = [];
 function riskFlow(receipt) {
-  const original = `<span class="risk-chip ${esc(receipt.original_risk)}">${esc(receipt.original_risk)} · ${esc(receipt.original_score ?? '—')}</span>`;
+  const original = `<span class="risk-chip ${esc(receipt.original_risk)}">${esc(receipt.original_risk)} · ${esc(riskScore(receipt.original_score))}</span>`;
   if (receipt.selected_score === null || receipt.selected_score === undefined) return `<div class="risk-flow">${original}</div>`;
-  return `<div class="risk-flow">${original}<span class="risk-arrow">→</span><span class="risk-chip ${esc(receipt.selected_risk || 'low')}">${esc(receipt.selected_risk || 'unknown')} · ${esc(receipt.selected_score)}</span><span class="pill">${esc(receipt.risk_points_reduced || 0)} points reduced</span></div>`;
+  return `<div class="risk-flow">${original}<span class="risk-arrow">→</span><span class="risk-chip ${esc(receipt.selected_risk || 'low')}">${esc(receipt.selected_risk || 'unknown')} · ${esc(riskScore(receipt.selected_score))}</span><span class="pill">${esc(receipt.risk_points_reduced || 0)} points reduced</span></div>`;
 }
 function predictedStats(receipt) {
   const p = receipt.predicted || {};
@@ -59,7 +59,7 @@ function renderReceiptRows(receipts) {
     <td>${esc(dateLabel(receipt.created_at))}</td>
     <td><strong>${esc(receipt.tool)}</strong><br><span class="sub">${esc(receipt.project)}</span></td>
     <td>${esc(receipt.decision_label)}</td>
-    <td>${esc(receipt.original_score ?? '—')} → ${esc(receipt.selected_score ?? '—')}</td>
+    <td>${esc(riskScore(receipt.original_score))} → ${esc(riskScore(receipt.selected_score))}</td>
     <td>${esc(receipt.outcome || receipt.session_status)}</td>
     <td><button class="row-action">Review</button></td>
   </tr>`).join('');
@@ -205,7 +205,7 @@ async function preflightPrompt() {
     const riskTone = data.risk || 'low';
     resultNode.innerHTML = `${renderPlanAction(data.plan_action)}
     <div class="risk-card ${esc(riskTone)}" style="margin-top:14px">
-      <h3>Risk: ${esc(data.risk)} · score ${esc(data.score)}</h3>
+      <h3>Risk: ${esc(data.risk)} · ${esc(riskScore(data.score))} <span class="risk-scale">(${esc(RISK_SCALE_NOTE)})</span></h3>
       <p>${esc(data.impact_label)}</p>
       <h3 style="margin-top:14px">Findings</h3>
       <ul class="prompt-list">${data.findings.map(item => `<li>${esc(item)}</li>`).join('')}</ul>
@@ -733,6 +733,26 @@ function renderHandoffForm(capsule) {
 // preview showed "• [object Object]" where the reasoning should be. The copied
 // brief was never affected -- handoff.py reads .summary correctly -- but the
 // preview is what the user judges the artefact by.
+// Counts are printed with separators everywhere: "12206" and "4045" were
+// rendered raw next to compacted values like "55.5k" in the same column.
+// The prompt risk score is an unbounded sum of penalty points, not a rating out
+// of N -- cli.py's _risk_for_score bands it at >=3 medium and >=6 high, and
+// nothing caps the total. So the scale is made visible by naming those bands
+// rather than by inventing a denominator: writing it "2 of 5" would be a
+// confident-looking figure with a made-up maximum.
+const RISK_MEDIUM_AT = 3;
+const RISK_HIGH_AT = 6;
+const RISK_SCALE_NOTE = `medium at ${RISK_MEDIUM_AT}, high at ${RISK_HIGH_AT}`;
+
+function riskScore(score) {
+  return score === null || score === undefined ? '—' : `${score} pts`;
+}
+
+function formatCount(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n.toLocaleString('en-US') : String(value ?? '');
+}
+
 function briefText(item) {
   if (item == null) return '';
   if (typeof item === 'string') return item;
@@ -1714,13 +1734,23 @@ function headroomLabel(chart) {
 function healthFacts(row) {
   const chart = row.chart || {};
   const peakIsHistoric = chart.peak_turn_tokens_n > chart.latest_turn_tokens_n * 1.05;
-  return [
+  // Two scopes used to run together in one dot-separated list, so "68% replay"
+  // (the charted session) and "10 sessions" (the whole project) read as one
+  // measurement. The card already warns in prose that its buttons act on a
+  // single session rather than all of them; the numbers now say so too.
+  const session = [
     peakIsHistoric ? `peak ${row.peak_turn_tokens}` : '',
     row.bloat_measurable ? `${row.bloat_label} replay` : '',
     row.bloat_measurable ? `${row.replayed_cost_label} on replay` : '',
+  ].filter(Boolean).join(' \u00b7 ');
+  const project = [
     `${row.session_count} session${row.session_count === 1 ? '' : 's'}`,
     row.critical_sessions ? `${row.critical_sessions} critical` : '',
   ].filter(Boolean).join(' \u00b7 ');
+  return [
+    session ? `this session: ${session}` : '',
+    project ? `this project: ${project}` : '',
+  ].filter(Boolean).join('  \u2014  ');
 }
 
 // A health-card button goes where its label says. The kind comes from
@@ -2938,8 +2968,14 @@ function ambientRunning(card) {
       + '<button class="btn-quiet" onclick="selectSession(\'' + esc(card.session_id) + '\')">Inspect session</button>',
     facts: [
       peak > latest && card.peak_turn_tokens ? ['peak', card.peak_turn_tokens] : null,
-      chart.turns_since_reset ? ['turns', String(chart.turns_since_reset)] : null,
-      card.session_count ? ['sessions here', String(card.session_count)] : null,
+      // turns_since_reset, not the session total: after a /compact the two
+      // diverge and a bare "turns" overstates the context actually in play.
+      // Kept short: longer labels wrapped this row to two lines at 880px and
+      // broke the equal-height contract between the two ambient states.
+      chart.turns_since_reset ? ['context turns', String(chart.turns_since_reset)] : null,
+      // The only project-scoped figure in this row. "sessions here" left the
+      // reader to guess whether "here" meant this session or this project.
+      card.session_count ? ['project sessions', String(card.session_count)] : null,
       card.efficiency_label ? ['new context', card.efficiency_label] : null,
       card.replayed_cost_label ? ['on replay', card.replayed_cost_label] : null,
     ],
@@ -3179,8 +3215,15 @@ async function loadOnce(resetDetail, forceRefresh) {
   const survivalRow = document.getElementById('costPerSurvivingRow');
   if (survival.available) {
     survivalRow.hidden = false;
+    // Survival has its own fixed window (SURVIVAL_WINDOW_DAYS, 30) and ignores
+    // the date picker entirely -- a commit needs to age past MIN_AGE_DAYS
+    // before survival means anything, so the figure cannot follow a 24h view.
+    // It sat under the picker looking filtered and never moved. Naming its real
+    // window is the honest fix; calling it "all time" would be a second wrong
+    // label on the same number.
+    const survivalWindow = survival.window_days ? `last ${survival.window_days} days` : 'fixed window';
     document.getElementById('costPerSurviving').textContent =
-      `${survival.cost_per_surviving_line_label} per surviving line (${survival.survival_pct}% of ${survival.lines_touched} lines still standing)`;
+      `${survival.cost_per_surviving_line_label} per surviving line — ${survival.survival_pct}% of ${formatCount(survival.lines_touched)} still standing (${survivalWindow}, not the selected range)`;
   } else {
     survivalRow.hidden = true;
   }

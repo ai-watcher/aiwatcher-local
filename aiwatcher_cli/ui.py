@@ -3485,7 +3485,10 @@ def _insight_feed(
         )
         cards.append({
             "id": "replayed-context",
-            "title": f"{share:.0f}% of your spend went on re-sending conversation history",
+            # The share is window-scoped (total replayed / total window cost over
+            # every session). The body already says "this window"; the headline
+            # did not, and it is the half that gets read.
+            "title": f"{share:.0f}% of this window's spend went on re-sending conversation history",
             "body": (
                 f"{money(replay['total_replayed_usd'])} of {money(window_cost)} this window. The worst session replayed "
                 f"{top['replayed_pct']:.0f}% of its context, {money(top['replayed_usd'])} of its "
