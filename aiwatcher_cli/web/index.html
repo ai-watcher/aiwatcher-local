@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AIWatcher Local</title>
+  <style>@@INCLUDE:index.css@@</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">AW</div>
+      <div class="brand-copy">
+        <div class="actions">
+          <h1>AIWatcher Local</h1>
+          <span class="status-badge"><span class="status-dot"></span>Private and local</span>
+        </div>
+        <p>Your AI coding work, outcomes, and improvement signals.</p>
+      </div>
+    </div>
+    <div class="actions">
+      <select id="days" onchange="changeWindow()">
+        <option value="1">Last 24 hours</option>
+        <option value="7" selected>Last 7 days</option>
+        <option value="30">Last 30 days</option>
+      </select>
+      <button id="refreshButton" class="btn-quiet" onclick="load(false, true)">Refresh data</button>
+      <a class="link-button" href="https://www.getaiwatcher.com" target="_blank" rel="noreferrer">Enterprise</a>
+    </div>
+  </header>
+
+  <section class="runtime-strip" aria-live="polite">
+    <div class="runtime-copy">
+      <span id="watcherPill" class="cache-pill building">Watcher unknown</span>
+      <span id="cacheStatus">Loading local index...</span>
+    </div>
+    <button id="watcherCommandButton" class="btn-quiet" onclick="copyWatcherCommand()" hidden>Copy watcher command</button>
+  </section>
+
+  <nav class="product-nav" aria-label="AIWatcher Local sections">
+    <button class="nav-tab active" data-view="today" onclick="showView('today')">Home</button>
+    <button class="nav-tab" data-view="prompt" onclick="showView('prompt')">Plan / Control</button>
+    <button class="nav-tab" data-view="sessions" onclick="showView('sessions')">Watch</button>
+    <button class="nav-tab" data-view="receipts" onclick="showView('receipts')">Prove</button>
+    <button class="nav-tab" data-view="insights" onclick="showView('insights')">Improve</button>
+    <button class="nav-tab" data-view="setup" onclick="showView('setup')">Settings</button>
+  </nav>
+
+  <section id="view-today" class="view">
+    <section id="handoffBubble" class="card handoff-bubble" style="margin-bottom:14px" hidden></section>
+
+    <section class="card home-command-card" style="margin-bottom:14px">
+      <div class="section-title">
+        <div><h2>What needs attention</h2><p>The few local actions most likely to save context, reduce rework, or improve proof.</p></div>
+        <button class="btn-quiet" onclick="showView('coverage')">Check coverage</button>
+      </div>
+      <div id="actionQueue" class="action-queue"></div>
+    </section>
+
+    <section class="grid two" style="margin-bottom:14px">
+      <div class="card hero-card">
+        <div class="section-title"><div><h2>Latest AI work</h2><p>Your most recent local session and its outcome.</p></div></div>
+        <div id="latestSession"></div>
+      </div>
+      <div class="card attention-card">
+        <div class="section-title"><div><h2>One thing worth changing</h2><p>The clearest next improvement from local evidence.</p></div></div>
+        <div id="todayRecommendation"></div>
+      </div>
+    </section>
+
+    <section class="grid kpis">
+      <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub">Value per useful change: <span id="costPerUseful">-</span></div><div class="sub" id="costPerSurvivingRow" hidden>Cost per surviving line: <span id="costPerSurviving">-</span></div><div class="metric-spark" data-tile-spark="usefulOutcomes" hidden></div></div>
+      <div class="card metric-card metric-amber"><div class="label">Preflight decisions</div><div class="value" id="preflightDecisions">-</div><div class="sub"><span id="windowLabel">-</span></div><div class="metric-spark" data-tile-spark="preflightDecisions" hidden></div></div>
+      <div class="card metric-card metric-blue"><div class="label">Sessions observed</div><div class="value" id="sessions">-</div><div class="sub">This machine only</div><div class="metric-spark" data-tile-spark="sessions" hidden></div></div>
+      <div class="card metric-card metric-neutral"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div><div class="metric-spark" data-tile-spark="apiValue" hidden></div></div>
+    </section>
+
+    <section class="grid two" style="margin:14px 0">
+      <div class="card">
+        <div class="section-title"><div><h2>Context health</h2><p>Where a fresh start or narrower prompt would help.</p></div><button class="btn-quiet" onclick="showView('sessions')">Open Watch</button></div>
+        <div id="contextHealth"></div>
+      </div>
+      <div class="card">
+        <div class="section-title"><div><h2>Proof snapshot</h2><p>Latest gate and Fresh Start receipts.</p></div><button class="btn-quiet" onclick="showView('receipts')">Open Prove</button></div>
+        <div id="latestIntervention"></div>
+        <div id="latestHandoffDecision" style="margin-top:12px"></div>
+      </div>
+    </section>
+
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title"><div><h2>Spend leakage</h2><p>Exploration that has not landed in commits yet.</p></div><button class="btn-quiet" onclick="showView('insights')">Open Improve</button></div>
+      <div id="unbanked"></div>
+    </section>
+
+    <section class="grid two">
+      <div class="card">
+        <div class="section-title"><div><h2>Projects Driving AI Usage</h2><p>Measured in tokens, so plan-based tools still count. Click a project to inspect local sessions, models, and tools.</p></div></div>
+        <div class="composition" id="projectsComposition" hidden>
+          <div class="pie-host" data-pie="projects"></div>
+          <div class="composition-legend" id="projectsCompositionLegend"></div>
+        </div>
+        <div id="projects"></div>
+      </div>
+      <div class="card">
+        <div class="section-title"><div><h2>Recent sessions</h2><p>Review work and record whether it was useful.</p></div></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Tool</th><th>Project</th><th>Tokens</th><th></th></tr></thead>
+          <tbody id="recent"></tbody>
+        </table></div>
+      </div>
+    </section>
+
+    <section class="grid two" style="margin-top:14px">
+      <div class="card">
+        <h2>Models and Tools</h2>
+        <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 4px">By model</h3>
+        <div id="models"></div>
+        <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:14px 0 4px">By tool</h3>
+        <div class="composition" id="toolsComposition" hidden>
+          <div class="pie-host" data-pie="tools"></div>
+          <div class="composition-legend" id="toolsCompositionLegend"></div>
+        </div>
+        <div id="tools"></div>
+        <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:16px 0 2px">Model mix within each tool</h3>
+        <p style="font-size:.7rem;color:var(--faint);margin:0 0 8px">Each bar is that tool's own 100%, so size means proportion, not volume — the token total is on the right.</p>
+        <div id="toolModels" hidden></div>
+      </div>
+      <div class="card">
+        <div class="section-title"><div><h2>Privacy at a glance</h2><p>Your local trust boundary stays visible.</p></div></div>
+        <div class="privacy-grid" id="privacy"></div>
+        <div id="insights" hidden></div>
+      </div>
+    </section>
+  </section>
+
+  <section id="view-prompt" class="view" hidden>
+    <div class="prompt-shell">
+      <div class="card">
+        <div class="section-title"><div><h2>Plan</h2><p>Paste the prompt you are about to send. AIWatcher chooses the route before you spend context: rewrite, fork, Fresh Start, archive, or continue.</p></div></div>
+        <textarea id="promptInput" class="prompt-box" placeholder="Paste or draft the next AI prompt here. Example: Refactor every screen after reviewing the current architecture."></textarea>
+        <div class="prompt-form-row">
+          <select id="promptTool">
+            <option value="codex">Codex</option>
+            <option value="claude">Claude</option>
+            <option value="cursor">Cursor</option>
+            <option value="agent">Generic agent</option>
+          </select>
+          <input id="promptCwd" class="prompt-box" style="min-height:38px;resize:none" placeholder="Working directory, optional">
+        </div>
+        <div class="actions">
+          <button class="btn-primary" onclick="preflightPrompt()">Plan next prompt</button>
+          <button class="btn-quiet" onclick="clearPromptCompanion()">Clear</button>
+        </div>
+        <p style="margin-top:12px">Use this when a surface does not reliably invoke hooks. Hook-capable tools can get the same local analysis automatically; this tab is the manual bridge. Nothing is sent anywhere or intercepted on your behalf, and prompt text is analyzed locally and not persisted.</p>
+      </div>
+      <div class="card">
+        <div class="section-title"><div><h2>Route</h2><p>One recommended action first, evidence second.</p></div></div>
+        <div id="promptResult" class="prompt-result"><div class="empty">Run Plan to choose the safest next route before sending the prompt.</div></div>
+      </div>
+    </div>
+    <section id="optimizeWorkspace" class="card" style="margin-top:14px">
+      <div class="section-title">
+        <div><h2>Optimize workspace</h2><p>Review stale chats, pending Fresh Starts, AI worktrees, and runtime clutter before carrying context forward.</p></div>
+        <span class="pill">Local evidence only</span>
+      </div>
+      <div id="optimizeWorkspaceBody"><div class="empty">Loading workspace cleanup evidence...</div></div>
+    </section>
+  </section>
+
+  <section id="view-projects" class="view" hidden>
+    <div class="card">
+      <div class="section-title">
+        <div><h2>Projects</h2><p>Local repos and folders absorbing AI coding work.</p></div>
+        <span class="pill" id="projectWindow">-</span>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Project</th><th>Status</th><th>Sessions</th><th>Tokens</th><th>Model calls</th><th>API value</th></tr></thead>
+        <tbody id="projectRows"></tbody>
+      </table></div>
+    </div>
+  </section>
+
+  <section id="view-sessions" class="view" hidden>
+    <div class="card" style="margin-bottom:14px">
+      <div class="section-title">
+        <div><h2>Context health</h2><p>Context bloat, runway pressure, and Fresh Start actions for local work.</p></div>
+        <span class="pill">Actionable sessions</span>
+      </div>
+      <div id="sessionContextHealth"></div>
+    </div>
+    <div class="card">
+      <div class="section-title">
+        <div><h2>Work</h2><p>Search sessions, inspect projects, review changes, and continue prior local AI work. Prompt text is shown for your own review only, never uploaded.</p></div>
+        <span class="pill">Local machine only</span>
+      </div>
+      <div class="actions" style="margin-bottom:12px">
+        <button class="btn-quiet" data-view="projects" onclick="showView('projects')">Projects</button>
+        <button class="btn-quiet" data-view="changes" onclick="showView('changes')">Changes ledger</button>
+      </div>
+      <div class="session-filters">
+        <input id="sessionSearch" type="text" placeholder="Search project, tool, model, session id, or a file/topic keyword" oninput="debounceSessionSearch()">
+        <select id="sessionOutcomeFilter" onchange="loadSessions()">
+          <option value="">Any outcome</option>
+          <option value="useful">Useful</option>
+          <option value="rework">Rework</option>
+          <option value="abandoned">Abandoned</option>
+        </select>
+        <select id="sessionStateFilter" onchange="loadSessions()">
+          <option value="">Any session state</option>
+          <option value="active_recent">Active or recent</option>
+          <option value="active">Active now</option>
+          <option value="history">Historical logs</option>
+        </select>
+        <button class="btn-quiet" onclick="clearSessionFilters()">Clear</button>
+      </div>
+      <p class="receipt-note">Every row says what AIWatcher knows: active app, likely workspace, historical log, user-marked outcome, or inferred local evidence.</p>
+      <p class="receipt-note" id="sessionResultsNote"></p>
+      <div class="table-wrap"><table>
+        <thead><tr>
+          <th><button class="sort-head" onclick="setSessionSort('tool')">Tool <span id="sort-session-tool"></span></button></th>
+          <th><button class="sort-head" onclick="setSessionSort('project')">Project <span id="sort-session-project"></span></button></th>
+          <th><button class="sort-head" onclick="setSessionSort('model')">Model <span id="sort-session-model"></span></button></th>
+          <th class="num"><button class="sort-head" onclick="setSessionSort('tokens_value')">Tokens <span id="sort-session-tokens_value"></span></button></th>
+          <th></th>
+        </tr></thead>
+        <tbody id="sessionRows"></tbody>
+      </table></div>
+    </div>
+  </section>
+
+  <section id="view-changes" class="view" hidden>
+    <div class="card">
+      <div class="section-title">
+        <div><h2>Cost per change</h2><p>What each commit cost in AI spend, and what that works out to per line.</p></div>
+        <span class="pill">Ranked by cost</span>
+      </div>
+      <div id="changeTotals"></div>
+      <div class="table-wrap"><table>
+        <thead><tr>
+          <th><button class="sort-head" onclick="setChangeSort('committed_at')">Commit <span id="sort-change-committed_at"></span></button></th>
+          <th><button class="sort-head" onclick="setChangeSort('project')">Project <span id="sort-change-project"></span></button></th>
+          <th class="num"><button class="sort-head" onclick="setChangeSort('cost_usd')">Cost <span id="sort-change-cost_usd"></span></button></th>
+          <th class="num"><button class="sort-head" onclick="setChangeSort('lines_changed')">Lines <span id="sort-change-lines_changed"></span></button></th>
+          <th class="num"><button class="sort-head" onclick="setChangeSort('usd_per_line')">$/line <span id="sort-change-usd_per_line"></span></button></th>
+          <th class="num"><button class="sort-head" onclick="setChangeSort('survival_pct')">Still standing <span id="sort-change-survival_pct"></span></button></th>
+          <th class="num"><button class="sort-head" onclick="setChangeSort('usd_per_surviving_line')">$/surviving line <span id="sort-change-usd_per_surviving_line"></span></button></th>
+        </tr></thead>
+        <tbody id="changeRows"></tbody>
+      </table></div>
+      <p class="receipt-note">A change's cost is the AI spend in that repo since the previous change, attributed per
+        model call rather than per session, and capped at a 12h lookback from when the work was <em>authored</em> —
+        rebasing rewrites a commit's date, and keying off that stranded the spend behind it. Survival is only measured
+        for changes old enough to judge and costly enough to reach the sampling budget — a blank means not measured,
+        not "did not survive". It is a floor either way: reformatting moves attribution away from the original change.</p>
+    </div>
+  </section>
+
+  <section id="view-receipts" class="view" hidden>
+    <div class="card" style="margin-bottom:14px">
+      <div class="section-title">
+        <div><h2>Fresh Start receipts</h2><p>When AIWatcher suggested a fresh session, what you chose, and whether a follow-up session was observed.</p></div>
+        <div class="actions"><button class="btn-quiet" onclick="quietFreshStartReminders()">Quiet reminders</button><span class="pill">Metadata only</span></div>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Time</th><th>Decision</th><th>Expected context at risk</th><th>Proof</th><th>Sessions</th><th></th></tr></thead>
+        <tbody id="handoffDecisionRows"></tbody>
+      </table></div>
+    </div>
+    <div class="card">
+      <div class="section-title">
+        <div><h2>Intervention receipts</h2><p>Risk decisions, predicted impact, resulting usage, and developer outcomes.</p></div>
+        <span class="pill">Prompt text stays private</span>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Time</th><th>Tool / project</th><th>Decision</th><th>Risk change</th><th>Result</th><th></th></tr></thead>
+        <tbody id="receiptRows"></tbody>
+      </table></div>
+    </div>
+  </section>
+
+  <section id="view-insights" class="view" hidden>
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title">
+        <div><h2>Spend and improvement signals</h2><p>Ranked by money, context pressure, and what to change next.</p></div>
+        <span class="pill">Local logs only</span>
+      </div>
+      <div id="insightHeadline"></div>
+      <div id="insightFeed"></div>
+    </section>
+    <section class="card" style="margin-bottom:14px" id="modelScatter" hidden>
+      <div class="section-title">
+        <div><h2>Cost against size, one dot per session</h2><p>Both axes are logarithmic, so a dearer model sits higher rather than climbing more steeply. Look for a hollow dot high up: an expensive session that produced nothing. A faded dot is one nobody has judged yet, which is not the same as one that failed. Click any dot to open that session.</p></div>
+      </div>
+      <div class="bar-legend" id="modelScatterLegend"></div>
+      <div data-scatter></div>
+      <p class="receipt-note" id="modelScatterWithheld" hidden></p>
+      <p class="receipt-note">Not a verdict on which model is better value. If the dear model gets the hard problems it will land less often for reasons that have nothing to do with the model, and nothing local separates those.</p>
+    </section>
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title">
+        <div><h2>Outcomes and guardrails</h2><p>What stuck, and what was caught before it ran.</p></div>
+      </div>
+      <div id="report"></div>
+    </section>
+    <p class="receipt-note" style="margin-top:4px">
+      Read-only local scan &middot; no LLM calls &middot; no source or prompt content in summaries &middot;
+      nothing leaves this machine unless you connect Cloud.
+    </p>
+  </section>
+
+  <section id="view-coverage" class="view" hidden>
+    <div class="card">
+      <div class="section-title">
+        <div><h2>Surface Coverage</h2><p>What AIWatcher can gate, scan, or only help with manually on this machine.</p></div>
+        <span class="pill">Verified locally</span>
+      </div>
+      <div id="coverageRows" class="coverage-grid"></div>
+    </div>
+  </section>
+
+  <section id="view-setup" class="view" hidden>
+    <div class="card">
+      <div class="section-title">
+        <div><h2>Settings</h2><p>Setup, coverage, privacy, and local companion behavior.</p></div>
+        <span class="pill">Local only</span>
+      </div>
+      <p class="receipt-note">Ambient Watch starts with the dashboard by default. For standalone mode, run <code>aiwatcher watch --notify --overlay --interval 60</code>.</p>
+      <div class="actions" style="margin-bottom:12px">
+        <button class="btn-quiet" data-view="coverage" onclick="showView('coverage')">Surface coverage</button>
+      </div>
+      <div class="section-title">
+        <div><h2>Surface coverage</h2><p>Detected tools, hook confidence, and what AIWatcher can honestly measure.</p></div>
+      </div>
+      <div id="coverageRowsSettings" class="coverage-grid" style="margin-bottom:14px"></div>
+      <div class="handoff-cta" style="margin-bottom:14px">
+        <h4>Test Fresh Start with sample data</h4>
+        <p>Open a seeded context-pressure case, tune the continuation brief, and verify the copy flow without waiting for a real bloated session.</p>
+        <button class="btn-primary" onclick="openDemoHandoff()">Try Fresh Start demo</button>
+      </div>
+      <div id="setupRows" class="coverage-grid"></div>
+    </div>
+  </section>
+</main>
+<div class="ask-backdrop" id="askBackdrop" onclick="closeAskPanel()"></div>
+<section class="ask-panel" id="askPanel" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="askTitle">
+  <div class="ask-head">
+    <div>
+      <h2 id="askTitle">Ask AIWatcher</h2>
+      <p>Local answers from sessions, receipts, coverage, and workspace evidence.</p>
+    </div>
+    <button class="btn-quiet" onclick="closeAskPanel()" aria-label="Close Ask AIWatcher">Close</button>
+  </div>
+  <div class="ask-templates" aria-label="Suggested questions">
+    <button class="ask-template" onclick="askTemplate('Can I archive this chat?')">Can I archive this?</button>
+    <button class="ask-template" onclick="askTemplate('What is my context health?')">Context health</button>
+    <button class="ask-template" onclick="askTemplate('Are my prompts driving outcomes?')">Prompt outcomes</button>
+    <button class="ask-template" onclick="askTemplate('What surfaces are covered?')">Coverage</button>
+  </div>
+  <div class="ask-messages" id="askMessages">
+    <div class="ask-message aiw">
+      <strong>AIWatcher local</strong>
+      <p>Ask about archive safety, context pressure, prompt outcomes, spend, or tool coverage. I only answer from local AIWatcher evidence.</p>
+    </div>
+  </div>
+  <div class="ask-form">
+    <textarea id="askInput" placeholder="Ask: can I archive this chat, what is my context health, are my prompts driving outcomes..." onkeydown="handleAskKey(event)"></textarea>
+    <button class="btn-primary" id="askSendButton" onclick="askAIWatcher()">Ask</button>
+  </div>
+</section>
+<div class="drawer-backdrop" id="drawerBackdrop" onclick="closeDrawer()"></div>
+<aside class="drawer" id="detailDrawer" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="drawerTitle">
+  <div class="drawer-header">
+    <div><h2 id="drawerTitle">Work detail</h2><p>Local metadata only</p></div>
+    <button class="btn-quiet" onclick="closeDrawer()" aria-label="Close work detail">Close</button>
+  </div>
+  <div class="drawer-content" id="detailContent"><div class="loading">Select a project or session to inspect.</div></div>
+</aside>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script>@@INCLUDE:index.js@@</script>
+</body>
+</html>
