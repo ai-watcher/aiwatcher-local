@@ -40,7 +40,14 @@
       <span id="cacheStatus">Loading local index...</span>
       <span id="freshness" class="freshness" aria-live="off"></span>
     </div>
-    <button id="watcherCommandButton" class="btn-quiet" onclick="copyWatcherCommand()" hidden>Copy watcher command</button>
+    <!-- Starting the watcher needs a terminal, so the product says so and shows
+         the command, rather than offering a clipboard action and leaving the
+         user to guess what they just copied. -->
+    <div id="watcherStart" class="watcher-start" hidden>
+      <span class="watcher-start-hint">Run this in a terminal to start it:</span>
+      <code id="watcherCommandText"></code>
+      <button class="btn-quiet" onclick="copyWatcherCommand()">Copy</button>
+    </div>
   </section>
 
   <nav class="product-nav" aria-label="AIWatcher Local sections">

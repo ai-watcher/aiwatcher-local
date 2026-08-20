@@ -776,5 +776,51 @@ class HealthCardActionTest(unittest.TestCase):
         self.assertIn("row.can_handoff", button)
 
 
+class FalseAffordanceTest(unittest.TestCase):
+    """Three controls that lied about what they were, from the review's P0 tier."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+        cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+
+    def test_clear_costs_the_prompt_and_not_the_analysis(self):
+        # It sat 20px from the primary action and wiped the whole Route result --
+        # route, risk score, findings, suggestions, brief -- with no undo.
+        clear = js_function_source(self.js, "clearPromptCompanion")
+        self.assertIn("promptInput", clear)
+        self.assertNotIn("promptResult", clear)
+
+    def test_no_live_return_is_not_shaped_like_a_button(self):
+        # A disabled button is still a button: same height, border and padding as
+        # the three real ones beside it, with its reason hidden in a title.
+        # Narrowed to status text specifically. A disabled button is honest in a
+        # loading skeleton, where it really does become available -- these two
+        # never do, because they report a fact rather than offer an action.
+        for status in ("No live return", "No exact return"):
+            with self.subTest(status=status):
+                self.assertNotIn(f'disabled>{status}', self.js)
+                self.assertNotIn(f"disabled title=\"${{esc(openToolNote)}}\">{status}", self.js)
+        self.assertIn("action-note", self.js)
+        self.assertIn(".action-note", self.css)
+
+    def test_the_watcher_command_is_readable_without_clicking(self):
+        # Starting it needs a terminal, so the product shows the command instead
+        # of offering a clipboard action for something the user cannot see.
+        self.assertIn('id="watcherCommandText"', self.html)
+        self.assertNotIn('id="watcherCommandButton"', self.html)
+        render = js_function_source(self.js, "renderWatcher")
+        self.assertIn("commandText.textContent", render)
+        # Stopped is a warning: every screen is reporting on data that is not
+        # being collected. It used to read in the same blue as "building".
+        self.assertIn("cache-pill refreshing", render)
+        self.assertNotIn("cache-pill stale", render)
+
+    def test_the_watcher_toast_does_not_promise_an_undefined_feature(self):
+        # "ambient nudges" appears nowhere else in the product.
+        self.assertNotIn("ambient nudges", self.js)
+
+
 if __name__ == "__main__":
     unittest.main()

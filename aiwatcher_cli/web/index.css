@@ -446,6 +446,19 @@
     .action-evidence .pill { background: rgba(5,9,14,.38); }
     .action-buttons { display: flex; flex-wrap: wrap; gap: 9px; align-items: center; }
     .action-buttons .btn-primary { box-shadow: 0 0 0 1px rgba(255,255,255,.06), 0 10px 26px rgba(47,111,189,.24); }
+    /* A status, not a control. Deliberately carries no border, background or
+       button padding, so it cannot be mistaken for the real buttons it sits
+       beside -- which is what the disabled button here used to do. */
+    .action-note { font-size: 12px; color: var(--muted); line-height: 1.45; }
+    /* The command is shown, not just copyable: a user should be able to read
+       what they are about to paste into a terminal without clicking first. */
+    .watcher-start { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .watcher-start-hint { font-size: 12px; color: var(--muted); }
+    .watcher-start code {
+      font-size: 12px; padding: 3px 8px; border-radius: 4px;
+      background: rgba(255,255,255,.06); border: 1px solid var(--line);
+      color: var(--text); user-select: all; overflow-wrap: anywhere;
+    }
     .tool-link-note { margin-top: 10px; font-size: 12px; color: #94a3b8; }
     .ai-loading-panel {
       display: grid;

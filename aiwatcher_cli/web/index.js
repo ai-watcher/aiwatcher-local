@@ -157,9 +157,14 @@ async function recordOptimizeDecision(decision, project = '', impact = '', butto
     showToast(`Could not save Optimize decision: ${error.message || 'unknown error'}`, 'error');
   }
 }
+// Scoped to the textarea. It used to wipe the Route result too -- the route,
+// risk score, findings, suggestions and paste-ready brief -- with no
+// confirmation, from a quiet button sitting 20px from the primary action. An
+// accidental press now costs the prompt text and nothing else; the analysis
+// stands until the next Plan run replaces it.
 function clearPromptCompanion() {
   document.getElementById('promptInput').value = '';
-  document.getElementById('promptResult').innerHTML = '<div class="empty">Run Plan to choose the safest next route before sending the prompt.</div>';
+  document.getElementById('promptInput').focus();
 }
 function renderPlanAction(action) {
   const route = action || {};
@@ -405,7 +410,7 @@ function runtimeReturnPanel(runtime, sourcePath) {
   const updated = runtime.updated_at || runtime.updated_at_label || '';
   const action = available
     ? `<button class="btn-quiet" data-session="${esc(runtime.session_id || '')}" onclick="returnToRuntime(this.dataset.session)">${esc(runtime.action_label || 'Open workspace')}</button>`
-    : `<button class="btn-quiet" disabled>No exact return</button>`;
+    : `<span class="action-note">No exact return — ${esc(exactReason)}</span>`;
   return `<section class="detail-section runtime-return">
     <details class="aiw-details">
       <summary>Return, share, and source log</summary>
@@ -428,17 +433,22 @@ function runtimeReturnPanel(runtime, sourcePath) {
 let watcherCommand = 'aiwatcher watch --notify --overlay --interval 60';
 function renderWatcher(watcher) {
   const pill = document.getElementById('watcherPill');
-  const button = document.getElementById('watcherCommandButton');
+  const start = document.getElementById('watcherStart');
+  const commandText = document.getElementById('watcherCommandText');
   watcherCommand = (watcher && watcher.command) || watcherCommand;
   if (watcher && watcher.running) {
     pill.className = 'cache-pill fresh';
     pill.textContent = 'Watcher running';
-    button.hidden = true;
-  } else {
-    pill.className = 'cache-pill stale';
-    pill.textContent = watcher && watcher.status === 'stale' ? 'Watcher stale' : 'Watcher stopped';
-    button.hidden = false;
+    start.hidden = true;
+    return;
   }
+  // Stopped is a warning, not a neutral state: every screen is reporting on
+  // data the watcher is not currently collecting. It used to read in the same
+  // blue as "building".
+  pill.className = 'cache-pill refreshing';
+  pill.textContent = watcher && watcher.status === 'stale' ? 'Watcher stale' : 'Watcher stopped';
+  commandText.textContent = watcherCommand || 'aiwatcher watch';
+  start.hidden = false;
 }
 function renderCacheStatus(cache) {
   const status = document.getElementById('cacheStatus');
@@ -452,7 +462,7 @@ function renderCacheStatus(cache) {
     : `Showing ${source}`;
 }
 function copyWatcherCommand() {
-  copyText(watcherCommand, 'Watcher command copied — paste it in a terminal to enable ambient nudges');
+  copyText(watcherCommand, 'Copied. Paste in a terminal to start the watcher.');
 }
 function survivalStatus(survival) {
   // The status itself, not a rendered label: "survived" | "churned" | "unknown"
@@ -1967,9 +1977,13 @@ function renderSessionActions(s) {
       ? 'Mark whether this worked so AIWatcher can measure value per useful change instead of only tokens.'
       : 'Use this session as evidence, then preflight the next prompt before sending it.';
   const openToolNote = runtime.reason || openAction.reason || 'No safe return target is available for this session yet.';
+  // When there is no live return there is no action, so nothing here may carry
+  // button shape. It used to render a disabled button of exactly the same
+  // height, border and padding as the three real ones beside it, with the
+  // reason hidden in a title attribute where it could not be read.
   const openButton = openAction.available
     ? `<button class="btn-quiet" onclick="returnToRuntime('${esc(s.session_id)}')" title="${esc(openToolNote)}">${esc(openAction.label || runtime.action_label || 'Open workspace')}</button>`
-    : `<button class="btn-quiet" disabled title="${esc(openToolNote)}">${esc(openAction.label || runtime.action_label || 'No live return')}</button>`;
+    : `<span class="action-note">${esc(openAction.label || runtime.action_label || 'No live return')} — ${esc(openToolNote)}</span>`;
   const evidenceChips = [
     s.calls ? `${s.calls} model calls` : '',
     s.tool_calls ? `${s.tool_calls} tool calls` : '',
