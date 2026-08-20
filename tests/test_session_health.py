@@ -205,5 +205,61 @@ class UnmeasurableReplayTests(unittest.TestCase):
         self.assertEqual(health.bloat_ratio, 0.0)
 
 
+class ContextResetTests(unittest.TestCase):
+    """A reset is one huge negative delta, and averaging it in inverts the answer.
+
+    These pin the case that motivated the change: a session growing steadily,
+    compacted once, whose whole-session mean delta comes out *negative* — so the
+    dashboard would print "context accumulating" next to a growth figure claiming
+    the session is shrinking, and any projection built on it would never fire.
+    """
+
+    def _health(self, values: list[int]):
+        events = [_event(i, tokens_in=v) for i, v in enumerate(values)]
+        return analyze_session_health(_session(), events)
+
+    def test_reset_delta_is_excluded_from_growth_rate(self) -> None:
+        # +8K a turn throughout, with one reset from 74K down to 20K.
+        health = self._health([50_000, 58_000, 66_000, 74_000, 20_000, 28_000, 36_000])
+        assert health is not None
+        self.assertEqual(health.context_resets, 1)
+        self.assertAlmostEqual(health.growth_rate, 8_000.0)
+        # Without the exclusion this is -2,333: the single -54K delta outweighs
+        # five +8K ones, and a steadily growing session reports as shrinking.
+        self.assertGreater(health.growth_rate, 0)
+
+    def test_projection_uses_only_the_segment_since_the_last_reset(self) -> None:
+        health = self._health([50_000, 58_000, 66_000, 74_000, 20_000, 28_000, 36_000])
+        assert health is not None
+        self.assertEqual(health.turns_since_reset, 2)
+        self.assertAlmostEqual(health.segment_growth_rate, 8_000.0)
+        # From 36K at +8K/turn, CRITICAL_TOKENS_PER_TURN (200K) is 20.5 turns out.
+        self.assertEqual(health.turns_to_critical, 21)
+
+    def test_no_projection_when_the_session_is_not_on_that_trajectory(self) -> None:
+        flat = self._health([100_000, 100_000, 100_000, 100_000])
+        assert flat is not None
+        self.assertEqual(flat.context_resets, 0)
+        self.assertIsNone(flat.turns_to_critical)
+
+        already_past = self._health([205_000, 210_000, 215_000, 220_000])
+        assert already_past is not None
+        self.assertIsNone(already_past.turns_to_critical)
+
+    def test_small_session_jitter_is_not_a_reset(self) -> None:
+        """Below the floor, a halving is noise — every session would show resets."""
+        health = self._health([15_000, 5_000, 15_000, 5_000, 15_000])
+        assert health is not None
+        self.assertEqual(health.context_resets, 0)
+        self.assertEqual(health.turns_since_reset, 4)
+
+    def test_turns_since_reset_covers_the_whole_session_when_none_happened(self) -> None:
+        health = self._health([50_000, 58_000, 66_000, 74_000])
+        assert health is not None
+        self.assertEqual(health.context_resets, 0)
+        self.assertEqual(health.turns_since_reset, 3)
+        self.assertAlmostEqual(health.segment_growth_rate, health.growth_rate)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -18,6 +18,7 @@ which is both discriminating and directly actionable.
 
 from __future__ import annotations
 
+import math
 import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -38,6 +39,12 @@ CRITICAL_STALE_DAYS: float    = 7.0       # red: session older than 1 week
 HIGH_BLOAT_RATIO: float       = 0.60      # 60% of the session's spend was replay
 EXTREME_BLOAT_RATIO: float    = 0.75      # replay dominates; a restart pays for itself
 MIN_EVENTS_FOR_CONTEXT_ANALYSIS: int = 3  # need enough turns to detect meaningful growth
+# A context reset: per-turn input fell by more than this share in a single turn.
+# Deliberately not called "compaction" anywhere user-facing -- local logs show the
+# drop, not its cause, and /compact, a cleared window and a tool auto-compacting are
+# indistinguishable from here. The floor keeps ordinary jitter on small turns out.
+CONTEXT_RESET_DROP_RATIO: float = 0.40
+CONTEXT_RESET_FLOOR_TOKENS: int = 20_000
 MIN_TOKENS_FOR_CONTEXT_ANALYSIS: int = 5_000  # ignore sessions with trivial token counts
 ACTIVE_SESSION_DAYS: int = 30             # only surface sessions active in last 30 days
 
@@ -57,7 +64,7 @@ class ContextHealth:
     latest_turn_tokens: int       # most recent event's tokens_in
     peak_turn_tokens: int         # max tokens_in across all events
     avg_turn_tokens: float        # mean tokens_in per event
-    growth_rate: float            # average Δtokens_in per turn (positive = growing)
+    growth_rate: float            # average Δtokens_in per turn, reset deltas excluded
 
     # Bloat — measured in dollars; see the module docstring for why not tokens.
     bloat_ratio: float            # replayed_cost_usd / analyzed_cost_usd
@@ -79,7 +86,37 @@ class ContextHealth:
     is_extreme_bloat: bool
 
     severity: str                 # "healthy" | "warning" | "critical"
+
+    # Context resets — turns where per-turn input fell off a cliff. Named for what
+    # the logs show (a drop) rather than what caused it: /compact, a cleared window
+    # and a tool auto-compacting are indistinguishable from here. Defaulted so the
+    # many existing construction sites keep working.
+    context_resets: int = 0            # how many times this session shed its context
+    turns_since_reset: int = 0         # turns since the last one (all turns if none)
+    segment_growth_rate: float = 0.0   # Δtokens_in per turn in the current segment
+    # Turns until this segment reaches CRITICAL_TOKENS_PER_TURN. None when already
+    # past it, or flat/shrinking — "not on this trajectory" beats a huge number.
+    turns_to_critical: int | None = None
+
     recommendations: list[str] = field(default_factory=list)
+
+
+def _context_reset_indices(relevant: Sequence[LocalEvent]) -> set[int]:
+    """Indices where per-turn input fell off a cliff versus the turn before.
+
+    Returns the index of the turn *after* the drop, so callers can treat it as the
+    first turn of a new segment. Requires both an absolute floor and a relative
+    drop: a session bouncing between 3K and 1K every turn is noise, not a reset.
+    """
+    resets: set[int] = set()
+    for index in range(1, len(relevant)):
+        previous = relevant[index - 1].tokens_in
+        current = relevant[index].tokens_in
+        if previous < CONTEXT_RESET_FLOOR_TOKENS or current <= 0:
+            continue
+        if current < previous * (1.0 - CONTEXT_RESET_DROP_RATIO):
+            resets.add(index)
+    return resets
 
 
 def _age_hours(session: LocalSession) -> float:
@@ -120,13 +157,46 @@ def analyze_session_health(
     latest    = relevant[-1].tokens_in
     avg       = statistics.mean(e.tokens_in for e in relevant)
 
-    # Growth rate: average delta of tokens_in between consecutive events
+    # Growth rate: average delta of tokens_in between consecutive events, with
+    # context resets excluded.
+    #
+    # A reset (/compact, a cleared window, a tool auto-compacting) shows up as one
+    # large negative delta, and averaging it in corrupts the figure badly: a session
+    # growing +8K/turn for 30 turns that then sheds 200K reports about +3K/turn
+    # afterwards, because a single outlier is being averaged against 40 ordinary
+    # deltas. The field is documented as growth, a reset is not growth, and the CLI
+    # already prints this number as "context accumulating" -- so the deltas that
+    # cross a reset boundary are dropped rather than smoothed in.
+    reset_indices = _context_reset_indices(relevant)
     deltas = [
         relevant[i].tokens_in - relevant[i - 1].tokens_in
         for i in range(1, len(relevant))
         if relevant[i].tokens_in > 0 and relevant[i - 1].tokens_in > 0
+        and i not in reset_indices
     ]
     growth_rate = statistics.mean(deltas) if deltas else 0.0
+
+    # Growth since the last reset, which is the only segment a projection may use:
+    # extrapolating across a reset predicts a wall the session already stepped back
+    # from. Falls back to the whole-session figure when nothing was ever reset.
+    segment_start = max(reset_indices) if reset_indices else 0
+    segment_deltas = [
+        relevant[i].tokens_in - relevant[i - 1].tokens_in
+        for i in range(segment_start + 1, len(relevant))
+        if relevant[i].tokens_in > 0 and relevant[i - 1].tokens_in > 0
+    ]
+    segment_growth_rate = statistics.mean(segment_deltas) if segment_deltas else growth_rate
+    turns_since_reset = len(relevant) - 1 - segment_start
+
+    # Turns of headroom before this segment reaches the action threshold. None when
+    # the question does not apply -- already past it, or flat/shrinking, where the
+    # honest answer is "not on this trajectory" rather than a very large number.
+    if latest >= CRITICAL_TOKENS_PER_TURN or segment_growth_rate <= 0:
+        turns_to_critical = None
+    else:
+        turns_to_critical = max(
+            1, math.ceil((CRITICAL_TOKENS_PER_TURN - latest) / segment_growth_rate)
+        )
 
     # Bloat ratio: what share of this session's bill was re-sent history.
     # cache_read_tokens is the replayed portion as the provider counted it, and
@@ -211,6 +281,10 @@ def analyze_session_health(
         peak_turn_tokens=peak,
         avg_turn_tokens=avg,
         growth_rate=growth_rate,
+        context_resets=len(reset_indices),
+        turns_since_reset=turns_since_reset,
+        segment_growth_rate=segment_growth_rate,
+        turns_to_critical=turns_to_critical,
         bloat_ratio=bloat_ratio,
         efficiency_pct=efficiency,
         bloat_measurable=measurable,
