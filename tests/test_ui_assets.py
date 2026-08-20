@@ -443,5 +443,41 @@ class SessionDrawerTest(unittest.TestCase):
         self.assertNotIn("<summary></summary>", self.js)
 
 
+class PlanControlTest(unittest.TestCase):
+    """The tab is for planning the next prompt. A housekeeping checklist had
+    grown to 64% of it, sitting above the tool the tab is named for."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+
+    def test_housekeeping_opens_on_demand(self):
+        card = self.html[self.html.index('id="optimizeWorkspace"'):]
+        card = card[:card.index("</section>")]
+        self.assertIn("<details", card)
+        self.assertIn("optimizeWorkspaceSummary", card)
+
+    def test_the_summary_carries_the_count(self):
+        # A collapsed card with a bare title hides whether there is anything in it.
+        self.assertIn("to review)", self.js)
+
+    def test_pending_fresh_starts_are_grouped(self):
+        """Every pending decision became its own row, and they carry no rendered
+        field that tells them apart -- same title, summary and evidence. Three
+        identical rows in a list whose job is to say what to do next is worse
+        than one row saying three."""
+        source = inspect.getsource(ui._group_pending_fresh_starts)
+        self.assertIn("fresh_start_pending", source)
+        self.assertIn("decisions)", source)
+
+    def test_an_unmeasured_impact_is_not_rendered(self):
+        # "context at risk" with no number in front of it is a unit with no
+        # value, and it rendered as a pill reading "review".
+        server = inspect.getsource(ui.build_optimize_inventory)
+        self.assertNotIn('else "context at risk"', server)
+        self.assertNotIn("item.impact_label || 'review'", self.js)
+
+
 if __name__ == "__main__":
     unittest.main()

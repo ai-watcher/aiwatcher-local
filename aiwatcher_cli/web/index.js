@@ -1051,7 +1051,7 @@ function renderOptimizeWorkspace(optimize) {
       <div>
         <div class="action-title">${esc(item.title)} <span class="pill">${esc(item.evidence_label || 'Observed')}</span></div>
         <p>${esc(item.why_inactive || item.summary || '')}</p>
-        <div class="action-meta"><span class="pill">${esc(item.project || 'Local machine')}</span><span class="pill">${esc(item.impact_label || 'review')}</span><span class="pill">${esc(item.updated_label || '')}</span></div>
+        <div class="action-meta"><span class="pill">${esc(item.project || 'Local machine')}</span>${item.impact_label ? `<span class="pill">${esc(item.impact_label)}</span>` : ''}<span class="pill">${esc(item.updated_label || '')}</span></div>
         <p class="receipt-note">${esc(item.evidence || '')}</p>
       </div>
       <div class="actions">
@@ -3157,6 +3157,15 @@ async function load(resetDetail = true, forceRefresh = false) {
   document.getElementById('handoffDecisionRows').innerHTML = renderHandoffDecisionRows(handoffDecisions);
   document.getElementById('sessionContextHealth').innerHTML = renderContextHealth(data.context_health || [], data.context_health_status || 'ready');
   document.getElementById('optimizeWorkspaceBody').innerHTML = renderOptimizeWorkspace(data.optimize || null);
+  // The summary has to carry the count, or a collapsed card hides the fact that
+  // there is anything in it at all.
+  const optimizeSummary = document.getElementById('optimizeWorkspaceSummary');
+  if (optimizeSummary) {
+    const pending = ((data.optimize || {}).candidates || []).length;
+    optimizeSummary.textContent = pending
+      ? `Optimize workspace (${pending} to review)`
+      : 'Optimize workspace';
+  }
   // SVG is built after the markup lands: the cards are assembled as an HTML
   // string, and appending nodes into elements that do not exist yet silently
   // draws nothing. Nodes are collected by attribute rather than looked up by a

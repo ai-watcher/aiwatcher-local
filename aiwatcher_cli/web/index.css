@@ -779,6 +779,9 @@
        full height was most of a screen of nothing but summaries. */
     .detail-section:has(> details.aiw-details:only-child:not([open])) { padding: 8px 0; }
     .detail-section > details.aiw-details:only-child { margin-top: 0; }
+    .optimize-lede { margin: 0 0 12px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+    #optimizeWorkspace { padding: 8px 0; }
+    #optimizeWorkspace > details.aiw-details { margin-top: 0; }
     details.aiw-details { border: 1px solid var(--drawer-line); border-radius: 8px; background: rgba(5,9,14,.22); margin-top: 12px; }
     details.aiw-details summary { cursor: pointer; padding: 12px 14px; color: #dce6f6; font-weight: 750; }
     details.aiw-details[open] summary { border-bottom: 1px solid var(--drawer-line); }

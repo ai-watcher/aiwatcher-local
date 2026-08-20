@@ -655,6 +655,38 @@ def _optimize_checklist(candidates: list[dict[str, object]]) -> str:
     return "\n".join(lines)
 
 
+def _group_pending_fresh_starts(candidates: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Collapse pending Fresh Start rows that nothing on screen distinguishes.
+
+    One row per project, carrying the count. They differ only by the decision id
+    and, sometimes, by how long ago it was -- neither of which is rendered, so
+    three of them read as the same item repeated.
+    """
+    grouped: dict[str, dict[str, object]] = {}
+    out: list[dict[str, object]] = []
+    for candidate in candidates:
+        if candidate.get("kind") != "fresh_start_pending":
+            out.append(candidate)
+            continue
+        key = str(candidate.get("project_full") or candidate.get("project") or "")
+        first = grouped.get(key)
+        if first is None:
+            grouped[key] = candidate
+            out.append(candidate)
+            continue
+        first["session_count"] = int(first.get("session_count") or 1) + 1
+        tokens = int(first.get("tokens_at_risk") or 0) + int(candidate.get("tokens_at_risk") or 0)
+        first["tokens_at_risk"] = tokens
+        first["impact_label"] = f"~{compact_int(tokens)} context at risk" if tokens else None
+        count = first["session_count"]
+        first["title"] = f"Finish Fresh Start cleanup ({count} decisions)"
+        first["summary"] = (
+            f"{count} Fresh Start briefs were copied without a linked follow-up session. "
+            "Mark the old chats done, or paste each brief into its new chat."
+        )
+    return out
+
+
 def build_optimize_inventory(
     rows: list[LocalSession],
     *,
@@ -749,7 +781,7 @@ def build_optimize_inventory(
             "why_inactive": "AIWatcher saw a Fresh Start decision but has not linked a later same-project session yet.",
             "evidence_label": "Observed",
             "evidence": "Observed from AIWatcher Fresh Start receipt metadata.",
-            "impact_label": f"~{compact_int(tokens)} context at risk" if tokens else "context at risk",
+            "impact_label": f"~{compact_int(tokens)} context at risk" if tokens else None,
             "tokens_at_risk": tokens,
             "session_count": 1,
             "updated_label": _elapsed_label(created_at, now=now),
@@ -810,6 +842,7 @@ def build_optimize_inventory(
             "action_label": "Copy cleanup checklist",
         })
 
+    candidates = _group_pending_fresh_starts(candidates)
     candidates.sort(key=lambda item: (int(item.get("tokens_at_risk") or 0), int(item.get("session_count") or 0)), reverse=True)
     for item in candidates:
         item["checklist"] = _optimize_candidate_checklist(item)

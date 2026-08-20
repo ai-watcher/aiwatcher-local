@@ -92,12 +92,18 @@
         <div id="promptResult" class="prompt-result"><div class="empty">Run Plan to choose the safest next route before sending the prompt.</div></div>
       </div>
     </div>
+    <!-- Housekeeping, not planning. It was 64% of this tab, above the tool the
+         tab is named for, so it now opens on demand with its count in the
+         summary. The link to planning is real -- you clear clutter before
+         carrying context forward -- but it is the preamble, not the point. -->
     <section id="optimizeWorkspace" class="card" style="margin-top:14px">
-      <div class="section-title">
-        <div><h2>Optimize workspace</h2><p>Review stale chats, pending Fresh Starts, AI worktrees, and runtime clutter before carrying context forward.</p></div>
-        <span class="pill">Local evidence only</span>
-      </div>
-      <div id="optimizeWorkspaceBody"><div class="empty">Loading workspace cleanup evidence...</div></div>
+      <details class="aiw-details">
+        <summary><span id="optimizeWorkspaceSummary">Optimize workspace</span></summary>
+        <div class="details-body">
+          <p class="optimize-lede">Review stale chats, pending Fresh Starts, AI worktrees, and runtime clutter before carrying context forward. <span class="pill">Local evidence only</span></p>
+          <div id="optimizeWorkspaceBody"><div class="empty">Loading workspace cleanup evidence...</div></div>
+        </div>
+      </details>
     </section>
   </section>
 
