@@ -566,6 +566,52 @@
     .action-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
     .action-row .actions { justify-content: flex-end; }
     .coverage-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    /* ---- Watch: one project expanded, the rest as rows -------------------
+       Four cards of equal weight gave the eye nowhere to start. */
+    .health-stack { display: flex; flex-direction: column; gap: 10px; }
+    .health-card.lead { border-color: rgba(242, 119, 143, .30); }
+    .health-verdict { margin: 0; font-size: 14px; line-height: 1.5; color: var(--text); max-width: 62ch; }
+    .health-hero { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; margin: 2px 0; }
+    .health-hero b { font-size: 26px; font-weight: 650; letter-spacing: -.02em; color: var(--text); }
+    .health-hero u { text-decoration: none; font-size: 13px; color: var(--muted); }
+    .health-now { margin-left: auto; font-family: var(--mono); font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+    /* the meter is comparable across projects; the trend deliberately is not */
+    .meter-host { position: relative; }
+    .meter-svg { width: 100%; height: 20px; display: block; }
+    .meter-host[data-over]:not([data-over=""])::after {
+      content: attr(data-over) "x over"; position: absolute; right: 0; top: -2px;
+      font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--red);
+    }
+    .trend-host { position: relative; padding-bottom: 14px; }
+    .trend-svg { width: 100%; height: 60px; display: block; }
+    .trend-host::before {
+      content: attr(data-turns) " turns"; position: absolute; left: 0; bottom: 0;
+      font-family: var(--mono); font-size: 10.5px; color: var(--faint);
+    }
+    .trend-host::after {
+      content: attr(data-delta); position: absolute; right: 0; bottom: 0;
+      font-family: var(--mono); font-size: 10.5px; color: var(--faint);
+    }
+    .health-facts { margin: 0; font-family: var(--mono); font-size: 11.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+
+    .health-row {
+      display: grid; grid-template-columns: minmax(0, 1fr) 130px 72px 104px 78px;
+      align-items: center; gap: 12px; width: 100%; text-align: left;
+      padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px;
+      background: var(--surface); color: var(--text);
+    }
+    .health-row:hover { background: var(--surface-hover); }
+    .health-row-name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .health-row-trend { display: block; }
+    .health-row-trend .trend-svg { height: 26px; }
+    .health-row-now, .health-row-room { font-family: var(--mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .health-row-now { text-align: right; color: var(--text); }
+    @media (max-width: 860px) {
+      .health-row { grid-template-columns: minmax(0, 1fr) 72px 78px; }
+      .health-row-trend, .health-row-room { display: none; }
+    }
+
     .coverage-card, .health-card {
       border: 1px solid var(--line);
       border-radius: 8px;

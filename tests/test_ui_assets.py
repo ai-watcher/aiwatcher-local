@@ -566,5 +566,57 @@ class ChangesLedgerTest(unittest.TestCase):
         self.assertNotIn("receipt-note", totals)
 
 
+class WatchTest(unittest.TestCase):
+    """Watch drew four project cards of equal weight, each with four stat tiles
+    and its own chart scaled to its own peak."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+
+    def test_position_and_shape_are_separate_marks(self):
+        """One chart could not do both. Forcing a common y-axis so the limit sat
+        on one row -- the point of a shared scale -- flattened three of four
+        series to under 5px of travel, because a project 690k deep barely moves
+        in relative terms. Position went to a meter on a shared scale; shape kept
+        its own."""
+        self.assertIn("function drawMeter(", self.js)
+        self.assertIn("function drawTrend(", self.js)
+        meter = js_function_source(self.js, "drawMeter")
+        # the meter's track is the limit, not this project's peak, or it would
+        # not be comparable with the card above it
+        self.assertIn("critical * 1.25", meter)
+        trend = js_function_source(self.js, "drawTrend")
+        self.assertIn("Math.min(...series)", trend)
+
+    def test_the_worst_project_leads(self):
+        rank = js_function_source(self.js, "healthRank")
+        self.assertIn("latest >= critical", rank)
+        self.assertIn("healthLeadCard", self.js)
+        self.assertIn("healthQuietRow", self.js)
+
+    def test_the_verdict_comes_before_the_marks(self):
+        # Same rule as the session drawer: reach the conclusion, then show the
+        # evidence for it.
+        card = js_function_source(self.js, "healthLeadCard")
+        self.assertLess(card.index("health-verdict"), card.index("meter-host"))
+        self.assertLess(card.index("meter-host"), card.index("trend-host"))
+
+    def test_the_superseded_chart_is_gone(self):
+        # drawRunway, its legend and its caption had no host left once the cards
+        # stopped emitting data-runway.
+        for name in ("function drawRunway(", "function runwayLegend(",
+                     "function runwayCaption(", "drawRunwayMini"):
+            with self.subTest(symbol=name):
+                self.assertNotIn(name, self.js)
+        # runwayVerdict survives: the lead card still states the deadline.
+        self.assertIn("function runwayVerdict(", self.js)
+
+    def test_projects_are_named_not_pathed(self):
+        self.assertIn("function healthProjectName(", self.js)
+        card = js_function_source(self.js, "healthLeadCard")
+        self.assertIn("healthProjectName(row)", card)
+
+
 if __name__ == "__main__":
     unittest.main()

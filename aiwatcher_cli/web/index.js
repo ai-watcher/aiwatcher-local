@@ -1166,105 +1166,54 @@ function chartLine(parent, points, token, opts) {
    OR peak > X`: a session that crossed before a reset still reads critical on
    the card while sitting well below the line now, and hiding that makes the
    card and the chart look like they disagree. */
-function drawRunway(node, chart) {
+/* Position and shape are two questions, and one chart answers them badly.
+   Forcing a common y-axis across projects -- so the limit sits on one row and the
+   column can be scanned -- flattened three of four series to under 5px of travel,
+   because a project 690k deep barely moves in relative terms. So they split: the
+   meter carries position on a scale every card shares, and the trend keeps its
+   own scale, where the slope is legible. */
+function drawMeter(node, chart) {
+  if (!node || !chart) return;
+  const critical = chart.critical_tokens_n || 0;
+  const pressure = chart.pressure_tokens_n || 0;
+  const latest = chart.latest_turn_tokens_n || 0;
+  if (!critical) return;
+  const W = 1000, H = 20, track = critical * 1.25;
+  const at = value => Math.min(1, value / track) * W;
+  const tone = latest >= critical ? 'var(--red)' : latest >= pressure ? 'var(--amber)' : 'var(--green)';
+  const parts = [
+    `<rect x="0" y="6" width="${W}" height="9" rx="4.5" fill="var(--surface)"/>`,
+    `<rect x="0" y="6" width="${at(Math.min(latest, critical)).toFixed(1)}" height="9" rx="4.5" fill="${tone}"/>`,
+    `<line x1="${at(pressure).toFixed(1)}" x2="${at(pressure).toFixed(1)}" y1="1" y2="19" stroke="var(--amber)" stroke-width="2"/>`,
+    `<line x1="${at(critical).toFixed(1)}" x2="${at(critical).toFixed(1)}" y1="1" y2="19" stroke="var(--red)" stroke-width="2"/>`,
+  ];
+  node.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="meter-svg" role="img"
+    aria-label="${esc(compactTokens(latest))} per turn against a ${esc(compactTokens(critical))} limit">${parts.join('')}</svg>`;
+  node.setAttribute('data-over', latest > critical ? (latest / critical).toFixed(1) : '');
+}
+
+function drawTrend(node, chart) {
   if (!node || !chart) return;
   const series = chart.turn_series || [];
-  if (series.length < 3) return;
-
-  const W = 620, H = 190, plot = { left: 46, right: 560, top: 16, bottom: 148 };
-  const projected = chart.turns_to_critical;
-  const projectedTurns = projected === null || projected === undefined
-    ? 0 : Math.min(projected, RUNWAY_MAX_PROJECTED_TURNS);
-  const total = series.length + projectedTurns;
-  const ceiling = Math.max(chart.critical_tokens_n, chart.peak_turn_tokens_n) * 1.12;
-
-  const x = chartScale(0, Math.max(1, total - 1), plot.left, plot.right);
-  const y = chartScale(0, ceiling, plot.bottom, plot.top);
-
-  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'runway-svg', 'aria-hidden': 'true' });
-
-  // Status bands. These encode state, so they take status colours -- and they
-  // are named in the caption below, never left to hue alone.
-  svg.appendChild(svgEl('rect', {
-    x: plot.left, y: y(chart.critical_tokens_n), width: plot.right - plot.left,
-    height: Math.max(0, y(chart.pressure_tokens_n) - y(chart.critical_tokens_n)),
-    fill: chartToken('--amber'), opacity: 0.12,
-  }));
-  svg.appendChild(svgEl('rect', {
-    x: plot.left, y: y(ceiling), width: plot.right - plot.left,
-    height: Math.max(0, y(chart.critical_tokens_n) - y(ceiling)),
-    fill: chartToken('--red'), opacity: 0.12,
-  }));
-
-  chartGrid(svg, plot, [0, ceiling / 2, ceiling], v => Math.round(v / 1000) + 'K', y);
-
-  [[chart.pressure_tokens_n, '--amber'], [chart.critical_tokens_n, '--red']].forEach(([value, token]) => {
-    svg.appendChild(svgEl('line', {
-      x1: plot.left, y1: y(value), x2: plot.right, y2: y(value),
-      stroke: chartToken(token), 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke',
-    }));
-  });
-
-  // Say what crossing each line means, on the line. A legend tells you which
-  // colour is which; it cannot tell you which way is bad, and the y-axis is in
-  // tokens, where "more" is not obviously worse to anyone who has not been told
-  // that context accumulates. Labelled in place, a data line sitting above both
-  // needs no explaining at all.
-  //
-  // The pressure label is dropped when the two lines are too close to hold
-  // separate text -- on a session running four times the limit they are 7px
-  // apart, and two labels there overlap into one unreadable smear. The action
-  // line is the one that keeps its label, being the one that asks for anything.
-  const labelGap = y(chart.pressure_tokens_n) - y(chart.critical_tokens_n);
-  chartText(svg, plot.left + 6, y(chart.critical_tokens_n) - 5,
-    compactTokens(chart.critical_tokens_n) + ' — act now', { anchor: 'start', fill: '--red', size: 10 });
-  if (labelGap >= 16) {
-    chartText(svg, plot.left + 6, y(chart.pressure_tokens_n) - 5,
-      compactTokens(chart.pressure_tokens_n) + ' — pressure builds', { anchor: 'start', fill: '--amber', size: 10 });
-  }
-
-  // The peak is only worth its own line when it is meaningfully above where the
-  // session sits now -- that is the case severity reads and the chart otherwise
-  // appears to contradict. When the peak IS the current turn, the line would sit
-  // on top of the marker and "already crossed once" would describe the present.
-  const peakIsHistoric = chart.peak_turn_tokens_n > chart.latest_turn_tokens_n * 1.05;
-  if (chart.peak_turn_tokens_n > chart.critical_tokens_n && peakIsHistoric) {
-    svg.appendChild(svgEl('line', {
-      x1: plot.left, y1: y(chart.peak_turn_tokens_n), x2: plot.right, y2: y(chart.peak_turn_tokens_n),
-      stroke: chartToken('--muted'), 'stroke-width': 1, opacity: 0.6, 'vector-effect': 'non-scaling-stroke',
-    }));
-    chartText(svg, plot.left + 6, y(chart.peak_turn_tokens_n) - 6,
-      'peak ' + compactTokens(chart.peak_turn_tokens_n) + ' — already crossed once',
-      { anchor: 'start', fill: '--muted' });
-  }
-
-  chartLine(svg, series.map((v, i) => [x(i), y(v)]), '--blue');
-
-  if (projectedTurns > 0 && chart.growth_per_turn_n > 0) {
-    const from = series[series.length - 1];
-    const forward = [];
-    for (let i = 0; i <= projectedTurns; i++) {
-      forward.push([x(series.length - 1 + i), y(from + chart.growth_per_turn_n * i)]);
-    }
-    // Dashed because it is a projection -- the one thing dashing should mean.
-    chartLine(svg, forward, '--blue', { dash: '5 4', opacity: 0.5 });
-  }
-
-  svg.appendChild(svgEl('circle', {
-    cx: x(series.length - 1), cy: y(series[series.length - 1]), r: 4.5,
-    fill: chartToken('--blue'), stroke: chartToken('--surface'), 'stroke-width': 2,
-  }));
-
-  svg.appendChild(svgEl('line', {
-    x1: plot.left, y1: plot.bottom, x2: plot.right, y2: plot.bottom,
-    stroke: chartToken('--line-strong'), 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke',
-  }));
-  chartText(svg, plot.left, plot.bottom + 18, 'turn 1', { anchor: 'start' });
-  chartText(svg, x(series.length - 1), plot.bottom + 18, 'now');
-  if (projectedTurns > 0) chartText(svg, plot.right, plot.bottom + 18, 'projected', { anchor: 'end' });
-
-  node.innerHTML = '';
-  node.appendChild(svg);
+  if (series.length < 2) return;
+  const W = 1000, H = 60, pad = 6;
+  const lo = Math.min(...series), hi = Math.max(...series);
+  const span = Math.max(1, hi - lo);
+  const x = i => (i / (series.length - 1)) * W;
+  const y = v => pad + (1 - (v - lo) / span) * (H - pad * 2 - 12);
+  const latest = chart.latest_turn_tokens_n || series[series.length - 1];
+  const tone = latest >= (chart.critical_tokens_n || Infinity) ? 'var(--red)'
+    : latest >= (chart.pressure_tokens_n || Infinity) ? 'var(--amber)' : 'var(--green)';
+  const points = series.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const delta = series[series.length - 1] - series[0];
+  node.innerHTML = `<svg viewBox="0 0 ${W} ${H}" class="trend-svg" role="img"
+    aria-label="context per turn across ${series.length} turns, ${delta >= 0 ? 'up' : 'down'} ${esc(compactTokens(Math.abs(delta)))}">
+    <polyline points="${points}" fill="none" stroke="${tone}" stroke-width="2.5" stroke-linejoin="round"/>
+    <circle cx="${x(series.length - 1).toFixed(1)}" cy="${y(series[series.length - 1]).toFixed(1)}" r="5"
+      fill="${tone}" stroke="var(--bg)" stroke-width="3"/>
+  </svg>`;
+  node.setAttribute('data-turns', series.length);
+  node.setAttribute('data-delta', `${delta >= 0 ? '+' : '-'}${compactTokens(Math.abs(delta))} across these turns`);
 }
 
 /* The runway verdict as {headline, detail, severity}, so Home and the full card
@@ -1313,59 +1262,7 @@ function runwayVerdict(chart) {
    Only lines that were actually drawn are listed: drawRunway omits the
    projection when there is no headroom left, and the peak line when the peak is
    the current turn, and a legend naming an absent line sends you hunting for it. */
-function runwayLegend(chart) {
-  if (!chart || (chart.turn_series || []).length < 3) return '';
-  const items = [
-    ['swatch-blue', 'Context per turn (higher is worse)'],
-    ['swatch-amber', 'Pressure'],
-    ['swatch-red', 'Action needed'],
-  ];
-  if (chart.turns_to_critical > 0 && chart.growth_per_turn_n > 0) {
-    items.push(['swatch-dash', 'Projected']);
-  }
-  const peakIsHistoric = chart.peak_turn_tokens_n > chart.latest_turn_tokens_n * 1.05;
-  if (chart.peak_turn_tokens_n > chart.critical_tokens_n && peakIsHistoric) {
-    items.push(['swatch-peak', 'Earlier peak']);
-  }
-  return `<p class="feed-chart-note runway-legend">${items
-    .map(([cls, label]) => `<span class="${cls}"></span>${label}`).join(' ')}</p>`;
-}
-function runwayCaption(chart) {
-  const verdict = runwayVerdict(chart);
-  if (!verdict) return '';
-  const resets = chart.context_resets
-    ? ` After ${chart.context_resets} context reset${chart.context_resets === 1 ? '' : 's'}, growth is measured from the latest one only.`
-    : '';
-  // The colours are named by runwayLegend now, unconditionally, so the caption
-  // is free to be only the verdict.
-  return `<p class="receipt-note"><strong>${esc(verdict.headline)}</strong> — ${esc(verdict.detail)}${resets}</p>`;
-}
 
-/* Home's summary is one row, so this is the curve and the threshold and nothing
-   else: no axes, no projection, no labels. It exists to show the shape and let
-   the headline carry the number. */
-function drawRunwayMini(node, chart) {
-  if (!node || !chart) return;
-  const series = chart.turn_series || [];
-  if (series.length < 3) return;
-  const W = 220, H = 34, pad = 2;
-  const ceiling = Math.max(chart.critical_tokens_n, ...series) * 1.05;
-  const x = chartScale(0, series.length - 1, pad, W - pad);
-  const y = chartScale(0, ceiling, H - pad, pad);
-
-  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'runway-mini', preserveAspectRatio: 'none', 'aria-hidden': 'true' });
-  svg.appendChild(svgEl('line', {
-    x1: pad, y1: y(chart.critical_tokens_n), x2: W - pad, y2: y(chart.critical_tokens_n),
-    stroke: chartToken('--red'), 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke',
-  }));
-  chartLine(svg, series.map((v, i) => [x(i), y(v)]), '--blue', { width: 1.75 });
-  svg.appendChild(svgEl('circle', {
-    cx: x(series.length - 1), cy: y(series[series.length - 1]), r: 2.5,
-    fill: chartToken('--blue'), stroke: chartToken('--surface'), 'stroke-width': 1.5,
-  }));
-  node.innerHTML = '';
-  node.appendChild(svg);
-}
 /* Daily shape under a metric tile. Deliberately unlabelled: there are no axes,
    no ticks and no gridlines, because the tile already carries the number and
    the only question left is which way it has been going.
@@ -1742,30 +1639,59 @@ function unbankedColours(segments) {
   });
 }
 
-function renderContextHealth(rows) {
-  const status = arguments.length > 1 ? arguments[1] : 'ready';
-  if (status === 'pending') return '<div class="loading">Checking context health and handoff opportunities...</div>';
-  if (!rows.length) return '<div class="empty">No active context-health warnings. AIWatcher will surface bloat, stale sessions, and handoff opportunities here.</div>';
-  return `<div class="coverage-grid">${rows.map(row => `<div class="health-card">
+function healthProjectName(row) {
+  const full = String(row.project_full || row.project || '');
+  const leaf = full.split(/[\/]/).filter(Boolean).pop();
+  return leaf || full;
+}
+
+function healthRank(row) {
+  // Worst first: anything past the limit outranks anything below it, and within
+  // each group the bigger per-turn number leads.
+  const chart = row.chart || {};
+  const critical = chart.critical_tokens_n || Infinity;
+  const latest = chart.latest_turn_tokens_n || 0;
+  return [latest >= critical ? 1 : 0, latest];
+}
+
+function headroomLabel(chart) {
+  const turns = chart && chart.turns_to_critical;
+  if (turns === null || turns === undefined) {
+    return { big: 'No headroom', sub: 'already past the limit' };
+  }
+  return { big: `${turns} turn${turns === 1 ? '' : 's'}`, sub: 'of headroom at this rate' };
+}
+
+function healthFacts(row) {
+  const chart = row.chart || {};
+  const peakIsHistoric = chart.peak_turn_tokens_n > chart.latest_turn_tokens_n * 1.05;
+  return [
+    peakIsHistoric ? `peak ${row.peak_turn_tokens}` : '',
+    row.bloat_measurable ? `${row.bloat_label} replay` : '',
+    row.bloat_measurable ? `${row.replayed_cost_label} on replay` : '',
+    `${row.session_count} session${row.session_count === 1 ? '' : 's'}`,
+    row.critical_sessions ? `${row.critical_sessions} critical` : '',
+  ].filter(Boolean).join(' \u00b7 ');
+}
+
+function healthLeadCard(row) {
+  const verdict = runwayVerdict(row.chart);
+  const room = headroomLabel(row.chart);
+  return `<div class="health-card lead">
     <div class="health-head">
-      <div><h3>${esc(row.project)}</h3><p>${row.session_count > 1
-        ? `${esc(row.session_count)} sessions here · charted below: <button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${row.charted_because_live
-            ? 'the worst recently active one' : 'the one under most pressure'}</button> (${esc(row.tool)} · last active ${esc(row.age_label)} ago)${row.bigger_idle_label
-            ? ` — a larger one, ${esc(row.bigger_idle_label)}, has been quiet for ${esc(row.bigger_idle_age_label)}` : ''}`
-        : `<button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.tool)} session</button> · last active ${esc(row.age_label)} ago`}</p></div>
+      <div><h3 title="${esc(row.project_full || row.project)}">${esc(healthProjectName(row))}</h3><p>${row.session_count > 1
+        ? `${esc(row.session_count)} sessions here \u00b7 charted below: <button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${row.charted_because_live
+            ? 'the worst recently active one' : 'the one under most pressure'}</button> (${esc(row.tool)} \u00b7 last active ${esc(row.age_label)} ago)${row.bigger_idle_label
+            ? ` \u2014 a larger one, ${esc(row.bigger_idle_label)}, has been quiet for ${esc(row.bigger_idle_age_label)}` : ''}`
+        : `<button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.tool)} session</button> \u00b7 last active ${esc(row.age_label)} ago`}</p></div>
       <span class="health-severity ${esc(row.severity)}">${esc(row.severity)}</span>
     </div>
-    <div class="mini-grid">
-      <div class="mini"><span class="label">Latest turn</span><strong>${esc(row.latest_turn_tokens)}</strong></div>
-      <div class="mini"><span class="label">Peak turn</span><strong>${esc(row.peak_turn_tokens)}</strong></div>
-      <div class="mini"><span class="label">Spend on replay</span><strong>${esc(row.bloat_label)}</strong></div>
-      <div class="mini"><span class="label">Replay cost</span><strong>${esc(row.replayed_cost_label)}</strong></div>
-    </div>
-    <div class="runway" data-runway="${esc(row.session_id)}"></div>
-    ${runwayLegend(row.chart)}
-    ${runwayCaption(row.chart)}
-    ${row.session_count > 1 ? `<p class="receipt-note">${esc(row.group_note || `${row.session_count} related sessions need attention.`)} ${row.critical_sessions ? `${esc(row.critical_sessions)} critical.` : ''}</p>` : ''}
-    <p>${esc(row.recommendation)}</p>
+    ${verdict ? `<p class="health-verdict"><strong>${esc(verdict.headline)}</strong> \u2014 ${esc(verdict.detail)}</p>` : ''}
+    <div class="health-hero"><b>${esc(room.big)}</b><u>${esc(room.sub)}</u>
+      <span class="health-now">${esc(row.latest_turn_tokens)} per turn</span></div>
+    <div class="meter-host" data-meter="${esc(row.session_id)}"></div>
+    <div class="trend-host" data-trend="${esc(row.session_id)}"></div>
+    <p class="health-facts">${esc(healthFacts(row))}</p>
     <div class="health-actions">
       <button class="btn-primary" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.action.label)}</button>
       ${row.can_handoff ? `<button class="btn-quiet" data-session="${esc(row.session_id)}" onclick="openHandoff(this.dataset.session)">${esc(row.action.secondary_label)}</button>` : ''}
@@ -1774,7 +1700,32 @@ function renderContextHealth(rows) {
     <p class="receipt-note">${esc(row.action.reason)}${row.session_count > 1
       ? ' These act on that one session, not on all ' + esc(row.session_count) + ' in the project.'
       : ''}</p>
-  </div>`).join('')}</div>`;
+  </div>`;
+}
+
+function healthQuietRow(row) {
+  const room = headroomLabel(row.chart);
+  return `<button class="health-row" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">
+    <span class="health-row-name" title="${esc(row.project_full || row.project)}">${esc(healthProjectName(row))}</span>
+    <span class="health-row-trend" data-trend="${esc(row.session_id)}"></span>
+    <span class="health-row-now">${esc(row.latest_turn_tokens)}</span>
+    <span class="health-row-room">${esc(room.big)}</span>
+    <span class="health-severity ${esc(row.severity)}">${esc(row.severity)}</span>
+  </button>`;
+}
+
+function renderContextHealth(rows) {
+  const status = arguments.length > 1 ? arguments[1] : 'ready';
+  if (status === 'pending') return '<div class="loading">Checking context health and handoff opportunities...</div>';
+  if (!rows.length) return '<div class="empty">No active context-health warnings. AIWatcher will surface bloat, stale sessions, and handoff opportunities here.</div>';
+  // One project is worth acting on; the rest are worth knowing about. Four cards
+  // of equal weight gave the eye nowhere to start.
+  const ranked = rows.slice().sort((a, b) => {
+    const [ac, av] = healthRank(a), [bc, bv] = healthRank(b);
+    return bc - ac || bv - av;
+  });
+  const [lead, ...rest] = ranked;
+  return `<div class="health-stack">${healthLeadCard(lead)}${rest.map(healthQuietRow).join('')}</div>`;
 }
 function renderCoverage(rows) {
   if (!rows.length) return '<div class="empty">Coverage could not be determined on this machine.</div>';
@@ -3190,17 +3141,17 @@ async function load(resetDetail = true, forceRefresh = false) {
   // selector built from the session id, which is scanner-supplied and would need
   // escaping to be safe inside one. Runs after both context-health renderers so
   // it finds the placeholders wherever they were emitted.
-  const runwayNodes = {};
-  document.querySelectorAll('[data-runway]').forEach(node => {
-    runwayNodes[node.getAttribute('data-runway')] = node;
+  const meterNodes = {};
+  document.querySelectorAll('[data-meter]').forEach(node => {
+    meterNodes[node.getAttribute('data-meter')] = node;
   });
-  const runwayMiniNodes = {};
-  document.querySelectorAll('[data-runway-mini]').forEach(node => {
-    runwayMiniNodes[node.getAttribute('data-runway-mini')] = node;
+  const trendNodes = {};
+  document.querySelectorAll('[data-trend]').forEach(node => {
+    trendNodes[node.getAttribute('data-trend')] = node;
   });
   (data.context_health || []).forEach(row => {
-    drawRunway(runwayNodes[row.session_id], row.chart);
-    drawRunwayMini(runwayMiniNodes[row.session_id], row.chart);
+    drawMeter(meterNodes[row.session_id], row.chart);
+    drawTrend(trendNodes[row.session_id], row.chart);
   });
   changeRowsCache = data.changes || [];
   document.getElementById('changeRows').innerHTML = renderChangeRows(changeRowsCache);

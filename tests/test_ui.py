@@ -1177,23 +1177,18 @@ class DashboardWindowTests(unittest.TestCase):
         # take red; the repo ramp is the non-status hues only.
         self.assertIn("const UNBANKED_REPO_COLOURS = ['--blue', '--cyan', '--green'];", ui.HTML)
 
-    def test_home_leads_context_health_with_the_runway_verdict(self) -> None:
-        """Home is the "what now" surface, so it must carry the deadline.
+    def test_the_runway_deadline_is_computed_in_one_place(self) -> None:
+        """One function decides how long a session has.
 
-        The full runway card lives in the Watch view. Home showing only "heavy"
-        describes a state and leaves the urgency to the reader, which is the gap
-        this closes. Both surfaces read runwayVerdict() so they cannot disagree
-        about how long a session has.
+        This used to say "both surfaces read runwayVerdict() so they cannot
+        disagree" -- Home carried a copy of the context-health card. Home is the
+        ambient surface now and no longer does, so there is one reader rather
+        than two. The rule that mattered survives the move: whoever states the
+        deadline derives it here rather than recomputing it, and the two opposite
+        reasons turns_to_critical can be null stay distinguishable.
         """
         self.assertIn("function runwayVerdict(chart)", ui.HTML)
-        self.assertIn("home-runway", ui.HTML)
-        self.assertIn("data-runway-mini", ui.HTML)
-        self.assertIn("drawRunwayMini", ui.HTML)
-        # runwayCaption must be derived from the same verdict rather than
-        # recomputing it -- two surfaces computing this independently is how they
-        # end up quoting different numbers for one session.
-        self.assertIn("const verdict = runwayVerdict(chart);", ui.HTML)
-        # The two opposite null cases stay distinguishable on Home too.
+        self.assertIn("runwayVerdict(row.chart)", ui.HTML)
         self.assertIn("Already past the action threshold", ui.HTML)
         self.assertIn("Not growing right now", ui.HTML)
 
