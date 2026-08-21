@@ -900,5 +900,73 @@ class TileSparklineTest(unittest.TestCase):
         self.assertIn("return true;", draw)
 
 
+class DesignScaleTest(unittest.TestCase):
+    """P3-1/2/3/6/9. The stylesheet had grown 24 font sizes, 12 weights, 12 radii
+    and 19 gap values, several of them fractional (.68rem = 10.88px) rather than
+    chosen. These assert the scales exist and that raw values do not creep back."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+        cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+
+    def test_the_scales_are_defined(self):
+        for token in ("--fs-1", "--fs-2", "--fs-3", "--fs-4", "--fs-5", "--fs-6", "--fs-hero",
+                      "--fw-normal", "--fw-med", "--fw-bold",
+                      "--r-1", "--r-2", "--r-pill",
+                      "--sp-1", "--sp-4", "--sp-7", "--w-prose"):
+            with self.subTest(token=token):
+                self.assertIn(f"{token}:", self.css)
+
+    def test_no_raw_values_outside_the_scales(self):
+        # Only `inherit`, `0` and `50%` (real circles) may stay literal.
+        allowed = {"inherit", "0", "50%"}
+        for prop in ("font-size", "font-weight", "border-radius", "gap"):
+            raw = re.findall(rf"(?<![-\w]){prop}\s*:\s*([^;}}]+)", self.css)
+            leftovers = [v.strip() for v in raw if "var(" not in v and v.strip() not in allowed]
+            with self.subTest(prop=prop):
+                self.assertEqual(leftovers, [], f"{prop} still has raw values: {leftovers}")
+
+    def test_inline_styles_use_the_scale_too(self):
+        # A CSS-only pass left .75rem and .7rem in the markup, which is how
+        # 11.2px survived an audit that only read the stylesheet.
+        self.assertNotIn("font-size:.7rem", self.html)
+        self.assertNotIn("font-size:.75rem", self.html)
+
+    def test_running_text_is_capped(self):
+        # Measured at 2100px, .receipt-note reached 252 characters per line on
+        # five views. Capped on the element, since enumerating containers missed
+        # paragraphs in plain divs.
+        self.assertIn("--w-prose", self.css)
+        self.assertIn("p, .empty, .lede, .prompt-list li { max-width: var(--w-prose); }", self.css)
+
+    def test_the_stat_row_fills_its_container(self):
+        # repeat(4, ...) with three children left a quarter-width hole that read
+        # as a card which had failed to load.
+        kpis = self.css[self.css.index(".kpis {"):]
+        kpis = kpis[:kpis.index("}")]
+        self.assertIn("repeat(auto-fit, minmax(240px, 1fr))", kpis)
+        # .mini-grid keeps repeat(4, ...) and should: it holds four children.
+        self.assertNotIn("repeat(4,", kpis)
+
+    def test_root_declares_a_font_family(self):
+        # Without it :root computed to Times New Roman and only body caught Inter.
+        root = self.css[self.css.index(":root"):self.css.index("}", self.css.index(":root"))]
+        self.assertIn("font-family:", root)
+
+    def test_rows_with_an_action_respond_to_hover(self):
+        self.assertIn("tbody tr:has(.row-action):hover", self.css)
+        self.assertIn("--surface-hover", self.css)
+
+    def test_nav_children_read_as_children(self):
+        # They were the same size and weight as their parents; only a 12px indent
+        # distinguished them.
+        sub = self.css[self.css.index(".nav-sub {"):]
+        sub = sub[:sub.index("}")]
+        self.assertIn("var(--fs-2)", sub)
+        self.assertIn("var(--fw-normal)", sub)
+
+
 if __name__ == "__main__":
     unittest.main()

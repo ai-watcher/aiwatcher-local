@@ -1484,7 +1484,8 @@ function drawPie(node, chart) {
     if (sweep > 0.55) {
       const mid = angle + sweep / 2;
       chartText(svg, cx + r * 0.62 * Math.cos(mid), cy + r * 0.62 * Math.sin(mid) + 4,
-        Math.round(segment.pct) + '%', { fill: '--surface', weight: 700, size: 12 });
+        // 600 is --fw-med; 700 was the one weight left outside the three-step scale.
+        Math.round(segment.pct) + '%', { fill: '--surface', weight: 600, size: 12 });
     }
     angle = end;
   });
