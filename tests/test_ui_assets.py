@@ -506,6 +506,68 @@ class DrawerArrivalTest(unittest.TestCase):
         self.assertIn("animation-duration: .001ms !important", reduce[:400])
 
 
+class HomeStatRowTest(unittest.TestCase):
+    """The stat row is meant to be read across, not card by card.
+
+    It used to align without comparing: one card carried two metrics and two
+    supporting lines and the other two carried one each, so the row was 216px
+    tall because of one card and the other two ended 53px short of it. Equal
+    boxes, unequal content, nothing lining up to compare.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+        cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+        start = cls.html.index('class="grid kpis"')
+        cls.row = cls.html[start:cls.html.index("</section>", start)]
+
+    def test_one_supporting_line_per_card(self):
+        # Two cards' worth of supporting copy in one card is what set the row's
+        # height; the reserved min-height is what makes the other cards agree
+        # with it rather than stopping short.
+        for card in self.row.split('<div class="card metric-card')[1:]:
+            with self.subTest(card=card[:60]):
+                self.assertEqual(card.count('class="sub"'), 1)
+        self.assertIn(".metric-card .sub { min-height:", self.css)
+
+    def test_cost_per_surviving_line_has_its_own_card(self):
+        self.assertIn('<div class="label">Cost per surviving line</div>', self.row)
+        # Not a sentence inside the Useful outcomes card any more.
+        self.assertNotIn("per surviving line —", self.js)
+
+    def test_every_card_ends_in_the_same_place(self):
+        # Two of the four tiles caveat their sparkline and two do not, which left
+        # those two 17px short. The caveat line is emitted either way.
+        self.assertIn("series.caveat || ''", self.js)
+        self.assertIn(".metric-spark-caveat {", self.css)
+        caveat = self.css[self.css.index(".metric-spark-caveat {"):]
+        self.assertIn("min-height:", caveat[:caveat.index("}")])
+
+    def test_unmeasured_survival_keeps_its_slot(self):
+        # Q5 of the number rule: unmeasurable is a distinct state and has to be
+        # shown as unmeasurable with the reason, without reflowing a row that
+        # sits on an ambient surface.
+        tile = self.js[self.js.index("function renderSurvivalTile("):]
+        tile = tile[:tile.index(chr(10) + "}")]
+        self.assertIn("survival.reason", tile)
+        self.assertNotIn("hidden = true", tile)
+        reason = self.css[self.css.index(".survival-reason {"):]
+        reason = reason[:reason.index("}")]
+        # 45px is the meter slot's height, so both states measure the same.
+        self.assertIn("height: 45px", reason)
+        self.assertIn("overflow: hidden", reason)
+
+    def test_survival_is_a_meter_not_a_trend(self):
+        # A trend would have to be drawn over the date picker's window, and
+        # survival ignores the picker -- that is a different question from the
+        # one the number answers.
+        self.assertIn("function drawSurvivalMeter(", self.js)
+        self.assertNotIn('data-tile-spark="costPerSurviving"', self.html)
+        self.assertIn("not the selected range", self.js)
+
+
 class PlanControlTest(unittest.TestCase):
     """The tab is for planning the next prompt. A housekeeping checklist had
     grown to 64% of it, sitting above the tool the tab is named for."""
@@ -997,12 +1059,21 @@ class DesignScaleTest(unittest.TestCase):
 
     def test_the_stat_row_fills_its_container(self):
         # repeat(4, ...) with three children left a quarter-width hole that read
-        # as a card which had failed to load.
-        kpis = self.css[self.css.index(".kpis {"):]
-        kpis = kpis[:kpis.index("}")]
-        self.assertIn("repeat(auto-fit, minmax(240px, 1fr))", kpis)
-        # .mini-grid keeps repeat(4, ...) and should: it holds four children.
-        self.assertNotIn("repeat(4,", kpis)
+        # as a card which had failed to load. The guard is the property, not the
+        # spelling: however many columns the row declares at any width, the cards
+        # have to divide into them evenly or the last row has a gap in it.
+        cards = self.html.count('class="card metric-card')
+        self.assertEqual(cards, 4)
+        declared = re.findall(r"\.kpis \{[^}]*grid-template-columns:\s*([^;]+);", self.css)
+        self.assertTrue(declared, "the stat row declares no columns")
+        for value in declared:
+            with self.subTest(columns=value.strip()):
+                if "auto-fit" in value or "auto-fill" in value:
+                    continue
+                repeated = re.match(r"repeat\((\d+),", value.strip())
+                count = int(repeated.group(1)) if repeated else len(value.split())
+                self.assertEqual(cards % count, 0,
+                                 "%d cards do not fill %d columns" % (cards, count))
 
     def test_root_declares_a_font_family(self):
         # Without it :root computed to Times New Roman and only body caught Inter.
@@ -1172,11 +1243,14 @@ class AmbientScalingTest(unittest.TestCase):
     def test_home_is_not_rebuilt_as_two_columns(self):
         # The stat row stays below the ambient surface. Putting it beside the
         # hero would halve the width of the prose verdicts, which Appendix B
-        # calls the reason to use the product.
+        # calls the reason to use the product. What matters is that the row is
+        # never placed into a column of a page-level grid -- how many columns it
+        # divides itself into is its own business, and is guarded by
+        # test_the_stat_row_fills_its_container.
         kpis = self.css[self.css.index(".kpis {"):]
         kpis = kpis[:kpis.index("}")]
-        self.assertIn("repeat(auto-fit", kpis)
         self.assertNotIn("grid-column", kpis)
+        self.assertNotIn("grid-row", kpis)
 
     def test_the_runtime_strip_is_one_line_of_text(self):
         # It carried the same visual weight as a content card to report a

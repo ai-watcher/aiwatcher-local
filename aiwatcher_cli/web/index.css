@@ -342,7 +342,17 @@
        the right end and read as a card that had failed to load. auto-fit makes
        the row fill whatever it holds, and removes the need for the explicit
        count breakpoints below. */
-    .kpis { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin: var(--sp-3) 0; }
+    /* Two or four, never three-and-an-orphan. auto-fit chose three columns at
+       1280x900 and dropped the fourth card onto a row of its own -- the "three
+       boxes" shape this row exists to stop being. Four columns only fit once a
+       column is wide enough for one line of supporting copy: the longest of the
+       four needs 199px of copy width, so a 235px column holds every one of them
+       on one line -- four of those plus gaps fit once the window reaches 1280px
+       and the nav rail is taken out. Below that the honest shape is 2x2, where
+       every column is wide, rather than four columns that wrap one card's copy
+       and pull the whole row taller. */
+    .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: var(--sp-3) 0; }
+    @media (min-width: 1280px) { .kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
     /* Headings and <strong> were never given a weight, so they took the UA
        default of 700 -- a fourth weight the stylesheet did not know it had.
        600 matches where the explicit 650/700/720 rules already landed. */
@@ -417,7 +427,28 @@
        either duplicate a token that already means something or invent a fourth. */
     .metric-spark { color: var(--metric, var(--blue)); margin-top: 10px; margin-bottom: 2px; }
     .metric-spark svg { display: block; width: 100%; height: 28px; }
-    .metric-spark-caveat { color: var(--muted); font-size: var(--fs-1); margin-top: 2px; }
+    .metric-spark-caveat { color: var(--muted); font-size: var(--fs-1); margin-top: 2px; min-height: 1.3em; }
+    /* One line of supporting copy per card, reserved whether or not the copy
+       wraps -- the row's height used to be set by whichever card had the longest
+       sentence, which left 53px of dead space in the other two and made three
+       equal-height boxes that were not comparing anything. */
+    .metric-card .sub { min-height: 1.45em; }
+    /* Unmeasured is a state, not a value: it keeps the slot's size so the row
+       does not reflow, and drops to supporting weight so it is not read as a
+       figure. The reason sits in the .sub directly beneath it. */
+    .value-unmeasured { font-size: var(--fs-3); font-weight: var(--fw-med); color: var(--muted); }
+    /* Survival is a share of a whole against a fixed 0-100% scale, so it is a
+       meter. Same slot and same 28px as the sparklines, so every card in the row
+       ends at the same place. Colour comes from the tile's --metric through
+       currentColor, like the sparklines, rather than claiming a status. */
+    .survival-meter { display: block; width: 100%; height: 28px; }
+    /* The unmeasured state's explanation, in the slot the meter would have had.
+       45px is that slot's measured height -- 28px of meter, 2px of margin and
+       one 15px caveat line -- so the card is the same height whether or not
+       survival has been computed. Clipped rather than allowed to grow: this row
+       sits on an ambient surface that must not reflow when a background refresh
+       lands, and the sentence is short enough to fit two lines at this width. */
+    .survival-reason { display: block; height: 45px; overflow: hidden; font-size: var(--fs-1); color: var(--muted); }
     /* The decorative rule is pinned to the card's bottom edge and would cut
        straight through a sparkline placed there. */
     .metric-card:has(.metric-spark)::after { display: none; }

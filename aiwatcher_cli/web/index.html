@@ -74,7 +74,15 @@
          the same as four numbers in one glance. Three, not four -- preflight
          decisions moved to Prove and duplicating it back would undo that. -->
     <section class="grid kpis" style="margin-top:14px">
-      <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub">Value per useful change: <span id="costPerUseful">-</span></div><div class="sub" id="costPerSurvivingRow" hidden><span id="costPerSurviving">-</span></div><div class="metric-spark" data-tile-spark="usefulOutcomes" hidden></div></div>
+      <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub" id="costPerUseful">-</div><div class="metric-spark" data-tile-spark="usefulOutcomes" hidden></div></div>
+      <!-- Promoted out of the Useful outcomes card, where it was a second metric
+           reading as a footnote to the first: a whole sentence carrying a rate, a
+           base and a window, which made that one card 53px taller than its
+           neighbours and set the height of the row. It is the other ratio this
+           dashboard is willing to judge, so it gets a slot, not a sentence. The
+           green rail is the shared identity of the two outcome-quality ratios,
+           not a claim about the value -- it is green at every value. -->
+      <div class="card metric-card metric-green"><div class="label">Cost per surviving line</div><div class="value" id="costPerSurviving">-</div><div class="sub" id="costPerSurvivingSub">-</div><div class="metric-spark" id="survivalMeter" hidden></div></div>
       <div class="card metric-card metric-blue"><div class="label">Sessions observed</div><div class="value" id="sessions">-</div><div class="sub">This machine only</div><div class="metric-spark" data-tile-spark="sessions" hidden></div></div>
       <div class="card metric-card metric-neutral"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div><div class="metric-spark" data-tile-spark="apiValue" hidden></div></div>
     </section>

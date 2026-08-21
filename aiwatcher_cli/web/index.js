@@ -1777,14 +1777,85 @@ function drawTileSpark(node, series, days) {
 
   node.innerHTML = '';
   node.appendChild(svg);
-  if (series.caveat) {
-    const note = document.createElement('div');
-    note.className = 'metric-spark-caveat';
-    note.textContent = series.caveat;
-    node.appendChild(note);
-  }
+  // Always emitted, empty when there is nothing to caveat: two of the four
+  // tiles carry one and two do not, which ended those two cards 17px short of
+  // their neighbours. The row is meant to be read across, so every card has to
+  // end in the same place whatever it happens to have to say.
+  const note = document.createElement('div');
+  note.className = 'metric-spark-caveat';
+  note.textContent = series.caveat || '';
+  node.appendChild(note);
   node.hidden = false;
   return true;
+}
+// Cost per surviving line, as a tile rather than a sentence inside another one.
+//
+// Q: what did a line of code that is still there actually cost? Unit: dollars
+// per surviving line, cumulative over survival's own fixed window. Compared
+// against nothing -- there is no threshold for it here, so the rail is identity
+// and never status. It discriminates: it moves with both spend and churn, and
+// the commit receipt already reads a 30-day median off the same figure.
+//
+// Survival has its own fixed window (SURVIVAL_WINDOW_DAYS, 30) and ignores the
+// date picker entirely -- a commit needs to age past MIN_AGE_DAYS before
+// survival means anything, so the figure cannot follow a 24h view. It sat under
+// the picker looking filtered and never moved. Naming its real window is the
+// honest fix; calling it "all time" would be a second wrong label on the same
+// number. The window now sits in the caveat slot, where the sparklines put
+// theirs, which keeps the supporting line to one line like every other card.
+function renderSurvivalTile(survival) {
+  const value = document.getElementById('costPerSurviving');
+  const sub = document.getElementById('costPerSurvivingSub');
+  const meter = document.getElementById('survivalMeter');
+  if (!value || !sub || !meter) return;
+  if (!survival.available) {
+    // Unmeasured is its own state, not a zero and not a dash presented as an
+    // answer. The reason can be a whole sentence with an instruction in it,
+    // which wrapped to three lines in a 235px column and pushed the row 31px
+    // taller than its measured state -- a reflow the ambient surface is not
+    // allowed. So the short form goes on the one supporting line every card
+    // gets, and the full reason takes the slot the meter would have used,
+    // which is already 45px of reserved height.
+    value.textContent = 'not yet';
+    value.classList.add('value-unmeasured');
+    sub.textContent = 'Not measured yet';
+    const reason = String(survival.reason || '').replace(/^Not measured yet\.\s*/, '');
+    meter.innerHTML = '';
+    const note = document.createElement('div');
+    note.className = 'survival-reason';
+    note.textContent = reason || 'Reopen the dashboard to compute it.';
+    meter.appendChild(note);
+    meter.hidden = false;
+    return;
+  }
+  value.textContent = survival.cost_per_surviving_line_label;
+  value.classList.remove('value-unmeasured');
+  sub.textContent = `${survival.survival_pct}% of ${formatCount(survival.lines_touched)} lines still standing`;
+  drawSurvivalMeter(meter, survival);
+}
+// A meter, not a sparkline: survival is a share of a whole on a fixed 0-100%
+// scale, which is position against a shared limit. A trend line would have to
+// be drawn over the date picker's window, and that is a different question from
+// the one the number answers.
+function drawSurvivalMeter(node, survival) {
+  const pct = Math.max(0, Math.min(100, Number(survival.survival_pct) || 0));
+  const svg = svgEl('svg', {
+    viewBox: '0 0 240 28', class: 'metric-spark-svg survival-meter',
+    preserveAspectRatio: 'none', role: 'img',
+  });
+  svg.appendChild(svgEl('rect', { x: 0, y: 10, width: 240, height: 8, rx: 4, fill: 'currentColor', opacity: 0.18 }));
+  svg.appendChild(svgEl('rect', { x: 0, y: 10, width: 240 * pct / 100, height: 8, rx: 4, fill: 'currentColor' }));
+  const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+  title.textContent = `${survival.survival_pct}% of the lines measured are still standing.`;
+  svg.appendChild(title);
+  node.innerHTML = '';
+  node.appendChild(svg);
+  const note = document.createElement('div');
+  note.className = 'metric-spark-caveat';
+  const window_ = survival.window_days ? `last ${survival.window_days} days` : 'a fixed window';
+  note.textContent = `${window_} · not the selected range`;
+  node.appendChild(note);
+  node.hidden = false;
 }
 // An empty slot rather than no slot. The Useful outcomes tile has too few judged
 // points to plot at short ranges, and hiding its sparkline made that one card a
@@ -3678,23 +3749,15 @@ async function loadOnce(resetDetail, forceRefresh) {
   document.getElementById('apiValue').textContent = totals.api_value_label;
   document.getElementById('sessions').textContent = totals.sessions;
   document.getElementById('usefulOutcomes').textContent = totals.useful_outcomes;
-  document.getElementById('costPerUseful').textContent = `${totals.cost_per_useful_change}${totals.inferred_useful_outcomes ? ` · ${totals.inferred_useful_outcomes} to confirm` : ''}`;
-  const survival = data.survival || {};
-  const survivalRow = document.getElementById('costPerSurvivingRow');
-  if (survival.available) {
-    survivalRow.hidden = false;
-    // Survival has its own fixed window (SURVIVAL_WINDOW_DAYS, 30) and ignores
-    // the date picker entirely -- a commit needs to age past MIN_AGE_DAYS
-    // before survival means anything, so the figure cannot follow a 24h view.
-    // It sat under the picker looking filtered and never moved. Naming its real
-    // window is the honest fix; calling it "all time" would be a second wrong
-    // label on the same number.
-    const survivalWindow = survival.window_days ? `last ${survival.window_days} days` : 'fixed window';
-    document.getElementById('costPerSurviving').textContent =
-      `${survival.cost_per_surviving_line_label} per surviving line — ${survival.survival_pct}% of ${formatCount(survival.lines_touched)} still standing (${survivalWindow}, not the selected range)`;
-  } else {
-    survivalRow.hidden = true;
-  }
+  // "value", not "cost": this is API-equivalent, so for anyone on a
+  // subscription no money moved -- the same distinction the metric-neutral rail
+  // on the API-equivalent tile exists to protect. Shortened from "Value per
+  // useful change: X" so it holds one line at a 235px column, which is what
+  // lets four tiles sit across a 1280px window instead of stacking 2x2 and
+  // costing the page 193px of height.
+  document.getElementById('costPerUseful').textContent =
+    `${totals.cost_per_useful_change} value each${totals.inferred_useful_outcomes ? ` · ${totals.inferred_useful_outcomes} to confirm` : ''}`;
+  renderSurvivalTile(data.survival || {});
   document.getElementById('preflightDecisions').textContent = totals.preflight_decisions;
   // Same two-step contract as the runway charts: the tiles' numbers are set
   // first, then SVG is appended into nodes collected by attribute. Absent on
