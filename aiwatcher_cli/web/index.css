@@ -735,16 +735,24 @@
       content: attr(data-over) "x over"; position: absolute; right: 0; top: -2px;
       font-family: var(--mono); font-size: var(--fs-1); font-weight: var(--fw-med); color: var(--red);
     }
-    .trend-host { position: relative; padding-bottom: 14px; }
-    .trend-svg { width: 100%; height: 60px; display: block; }
-    .trend-host::before {
-      content: attr(data-turns) " turns"; position: absolute; left: 0; bottom: 0;
-      font-family: var(--mono); font-size: var(--fs-1); color: var(--faint);
+    /* The axes carry the turn count and the scale now, so the two floating
+       pseudo-element captions that used to sit in the bottom corners at a
+       height that related to nothing are gone. */
+    .trend-host { position: relative; }
+    .trend-svg { width: 100%; height: auto; display: block; }
+    .trend-tick { font-size: var(--fs-1); font-family: var(--mono); fill: var(--faint); }
+    .trend-value { font-size: var(--fs-2); font-weight: var(--fw-med); font-family: var(--mono); }
+    .trend-capture { cursor: crosshair; }
+    .trend-crosshair { pointer-events: none; }
+    .trend-cursor { pointer-events: none; }
+    .trend-tip {
+      position: absolute; bottom: 100%; margin-bottom: 4px;
+      padding: 2px var(--sp-2); border: 1px solid var(--line-strong);
+      border-radius: var(--r-1); background: var(--surface-raised);
+      color: var(--text); font-size: var(--fs-1); font-family: var(--mono);
+      white-space: nowrap; pointer-events: none; z-index: 2;
     }
-    .trend-host::after {
-      content: attr(data-delta); position: absolute; right: 0; bottom: 0;
-      font-family: var(--mono); font-size: var(--fs-1); color: var(--faint);
-    }
+
     .health-facts { margin: 0; font-family: var(--mono); font-size: var(--fs-1); color: var(--faint); font-variant-numeric: tabular-nums; }
 
     .health-row {

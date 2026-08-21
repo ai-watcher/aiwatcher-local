@@ -1411,29 +1411,178 @@ function drawMeter(node, chart) {
   node.setAttribute('data-over', latest > critical ? (latest / critical).toFixed(1) : '');
 }
 
+/* Context per turn against the thresholds that decide what it means.
+
+   The old chart scaled y to the data's own min and max, which is the most
+   natural thing to do and was badly wrong here. A session sitting at 819k
+   against a 200k limit drew as a gentle 7% rise, because 752k-810k filled the
+   canvas and the two thresholds were nowhere on it. The reader could not see
+   the one fact that matters -- that this is four times over the line -- because
+   the line was not drawn. Same defect as any true number answering a question
+   it was not asked.
+
+   So the y domain always contains both thresholds. A healthy session sits low
+   in the frame with room above it; an overrun sits near the top with the limits
+   compressed at the bottom, which is what being far past them looks like.
+
+   Rendered 1:1 rather than through a stretched viewBox: the old one used a
+   fixed 1000x60 box scaled to fit, so in a narrow card the whole plot collapsed
+   into a 14px band floating in the middle of its container. */
+const TREND_HEIGHT = 152;
+const TREND_COMPACT_HEIGHT = 26;
+
+/* Drawn 1:1, so it has to be redrawn when its width changes -- including the
+   first time it becomes visible. A chart built while its view is still hidden
+   measures zero, falls back to a default width, and is then stretched by CSS to
+   whatever the container turns out to be: the old one rendered 152px tall as
+   254px that way. One observer per host, redrawing only on a real width change
+   so it cannot drive itself. */
+const _trendObserved = new WeakSet();
+
+function observeTrend(node) {
+  if (_trendObserved.has(node) || typeof ResizeObserver === 'undefined') return;
+  _trendObserved.add(node);
+  const observer = new ResizeObserver(() => {
+    const width = Math.round(node.getBoundingClientRect().width);
+    if (!width || width === Number(node.dataset.drawnAt)) return;
+    const chart = _trendCharts.get(node);
+    if (chart) drawTrend(node, chart);
+  });
+  observer.observe(node);
+}
+
+const _trendCharts = new WeakMap();
+
 function drawTrend(node, chart) {
   if (!node || !chart) return;
   const series = chart.turn_series || [];
   if (series.length < 2) return;
-  const W = 1000, H = 60, pad = 6;
-  const lo = Math.min(...series), hi = Math.max(...series);
-  const span = Math.max(1, hi - lo);
-  const x = i => (i / (series.length - 1)) * W;
-  const y = v => pad + (1 - (v - lo) / span) * (H - pad * 2 - 12);
-  const latest = chart.latest_turn_tokens_n || series[series.length - 1];
-  const tone = latest >= (chart.critical_tokens_n || Infinity) ? 'var(--red)'
-    : latest >= (chart.pressure_tokens_n || Infinity) ? 'var(--amber)' : 'var(--green)';
+  _trendCharts.set(node, chart);
+  observeTrend(node);
+
+  const compact = node.classList.contains('health-row-trend');
+  const measured = Math.round(node.getBoundingClientRect().width);
+  // Hidden view: leave it for the observer rather than drawing at a guessed size.
+  if (!measured && node.dataset.drawnAt) return;
+  const W = Math.max(160, measured || 640);
+  const H = compact ? TREND_COMPACT_HEIGHT : TREND_HEIGHT;
+
+  const pressure = Number(chart.pressure_tokens_n) || 0;
+  const critical = Number(chart.critical_tokens_n) || 0;
+
+  // The scale stays the data's own, because shape is this chart's whole job --
+  // the meter above it already carries position against the limit, on a scale
+  // shared with every other card. Stretching y down to include a 200k threshold
+  // when the session runs at 838k squeezes sixty turns of movement into six
+  // percent of the frame, which is the flattening the meter/trend split was
+  // made to avoid. What was missing was never the thresholds; it was any way to
+  // read the magnitudes at all.
+  const lo = Math.min(...series);
+  const hi = Math.max(...series);
+  const headroom = Math.max((hi - lo) * 0.18, hi * 0.02, 1);
+  const top = hi + headroom;
+  const base = Math.max(0, lo - headroom);
+  const span = Math.max(1, top - base);
+
+  const padL = compact ? 0 : 46;      // room for the y labels
+  const padR = compact ? 0 : 8;
+  const padT = compact ? 3 : 10;
+  const padB = compact ? 3 : 18;      // room for the turn labels
+  const plotW = Math.max(1, W - padL - padR);
+  const plotH = Math.max(1, H - padT - padB);
+
+  const x = i => padL + (i / (series.length - 1)) * plotW;
+  const y = v => padT + (1 - (Math.min(Math.max(v, base), top) - base) / span) * plotH;
+
+  const latest = Number(chart.latest_turn_tokens_n) || series[series.length - 1];
+  const tone = critical && latest >= critical ? 'var(--red)'
+    : pressure && latest >= pressure ? 'var(--amber)' : 'var(--green)';
+
   const points = series.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const area = `${padL},${(padT + plotH).toFixed(1)} ${points} ${(padL + plotW).toFixed(1)},${(padT + plotH).toFixed(1)}`;
   const delta = series[series.length - 1] - series[0];
-  node.innerHTML = `<svg viewBox="0 0 ${W} ${H}" class="trend-svg" role="img"
-    aria-label="context per turn across ${series.length} turns, ${delta >= 0 ? 'up' : 'down'} ${esc(compactTokens(Math.abs(delta)))}">
-    <polyline points="${points}" fill="none" stroke="${tone}" stroke-width="2.5" stroke-linejoin="round"/>
-    <circle cx="${x(series.length - 1).toFixed(1)}" cy="${y(series[series.length - 1]).toFixed(1)}" r="5"
-      fill="${tone}" stroke="var(--bg)" stroke-width="3"/>
-  </svg>`;
-  node.setAttribute('data-turns', series.length);
-  node.setAttribute('data-delta', `${delta >= 0 ? '+' : '-'}${compactTokens(Math.abs(delta))} across these turns`);
+
+  // A threshold inside the drawn range gets a line. One outside it gets said in
+  // words at the edge it fell off, because silently omitting it is how a reader
+  // concludes the axis starts at zero and that they are comfortably under.
+  const thresholds = [
+    { value: pressure, colour: 'var(--amber)', name: 'pressure' },
+    { value: critical, colour: 'var(--red)', name: 'act now' },
+  ].filter(m => m.value > 0);
+  const marks = compact ? [] : thresholds.filter(m => m.value >= base && m.value <= top);
+  const below = compact ? [] : thresholds.filter(m => m.value < base);
+
+  const gridline = m => `
+    <line x1="${padL}" y1="${y(m.value).toFixed(1)}" x2="${(padL + plotW).toFixed(1)}" y2="${y(m.value).toFixed(1)}"
+      stroke="${m.colour}" stroke-width="1" stroke-dasharray="3 4" opacity=".55"/>
+    <text x="${padL - 6}" y="${(y(m.value) + 3.5).toFixed(1)}" text-anchor="end"
+      class="trend-tick" fill="${m.colour}">${esc(compactTokens(m.value))}</text>`;
+
+  node.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" class="trend-svg" role="img"
+    aria-label="Context per turn across ${series.length} turns, ${delta >= 0 ? 'rising' : 'falling'} ${esc(compactTokens(Math.abs(delta)))}, latest ${esc(compactTokens(latest))} against a ${esc(compactTokens(critical))} limit">
+    ${compact ? '' : `<line x1="${padL}" y1="${(padT + plotH).toFixed(1)}" x2="${(padL + plotW).toFixed(1)}" y2="${(padT + plotH).toFixed(1)}" stroke="var(--line)" stroke-width="1"/>`}
+    ${marks.map(gridline).join('')}
+    <polygon points="${area}" fill="${tone}" opacity=".10"/>
+    <polyline points="${points}" fill="none" stroke="${tone}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="${x(series.length - 1).toFixed(1)}" cy="${y(series[series.length - 1]).toFixed(1)}" r="4"
+      fill="${tone}" stroke="var(--bg)" stroke-width="2"/>
+    ${compact ? '' : `
+      <text x="${padL - 6}" y="${(padT + 4).toFixed(1)}" text-anchor="end" class="trend-tick">${esc(compactTokens(Math.round(top)))}</text>
+      <text x="${padL - 6}" y="${(padT + plotH).toFixed(1)}" text-anchor="end" class="trend-tick">${esc(compactTokens(Math.round(base)))}</text>
+      ${below.length ? `<text x="${padL}" y="${(padT + plotH - 5).toFixed(1)}" class="trend-tick" fill="${below[below.length - 1].colour}">${esc(below.map(m => compactTokens(m.value)).join(' and '))} ${below.length > 1 ? 'limits are' : 'limit is'} below this range</text>` : ''}
+      <text x="${padL}" y="${H - 5}" class="trend-tick" fill="var(--faint)">turn 1</text>
+      <text x="${(padL + plotW).toFixed(1)}" y="${H - 5}" text-anchor="end" class="trend-tick" fill="var(--faint)">turn ${series.length}</text>
+      <text x="${(padL + plotW).toFixed(1)}" y="${Math.max(12, y(series[series.length - 1]) - 9).toFixed(1)}" text-anchor="end"
+        class="trend-value" fill="${tone}">${esc(compactTokens(latest))}</text>`}
+    <g class="trend-hover" hidden>
+      <line class="trend-crosshair" y1="${padT}" y2="${(padT + plotH).toFixed(1)}" stroke="var(--line-strong)" stroke-width="1"/>
+      <circle class="trend-cursor" r="3.5" fill="var(--bg)" stroke="${tone}" stroke-width="2"/>
+    </g>
+    <rect x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" fill="transparent" class="trend-capture"/>
+  </svg>${compact ? '' : '<div class="trend-tip" hidden></div>'}`;
+
+  node.dataset.drawnAt = String(W);
+  if (compact) return;
+  attachTrendHover(node, series, { padL, plotW, padT, plotH, x, y, top });
 }
+
+/* Crosshair and tooltip. A line chart that cannot be read point by point makes
+   the reader guess at the values between its endpoints. */
+function attachTrendHover(node, series, geom) {
+  const svg = node.querySelector('svg');
+  const capture = node.querySelector('.trend-capture');
+  const group = node.querySelector('.trend-hover');
+  const crosshair = node.querySelector('.trend-crosshair');
+  const cursor = node.querySelector('.trend-cursor');
+  const tip = node.querySelector('.trend-tip');
+  if (!svg || !capture || !group || !tip) return;
+
+  const show = event => {
+    const box = svg.getBoundingClientRect();
+    const scale = box.width / svg.viewBox.baseVal.width || 1;
+    const local = (event.clientX - box.left) / scale;
+    const ratio = (local - geom.padL) / geom.plotW;
+    const index = Math.max(0, Math.min(series.length - 1, Math.round(ratio * (series.length - 1))));
+    const px = geom.x(index);
+    const py = geom.y(series[index]);
+    group.removeAttribute('hidden');
+    crosshair.setAttribute('x1', px.toFixed(1));
+    crosshair.setAttribute('x2', px.toFixed(1));
+    cursor.setAttribute('cx', px.toFixed(1));
+    cursor.setAttribute('cy', py.toFixed(1));
+    tip.hidden = false;
+    tip.textContent = `turn ${index + 1} · ${compactTokens(series[index])}`;
+    // Flip before the tooltip runs off the right edge rather than after.
+    const tipW = tip.getBoundingClientRect().width || 90;
+    const left = px * scale;
+    tip.style.left = `${Math.max(0, Math.min(box.width - tipW, left - tipW / 2))}px`;
+  };
+  const hide = () => { group.setAttribute('hidden', ''); tip.hidden = true; };
+
+  capture.addEventListener('mousemove', show);
+  capture.addEventListener('mouseleave', hide);
+}
+
 
 /* The runway verdict as {headline, detail, severity}, so Home and the full card
    render the same judgement from one place. Two surfaces computing "how long

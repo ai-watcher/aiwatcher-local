@@ -1336,5 +1336,80 @@ class RegressionRepairTest(unittest.TestCase):
         self.assertIn("z-index: 20", header)
 
 
+class ContextHealthChartTest(unittest.TestCase):
+    """Plan item 7. The largest object on the most-visited screen, and it
+    communicated almost nothing.
+
+    The old chart scaled y to the series' own min and max. On a session at 838k
+    per turn against a 200k limit, that drew 752k-810k across the whole canvas:
+    a gentle 7% rise, with both thresholds off the chart entirely. The one fact
+    that mattered -- four times over the line -- was the one thing a reader could
+    not see."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+        cls.draw = js_function_source(cls.js, "drawTrend")
+
+    def test_the_scale_stays_the_data_s_own(self):
+        # Shape is this chart's job -- the meter beside it carries position
+        # against the limit on a shared scale. Stretching y to include a 200k
+        # threshold for a session running at 838k squeezes sixty turns into six
+        # percent of the frame, which is the flattening the meter/trend split
+        # exists to prevent.
+        self.assertIn("Math.min(...series)", self.draw)
+        self.assertIn("Math.max(...series)", self.draw)
+
+    def test_the_magnitudes_are_readable(self):
+        # What was missing was never the thresholds; it was any way to tell what
+        # the y values were.
+        self.assertIn("compactTokens(Math.round(top))", self.draw)
+        self.assertIn("compactTokens(Math.round(base))", self.draw)
+
+    def test_a_threshold_off_the_scale_is_stated_not_omitted(self):
+        # Silently dropping it is how a reader concludes the axis starts at zero
+        # and that they are comfortably under the limit.
+        self.assertIn("limit is", self.draw)
+        self.assertIn("below this range", self.draw)
+        self.assertIn("stroke-dasharray", self.draw)
+
+    def test_the_axes_exist(self):
+        self.assertIn("turn 1", self.draw)
+        self.assertIn("turn ${series.length}", self.draw)
+        self.assertIn("trend-tick", self.css)
+
+    def test_the_floating_captions_are_gone(self):
+        # They sat in the bottom corners at a height that related to nothing.
+        self.assertNotIn(".trend-host::before", self.css)
+        self.assertNotIn(".trend-host::after", self.css)
+        self.assertNotIn("data-delta", self.js)
+
+    def test_it_is_drawn_at_its_real_size(self):
+        # A fixed 1000x60 viewBox scaled to fit collapsed the whole plot into a
+        # 14px band floating in the middle of a narrow card.
+        self.assertIn("node.getBoundingClientRect().width", self.draw)
+        self.assertIn("viewBox=\"0 0 ${W} ${H}\"", self.draw)
+
+    def test_it_redraws_when_its_width_changes(self):
+        # Drawn 1:1, so a chart built while its view is hidden measures zero and
+        # would otherwise stay stretched at whatever CSS made of it.
+        self.assertIn("ResizeObserver", self.js)
+        observe = js_function_source(self.js, "observeTrend")
+        # Guarded so a redraw cannot drive the observer that triggered it.
+        self.assertIn("node.dataset.drawnAt", observe)
+
+    def test_a_line_chart_can_be_read_point_by_point(self):
+        self.assertIn("function attachTrendHover", self.js)
+        self.assertIn("trend-crosshair", self.css)
+        self.assertIn("trend-tip", self.css)
+
+    def test_the_compact_row_variant_stays_a_sparkline(self):
+        # Axis furniture does not fit in 26px, and the collapsed rows are a
+        # glance, not a reading.
+        self.assertIn("health-row-trend", self.draw)
+        self.assertIn("compact ? '' :", self.draw)
+
+
 if __name__ == "__main__":
     unittest.main()
