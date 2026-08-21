@@ -1079,5 +1079,58 @@ class InformationArchitectureTest(unittest.TestCase):
         self.assertIn("top: calc(var(--header-h)", self.css)
 
 
+class AmbientScalingTest(unittest.TestCase):
+    """P3-5, the Home question.
+
+    Measured before deciding: Home filled 102% of a 1280x800 viewport but 63% of
+    a 1280x1287 one. The review's fix -- hero left, stat cards stacked right --
+    was measured too and makes it worse: two columns take Home from 584px to
+    about 330px, so it fills 42% at 800px rather than 102%. It fills the viewport
+    by removing height. The surface scales instead: same content, same slots,
+    sized to the room available."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+
+    def test_the_surface_scales_with_the_viewport(self):
+        ambient = self.css[self.css.index("    .ambient {"):]
+        ambient = ambient[:ambient.index("}")]
+        self.assertIn("min-height: clamp(", ambient)
+        self.assertIn("vh", ambient)
+        # Clamped at both ends so a short window and a very tall one stay sane.
+        self.assertIn("300px", ambient)
+        self.assertIn("760px", ambient)
+
+    def test_the_hero_tracks_the_surface(self):
+        # The scaling lives in --fs-hero rather than as a raw value in the rule,
+        # so the type scale still owns every size. The token test enforces that.
+        root = self.css[self.css.index(":root"):self.css.index("}", self.css.index(":root"))]
+        self.assertIn("--fs-hero: clamp(", root)
+        self.assertIn("vh", root)
+        hero = self.css[self.css.index("    .ambient-hero {"):]
+        hero = hero[:hero.index("}")]
+        self.assertIn("font-size: var(--fs-hero)", hero)
+
+    def test_home_is_not_rebuilt_as_two_columns(self):
+        # The stat row stays below the ambient surface. Putting it beside the
+        # hero would halve the width of the prose verdicts, which Appendix B
+        # calls the reason to use the product.
+        kpis = self.css[self.css.index(".kpis {"):]
+        kpis = kpis[:kpis.index("}")]
+        self.assertIn("repeat(auto-fit", kpis)
+        self.assertNotIn("grid-column", kpis)
+
+    def test_the_runtime_strip_is_one_line_of_text(self):
+        # It carried the same visual weight as a content card to report a
+        # watcher state and a timestamp, and its 34px was what kept Home from
+        # fitting an 800px-tall viewport.
+        strip = self.css[self.css.index("    .runtime-strip {"):]
+        strip = strip[:strip.index("}")]
+        self.assertNotIn("border:", strip)
+        self.assertNotIn("box-shadow", strip)
+        self.assertIn("color: var(--muted)", strip)
+
+
 if __name__ == "__main__":
     unittest.main()

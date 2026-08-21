@@ -12,7 +12,10 @@
       --fs-4: 16px;   /* card and section headings */
       --fs-5: 24px;   /* section figures */
       --fs-6: 30px;   /* display figures */
-      --fs-hero: 46px;/* the ambient hero only */
+      /* The ambient hero only, and the one size that is not fixed: it tracks
+         viewport height so the surface fills a tall monitor without gaining
+         content. Stays near 46px at 800px tall, roughly doubles at 1440px. */
+      --fs-hero: clamp(40px, 5.6vh, 88px);
       --fw-normal: 400;
       --fw-med: 600;
       --fw-bold: 800;
@@ -73,7 +76,7 @@
     main {
       width: min(100%, 1780px);
       margin: 0 auto;
-      padding: 28px 36px 52px;
+      padding: 28px 36px 32px;
       display: grid;
       grid-template-columns: 192px minmax(0, 1fr);
       gap: var(--sp-4) var(--sp-5);
@@ -87,7 +90,7 @@
     header {
       position: sticky; top: 0; z-index: 20;
       display: flex; align-items: center; justify-content: space-between;
-      gap: var(--sp-5); margin-bottom: 22px; padding: var(--sp-3) 0;
+      gap: var(--sp-5); margin-bottom: var(--sp-3); padding: var(--sp-2) 0;
       background: var(--bg); border-bottom: 1px solid var(--line);
     }
     h1 { font-size: var(--fs-5); margin: 0; letter-spacing: 0; line-height: 1.12; }
@@ -112,19 +115,33 @@
       border-radius: var(--r-pill); padding: 5px 9px; font-size: var(--fs-1); font-weight: var(--fw-med);
     }
     .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+    /* P4-14: this was a full-width bordered bar carrying the same visual weight
+       as a content card, to report a watcher state and a timestamp. One line of
+       muted text now -- no border, no card background, no shadow. It also gave
+       back the 34px that kept Home from fitting an 800px-tall viewport. */
     .runtime-strip {
-      display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);
-      border: 1px solid rgba(148,163,184,.18); border-radius: var(--r-2);
-      background:
-        linear-gradient(180deg, rgba(255,255,255,.035), transparent),
-        rgba(14,20,29,.78);
-      padding: 11px 13px; margin: -2px 0 18px;
-      box-shadow: inset 0 1px 0 rgba(255,255,255,.035), 0 18px 44px rgba(0,0,0,.10);
+      display: flex; align-items: center; justify-content: space-between;
+      gap: var(--sp-3); flex-wrap: wrap;
+      padding: 0; margin: -6px 0 var(--sp-3);
+      font-size: var(--fs-2); color: var(--muted);
     }
     /* ---- ambient surface ---------------------------------------------------
        Five slots in a fixed order. The two states share them, so nothing moves
        when a session starts or ends. Sizes are set on the container rather than
        per-slot so the running and quiet states measure identically. */
+    /* The ambient surface scales with the screen instead of ending at a fixed
+       height. Measured: Home filled 102% of a 1280x800 viewport but only 63% of
+       a 1280x1287 one, leaving 471px of dead ground on a tall monitor.
+       The review's fix -- hero left, stat cards stacked right -- was measured
+       too and makes it worse: two columns take Home from 584px to about 330px,
+       so it would fill 42% at 800px rather than 102%, halve the width of the
+       prose verdicts, and add a reflow point at narrow widths. It fills the
+       viewport by removing height.
+       So: same content, same five slots, same order -- just sized to the room
+       available. A bigger number is easier to read from four feet, which is the
+       whole point of the surface. The calc is a line through the two measured
+       points (320px at 800px tall, ~665px at 1287px tall), clamped at both ends
+       so small windows and very tall ones both stay sane. */
     .ambient {
       background: var(--bg);
       border: 1px solid var(--line);
@@ -134,6 +151,8 @@
       display: flex;
       flex-direction: column;
       gap: var(--sp-3);
+      min-height: clamp(300px, calc(71vh - 250px), 760px);
+      justify-content: space-between;
     }
     .ambient[data-state="critical"] { border-color: rgba(242, 119, 143, .38); }
     .ambient[data-state="warning"] { border-color: rgba(242, 191, 107, .34); }
@@ -319,7 +338,7 @@
        the right end and read as a card that had failed to load. auto-fit makes
        the row fill whatever it holds, and removes the need for the explicit
        count breakpoints below. */
-    .kpis { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin: var(--sp-4) 0; }
+    .kpis { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin: var(--sp-3) 0; }
     /* Headings and <strong> were never given a weight, so they took the UA
        default of 700 -- a fourth weight the stylesheet did not know it had.
        600 matches where the explicit 650/700/720 rules already landed. */
