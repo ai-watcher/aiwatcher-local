@@ -1303,5 +1303,38 @@ class PlanZoneTest(unittest.TestCase):
         self.assertIn('"removals"', source)
 
 
+class RegressionRepairTest(unittest.TestCase):
+    """Plan items 4, 5 and 6 -- damage from the scales/sticky-header pass."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+
+    def _rule(self, selector):
+        start = self.css.index(selector)
+        return self.css[start:self.css.index("}", start)]
+
+    def test_a_card_title_sits_above_its_body_text_on_the_scale(self):
+        # They were separated by weight alone -- and the scales pass had just
+        # weakened that, moving unstyled headings from the UA default 700 to 600.
+        self.assertIn("var(--fs-4)", self._rule("    h3 {"))
+        self.assertIn("var(--fs-5)", self._rule("    h2 {"))
+
+    def test_data_strips_are_not_capped_like_prose(self):
+        # .health-facts is a dot-separated row of figures. At 68ch it wrapped
+        # inside an item, so one line ended "1" and the next began "session".
+        self.assertIn(".health-facts", self.css)
+        rule = self._rule(".health-facts, [class$=")
+        self.assertIn("max-width: none", rule)
+
+    def test_the_nav_stacks_above_the_page_and_below_the_header(self):
+        # The sticky header got a stacking context and the nav did not, so below
+        # roughly 470px of viewport height the nav slid under the header band.
+        nav = self._rule("    .product-nav {")
+        self.assertIn("z-index: 10", nav)
+        header = self._rule("    header {")
+        self.assertIn("z-index: 20", header)
+
+
 if __name__ == "__main__":
     unittest.main()

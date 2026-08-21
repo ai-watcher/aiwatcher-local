@@ -94,8 +94,12 @@
       background: var(--bg); border-bottom: 1px solid var(--line);
     }
     h1 { font-size: var(--fs-5); margin: 0; letter-spacing: 0; line-height: 1.12; }
-    h2 { margin: 0; font-size: var(--fs-4); line-height: 1.25; }
-    h3 { margin: 0; font-size: var(--fs-3); }
+    /* A card title has to sit a step up the scale from the text under it, not
+       just a step up in weight -- especially since heading weight moved from
+       the UA default of 700 to --fw-med when the scales landed, which left
+       14px/600 sitting directly above 14px/400. */
+    h2 { margin: 0; font-size: var(--fs-5); line-height: 1.2; }
+    h3 { margin: 0; font-size: var(--fs-4); line-height: 1.3; }
     p { color: var(--muted); line-height: 1.5; margin: 0; }
     .brand { display: flex; align-items: center; gap: var(--sp-3); min-width: 0; }
     .brand-mark {
@@ -280,7 +284,7 @@
     }
     .grid { display: grid; gap: var(--sp-3); }
     .product-nav {
-      position: sticky; top: calc(var(--header-h) + var(--sp-2)); display: grid; gap: var(--sp-1); width: 100%;
+      position: sticky; top: calc(var(--header-h) + var(--sp-2)); z-index: 10; display: grid; gap: var(--sp-1); width: 100%;
       margin: 0; padding: 8px; border: 1px solid rgba(148,163,184,.18);
       border-radius: var(--r-2);
       background:
@@ -643,7 +647,11 @@
        div, which still ran to 243 characters. Anything that genuinely needs the
        full width opts out with .full-width. */
     p, .empty, .lede, .prompt-list li { max-width: var(--w-prose); }
-    .full-width { max-width: none; }
+    /* Data strips are not prose. .health-facts is a dot-separated row of
+       figures; at 68ch it wrapped inside an item, so a line ended "1" and the
+       next began "session · 1 critical". Anything ending in -facts is a strip
+       of the same kind, and .full-width is the explicit opt-out. */
+    .health-facts, [class$="-facts"], .full-width { max-width: none; }
     td.num, th.num { text-align: right; white-space: nowrap; }
     .muted { color: var(--muted); }
     .bar-row { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(120px, 1.5fr) 88px; gap: var(--sp-3); align-items: center; margin: 11px 0; padding: 5px 0; }
