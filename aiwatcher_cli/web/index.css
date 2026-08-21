@@ -802,7 +802,10 @@
     .session-filters input[type="text"]:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
     .row-action { min-height: 30px; padding: 5px 9px; color: #ddecff; background: var(--blue-soft); border-color: #3d6594; font-size: var(--fs-2); }
     .action-stack { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; justify-content: flex-end; }
-    .empty { color: var(--muted); padding: 16px; border: 1px dashed var(--line); border-radius: var(--r-2); }
+    .empty { color: var(--muted); padding: var(--sp-4); border: 1px dashed var(--line); border-radius: var(--r-2); }
+    /* A no-results message belongs where the rows would have been, not flush
+       against whichever edge the cell's alignment happened to inherit. */
+    td .empty { text-align: center; padding: var(--sp-6) var(--sp-4); margin-inline: auto; }
     .digest-row { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); padding: 8px 0; border-bottom: 1px solid var(--line); }
     .digest-row:last-child { border-bottom: 0; }
     .digest-row.clickable { cursor: pointer; }

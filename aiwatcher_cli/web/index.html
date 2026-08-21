@@ -212,13 +212,12 @@
   </section>
 
   <section id="view-receipts" class="view" hidden>
-    <section class="grid kpis" style="margin-bottom:14px">
-      <div class="card metric-card metric-amber"><div class="label">Preflight decisions</div><div class="value" id="preflightDecisions">-</div><div class="sub"><span id="windowLabel">-</span></div><div class="metric-spark" data-tile-spark="preflightDecisions" hidden></div></div>
-    </section>
-
+    <!-- The preflight count used to be a standalone card floating above this
+         one with nothing connecting them (P3-4). It is an inline stat on the
+         card it describes. Both ids are kept: load() writes to them. -->
     <div class="card" style="margin-bottom:14px">
       <div class="section-title">
-        <div><h2>Fresh Start receipts</h2><p>When AIWatcher suggested a fresh session, what you chose, and whether a follow-up session was observed.</p></div>
+        <div><h2>Fresh Start receipts</h2><p><strong id="preflightDecisions">-</strong> preflight decisions &middot; <span id="windowLabel">-</span>. When AIWatcher suggested a fresh session, what you chose, and whether a follow-up session was observed. Proof stays pending until a later session in the same project is observed.</p></div>
         <div class="actions"><button class="btn-quiet" onclick="quietFreshStartReminders()">Quiet reminders</button><span class="note-chip local">Local only</span></div>
       </div>
       <div class="table-wrap"><table>

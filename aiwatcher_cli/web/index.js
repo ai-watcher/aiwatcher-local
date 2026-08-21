@@ -68,7 +68,7 @@ function renderReceiptRows(receipts) {
   if (!receipts.length) return '<tr><td colspan="6"><div class="empty">No interventions recorded in this window.</div></td></tr>';
   return receipts.map(receipt => `<tr class="clickable" onclick="openReceipt('${esc(receipt.id)}')">
     <td>${esc(dateLabel(receipt.created_at))}</td>
-    <td><strong>${esc(receipt.tool)}</strong><br><span class="sub">${esc(receipt.project)}</span></td>
+    <td><strong>${esc(receipt.tool)}</strong><br><span class="sub" title="${esc(projectTitle(receipt))}">${esc(projectName(receipt))}</span></td>
     <td>${esc(receipt.decision_label)}</td>
     <td>${esc(riskScore(receipt.original_score))} → ${esc(riskScore(receipt.selected_score))}</td>
     <td>${esc(receipt.outcome || receipt.session_status)}</td>
@@ -90,7 +90,16 @@ function renderHandoffDecisionRows(decisions) {
     <td>${esc(dateLabel(decision.created_at))}</td>
     <td>${esc(handoffDecisionLabel(decision.decision))}</td>
     <td>${esc(decision.expected_saved_context_label ? `~${decision.expected_saved_context_label}` : '—')}</td>
-    <td><strong>${esc(decision.proof_status || 'Proof pending')}</strong><br><span class="sub">${esc(decision.observed_followup ? decision.observed_followup.label : decision.proof_reason || decision.outcome || decision.inferred_outcome || decision.proof_confidence || 'No saved-token claim yet')}</span>${decision.proof_evidence ? `<br><span class="sub">${esc(decision.proof_evidence.label)} · ${esc(decision.proof_evidence.commits)} commits · ${esc(decision.proof_evidence.tests)} tests</span>` : ''}</td>
+    <td><strong>${esc(decision.proof_status || 'Proof pending')}</strong>${(() => {
+      // The generic pending reason was the same 22 words on every pending row.
+      // It is stated once in the card subtitle now; the cell keeps anything
+      // specific to that row.
+      const specific = decision.observed_followup ? decision.observed_followup.label
+        : (decision.proof_status && decision.proof_status !== 'Proof pending'
+            ? decision.proof_reason || decision.outcome || decision.inferred_outcome || decision.proof_confidence
+            : decision.outcome || decision.inferred_outcome);
+      return specific ? `<br><span class="sub">${esc(specific)}</span>` : '';
+    })()}${decision.proof_evidence ? `<br><span class="sub">${esc(decision.proof_evidence.label)} · ${esc(decision.proof_evidence.commits)} commits · ${esc(decision.proof_evidence.tests)} tests</span>` : ''}</td>
     <td><span class="sub">source</span> ${esc(decision.source_session_id || decision.session_id || 'unknown')}<br><span class="sub">next</span> ${esc(decision.next_session_id || 'waiting')}</td>
     <td>${decision.next_session_id ? `<button class="row-action" onclick="selectSession('${esc(decision.next_session_id)}')">Inspect next</button>` : decision.source_session_id ? `<button class="row-action" onclick="selectSession('${esc(decision.source_session_id)}')">Inspect source</button>` : ''}</td>
   </tr>`).join('');
@@ -605,8 +614,8 @@ function verdictLines(s) {
 
   const p = v.pressure || {};
   if (p.measurable) {
-    const critical = compactTokens(p.critical_tokens).replace(/K$/, 'k');
-    const pressure = compactTokens(p.pressure_tokens).replace(/K$/, 'k');
+    const critical = compactTokens(p.critical_tokens);
+    const pressure = compactTokens(p.pressure_tokens);
     let body;
     if (p.turns_to_critical === null || p.turns_to_critical === undefined) {
       body = p.latest_turn_tokens >= p.critical_tokens
@@ -1133,10 +1142,11 @@ function tooYoungToJudge(row) {
   return (Date.now() - at) < SURVIVAL_MIN_AGE_DAYS * 86400000;
 }
 
+// Same Windows-path bug as projectName had: this matched forward slashes only,
+// so a backslash path came back whole and the Changes ledger showed a full
+// C:\ path beside shortened ones.
 function repoLabel(row) {
-  const full = String(row.repo || row.project || '');
-  const leaf = full.split(/[\/]/).filter(Boolean).pop();
-  return leaf || full;
+  return projectName({ project_full: row.repo || row.project || '' });
 }
 
 function renderChangeRows(rows) {
@@ -1210,7 +1220,7 @@ function renderOptimizeWorkspace(optimize) {
       <div>
         <div class="action-title">${esc(item.title)} <span class="pill">${esc(item.evidence_label || 'Observed')}</span></div>
         <p>${esc(item.why_inactive || item.summary || '')}</p>
-        <div class="action-meta"><span class="pill">${esc(item.project || 'Local machine')}</span>${item.impact_label ? `<span class="pill">${esc(item.impact_label)}</span>` : ''}<span class="pill">${esc(item.updated_label || '')}</span></div>
+        <div class="action-meta"><span class="pill" title="${esc(item.project || '')}">${esc(item.project ? projectName({ project_full: item.project }) : 'Local machine')}</span>${item.impact_label ? `<span class="pill">${esc(item.impact_label)}</span>` : ''}<span class="pill">${esc(item.updated_label || '')}</span></div>
         <p class="receipt-note">${esc(item.evidence || '')}</p>
       </div>
       <div class="actions">
@@ -1436,6 +1446,12 @@ function drawTileSpark(node, series, days) {
     preserveAspectRatio: 'none', role: 'img',
   });
 
+  // A faint baseline, so the line has something to be high or low against.
+  svg.appendChild(svgEl('line', {
+    x1: pad, y1: H - pad, x2: W - pad, y2: H - pad,
+    stroke: 'currentColor', 'stroke-width': 1, opacity: 0.25,
+  }));
+
   if (through < values.length - 1) {
     svg.appendChild(svgEl('rect', {
       x: x(through), y: 0, width: (W - pad) - x(through), height: H,
@@ -1508,7 +1524,10 @@ function compactTokens(n) {
   // millions, and "100000K" is not a number anyone reads.
   if (n >= 1e9) return +(n / 1e9).toFixed(n >= 1e10 ? 0 : 1) + 'B';
   if (n >= 1e6) return +(n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M';
-  if (n >= 1000) return Math.round(n / 1000) + 'K';
+  // Lowercase k with one decimal, matching ui.py's compact_int. They disagreed:
+  // Python rendered 564.2k and this rendered 564K, and both appeared in the same
+  // Watch card. Four call sites had grown a  to paper over it.
+  if (n >= 1000) return +(n / 1000).toFixed(1) + 'k';
   return String(Math.round(n));
 }
 
@@ -1805,10 +1824,26 @@ function unbankedColours(segments) {
   });
 }
 
+// The last two path segments, always. The same project appeared three ways in
+// four adjacent rows: "...s/tadan/Downloads/AgentWatch/aiwatcher-local-public",
+// "...ers/tadan/Downloads/..." and an untouched Windows path. The third was
+// this function failing to split a Windows path -- it matched forward slashes
+// only, so a backslash path came back whole. Two segments rather than one
+// because the leaf alone does not separate aiwatcher-local-public from
+// aiwatcher-local-pr46 at a glance.
+function projectName(row) {
+  const full = String((row && (row.project_full || row.project)) || '');
+  const parts = full.split(/[\\/]+/).filter(Boolean);
+  if (!parts.length) return 'unknown';
+  return parts.slice(-2).join('/');
+}
+
+function projectTitle(row) {
+  return String((row && (row.project_full || row.project)) || 'unknown');
+}
+
 function healthProjectName(row) {
-  const full = String(row.project_full || row.project || '');
-  const leaf = full.split(/[\/]/).filter(Boolean).pop();
-  return leaf || full;
+  return projectName(row);
 }
 
 function healthRank(row) {
@@ -1999,7 +2034,7 @@ function bars(rows, valueKey = "api_value_label", kind = "project", weightKey = 
     // `amount` carries markup, so it is interpolated raw below -- every value
     // inside it is escaped individually above.
     return `<div class="bar-row ${kind === "project" ? "clickable" : ""}" title="${esc(row.name)}" ${click}>
-      <div class="bar-label">${esc(row.short_name || row.name)}${kind === "project" && row.health ? ` ${healthPill(row.health)}` : ''}</div>
+      <div class="bar-label">${esc(kind === "project" ? projectName({ project_full: row.name }) : (row.short_name || row.name))}${kind === "project" && row.health ? ` ${healthPill(row.health)}` : ''}</div>
       <div class="bar-shell"><div class="bar" style="width:${width}%"></div></div>
       <div class="amount">${amount}</div>
     </div>`;
@@ -2784,9 +2819,9 @@ function replaySplitCaption(chart) {
   // spikes, reads are every single turn.
   const writeNote = written >= 1
     ? ` A further <strong>${written}%</strong> went on writing it to cache.` : '';
-  return `<p class="feed-chart-note"><span class="swatch-blue"></span>New context
+  return `<p class="feed-chart-note"><span class="feed-chart-legend"><span class="swatch-blue"></span>New context
     <span class="swatch-cyan"></span>Written to cache
-    <span class="swatch-amber"></span>Read back —
+    <span class="swatch-amber"></span>Read back</span>
     <span class="feed-chart-sentence"><strong>${share}%</strong> of what this session cost across ${chart.turns} turns
     went on re-sent history.${writeNote} ${chart.session_turns > chart.turns
       ? `Showing the last ${chart.turns} of this session's ${chart.session_turns} turns.` : ''}
@@ -2929,7 +2964,7 @@ function renderSessionRows(rows, filtered) {
   document.getElementById('sessionRows').innerHTML = rows.length
     ? sortedRows(rows, sessionSort).map(s => `<tr class="clickable" onclick="selectSession('${esc(s.session_id)}')">
         <td>${esc(s.tool)}</td>
-        <td>${esc(s.project)}<br>${sessionStatePill(s.state)} ${s.outcome ? outcomePill(s.outcome) : outcomeEvidencePill(s)}</td>
+        <td title="${esc(projectTitle(s))}">${esc(projectName(s))}<br>${sessionStatePill(s.state)} ${s.outcome ? outcomePill(s.outcome) : outcomeEvidencePill(s)}</td>
         <td>${esc(s.model)}</td>
         <td class="mono num">${esc(s.tokens)}</td>
         <td><button class="row-action">Review</button></td>
@@ -3054,7 +3089,7 @@ function ambientRunning(card) {
 
   // compactTokens returns "200K"; the server's turn labels are "350.2k". Match the
   // hero rather than the other chart, so this component is internally consistent.
-  const scaleLabel = value => compactTokens(value).replace(/K$/, 'k');
+  const scaleLabel = value => compactTokens(value);
   const scale = [];
   if (pressure) scale.push({ label: scaleLabel(pressure) + ' pressure', tone: 'amber' });
   if (critical) scale.push({ label: scaleLabel(critical) + ' act now', tone: 'red' });
@@ -3064,7 +3099,7 @@ function ambientRunning(card) {
   // already past the threshold, and claiming headroom there would be a lie.
   const runway = chart.turns_to_critical === null || chart.turns_to_critical === undefined
     ? (latest >= critical && critical
-        ? 'It is already past the ' + compactTokens(critical).replace(/K$/, 'k') + ' threshold, so there is no headroom left to project.'
+        ? 'It is already past the ' + compactTokens(critical) + ' threshold, so there is no headroom left to project.'
         : '')
     : 'About <b>' + chart.turns_to_critical + ' turns</b> of headroom at the current rate.';
   const bloat = card.bloat_measurable && card.bloat_label
@@ -3446,7 +3481,7 @@ async function loadOnce(resetDetail, forceRefresh) {
   document.getElementById('projectWindow').textContent = totals.window_label;
   document.getElementById('projectRows').innerHTML = data.projects.length
     ? data.projects.map(p => `<tr class="clickable" onclick="selectProject(decodeURIComponent(this.dataset.id))" data-id="${encodeURIComponent(p.id)}">
-        <td>${esc(p.short_name || p.name)}</td>
+        <td title="${esc(p.name || '')}">${esc(projectName({ project_full: p.name || p.short_name }))}</td>
         <td>${healthPill(p.health)}</td>
         <td class="mono">${esc(p.sessions)}</td>
         <td class="mono">${esc(p.tokens_label)}</td>

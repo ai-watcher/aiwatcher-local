@@ -186,6 +186,23 @@ def _usage_summary(row: LocalSession) -> dict[str, object]:
     }
 
 
+def project_name(path: str | None, segments: int = 2) -> str:
+    """The last *segments* path components, for display in a column.
+
+    Left-truncating a path mid-word ("...s/tadan/Downloads/...") makes a column
+    unscannable, and the part that identifies a project is at the end. Two
+    components rather than one because the leaf alone does not separate
+    aiwatcher-local-public from aiwatcher-local-pr46 at a glance. Kept beside
+    short_path rather than replacing it: that is also used for CLI output.
+    """
+    if not path:
+        return "unknown"
+    parts = [part for part in re.split(r"[\\/]+", str(path)) if part]
+    if not parts:
+        return "unknown"
+    return "/".join(parts[-segments:])
+
+
 def short_path(path: str | None, max_len: int = 54) -> str:
     if not path:
         return "unknown"
@@ -3505,7 +3522,7 @@ def _insight_feed(
                 f"{money(top['session_usd'])}. {closing}"
             ),
             "session_label": (
-                f"{short_path(project_key(top.get('project_path')))} · {top.get('tool') or 'session'}"
+                f"{project_name(project_key(top.get('project_path')))} · {top.get('tool') or 'session'}"
                 if top.get("project_path") else str(top.get("tool") or "session")
             ),
             "impact_usd": replay["total_replayed_usd"],

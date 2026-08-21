@@ -285,7 +285,19 @@ def build_handoff_capsule(
                 f"{_compact_int(health.latest_turn_tokens)} input tokens{detail}."
             )
         if health.recommendations:
-            warnings.extend(health.recommendations[:2])
+            extras = health.recommendations[:2]
+            if health.severity != "healthy":
+                # The line just above already gives the per-turn figure and the
+                # severity. A recommendation restating them put the same fact in
+                # two adjacent bullets -- "latest turn used 823.7k input tokens"
+                # followed by "Context is 823,709 tokens/turn (critical)".
+                compact = _compact_int(health.latest_turn_tokens)
+                exact = str(health.latest_turn_tokens)
+                extras = [
+                    rec for rec in extras
+                    if compact not in rec and exact not in rec.replace(",", "")
+                ]
+            warnings.extend(extras)
     if session.agent_calls >= 250:
         warnings.append(f"{session.agent_calls} model calls were observed; continue with a smaller checkpoint.")
     if session.tool_calls >= 80:

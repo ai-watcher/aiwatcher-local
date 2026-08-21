@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import inspect
 import re
+
+BS = chr(92)
 import unittest
 
 from aiwatcher_cli import ui
@@ -261,7 +263,10 @@ class TrimmedHomeTest(unittest.TestCase):
     MOVED = {
         "Models and Tools": "view-insights",
         "Privacy at a glance": "view-setup",
-        "Preflight decisions": "view-receipts",
+        # Lowercase because it is no longer a tile label: the count folded into
+        # the Fresh Start receipts subtitle, where it reads as a sentence
+        # ("6 preflight decisions, last 7 days") rather than a floating card.
+        "preflight decisions": "view-receipts",
     }
 
     @classmethod
@@ -1130,6 +1135,72 @@ class AmbientScalingTest(unittest.TestCase):
         self.assertNotIn("border:", strip)
         self.assertNotIn("box-shadow", strip)
         self.assertIn("color: var(--muted)", strip)
+
+
+class PathsAndChartsTest(unittest.TestCase):
+    """The rest of P3 and P4."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+        cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+
+    def test_project_name_handles_both_separators(self):
+        # The same project appeared three ways in four adjacent rows. The third
+        # was a Windows path that never shortened, because the split matched
+        # forward slashes only.
+        self.assertEqual(ui.project_name("C:/Users/me/Work/thing"), "Work/thing")
+        self.assertEqual(
+            ui.project_name("C:" + BS + "Users" + BS + "me" + BS + "Work" + BS + "thing"),
+            "Work/thing",
+        )
+        self.assertEqual(ui.project_name(""), "unknown")
+        self.assertEqual(ui.project_name(None), "unknown")
+        # Two segments, because the leaf alone does not separate these.
+        self.assertNotEqual(
+            ui.project_name("/a/AgentWatch/aiwatcher-local-public"),
+            ui.project_name("/a/AgentWatch/aiwatcher-local-pr46"),
+        )
+
+    def test_the_front_end_shortens_paths_the_same_way(self):
+        self.assertIn("function projectName", self.js)
+        # Left-truncating mid-word is what made the column unscannable.
+        self.assertNotIn("esc(p.short_name || p.name)", self.js)
+        self.assertNotIn("esc(s.project)}<br>", self.js)
+
+    def test_one_spelling_for_the_thousands_suffix(self):
+        # Python rendered 564.2k and the front end rendered 564K, and both
+        # appeared in the same Watch card; five call sites had grown a
+        # .replace(/K$/, 'k') to paper over it.
+        self.assertNotIn("replace(/K$/", self.js)
+        self.assertIn("+ 'k'", self.js)
+
+    def test_sparklines_show_where_the_line_sits(self):
+        draw = js_function_source(self.js, "drawTileSpark")
+        self.assertIn("svgEl('line'", draw)     # baseline
+        self.assertIn("svgEl('circle'", draw)   # endpoint marker
+
+    def test_prove_opens_with_one_card(self):
+        # A quarter-width tile floated above the card it described, with nothing
+        # connecting them. Both ids stay: load() writes to them.
+        self.assertNotIn('metric-card metric-amber', self.html)
+        self.assertIn('id="preflightDecisions"', self.html)
+        self.assertIn('id="windowLabel"', self.html)
+
+    def test_the_pending_reason_is_stated_once(self):
+        # The same 22 words repeated on every pending row.
+        rows = js_function_source(self.js, "renderHandoffDecisionRows")
+        # proof_reason is still read, but only for rows whose status is not the
+        # generic pending one -- that is the whole fix, so assert the guard
+        # rather than the absence of the field.
+        self.assertIn("decision.proof_status !== 'Proof pending'", rows)
+        # And the sentence it replaced is stated once, on the card.
+        self.assertIn("Proof stays pending until", self.html)
+
+    def test_an_empty_table_says_so_where_the_rows_would_be(self):
+        self.assertIn("td .empty", self.css)
+        self.assertIn("text-align: center", self.css)
 
 
 if __name__ == "__main__":
