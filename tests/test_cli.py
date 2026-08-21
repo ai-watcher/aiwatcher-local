@@ -3604,7 +3604,12 @@ Fresh-session instructions
         ):
             result = cli.command_agent_prompt(args)
         self.assertEqual(result, 0)
-        run.assert_called_once()
+        # The guarantee is that the real agent binary is invoked exactly once,
+        # not that nothing else shells out. Blast-radius scoring reads the file
+        # list with one cached `git ls-files`, so assert on the agent call
+        # rather than on the total subprocess count.
+        agent_calls = [c for c in run.call_args_list if c.args and c.args[0] and c.args[0][0] != "git"]
+        self.assertEqual(len(agent_calls), 1)
 
 
 class HeadlessPromptGateTests(unittest.TestCase):

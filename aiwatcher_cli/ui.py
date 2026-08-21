@@ -2439,6 +2439,10 @@ def build_prompt_preflight(prompt: str, *, tool: str = "agent", cwd: str | None 
         # this prompt from the advice every prompt of this shape receives.
         "signals": result.get("signals") if isinstance(result.get("signals"), dict) else {},
         "removals": result.get("removals") if isinstance(result.get("removals"), list) else [],
+        # Itemised so the score can be accounted for. A number a reader cannot
+        # take apart is a number they stop believing, and this one decides
+        # whether the product spends money on a second opinion.
+        "blast": result.get("blast") if isinstance(result.get("blast"), dict) else {},
         "workflow": result.get("workflow") if isinstance(result.get("workflow"), dict) else {},
         "plan_action": _prompt_plan_action(text, result, handoff_bubble),
         "impact_label": impact_label,

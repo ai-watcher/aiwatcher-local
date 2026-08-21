@@ -126,5 +126,127 @@ class PreflightPayloadTests(unittest.TestCase):
         self.assertNotEqual(billing["suggested_prompt"], settings["suggested_prompt"])
 
 
+BILLING_VARIANTS = (
+    "Rewrite the billing module to use the new pricing table and delete the legacy adapter",
+    "Rewrite the billing module to use the new pricing rules and delete the legacy adapter",
+    "Delete the legacy adapter and rewrite the billing module for the new pricing scheme",
+)
+
+
+class BlastRadiusScoreTests(unittest.TestCase):
+    """Plan item 3 / spec M2.
+
+    The acceptance test the plan shipped with -- "the billing prompt reaches the
+    medium band and a settings refactor does not" -- passed before any of this
+    was written. The billing prompt scored high because "pricing table" sits
+    within 35 characters of "delete", and `table` was in the database-target
+    list, so the scorer believed a table was being dropped. Swapping one word
+    for "rules" dropped it to low. These test the property that was actually
+    wanted: the same intent scores the same however it is phrased.
+    """
+
+    def _score(self, text):
+        with mock.patch.object(cli, "sessions_since", return_value=[]):
+            return cli.analyze_prompt(text, tool="claude", cwd=None)
+
+    def test_the_same_intent_scores_the_same_however_it_is_worded(self):
+        scores = [self._score(t)["score"] for t in BILLING_VARIANTS]
+        self.assertEqual(len(set(scores)), 1, f"paraphrases scored differently: {scores}")
+        for text, score in zip(BILLING_VARIANTS, scores):
+            with self.subTest(text=text[:40]):
+                self.assertGreaterEqual(score, ps.GATE_POINTS)
+
+    def test_ordinary_work_stays_below_the_gate(self):
+        for text in (
+            SETTINGS,
+            "Add a pricing table to the settings page",
+            "Show the session id in the drawer header",
+            "Explain this function",
+        ):
+            with self.subTest(text=text[:40]):
+                self.assertFalse(ps.score_blast_radius(text)["gate"])
+
+    def test_a_bare_table_is_not_a_database(self):
+        # "pricing table", "lookup table", "HTML table". The qualifier is what
+        # makes it a database, and `drop table` is matched separately anyway.
+        # Compared on the blast contribution, not the total: almost every prompt
+        # carries a baseline +2 for naming no plan or checkpoint, which is a
+        # statement about prompt shape rather than about what it would touch.
+        self.assertEqual(ps.score_blast_radius("Add a pricing table to the settings page")["points"], 2)
+        self.assertFalse(ps.score_blast_radius("Add a pricing table to the settings page")["gate"])
+        self.assertGreaterEqual(self._score("Drop the users table from the production database")["score"], 6)
+
+    def test_narrow_cleanup_is_not_high_risk(self):
+        # A destructive verb aimed at nothing sensitive or broad is maintenance.
+        for text in ("delete dead code in one test file", "clear cache",
+                     "remove old code from utils.py"):
+            with self.subTest(text=text):
+                self.assertNotEqual(self._score(text)["risk"], "high")
+
+    def test_documentation_and_fixtures_are_exempt(self):
+        for text in (
+            "Update the auth docs to remove an obsolete screenshot",
+            "Remove the validation error message from the signup form UI",
+        ):
+            with self.subTest(text=text[:40]):
+                blast = ps.score_blast_radius(text)
+                self.assertEqual(blast["points"], 0)
+                self.assertEqual([r["signal"] for r in blast["reasons"]], ["benign_context"])
+
+    def test_breadth_overrides_the_exemption(self):
+        # "delete all the tests" names a fixture context and is still sweeping.
+        self.assertGreater(ps.score_blast_radius("delete all the tests across the entire codebase")["points"], 0)
+
+    def test_a_short_question_is_not_a_short_change_request(self):
+        # Spec 2 scores a terse *change request*. Terseness alone said a
+        # three-word question carried risk.
+        self.assertEqual(ps.score_blast_radius("Explain this function")["points"], 0)
+
+    def test_sensitivity_alone_does_not_reach_the_gate(self):
+        # Measured over 812 real local prompts, scoring a domain keyword at 3 on
+        # its own fires on 19% of them -- "session" alone appears in 11%, being
+        # this product's main domain noun. Pairing halves that.
+        blast = ps.score_blast_radius("Show the session id in the drawer header")
+        self.assertLess(blast["points"], ps.GATE_POINTS)
+        self.assertIn("sensitive_alone", [r["signal"] for r in blast["reasons"]])
+
+    def test_a_guarded_prompt_scores_lower_than_the_bare_one(self):
+        bare = "Refactor the entire codebase and delete old auth secrets"
+        guarded = bare + ". Ask for confirmation before deleting anything."
+        self.assertLess(
+            ps.score_blast_radius(guarded, guarded=True)["points"],
+            ps.score_blast_radius(bare)["points"],
+        )
+
+    def test_blast_radius_cannot_break_prompt_analysis(self):
+        # It shells out to git. A missing, slow or mocked git must cost the
+        # score a signal, not the caller an exception.
+        with mock.patch("subprocess.run", side_effect=OSError("no git")):
+            ps._TREE_CACHE.clear()
+            self.assertEqual(ps.repo_paths("/nowhere"), ())
+        ps._TREE_CACHE.clear()
+
+    def test_refusal_is_decided_separately_from_the_displayed_score(self):
+        # The displayed score includes blast radius, which is the honest figure.
+        # Folding it into the block threshold would have taken the hook from
+        # blocking 0% of real prompts to 3%, as a side effect of a scoring fix.
+        result = self._score(BILLING_VARIANTS[0])
+        self.assertGreaterEqual(result["score"], 6)
+        self.assertIn("hook_risk", result)
+        self.assertEqual(
+            cli._risk_for_score(result["score"] - result["blast"]["points"]),
+            cli._blocking_risk(result),
+        )
+
+    def test_blast_reasons_are_itemised_and_not_mixed_into_findings(self):
+        # A finding pairs one-for-one with a guardrail chip; blast reasons are
+        # observations, not controls.
+        result = self._score(BILLING_VARIANTS[0])
+        self.assertTrue(result["blast"]["reasons"])
+        for reason in result["blast"]["reasons"]:
+            self.assertIn("text", reason)
+            self.assertNotIn(reason["text"], result["findings"])
+
+
 if __name__ == "__main__":
     unittest.main()

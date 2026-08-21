@@ -1583,6 +1583,39 @@ def _is_generated_brief(text: str) -> bool:
     return _consume_brief_token_safely(token, "execution_brief")
 
 
+
+_BLAST_FINDING_TEXT = {
+    "destructive_verb": "Prompt asks to {detail} something.",
+    "destructive_verb_narrow": "Prompt asks to {detail}, but nothing broad or sensitive.",
+    "destructive_verb_resolved": "Those words point at real files here ({detail}).",
+    "sensitive_paired": "Destructive or sweeping work in a sensitive area ({detail}).",
+    "sensitive_alone": "Touches a sensitive area ({detail}), but not destructively.",
+    "breadth_word": "Prompt is repo-wide in scope ({detail}).",
+    "scope_5_to_20": "The named nouns resolve to {detail} in this repository.",
+    "scope_over_20": "The named nouns resolve to {detail} in this repository.",
+    "terse": "Change request is very short ({detail}), so \"done\" is undefined.",
+    "guarded": "Reduced: {detail}.",
+    "benign_context": "Documentation, UI copy or test fixtures ({detail}), so blast radius does not apply.",
+}
+
+
+def _blast_finding(reason: dict[str, object]) -> str:
+    template = _BLAST_FINDING_TEXT.get(str(reason.get("signal")), "{detail}")
+    return template.format(detail=str(reason.get("detail") or ""))
+
+
+
+def _blocking_risk(result: dict[str, object]) -> str:
+    """The band that decides refusal, which is not the band that gets displayed.
+
+    analyze_prompt() reports a score including blast radius, because that is the
+    truth about what a prompt would touch. Refusal is a separate policy: a
+    scoring change should not quietly make the product turn more work away.
+    Falls back to the displayed risk for callers that predate the split.
+    """
+    return str(result.get("hook_risk") or result.get("risk") or "low")
+
+
 def _risk_for_score(score: int) -> str:
     if score >= 6:
         return "high"
@@ -1952,7 +1985,12 @@ def analyze_prompt(
     high_impact_targets = (
         r"repo|repository|codebase|workspace|working tree|source tree|"
         r"project(?:\s+(?:folder|directory|root|workspace|repo|repository))?|"
-        r"all files|all code|entire app|whole app|database|db|table|schema|"
+        # "table" on its own is a pricing table, a lookup table, an HTML table.
+        # Requiring the database qualifier costs nothing -- "drop table" and
+        # "truncate table" are matched separately below -- and it removes a
+        # 6-point swing that fired on "the new pricing table and delete the
+        # legacy adapter", where no database is involved at all.
+        r"all files|all code|entire app|whole app|database|(?:database|db|sql)\s+tables?|schema|"
         r"customer data|production data|prod data|account|tenant|environment|"
         r"credentials?|secrets?|api keys?|access tokens?|auth tokens?|bearer tokens?|"
         r"refresh tokens?|session tokens?"
@@ -2018,11 +2056,38 @@ def analyze_prompt(
         suggestions.append("Keep this as an audit: return findings, proposed fix/tests, and wait before changing files.")
         guardrails.append({"icon": "\U0001F6A7", "label": "Review only"})
 
+    # Spec 2: blast radius joins the same points total, so there is one scale
+    # and the UI's "medium at 3, high at 6" keeps meaning what it says. Before
+    # this, the scorer counted prompt shape only -- whether a plan or checkpoint
+    # was named -- and was blind to what the prompt would actually touch.
+    # An execution brief restates the prompt it was generated from, so scoring
+    # its nouns counts the same work twice: once for what the user asked, and
+    # again for the artifact written to make that ask safer. The guardrails the
+    # brief adds are the mitigation, and the existing scorer already reads them.
+    if _looks_like_execution_brief(text):
+        blast = {"points": 0, "reasons": [], "gate": False,
+                 "signals": prompt_signals.scan_prompt(text), "scope": {}}
+    else:
+        blast = prompt_signals.score_blast_radius(text, cwd=cwd, guarded=safety_guardrails)
+    score += blast["points"]
+    # Deliberately not appended to `findings`. A finding pairs with a guardrail
+    # chip one-for-one, and these are observations about blast radius rather
+    # than controls to apply -- mixing them in would produce six findings and
+    # three chips. Zone B renders them from their own field.
+    blast_reasons = [{**reason, "text": _blast_finding(reason)} for reason in blast["reasons"]]
+
     if not findings:
         findings.append("No obvious cost or safety risk found from prompt text alone.")
         suggestions.append("Keep the task scoped and ask for a brief plan before large edits.")
 
     risk = _risk_for_score(score)
+    # Whether the product REFUSES to run a prompt is deliberately not decided by
+    # the same number that describes it. The displayed score now includes blast
+    # radius, which is the honest figure; folding that into the block threshold
+    # would have changed refusal behaviour as a side effect of a scoring fix --
+    # measured at 0% -> 3% of real prompts on this machine. Hooks and gates keep
+    # deciding on prompt shape and the destructive heuristics, exactly as before.
+    hook_risk = _risk_for_score(score - blast["points"])
     semantic_review = None
     if score > 0 or os.environ.get(RISK_REVIEW_CMD_ENV, "").strip():
         score, risk, semantic_review = _apply_external_risk_review(
@@ -2107,6 +2172,9 @@ def analyze_prompt(
         "suggestions": suggestions,
         "signals": observed_signals,
         "removals": prompt_signals.requested_removals(text),
+        "blast": {"points": blast["points"], "reasons": blast_reasons,
+                  "gate": blast["gate"], "scope": blast.get("scope") or {}},
+        "hook_risk": hook_risk,
         "guardrails": guardrails,
         "semantic_review": semantic_review or {},
         "workflow": workflow,
@@ -5976,7 +6044,7 @@ def command_preflight(args: argparse.Namespace) -> int:
         return 2
     result = analyze_prompt(prompt, tool=args.tool, cwd=args.cwd or os.getcwd())
     print(render_preflight(result))
-    if result["risk"] == "high" and args.fail_on_high:
+    if _blocking_risk(result) == "high" and args.fail_on_high:
         return 3
     return 0
 
@@ -6022,7 +6090,7 @@ def _choose_preflight_prompt(
 
     can_prompt = sys.stdin.isatty() if interactive is None else interactive
     if not can_prompt:
-        if result["risk"] == "high":
+        if _blocking_risk(result) == "high":
             return None, "blocked"
         return prompt, "original"
 
@@ -6550,7 +6618,7 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
     # Prompt Gate is intentionally interactive for both medium and high risk
     # prompts when the hook was installed with --gate. Low risk still passes
     # unchanged above.
-    if _prompt_gate_requested(args) and result["risk"] in {"medium", "high"}:
+    if _prompt_gate_requested(args) and _blocking_risk(result) in {"medium", "high"}:
         gate = None
         try:
             gate = run_prompt_gate(tool=tool, cwd=cwd, prompt=prompt, result=result)
@@ -6631,7 +6699,7 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
                 return 0
         # If the browser gate times out, fall back to the deterministic hook policy below.
 
-    if result["risk"] == "high":
+    if _blocking_risk(result) == "high":
         _record_hook_intervention(
             tool=tool,
             cwd=cwd,
@@ -6709,7 +6777,7 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
     # Prompt Gate is intentionally interactive for both medium and high risk
     # prompts when the Cursor hook was installed with --gate. Cursor still cannot
     # rewrite prompt text in place, so brief decisions return a resubmission note.
-    if _prompt_gate_requested(args) and result["risk"] in {"medium", "high"}:
+    if _prompt_gate_requested(args) and _blocking_risk(result) in {"medium", "high"}:
         try:
             gate = run_prompt_gate(tool="cursor", cwd=cwd, prompt=prompt, result=result)
         except OSError as exc:

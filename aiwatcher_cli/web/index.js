@@ -268,6 +268,9 @@ function renderDerivedZone(data) {
 // state. Everything here was read out of the prompt on this machine.
 function renderObservedZone(data, riskTone) {
   const signals = data.signals || {};
+  // Every point in the score, itemised. The gate that decides whether to pay
+  // for a second opinion reads this number, so it has to be accountable.
+  const blast = ((data.blast || {}).reasons) || [];
   const removals = (data.removals || []).filter(item => item && item.requested);
   const chips = [
     ...(signals.destructive_verbs || []).map(v => ['destructive', v]),
@@ -281,6 +284,8 @@ function renderObservedZone(data, riskTone) {
       <span class="confidence-chip observed">observed</span>
     </div>
     <p><strong>Risk: ${esc(data.risk)} · ${esc(riskScore(data.score))}</strong> <span class="risk-scale">(${esc(RISK_SCALE_NOTE)})</span></p>
+    ${blast.length ? `<ul class="prompt-list blast-list">${blast.map(r =>
+      `<li><span class="blast-points ${Number(r.points) < 0 ? 'down' : ''}">${Number(r.points) > 0 ? '+' : ''}${esc(r.points)}</span> ${esc(r.text || r.detail || r.signal)}</li>`).join('')}</ul>` : ''}
     <p>${esc(data.impact_label)}</p>
     ${chips.length ? `<div class="pill-row signal-row">${chips.map(([kind, word]) =>
       `<span class="signal-chip ${esc(kind)}">${esc(kind)}: ${esc(word)}</span>`).join('')}</div>` : ''}

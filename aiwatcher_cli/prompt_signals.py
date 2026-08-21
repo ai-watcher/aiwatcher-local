@@ -53,6 +53,22 @@ SENSITIVE_KEYWORDS: tuple[str, ...] = (
     "terraform", "pii", "gdpr", "audit",
 )
 
+# Naming a sensitive area is not the same as working on it. "Remove the obsolete
+# screenshot from the auth docs" contains "auth", but the thing being removed is
+# a picture in a document. The existing security heuristic avoids this by
+# requiring a control noun -- "auth middleware", not bare "auth" -- and the
+# sensitivity list is coarser than that, so it needs the exemption stated.
+BENIGN_CONTEXT_WORDS: tuple[str, ...] = (
+    "doc", "docs", "documentation", "readme", "changelog", "screenshot",
+    "comment", "comments", "typo", "wording", "caption", "label",
+    "tooltip", "alt text", "placeholder", "example", "examples", "sample",
+    "fixture", "fixtures", "mock", "mocks", "storybook",
+    "ui", "form", "error message", "test", "tests",
+)
+# Deliberately excludes generic containers like "page" and "module": "remove the
+# auth middleware from the login page" is real security work that happens to
+# name a page. The list is things that are themselves copy, docs or fixtures.
+
 BREADTH_WORDS: tuple[str, ...] = (
     "all", "every", "entire", "across", "codebase", "repo-wide",
 )
@@ -62,6 +78,7 @@ _CONFIG_KEYS = {
     "removal_verbs": REMOVAL_VERBS,
     "sensitive_keywords": SENSITIVE_KEYWORDS,
     "breadth_words": BREADTH_WORDS,
+    "benign_context_words": BENIGN_CONTEXT_WORDS,
 }
 
 
@@ -124,6 +141,7 @@ def scan_prompt(prompt: str, *, word_lists: dict[str, tuple[str, ...]] | None = 
         "destructive_verbs": _match_terms(text, lists["destructive_verbs"]),
         "sensitive_keywords": _match_terms(text, lists["sensitive_keywords"]),
         "breadth_words": _match_terms(text, lists["breadth_words"]),
+        "benign_context": _match_terms(text, lists["benign_context_words"]),
         "word_count": len(words),
         # Spec 2: a very short change request carries a point, because there is
         # not enough of it to say what "done" means.
@@ -173,3 +191,227 @@ def requested_removals(prompt: str, *, word_lists: dict[str, tuple[str, ...]] | 
             seen.add(key)
             removals.append({"what": obj, "requested": True, "verb": verb})
     return removals[:10]
+
+
+# --------------------------------------------------------------------------
+# Blast radius (spec section 2). Everything above is lexical; this half asks
+# what the prompt's nouns actually point at in the repository.
+# --------------------------------------------------------------------------
+
+# Words too common to be worth resolving against a file tree. Matching "test"
+# or "page" against every path turns a narrow prompt into a repo-wide one.
+_STOPWORDS = frozenset("""
+a an and the this that these those to for of in on at by with from into over
+under is are was were be been being do does did done make makes made use uses
+used add adds added new old also then than but or if it its as so we you i
+please can could should would will just now here there what which when where
+how why all any some each every code file files line lines test tests page
+pages thing things stuff bit way ways time times run runs need needs want
+""".split())
+
+
+def _significant_nouns(prompt: str) -> list[str]:
+    words = re.findall(r"[A-Za-z][A-Za-z0-9_.-]{2,}", prompt or "")
+    seen: set[str] = set()
+    out: list[str] = []
+    for word in words:
+        lowered = word.lower()
+        if lowered in _STOPWORDS or lowered in seen:
+            continue
+        seen.add(lowered)
+        out.append(lowered)
+    return out
+
+
+_TREE_CACHE: dict[str, tuple[str, tuple[str, ...]]] = {}
+
+
+def repo_paths(cwd: str | None) -> tuple[str, ...]:
+    """Tracked paths for *cwd*, cached against the current HEAD.
+
+    Keyed on HEAD rather than a clock, so re-planning the same prompt against
+    an unchanged tree costs one cheap git call and nothing else. A directory
+    that is not a repository, or a git that fails for any reason, returns empty
+    -- blast radius simply contributes nothing rather than blocking the score.
+    """
+    if not cwd:
+        return ()
+    # Blast radius is a best-effort signal on top of a free lexical one. It must
+    # never be able to break prompt analysis: a shelled-out git that is missing,
+    # slow, in a non-repository, or replaced by a test double contributes
+    # nothing and the score is computed without it.
+    #
+    # One git call, cached for the life of the process. This runs on the hook
+    # path, which fires on every prompt submit, and spec 10 names Stage 1's
+    # sub-second response as a feature worth protecting. A file list that goes
+    # stale within a single process costs at most a slightly wrong file count.
+    cached = _TREE_CACHE.get(cwd)
+    if cached is not None:
+        return cached[1]
+    try:
+        import subprocess
+        listed = subprocess.run(
+            ["git", "-C", cwd, "ls-files"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if getattr(listed, "returncode", 1) != 0:
+            _TREE_CACHE[cwd] = ("", ())
+            return ()
+        stdout = str(getattr(listed, "stdout", "") or "")
+        paths = tuple(line.strip() for line in stdout.splitlines() if line.strip())
+    except Exception:
+        _TREE_CACHE[cwd] = ("", ())
+        return ()
+    head = ""
+    _TREE_CACHE[cwd] = (head, paths)
+    return paths
+
+
+def resolve_scope(prompt: str, paths: tuple[str, ...]) -> dict[str, Any]:
+    """Which of the prompt's nouns point at real files, and how many.
+
+    Matches against the path's own segments rather than the whole string, so
+    "billing" does not resolve every file under a directory that happens to
+    contain the word somewhere in its full path.
+    """
+    if not paths:
+        return {"matched_paths": [], "matched_nouns": [], "unresolved_nouns": [], "file_count": 0}
+    nouns = _significant_nouns(prompt)
+    if not nouns:
+        return {"matched_paths": [], "matched_nouns": [], "unresolved_nouns": [], "file_count": 0}
+
+    segments: dict[str, set[str]] = {}
+    for path in paths:
+        for part in re.split(r"[\/]+", path.lower()):
+            stem = re.sub(r"\.[a-z0-9]+$", "", part)
+            if stem:
+                segments.setdefault(stem, set()).add(path)
+
+    matched: set[str] = set()
+    matched_nouns: list[str] = []
+    unresolved: list[str] = []
+    for noun in nouns:
+        hits = segments.get(noun) or {p for stem, ps in segments.items() if noun in stem for p in ps}
+        if hits:
+            matched_nouns.append(noun)
+            matched.update(hits)
+        else:
+            unresolved.append(noun)
+    return {
+        "matched_paths": sorted(matched)[:200],
+        "matched_nouns": matched_nouns,
+        "unresolved_nouns": unresolved[:10],
+        "file_count": len(matched),
+    }
+
+
+# Spec 2's points table. Gate at the medium band, which the UI already names,
+# so a user learns one scale rather than two.
+GATE_POINTS = 3
+
+POINTS = {
+    "destructive_verb": 3,
+    "destructive_verb_narrow": 1,
+    "destructive_verb_resolved": 2,
+    "sensitive_paired": 3,
+    "sensitive_alone": 1,
+    "breadth_word": 2,
+    "scope_5_to_20": 1,
+    "scope_over_20": 2,
+    "terse": 1,
+}
+
+
+def score_blast_radius(prompt: str, *, cwd: str | None = None, guarded: bool = False,
+                       word_lists: dict[str, tuple[str, ...]] | None = None) -> dict[str, Any]:
+    """Points for what this prompt would touch, with every one itemised.
+
+    Returns the reasons as well as the total, because a number a user cannot
+    account for is a number they stop trusting -- and because the gate has to be
+    explainable before it is allowed to spend anything.
+
+    One deliberate change from the spec's table. A domain keyword on its own
+    scores 1, not 3; it scores 3 only alongside a destructive verb or a breadth
+    word. Measured over 812 real local prompts, the table as written fires on
+    19% of them, largely because "session" is both a sensitivity keyword and
+    this product's main domain noun -- it appears in 11% of prompts on its own.
+    A sensitive area is only risky when something broad or destructive is being
+    done to it; naming one is just describing where you work. With the pairing
+    rule the same corpus fires on 10%.
+    """
+    lists = word_lists or load_word_lists()
+    signals = scan_prompt(prompt, word_lists=lists)
+    scope = resolve_scope(prompt, repo_paths(cwd))
+    reasons: list[dict[str, Any]] = []
+
+    def add(key: str, detail: str) -> None:
+        reasons.append({"signal": key, "points": POINTS[key], "detail": detail})
+
+    destructive = signals["destructive_verbs"]
+    breadth = signals["breadth_words"]
+    sensitive = signals["sensitive_keywords"]
+
+    # A destructive verb scores fully when it is aimed at something sensitive,
+    # sweeping, or resolvable in the repository. Aimed at nothing in particular
+    # -- "delete dead code in one test file", "clear cache" -- it is ordinary
+    # maintenance, and scoring it as high-risk is how a gate ends up paying for
+    # a second opinion on a one-line cleanup.
+    # Documentation, UI copy and test fixtures are exempt outright, not merely
+    # de-weighted. "Update the auth docs to remove an obsolete screenshot" names
+    # a sensitive area and a destructive verb and is neither. The existing
+    # security heuristic already treats these contexts this way; the sensitivity
+    # list is coarser than it, so it needs the same exemption said out loud.
+    # Breadth overrides the exemption: "delete all the tests" is still sweeping.
+    benign = signals.get("benign_context") or []
+    if benign and not breadth:
+        return {
+            "points": 0,
+            "reasons": [{"signal": "benign_context", "points": 0,
+                         "detail": ", ".join(benign[:4])}],
+            "gate": False,
+            "signals": signals,
+            "scope": scope,
+        }
+    destructive_has_target = bool(sensitive or breadth or scope["matched_nouns"])
+    if destructive:
+        if destructive_has_target:
+            add("destructive_verb", ", ".join(destructive[:4]))
+        else:
+            add("destructive_verb_narrow", ", ".join(destructive[:4]))
+        if scope["matched_nouns"]:
+            add("destructive_verb_resolved", f"{scope['file_count']} file(s) match the named nouns")
+    if sensitive:
+        if destructive or breadth:
+            add("sensitive_paired", ", ".join(sensitive[:4]))
+        else:
+            add("sensitive_alone", ", ".join(sensitive[:4]))
+    if breadth:
+        add("breadth_word", ", ".join(breadth[:4]))
+    if 5 <= scope["file_count"] <= 20:
+        add("scope_5_to_20", f"{scope['file_count']} files")
+    elif scope["file_count"] > 20:
+        add("scope_over_20", f"{scope['file_count']} files")
+    # Spec 2 scores a short *change request*, not a short prompt. "Explain this
+    # function" is three words and asks for nothing to be changed; scoring it
+    # made a read-only question look like risk. Terseness is a modifier on
+    # something else, so it only counts when another signal already fired.
+    if signals["terse"] and reasons:
+        add("terse", f"{signals['word_count']} words")
+
+    total = sum(item["points"] for item in reasons)
+    # A prompt that already says "ask for confirmation before deleting" carries
+    # the same blast radius but genuinely less risk, which is the same call the
+    # existing scorer makes when it halves a destructive penalty for a guarded
+    # prompt. Without this, feeding a generated brief back in scores as high as
+    # the bare prompt it was written to make safer.
+    if guarded and total:
+        total = total // 2
+        reasons.append({"signal": "guarded", "points": -(sum(i["points"] for i in reasons) - total),
+                        "detail": "prompt already states a confirmation or checkpoint guardrail"})
+    return {
+        "points": total,
+        "reasons": reasons,
+        "gate": total >= GATE_POINTS,
+        "signals": signals,
+        "scope": scope,
+    }

@@ -544,6 +544,9 @@
     .plan-zone-guardrails > summary:hover { color: var(--text); }
     .signal-row { margin-top: var(--sp-2); }
     .signal-chip { font-size: var(--fs-1); padding: 2px var(--sp-2); border-radius: var(--r-pill); border: 1px solid var(--line); color: var(--muted); }
+    .blast-list li { display: flex; gap: var(--sp-2); align-items: baseline; }
+    .blast-points { font-variant-numeric: tabular-nums; font-weight: var(--fw-med); color: var(--amber); min-width: 2.2em; }
+    .blast-points.down { color: var(--green); }
     .signal-chip.destructive { color: #ffd8df; border-color: rgba(242,119,143,.45); background: var(--red-soft); }
     .signal-chip.sensitive { color: #ffe2a4; border-color: rgba(246,189,96,.45); background: var(--amber-soft); }
     .signal-chip.breadth { color: #dceaff; border-color: rgba(112,167,255,.45); background: var(--blue-soft); }
