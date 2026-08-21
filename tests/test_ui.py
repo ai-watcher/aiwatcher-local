@@ -179,7 +179,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn('recommended-action action-composer', ui.HTML)
         self.assertIn('recommended-action loading-action', ui.HTML)
         self.assertIn('ai-loading-panel', ui.HTML)
-        self.assertIn("Recommended: continue in a fresh session", ui.HTML)
+        # Sentence case: this sits under an uppercase NEEDS ACTION eyebrow, and
+        # a lowercase headline beneath an uppercase one read as a broken string.
+        self.assertIn("Recommended: Continue in a fresh session", ui.HTML)
         self.assertIn("Build Fresh Start brief", ui.HTML)
         self.assertIn("Fresh Start", ui.HTML)
         self.assertIn("renderIdentityStrip", ui.HTML)

@@ -461,7 +461,9 @@ def _project_health(items: list[LocalSession]) -> dict[str, object]:
     if api_value >= 10 or tool_calls >= 250 or calls >= 250 or tokens >= 1_000_000:
         return {
             "status": "review",
-            "label": "Review",
+            # The column holds states: Critical, Healthy, Limited data. "Review"
+            # was an instruction sitting among them.
+            "label": "Needs review",
             "tone": "warning",
             "reason": "High usage for this window. Check whether the latest sessions produced useful outcomes.",
             "action_label": "Review",
@@ -3091,6 +3093,14 @@ def _change_rows(
             ),
             "survival_pct": survived,
             "survival_label": f"{survived:.0f}%" if survived is not None else "—",
+            # The numeric field is emitted alongside the label because the column
+            # header offers sorting on it. Every other sortable column ships both;
+            # this one shipped only the label, so the header advertised a sort
+            # that had nothing to sort by and silently did nothing when clicked.
+            "usd_per_surviving_line": (
+                round(float(measured["usd_per_surviving_line"]), 6)
+                if measured.get("usd_per_surviving_line") is not None else None
+            ),
             "usd_per_surviving_line_label": (
                 money(float(measured["usd_per_surviving_line"]))
                 if measured.get("usd_per_surviving_line") is not None else "—"

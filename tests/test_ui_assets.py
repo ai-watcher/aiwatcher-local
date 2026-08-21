@@ -968,5 +968,53 @@ class DesignScaleTest(unittest.TestCase):
         self.assertIn("var(--fw-normal)", sub)
 
 
+class CopyAndAffordanceTest(unittest.TestCase):
+    """P2-4, P2-8 and the P4 copy edits."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+        cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+
+    def test_a_sortable_column_has_something_to_sort_by(self):
+        # $/surviving line offered a sort and shipped only a label, so clicking
+        # it genuinely did nothing. Every other sortable column ships both.
+        source = inspect.getsource(ui)
+        self.assertIn('"usd_per_surviving_line":', source)
+        self.assertIn('"usd_per_surviving_line_label":', source)
+
+    def test_pill_shape_is_reserved_for_things_you_can_click(self):
+        # Six phrasings of one privacy claim, plus two card descriptors, were
+        # inert <span>s shaped exactly like filter chips.
+        self.assertNotIn('<span class="pill">', self.html)
+        self.assertIn("note-chip", self.css)
+        for gone in ("Local evidence only", "Local machine only", "Local logs only",
+                     "Prompt text stays private"):
+            with self.subTest(phrase=gone):
+                self.assertNotIn(gone, self.html)
+
+    def test_targets_are_named_as_products(self):
+        # The buttons rendered their raw ids: "Generic claude codex cursor vscode".
+        self.assertIn("HANDOFF_TARGET_LABELS", self.js)
+        for label in ("Claude Code", "VS Code", "Codex", "Cursor"):
+            with self.subTest(label=label):
+                self.assertIn(label, self.js)
+
+    def test_the_tool_default_follows_the_observed_tool(self):
+        # It defaulted to whichever option came first (Codex) while every
+        # observed session on this machine is claude-code.
+        self.assertIn("function setDefaultPromptTool", self.js)
+        self.assertIn("promptToolTouched", self.js)
+        self.assertIn('<option value="claude">Claude Code</option>', self.html)
+
+    def test_the_status_column_holds_states_not_instructions(self):
+        source = inspect.getsource(ui._project_health) if hasattr(ui, "_project_health") else inspect.getsource(ui)
+        self.assertIn('"label": "Needs review"', source)
+
+    def test_nav_uses_one_case_convention(self):
+        self.assertNotIn("Plan / Control", self.html)
+
+
 if __name__ == "__main__":
     unittest.main()

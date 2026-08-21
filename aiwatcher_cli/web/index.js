@@ -1,6 +1,15 @@
 // The window the tile sparklines were last drawn for.
 let tileSparkWindow = null;
 
+// These are product names, not ids. The buttons used to render the raw target
+// key, so the row read "Generic claude codex cursor vscode".
+const HANDOFF_TARGET_LABELS = {
+  generic: 'Generic',
+  claude: 'Claude Code',
+  codex: 'Codex',
+  cursor: 'Cursor',
+  vscode: 'VS Code',
+};
 const HANDOFF_TYPES = [
   { id: 'coding', label: 'Coding continuation' },
   { id: 'product', label: 'Product/strategy continuation' },
@@ -433,6 +442,25 @@ function runtimeReturnPanel(runtime, sourcePath) {
   </section>`;
 }
 let watcherCommand = 'aiwatcher watch --notify --overlay --interval 60';
+// The dropdown defaulted to whichever option came first in the markup, which
+// was Codex, while every observed session on this machine is claude-code. Set
+// it from the most recent session instead, and only before the user has touched
+// it -- re-picking on every 10s poll would fight them mid-edit.
+let promptToolTouched = false;
+
+function setDefaultPromptTool(data) {
+  const select = document.getElementById('promptTool');
+  if (!select || promptToolTouched) return;
+  const recent = (data.recent_sessions || [])[0];
+  const tool = String((recent && recent.tool) || '').toLowerCase();
+  const match = tool.includes('claude') ? 'claude'
+    : tool.includes('codex') ? 'codex'
+    : tool.includes('cursor') ? 'cursor'
+    : null;
+  // Falls back to Claude Code rather than to the first option in the list.
+  select.value = match || 'claude';
+}
+
 function renderWatcher(watcher) {
   const pill = document.getElementById('watcherPill');
   const start = document.getElementById('watcherStart');
@@ -853,7 +881,7 @@ function renderHandoff(capsule) {
     ${renderHandoffForm(capsule)}
     <div class="copy-row">
       <span class="label" style="align-self:center">Format for</span>
-      ${['generic','claude','codex','cursor','vscode'].map(item => `<button class="btn-quiet" aria-pressed="${item === target ? 'true' : 'false'}" onclick="regenerateHandoff('${esc(capsule.session_id)}','${item}', ${includePrompt}, ${isDemo ? 'true' : 'false'})">${esc(item === 'generic' ? 'Generic' : item)}</button>`).join('')}
+      ${Object.entries(HANDOFF_TARGET_LABELS).map(([item, label]) => `<button class="btn-quiet" aria-pressed="${item === target ? 'true' : 'false'}" onclick="regenerateHandoff('${esc(capsule.session_id)}','${item}', ${includePrompt}, ${isDemo ? 'true' : 'false'})">${esc(label)}</button>`).join('')}
     </div>
     <p class="tool-link-note">${esc(runtime.reason || 'Use the Fresh Start brief when the exact running chat cannot be reopened.')}</p>
     ${enrichment}
@@ -2024,7 +2052,7 @@ function renderSessionActions(s) {
   const runtime = s.runtime_attachment || actions.find(action => action.id === 'open_tool') || {};
   const openAction = actions.find(action => action.id === 'open_tool') || {};
   const title = hasHandoff
-    ? 'Recommended: continue in a fresh session'
+    ? 'Recommended: Continue in a fresh session'
     : needsOutcome
       ? 'Recommended: mark the outcome'
       : 'Recommended: tighten the next prompt';
@@ -3236,6 +3264,7 @@ async function loadOnce(resetDetail, forceRefresh) {
     return null;
   }
   renderWatcher(data.watcher || null);
+  setDefaultPromptTool(data);
   renderCacheStatus(data.cache || null);
   const totals = data.totals;
   document.getElementById('windowLabel').textContent = totals.window_label;

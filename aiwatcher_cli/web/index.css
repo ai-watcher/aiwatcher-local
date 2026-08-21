@@ -496,6 +496,13 @@
        beside -- which is what the disabled button here used to do. */
     .action-note { font-size: var(--fs-2); color: var(--muted); line-height: 1.45; }
     .risk-scale { font-size: var(--fs-2); font-weight: var(--fw-normal); color: var(--muted); }
+    /* Pill shape is reserved for things you can click. These are statements --
+       six different phrasings of "this data stays local", plus two describing
+       what a card contains -- and every one of them was an inert <span> shaped
+       exactly like a filter chip. The lock is on the privacy note only. */
+    .note-chip { font-size: var(--fs-1); color: var(--muted); white-space: nowrap; }
+    .note-chip.local::before { content: "🔒 "; opacity: .75; }
+    .note-chip:not(:first-child) { margin-left: var(--sp-2); }
     .metric-spark-empty { color: var(--line); }
     /* The command is shown, not just copyable: a user should be able to read
        what they are about to paste into a terminal without clicking first. */

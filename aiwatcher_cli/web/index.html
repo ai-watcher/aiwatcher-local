@@ -52,7 +52,7 @@
 
   <nav class="product-nav" aria-label="AIWatcher Local sections">
     <button class="nav-tab active" data-view="today" onclick="showView('today')">Home</button>
-    <button class="nav-tab" data-view="prompt" onclick="showView('prompt')">Plan / Control</button>
+    <button class="nav-tab" data-view="prompt" onclick="showView('prompt')">Plan</button>
     <button class="nav-tab" data-view="sessions" onclick="showView('sessions')">Watch</button>
     <button class="nav-tab nav-sub" data-view="projects" onclick="showView('projects')">Projects</button>
     <button class="nav-tab nav-sub" data-view="changes" onclick="showView('changes')">Changes ledger</button>
@@ -91,9 +91,11 @@
         <div class="section-title"><div><h2>Plan</h2><p>Paste the prompt you are about to send. AIWatcher chooses the route before you spend context: rewrite, fork, Fresh Start, archive, or continue.</p></div></div>
         <textarea id="promptInput" class="prompt-box" placeholder="Paste or draft the next AI prompt here. Example: Refactor every screen after reviewing the current architecture."></textarea>
         <div class="prompt-form-row">
-          <select id="promptTool">
+          <!-- Default is set by setDefaultPromptTool() from the most recently
+               observed session, not by whichever option happens to come first. -->
+          <select id="promptTool" onchange="promptToolTouched = true">
             <option value="codex">Codex</option>
-            <option value="claude">Claude</option>
+            <option value="claude">Claude Code</option>
             <option value="cursor">Cursor</option>
             <option value="agent">Generic agent</option>
           </select>
@@ -118,7 +120,7 @@
       <details class="aiw-details">
         <summary><span id="optimizeWorkspaceSummary">Optimize workspace</span></summary>
         <div class="details-body">
-          <p class="optimize-lede">Review stale chats, pending Fresh Starts, AI worktrees, and runtime clutter before carrying context forward. <span class="pill">Local evidence only</span></p>
+          <p class="optimize-lede">Review stale chats, pending Fresh Starts, AI worktrees, and runtime clutter before carrying context forward. <span class="note-chip local">Local only</span></p>
           <div id="optimizeWorkspaceBody"><div class="empty">Loading workspace cleanup evidence...</div></div>
         </div>
       </details>
@@ -142,14 +144,14 @@
     <div class="card" style="margin-bottom:14px">
       <div class="section-title">
         <div><h2>Context health</h2><p>Context bloat, runway pressure, and Fresh Start actions for local work.</p></div>
-        <span class="pill">Actionable sessions</span>
+        <span class="note-chip">Actionable sessions</span>
       </div>
       <div id="sessionContextHealth"></div>
     </div>
     <div class="card">
       <div class="section-title">
         <div><h2>Work</h2><p>Search sessions, inspect projects, review changes, and continue prior local AI work. Prompt text is shown for your own review only, never uploaded.</p></div>
-        <span class="pill">Local machine only</span>
+        <span class="note-chip local">Local only</span>
       </div>
       <div class="session-filters">
         <input id="sessionSearch" type="text" placeholder="Search project, tool, model, session id, or a file/topic keyword" oninput="debounceSessionSearch()">
@@ -186,7 +188,7 @@
     <div class="card">
       <div class="section-title">
         <div><h2>Cost per change</h2><p>What each commit cost in AI spend, and what that works out to per line.</p></div>
-        <span class="pill">Ranked by cost</span>
+        <span class="note-chip">Ranked by cost</span>
       </div>
       <div id="changeTotals"></div>
       <div class="table-wrap"><table>
@@ -217,7 +219,7 @@
     <div class="card" style="margin-bottom:14px">
       <div class="section-title">
         <div><h2>Fresh Start receipts</h2><p>When AIWatcher suggested a fresh session, what you chose, and whether a follow-up session was observed.</p></div>
-        <div class="actions"><button class="btn-quiet" onclick="quietFreshStartReminders()">Quiet reminders</button><span class="pill">Metadata only</span></div>
+        <div class="actions"><button class="btn-quiet" onclick="quietFreshStartReminders()">Quiet reminders</button><span class="note-chip local">Local only</span></div>
       </div>
       <div class="table-wrap"><table>
         <thead><tr><th>Time</th><th>Decision</th><th>Expected context at risk</th><th>Proof</th><th>Sessions</th><th></th></tr></thead>
@@ -227,7 +229,7 @@
     <div class="card">
       <div class="section-title">
         <div><h2>Intervention receipts</h2><p>Risk decisions, predicted impact, resulting usage, and developer outcomes.</p></div>
-        <span class="pill">Prompt text stays private</span>
+        <span class="note-chip local">Local only</span>
       </div>
       <div class="table-wrap"><table>
         <thead><tr><th>Time</th><th>Tool / project</th><th>Decision</th><th>Risk change</th><th>Result</th><th></th></tr></thead>
@@ -240,7 +242,7 @@
     <section class="card" style="margin-bottom:14px">
       <div class="section-title">
         <div><h2>Spend and improvement signals</h2><p>Ranked by money, context pressure, and what to change next.</p></div>
-        <span class="pill">Local logs only</span>
+        <span class="note-chip local">Local only</span>
       </div>
       <div id="insightHeadline"></div>
       <div id="insightFeed"></div>
@@ -288,7 +290,7 @@
     <div class="card">
       <div class="section-title">
         <div><h2>Settings</h2><p>Setup, coverage, privacy, and local companion behavior.</p></div>
-        <span class="pill">Local only</span>
+        <span class="note-chip local">Local only</span>
       </div>
       <p class="receipt-note">Ambient Watch starts with the dashboard by default. For standalone mode, run <code>aiwatcher watch --notify --overlay --interval 60</code>.</p>
       <details class="aiw-details">
