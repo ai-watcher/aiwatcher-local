@@ -332,8 +332,8 @@ class SessionDrawerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
-        start = cls.js.index("document.getElementById('detailContent').innerHTML = `<div class=\"session-review-shell\">")
-        cls.composition = cls.js[start:cls.js.index("`;", start)]
+        start = cls.js.index("setDrawerContent(`<div class=\"session-review-shell\">")
+        cls.composition = cls.js[start:cls.js.index("`);", start)]
 
     def test_the_conclusion_comes_before_its_evidence(self):
         # renderVerdict says what to do and promptReview says why; the evidence
@@ -456,6 +456,54 @@ class SessionDrawerTest(unittest.TestCase):
     def test_nothing_is_only_reachable_by_scrolling_past_it(self):
         # Collapsing must not become hiding: every summary has a body.
         self.assertNotIn("<summary></summary>", self.js)
+
+
+class DrawerArrivalTest(unittest.TestCase):
+    """A drawer populates in up to three writes -- a loading line, a fast
+    summary, then full evidence 0.2s to 4.5s later -- so content has to resolve
+    rather than jump. The hero is byte-identical across the summary -> detail
+    swap, so fading the whole node would blink content that had already
+    settled."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+
+    def test_every_drawer_write_goes_through_the_helper(self):
+        # A raw assignment would skip the diff and animate nothing, which is the
+        # jump this replaced.
+        self.assertNotIn("detailContent').innerHTML =", self.js)
+        self.assertGreater(self.js.count("setDrawerContent("), 10)
+
+    def test_only_blocks_that_changed_are_animated(self):
+        helper = self.js[self.js.index("function setDrawerContent("):]
+        helper = helper[:helper.index(chr(10) + "}")]
+        self.assertIn("settled.has(el.outerHTML)", helper)
+        # Recorded before the class lands, or the next write compares against
+        # markup carrying a leftover .aiw-arrive and re-animates everything.
+        self.assertLess(helper.index("node.aiwSettled = new Set("),
+                        helper.index("classList.add('aiw-arrive')"))
+
+    def test_reopening_a_drawer_resolves_again(self):
+        opener = self.js[self.js.index("function openDrawer("):]
+        self.assertIn("aiwSettled = null", opener[:opener.index(chr(10) + "}")])
+
+    def test_a_write_that_lands_while_hidden_is_not_parked_invisible(self):
+        # The animation fills backwards, so a pending one holds opacity 0 and
+        # this page spends most of its life hidden on a second monitor.
+        helper = self.js[self.js.index("function setDrawerContent("):]
+        helper = helper[:helper.index(chr(10) + "}")]
+        self.assertIn("document.hidden", helper)
+        self.assertLess(helper.index("document.hidden"),
+                        helper.index("classList.add('aiw-arrive')"))
+
+    def test_the_arrival_is_short_and_respects_reduced_motion(self):
+        self.assertIn("@keyframes aiwArrive", self.css)
+        self.assertIn(".aiw-arrive { animation: aiwArrive .18s", self.css)
+        # Covered by the global reduce block rather than a rule of its own.
+        reduce = self.css[self.css.index("@media (prefers-reduced-motion: reduce)"):]
+        self.assertIn("animation-duration: .001ms !important", reduce[:400])
 
 
 class PlanControlTest(unittest.TestCase):

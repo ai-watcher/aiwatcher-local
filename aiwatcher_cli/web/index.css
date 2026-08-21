@@ -1238,6 +1238,15 @@
     button.copied { border-color: rgba(67,217,163,.55); color: var(--green); }
     .toast.show { opacity: 1; transform: translateY(0); }
     .toast.error { border-color: rgba(242,125,143,.55); background: #2a171d; }
+    /* Drawer content lands 0.2s-4.5s after the panel opens, so a bare swap
+       reads as a jump rather than a resolve. Only the blocks that actually
+       changed carry this (see setDrawerContent in index.js); the global
+       prefers-reduced-motion block below collapses it to nothing. */
+    @keyframes aiwArrive {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: none; }
+    }
+    .aiw-arrive { animation: aiwArrive .18s ease-out both; }
     .loading { color: var(--muted); padding: 18px 0; }
     .drawer .loading { padding: 18px 2px; }
     @keyframes recommendationPulse {

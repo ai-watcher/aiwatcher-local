@@ -128,13 +128,13 @@ function openReceipt(receiptId) {
          <div class="mini"><span class="label">API-equivalent</span><strong>${esc(receipt.inferred.api_value_label || '—')}</strong></div>
        </div><p>${esc(receipt.inferred.disclaimer)}</p></section>`
     : '';
-  document.getElementById('detailContent').innerHTML = `<section class="detail-section">
+  setDrawerContent(`<section class="detail-section">
     <h2>${esc(receipt.decision_label)}</h2>
     <p>${esc(receipt.tool)} · ${esc(receipt.project)} · ${esc(dateLabel(receipt.created_at))}</p>
     ${riskFlow(receipt)}
     <div class="pill-row"><span class="pill">${esc(receipt.session_status)}</span>${outcomePill(receipt.outcome)}</div>
   </section><section class="detail-section"><h3>Predicted before execution</h3>${predictedStats(receipt)}</section>${actual}${inferred}
-  <section class="detail-section"><h3>Privacy evidence</h3><p>Prompt text is not stored. This receipt contains hashes, policy findings, aggregate usage, and your outcome only.</p></section>`;
+  <section class="detail-section"><h3>Privacy evidence</h3><p>Prompt text is not stored. This receipt contains hashes, policy findings, aggregate usage, and your outcome only.</p></section>`);
 }
 // Feedback lands on the button that was pressed. The toast renders bottom-right,
 // which on this layout is up to 750px from the control -- far enough that a
@@ -456,6 +456,8 @@ async function returnToRuntime(sessionId) {
   }
 }
 function openDrawer(title) {
+  const content = document.getElementById('detailContent');
+  if (content) content.aiwSettled = null;
   document.getElementById('drawerTitle').textContent = title;
   document.getElementById('drawerBackdrop').classList.add('open');
   document.getElementById('detailDrawer').classList.add('open');
@@ -467,6 +469,38 @@ function closeDrawer() {
   document.getElementById('detailDrawer').classList.remove('open');
   document.getElementById('detailDrawer').setAttribute('aria-hidden', 'true');
   document.body.classList.remove('drawer-open');
+}
+// A drawer populates in up to three writes: a loading line at ~0ms, a fast
+// summary, then full evidence anywhere from 200ms to 4.5s later. Each write
+// replaced the node wholesale, so the populated state landed as a jump.
+// Fading the whole node instead makes the last write blink the hero, which is
+// byte-identical across the summary -> detail swap and has already settled.
+// So diff against what is on screen and animate only the blocks that changed.
+// prefers-reduced-motion is honoured by the global reduce block in index.css,
+// which collapses the animation to nothing.
+function drawerArrivalBlocks(node) {
+  // A session review wraps everything in one .session-review-shell, so the
+  // blocks that arrive independently sit one level further down.
+  const children = Array.from(node.children);
+  if (children.length === 1 && children[0].children.length > 1) return Array.from(children[0].children);
+  return children;
+}
+function setDrawerContent(html) {
+  const node = document.getElementById('detailContent');
+  if (!node) return null;
+  const settled = node.aiwSettled || new Set();
+  node.innerHTML = html;
+  const blocks = drawerArrivalBlocks(node);
+  // Recorded before the class is added, so the next write compares against
+  // pristine markup rather than markup carrying a leftover .aiw-arrive.
+  node.aiwSettled = new Set(blocks.map(el => el.outerHTML));
+  // The arrival animation fills backwards, so a pending one holds the block at
+  // opacity 0. This page spends most of its life hidden on a second monitor,
+  // where animations never start -- so a write that lands while hidden is left
+  // alone rather than parked invisible. Nobody is watching it resolve anyway.
+  if (document.hidden) return node;
+  blocks.forEach(el => { if (!settled.has(el.outerHTML)) el.classList.add('aiw-arrive'); });
+  return node;
 }
 function outcomePill(outcome) {
   const value = outcome || 'not marked';
@@ -1071,7 +1105,7 @@ async function regenerateHandoff(sessionId, target = 'generic', includePrompt = 
 async function openDemoHandoff(target = 'generic', includePrompt = false, options = null) {
   openDrawer('Fresh Start');
   const node = document.getElementById('detailContent');
-  node.innerHTML = '<div class="loading">Building Fresh Start demo from sample context pressure...</div>';
+  setDrawerContent('<div class="loading">Building Fresh Start demo from sample context pressure...</div>');
   const demoOptions = options || {
     type: 'product',
     objective: 'Continue the work in a fresh session without losing decisions, constraints, or acceptance criteria.',
@@ -1082,15 +1116,15 @@ async function openDemoHandoff(target = 'generic', includePrompt = false, option
   const payload = handoffPayload('', target, includePrompt, demoOptions);
   const capsule = await postJson('/api/handoff-demo', payload);
   if (capsule.error) {
-    node.innerHTML = `<div class="empty">${esc(capsule.error)}</div>`;
+    setDrawerContent(`<div class="empty">${esc(capsule.error)}</div>`);
     return;
   }
-  node.innerHTML = renderHandoff(capsule);
+  setDrawerContent(renderHandoff(capsule));
 }
 async function openHandoff(sessionId, target = 'generic', includePrompt = false, options = null) {
   openDrawer('Fresh Start');
   const node = document.getElementById('detailContent');
-  node.innerHTML = '<div class="loading">Finding the source session before building the Fresh Start brief...</div>';
+  setDrawerContent('<div class="loading">Finding the source session before building the Fresh Start brief...</div>');
   const handoffOptions = options || handoffOptionsFromForm();
   const payload = handoffPayload(sessionId, target, includePrompt, handoffOptions);
   const summaryPromise = fetch(`/api/session-summary?id=${encodeURIComponent(sessionId)}`)
@@ -1101,20 +1135,20 @@ async function openHandoff(sessionId, target = 'generic', includePrompt = false,
   const handoffPromise = postJson('/api/handoff', payload);
   const fastSummary = await summaryPromise;
   if (fastSummary && !fastSummary.error) {
-    node.innerHTML = renderSessionSummary(fastSummary, 'Building Fresh Start brief...');
+    setDrawerContent(renderSessionSummary(fastSummary, 'Building Fresh Start brief...'));
   } else {
-    node.innerHTML = '<div class="loading">Building local Fresh Start brief...</div>';
+    setDrawerContent('<div class="loading">Building local Fresh Start brief...</div>');
   }
   const basicCapsule = await basicPromise;
   if (basicCapsule && !basicCapsule.error && !includePrompt) {
-    node.innerHTML = renderHandoff(basicCapsule);
+    setDrawerContent(renderHandoff(basicCapsule));
   }
   const capsule = await handoffPromise;
   if (capsule.error) {
-    node.innerHTML = `<div class="empty">${esc(capsule.error)}</div>`;
+    setDrawerContent(`<div class="empty">${esc(capsule.error)}</div>`);
     return;
   }
-  node.innerHTML = renderHandoff(capsule);
+  setDrawerContent(renderHandoff(capsule));
 }
 function handoffDecisionBubble(sessionId) {
   const current = window.currentHandoffBubble || {};
@@ -2307,12 +2341,12 @@ function miniStats(totals) {
 }
 async function selectProject(project) {
   openDrawer('Project detail');
-  document.getElementById('detailContent').innerHTML = '<div class="loading">Loading project activity...</div>';
+  setDrawerContent('<div class="loading">Loading project activity...</div>');
   const days = document.getElementById('days').value;
   const res = await fetch(`/api/project?days=${days}&project=${encodeURIComponent(project)}`);
   const data = await res.json();
   document.getElementById('drawerTitle').textContent = data.project_short || 'Project detail';
-  document.getElementById('detailContent').innerHTML = `<section class="detail-section"><h2>${esc(data.project_short)}</h2>
+  setDrawerContent(`<section class="detail-section"><h2>${esc(data.project_short)}</h2>
     ${miniStats(data.totals)}
     <div class="verdict-card ${data.health && data.health.status === 'critical' ? 'high' : ''}">
       <h3>${healthPill(data.health)} ${esc(data.health ? data.health.reason : 'Review recent local sessions before optimizing.')}</h3>
@@ -2326,7 +2360,7 @@ async function selectProject(project) {
     <div class="table-wrap"><table><thead><tr><th>Tool</th><th>Model</th><th>Status</th><th>Tokens</th><th></th></tr></thead>
       <tbody>${data.sessions.map(s => `<tr class="clickable" onclick="selectSession('${s.session_id}')">
         <td>${esc(s.tool)}</td><td>${esc(s.model)}</td><td>${sessionStatePill(s.state)} ${outcomeEvidencePill(s)}</td><td>${esc(s.tokens_label)}</td><td><button class="row-action">Review</button></td>
-      </tr>`).join('')}</tbody></table></div></section>`;
+      </tr>`).join('')}</tbody></table></div></section>`);
 }
 function renderSessionHero(s) {
   const actions = s.actions || [];
@@ -2459,9 +2493,9 @@ async function selectSession(sessionId, attempt = 0, token = null) {
   openDrawer('Session review');
   document.getElementById('drawerTitle').textContent = 'Session review';
   const node = document.getElementById('detailContent');
-  node.innerHTML = attempt
+  setDrawerContent(attempt
     ? `<div class="loading">Still looking for this session (attempt ${attempt + 1} of ${SESSION_LOOKUP_ATTEMPTS})...</div>`
-    : `<div class="loading">Loading session identity for ${esc(sessionId)}...</div>`;
+    : `<div class="loading">Loading session identity for ${esc(sessionId)}...</div>`);
   const summaryPromise = fetch(`/api/session-summary?id=${encodeURIComponent(sessionId)}`)
     .then(res => res.json())
     .catch(() => null);
@@ -2469,9 +2503,9 @@ async function selectSession(sessionId, attempt = 0, token = null) {
   const fastSummary = await summaryPromise;
   if (!isCurrent()) return;
   if (fastSummary && !fastSummary.error) {
-    node.innerHTML = renderSessionSummary(fastSummary);
+    setDrawerContent(renderSessionSummary(fastSummary));
   } else {
-    node.innerHTML = `<div class="loading">Loading session details for ${esc(sessionId)}...</div>`;
+    setDrawerContent(`<div class="loading">Loading session details for ${esc(sessionId)}...</div>`);
   }
   const res = await detailPromise;
   const s = await res.json();
@@ -2486,11 +2520,11 @@ async function selectSession(sessionId, attempt = 0, token = null) {
       }, 1400);
       return;
     }
-    node.innerHTML = `<div class="empty">${esc(s.error)}</div>`;
+    setDrawerContent(`<div class="empty">${esc(s.error)}</div>`);
     return;
   }
   if (s.detail_pending) {
-    if (!fastSummary || fastSummary.error) node.innerHTML = renderSessionSummary(s);
+    if (!fastSummary || fastSummary.error) setDrawerContent(renderSessionSummary(s));
     const pending = document.createElement('div');
     pending.className = 'loading';
     pending.textContent = s.detail_message || 'Timeline and evidence are still indexing in the background.';
@@ -2609,7 +2643,7 @@ async function selectSession(sessionId, attempt = 0, token = null) {
     // change. The asks table is the evidence for that conclusion, so it follows.
     promptReview = `${coaching}${expensiveAsks}<section class="detail-section"><h3>Prompt context</h3>${opener}</section>`;
   }
-  document.getElementById('detailContent').innerHTML = `<div class="session-review-shell">${renderSessionHero(s)}
+  setDrawerContent(`<div class="session-review-shell">${renderSessionHero(s)}
     ${renderSessionActions(s)}
     ${renderVerdict(s)}
     ${outcomeActions}
@@ -2627,7 +2661,7 @@ async function selectSession(sessionId, attempt = 0, token = null) {
         <tr><th>Privacy</th><td>${esc(s.privacy)}</td></tr>
       </tbody></table>
     </div></details></section>
-    ${timeline}</div>`;
+    ${timeline}</div>`);
 }
 async function markOutcome(sessionId, outcome) {
   const buttons = document.querySelectorAll('.outcome-button');
