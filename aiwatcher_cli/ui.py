@@ -2480,7 +2480,11 @@ def _prompt_plan_action(
                 or "Current local context has enough pressure that a Fresh Start brief is safer than replaying the chat."
             ),
             "next_step": "Open the session, copy the Fresh Start brief, then paste this planned task into the new chat.",
-            "primary_label": "Open Fresh Start",
+            # One verb opens the Fresh Start drawer, everywhere. "Open Fresh
+            # Start", "Start fresh" and "Try Fresh Start demo" were three names
+            # for one action. (Home's button keeps its own name because it
+            # copies rather than opens.)
+            "primary_label": "Start fresh",
             "primary_url": f"/?session={session_id}",
             "confidence": "observed",
         }

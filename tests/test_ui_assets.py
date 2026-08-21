@@ -1070,7 +1070,10 @@ class InformationArchitectureTest(unittest.TestCase):
         for gone in (">Copy original<", ">Copy brief only<"):
             with self.subTest(label=gone):
                 self.assertNotIn(gone, self.js)
-        for present in ("Copy my prompt", "Copy without opening", "Copy execution brief"):
+        # "Copy without opening" named the mechanism, not the artifact, which
+        # was the whole premise of the rename that fixed the collision.
+        self.assertNotIn("Copy without opening", self.js)
+        for present in ("Copy my prompt", "Copy brief", "Copy execution brief"):
             with self.subTest(label=present):
                 self.assertIn(present, self.js)
 
@@ -1409,6 +1412,84 @@ class ContextHealthChartTest(unittest.TestCase):
         # glance, not a reading.
         self.assertIn("health-row-trend", self.draw)
         self.assertIn("compact ? '' :", self.draw)
+
+
+class CorrectnessSweepTest(unittest.TestCase):
+    """Plan items 11-21. Marked done in the backlog, verified not done."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+        cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+
+    def test_a_number_column_shares_one_unit_and_one_precision(self):
+        # A column is read down, not across. Tokens showed "331.2M" above
+        # "158.3k"; $/line showed "$1.14" above "$0.0030".
+        self.assertIn("function tokenColumnFormatter", self.js)
+        self.assertIn("function currencyColumnFormatter", self.js)
+        rows = js_function_source(self.js, "renderChangeRows")
+        self.assertIn("currencyColumnFormatter", rows)
+        self.assertNotIn("usd_per_line_label", rows)
+
+    def test_a_sub_cent_value_says_so_rather_than_rounding_to_zero(self):
+        fmt = js_function_source(self.js, "currencyColumnFormatter")
+        self.assertIn("<$0.01", fmt)
+
+    def test_numeric_cells_line_up(self):
+        # It was on 32 of 168, which reads the same as being on none.
+        self.assertIn("td.num, td.mono", self.css)
+        block = self.css[self.css.index("td.num, td.mono"):]
+        self.assertIn("tabular-nums", block[:400])
+
+    def test_the_surviving_line_label_is_not_doubled(self):
+        # The span renders "$0.03 per surviving line"; the prefix said it again
+        # and made the line longer than before the fix that added the scope note.
+        self.assertNotIn("Cost per surviving line: <span", self.html)
+        self.assertIn('id="costPerSurviving"', self.html)
+
+    def test_the_quiet_state_states_its_session_count_once(self):
+        quiet = js_function_source(self.js, "ambientQuiet")
+        self.assertNotIn("' session' +", quiet)
+        self.assertIn("Sessions observed", self.html)
+
+    def test_one_verb_opens_the_fresh_start_drawer(self):
+        self.assertNotIn("Try Fresh Start demo", self.html)
+        self.assertIn("Try it with sample data", self.html)
+        self.assertNotIn('"primary_label": "Open Fresh Start"', inspect.getsource(ui))
+        # Home keeps its own name because it copies rather than opens; naming it
+        # "Start fresh" would be the label lying about the behaviour again.
+        self.assertIn("Copy Fresh Start brief", self.js)
+
+    def test_copy_labels_name_artifacts(self):
+        self.assertNotIn("Copy without opening", self.js)
+
+    def test_points_are_pluralised(self):
+        score = js_function_source(self.js, "riskScore")
+        self.assertIn("'pt'", score)
+        self.assertIn("'pts'", score)
+
+    def test_a_sort_target_is_the_whole_header_cell(self):
+        # It was a 16px inline button covering 4-28% of its cell, under the
+        # 24x24 minimum -- and the reason a reviewer clicking the th concluded
+        # sorting was broken.
+        rule = self.css[self.css.index("    .sort-head {"):]
+        rule = rule[:rule.index("}")]
+        self.assertIn("display: block", rule)
+        self.assertIn("width: 100%", rule)
+        self.assertIn("min-height: 24px", rule)
+
+    def test_a_project_row_is_reachable_by_keyboard(self):
+        # The Watch health rows were already real buttons; Projects was a
+        # <tr onclick> with no role and no tab stop.
+        self.assertIn("row-open", self.js)
+        self.assertIn(".row-open", self.css)
+        self.assertNotIn('<tr class="clickable" onclick="selectProject', self.js)
+
+    def test_the_quiet_toggle_reports_its_own_state(self):
+        self.assertIn('aria-pressed="false"', self.html)
+        handler = js_function_source(self.js, "quietFreshStartReminders")
+        self.assertIn("aria-pressed", handler)
 
 
 if __name__ == "__main__":

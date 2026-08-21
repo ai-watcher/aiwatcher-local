@@ -655,7 +655,14 @@
        next began "session · 1 critical". Anything ending in -facts is a strip
        of the same kind, and .full-width is the explicit opt-out. */
     .health-facts, [class$="-facts"], .full-width { max-width: none; }
+    /* Every numeric cell and stat value lines up down its column. It was on 32
+       of 168 of them, which is the same as being on none: a column only reads
+       as a column when the digits share a grid. */
     td.num, th.num { text-align: right; white-space: nowrap; }
+    td.num, td.mono, .num, .value, .mini strong, .health-hero b, .ambient-hero,
+    .ambient-facts b, .blast-points, .trend-tick, .trend-value {
+      font-variant-numeric: tabular-nums;
+    }
     .muted { color: var(--muted); }
     .bar-row { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(120px, 1.5fr) 88px; gap: var(--sp-3); align-items: center; margin: 11px 0; padding: 5px 0; }
     .bar-row.clickable, tr.clickable { cursor: pointer; }
@@ -816,9 +823,15 @@
     th, td { border-bottom: 1px solid var(--line); padding: 11px 8px; text-align: left; }
     th { color: var(--muted); font-weight: var(--fw-med); }
     td:last-child, th:last-child { text-align: right; }
+    /* The whole header cell is the target. It was a 16px-tall inline button
+       covering between 4% and 28% of its cell, so most of every header was dead
+       space and the hit area sat under the 24x24 minimum -- which is also why a
+       reviewer clicking the <th> concluded sorting was broken. */
     .sort-head {
-      min-height: 0;
-      padding: 0;
+      display: block;
+      width: 100%;
+      min-height: 24px;
+      padding: var(--sp-2) 0;
       border: 0;
       background: transparent;
       color: inherit;
@@ -827,6 +840,15 @@
       text-align: inherit;
     }
     .sort-head:hover { background: transparent; color: white; }
+    /* A project row opens a drawer, so the thing that opens it is a button and
+       reachable by keyboard. The Watch health rows were already done this way;
+       Projects was left as a <tr onclick> with no role and no tab stop. */
+    .row-open {
+      display: block; width: 100%; text-align: left; padding: 0;
+      border: 0; background: transparent; color: inherit;
+      font: inherit; cursor: pointer;
+    }
+    .row-open:hover { color: var(--text); }
     .sort-head span { display: inline-block; min-width: 10px; color: var(--blue); }
     tr.clickable:hover { background: rgba(112,167,255,.05); }
     .session-filters { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; margin: 14px 0 4px; }

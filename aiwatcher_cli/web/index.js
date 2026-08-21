@@ -888,7 +888,8 @@ const RISK_HIGH_AT = 6;
 const RISK_SCALE_NOTE = `medium at ${RISK_MEDIUM_AT}, high at ${RISK_HIGH_AT}`;
 
 function riskScore(score) {
-  return score === null || score === undefined ? '—' : `${score} pts`;
+  if (score === null || score === undefined) return '—';
+  return `${score} ${Math.abs(Number(score)) === 1 ? 'pt' : 'pts'}`;
 }
 
 function formatCount(value) {
@@ -1016,7 +1017,7 @@ function renderHandoff(capsule) {
   </section>
   <section class="detail-section"><h3>Brief that will be copied</h3>
     <textarea id="handoffBrief" class="brief-box">${esc(capsule.next_brief || '')}</textarea>
-    <div class="copy-row"><button class="btn-quiet" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', false, ${isDemo ? 'true' : 'false'})">Copy without opening</button></div>
+    <div class="copy-row"><button class="btn-quiet" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', false, ${isDemo ? 'true' : 'false'})">Copy brief</button></div>
     ${changedFiles.length ? `<details class="aiw-details"><summary>${esc(changedFiles.length)} changed file${changedFiles.length === 1 ? '' : 's'} to inspect</summary><div class="details-body"><div class="pill-row">${changedFiles.slice(0, 12).map(file => `<span class="pill">${esc(file)}</span>`).join('')}</div></div></details>` : ''}
   </section>`;
 }
@@ -1217,24 +1218,63 @@ function repoLabel(row) {
   return projectName({ project_full: row.repo || row.project || '' });
 }
 
+
+/* A number column is read down, not across, so its unit and its precision have
+   to be decided for the column rather than per cell. The Tokens column showed
+   "331.2M" above "158.3k"; the $/line column showed "$1.14" above "$0.0030".
+   Both are individually correct and neither can be compared with the row above
+   it without re-reading the suffix. */
+
+function tokenColumnFormatter(values) {
+  const nums = values.map(Number).filter(Number.isFinite);
+  const peak = nums.length ? Math.max(...nums) : 0;
+  // One unit for the whole column, chosen by its largest value. A 158k row
+  // reading 0.2M beside a 331.2M one is the comparison working, not precision
+  // being lost -- next to a third of a billion, 158k *is* rounding error.
+  const unit = peak >= 1e9 ? ['B', 1e9] : peak >= 1e6 ? ['M', 1e6] : peak >= 1e3 ? ['k', 1e3] : ['', 1];
+  return value => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return String(value ?? '');
+    if (!unit[0]) return String(Math.round(n));
+    return (n / unit[1]).toFixed(1) + unit[0];
+  };
+}
+
+function currencyColumnFormatter(values) {
+  const nums = values.map(Number).filter(v => Number.isFinite(v) && v > 0);
+  const floor = nums.length ? Math.min(...nums) : 0;
+  // Two decimals everywhere, and anything that would round to zero says so
+  // instead. "$0.00" claims the work was free; "<$0.01" is the same fact
+  // without the lie, and keeps every cell in the column to one decimal count.
+  return value => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '—';
+    if (n > 0 && n < 0.005) return '<$0.01';
+    return '$' + n.toFixed(2);
+  };
+}
+
 function renderChangeRows(rows) {
   if (!rows.length) {
     return `<tr><td colspan="7" class="empty">No commits in this window, or git history could not be read.</td></tr>`;
   }
-  return sortedRows(rows, changeSort).map(row => `<tr>
+  const ordered = sortedRows(rows, changeSort);
+  const perLine = currencyColumnFormatter(ordered.map(r => r.usd_per_line));
+  const perSurviving = currencyColumnFormatter(ordered.map(r => r.usd_per_surviving_line));
+  return ordered.map(row => `<tr>
     <td><code>${esc(row.short_sha)}</code> ${esc(row.subject)}
       <div class="session-meta">${esc(dateLabel(row.committed_at))}${row.tools.length ? ' &middot; ' + esc(row.tools.join(', ')) : ''}${row.event_count ? ' &middot; ' + esc(row.event_count) + ' model calls' : ''}${row.was_rewritten ? ' &middot; <span class="muted" title="Rebased or amended on ' + esc(dateLabel(row.rewritten_at)) + '. Cost is attributed by when the work was authored, not when it was rewritten.">rewritten</span>' : ''}</div></td>
     <td title="${esc(row.repo || row.project)}">${esc(repoLabel(row))}</td>
     <td class="num">${row.unattributed ? '<span class="muted">no spend observed</span>' : esc(row.cost_label)}</td>
     <td class="num">+${esc(row.lines_added)} / -${esc(row.lines_removed)}
       <div class="session-meta">${esc(row.files_changed)} file(s)</div></td>
-    <td class="num">${row.unattributed ? '—' : esc(row.usd_per_line_label)}</td>
+    <td class="num">${row.unattributed ? '—' : esc(perLine(row.usd_per_line))}</td>
     <td class="num">${row.survival_pct === null || row.survival_pct === undefined
       ? `<span class="muted">${tooYoungToJudge(row) ? 'too new' : '—'}</span>`
       : esc(row.survival_label)}</td>
     <td class="num">${row.survival_pct === null || row.survival_pct === undefined
       ? '<span class="muted">—</span>'
-      : esc(row.usd_per_surviving_line_label)}</td>
+      : esc(perSurviving(row.usd_per_surviving_line))}</td>
   </tr>`).join('');
 }
 function renderChangeTotals(rows, meta, unbanked) {
@@ -3101,6 +3141,14 @@ async function quietFreshStartReminders() {
       body: JSON.stringify({ state: 'proof_pending' }),
     });
     freshStartReceiptsMarkedViewed = true;
+    // A toggle that does not show its own state leaves the reader pressing it
+    // again to find out whether the first press worked.
+    const button = pressedButton();
+    if (button) {
+      button.setAttribute('aria-pressed', 'true');
+      button.textContent = 'Reminders quieted';
+      button.disabled = true;
+    }
     showToast('Fresh Start reminders quieted. Receipts stay available here.');
   } catch (error) {
     showToast('Could not quiet Fresh Start reminders yet.', 'error');
@@ -3186,12 +3234,13 @@ function renderSessionRows(rows, filtered) {
   updateSortIndicators('session', sessionSortChosen ? sessionSort : { key: null, dir: 'desc' },
     ['tool', 'project', 'model', 'tokens_value']);
   const ordered = sessionSortChosen ? sortedRows(rows, sessionSort) : rows;
+  const tokens = tokenColumnFormatter(ordered.map(s => s.tokens_value));
   document.getElementById('sessionRows').innerHTML = rows.length
     ? ordered.map(s => `<tr class="clickable" onclick="selectSession('${esc(s.session_id)}')">
         <td>${esc(s.tool)}</td>
         <td title="${esc(projectTitle(s))}">${esc(projectName(s))}${s.match_field ? `<span class="match-note">matched on ${esc(s.match_field)}</span>` : ''}<br>${sessionStatePill(s.state)} ${s.outcome ? outcomePill(s.outcome) : outcomeEvidencePill(s)}</td>
         <td>${esc(s.model)}</td>
-        <td class="mono num">${esc(s.tokens)}</td>
+        <td class="mono num">${esc(s.tokens_value === null || s.tokens_value === undefined ? s.tokens : tokens(s.tokens_value))}</td>
         <td><button class="row-action">Review</button></td>
       </tr>`).join('')
     : `<tr><td colspan="5"><div class="empty">${filtered
@@ -3376,12 +3425,14 @@ function ambientQuiet(data) {
        { label: (100 - Math.round(replayed)) + '% new', tone: 'green' }]
     : [];
 
+  // The Sessions observed tile sits about 150px below this and states the
+  // count with a label on it. Saying it here too was the third copy of one
+  // number on one screen; the sentence leads with what the tile cannot say.
   const sessions = Number(totals.sessions) || 0;
-  let sentence = sessions
-    ? '<b>' + sessions + '</b> session' + (sessions === 1 ? '' : 's') + ' in this window.'
-    : 'No local sessions in this window yet.';
+  let sentence = sessions ? '' : 'No local sessions in this window yet.';
   if (hasSplit) {
-    sentence += ' <b>' + Math.round(replayed) + '%</b> of what they cost went on re-sending history.';
+    sentence += (sentence ? ' ' : '')
+      + '<b>' + Math.round(replayed) + '%</b> of what this window cost went on re-sending history.';
   }
   if (needsReview) {
     sentence += ' <b>' + needsReview + '</b> ' + (needsReview === 1 ? 'is' : 'are')
@@ -3705,8 +3756,8 @@ async function loadOnce(resetDetail, forceRefresh) {
   document.getElementById('privacy').innerHTML = data.privacy.map(p => `<div class="privacy-item"><span class="privacy-check">&#10003;</span><span>${esc(p)}</span></div>`).join('');
   document.getElementById('projectWindow').textContent = totals.window_label;
   document.getElementById('projectRows').innerHTML = data.projects.length
-    ? data.projects.map(p => `<tr class="clickable" onclick="selectProject(decodeURIComponent(this.dataset.id))" data-id="${encodeURIComponent(p.id)}">
-        <td title="${esc(p.name || '')}">${esc(projectName({ project_full: p.name || p.short_name }))}</td>
+    ? data.projects.map(p => `<tr class="clickable" data-id="${encodeURIComponent(p.id)}">
+        <td title="${esc(p.name || '')}"><button class="row-open" onclick="selectProject(decodeURIComponent(this.closest('tr').dataset.id))">${esc(projectName({ project_full: p.name || p.short_name }))}</button></td>
         <td>${healthPill(p.health)}</td>
         <td class="mono">${esc(p.sessions)}</td>
         <td class="mono">${esc(p.tokens_label)}</td>

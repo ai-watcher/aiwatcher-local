@@ -74,7 +74,7 @@
          the same as four numbers in one glance. Three, not four -- preflight
          decisions moved to Prove and duplicating it back would undo that. -->
     <section class="grid kpis" style="margin-top:14px">
-      <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub">Value per useful change: <span id="costPerUseful">-</span></div><div class="sub" id="costPerSurvivingRow" hidden>Cost per surviving line: <span id="costPerSurviving">-</span></div><div class="metric-spark" data-tile-spark="usefulOutcomes" hidden></div></div>
+      <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub">Value per useful change: <span id="costPerUseful">-</span></div><div class="sub" id="costPerSurvivingRow" hidden><span id="costPerSurviving">-</span></div><div class="metric-spark" data-tile-spark="usefulOutcomes" hidden></div></div>
       <div class="card metric-card metric-blue"><div class="label">Sessions observed</div><div class="value" id="sessions">-</div><div class="sub">This machine only</div><div class="metric-spark" data-tile-spark="sessions" hidden></div></div>
       <div class="card metric-card metric-neutral"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div><div class="metric-spark" data-tile-spark="apiValue" hidden></div></div>
     </section>
@@ -218,7 +218,7 @@
     <div class="card" style="margin-bottom:14px">
       <div class="section-title">
         <div><h2>Fresh Start receipts</h2><p><strong id="preflightDecisions">-</strong> preflight decisions &middot; <span id="windowLabel">-</span>. When AIWatcher suggested a fresh session, what you chose, and whether a follow-up session was observed. Proof stays pending until a later session in the same project is observed.</p></div>
-        <div class="actions"><button class="btn-quiet" onclick="quietFreshStartReminders()">Quiet reminders</button><span class="note-chip local">Local only</span></div>
+        <div class="actions"><button class="btn-quiet" aria-pressed="false" onclick="quietFreshStartReminders()">Quiet reminders</button><span class="note-chip local">Local only</span></div>
       </div>
       <div class="table-wrap"><table>
         <thead><tr><th>Time</th><th>Decision</th><th>Expected context at risk</th><th>Proof</th><th>Sessions</th><th></th></tr></thead>
@@ -309,7 +309,7 @@
       <div class="handoff-cta" style="margin-top:14px">
         <h4>Test Fresh Start with sample data</h4>
         <p>Open a seeded context-pressure case, tune the continuation brief, and verify the copy flow without waiting for a real bloated session.</p>
-        <button class="btn-primary" onclick="openDemoHandoff()">Try Fresh Start demo</button>
+        <button class="btn-primary" onclick="openDemoHandoff()">Try it with sample data</button>
       </div>
     </div>
   </section>

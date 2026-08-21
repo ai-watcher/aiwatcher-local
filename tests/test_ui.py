@@ -196,7 +196,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("/api/handoff-basic", ui.HTML)
         self.assertIn("/api/handoff-demo", ui.HTML)
         self.assertIn("openDemoHandoff", ui.HTML)
-        self.assertIn("Try Fresh Start demo", ui.HTML)
+        # One verb opens the drawer. "Open Fresh Start", "Start fresh" and
+        # "Try Fresh Start demo" were three names for the same action.
+        self.assertIn("Try it with sample data", ui.HTML)
         self.assertIn('id="handoffType"', ui.HTML)
         self.assertIn('id="handoffObjective"', ui.HTML)
         self.assertIn('id="handoffSources"', ui.HTML)
