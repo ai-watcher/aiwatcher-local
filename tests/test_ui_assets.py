@@ -869,5 +869,36 @@ class ScopeAndScaleTest(unittest.TestCase):
         self.assertIn("formatCount(survival.lines_touched)", self.js)
 
 
+class TileSparklineTest(unittest.TestCase):
+    """The tile row must not change shape on a button that only promises to
+    refresh the numbers."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+
+    def test_a_shell_payload_does_not_wipe_the_sparklines(self):
+        # A forced refresh returns summary_complete: false with no tile_trends,
+        # and the old code cleared on "no data present" -- so pressing "Refresh
+        # data" emptied every sparkline until some later poll restored them.
+        self.assertIn("data.summary_complete", self.js)
+        self.assertIn("windowChanged", self.js)
+
+    def test_a_window_change_still_clears(self):
+        # The original worry stands: the previous window's shape would be worse
+        # than none at all.
+        self.assertIn("tileSparkWindow", self.js)
+
+    def test_the_slot_is_always_occupied(self):
+        # usefulOutcomes has too few judged points to plot at short ranges, and
+        # hiding it made that card a different height from its neighbours -- the
+        # row's alignment shifted when the reader changed the range.
+        self.assertIn("drawTileSparkPlaceholder", self.js)
+        self.assertIn("not enough data yet", self.js)
+        draw = js_function_source(self.js, "drawTileSpark")
+        self.assertIn("return false;", draw)
+        self.assertIn("return true;", draw)
+
+
 if __name__ == "__main__":
     unittest.main()

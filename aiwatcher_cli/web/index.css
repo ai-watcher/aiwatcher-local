@@ -451,6 +451,7 @@
        beside -- which is what the disabled button here used to do. */
     .action-note { font-size: 12px; color: var(--muted); line-height: 1.45; }
     .risk-scale { font-size: 12px; font-weight: 400; color: var(--muted); }
+    .metric-spark-empty { color: var(--line); }
     /* The command is shown, not just copyable: a user should be able to read
        what they are about to paste into a terminal without clicking first. */
     .watcher-start { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }

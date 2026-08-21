@@ -1,3 +1,5 @@
+// The window the tile sparklines were last drawn for.
+let tileSparkWindow = null;
 
 const HANDOFF_TYPES = [
   { id: 'coding', label: 'Coding continuation' },
@@ -1345,17 +1347,17 @@ function runwayVerdict(chart) {
    it yet. The tail is shaded and left empty instead, and the caveat says so in
    words rather than relying on the shading being noticed. */
 function drawTileSpark(node, series, days) {
-  if (!node || !series) return;
+  if (!node || !series) return false;
   const values = series.values || [];
-  if (values.length < 3) return;
+  if (values.length < 3) return false;
   const W = 240, H = 28, pad = 3;
   // Drawn only as far as there is a verdict; the rest of the axis is still laid
   // out, so the shaded gap is visibly a gap rather than a shorter chart.
   const through = Number.isInteger(series.judged_through) ? series.judged_through : values.length - 1;
   const drawn = values.slice(0, through + 1);
-  if (drawn.length < 2) return;
+  if (drawn.length < 2) return false;
   const peak = Math.max(...drawn);
-  if (!(peak > 0)) return;
+  if (!(peak > 0)) return false;
 
   const x = chartScale(0, values.length - 1, pad, W - pad);
   const y = chartScale(0, peak, H - pad, pad);
@@ -1405,7 +1407,31 @@ function drawTileSpark(node, series, days) {
     node.appendChild(note);
   }
   node.hidden = false;
+  return true;
 }
+// An empty slot rather than no slot. The Useful outcomes tile has too few judged
+// points to plot at short ranges, and hiding its sparkline made that one card a
+// different height from its neighbours -- the row's alignment shifted when the
+// reader changed the date range, which reads as a failed load.
+function drawTileSparkPlaceholder(node) {
+  if (!node) return;
+  const svg = svgEl('svg', {
+    viewBox: '0 0 240 28', class: 'metric-spark-svg metric-spark-empty',
+    preserveAspectRatio: 'none', role: 'img',
+  });
+  svg.appendChild(svgEl('line', { x1: 3, y1: 25, x2: 237, y2: 25, stroke: 'currentColor', 'stroke-width': 1, opacity: 0.35 }));
+  const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+  title.textContent = 'Not enough data yet for a trend.';
+  svg.appendChild(title);
+  node.innerHTML = '';
+  node.appendChild(svg);
+  const note = document.createElement('div');
+  note.className = 'metric-spark-caveat';
+  note.textContent = 'not enough data yet';
+  node.appendChild(note);
+  node.hidden = false;
+}
+
 function compactTokens(n) {
   if (!n) return '0';
   // Carries past thousands: the scatter's decade ticks reach hundreds of
@@ -3027,9 +3053,14 @@ function ambientQuiet(data) {
       : '')
       + '<button class="btn-quiet" onclick="showView(\'insights\')">Open Improve</button>',
     facts: [
-      totals.sessions ? ['sessions', String(totals.sessions)] : null,
-      totals.tokens_label ? ['tokens', totals.tokens_label] : null,
+      // No 'sessions' entry: the sentence directly above already says
+      // "N sessions in this window", and the Sessions observed tile below says
+      // it a third time. One labelled statement of a number per screen.
+      // The hero is the last session's tokens; this is every session in the
+      // window. Two token totals 200px apart, and only one of them was scoped.
+      totals.tokens_label ? ['tokens this window', totals.tokens_label] : null,
       totals.useful_outcomes ? ['useful', String(totals.useful_outcomes)] : null,
+      // Frozen across every range because it is a rate, not a window total.
       totals.projected_month_label ? ['projected month', totals.projected_month_label] : null,
     ],
   };
@@ -3233,14 +3264,30 @@ async function loadOnce(resetDetail, forceRefresh) {
   // the fast shell payload, so every tile is reset rather than left showing the
   // previous window's shape while the full refresh is still running.
   const tileTrends = data.tile_trends || null;
-  document.querySelectorAll('[data-tile-spark]').forEach(node => {
-    node.innerHTML = '';
-    node.hidden = true;
-    const series = tileTrends && tileTrends.series
-      ? tileTrends.series[node.getAttribute('data-tile-spark')]
-      : null;
-    if (series) drawTileSpark(node, series, tileTrends.days);
-  });
+  // A fast shell payload carries no tile_trends, and a forced refresh always
+  // returns the shell -- so clearing on "no data present" meant pressing
+  // "Refresh data" emptied every sparkline and left the tiles collapsed until
+  // some later poll happened to bring them back. The row visibly changed shape
+  // on a button whose whole promise is that nothing changes but the numbers.
+  //
+  // The original worry is still handled: showing the previous window's shape
+  // would be worse than showing none, so a window change still clears. What no
+  // longer clears is a payload that simply has not finished computing.
+  const sparkDays = String(document.getElementById('days').value);
+  const windowChanged = sparkDays !== tileSparkWindow;
+  if (tileTrends || data.summary_complete || windowChanged) {
+    tileSparkWindow = sparkDays;
+    document.querySelectorAll('[data-tile-spark]').forEach(node => {
+      node.innerHTML = '';
+      node.hidden = true;
+      const series = tileTrends && tileTrends.series
+        ? tileTrends.series[node.getAttribute('data-tile-spark')]
+        : null;
+      if (!series || !drawTileSpark(node, series, tileTrends.days)) {
+        drawTileSparkPlaceholder(node);
+      }
+    });
+  }
   receiptCache = data.intervention_receipts || [];
   const handoffDecisions = data.handoff_decisions || [];
   document.getElementById('receiptRows').innerHTML = renderReceiptRows(receiptCache);
