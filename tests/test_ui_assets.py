@@ -1260,5 +1260,48 @@ class SearchRankingTest(unittest.TestCase):
         self.assertIn("match_field", self.js)
 
 
+class PlanZoneTest(unittest.TestCase):
+    """Plan item 1 / spec M1. The result was one undifferentiated block, so the
+    house template read as though it had been worked out from the prompt.
+    Diffing two unrelated prompts produced identical output apart from the tool
+    name, which comes from a dropdown."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+
+    def test_the_result_has_three_zones_in_order(self):
+        for fn in ("renderDerivedZone", "renderObservedZone", "renderGuardrailZone"):
+            with self.subTest(zone=fn):
+                self.assertIn(f"function {fn}", self.js)
+        body = js_function_source(self.js, "preflightPrompt")
+        self.assertLess(body.index("renderDerivedZone"), body.index("renderObservedZone"))
+        self.assertLess(body.index("renderObservedZone"), body.index("renderGuardrailZone"))
+
+    def test_the_derived_zone_is_never_silent(self):
+        zone = js_function_source(self.js, "renderDerivedZone")
+        self.assertIn("Nothing in this prompt matched a signal worth a second opinion.", zone)
+        self.assertIn("RISK_MEDIUM_AT", zone)   # gated-out vs unavailable read differently
+
+    def test_the_guardrails_are_labelled_as_house_advice(self):
+        zone = js_function_source(self.js, "renderGuardrailZone")
+        self.assertIn("Standard execution guardrails", zone)
+        self.assertIn("Not derived from yours", zone)
+        self.assertIn("<details", zone)         # collapsed by default
+
+    def test_the_observed_zone_never_has_an_unavailable_state(self):
+        # Stage 1 is local and free, so there is no condition under which it
+        # cannot answer.
+        zone = js_function_source(self.js, "renderObservedZone")
+        self.assertNotIn("unavailable", zone)
+        self.assertIn("signal-chip", zone)
+
+    def test_the_server_ships_the_signals(self):
+        source = inspect.getsource(ui.build_prompt_preflight)
+        self.assertIn('"signals"', source)
+        self.assertIn('"removals"', source)
+
+
 if __name__ == "__main__":
     unittest.main()

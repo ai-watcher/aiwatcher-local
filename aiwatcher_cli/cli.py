@@ -42,6 +42,7 @@ from .companion import (
     uninstall_login_autostart,
 )
 from .evidence_capture import record_missing_evidence_snapshots
+from . import prompt_signals
 from .local_state import (
     COMMAND_GATE_BLOCKED_DECISIONS,
     VALID_OUTCOMES,
@@ -1439,10 +1440,26 @@ def build_execution_brief(
     multiple_tasks: bool,
     workflow_recommendation: dict[str, str] | None = None,
     plan_only: bool = False,
+    removals: list[dict[str, object]] | None = None,
 ) -> str:
-    """Preserve the requested outcome while adding only relevant controls."""
+    """Preserve the requested outcome while adding only relevant controls.
+
+    *removals* are removals the prompt asks for (spec 4.1). They are rendered
+    above the guardrails and they change one of them, because the template used
+    to tell an agent not to "expand into unrelated cleanup" even when the
+    cleanup was the stated goal. An agent reading that leaves the adapter in
+    place and reports success.
+    """
+    requested = [item for item in (removals or []) if item.get("requested")]
     lines = ["Task"]
     lines.extend(_brief_task_sections(prompt, cwd=cwd))
+    if requested:
+        # Above the guardrails, so the goal is read before the caution.
+        lines.extend(["", "Requested removals"])
+        for item in requested:
+            what = str(item.get("what") or "").strip()
+            path = str(item.get("path") or "").strip()
+            lines.append(f"- {what}{f' ({path})' if path else ''} — this removal is the goal, not a side effect.")
     lines.extend(["", "Execution approach"])
     if workflow_recommendation:
         lines.append(f"- Recommended workflow: {workflow_recommendation.get('label', 'Continue here')}.")
@@ -1479,10 +1496,14 @@ def build_execution_brief(
     if plan_only:
         lines.append("- Do not claim code was changed or tests were run unless the user later authorizes implementation.")
     else:
-        lines.extend([
-            "- Run the narrowest relevant verification after implementation.",
-            "- Stop when the requested outcome is verified; do not expand into unrelated cleanup.",
-        ])
+        lines.append("- Run the narrowest relevant verification after implementation.")
+        if requested:
+            # Bounds the cleanup instead of forbidding it. "Do not expand into
+            # unrelated cleanup" reads, next to a requested deletion, as
+            # "do not delete".
+            lines.append("- Do not remove anything beyond the removals listed above.")
+        else:
+            lines.append("- Stop when the requested outcome is verified; do not expand into unrelated cleanup.")
     reliable_cwd = _brief_working_directory(cwd)
     if reliable_cwd:
         lines.extend(["", "Working directory", reliable_cwd])
@@ -2066,6 +2087,7 @@ def analyze_prompt(
         multiple_tasks=multiple_tasks,
         workflow_recommendation=workflow,
         plan_only=plan_only,
+        removals=prompt_signals.requested_removals(text),
     )
     estimated_impact = (
         estimate_prompt_savings(text, risk_score=score, tool=tool, cwd=cwd)
@@ -2073,12 +2095,18 @@ def analyze_prompt(
         else {}
     )
     workflow = {**workflow, "reward": _workflow_reward_label(estimated_impact, workflow)}
+    # Stage 1 output, carried so the Plan result can separate what was observed
+    # locally from what is standard house advice (spec 4, zones B and C). Free
+    # and lexical: no file is read and nothing is spawned to produce it.
+    observed_signals = prompt_signals.scan_prompt(text)
     return {
         "risk": risk,
         "score": score,
         "tool": tool,
         "findings": findings,
         "suggestions": suggestions,
+        "signals": observed_signals,
+        "removals": prompt_signals.requested_removals(text),
         "guardrails": guardrails,
         "semantic_review": semantic_review or {},
         "workflow": workflow,

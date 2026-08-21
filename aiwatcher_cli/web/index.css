@@ -530,6 +530,19 @@
        what a card contains -- and every one of them was an inert <span> shaped
        exactly like a filter chip. The lock is on the privacy note only. */
     .note-chip { font-size: var(--fs-1); color: var(--muted); white-space: nowrap; }
+    /* The three Plan zones. Derived / observed / house advice, in that order,
+       visually separated so a reader can tell which is which at a glance. */
+    .plan-zone { margin-top: var(--sp-3); }
+    .plan-zone h4 { margin: var(--sp-3) 0 var(--sp-1); font-size: var(--fs-2); color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+    .plan-zone-derived { border-left: 3px solid var(--line-strong); }
+    .zone-empty { color: var(--muted); font-style: normal; }
+    .plan-zone-guardrails > summary { cursor: pointer; color: var(--muted); font-size: var(--fs-2); padding: var(--sp-2) 0; }
+    .plan-zone-guardrails > summary:hover { color: var(--text); }
+    .signal-row { margin-top: var(--sp-2); }
+    .signal-chip { font-size: var(--fs-1); padding: 2px var(--sp-2); border-radius: var(--r-pill); border: 1px solid var(--line); color: var(--muted); }
+    .signal-chip.destructive { color: #ffd8df; border-color: rgba(242,119,143,.45); background: var(--red-soft); }
+    .signal-chip.sensitive { color: #ffe2a4; border-color: rgba(246,189,96,.45); background: var(--amber-soft); }
+    .signal-chip.breadth { color: #dceaff; border-color: rgba(112,167,255,.45); background: var(--blue-soft); }
     /* Why this row is in the results. A search for one project used to return
        every sibling under the same parent with nothing saying so. */
     .match-note { margin-left: var(--sp-2); font-size: var(--fs-1); color: var(--faint); white-space: nowrap; }

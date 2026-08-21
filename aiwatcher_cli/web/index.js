@@ -237,6 +237,74 @@ function renderPlanAction(action) {
     <div class="copy-row">${primary}</div>
   </div>`;
 }
+/* The Plan result is three zones, in this order, and the order is the point.
+   It used to be one undifferentiated block, which read as though the whole
+   thing had been worked out from the prompt. It had not: diffing two unrelated
+   prompts produced identical output apart from the tool name, which comes from
+   a dropdown. Separating what was derived from what is house advice is the
+   honesty fix, and it ships before there is anything to put in zone A. */
+
+// Zone A. Anything actually derived from this specific prompt. Empty until a
+// second opinion exists to fill it -- but never silent, because an empty zone
+// that says why is what makes the difference between the zones legible.
+function renderDerivedZone(data) {
+  const second = data.second_opinion || {};
+  const gatePassed = Number(data.score || 0) >= RISK_MEDIUM_AT;
+  const reason = second.reason
+    || (second.available === false ? 'No analyst is configured on this build.' : '')
+    || (gatePassed
+        ? 'Local signals reached the medium band, but no analyst is configured on this build.'
+        : 'Nothing in this prompt matched a signal worth a second opinion.');
+  return `<section class="detail-section plan-zone plan-zone-derived">
+    <div class="section-title">
+      <div><h3>From your prompt</h3><p>Worked out from what you wrote, not from a template.</p></div>
+      <span class="confidence-chip unknown">unavailable</span>
+    </div>
+    <p class="zone-empty">${esc(reason)}</p>
+  </section>`;
+}
+
+// Zone B. Stage 1: local, lexical and free, so it never has an unavailable
+// state. Everything here was read out of the prompt on this machine.
+function renderObservedZone(data, riskTone) {
+  const signals = data.signals || {};
+  const removals = (data.removals || []).filter(item => item && item.requested);
+  const chips = [
+    ...(signals.destructive_verbs || []).map(v => ['destructive', v]),
+    ...(signals.sensitive_keywords || []).map(v => ['sensitive', v]),
+    ...(signals.breadth_words || []).map(v => ['breadth', v]),
+    ...(signals.terse ? [['terse', `${signals.word_count} words`]] : []),
+  ];
+  return `<section class="detail-section plan-zone risk-card ${esc(riskTone)}">
+    <div class="section-title">
+      <div><h3>Observed locally</h3><p>Read from your prompt on this machine. No file was opened and nothing was sent anywhere.</p></div>
+      <span class="confidence-chip observed">observed</span>
+    </div>
+    <p><strong>Risk: ${esc(data.risk)} · ${esc(riskScore(data.score))}</strong> <span class="risk-scale">(${esc(RISK_SCALE_NOTE)})</span></p>
+    <p>${esc(data.impact_label)}</p>
+    ${chips.length ? `<div class="pill-row signal-row">${chips.map(([kind, word]) =>
+      `<span class="signal-chip ${esc(kind)}">${esc(kind)}: ${esc(word)}</span>`).join('')}</div>` : ''}
+    ${removals.length ? `<h4>Requested removals</h4><ul class="prompt-list">${removals.map(item =>
+      `<li>${esc(item.what)}${item.path ? ` <span class="sub">${esc(item.path)}</span>` : ''}</li>`).join('')}</ul>` : ''}
+    <h4>Findings</h4>
+    <ul class="prompt-list">${(data.findings || []).map(item => `<li>${esc(item)}</li>`).join('')}</ul>
+  </section>`;
+}
+
+// Zone C. The same advice every prompt gets. Collapsed, and labelled as what it
+// is -- it used to sit beside the derived material with nothing separating them.
+function renderGuardrailZone(data) {
+  const suggestions = data.suggestions || [];
+  if (!suggestions.length) return '';
+  return `<details class="detail-section plan-zone plan-zone-guardrails">
+    <summary>Standard execution guardrails (${suggestions.length})</summary>
+    <div class="details-body">
+      <p>House advice applied to every prompt of this shape. Not derived from yours.</p>
+      <ul class="prompt-list">${suggestions.map(item => `<li>${esc(item)}</li>`).join('')}</ul>
+    </div>
+  </details>`;
+}
+
 async function preflightPrompt() {
   const prompt = document.getElementById('promptInput').value;
   const tool = document.getElementById('promptTool').value;
@@ -260,14 +328,9 @@ async function preflightPrompt() {
     }
     const riskTone = data.risk || 'low';
     resultNode.innerHTML = `${renderPlanAction(data.plan_action)}
-    <div class="risk-card ${esc(riskTone)}" style="margin-top:14px">
-      <h3>Risk: ${esc(data.risk)} · ${esc(riskScore(data.score))} <span class="risk-scale">(${esc(RISK_SCALE_NOTE)})</span></h3>
-      <p>${esc(data.impact_label)}</p>
-      <h3 style="margin-top:14px">Findings</h3>
-      <ul class="prompt-list">${data.findings.map(item => `<li>${esc(item)}</li>`).join('')}</ul>
-      <h3 style="margin-top:14px">Suggestions</h3>
-      <ul class="prompt-list">${data.suggestions.map(item => `<li>${esc(item)}</li>`).join('')}</ul>
-    </div>
+    ${renderDerivedZone(data)}
+    ${renderObservedZone(data, riskTone)}
+    ${renderGuardrailZone(data)}
     <div class="detail-section">
       <h3>Paste-ready brief</h3>
       <textarea id="promptBrief" class="brief-box">${esc(data.suggested_prompt)}</textarea>

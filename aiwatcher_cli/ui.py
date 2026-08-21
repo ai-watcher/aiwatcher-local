@@ -2435,6 +2435,10 @@ def build_prompt_preflight(prompt: str, *, tool: str = "agent", cwd: str | None 
         "findings": result["findings"],
         "suggestions": result["suggestions"],
         "suggested_prompt": result["suggested_prompt"],
+        # Stage 1 output, so the Plan result can separate what was read out of
+        # this prompt from the advice every prompt of this shape receives.
+        "signals": result.get("signals") if isinstance(result.get("signals"), dict) else {},
+        "removals": result.get("removals") if isinstance(result.get("removals"), list) else [],
         "workflow": result.get("workflow") if isinstance(result.get("workflow"), dict) else {},
         "plan_action": _prompt_plan_action(text, result, handoff_bubble),
         "impact_label": impact_label,
