@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import re
+from types import SimpleNamespace
 
 BS = chr(92)
 import unittest
@@ -1201,6 +1202,62 @@ class PathsAndChartsTest(unittest.TestCase):
     def test_an_empty_table_says_so_where_the_rows_would_be(self):
         self.assertIn("td .empty", self.css)
         self.assertIn("text-align: center", self.css)
+
+
+class SearchRankingTest(unittest.TestCase):
+    """P2-11. Raw substring matching over the whole project path made every
+    ancestor directory a match: on this machine the projects live under
+    Downloads/AgentWatch/, so searching "agentwatch" returned 13 of 14 sessions
+    across three unrelated projects, only one of which is named that."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+
+    def _row(self, project, tool="claude-code", model="claude-opus-5", sid="s1"):
+        return SimpleNamespace(session_id=sid, tool=tool, model=model, project_path=project)
+
+    def test_the_project_itself_outranks_its_parent(self):
+        from aiwatcher_cli import cli
+        own = self._row("/home/me/AgentWatch/agentwatch")
+        sibling = self._row("/home/me/AgentWatch/aiwatcher-local-public")
+        self.assertEqual(cli.search_field_rank(own, "agentwatch"), cli.SEARCH_RANK_PROJECT_LEAF)
+        self.assertEqual(cli.search_field_rank(sibling, "agentwatch"), cli.SEARCH_RANK_PROJECT_TAIL)
+        self.assertLess(
+            cli.search_field_rank(own, "agentwatch"),
+            cli.search_field_rank(sibling, "agentwatch"),
+        )
+
+    def test_a_sibling_still_matches_rather_than_disappearing(self):
+        # Ranked, not filtered: hiding the siblings would answer a different
+        # question from the one the reader asked.
+        from aiwatcher_cli import cli
+        sibling = self._row("/home/me/AgentWatch/aiwatcher-local-public")
+        self.assertIsNotNone(cli.search_field_rank(sibling, "agentwatch"))
+
+    def test_identity_fields_rank_above_any_path(self):
+        from aiwatcher_cli import cli
+        row = self._row("/home/me/AgentWatch/agentwatch", tool="codex-cli")
+        self.assertEqual(cli.search_field_rank(row, "codex"), cli.SEARCH_RANK_IDENTITY)
+        self.assertLess(cli.SEARCH_RANK_IDENTITY, cli.SEARCH_RANK_PROJECT_LEAF)
+
+    def test_windows_paths_rank_the_same_way(self):
+        from aiwatcher_cli import cli
+        row = self._row("C:" + BS + "me" + BS + "AgentWatch" + BS + "agentwatch")
+        self.assertEqual(cli.search_field_rank(row, "agentwatch"), cli.SEARCH_RANK_PROJECT_LEAF)
+
+    def test_no_match_is_none(self):
+        from aiwatcher_cli import cli
+        self.assertIsNone(cli.search_field_rank(self._row("/a/b/c"), "nothinghere"))
+
+    def test_the_front_end_keeps_the_server_order(self):
+        # renderSessionRows re-sorted every payload by recency, which threw the
+        # relevance order away before it reached the screen.
+        self.assertIn("sessionSortChosen", self.js)
+        rows = js_function_source(self.js, "renderSessionRows")
+        self.assertIn("sessionSortChosen ? sortedRows(rows, sessionSort) : rows", rows)
+        # And the row says why it matched.
+        self.assertIn("match_field", self.js)
 
 
 if __name__ == "__main__":

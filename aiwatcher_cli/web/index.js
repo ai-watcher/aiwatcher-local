@@ -2861,6 +2861,11 @@ let freshStartReceiptsMarkedViewed = false;
 let sessionRowsCache = [];
 let changeRowsCache = [];
 let sessionSort = { key: 'updated_at', dir: 'desc' };
+// The server returns rows already ordered -- by relevance when there is a search
+// term, by recency otherwise. Re-sorting on arrival threw the relevance away, so
+// a project search still looked unranked. The client only takes over once the
+// reader picks a column.
+let sessionSortChosen = false;
 let changeSort = { key: 'cost_usd', dir: 'desc' };
 async function markFreshStartReceiptsViewed() {
   if (freshStartReceiptsMarkedViewed) return;
@@ -2947,6 +2952,7 @@ function updateSortIndicators(prefix, sort, keys) {
   });
 }
 function setSessionSort(key) {
+  sessionSortChosen = true;
   sessionSort = { key, dir: sessionSort.key === key && sessionSort.dir === 'desc' ? 'asc' : 'desc' };
   renderSessionRows(sessionRowsCache, Boolean(
     document.getElementById('sessionSearch').value.trim()
@@ -2960,11 +2966,13 @@ function setChangeSort(key) {
   updateSortIndicators('change', changeSort, ['committed_at', 'project', 'cost_usd', 'lines_changed', 'usd_per_line', 'survival_pct', 'usd_per_surviving_line']);
 }
 function renderSessionRows(rows, filtered) {
-  updateSortIndicators('session', sessionSort, ['tool', 'project', 'model', 'tokens_value']);
+  updateSortIndicators('session', sessionSortChosen ? sessionSort : { key: null, dir: 'desc' },
+    ['tool', 'project', 'model', 'tokens_value']);
+  const ordered = sessionSortChosen ? sortedRows(rows, sessionSort) : rows;
   document.getElementById('sessionRows').innerHTML = rows.length
-    ? sortedRows(rows, sessionSort).map(s => `<tr class="clickable" onclick="selectSession('${esc(s.session_id)}')">
+    ? ordered.map(s => `<tr class="clickable" onclick="selectSession('${esc(s.session_id)}')">
         <td>${esc(s.tool)}</td>
-        <td title="${esc(projectTitle(s))}">${esc(projectName(s))}<br>${sessionStatePill(s.state)} ${s.outcome ? outcomePill(s.outcome) : outcomeEvidencePill(s)}</td>
+        <td title="${esc(projectTitle(s))}">${esc(projectName(s))}${s.match_field ? `<span class="match-note">matched on ${esc(s.match_field)}</span>` : ''}<br>${sessionStatePill(s.state)} ${s.outcome ? outcomePill(s.outcome) : outcomeEvidencePill(s)}</td>
         <td>${esc(s.model)}</td>
         <td class="mono num">${esc(s.tokens)}</td>
         <td><button class="row-action">Review</button></td>

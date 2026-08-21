@@ -413,6 +413,47 @@ def latest_session(sessions: Iterable[LocalSession]) -> LocalSession | None:
     return max(rows, key=session_sort_key)
 
 
+# How well a session matches a search term, lowest first. Raw substring matching
+# over the whole project path made every ancestor directory a match: on a machine
+# where the projects live under Downloads/AgentWatch/, searching "agentwatch"
+# returned 13 of 14 sessions across three unrelated projects, only one of which
+# is actually named that. Ranking by where the term landed puts the project the
+# user meant at the top without hiding the others, which a hard filter would.
+SEARCH_RANK_IDENTITY = 0    # session id, tool, or model
+SEARCH_RANK_PROJECT_LEAF = 1  # the project's own name
+SEARCH_RANK_PROJECT_TAIL = 2  # its parent directory
+SEARCH_RANK_PROJECT_PATH = 3  # somewhere further up the path
+SEARCH_RANK_TOPIC = 4         # a changed file, from git evidence
+
+SEARCH_RANK_FIELDS = {
+    SEARCH_RANK_IDENTITY: "tool or model",
+    SEARCH_RANK_PROJECT_LEAF: "project",
+    SEARCH_RANK_PROJECT_TAIL: "parent folder",
+    SEARCH_RANK_PROJECT_PATH: "path",
+    SEARCH_RANK_TOPIC: "changed file",
+}
+
+
+def _path_segments(path: str | None) -> list[str]:
+    return [part for part in re.split(r"[\\\\/]+", str(path or "")) if part]
+
+
+def search_field_rank(row: LocalSession, needle: str) -> int | None:
+    """Where *needle* matched on *row*, or None if it did not match a field."""
+    if not needle:
+        return None
+    if needle in " ".join([row.session_id, row.tool, row.model or ""]).lower():
+        return SEARCH_RANK_IDENTITY
+    segments = [part.lower() for part in _path_segments(row.project_path)]
+    if segments and needle in segments[-1]:
+        return SEARCH_RANK_PROJECT_LEAF
+    if len(segments) > 1 and needle in segments[-2]:
+        return SEARCH_RANK_PROJECT_TAIL
+    if needle in str(row.project_path or "").lower():
+        return SEARCH_RANK_PROJECT_PATH
+    return None
+
+
 def filter_sessions(
     sessions: Sequence[LocalSession],
     *,
@@ -436,10 +477,8 @@ def filter_sessions(
     if search:
         needle = search.strip().lower()
 
-        def field_haystack(row: LocalSession) -> str:
-            return " ".join([row.session_id, row.tool, row.model or "", row.project_path or ""]).lower()
-
-        field_matched_ids = {row.session_id for row in rows if needle in field_haystack(row)}
+        ranks = {row.session_id: search_field_rank(row, needle) for row in rows}
+        field_matched_ids = {sid for sid, rank in ranks.items() if rank is not None}
         unmatched = [row for row in rows if row.session_id not in field_matched_ids]
         evidence_by_session = evidence_for_sessions(unmatched) if unmatched else {}
         topic_matched_ids = {
@@ -450,6 +489,9 @@ def filter_sessions(
         }
         matched_ids = field_matched_ids | topic_matched_ids
         rows = [row for row in rows if row.session_id in matched_ids]
+        # Best match first. Ties keep the incoming order, which callers have
+        # already sorted by recency.
+        rows.sort(key=lambda row: ranks.get(row.session_id) if ranks.get(row.session_id) is not None else SEARCH_RANK_TOPIC)
     if outcome:
         recorded = outcomes_for_sessions({row.session_id for row in rows})
         rows = [row for row in rows if (recorded.get(row.session_id) or {}).get("outcome") == outcome]

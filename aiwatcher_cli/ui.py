@@ -20,6 +20,9 @@ from urllib.parse import parse_qs, urlparse
 
 from . import __version__
 from .cli import (
+    SEARCH_RANK_FIELDS,
+    SEARCH_RANK_TOPIC,
+    search_field_rank,
     usable_survival_summary,
     _loop_signal,
     _velocity_signal,
@@ -1100,7 +1103,21 @@ def build_session_search(
                 return status in {"ended", "stale", "unknown"}
             return True
         matched = [row for row in matched if state_matches(row)]
-    matched = sorted(matched, key=lambda row: row.updated_at or row.started_at or MIN_DT, reverse=True)
+    # Recency alone would undo filter_sessions' relevance order, so a search
+    # sorts by where the term matched first and recency second. Without a search
+    # there is nothing to rank on and it stays purely recent-first.
+    needle = (search or "").strip().lower()
+    if needle:
+        matched = sorted(
+            matched,
+            key=lambda row: (
+                search_field_rank(row, needle)
+                if search_field_rank(row, needle) is not None else SEARCH_RANK_TOPIC,
+                -( (row.updated_at or row.started_at or MIN_DT).timestamp() ),
+            ),
+        )
+    else:
+        matched = sorted(matched, key=lambda row: row.updated_at or row.started_at or MIN_DT, reverse=True)
     total_matched = len(matched)
     matched = matched[:SESSION_SEARCH_RESULT_LIMIT]
     window_outcomes = outcomes_for_sessions({row.session_id for row in matched})
@@ -1116,7 +1133,21 @@ def build_session_search(
         "query": {"search": search or "", "outcome": outcome or "", "evidence": evidence or "", "state": state_filter or ""},
         "total_scanned": len(rows),
         "total_matched": total_matched,
-        "sessions": [_session_row_json(row, window_outcomes, evidence_by_session) for row in matched],
+        "sessions": [
+            {
+                **_session_row_json(row, window_outcomes, evidence_by_session),
+                # Named so a reader can see why a row is in the results at all --
+                # "parent folder" is what made a search for one project return
+                # every sibling under the same directory.
+                "match_field": (
+                    SEARCH_RANK_FIELDS.get(
+                        search_field_rank(row, needle)
+                        if search_field_rank(row, needle) is not None else SEARCH_RANK_TOPIC
+                    ) if needle else None
+                ),
+            }
+            for row in matched
+        ],
     }
 
 

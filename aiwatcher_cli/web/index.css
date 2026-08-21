@@ -530,6 +530,9 @@
        what a card contains -- and every one of them was an inert <span> shaped
        exactly like a filter chip. The lock is on the privacy note only. */
     .note-chip { font-size: var(--fs-1); color: var(--muted); white-space: nowrap; }
+    /* Why this row is in the results. A search for one project used to return
+       every sibling under the same parent with nothing saying so. */
+    .match-note { margin-left: var(--sp-2); font-size: var(--fs-1); color: var(--faint); white-space: nowrap; }
     /* A settled session states an option; it does not make a demand. */
     .recommended-action.settled .action-composer-head h3 { color: var(--muted); }
     /* Secondary actions, folded away so two controls are visible at rest. */
