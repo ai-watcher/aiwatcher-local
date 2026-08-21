@@ -1016,5 +1016,68 @@ class CopyAndAffordanceTest(unittest.TestCase):
         self.assertNotIn("Plan / Control", self.html)
 
 
+class InformationArchitectureTest(unittest.TestCase):
+    """The P2 block: what is shown, in what order, and what looks clickable."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+
+    def test_two_controls_at_rest_in_the_drawer(self):
+        # Five same-sized controls wrapped across two rows with no ranking, and
+        # mixed two questions: "what next" and "grade what happened".
+        actions = js_function_source(self.js, "renderSessionActions")
+        self.assertIn('class="action-more"', actions)
+        self.assertIn("Start fresh", actions)
+        self.assertIn("Continue here", actions)
+        # It only scrolled to the outcome triad, which is its own labelled step.
+        self.assertNotIn(">Mark outcome<", actions)
+
+    def test_a_settled_session_does_not_make_a_demand(self):
+        actions = js_function_source(self.js, "renderSessionActions")
+        self.assertIn("Optional next step", actions)
+        self.assertIn("const settled = s.outcome === 'useful'", actions)
+        self.assertIn(".recommended-action.settled", self.css)
+
+    def test_the_brief_comes_after_the_form_that_shapes_it(self):
+        # The generated output sat above five empty fields, so a first-time
+        # reader could not tell whether it was ready or waiting on them.
+        body = self.js[self.js.index("handoff-refine"):]
+        self.assertIn("Refine this brief (optional)", self.js)
+        self.assertIn("Ready to copy", self.js)
+        refine_at = self.js.index("handoff-refine")
+        preview_at = self.js.index("${renderFreshStartPreview(capsule)}")
+        self.assertLess(refine_at, preview_at)
+
+    def test_copy_feedback_lands_on_the_button(self):
+        # The toast renders up to 750px from the control, and two copy buttons
+        # fired none at all.
+        self.assertIn("function flashCopied", self.js)
+        self.assertIn("lastPressedButton", self.js)
+        # Captured on the way down, because several copy paths await a fetch
+        # first and window.event is gone by then.
+        self.assertIn("}, true);", self.js)
+        self.assertIn("button.copied", self.css)
+
+    def test_each_copy_button_names_its_artefact(self):
+        for gone in (">Copy original<", ">Copy brief only<"):
+            with self.subTest(label=gone):
+                self.assertNotIn(gone, self.js)
+        for present in ("Copy my prompt", "Copy without opening", "Copy execution brief"):
+            with self.subTest(label=present):
+                self.assertIn(present, self.js)
+
+    def test_the_header_stays_reachable(self):
+        # The nav was already sticky; the header was not, so the date range and
+        # Refresh scrolled out of reach on long views.
+        header = self.css[self.css.index("    header {"):]
+        header = header[:header.index("}")]
+        self.assertIn("position: sticky", header)
+        # The nav offset is derived from the header height so they cannot overlap.
+        self.assertIn("--header-h", self.css)
+        self.assertIn("top: calc(var(--header-h)", self.css)
+
+
 if __name__ == "__main__":
     unittest.main()

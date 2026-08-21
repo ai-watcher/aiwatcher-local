@@ -127,12 +127,48 @@ function openReceipt(receiptId) {
   </section><section class="detail-section"><h3>Predicted before execution</h3>${predictedStats(receipt)}</section>${actual}${inferred}
   <section class="detail-section"><h3>Privacy evidence</h3><p>Prompt text is not stored. This receipt contains hashes, policy findings, aggregate usage, and your outcome only.</p></section>`;
 }
+// Feedback lands on the button that was pressed. The toast renders bottom-right,
+// which on this layout is up to 750px from the control -- far enough that a
+// successful copy read as nothing happening, and two copy buttons fired no
+// toast at all, so "no visible feedback" did not reliably mean failure.
+function flashCopied(button, text = 'Copied') {
+  if (!button || button.dataset.copyRestore !== undefined) return false;
+  button.dataset.copyRestore = button.textContent;
+  button.textContent = text;
+  button.classList.add('copied');
+  window.setTimeout(() => {
+    button.textContent = button.dataset.copyRestore;
+    delete button.dataset.copyRestore;
+    button.classList.remove('copied');
+  }, 2000);
+  return true;
+}
+
+// The pressed button is recorded on the way down, because window.event is only
+// set while a synchronous handler runs -- and several copy paths await a fetch
+// first (startFreshFromBubble builds the brief before copying it), by which
+// time it is gone. Capture phase, so it fires before the handler.
+let lastPressedButton = null;
+document.addEventListener('click', event => {
+  const node = event.target && event.target.closest ? event.target.closest('button') : null;
+  lastPressedButton = node || null;
+}, true);
+
+function pressedButton() {
+  const button = lastPressedButton;
+  // Ignore a button that has since been re-rendered out of the document.
+  return button && button.isConnected ? button : null;
+}
+
 async function copyText(value, label = 'Copied') {
+  const button = pressedButton();
   try {
     await navigator.clipboard.writeText(value || '');
-    showToast(label);
+    // Falls back to the toast when there is no button to write on.
+    if (!flashCopied(button)) showToast(label);
     return true;
   } catch (error) {
+    flashCopied(button, 'Copy failed');
     showToast('Copy failed. Select the text manually.', 'error');
     return false;
   }
@@ -227,8 +263,8 @@ async function preflightPrompt() {
       <h3>Paste-ready brief</h3>
       <textarea id="promptBrief" class="brief-box">${esc(data.suggested_prompt)}</textarea>
       <div class="copy-row">
-        <button class="btn-primary" onclick="copyText(document.getElementById('promptBrief').value, 'Execution brief copied — paste it into your AI tool now')">Copy brief</button>
-        <button class="btn-quiet" onclick="copyText(document.getElementById('promptInput').value, 'Original prompt copied — paste it into your AI tool now')">Copy original</button>
+        <button class="btn-primary" onclick="copyText(document.getElementById('promptBrief').value, 'Execution brief copied — paste it into your AI tool now')">Copy execution brief</button>
+        <button class="btn-quiet" onclick="copyText(document.getElementById('promptInput').value, 'Original prompt copied — paste it into your AI tool now')">Copy my prompt</button>
       </div>
       <p style="margin-top:10px">Paste whichever you choose as the next message in your AI tool. If the recommended route is Fresh Start or Fork, open that route first and paste the brief there.</p>
       <p style="margin-top:6px">${esc(data.privacy)}</p>
@@ -816,7 +852,7 @@ function renderFreshStartPreview(capsule) {
   const decisions = capsule.decisions || [];
   return `<div class="fresh-preview">
     <div class="fresh-preview-head">
-      <div><h3>Fresh Start brief preview</h3><p>This is the structured context the next AI session receives.</p></div>
+      <div><h3>Ready to copy</h3><p>This is the structured context the next AI session receives. Refine it above first if anything is missing.</p></div>
       <span class="confidence-chip observed">Metadata only</span>
     </div>
     <div class="fresh-preview-grid">
@@ -877,8 +913,14 @@ function renderHandoff(capsule) {
         ${isDemo ? `<button class="btn-quiet" onclick="showView('sessions'); closeDrawer()">Find real sessions</button>` : `<button class="btn-quiet" onclick="selectSession('${esc(capsule.session_id)}')">Inspect source session</button>`}
       </div>
     </div>
+    <!-- Refinement first but folded away, then the brief. The output used to
+         sit above the five empty fields that shape it, which reads as "this is
+         waiting for you" when in fact it is ready to copy. -->
+    <details class="handoff-refine">
+      <summary>Refine this brief (optional)</summary>
+      ${renderHandoffForm(capsule)}
+    </details>
     ${renderFreshStartPreview(capsule)}
-    ${renderHandoffForm(capsule)}
     <div class="copy-row">
       <span class="label" style="align-self:center">Format for</span>
       ${Object.entries(HANDOFF_TARGET_LABELS).map(([item, label]) => `<button class="btn-quiet" aria-pressed="${item === target ? 'true' : 'false'}" onclick="regenerateHandoff('${esc(capsule.session_id)}','${item}', ${includePrompt}, ${isDemo ? 'true' : 'false'})">${esc(label)}</button>`).join('')}
@@ -897,7 +939,7 @@ function renderHandoff(capsule) {
   </section>
   <section class="detail-section"><h3>Brief that will be copied</h3>
     <textarea id="handoffBrief" class="brief-box">${esc(capsule.next_brief || '')}</textarea>
-    <div class="copy-row"><button class="btn-quiet" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', false, ${isDemo ? 'true' : 'false'})">Copy brief only</button></div>
+    <div class="copy-row"><button class="btn-quiet" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', false, ${isDemo ? 'true' : 'false'})">Copy without opening</button></div>
     ${changedFiles.length ? `<details class="aiw-details"><summary>${esc(changedFiles.length)} changed file${changedFiles.length === 1 ? '' : 's'} to inspect</summary><div class="details-body"><div class="pill-row">${changedFiles.slice(0, 12).map(file => `<span class="pill">${esc(file)}</span>`).join('')}</div></div></details>` : ''}
   </section>`;
 }
@@ -2074,19 +2116,39 @@ function renderSessionActions(s) {
     s.tool_calls ? `${s.tool_calls} tool calls` : '',
     runtime.exact_return_available ? 'Exact return available' : (runtime.available ? 'App focus only' : 'Log only'),
   ].filter(Boolean).slice(0, 5).map(item => `<span class="pill">${esc(item)}</span>`).join('');
-  return `<section class="detail-section recommended-action action-composer">
+  // A session already judged useful and verified is not making a demand of
+  // anyone. It kept a critical-toned "Needs action" eyebrow directly under its
+  // own "Outcome: useful" and "Verified outcome" chips, which is the UI arguing
+  // with itself.
+  // confidenceLabel() renders "Verified outcome" purely from s.outcome being
+  // set -- a recorded judgement rather than an inferred one -- so that is the
+  // same condition. There is no separate verified flag to read.
+  const settled = s.outcome === 'useful';
+  return `<section class="detail-section recommended-action action-composer${settled ? ' settled' : ''}">
     <div class="action-composer-head">
-      <h3>Needs action</h3>
+      <h3>${settled ? 'Optional next step' : 'Needs action'}</h3>
       <strong>${esc(title.replace(/^Recommended: /, ''))}</strong>
       <p>${esc(body)}</p>
     </div>
     <div class="action-evidence">${evidenceChips}</div>
+    <!-- Two questions were being asked at once here -- "what next" and "grade
+         what happened" -- across five same-sized controls wrapping onto two
+         rows, with nothing ranking them. Two stay visible; the rest fold into
+         More. "Mark outcome" is gone: it only scrolled to the outcome triad,
+         which is its own step further down with its own question. The server's
+         recommendation still decides which control is primary. -->
     <div class="action-buttons">
-      ${hasHandoff ? `<button class="${primaryId === 'handoff' ? 'btn-primary' : 'btn-quiet'}" onclick="${handoffAction.label === 'Inspect evidence' ? "document.getElementById('evidencePanel').scrollIntoView({ behavior: 'smooth', block: 'center' })" : `openHandoff('${esc(s.session_id)}')`}">${esc(handoffAction.label || 'Build Fresh Start brief')}</button>` : ''}
-      ${needsOutcome ? `<button class="${primaryId === 'review_outcome' ? 'btn-primary' : 'btn-quiet'}" onclick="document.getElementById('outcomePanel').scrollIntoView({ behavior: 'smooth', block: 'center' })">Mark outcome</button>` : ''}
-      <button class="${primaryId === 'optimize_next_prompt' ? 'btn-primary' : 'btn-quiet'}" onclick="showView('prompt'); closeDrawer(); document.getElementById('promptInput').focus(); showToast('Paste the next prompt here to optimize it before sending')">Optimize next prompt</button>
-      ${hasHandoff ? `<button class="btn-quiet" onclick="continueFromSession('${esc(s.session_id)}')">Continue here</button>` : ''}
-      ${openButton}
+      ${hasHandoff
+        ? `<button class="btn-primary" onclick="${handoffAction.label === 'Inspect evidence' ? "document.getElementById('evidencePanel').scrollIntoView({ behavior: 'smooth', block: 'center' })" : `openHandoff('${esc(s.session_id)}')`}">${esc(handoffAction.label === 'Inspect evidence' ? 'Inspect evidence' : 'Start fresh')}</button>
+           <button class="btn-quiet" onclick="continueFromSession('${esc(s.session_id)}')">Continue here</button>`
+        : `<button class="${primaryId === 'optimize_next_prompt' ? 'btn-primary' : 'btn-quiet'}" onclick="showView('prompt'); closeDrawer(); document.getElementById('promptInput').focus(); showToast('Paste the next prompt here to optimize it before sending')">Optimize next prompt</button>`}
+      <details class="action-more">
+        <summary>More</summary>
+        <div class="action-more-body">
+          ${hasHandoff ? `<button class="btn-quiet" onclick="showView('prompt'); closeDrawer(); document.getElementById('promptInput').focus(); showToast('Paste the next prompt here to optimize it before sending')">Optimize next prompt</button>` : ''}
+          ${openButton}
+        </div>
+      </details>
     </div>
     <p class="tool-link-note">${esc(openToolNote)}</p>
   </section>`;

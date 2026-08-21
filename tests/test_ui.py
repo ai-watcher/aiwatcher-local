@@ -225,7 +225,11 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("/api/runtime-return", ui.HTML)
         self.assertIn("method: 'POST'", ui.HTML)
         self.assertIn("JSON.stringify({session_id: sessionId})", ui.HTML)
-        self.assertIn("primaryId === 'handoff' ? 'btn-primary' : 'btn-quiet'", ui.HTML)
+        # The cluster now shows two controls at rest and folds the rest into
+        # More, so handoff is unconditionally primary when it exists. The
+        # server's recommendation still ranks the no-handoff case.
+        self.assertIn("primaryId === 'optimize_next_prompt' ? 'btn-primary' : 'btn-quiet'", ui.HTML)
+        self.assertIn('class="action-more"', ui.HTML)
         self.assertIn("onclick=\"openHandoff", ui.HTML)
         self.assertIn("watch --notify", ui.HTML)
         self.assertIn("/api/handoff", ui.HTML)

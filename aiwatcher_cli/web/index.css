@@ -22,6 +22,7 @@
       --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px; --sp-4: 16px;
       --sp-5: 24px; --sp-6: 32px; --sp-7: 48px;
       --w-prose: 68ch;
+      --header-h: 74px;  /* measured; the nav's sticky offset is derived from it */
       /* No family was declared here, so :root computed to Times New Roman and
          only body caught Inter. Non-visual today, but it means nothing global
          was catching every node. */
@@ -79,7 +80,16 @@
       align-items: start;
     }
     header, .runtime-strip { grid-column: 1 / -1; }
-    header { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-5); margin-bottom: 22px; }
+    /* The nav was already sticky; the header was not, so the date range and
+       Refresh data scrolled out of reach on long views -- worst on the Changes
+       ledger, where getting back to the picker meant scrolling to the top. The
+       nav's offset is derived from this height so the two cannot overlap. */
+    header {
+      position: sticky; top: 0; z-index: 20;
+      display: flex; align-items: center; justify-content: space-between;
+      gap: var(--sp-5); margin-bottom: 22px; padding: var(--sp-3) 0;
+      background: var(--bg); border-bottom: 1px solid var(--line);
+    }
     h1 { font-size: var(--fs-5); margin: 0; letter-spacing: 0; line-height: 1.12; }
     h2 { margin: 0; font-size: var(--fs-4); line-height: 1.25; }
     h3 { margin: 0; font-size: var(--fs-3); }
@@ -251,7 +261,7 @@
     }
     .grid { display: grid; gap: var(--sp-3); }
     .product-nav {
-      position: sticky; top: 18px; display: grid; gap: var(--sp-1); width: 100%;
+      position: sticky; top: calc(var(--header-h) + var(--sp-2)); display: grid; gap: var(--sp-1); width: 100%;
       margin: 0; padding: 8px; border: 1px solid rgba(148,163,184,.18);
       border-radius: var(--r-2);
       background:
@@ -501,6 +511,24 @@
        what a card contains -- and every one of them was an inert <span> shaped
        exactly like a filter chip. The lock is on the privacy note only. */
     .note-chip { font-size: var(--fs-1); color: var(--muted); white-space: nowrap; }
+    /* A settled session states an option; it does not make a demand. */
+    .recommended-action.settled .action-composer-head h3 { color: var(--muted); }
+    /* Secondary actions, folded away so two controls are visible at rest. */
+    .action-more { position: relative; }
+    .handoff-refine { margin: var(--sp-3) 0; }
+    .handoff-refine > summary {
+      cursor: pointer; color: var(--muted); font-size: var(--fs-2);
+      padding: var(--sp-2) 0;
+    }
+    .handoff-refine > summary:hover { color: var(--text); }
+    .action-more > summary {
+      list-style: none; cursor: pointer; display: inline-flex; align-items: center;
+      min-height: 34px; padding: var(--sp-2) var(--sp-3); border: 1px solid var(--line);
+      border-radius: var(--r-2); color: var(--muted); font-size: var(--fs-2);
+    }
+    .action-more > summary::-webkit-details-marker { display: none; }
+    .action-more > summary:hover { background: var(--surface-hover); color: var(--text); }
+    .action-more-body { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; margin-top: var(--sp-2); }
     .note-chip.local::before { content: "🔒 "; opacity: .75; }
     .note-chip:not(:first-child) { margin-left: var(--sp-2); }
     .metric-spark-empty { color: var(--line); }
@@ -1125,7 +1153,10 @@
     .outcome-button.selected.useful { background: rgba(53,211,153,.28); box-shadow: inset 0 0 0 2px var(--green); color: #eafff5; }
     .outcome-button.selected.rework { background: rgba(246,189,96,.28); box-shadow: inset 0 0 0 2px var(--amber); color: #fff3dc; }
     .outcome-button.selected.abandoned { background: rgba(242,125,143,.28); box-shadow: inset 0 0 0 2px var(--red); color: #ffe3e8; }
-    .toast { position: fixed; right: 20px; bottom: 20px; z-index: 30; max-width: 420px; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: var(--r-2); background: #18212c; color: white; box-shadow: 0 12px 32px rgba(0,0,0,.35); opacity: 0; transform: translateY(12px); pointer-events: none; transition: opacity .18s ease, transform .18s ease; }
+    .toast { position: fixed; right: 20px; top: calc(var(--header-h) + var(--sp-3)); z-index: 30; max-width: 420px; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: var(--r-2); background: #18212c; color: var(--text); box-shadow: 0 12px 32px rgba(0,0,0,.35); opacity: 0; transform: translateY(12px); pointer-events: none; transition: opacity .18s ease, transform .18s ease; }
+    /* Moved under the header from the bottom-right corner, where it was
+       partly clipped by the window edge and far from every button. */
+    button.copied { border-color: rgba(67,217,163,.55); color: var(--green); }
     .toast.show { opacity: 1; transform: translateY(0); }
     .toast.error { border-color: rgba(242,125,143,.55); background: #2a171d; }
     .loading { color: var(--muted); padding: 18px 0; }
