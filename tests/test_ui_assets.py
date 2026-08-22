@@ -626,6 +626,41 @@ class HorizontalCompositionTest(unittest.TestCase):
         self.assertIn("gap: var(--sp-3)", shell[:shell.index("}")])
 
 
+class InsightEvidencePairingTest(unittest.TestCase):
+    """An insight's claim beside the chart that evidences it.
+
+    The claim is prose and stops at 68ch, so at 1492x945 it used 513px of a
+    1151px row and the chart sat underneath it -- about 600px of every row
+    empty while the feed grew downwards.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+
+    def test_the_claim_and_its_evidence_are_separate_containers(self):
+        # Grid auto-placement cannot put a title, a paragraph and a chart into
+        # two columns in the right order, so the two halves are wrapped.
+        feed = js_function_source(self.js, "renderInsightFeed")
+        self.assertIn('class="feed-says"', feed)
+        self.assertIn('class="feed-shows"', feed)
+        # Only rows that actually carry a chart become two columns.
+        self.assertIn("card.chart ? ' has-evidence' : ''", feed)
+
+    def test_the_evidence_column_never_shrinks_the_chart_below_its_canvas(self):
+        # These two charts are a fixed 640-unit viewBox scaled by CSS, unlike
+        # the trend chart on Watch which redraws at its measured width. So the
+        # column width sets the type size: under 640px, 11px axis labels render
+        # smaller than the smallest size in the scale.
+        rule = self.css[self.css.index(".feed-main.has-evidence {"):]
+        rule = rule[:rule.index("}")]
+        self.assertIn("minmax(0, 640px)", rule)
+        for name in ("drawDailySpend", "drawReplaySplit"):
+            with self.subTest(chart=name):
+                self.assertIn("const W = 640", js_function_source(self.js, name))
+
+
 class PlanControlTest(unittest.TestCase):
     """The tab is for planning the next prompt. A housekeeping checklist had
     grown to 64% of it, sitting above the tool the tab is named for."""

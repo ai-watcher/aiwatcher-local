@@ -739,6 +739,31 @@
     .feed-main strong { display: block; color: white; margin-bottom: 4px; }
     .feed-main p { margin: 0; color: var(--muted); line-height: 1.5; }
     .feed-impact { font-size: var(--fs-4); white-space: nowrap; padding-top: 1px; }
+    /* A finding's claim and the chart that evidences it, side by side.
+       The claim is prose and stops at 68ch, so at 1492x945 it used 513px of a
+       1151px row and the chart was pushed underneath it -- roughly 600px of
+       every row left empty while the page grew downwards.
+
+       The evidence column is capped at 640px because that is the viewBox these
+       charts are drawn on: unlike the trend chart on Watch, they are a fixed
+       640-unit canvas scaled by CSS, so the column width sets the type size.
+       Full width blew them up to 1.77x; a column any narrower than 640 shrinks
+       11px axis labels below the smallest size in the type scale. At 640 they
+       render 1:1. Getting the pairing at narrower windows means making these
+       two charts draw at their measured width the way drawTrend does, which is
+       a change to the charts and not to this layout.
+
+       1480px is where a 640px chart and a claim wide enough to read still fit
+       in the same row: below it the claim drops under 400px and the two stack
+       instead. */
+    @media (min-width: 1480px) {
+      .feed-main.has-evidence {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 640px);
+        column-gap: var(--sp-4);
+        align-items: start;
+      }
+    }
     .insight strong { display: block; margin-bottom: 3px; color: white; }
     .pill-row { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: 12px; }
     .pill { border: 1px solid var(--line); background: #0b1118; border-radius: var(--r-pill); padding: 5px 9px; color: #bdc9d9; font-size: var(--fs-1); }

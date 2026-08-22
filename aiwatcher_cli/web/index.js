@@ -3212,11 +3212,13 @@ function renderInsightFeed(insights) {
   }
   return insights.map(card => `<div class="feed-row ${esc(card.severity || 'info')}${card.session_id ? ' clickable' : ''}"
       ${card.session_id ? `onclick="selectSession('${esc(card.session_id)}')"` : ''}>
-      <div class="feed-main">
-        <strong>${esc(card.title)}</strong>
-        <p>${esc(card.body)}</p>
-        ${card.session_id && card.session_label ? `<p class="feed-session">Charted: <button class="link-inline" data-session="${esc(card.session_id)}" onclick="event.stopPropagation(); selectSession(this.dataset.session)">${esc(card.session_label)}</button></p>` : ''}
-        ${card.chart ? `<div class="feed-chart" data-feed-chart="${esc(card.id)}"></div>${feedChartCaption(card.chart)}` : ''}
+      <div class="feed-main${card.chart ? ' has-evidence' : ''}">
+        <div class="feed-says">
+          <strong>${esc(card.title)}</strong>
+          <p>${esc(card.body)}</p>
+          ${card.session_id && card.session_label ? `<p class="feed-session">Charted: <button class="link-inline" data-session="${esc(card.session_id)}" onclick="event.stopPropagation(); selectSession(this.dataset.session)">${esc(card.session_label)}</button></p>` : ''}
+        </div>
+        ${card.chart ? `<div class="feed-shows"><div class="feed-chart" data-feed-chart="${esc(card.id)}"></div>${feedChartCaption(card.chart)}</div>` : ''}
       </div>
       ${card.impact_label ? `<span class="feed-impact mono">${esc(card.impact_label)}</span>` : ''}
     </div>`).join('');
