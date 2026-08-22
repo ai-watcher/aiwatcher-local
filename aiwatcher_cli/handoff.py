@@ -279,6 +279,91 @@ def _clean_user_items(items: Sequence[str] | None, *, limit: int = 8, item_limit
     return cleaned
 
 
+def _brief_memory_summary(
+    *,
+    project_label: str,
+    project_reliable: bool,
+    objective_text: str | None,
+    profile: dict[str, object],
+    evidence: object,
+    decisions: Sequence[dict[str, object]],
+    source_identity_label: str,
+    exact_return_label: str,
+    same_project_session_count: int,
+) -> dict[str, list[str]]:
+    """Build a human-readable handoff memo before the forensic evidence.
+
+    Claude can summarize its own transcript. AIWatcher often cannot, so this
+    section is deliberately framed as local evidence plus inference instead of
+    pretending the previous chat text is available.
+    """
+    project_part = project_label if project_reliable else "an unconfirmed project"
+    session_label = str(profile.get("session_label") or "AI work session")
+    summary: list[str] = []
+    if objective_text:
+        summary.append(f"- You were trying to: {objective_text}")
+    else:
+        summary.append(
+            f"- AIWatcher inferred this was a {session_label} in {project_part}; confirm the task from the workspace before editing."
+        )
+    summary.append(
+        f"- Source session match: {source_identity_label}; return capability: {exact_return_label}."
+    )
+    if same_project_session_count > 1:
+        summary.append(
+            f"- {same_project_session_count} same-project sessions were observed, so verify this is the intended source before carrying context forward."
+        )
+
+    decision_lines: list[str] = []
+    for decision in decisions:
+        text = str(decision.get("summary") or "").strip()
+        if text:
+            decision_lines.append(f"- {text}")
+        if len(decision_lines) >= 4:
+            break
+    if not decision_lines:
+        decision_lines.append("- No explicit decision notes were found; infer decisions only from commits, changed files, and user confirmation.")
+
+    current_state: list[str] = []
+    commits = getattr(evidence, "commits", []) or []
+    changed_files = getattr(evidence, "changed_files", []) or []
+    tests = getattr(evidence, "tests", []) or []
+    if commits:
+        latest = commits[0]
+        subject = str(latest.get("subject") or "").strip()
+        current_state.append(
+            f"- Latest nearby commit: {latest.get('sha')}{(': ' + subject) if subject else ''}."
+        )
+    if changed_files:
+        shown = ", ".join(str(item) for item in changed_files[:4])
+        extra = f" and {len(changed_files) - 4} more" if len(changed_files) > 4 else ""
+        current_state.append(f"- Working tree has {len(changed_files)} changed file(s): {shown}{extra}.")
+    if tests:
+        current_state.append(f"- {len(tests)} nearby test artifact(s) were detected; inspect before claiming done.")
+    if not current_state:
+        current_state.append("- No nearby commits, changed files, or test artifacts were found; reconstruct from the repository state first.")
+
+    checkpoint_items = list(profile.get("checkpoint") or [])
+    open_items = [
+        "- First confirm the source session identity and project are the work the user meant to continue.",
+        f"- Next checkpoint: {checkpoint_items[0] if checkpoint_items else 'inspect the listed evidence and choose one smallest safe step.'}",
+    ]
+
+    files: list[str] = []
+    for item in changed_files[:8]:
+        files.append(f"- {item}")
+    if not files:
+        files.append("- No changed files detected yet; start with `git status --short` and `git diff --stat`.")
+
+    return {
+        "summary": summary,
+        "decisions": decision_lines,
+        "current_state": current_state,
+        "open": open_items,
+        "files": files,
+    }
+
+
 def _target_guidance(target: str) -> list[str]:
     if target == "codex":
         return [
@@ -532,6 +617,18 @@ def build_handoff_capsule(
             *[f"- {item}" for item in acceptance_lines],
         ]
 
+    memory_summary = _brief_memory_summary(
+        project_label=project_label,
+        project_reliable=project_reliable,
+        objective_text=objective_text,
+        profile=profile,
+        evidence=evidence,
+        decisions=decisions,
+        source_identity_label=source_identity_label,
+        exact_return_label=exact_return_label,
+        same_project_session_count=same_project_session_count,
+    )
+
     next_brief = "\n".join([
         "AIWatcher Fresh Start brief",
         "",
@@ -539,6 +636,21 @@ def build_handoff_capsule(
         "Continue from source-session metadata and workspace state, not from hidden conversation history.",
         f"Target tool: {TARGET_LABELS[target]}.",
         f"Continuation type: {HANDOFF_TYPE_LABELS[handoff_type]}.",
+        "",
+        "Summary from previous work",
+        *memory_summary["summary"],
+        "",
+        "Decisions made",
+        *memory_summary["decisions"],
+        "",
+        "Current state",
+        *memory_summary["current_state"],
+        "",
+        "Open next step",
+        *memory_summary["open"],
+        "",
+        "Files/evidence to inspect first",
+        *memory_summary["files"],
         "",
         "Source session identity",
         *source_identity_lines,
