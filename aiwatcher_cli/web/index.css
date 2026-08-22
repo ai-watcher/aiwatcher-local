@@ -360,8 +360,17 @@
        rather than one stretching to pad out the other. */
     .watch-shell { display: grid; gap: var(--sp-3); }
     .watch-shell > .card { margin: 0; }
-    @media (min-width: 1280px) {
-      .watch-shell { grid-template-columns: minmax(0, 0.85fr) minmax(0, 1fr); align-items: start; }
+    /* Split evenly, and the breakpoint is set by the one hard constraint: the
+       work table must never scroll sideways. Its min-content is 393px, so with
+       68px of card padding a column below ~461px would clip it. At 1300 the
+       content area is ~997px and an even split gives each card ~493px.
+       The facts strip above wants ~584px to hold one line, which no split of a
+       1300px window can give it -- and tuning the breakpoint to that number
+       would be tuning to today's dollar figures, since the strip's width grows
+       with the values in it. It wraps between its two scopes instead, never
+       inside one (see .health-facts). At 1492 it fits on one line again. */
+    @media (min-width: 1300px) {
+      .watch-shell { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
     }
     @media (min-width: 1280px) { .kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
     /* Headings and <strong> were never given a weight, so they took the UA
@@ -802,7 +811,11 @@
       white-space: nowrap; pointer-events: none; z-index: 2;
     }
 
-    .health-facts { margin: 0; font-family: var(--mono); font-size: var(--fs-1); color: var(--faint); font-variant-numeric: tabular-nums; }
+    .health-facts { margin: 0; font-family: var(--mono); font-size: var(--fs-1); color: var(--faint); font-variant-numeric: tabular-nums; display: flex; flex-wrap: wrap; column-gap: var(--sp-2); }
+    /* Each scope is one unbreakable run, so a column too narrow for both drops
+       the project scope to its own line instead of splitting a phrase across
+       two. See healthFacts in index.js. */
+    .health-facts > span { white-space: nowrap; }
 
     .health-row {
       display: grid; grid-template-columns: minmax(0, 1fr) 130px 72px 104px 78px;

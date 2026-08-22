@@ -582,6 +582,7 @@ class HorizontalCompositionTest(unittest.TestCase):
     def setUpClass(cls):
         cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
         cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
 
     def test_watch_puts_health_beside_the_work(self):
         watch = self.html[self.html.index('id="view-sessions"'):]
@@ -590,16 +591,30 @@ class HorizontalCompositionTest(unittest.TestCase):
         # The shell wraps both cards, not one of them.
         self.assertEqual(watch.count('<div class="card"'), 2)
 
-    def test_the_two_zones_only_form_when_both_fit(self):
-        # A 1024px window leaves 721px of content once the nav rail is out, and
-        # the Work table needs 393px of min-content on its own -- two real zones
-        # do not fit, so below the breakpoint it stacks rather than scrolling
-        # the table sideways.
+    def test_the_two_zones_only_form_when_the_table_still_fits(self):
+        # The hard constraint is the work table: 393px of min-content plus 68px
+        # of card padding, so a column under ~461px would clip it. Below the
+        # breakpoint the view stacks rather than scrolling the table sideways.
         shell = self.css[self.css.index(".watch-shell {"):]
-        shell = shell[:shell.index("@media") + 200]
-        self.assertIn("min-width: 1280px", shell)
+        shell = shell[:shell.index("@media") + 260]
+        self.assertIn("min-width: 1300px", shell)
         self.assertIn("grid-template-columns", shell)
         self.assertIn("align-items: start", shell)
+
+    def test_the_facts_strip_can_only_break_between_scopes(self):
+        # Item 5 removed a 68ch prose cap that broke this data strip mid-phrase,
+        # leaving "session . 1 critical" on a line of its own. A narrower column
+        # brings that pressure back, so the two scopes are separate runs that
+        # cannot split internally -- true at any width, rather than true only
+        # while the dollar figures in it stay short.
+        facts = js_function_source(self.js, "healthFacts")
+        self.assertIn("filter(Boolean);", facts)
+        self.assertNotIn("filter(Boolean).join('  ", facts)
+        rule = self.css[self.css.index(".health-facts > span {"):]
+        self.assertIn("white-space: nowrap", rule[:rule.index("}")])
+        container = self.css[self.css.index("    .health-facts { margin: 0;"):]
+        container = container[:container.index("}")]
+        self.assertIn("flex-wrap: wrap", container)
 
     def test_the_stacked_gap_comes_from_the_grid(self):
         # The first card carried an inline margin-bottom, which would have added

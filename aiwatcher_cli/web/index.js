@@ -2241,10 +2241,15 @@ function healthFacts(row) {
     `${row.session_count} session${row.session_count === 1 ? '' : 's'}`,
     row.critical_sessions ? `${row.critical_sessions} critical` : '',
   ].filter(Boolean).join(' \u00b7 ');
+  // Returned as groups rather than one joined string so the strip can only
+  // ever break between the two scopes. Squeezed into a narrow column it broke
+  // mid-phrase -- the defect that put "session . 1 critical" on a line of its
+  // own -- and splitting the scopes is pointless if a wrap can still put half
+  // of one underneath the other.
   return [
     session ? `this session: ${session}` : '',
-    project ? `this project: ${project}` : '',
-  ].filter(Boolean).join('  \u2014  ');
+    project ? `${session ? '\u2014 ' : ''}this project: ${project}` : '',
+  ].filter(Boolean);
 }
 
 // A health-card button goes where its label says. The kind comes from
@@ -2278,7 +2283,7 @@ function healthLeadCard(row) {
       <span class="health-now">${esc(row.latest_turn_tokens)} per turn</span></div>
     <div class="meter-host" data-meter="${esc(row.session_id)}"></div>
     <div class="trend-host" data-trend="${esc(row.session_id)}"></div>
-    <p class="health-facts">${esc(healthFacts(row))}</p>
+    <p class="health-facts">${healthFacts(row).map(group => `<span>${esc(group)}</span>`).join('')}</p>
     <div class="health-actions">
       ${healthActionButton(row, 'btn-primary', row.action.label, row.action.kind)}
       ${row.can_handoff ? healthActionButton(row, 'btn-quiet', row.action.secondary_label, row.action.secondary_kind) : ''}
