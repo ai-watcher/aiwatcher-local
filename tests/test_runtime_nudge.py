@@ -45,6 +45,30 @@ STATUS = {
 }
 
 
+class ForegroundProbeTests(unittest.TestCase):
+    """foreground_tool promises best-effort silence. It has to keep that promise
+    for the failure its own timeout creates.
+
+    Both platform probes shell out with timeout=1 and caught only OSError.
+    TimeoutExpired is a SubprocessError, so a busy machine raised straight
+    through and crashed `aiwatcher watch` -- and once foreground_tool moved onto
+    the watch path, one loaded local run turned ten watch tests red at once.
+    """
+
+    def test_a_busy_machine_does_not_crash_the_watch_loop(self) -> None:
+        import subprocess
+
+        from aiwatcher_cli import runtime_nudge
+
+        def timed_out(*args: object, **kwargs: object):
+            raise subprocess.TimeoutExpired(["tasklist"], 1)
+
+        for probe in ("_windows_foreground_app", "_macos_foreground_app"):
+            with self.subTest(probe=probe):
+                with patch.object(runtime_nudge.subprocess, "run", timed_out):
+                    self.assertIsNone(getattr(runtime_nudge, probe)())
+
+
 class RuntimeNudgeTests(unittest.TestCase):
     def test_active_process_is_eligible_after_a_short_pause(self) -> None:
         nudge = build_runtime_nudge(

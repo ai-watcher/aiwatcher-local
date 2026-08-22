@@ -1,4 +1,15 @@
+// The window the tile sparklines were last drawn for.
+let tileSparkWindow = null;
 
+// These are product names, not ids. The buttons used to render the raw target
+// key, so the row read "Generic claude codex cursor vscode".
+const HANDOFF_TARGET_LABELS = {
+  generic: 'Generic',
+  claude: 'Claude Code',
+  codex: 'Codex',
+  cursor: 'Cursor',
+  vscode: 'VS Code',
+};
 const HANDOFF_TYPES = [
   { id: 'coding', label: 'Coding continuation' },
   { id: 'product', label: 'Product/strategy continuation' },
@@ -28,9 +39,9 @@ function jsArg(value) {
 }
 let receiptCache = [];
 function riskFlow(receipt) {
-  const original = `<span class="risk-chip ${esc(receipt.original_risk)}">${esc(receipt.original_risk)} · ${esc(receipt.original_score ?? '—')}</span>`;
+  const original = `<span class="risk-chip ${esc(receipt.original_risk)}">${esc(receipt.original_risk)} · ${esc(riskScore(receipt.original_score))}</span>`;
   if (receipt.selected_score === null || receipt.selected_score === undefined) return `<div class="risk-flow">${original}</div>`;
-  return `<div class="risk-flow">${original}<span class="risk-arrow">→</span><span class="risk-chip ${esc(receipt.selected_risk || 'low')}">${esc(receipt.selected_risk || 'unknown')} · ${esc(receipt.selected_score)}</span><span class="pill">${esc(receipt.risk_points_reduced || 0)} points reduced</span></div>`;
+  return `<div class="risk-flow">${original}<span class="risk-arrow">→</span><span class="risk-chip ${esc(receipt.selected_risk || 'low')}">${esc(receipt.selected_risk || 'unknown')} · ${esc(riskScore(receipt.selected_score))}</span><span class="pill">${esc(receipt.risk_points_reduced || 0)} points reduced</span></div>`;
 }
 function predictedStats(receipt) {
   const p = receipt.predicted || {};
@@ -57,9 +68,9 @@ function renderReceiptRows(receipts) {
   if (!receipts.length) return '<tr><td colspan="6"><div class="empty">No interventions recorded in this window.</div></td></tr>';
   return receipts.map(receipt => `<tr class="clickable" onclick="openReceipt('${esc(receipt.id)}')">
     <td>${esc(dateLabel(receipt.created_at))}</td>
-    <td><strong>${esc(receipt.tool)}</strong><br><span class="sub">${esc(receipt.project)}</span></td>
+    <td><strong>${esc(receipt.tool)}</strong><br><span class="sub" title="${esc(projectTitle(receipt))}">${esc(projectName(receipt))}</span></td>
     <td>${esc(receipt.decision_label)}</td>
-    <td>${esc(receipt.original_score ?? '—')} → ${esc(receipt.selected_score ?? '—')}</td>
+    <td>${esc(riskScore(receipt.original_score))} → ${esc(riskScore(receipt.selected_score))}</td>
     <td>${esc(receipt.outcome || receipt.session_status)}</td>
     <td><button class="row-action">Review</button></td>
   </tr>`).join('');
@@ -79,7 +90,16 @@ function renderHandoffDecisionRows(decisions) {
     <td>${esc(dateLabel(decision.created_at))}</td>
     <td>${esc(handoffDecisionLabel(decision.decision))}</td>
     <td>${esc(decision.expected_saved_context_label ? `~${decision.expected_saved_context_label}` : '—')}</td>
-    <td><strong>${esc(decision.proof_status || 'Proof pending')}</strong><br><span class="sub">${esc(decision.observed_followup ? decision.observed_followup.label : decision.proof_reason || decision.outcome || decision.inferred_outcome || decision.proof_confidence || 'No saved-token claim yet')}</span>${decision.proof_evidence ? `<br><span class="sub">${esc(decision.proof_evidence.label)} · ${esc(decision.proof_evidence.commits)} commits · ${esc(decision.proof_evidence.tests)} tests</span>` : ''}</td>
+    <td><strong>${esc(decision.proof_status || 'Proof pending')}</strong>${(() => {
+      // The generic pending reason was the same 22 words on every pending row.
+      // It is stated once in the card subtitle now; the cell keeps anything
+      // specific to that row.
+      const specific = decision.observed_followup ? decision.observed_followup.label
+        : (decision.proof_status && decision.proof_status !== 'Proof pending'
+            ? decision.proof_reason || decision.outcome || decision.inferred_outcome || decision.proof_confidence
+            : decision.outcome || decision.inferred_outcome);
+      return specific ? `<br><span class="sub">${esc(specific)}</span>` : '';
+    })()}${decision.proof_evidence ? `<br><span class="sub">${esc(decision.proof_evidence.label)} · ${esc(decision.proof_evidence.commits)} commits · ${esc(decision.proof_evidence.tests)} tests</span>` : ''}</td>
     <td><span class="sub">source</span> ${esc(decision.source_session_id || decision.session_id || 'unknown')}<br><span class="sub">next</span> ${esc(decision.next_session_id || 'waiting')}</td>
     <td>${decision.next_session_id ? `<button class="row-action" onclick="selectSession('${esc(decision.next_session_id)}')">Inspect next</button>` : decision.source_session_id ? `<button class="row-action" onclick="selectSession('${esc(decision.source_session_id)}')">Inspect source</button>` : ''}</td>
   </tr>`).join('');
@@ -108,20 +128,56 @@ function openReceipt(receiptId) {
          <div class="mini"><span class="label">API-equivalent</span><strong>${esc(receipt.inferred.api_value_label || '—')}</strong></div>
        </div><p>${esc(receipt.inferred.disclaimer)}</p></section>`
     : '';
-  document.getElementById('detailContent').innerHTML = `<section class="detail-section">
+  setDrawerContent(`<section class="detail-section">
     <h2>${esc(receipt.decision_label)}</h2>
     <p>${esc(receipt.tool)} · ${esc(receipt.project)} · ${esc(dateLabel(receipt.created_at))}</p>
     ${riskFlow(receipt)}
     <div class="pill-row"><span class="pill">${esc(receipt.session_status)}</span>${outcomePill(receipt.outcome)}</div>
   </section><section class="detail-section"><h3>Predicted before execution</h3>${predictedStats(receipt)}</section>${actual}${inferred}
-  <section class="detail-section"><h3>Privacy evidence</h3><p>Prompt text is not stored. This receipt contains hashes, policy findings, aggregate usage, and your outcome only.</p></section>`;
+  <section class="detail-section"><h3>Privacy evidence</h3><p>Prompt text is not stored. This receipt contains hashes, policy findings, aggregate usage, and your outcome only.</p></section>`);
 }
+// Feedback lands on the button that was pressed. The toast renders bottom-right,
+// which on this layout is up to 750px from the control -- far enough that a
+// successful copy read as nothing happening, and two copy buttons fired no
+// toast at all, so "no visible feedback" did not reliably mean failure.
+function flashCopied(button, text = 'Copied') {
+  if (!button || button.dataset.copyRestore !== undefined) return false;
+  button.dataset.copyRestore = button.textContent;
+  button.textContent = text;
+  button.classList.add('copied');
+  window.setTimeout(() => {
+    button.textContent = button.dataset.copyRestore;
+    delete button.dataset.copyRestore;
+    button.classList.remove('copied');
+  }, 2000);
+  return true;
+}
+
+// The pressed button is recorded on the way down, because window.event is only
+// set while a synchronous handler runs -- and several copy paths await a fetch
+// first (startFreshFromBubble builds the brief before copying it), by which
+// time it is gone. Capture phase, so it fires before the handler.
+let lastPressedButton = null;
+document.addEventListener('click', event => {
+  const node = event.target && event.target.closest ? event.target.closest('button') : null;
+  lastPressedButton = node || null;
+}, true);
+
+function pressedButton() {
+  const button = lastPressedButton;
+  // Ignore a button that has since been re-rendered out of the document.
+  return button && button.isConnected ? button : null;
+}
+
 async function copyText(value, label = 'Copied') {
+  const button = pressedButton();
   try {
     await navigator.clipboard.writeText(value || '');
-    showToast(label);
+    // Falls back to the toast when there is no button to write on.
+    if (!flashCopied(button)) showToast(label);
     return true;
   } catch (error) {
+    flashCopied(button, 'Copy failed');
     showToast('Copy failed. Select the text manually.', 'error');
     return false;
   }
@@ -157,9 +213,14 @@ async function recordOptimizeDecision(decision, project = '', impact = '', butto
     showToast(`Could not save Optimize decision: ${error.message || 'unknown error'}`, 'error');
   }
 }
+// Scoped to the textarea. It used to wipe the Route result too -- the route,
+// risk score, findings, suggestions and paste-ready brief -- with no
+// confirmation, from a quiet button sitting 20px from the primary action. An
+// accidental press now costs the prompt text and nothing else; the analysis
+// stands until the next Plan run replaces it.
 function clearPromptCompanion() {
   document.getElementById('promptInput').value = '';
-  document.getElementById('promptResult').innerHTML = '<div class="empty">Run Plan to choose the safest next route before sending the prompt.</div>';
+  document.getElementById('promptInput').focus();
 }
 function renderPlanAction(action) {
   const route = action || {};
@@ -176,6 +237,222 @@ function renderPlanAction(action) {
     <div class="copy-row">${primary}</div>
   </div>`;
 }
+/* The Plan result is three zones, in this order, and the order is the point.
+   It used to be one undifferentiated block, which read as though the whole
+   thing had been worked out from the prompt. It had not: diffing two unrelated
+   prompts produced identical output apart from the tool name, which comes from
+   a dropdown. Separating what was derived from what is house advice is the
+   honesty fix, and it ships before there is anything to put in zone A. */
+
+// Zone A. Anything actually derived from this specific prompt. Empty until a
+// second opinion exists to fill it -- but never silent, because an empty zone
+// that says why is what makes the difference between the zones legible.
+function derivedZoneShell(chipClass, chipLabel, body) {
+  return `<section class="detail-section plan-zone plan-zone-derived" id="planDerivedZone">
+    <div class="section-title">
+      <div><h3>From your prompt</h3><p>Worked out from what you wrote, not from a template.</p></div>
+      <span class="confidence-chip ${esc(chipClass)}">${esc(chipLabel)}</span>
+    </div>
+    ${body}
+  </section>`;
+}
+function renderDerivedZone(data) {
+  const second = data.second_opinion || {};
+  if (second.pending) {
+    // Spec 4.2: zones B and C are complete and usable throughout, so this waits
+    // in place rather than holding the panel. A real run takes about 30s.
+    return derivedZoneShell('unknown', 'asking',
+      `<p class="zone-empty">Asking your own agent for a second opinion. Zones below are complete already.</p>
+       <div class="ai-loading-bar" aria-hidden="true"></div>`);
+  }
+  const gatePassed = Number(data.score || 0) >= RISK_MEDIUM_AT;
+  const reason = second.reason
+    || (gatePassed
+        ? 'Local signals reached the medium band, but no analyst is configured on this build.'
+        : 'Nothing in this prompt matched a signal worth a second opinion.');
+  return derivedZoneShell('unknown', 'unavailable', `<p class="zone-empty">${esc(reason)}</p>`);
+}
+// Zone A, filled. Every heading here maps to one schema field, so a reader can
+// see that this was extracted rather than composed -- and an empty field is
+// omitted rather than rendered as a heading with nothing under it.
+function renderSecondOpinion(second) {
+  if (second && second.needs_consent) {
+    // Spec 7: asked once per project, with the cost in the question. Nothing
+    // has been spawned at this point and nothing will be until this is answered.
+    return derivedZoneShell('unknown', 'your call',
+      `<p class="zone-empty">${esc(second.reason)}</p>
+       <div class="copy-row">
+         <button class="btn-primary" data-project="${esc(second.project_path || '')}"
+           onclick="answerSecondOpinionConsent(this.dataset.project, true)">Ask my agent (${esc(second.estimate_label || 'about $0.04')})</button>
+         <button class="btn-quiet" data-project="${esc(second.project_path || '')}"
+           onclick="answerSecondOpinionConsent(this.dataset.project, false)">Not for this project</button>
+       </div>`);
+  }
+  if (!second || !second.available || !second.analysis) {
+    const budget = second && second.budget;
+    const note = second && second.capped && budget
+      ? `<p class="second-opinion-cost mono">${esc(budgetLabel(budget))}</p>`
+      : '';
+    return derivedZoneShell('unknown', 'unavailable',
+      `<p class="zone-empty">${esc((second && second.reason) || 'Second opinion unavailable.')}</p>${note}`);
+  }
+  const a = second.analysis;
+  const list = (items) => `<ul class="prompt-list">${items.map(item => `<li>${esc(item)}</li>`).join('')}</ul>`;
+  const removals = (a.removals || []).filter(item => item && item.requested);
+  const parts = [
+    `<h4>What this asks for</h4><p>${esc(a.outcome)}</p>`,
+    `<h4>Done when</h4><p>${esc(a.success_check)}</p>`,
+  ];
+  if ((a.scope_paths || []).length) {
+    parts.push(`<h4>Likely in scope</h4>${list(a.scope_paths)}`);
+  }
+  if ((a.unresolved_nouns || []).length) {
+    // The highest-value line in the block: a noun with no file behind it is
+    // usually the thing that makes the task bigger than it looks.
+    parts.push(`<h4>Could not locate</h4><div class="pill-row">${a.unresolved_nouns.map(noun =>
+      `<span class="signal-chip sensitive">${esc(noun)}</span>`).join('')}</div>`);
+  }
+  if (removals.length) {
+    // Above the guardrails, always: a bullet telling the agent to avoid cleanup
+    // must never sit above the deletion the prompt actually asked for.
+    parts.push(`<h4>Requested removals</h4><ul class="prompt-list">${removals.map(item =>
+      `<li>${esc(item.what)}${item.path ? ` <span class="sub">${esc(item.path)}</span>` : ''}</li>`).join('')}</ul>`);
+  }
+  if ((a.ambiguities || []).length) {
+    parts.push(`<h4>Worth deciding before you send</h4>${list(a.ambiguities)}`);
+  }
+  parts.push(`<h4>First checkpoint</h4><p>${esc(a.first_checkpoint)}</p>`);
+  if (a.dropped_paths) {
+    parts.push(`<p class="receipt-note">${esc(a.dropped_paths)} path(s) the analyst named do not exist in this repository and were dropped. Confidence lowered a step.</p>`);
+  }
+  parts.push(secondOpinionCost(second));
+  if (second.budget) {
+    // The counter is visible before the cap bites, not only once it has.
+    parts.push(`<p class="second-opinion-cost mono">${esc(budgetLabel(second.budget))}</p>`);
+  }
+  // Everything in this zone came from a model, so the dot says "inferred" --
+  // never "observed", which is zone B's word for things read off the machine.
+  // Low confidence means more than half the prompt's nouns resolved to nothing,
+  // which is nearer to unknown than to inferred, and is the one case where the
+  // colour should stop a reader leaning on it.
+  const tone = a.confidence === 'low' ? 'unknown' : 'inferred';
+  return derivedZoneShell(tone, a.confidence, parts.join(''));
+}
+// Two ceilings, because one of them cannot bind on every host: Codex prices its
+// runs at nothing we can read, so a dollars-only counter would sit at $0.00
+// however many analysts had run. Both are shown, and either one stops the next.
+function budgetLabel(budget) {
+  const spent = `${moneyLabel(budget.spent_usd)} of ${moneyLabel(budget.cap_usd)}`;
+  const runs = `${formatCount(budget.runs)} of ${formatCount(budget.run_cap)} runs`;
+  return `this month: ${spent} · ${runs}`;
+}
+// Spec 5. On the screen the money was spent on, not buried in Settings.
+//
+// Codex reports no machine-readable cost, and printing "$0.00" for it would
+// claim the run was free -- true for a subscription, false for anyone on an API
+// key, and the local logs cannot tell those two apart. So a host that does not
+// price its own runs says so instead of being given a number it never gave us.
+function secondOpinionCost(second) {
+  const priced = second.cost_reported !== false && Number.isFinite(second.cost_usd);
+  const bits = [
+    'second opinion',
+    second.cli_label || second.cli || 'local agent',
+    second.model ? String(second.model) : '',
+    Number.isFinite(second.tokens) && second.tokens ? `${formatCount(second.tokens)} tokens` : '',
+    priced ? moneyLabel(second.cost_usd) : 'cost not reported by this CLI',
+    // Spec 7. "contents: on" is the state the user opted into. With it off the
+    // chip says which kind of off: a rule this CLI enforced, or an instruction
+    // it was given and followed. Codex cannot deny its own shell, so on that
+    // host it is the weaker one and does not get to claim the stronger.
+    second.contents ? 'contents: on'
+      : (second.contents_enforced ? 'contents: blocked' : 'contents: not requested'),
+  ].filter(Boolean);
+  return `<p class="second-opinion-cost mono">${esc(bits.join(' · '))}</p>`;
+}
+// Answering yes spends money, so it is a button the reader pressed, not a
+// consequence of having opened the Plan screen.
+async function answerSecondOpinionConsent(project, allowed) {
+  try {
+    await postJson('/api/second-opinion-consent', { project_path: project, allowed });
+  } catch (error) {
+    showToast('Could not record that choice.', 'error');
+    return;
+  }
+  if (!allowed) {
+    const node = document.getElementById('planDerivedZone');
+    if (node) node.outerHTML = renderSecondOpinion({ reason: 'Second opinion is turned off for this project.' });
+    return;
+  }
+  const node = document.getElementById('planDerivedZone');
+  if (node) node.outerHTML = derivedZoneShell('unknown', 'asking',
+    `<p class="zone-empty">Asking your own agent for a second opinion.</p>
+     <div class="ai-loading-bar" aria-hidden="true"></div>`);
+  loadSecondOpinion(document.getElementById('promptInput').value,
+                    document.getElementById('promptTool').value, project);
+}
+// Spec 4.2 again: if the reader copies the brief before this lands, the copy
+// says so rather than quietly omitting a zone they were told was coming.
+async function loadSecondOpinion(prompt, tool, cwd) {
+  const node = document.getElementById('planDerivedZone');
+  if (!node) return;
+  let second;
+  try {
+    second = await postJson('/api/second-opinion', { prompt, tool, cwd });
+  } catch (error) {
+    second = { available: false, reason: 'Could not reach the local AIWatcher server.' };
+  }
+  const current = document.getElementById('planDerivedZone');
+  // The reader may have re-run Plan while this was in flight.
+  if (!current || current !== node) return;
+  current.outerHTML = renderSecondOpinion(second);
+}
+
+// Zone B. Stage 1: local, lexical and free, so it never has an unavailable
+// state. Everything here was read out of the prompt on this machine.
+function renderObservedZone(data, riskTone) {
+  const signals = data.signals || {};
+  // Every point in the score, itemised. The gate that decides whether to pay
+  // for a second opinion reads this number, so it has to be accountable.
+  const blast = ((data.blast || {}).reasons) || [];
+  const removals = (data.removals || []).filter(item => item && item.requested);
+  const chips = [
+    ...(signals.destructive_verbs || []).map(v => ['destructive', v]),
+    ...(signals.sensitive_keywords || []).map(v => ['sensitive', v]),
+    ...(signals.breadth_words || []).map(v => ['breadth', v]),
+    ...(signals.terse ? [['terse', `${signals.word_count} words`]] : []),
+  ];
+  return `<section class="detail-section plan-zone risk-card ${esc(riskTone)}">
+    <div class="section-title">
+      <div><h3>Observed locally</h3><p>Read from your prompt on this machine. No file was opened and nothing was sent anywhere.</p></div>
+      <span class="confidence-chip observed">observed</span>
+    </div>
+    <p><strong>Risk: ${esc(data.risk)} · ${esc(riskScore(data.score))}</strong> <span class="risk-scale">(${esc(RISK_SCALE_NOTE)})</span></p>
+    ${blast.length ? `<ul class="prompt-list blast-list">${blast.map(r =>
+      `<li><span class="blast-points ${Number(r.points) < 0 ? 'down' : ''}">${Number(r.points) > 0 ? '+' : ''}${esc(r.points)}</span> ${esc(r.text || r.detail || r.signal)}</li>`).join('')}</ul>` : ''}
+    <p>${esc(data.impact_label)}</p>
+    ${chips.length ? `<div class="pill-row signal-row">${chips.map(([kind, word]) =>
+      `<span class="signal-chip ${esc(kind)}">${esc(kind)}: ${esc(word)}</span>`).join('')}</div>` : ''}
+    ${removals.length ? `<h4>Requested removals</h4><ul class="prompt-list">${removals.map(item =>
+      `<li>${esc(item.what)}${item.path ? ` <span class="sub">${esc(item.path)}</span>` : ''}</li>`).join('')}</ul>` : ''}
+    <h4>Findings</h4>
+    <ul class="prompt-list">${(data.findings || []).map(item => `<li>${esc(item)}</li>`).join('')}</ul>
+  </section>`;
+}
+
+// Zone C. The same advice every prompt gets. Collapsed, and labelled as what it
+// is -- it used to sit beside the derived material with nothing separating them.
+function renderGuardrailZone(data) {
+  const suggestions = data.suggestions || [];
+  if (!suggestions.length) return '';
+  return `<details class="detail-section plan-zone plan-zone-guardrails">
+    <summary>Standard execution guardrails (${suggestions.length})</summary>
+    <div class="details-body">
+      <p>House advice applied to every prompt of this shape. Not derived from yours.</p>
+      <ul class="prompt-list">${suggestions.map(item => `<li>${esc(item)}</li>`).join('')}</ul>
+    </div>
+  </details>`;
+}
+
 async function preflightPrompt() {
   const prompt = document.getElementById('promptInput').value;
   const tool = document.getElementById('promptTool').value;
@@ -199,24 +476,23 @@ async function preflightPrompt() {
     }
     const riskTone = data.risk || 'low';
     resultNode.innerHTML = `${renderPlanAction(data.plan_action)}
-    <div class="risk-card ${esc(riskTone)}" style="margin-top:14px">
-      <h3>Risk: ${esc(data.risk)} · score ${esc(data.score)}</h3>
-      <p>${esc(data.impact_label)}</p>
-      <h3 style="margin-top:14px">Findings</h3>
-      <ul class="prompt-list">${data.findings.map(item => `<li>${esc(item)}</li>`).join('')}</ul>
-      <h3 style="margin-top:14px">Suggestions</h3>
-      <ul class="prompt-list">${data.suggestions.map(item => `<li>${esc(item)}</li>`).join('')}</ul>
-    </div>
+    ${renderDerivedZone(data)}
+    ${renderObservedZone(data, riskTone)}
+    ${renderGuardrailZone(data)}
     <div class="detail-section">
       <h3>Paste-ready brief</h3>
       <textarea id="promptBrief" class="brief-box">${esc(data.suggested_prompt)}</textarea>
       <div class="copy-row">
-        <button class="btn-primary" onclick="copyText(document.getElementById('promptBrief').value, 'Execution brief copied — paste it into your AI tool now')">Copy brief</button>
-        <button class="btn-quiet" onclick="copyText(document.getElementById('promptInput').value, 'Original prompt copied — paste it into your AI tool now')">Copy original</button>
+        <button class="btn-primary" onclick="copyText(document.getElementById('promptBrief').value, 'Execution brief copied — paste it into your AI tool now')">Copy execution brief</button>
+        <button class="btn-quiet" onclick="copyText(document.getElementById('promptInput').value, 'Original prompt copied — paste it into your AI tool now')">Copy my prompt</button>
       </div>
       <p style="margin-top:10px">Paste whichever you choose as the next message in your AI tool. If the recommended route is Fresh Start or Fork, open that route first and paste the brief there.</p>
       <p style="margin-top:6px">${esc(data.privacy)}</p>
     </div>`;
+    // Stage 1 is on screen and complete before the expensive half is even
+    // asked for. The gate decided this, not the click: nothing spawns unless
+    // the free local score reached the medium band.
+    if ((data.second_opinion || {}).pending) loadSecondOpinion(prompt, tool, cwd);
   } catch (error) {
     resultNode.innerHTML = '<div class="empty">Could not reach the local AIWatcher server.</div>';
   }
@@ -327,6 +603,8 @@ async function returnToRuntime(sessionId) {
   }
 }
 function openDrawer(title) {
+  const content = document.getElementById('detailContent');
+  if (content) content.aiwSettled = null;
   document.getElementById('drawerTitle').textContent = title;
   document.getElementById('drawerBackdrop').classList.add('open');
   document.getElementById('detailDrawer').classList.add('open');
@@ -338,6 +616,38 @@ function closeDrawer() {
   document.getElementById('detailDrawer').classList.remove('open');
   document.getElementById('detailDrawer').setAttribute('aria-hidden', 'true');
   document.body.classList.remove('drawer-open');
+}
+// A drawer populates in up to three writes: a loading line at ~0ms, a fast
+// summary, then full evidence anywhere from 200ms to 4.5s later. Each write
+// replaced the node wholesale, so the populated state landed as a jump.
+// Fading the whole node instead makes the last write blink the hero, which is
+// byte-identical across the summary -> detail swap and has already settled.
+// So diff against what is on screen and animate only the blocks that changed.
+// prefers-reduced-motion is honoured by the global reduce block in index.css,
+// which collapses the animation to nothing.
+function drawerArrivalBlocks(node) {
+  // A session review wraps everything in one .session-review-shell, so the
+  // blocks that arrive independently sit one level further down.
+  const children = Array.from(node.children);
+  if (children.length === 1 && children[0].children.length > 1) return Array.from(children[0].children);
+  return children;
+}
+function setDrawerContent(html) {
+  const node = document.getElementById('detailContent');
+  if (!node) return null;
+  const settled = node.aiwSettled || new Set();
+  node.innerHTML = html;
+  const blocks = drawerArrivalBlocks(node);
+  // Recorded before the class is added, so the next write compares against
+  // pristine markup rather than markup carrying a leftover .aiw-arrive.
+  node.aiwSettled = new Set(blocks.map(el => el.outerHTML));
+  // The arrival animation fills backwards, so a pending one holds the block at
+  // opacity 0. This page spends most of its life hidden on a second monitor,
+  // where animations never start -- so a write that lands while hidden is left
+  // alone rather than parked invisible. Nobody is watching it resolve anyway.
+  if (document.hidden) return node;
+  blocks.forEach(el => { if (!settled.has(el.outerHTML)) el.classList.add('aiw-arrive'); });
+  return node;
 }
 function outcomePill(outcome) {
   const value = outcome || 'not marked';
@@ -405,7 +715,7 @@ function runtimeReturnPanel(runtime, sourcePath) {
   const updated = runtime.updated_at || runtime.updated_at_label || '';
   const action = available
     ? `<button class="btn-quiet" data-session="${esc(runtime.session_id || '')}" onclick="returnToRuntime(this.dataset.session)">${esc(runtime.action_label || 'Open workspace')}</button>`
-    : `<button class="btn-quiet" disabled>No exact return</button>`;
+    : `<span class="action-note">No exact return — ${esc(exactReason)}</span>`;
   return `<section class="detail-section runtime-return">
     <details class="aiw-details">
       <summary>Return, share, and source log</summary>
@@ -426,19 +736,43 @@ function runtimeReturnPanel(runtime, sourcePath) {
   </section>`;
 }
 let watcherCommand = 'aiwatcher watch --notify --overlay --interval 60';
+// The dropdown defaulted to whichever option came first in the markup, which
+// was Codex, while every observed session on this machine is claude-code. Set
+// it from the most recent session instead, and only before the user has touched
+// it -- re-picking on every 10s poll would fight them mid-edit.
+let promptToolTouched = false;
+
+function setDefaultPromptTool(data) {
+  const select = document.getElementById('promptTool');
+  if (!select || promptToolTouched) return;
+  const recent = (data.recent_sessions || [])[0];
+  const tool = String((recent && recent.tool) || '').toLowerCase();
+  const match = tool.includes('claude') ? 'claude'
+    : tool.includes('codex') ? 'codex'
+    : tool.includes('cursor') ? 'cursor'
+    : null;
+  // Falls back to Claude Code rather than to the first option in the list.
+  select.value = match || 'claude';
+}
+
 function renderWatcher(watcher) {
   const pill = document.getElementById('watcherPill');
-  const button = document.getElementById('watcherCommandButton');
+  const start = document.getElementById('watcherStart');
+  const commandText = document.getElementById('watcherCommandText');
   watcherCommand = (watcher && watcher.command) || watcherCommand;
   if (watcher && watcher.running) {
     pill.className = 'cache-pill fresh';
     pill.textContent = 'Watcher running';
-    button.hidden = true;
-  } else {
-    pill.className = 'cache-pill stale';
-    pill.textContent = watcher && watcher.status === 'stale' ? 'Watcher stale' : 'Watcher stopped';
-    button.hidden = false;
+    start.hidden = true;
+    return;
   }
+  // Stopped is a warning, not a neutral state: every screen is reporting on
+  // data the watcher is not currently collecting. It used to read in the same
+  // blue as "building".
+  pill.className = 'cache-pill refreshing';
+  pill.textContent = watcher && watcher.status === 'stale' ? 'Watcher stale' : 'Watcher stopped';
+  commandText.textContent = watcherCommand || 'aiwatcher watch';
+  start.hidden = false;
 }
 function renderCacheStatus(cache) {
   const status = document.getElementById('cacheStatus');
@@ -452,7 +786,7 @@ function renderCacheStatus(cache) {
     : `Showing ${source}`;
 }
 function copyWatcherCommand() {
-  copyText(watcherCommand, 'Watcher command copied — paste it in a terminal to enable ambient nudges');
+  copyText(watcherCommand, 'Copied. Paste in a terminal to start the watcher.');
 }
 function survivalStatus(survival) {
   // The status itself, not a rendered label: "survived" | "churned" | "unknown"
@@ -529,8 +863,8 @@ function verdictLines(s) {
 
   const p = v.pressure || {};
   if (p.measurable) {
-    const critical = compactTokens(p.critical_tokens).replace(/K$/, 'k');
-    const pressure = compactTokens(p.pressure_tokens).replace(/K$/, 'k');
+    const critical = compactTokens(p.critical_tokens);
+    const pressure = compactTokens(p.pressure_tokens);
     let body;
     if (p.turns_to_critical === null || p.turns_to_critical === undefined) {
       body = p.latest_turn_tokens >= p.critical_tokens
@@ -717,17 +1051,67 @@ function renderHandoffForm(capsule) {
     <div class="copy-row"><button class="btn-quiet" onclick="regenerateHandoff('${esc(capsule.session_id)}','${esc(capsule.target || 'generic')}', ${capsule.include_prompt_excerpt ? 'true' : 'false'}, ${capsule.demo ? 'true' : 'false'})">Regenerate brief</button></div>
   </div>`;
 }
+// Everything rendered into the brief preview has to be a string first.
+// Decision records are objects ({summary, reasoning, alternatives_rejected}),
+// and the old `item.text || item` fell through to the object itself, so the
+// preview showed "• [object Object]" where the reasoning should be. The copied
+// brief was never affected -- handoff.py reads .summary correctly -- but the
+// preview is what the user judges the artefact by.
+// Counts are printed with separators everywhere: "12206" and "4045" were
+// rendered raw next to compacted values like "55.5k" in the same column.
+// The prompt risk score is an unbounded sum of penalty points, not a rating out
+// of N -- cli.py's _risk_for_score bands it at >=3 medium and >=6 high, and
+// nothing caps the total. So the scale is made visible by naming those bands
+// rather than by inventing a denominator: writing it "2 of 5" would be a
+// confident-looking figure with a made-up maximum.
+const RISK_MEDIUM_AT = 3;
+const RISK_HIGH_AT = 6;
+const RISK_SCALE_NOTE = `medium at ${RISK_MEDIUM_AT}, high at ${RISK_HIGH_AT}`;
+
+function riskScore(score) {
+  if (score === null || score === undefined) return '—';
+  return `${score} ${Math.abs(Number(score)) === 1 ? 'pt' : 'pts'}`;
+}
+
+function formatCount(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n.toLocaleString('en-US') : String(value ?? '');
+}
+
+function briefText(item) {
+  if (item == null) return '';
+  if (typeof item === 'string') return item;
+  if (typeof item === 'object') {
+    const text = item.summary || item.text || item.label || '';
+    if (!text) {
+      // Drop it rather than render a placeholder. A missing bullet is
+      // recoverable; a bullet reading "[object Object]" is not.
+      console.error('AIWatcher: no renderable text on a brief item', item);
+    }
+    return text;
+  }
+  return String(item);
+}
+
 function listPreview(items, fallback) {
-  const values = (items || []).filter(Boolean);
+  const values = (items || []).map(briefText).filter(Boolean).filter(value => {
+    // Backstop for anything stringified before it reached us, so this class of
+    // bug cannot ship silently again.
+    if (/\[object \w+\]/.test(value)) {
+      console.error('AIWatcher: an object was stringified into the brief', value);
+      return false;
+    }
+    return true;
+  });
   if (!values.length) return esc(fallback);
   return values.slice(0, 4).map(item => `• ${esc(item)}`).join('<br>');
 }
 function renderFreshStartPreview(capsule) {
   const objective = capsule.objective || 'Reconstruct the current work from repo state, recent commits, changed files, and the evidence below.';
-  const decisions = (capsule.decisions || []).map(item => item.text || item).filter(Boolean);
+  const decisions = capsule.decisions || [];
   return `<div class="fresh-preview">
     <div class="fresh-preview-head">
-      <div><h3>Fresh Start brief preview</h3><p>This is the structured context the next AI session receives.</p></div>
+      <div><h3>Ready to copy</h3><p>This is the structured context the next AI session receives. Refine it above first if anything is missing.</p></div>
       <span class="confidence-chip observed">Metadata only</span>
     </div>
     <div class="fresh-preview-grid">
@@ -788,11 +1172,17 @@ function renderHandoff(capsule) {
         ${isDemo ? `<button class="btn-quiet" onclick="showView('sessions'); closeDrawer()">Find real sessions</button>` : `<button class="btn-quiet" onclick="selectSession('${esc(capsule.session_id)}')">Inspect source session</button>`}
       </div>
     </div>
+    <!-- Refinement first but folded away, then the brief. The output used to
+         sit above the five empty fields that shape it, which reads as "this is
+         waiting for you" when in fact it is ready to copy. -->
+    <details class="handoff-refine">
+      <summary>Refine this brief (optional)</summary>
+      ${renderHandoffForm(capsule)}
+    </details>
     ${renderFreshStartPreview(capsule)}
-    ${renderHandoffForm(capsule)}
     <div class="copy-row">
       <span class="label" style="align-self:center">Format for</span>
-      ${['generic','claude','codex','cursor','vscode'].map(item => `<button class="btn-quiet" aria-pressed="${item === target ? 'true' : 'false'}" onclick="regenerateHandoff('${esc(capsule.session_id)}','${item}', ${includePrompt}, ${isDemo ? 'true' : 'false'})">${esc(item === 'generic' ? 'Generic' : item)}</button>`).join('')}
+      ${Object.entries(HANDOFF_TARGET_LABELS).map(([item, label]) => `<button class="btn-quiet" aria-pressed="${item === target ? 'true' : 'false'}" onclick="regenerateHandoff('${esc(capsule.session_id)}','${item}', ${includePrompt}, ${isDemo ? 'true' : 'false'})">${esc(label)}</button>`).join('')}
     </div>
     <p class="tool-link-note">${esc(runtime.reason || 'Use the Fresh Start brief when the exact running chat cannot be reopened.')}</p>
     ${enrichment}
@@ -808,7 +1198,7 @@ function renderHandoff(capsule) {
   </section>
   <section class="detail-section"><h3>Brief that will be copied</h3>
     <textarea id="handoffBrief" class="brief-box">${esc(capsule.next_brief || '')}</textarea>
-    <div class="copy-row"><button class="btn-quiet" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', false, ${isDemo ? 'true' : 'false'})">Copy brief only</button></div>
+    <div class="copy-row"><button class="btn-quiet" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', false, ${isDemo ? 'true' : 'false'})">Copy brief</button></div>
     ${changedFiles.length ? `<details class="aiw-details"><summary>${esc(changedFiles.length)} changed file${changedFiles.length === 1 ? '' : 's'} to inspect</summary><div class="details-body"><div class="pill-row">${changedFiles.slice(0, 12).map(file => `<span class="pill">${esc(file)}</span>`).join('')}</div></div></details>` : ''}
   </section>`;
 }
@@ -862,7 +1252,7 @@ async function regenerateHandoff(sessionId, target = 'generic', includePrompt = 
 async function openDemoHandoff(target = 'generic', includePrompt = false, options = null) {
   openDrawer('Fresh Start');
   const node = document.getElementById('detailContent');
-  node.innerHTML = '<div class="loading">Building Fresh Start demo from sample context pressure...</div>';
+  setDrawerContent('<div class="loading">Building Fresh Start demo from sample context pressure...</div>');
   const demoOptions = options || {
     type: 'product',
     objective: 'Continue the work in a fresh session without losing decisions, constraints, or acceptance criteria.',
@@ -873,15 +1263,15 @@ async function openDemoHandoff(target = 'generic', includePrompt = false, option
   const payload = handoffPayload('', target, includePrompt, demoOptions);
   const capsule = await postJson('/api/handoff-demo', payload);
   if (capsule.error) {
-    node.innerHTML = `<div class="empty">${esc(capsule.error)}</div>`;
+    setDrawerContent(`<div class="empty">${esc(capsule.error)}</div>`);
     return;
   }
-  node.innerHTML = renderHandoff(capsule);
+  setDrawerContent(renderHandoff(capsule));
 }
 async function openHandoff(sessionId, target = 'generic', includePrompt = false, options = null) {
   openDrawer('Fresh Start');
   const node = document.getElementById('detailContent');
-  node.innerHTML = '<div class="loading">Finding the source session before building the Fresh Start brief...</div>';
+  setDrawerContent('<div class="loading">Finding the source session before building the Fresh Start brief...</div>');
   const handoffOptions = options || handoffOptionsFromForm();
   const payload = handoffPayload(sessionId, target, includePrompt, handoffOptions);
   const summaryPromise = fetch(`/api/session-summary?id=${encodeURIComponent(sessionId)}`)
@@ -892,20 +1282,20 @@ async function openHandoff(sessionId, target = 'generic', includePrompt = false,
   const handoffPromise = postJson('/api/handoff', payload);
   const fastSummary = await summaryPromise;
   if (fastSummary && !fastSummary.error) {
-    node.innerHTML = renderSessionSummary(fastSummary, 'Building Fresh Start brief...');
+    setDrawerContent(renderSessionSummary(fastSummary, 'Building Fresh Start brief...'));
   } else {
-    node.innerHTML = '<div class="loading">Building local Fresh Start brief...</div>';
+    setDrawerContent('<div class="loading">Building local Fresh Start brief...</div>');
   }
   const basicCapsule = await basicPromise;
   if (basicCapsule && !basicCapsule.error && !includePrompt) {
-    node.innerHTML = renderHandoff(basicCapsule);
+    setDrawerContent(renderHandoff(basicCapsule));
   }
   const capsule = await handoffPromise;
   if (capsule.error) {
-    node.innerHTML = `<div class="empty">${esc(capsule.error)}</div>`;
+    setDrawerContent(`<div class="empty">${esc(capsule.error)}</div>`);
     return;
   }
-  node.innerHTML = renderHandoff(capsule);
+  setDrawerContent(renderHandoff(capsule));
 }
 function handoffDecisionBubble(sessionId) {
   const current = window.currentHandoffBubble || {};
@@ -1003,30 +1393,73 @@ function tooYoungToJudge(row) {
   return (Date.now() - at) < SURVIVAL_MIN_AGE_DAYS * 86400000;
 }
 
+// Same Windows-path bug as projectName had: this matched forward slashes only,
+// so a backslash path came back whole and the Changes ledger showed a full
+// C:\ path beside shortened ones.
 function repoLabel(row) {
-  const full = String(row.repo || row.project || '');
-  const leaf = full.split(/[\/]/).filter(Boolean).pop();
-  return leaf || full;
+  return projectName({ project_full: row.repo || row.project || '' });
+}
+
+
+/* A number column is read down, not across, so its unit and its precision have
+   to be decided for the column rather than per cell. The Tokens column showed
+   "331.2M" above "158.3k"; the $/line column showed "$1.14" above "$0.0030".
+   Both are individually correct and neither can be compared with the row above
+   it without re-reading the suffix. */
+
+function tokenColumnFormatter(values) {
+  const nums = values.map(Number).filter(Number.isFinite);
+  const peak = nums.length ? Math.max(...nums) : 0;
+  // One unit for the whole column, chosen by its largest value. A 158k row
+  // reading 0.2M beside a 331.2M one is the comparison working, not precision
+  // being lost -- next to a third of a billion, 158k *is* rounding error.
+  const unit = peak >= 1e9 ? ['B', 1e9] : peak >= 1e6 ? ['M', 1e6] : peak >= 1e3 ? ['k', 1e3] : ['', 1];
+  return value => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return String(value ?? '');
+    if (!unit[0]) return String(Math.round(n));
+    return (n / unit[1]).toFixed(1) + unit[0];
+  };
+}
+
+function currencyColumnFormatter(values) {
+  const nums = values.map(Number).filter(v => Number.isFinite(v) && v > 0);
+  const floor = nums.length ? Math.min(...nums) : 0;
+  // Two decimals everywhere, and anything that would round to zero says so
+  // instead. "$0.00" claims the work was free; "<$0.01" is the same fact
+  // without the lie, and keeps every cell in the column to one decimal count.
+  return moneyLabel;
+}
+// Two decimals, and a real cost that would round to zero says so instead:
+// "$0.00" claims the work was free, "<$0.01" is the same fact without the lie.
+function moneyLabel(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '—';
+  if (n > 0 && n < 0.005) return '<$0.01';
+  return '$' + n.toFixed(2);
 }
 
 function renderChangeRows(rows) {
   if (!rows.length) {
     return `<tr><td colspan="7" class="empty">No commits in this window, or git history could not be read.</td></tr>`;
   }
-  return sortedRows(rows, changeSort).map(row => `<tr>
+  const ordered = sortedRows(rows, changeSort);
+  const perLine = currencyColumnFormatter(ordered.map(r => r.usd_per_line));
+  const perSurviving = currencyColumnFormatter(ordered.map(r => r.usd_per_surviving_line));
+  return ordered.map(row => `<tr>
     <td><code>${esc(row.short_sha)}</code> ${esc(row.subject)}
       <div class="session-meta">${esc(dateLabel(row.committed_at))}${row.tools.length ? ' &middot; ' + esc(row.tools.join(', ')) : ''}${row.event_count ? ' &middot; ' + esc(row.event_count) + ' model calls' : ''}${row.was_rewritten ? ' &middot; <span class="muted" title="Rebased or amended on ' + esc(dateLabel(row.rewritten_at)) + '. Cost is attributed by when the work was authored, not when it was rewritten.">rewritten</span>' : ''}</div></td>
     <td title="${esc(row.repo || row.project)}">${esc(repoLabel(row))}</td>
     <td class="num">${row.unattributed ? '<span class="muted">no spend observed</span>' : esc(row.cost_label)}</td>
     <td class="num">+${esc(row.lines_added)} / -${esc(row.lines_removed)}
       <div class="session-meta">${esc(row.files_changed)} file(s)</div></td>
-    <td class="num">${row.unattributed ? '—' : esc(row.usd_per_line_label)}</td>
+    <td class="num">${row.unattributed ? '—' : esc(perLine(row.usd_per_line))}</td>
     <td class="num">${row.survival_pct === null || row.survival_pct === undefined
       ? `<span class="muted">${tooYoungToJudge(row) ? 'too new' : '—'}</span>`
       : esc(row.survival_label)}</td>
     <td class="num">${row.survival_pct === null || row.survival_pct === undefined
       ? '<span class="muted">—</span>'
-      : esc(row.usd_per_surviving_line_label)}</td>
+      : esc(perSurviving(row.usd_per_surviving_line))}</td>
   </tr>`).join('');
 }
 function renderChangeTotals(rows, meta, unbanked) {
@@ -1080,7 +1513,7 @@ function renderOptimizeWorkspace(optimize) {
       <div>
         <div class="action-title">${esc(item.title)} <span class="pill">${esc(item.evidence_label || 'Observed')}</span></div>
         <p>${esc(item.why_inactive || item.summary || '')}</p>
-        <div class="action-meta"><span class="pill">${esc(item.project || 'Local machine')}</span>${item.impact_label ? `<span class="pill">${esc(item.impact_label)}</span>` : ''}<span class="pill">${esc(item.updated_label || '')}</span></div>
+        <div class="action-meta"><span class="pill" title="${esc(item.project || '')}">${esc(item.project ? projectName({ project_full: item.project }) : 'Local machine')}</span>${item.impact_label ? `<span class="pill">${esc(item.impact_label)}</span>` : ''}<span class="pill">${esc(item.updated_label || '')}</span></div>
         <p class="receipt-note">${esc(item.evidence || '')}</p>
       </div>
       <div class="actions">
@@ -1203,29 +1636,178 @@ function drawMeter(node, chart) {
   node.setAttribute('data-over', latest > critical ? (latest / critical).toFixed(1) : '');
 }
 
+/* Context per turn against the thresholds that decide what it means.
+
+   The old chart scaled y to the data's own min and max, which is the most
+   natural thing to do and was badly wrong here. A session sitting at 819k
+   against a 200k limit drew as a gentle 7% rise, because 752k-810k filled the
+   canvas and the two thresholds were nowhere on it. The reader could not see
+   the one fact that matters -- that this is four times over the line -- because
+   the line was not drawn. Same defect as any true number answering a question
+   it was not asked.
+
+   So the y domain always contains both thresholds. A healthy session sits low
+   in the frame with room above it; an overrun sits near the top with the limits
+   compressed at the bottom, which is what being far past them looks like.
+
+   Rendered 1:1 rather than through a stretched viewBox: the old one used a
+   fixed 1000x60 box scaled to fit, so in a narrow card the whole plot collapsed
+   into a 14px band floating in the middle of its container. */
+const TREND_HEIGHT = 152;
+const TREND_COMPACT_HEIGHT = 26;
+
+/* Drawn 1:1, so it has to be redrawn when its width changes -- including the
+   first time it becomes visible. A chart built while its view is still hidden
+   measures zero, falls back to a default width, and is then stretched by CSS to
+   whatever the container turns out to be: the old one rendered 152px tall as
+   254px that way. One observer per host, redrawing only on a real width change
+   so it cannot drive itself. */
+const _trendObserved = new WeakSet();
+
+function observeTrend(node) {
+  if (_trendObserved.has(node) || typeof ResizeObserver === 'undefined') return;
+  _trendObserved.add(node);
+  const observer = new ResizeObserver(() => {
+    const width = Math.round(node.getBoundingClientRect().width);
+    if (!width || width === Number(node.dataset.drawnAt)) return;
+    const chart = _trendCharts.get(node);
+    if (chart) drawTrend(node, chart);
+  });
+  observer.observe(node);
+}
+
+const _trendCharts = new WeakMap();
+
 function drawTrend(node, chart) {
   if (!node || !chart) return;
   const series = chart.turn_series || [];
   if (series.length < 2) return;
-  const W = 1000, H = 60, pad = 6;
-  const lo = Math.min(...series), hi = Math.max(...series);
-  const span = Math.max(1, hi - lo);
-  const x = i => (i / (series.length - 1)) * W;
-  const y = v => pad + (1 - (v - lo) / span) * (H - pad * 2 - 12);
-  const latest = chart.latest_turn_tokens_n || series[series.length - 1];
-  const tone = latest >= (chart.critical_tokens_n || Infinity) ? 'var(--red)'
-    : latest >= (chart.pressure_tokens_n || Infinity) ? 'var(--amber)' : 'var(--green)';
+  _trendCharts.set(node, chart);
+  observeTrend(node);
+
+  const compact = node.classList.contains('health-row-trend');
+  const measured = Math.round(node.getBoundingClientRect().width);
+  // Hidden view: leave it for the observer rather than drawing at a guessed size.
+  if (!measured && node.dataset.drawnAt) return;
+  const W = Math.max(160, measured || 640);
+  const H = compact ? TREND_COMPACT_HEIGHT : TREND_HEIGHT;
+
+  const pressure = Number(chart.pressure_tokens_n) || 0;
+  const critical = Number(chart.critical_tokens_n) || 0;
+
+  // The scale stays the data's own, because shape is this chart's whole job --
+  // the meter above it already carries position against the limit, on a scale
+  // shared with every other card. Stretching y down to include a 200k threshold
+  // when the session runs at 838k squeezes sixty turns of movement into six
+  // percent of the frame, which is the flattening the meter/trend split was
+  // made to avoid. What was missing was never the thresholds; it was any way to
+  // read the magnitudes at all.
+  const lo = Math.min(...series);
+  const hi = Math.max(...series);
+  const headroom = Math.max((hi - lo) * 0.18, hi * 0.02, 1);
+  const top = hi + headroom;
+  const base = Math.max(0, lo - headroom);
+  const span = Math.max(1, top - base);
+
+  const padL = compact ? 0 : 46;      // room for the y labels
+  const padR = compact ? 0 : 8;
+  const padT = compact ? 3 : 10;
+  const padB = compact ? 3 : 18;      // room for the turn labels
+  const plotW = Math.max(1, W - padL - padR);
+  const plotH = Math.max(1, H - padT - padB);
+
+  const x = i => padL + (i / (series.length - 1)) * plotW;
+  const y = v => padT + (1 - (Math.min(Math.max(v, base), top) - base) / span) * plotH;
+
+  const latest = Number(chart.latest_turn_tokens_n) || series[series.length - 1];
+  const tone = critical && latest >= critical ? 'var(--red)'
+    : pressure && latest >= pressure ? 'var(--amber)' : 'var(--green)';
+
   const points = series.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const area = `${padL},${(padT + plotH).toFixed(1)} ${points} ${(padL + plotW).toFixed(1)},${(padT + plotH).toFixed(1)}`;
   const delta = series[series.length - 1] - series[0];
-  node.innerHTML = `<svg viewBox="0 0 ${W} ${H}" class="trend-svg" role="img"
-    aria-label="context per turn across ${series.length} turns, ${delta >= 0 ? 'up' : 'down'} ${esc(compactTokens(Math.abs(delta)))}">
-    <polyline points="${points}" fill="none" stroke="${tone}" stroke-width="2.5" stroke-linejoin="round"/>
-    <circle cx="${x(series.length - 1).toFixed(1)}" cy="${y(series[series.length - 1]).toFixed(1)}" r="5"
-      fill="${tone}" stroke="var(--bg)" stroke-width="3"/>
-  </svg>`;
-  node.setAttribute('data-turns', series.length);
-  node.setAttribute('data-delta', `${delta >= 0 ? '+' : '-'}${compactTokens(Math.abs(delta))} across these turns`);
+
+  // A threshold inside the drawn range gets a line. One outside it gets said in
+  // words at the edge it fell off, because silently omitting it is how a reader
+  // concludes the axis starts at zero and that they are comfortably under.
+  const thresholds = [
+    { value: pressure, colour: 'var(--amber)', name: 'pressure' },
+    { value: critical, colour: 'var(--red)', name: 'act now' },
+  ].filter(m => m.value > 0);
+  const marks = compact ? [] : thresholds.filter(m => m.value >= base && m.value <= top);
+  const below = compact ? [] : thresholds.filter(m => m.value < base);
+
+  const gridline = m => `
+    <line x1="${padL}" y1="${y(m.value).toFixed(1)}" x2="${(padL + plotW).toFixed(1)}" y2="${y(m.value).toFixed(1)}"
+      stroke="${m.colour}" stroke-width="1" stroke-dasharray="3 4" opacity=".55"/>
+    <text x="${padL - 6}" y="${(y(m.value) + 3.5).toFixed(1)}" text-anchor="end"
+      class="trend-tick" fill="${m.colour}">${esc(compactTokens(m.value))}</text>`;
+
+  node.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" class="trend-svg" role="img"
+    aria-label="Context per turn across ${series.length} turns, ${delta >= 0 ? 'rising' : 'falling'} ${esc(compactTokens(Math.abs(delta)))}, latest ${esc(compactTokens(latest))} against a ${esc(compactTokens(critical))} limit">
+    ${compact ? '' : `<line x1="${padL}" y1="${(padT + plotH).toFixed(1)}" x2="${(padL + plotW).toFixed(1)}" y2="${(padT + plotH).toFixed(1)}" stroke="var(--line)" stroke-width="1"/>`}
+    ${marks.map(gridline).join('')}
+    <polygon points="${area}" fill="${tone}" opacity=".10"/>
+    <polyline points="${points}" fill="none" stroke="${tone}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="${x(series.length - 1).toFixed(1)}" cy="${y(series[series.length - 1]).toFixed(1)}" r="4"
+      fill="${tone}" stroke="var(--bg)" stroke-width="2"/>
+    ${compact ? '' : `
+      <text x="${padL - 6}" y="${(padT + 4).toFixed(1)}" text-anchor="end" class="trend-tick">${esc(compactTokens(Math.round(top)))}</text>
+      <text x="${padL - 6}" y="${(padT + plotH).toFixed(1)}" text-anchor="end" class="trend-tick">${esc(compactTokens(Math.round(base)))}</text>
+      ${below.length ? `<text x="${padL}" y="${(padT + plotH - 5).toFixed(1)}" class="trend-tick" fill="${below[below.length - 1].colour}">${esc(below.map(m => compactTokens(m.value)).join(' and '))} ${below.length > 1 ? 'limits are' : 'limit is'} below this range</text>` : ''}
+      <text x="${padL}" y="${H - 5}" class="trend-tick" fill="var(--faint)">turn 1</text>
+      <text x="${(padL + plotW).toFixed(1)}" y="${H - 5}" text-anchor="end" class="trend-tick" fill="var(--faint)">turn ${series.length}</text>
+      <text x="${(padL + plotW).toFixed(1)}" y="${Math.max(12, y(series[series.length - 1]) - 9).toFixed(1)}" text-anchor="end"
+        class="trend-value" fill="${tone}">${esc(compactTokens(latest))}</text>`}
+    <g class="trend-hover" hidden>
+      <line class="trend-crosshair" y1="${padT}" y2="${(padT + plotH).toFixed(1)}" stroke="var(--line-strong)" stroke-width="1"/>
+      <circle class="trend-cursor" r="3.5" fill="var(--bg)" stroke="${tone}" stroke-width="2"/>
+    </g>
+    <rect x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" fill="transparent" class="trend-capture"/>
+  </svg>${compact ? '' : '<div class="trend-tip" hidden></div>'}`;
+
+  node.dataset.drawnAt = String(W);
+  if (compact) return;
+  attachTrendHover(node, series, { padL, plotW, padT, plotH, x, y, top });
 }
+
+/* Crosshair and tooltip. A line chart that cannot be read point by point makes
+   the reader guess at the values between its endpoints. */
+function attachTrendHover(node, series, geom) {
+  const svg = node.querySelector('svg');
+  const capture = node.querySelector('.trend-capture');
+  const group = node.querySelector('.trend-hover');
+  const crosshair = node.querySelector('.trend-crosshair');
+  const cursor = node.querySelector('.trend-cursor');
+  const tip = node.querySelector('.trend-tip');
+  if (!svg || !capture || !group || !tip) return;
+
+  const show = event => {
+    const box = svg.getBoundingClientRect();
+    const scale = box.width / svg.viewBox.baseVal.width || 1;
+    const local = (event.clientX - box.left) / scale;
+    const ratio = (local - geom.padL) / geom.plotW;
+    const index = Math.max(0, Math.min(series.length - 1, Math.round(ratio * (series.length - 1))));
+    const px = geom.x(index);
+    const py = geom.y(series[index]);
+    group.removeAttribute('hidden');
+    crosshair.setAttribute('x1', px.toFixed(1));
+    crosshair.setAttribute('x2', px.toFixed(1));
+    cursor.setAttribute('cx', px.toFixed(1));
+    cursor.setAttribute('cy', py.toFixed(1));
+    tip.hidden = false;
+    tip.textContent = `turn ${index + 1} · ${compactTokens(series[index])}`;
+    // Flip before the tooltip runs off the right edge rather than after.
+    const tipW = tip.getBoundingClientRect().width || 90;
+    const left = px * scale;
+    tip.style.left = `${Math.max(0, Math.min(box.width - tipW, left - tipW / 2))}px`;
+  };
+  const hide = () => { group.setAttribute('hidden', ''); tip.hidden = true; };
+
+  capture.addEventListener('mousemove', show);
+  capture.addEventListener('mouseleave', hide);
+}
+
 
 /* The runway verdict as {headline, detail, severity}, so Home and the full card
    render the same judgement from one place. Two surfaces computing "how long
@@ -1287,17 +1869,17 @@ function runwayVerdict(chart) {
    it yet. The tail is shaded and left empty instead, and the caveat says so in
    words rather than relying on the shading being noticed. */
 function drawTileSpark(node, series, days) {
-  if (!node || !series) return;
+  if (!node || !series) return false;
   const values = series.values || [];
-  if (values.length < 3) return;
+  if (values.length < 3) return false;
   const W = 240, H = 28, pad = 3;
   // Drawn only as far as there is a verdict; the rest of the axis is still laid
   // out, so the shaded gap is visibly a gap rather than a shorter chart.
   const through = Number.isInteger(series.judged_through) ? series.judged_through : values.length - 1;
   const drawn = values.slice(0, through + 1);
-  if (drawn.length < 2) return;
+  if (drawn.length < 2) return false;
   const peak = Math.max(...drawn);
-  if (!(peak > 0)) return;
+  if (!(peak > 0)) return false;
 
   const x = chartScale(0, values.length - 1, pad, W - pad);
   const y = chartScale(0, peak, H - pad, pad);
@@ -1305,6 +1887,12 @@ function drawTileSpark(node, series, days) {
     viewBox: `0 0 ${W} ${H}`, class: 'metric-spark-svg',
     preserveAspectRatio: 'none', role: 'img',
   });
+
+  // A faint baseline, so the line has something to be high or low against.
+  svg.appendChild(svgEl('line', {
+    x1: pad, y1: H - pad, x2: W - pad, y2: H - pad,
+    stroke: 'currentColor', 'stroke-width': 1, opacity: 0.25,
+  }));
 
   if (through < values.length - 1) {
     svg.appendChild(svgEl('rect', {
@@ -1340,21 +1928,119 @@ function drawTileSpark(node, series, days) {
 
   node.innerHTML = '';
   node.appendChild(svg);
-  if (series.caveat) {
+  // Always emitted, empty when there is nothing to caveat: two of the four
+  // tiles carry one and two do not, which ended those two cards 17px short of
+  // their neighbours. The row is meant to be read across, so every card has to
+  // end in the same place whatever it happens to have to say.
+  const note = document.createElement('div');
+  note.className = 'metric-spark-caveat';
+  note.textContent = series.caveat || '';
+  node.appendChild(note);
+  node.hidden = false;
+  return true;
+}
+// Cost per surviving line, as a tile rather than a sentence inside another one.
+//
+// Q: what did a line of code that is still there actually cost? Unit: dollars
+// per surviving line, cumulative over survival's own fixed window. Compared
+// against nothing -- there is no threshold for it here, so the rail is identity
+// and never status. It discriminates: it moves with both spend and churn, and
+// the commit receipt already reads a 30-day median off the same figure.
+//
+// Survival has its own fixed window (SURVIVAL_WINDOW_DAYS, 30) and ignores the
+// date picker entirely -- a commit needs to age past MIN_AGE_DAYS before
+// survival means anything, so the figure cannot follow a 24h view. It sat under
+// the picker looking filtered and never moved. Naming its real window is the
+// honest fix; calling it "all time" would be a second wrong label on the same
+// number. The window now sits in the caveat slot, where the sparklines put
+// theirs, which keeps the supporting line to one line like every other card.
+function renderSurvivalTile(survival) {
+  const value = document.getElementById('costPerSurviving');
+  const sub = document.getElementById('costPerSurvivingSub');
+  const meter = document.getElementById('survivalMeter');
+  if (!value || !sub || !meter) return;
+  if (!survival.available) {
+    // Unmeasured is its own state, not a zero and not a dash presented as an
+    // answer. The reason can be a whole sentence with an instruction in it,
+    // which wrapped to three lines in a 235px column and pushed the row 31px
+    // taller than its measured state -- a reflow the ambient surface is not
+    // allowed. So the short form goes on the one supporting line every card
+    // gets, and the full reason takes the slot the meter would have used,
+    // which is already 45px of reserved height.
+    value.textContent = 'not yet';
+    value.classList.add('value-unmeasured');
+    sub.textContent = 'Not measured yet';
+    const reason = String(survival.reason || '').replace(/^Not measured yet\.\s*/, '');
+    meter.innerHTML = '';
     const note = document.createElement('div');
-    note.className = 'metric-spark-caveat';
-    note.textContent = series.caveat;
-    node.appendChild(note);
+    note.className = 'survival-reason';
+    note.textContent = reason || 'Reopen the dashboard to compute it.';
+    meter.appendChild(note);
+    meter.hidden = false;
+    return;
   }
+  value.textContent = survival.cost_per_surviving_line_label;
+  value.classList.remove('value-unmeasured');
+  sub.textContent = `${survival.survival_pct}% of ${formatCount(survival.lines_touched)} lines still standing`;
+  drawSurvivalMeter(meter, survival);
+}
+// A meter, not a sparkline: survival is a share of a whole on a fixed 0-100%
+// scale, which is position against a shared limit. A trend line would have to
+// be drawn over the date picker's window, and that is a different question from
+// the one the number answers.
+function drawSurvivalMeter(node, survival) {
+  const pct = Math.max(0, Math.min(100, Number(survival.survival_pct) || 0));
+  const svg = svgEl('svg', {
+    viewBox: '0 0 240 28', class: 'metric-spark-svg survival-meter',
+    preserveAspectRatio: 'none', role: 'img',
+  });
+  svg.appendChild(svgEl('rect', { x: 0, y: 10, width: 240, height: 8, rx: 4, fill: 'currentColor', opacity: 0.18 }));
+  svg.appendChild(svgEl('rect', { x: 0, y: 10, width: 240 * pct / 100, height: 8, rx: 4, fill: 'currentColor' }));
+  const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+  title.textContent = `${survival.survival_pct}% of the lines measured are still standing.`;
+  svg.appendChild(title);
+  node.innerHTML = '';
+  node.appendChild(svg);
+  const note = document.createElement('div');
+  note.className = 'metric-spark-caveat';
+  const window_ = survival.window_days ? `last ${survival.window_days} days` : 'a fixed window';
+  note.textContent = `${window_} · not the selected range`;
+  node.appendChild(note);
   node.hidden = false;
 }
+// An empty slot rather than no slot. The Useful outcomes tile has too few judged
+// points to plot at short ranges, and hiding its sparkline made that one card a
+// different height from its neighbours -- the row's alignment shifted when the
+// reader changed the date range, which reads as a failed load.
+function drawTileSparkPlaceholder(node) {
+  if (!node) return;
+  const svg = svgEl('svg', {
+    viewBox: '0 0 240 28', class: 'metric-spark-svg metric-spark-empty',
+    preserveAspectRatio: 'none', role: 'img',
+  });
+  svg.appendChild(svgEl('line', { x1: 3, y1: 25, x2: 237, y2: 25, stroke: 'currentColor', 'stroke-width': 1, opacity: 0.35 }));
+  const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+  title.textContent = 'Not enough data yet for a trend.';
+  svg.appendChild(title);
+  node.innerHTML = '';
+  node.appendChild(svg);
+  const note = document.createElement('div');
+  note.className = 'metric-spark-caveat';
+  note.textContent = 'not enough data yet';
+  node.appendChild(note);
+  node.hidden = false;
+}
+
 function compactTokens(n) {
   if (!n) return '0';
   // Carries past thousands: the scatter's decade ticks reach hundreds of
   // millions, and "100000K" is not a number anyone reads.
   if (n >= 1e9) return +(n / 1e9).toFixed(n >= 1e10 ? 0 : 1) + 'B';
   if (n >= 1e6) return +(n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M';
-  if (n >= 1000) return Math.round(n / 1000) + 'K';
+  // Lowercase k with one decimal, matching ui.py's compact_int. They disagreed:
+  // Python rendered 564.2k and this rendered 564K, and both appeared in the same
+  // Watch card. Four call sites had grown a  to paper over it.
+  if (n >= 1000) return +(n / 1000).toFixed(1) + 'k';
   return String(Math.round(n));
 }
 
@@ -1400,7 +2086,8 @@ function drawPie(node, chart) {
     if (sweep > 0.55) {
       const mid = angle + sweep / 2;
       chartText(svg, cx + r * 0.62 * Math.cos(mid), cy + r * 0.62 * Math.sin(mid) + 4,
-        Math.round(segment.pct) + '%', { fill: '--surface', weight: 700, size: 12 });
+        // 600 is --fw-med; 700 was the one weight left outside the three-step scale.
+        Math.round(segment.pct) + '%', { fill: '--surface', weight: 600, size: 12 });
     }
     angle = end;
   });
@@ -1650,10 +2337,26 @@ function unbankedColours(segments) {
   });
 }
 
+// The last two path segments, always. The same project appeared three ways in
+// four adjacent rows: "...s/tadan/Downloads/AgentWatch/aiwatcher-local-public",
+// "...ers/tadan/Downloads/..." and an untouched Windows path. The third was
+// this function failing to split a Windows path -- it matched forward slashes
+// only, so a backslash path came back whole. Two segments rather than one
+// because the leaf alone does not separate aiwatcher-local-public from
+// aiwatcher-local-pr46 at a glance.
+function projectName(row) {
+  const full = String((row && (row.project_full || row.project)) || '');
+  const parts = full.split(/[\\/]+/).filter(Boolean);
+  if (!parts.length) return 'unknown';
+  return parts.slice(-2).join('/');
+}
+
+function projectTitle(row) {
+  return String((row && (row.project_full || row.project)) || 'unknown');
+}
+
 function healthProjectName(row) {
-  const full = String(row.project_full || row.project || '');
-  const leaf = full.split(/[\/]/).filter(Boolean).pop();
-  return leaf || full;
+  return projectName(row);
 }
 
 function healthRank(row) {
@@ -1676,13 +2379,42 @@ function headroomLabel(chart) {
 function healthFacts(row) {
   const chart = row.chart || {};
   const peakIsHistoric = chart.peak_turn_tokens_n > chart.latest_turn_tokens_n * 1.05;
-  return [
+  // Two scopes used to run together in one dot-separated list, so "68% replay"
+  // (the charted session) and "10 sessions" (the whole project) read as one
+  // measurement. The card already warns in prose that its buttons act on a
+  // single session rather than all of them; the numbers now say so too.
+  const session = [
     peakIsHistoric ? `peak ${row.peak_turn_tokens}` : '',
     row.bloat_measurable ? `${row.bloat_label} replay` : '',
     row.bloat_measurable ? `${row.replayed_cost_label} on replay` : '',
+  ].filter(Boolean).join(' \u00b7 ');
+  const project = [
     `${row.session_count} session${row.session_count === 1 ? '' : 's'}`,
     row.critical_sessions ? `${row.critical_sessions} critical` : '',
   ].filter(Boolean).join(' \u00b7 ');
+  // Returned as groups rather than one joined string so the strip can only
+  // ever break between the two scopes. Squeezed into a narrow column it broke
+  // mid-phrase -- the defect that put "session . 1 critical" on a line of its
+  // own -- and splitting the scopes is pointless if a wrap can still put half
+  // of one underneath the other.
+  return [
+    session ? `this session: ${session}` : '',
+    project ? `${session ? '\u2014 ' : ''}this project: ${project}` : '',
+  ].filter(Boolean);
+}
+
+// A health-card button goes where its label says. The kind comes from
+// _context_action alongside the label, so the two cannot be changed apart.
+// Falls back to the review when a handoff is not available for this row,
+// rather than offering "Start fresh" and doing nothing.
+function healthActionButton(row, className, label, kind) {
+  const effective = (kind === 'handoff' && !row.can_handoff) ? 'review' : kind;
+  const text = effective === kind ? label : 'Review session';
+  return `<button class="${className}" data-session="${esc(row.session_id)}" data-kind="${esc(effective)}" onclick="runHealthAction(this.dataset.kind, this.dataset.session)">${esc(text)}</button>`;
+}
+
+function runHealthAction(kind, sessionId) {
+  return kind === 'handoff' ? openHandoff(sessionId) : selectSession(sessionId);
 }
 
 function healthLeadCard(row) {
@@ -1713,10 +2445,10 @@ function healthLeadCard(row) {
       <span class="health-now">${esc(row.latest_turn_tokens)} per turn</span></div>
     <div class="meter-host" data-meter="${esc(row.session_id)}"></div>
     <div class="trend-host" data-trend="${esc(row.session_id)}"></div>
-    <p class="health-facts">${esc(healthFacts(row))}</p>
+    <p class="health-facts">${healthFacts(row).map(group => `<span>${esc(group)}</span>`).join('')}</p>
     <div class="health-actions">
-      ${row.can_handoff ? `<button class="btn-primary" data-session="${esc(row.session_id)}" onclick="openHandoff(this.dataset.session)">Fresh Start</button>` : `<button class="btn-primary" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.action.label)}</button>`}
-      <button class="btn-quiet" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">Inspect</button>
+      ${healthActionButton(row, 'btn-primary', row.action.label, row.action.kind)}
+      ${row.can_handoff ? healthActionButton(row, 'btn-quiet', row.action.secondary_label, row.action.secondary_kind) : ''}
       ${row.can_handoff ? `<button class="btn-quiet" data-session="${esc(row.session_id)}" data-project="${esc(row.project_full || '')}" onclick="continueFreshStartProject(this.dataset.session, this.dataset.project)">Continue 48h</button>` : ''}
       ${row.can_handoff ? `<button class="btn-quiet" data-project="${esc(row.project_full || '')}" onclick="snoozeFreshStartProject(this.dataset.project, this)">Snooze 48h</button>` : ''}
       <button class="btn-quiet" data-compact="${esc(row.compact_prompt || '/compact')}" onclick="copyText(this.dataset.compact, 'Compact prompt copied')">Copy compact prompt</button>
@@ -1842,7 +2574,7 @@ function bars(rows, valueKey = "api_value_label", kind = "project", weightKey = 
     // `amount` carries markup, so it is interpolated raw below -- every value
     // inside it is escaped individually above.
     return `<div class="bar-row ${kind === "project" ? "clickable" : ""}" title="${esc(row.name)}" ${click}>
-      <div class="bar-label">${esc(row.short_name || row.name)}${kind === "project" && row.health ? ` ${healthPill(row.health)}` : ''}</div>
+      <div class="bar-label">${esc(kind === "project" ? projectName({ project_full: row.name }) : (row.short_name || row.name))}${kind === "project" && row.health ? ` ${healthPill(row.health)}` : ''}</div>
       <div class="bar-shell"><div class="bar" style="width:${width}%"></div></div>
       <div class="amount">${amount}</div>
     </div>`;
@@ -1858,12 +2590,12 @@ function miniStats(totals) {
 }
 async function selectProject(project) {
   openDrawer('Project detail');
-  document.getElementById('detailContent').innerHTML = '<div class="loading">Loading project activity...</div>';
+  setDrawerContent('<div class="loading">Loading project activity...</div>');
   const days = document.getElementById('days').value;
   const res = await fetch(`/api/project?days=${days}&project=${encodeURIComponent(project)}`);
   const data = await res.json();
   document.getElementById('drawerTitle').textContent = data.project_short || 'Project detail';
-  document.getElementById('detailContent').innerHTML = `<section class="detail-section"><h2>${esc(data.project_short)}</h2>
+  setDrawerContent(`<section class="detail-section"><h2>${esc(data.project_short)}</h2>
     ${miniStats(data.totals)}
     <div class="verdict-card ${data.health && data.health.status === 'critical' ? 'high' : ''}">
       <h3>${healthPill(data.health)} ${esc(data.health ? data.health.reason : 'Review recent local sessions before optimizing.')}</h3>
@@ -1877,7 +2609,7 @@ async function selectProject(project) {
     <div class="table-wrap"><table><thead><tr><th>Tool</th><th>Model</th><th>Status</th><th>Tokens</th><th></th></tr></thead>
       <tbody>${data.sessions.map(s => `<tr class="clickable" onclick="selectSession('${s.session_id}')">
         <td>${esc(s.tool)}</td><td>${esc(s.model)}</td><td>${sessionStatePill(s.state)} ${outcomeEvidencePill(s)}</td><td>${esc(s.tokens_label)}</td><td><button class="row-action">Review</button></td>
-      </tr>`).join('')}</tbody></table></div></section>`;
+      </tr>`).join('')}</tbody></table></div></section>`);
 }
 function renderSessionHero(s) {
   const actions = s.actions || [];
@@ -1937,7 +2669,7 @@ function renderSessionActions(s) {
   const runtime = s.runtime_attachment || actions.find(action => action.id === 'open_tool') || {};
   const openAction = actions.find(action => action.id === 'open_tool') || {};
   const title = hasHandoff
-    ? 'Recommended: continue in a fresh session'
+    ? 'Recommended: Continue in a fresh session'
     : needsOutcome
       ? 'Recommended: mark the outcome'
       : 'Recommended: tighten the next prompt';
@@ -1947,27 +2679,51 @@ function renderSessionActions(s) {
       ? 'Mark whether this worked so AIWatcher can measure value per useful change instead of only tokens.'
       : 'Use this session as evidence, then preflight the next prompt before sending it.';
   const openToolNote = runtime.reason || openAction.reason || 'No safe return target is available for this session yet.';
+  // When there is no live return there is no action, so nothing here may carry
+  // button shape. It used to render a disabled button of exactly the same
+  // height, border and padding as the three real ones beside it, with the
+  // reason hidden in a title attribute where it could not be read.
   const openButton = openAction.available
     ? `<button class="btn-quiet" onclick="returnToRuntime('${esc(s.session_id)}')" title="${esc(openToolNote)}">${esc(openAction.label || runtime.action_label || 'Open workspace')}</button>`
-    : `<button class="btn-quiet" disabled title="${esc(openToolNote)}">${esc(openAction.label || runtime.action_label || 'No live return')}</button>`;
+    : `<span class="action-note">${esc(openAction.label || runtime.action_label || 'No live return')} — ${esc(openToolNote)}</span>`;
   const evidenceChips = [
     s.calls ? `${s.calls} model calls` : '',
     s.tool_calls ? `${s.tool_calls} tool calls` : '',
     runtime.exact_return_available ? 'Exact return available' : (runtime.available ? 'App focus only' : 'Log only'),
   ].filter(Boolean).slice(0, 5).map(item => `<span class="pill">${esc(item)}</span>`).join('');
-  return `<section class="detail-section recommended-action action-composer">
+  // A session already judged useful and verified is not making a demand of
+  // anyone. It kept a critical-toned "Needs action" eyebrow directly under its
+  // own "Outcome: useful" and "Verified outcome" chips, which is the UI arguing
+  // with itself.
+  // confidenceLabel() renders "Verified outcome" purely from s.outcome being
+  // set -- a recorded judgement rather than an inferred one -- so that is the
+  // same condition. There is no separate verified flag to read.
+  const settled = s.outcome === 'useful';
+  return `<section class="detail-section recommended-action action-composer${settled ? ' settled' : ''}">
     <div class="action-composer-head">
-      <h3>Needs action</h3>
+      <h3>${settled ? 'Optional next step' : 'Needs action'}</h3>
       <strong>${esc(title.replace(/^Recommended: /, ''))}</strong>
       <p>${esc(body)}</p>
     </div>
     <div class="action-evidence">${evidenceChips}</div>
+    <!-- Two questions were being asked at once here -- "what next" and "grade
+         what happened" -- across five same-sized controls wrapping onto two
+         rows, with nothing ranking them. Two stay visible; the rest fold into
+         More. "Mark outcome" is gone: it only scrolled to the outcome triad,
+         which is its own step further down with its own question. The server's
+         recommendation still decides which control is primary. -->
     <div class="action-buttons">
-      ${hasHandoff ? `<button class="${primaryId === 'handoff' ? 'btn-primary' : 'btn-quiet'}" onclick="${handoffAction.label === 'Inspect evidence' ? "document.getElementById('evidencePanel').scrollIntoView({ behavior: 'smooth', block: 'center' })" : `openHandoff('${esc(s.session_id)}')`}">${esc(handoffAction.label || 'Build Fresh Start brief')}</button>` : ''}
-      ${needsOutcome ? `<button class="${primaryId === 'review_outcome' ? 'btn-primary' : 'btn-quiet'}" onclick="document.getElementById('outcomePanel').scrollIntoView({ behavior: 'smooth', block: 'center' })">Mark outcome</button>` : ''}
-      <button class="${primaryId === 'optimize_next_prompt' ? 'btn-primary' : 'btn-quiet'}" onclick="showView('prompt'); closeDrawer(); document.getElementById('promptInput').focus(); showToast('Paste the next prompt here to optimize it before sending')">Optimize next prompt</button>
-      ${hasHandoff ? `<button class="btn-quiet" onclick="continueFromSession('${esc(s.session_id)}')">Continue here</button>` : ''}
-      ${openButton}
+      ${hasHandoff
+        ? `<button class="btn-primary" onclick="${handoffAction.label === 'Inspect evidence' ? "document.getElementById('evidencePanel').scrollIntoView({ behavior: 'smooth', block: 'center' })" : `openHandoff('${esc(s.session_id)}')`}">${esc(handoffAction.label === 'Inspect evidence' ? 'Inspect evidence' : 'Start fresh')}</button>
+           <button class="btn-quiet" onclick="continueFromSession('${esc(s.session_id)}')">Continue here</button>`
+        : `<button class="${primaryId === 'optimize_next_prompt' ? 'btn-primary' : 'btn-quiet'}" onclick="showView('prompt'); closeDrawer(); document.getElementById('promptInput').focus(); showToast('Paste the next prompt here to optimize it before sending')">Optimize next prompt</button>`}
+      <details class="action-more">
+        <summary>More</summary>
+        <div class="action-more-body">
+          ${hasHandoff ? `<button class="btn-quiet" onclick="showView('prompt'); closeDrawer(); document.getElementById('promptInput').focus(); showToast('Paste the next prompt here to optimize it before sending')">Optimize next prompt</button>` : ''}
+          ${openButton}
+        </div>
+      </details>
     </div>
     <p class="tool-link-note">${esc(openToolNote)}</p>
   </section>`;
@@ -1986,9 +2742,9 @@ async function selectSession(sessionId, attempt = 0, token = null) {
   openDrawer('Session review');
   document.getElementById('drawerTitle').textContent = 'Session review';
   const node = document.getElementById('detailContent');
-  node.innerHTML = attempt
+  setDrawerContent(attempt
     ? `<div class="loading">Still looking for this session (attempt ${attempt + 1} of ${SESSION_LOOKUP_ATTEMPTS})...</div>`
-    : `<div class="loading">Loading session identity for ${esc(sessionId)}...</div>`;
+    : `<div class="loading">Loading session identity for ${esc(sessionId)}...</div>`);
   const summaryPromise = fetch(`/api/session-summary?id=${encodeURIComponent(sessionId)}`)
     .then(res => res.json())
     .catch(() => null);
@@ -1996,9 +2752,9 @@ async function selectSession(sessionId, attempt = 0, token = null) {
   const fastSummary = await summaryPromise;
   if (!isCurrent()) return;
   if (fastSummary && !fastSummary.error) {
-    node.innerHTML = renderSessionSummary(fastSummary);
+    setDrawerContent(renderSessionSummary(fastSummary));
   } else {
-    node.innerHTML = `<div class="loading">Loading session details for ${esc(sessionId)}...</div>`;
+    setDrawerContent(`<div class="loading">Loading session details for ${esc(sessionId)}...</div>`);
   }
   const res = await detailPromise;
   const s = await res.json();
@@ -2013,11 +2769,11 @@ async function selectSession(sessionId, attempt = 0, token = null) {
       }, 1400);
       return;
     }
-    node.innerHTML = `<div class="empty">${esc(s.error)}</div>`;
+    setDrawerContent(`<div class="empty">${esc(s.error)}</div>`);
     return;
   }
   if (s.detail_pending) {
-    if (!fastSummary || fastSummary.error) node.innerHTML = renderSessionSummary(s);
+    if (!fastSummary || fastSummary.error) setDrawerContent(renderSessionSummary(s));
     const pending = document.createElement('div');
     pending.className = 'loading';
     pending.textContent = s.detail_message || 'Timeline and evidence are still indexing in the background.';
@@ -2136,7 +2892,7 @@ async function selectSession(sessionId, attempt = 0, token = null) {
     // change. The asks table is the evidence for that conclusion, so it follows.
     promptReview = `${coaching}${expensiveAsks}<section class="detail-section"><h3>Prompt context</h3>${opener}</section>`;
   }
-  document.getElementById('detailContent').innerHTML = `<div class="session-review-shell">${renderSessionHero(s)}
+  setDrawerContent(`<div class="session-review-shell">${renderSessionHero(s)}
     ${renderSessionActions(s)}
     ${renderVerdict(s)}
     ${outcomeActions}
@@ -2154,7 +2910,7 @@ async function selectSession(sessionId, attempt = 0, token = null) {
         <tr><th>Privacy</th><td>${esc(s.privacy)}</td></tr>
       </tbody></table>
     </div></details></section>
-    ${timeline}</div>`;
+    ${timeline}</div>`);
 }
 async function markOutcome(sessionId, outcome) {
   const buttons = document.querySelectorAll('.outcome-button');
@@ -2603,9 +3359,9 @@ function replaySplitCaption(chart) {
   // spikes, reads are every single turn.
   const writeNote = written >= 1
     ? ` A further <strong>${written}%</strong> went on writing it to cache.` : '';
-  return `<p class="feed-chart-note"><span class="swatch-blue"></span>New context
+  return `<p class="feed-chart-note"><span class="feed-chart-legend"><span class="swatch-blue"></span>New context
     <span class="swatch-cyan"></span>Written to cache
-    <span class="swatch-amber"></span>Read back —
+    <span class="swatch-amber"></span>Read back</span>
     <span class="feed-chart-sentence"><strong>${share}%</strong> of what this session cost across ${chart.turns} turns
     went on re-sent history.${writeNote} ${chart.session_turns > chart.turns
       ? `Showing the last ${chart.turns} of this session's ${chart.session_turns} turns.` : ''}
@@ -2629,11 +3385,13 @@ function renderInsightFeed(insights) {
   }
   return insights.map(card => `<div class="feed-row ${esc(card.severity || 'info')}${card.session_id ? ' clickable' : ''}"
       ${card.session_id ? `onclick="selectSession('${esc(card.session_id)}')"` : ''}>
-      <div class="feed-main">
-        <strong>${esc(card.title)}</strong>
-        <p>${esc(card.body)}</p>
-        ${card.session_id && card.session_label ? `<p class="feed-session">Charted: <button class="link-inline" data-session="${esc(card.session_id)}" onclick="event.stopPropagation(); selectSession(this.dataset.session)">${esc(card.session_label)}</button></p>` : ''}
-        ${card.chart ? `<div class="feed-chart" data-feed-chart="${esc(card.id)}"></div>${feedChartCaption(card.chart)}` : ''}
+      <div class="feed-main${card.chart ? ' has-evidence' : ''}">
+        <div class="feed-says">
+          <strong>${esc(card.title)}</strong>
+          <p>${esc(card.body)}</p>
+          ${card.session_id && card.session_label ? `<p class="feed-session">Charted: <button class="link-inline" data-session="${esc(card.session_id)}" onclick="event.stopPropagation(); selectSession(this.dataset.session)">${esc(card.session_label)}</button></p>` : ''}
+        </div>
+        ${card.chart ? `<div class="feed-shows"><div class="feed-chart" data-feed-chart="${esc(card.id)}"></div>${feedChartCaption(card.chart)}</div>` : ''}
       </div>
       ${card.impact_label ? `<span class="feed-impact mono">${esc(card.impact_label)}</span>` : ''}
     </div>`).join('');
@@ -2645,6 +3403,11 @@ let freshStartReceiptsMarkedViewed = false;
 let sessionRowsCache = [];
 let changeRowsCache = [];
 let sessionSort = { key: 'updated_at', dir: 'desc' };
+// The server returns rows already ordered -- by relevance when there is a search
+// term, by recency otherwise. Re-sorting on arrival threw the relevance away, so
+// a project search still looked unranked. The client only takes over once the
+// reader picks a column.
+let sessionSortChosen = false;
 let changeSort = { key: 'cost_usd', dir: 'desc' };
 async function markFreshStartReceiptsViewed() {
   if (freshStartReceiptsMarkedViewed) return;
@@ -2663,6 +3426,14 @@ async function quietFreshStartReminders() {
       body: JSON.stringify({ state: 'proof_pending' }),
     });
     freshStartReceiptsMarkedViewed = true;
+    // A toggle that does not show its own state leaves the reader pressing it
+    // again to find out whether the first press worked.
+    const button = pressedButton();
+    if (button) {
+      button.setAttribute('aria-pressed', 'true');
+      button.textContent = 'Reminders quieted';
+      button.disabled = true;
+    }
     showToast('Fresh Start reminders quieted. Receipts stay available here.');
   } catch (error) {
     showToast('Could not quiet Fresh Start reminders yet.', 'error');
@@ -2779,6 +3550,7 @@ function updateSortIndicators(prefix, sort, keys) {
   });
 }
 function setSessionSort(key) {
+  sessionSortChosen = true;
   sessionSort = { key, dir: sessionSort.key === key && sessionSort.dir === 'desc' ? 'asc' : 'desc' };
   renderSessionRows(sessionRowsCache, Boolean(
     document.getElementById('sessionSearch').value.trim()
@@ -2792,13 +3564,16 @@ function setChangeSort(key) {
   updateSortIndicators('change', changeSort, ['committed_at', 'project', 'cost_usd', 'lines_changed', 'usd_per_line', 'survival_pct', 'usd_per_surviving_line']);
 }
 function renderSessionRows(rows, filtered) {
-  updateSortIndicators('session', sessionSort, ['tool', 'project', 'model', 'tokens_value']);
+  updateSortIndicators('session', sessionSortChosen ? sessionSort : { key: null, dir: 'desc' },
+    ['tool', 'project', 'model', 'tokens_value']);
+  const ordered = sessionSortChosen ? sortedRows(rows, sessionSort) : rows;
+  const tokens = tokenColumnFormatter(ordered.map(s => s.tokens_value));
   document.getElementById('sessionRows').innerHTML = rows.length
-    ? sortedRows(rows, sessionSort).map(s => `<tr class="clickable" onclick="selectSession('${esc(s.session_id)}')">
+    ? ordered.map(s => `<tr class="clickable" onclick="selectSession('${esc(s.session_id)}')">
         <td>${esc(s.tool)}</td>
-        <td>${esc(s.project)}<br>${sessionStatePill(s.state)} ${s.outcome ? outcomePill(s.outcome) : outcomeEvidencePill(s)}</td>
+        <td title="${esc(projectTitle(s))}">${esc(projectName(s))}${s.match_field ? `<span class="match-note">matched on ${esc(s.match_field)}</span>` : ''}<br>${sessionStatePill(s.state)} ${s.outcome ? outcomePill(s.outcome) : outcomeEvidencePill(s)}</td>
         <td>${esc(s.model)}</td>
-        <td class="mono num">${esc(s.tokens)}</td>
+        <td class="mono num">${esc(s.tokens_value === null || s.tokens_value === undefined ? s.tokens : tokens(s.tokens_value))}</td>
         <td><button class="row-action">Review</button></td>
       </tr>`).join('')
     : `<tr><td colspan="5"><div class="empty">${filtered
@@ -2921,7 +3696,7 @@ function ambientRunning(card) {
 
   // compactTokens returns "200K"; the server's turn labels are "350.2k". Match the
   // hero rather than the other chart, so this component is internally consistent.
-  const scaleLabel = value => compactTokens(value).replace(/K$/, 'k');
+  const scaleLabel = value => compactTokens(value);
   const scale = [];
   if (pressure) scale.push({ label: scaleLabel(pressure) + ' pressure', tone: 'amber' });
   if (critical) scale.push({ label: scaleLabel(critical) + ' act now', tone: 'red' });
@@ -2931,7 +3706,7 @@ function ambientRunning(card) {
   // already past the threshold, and claiming headroom there would be a lie.
   const runway = chart.turns_to_critical === null || chart.turns_to_critical === undefined
     ? (latest >= critical && critical
-        ? 'It is already past the ' + compactTokens(critical).replace(/K$/, 'k') + ' threshold, so there is no headroom left to project.'
+        ? 'It is already past the ' + compactTokens(critical) + ' threshold, so there is no headroom left to project.'
         : '')
     : 'About <b>' + chart.turns_to_critical + ' turns</b> of headroom at the current rate.';
   const bloat = card.bloat_measurable && card.bloat_label
@@ -2952,8 +3727,14 @@ function ambientRunning(card) {
       + '<button class="btn-quiet" onclick="selectSession(\'' + esc(card.session_id) + '\')">Inspect session</button>',
     facts: [
       peak > latest && card.peak_turn_tokens ? ['peak', card.peak_turn_tokens] : null,
-      chart.turns_since_reset ? ['turns', String(chart.turns_since_reset)] : null,
-      card.session_count ? ['sessions here', String(card.session_count)] : null,
+      // turns_since_reset, not the session total: after a /compact the two
+      // diverge and a bare "turns" overstates the context actually in play.
+      // Kept short: longer labels wrapped this row to two lines at 880px and
+      // broke the equal-height contract between the two ambient states.
+      chart.turns_since_reset ? ['context turns', String(chart.turns_since_reset)] : null,
+      // The only project-scoped figure in this row. "sessions here" left the
+      // reader to guess whether "here" meant this session or this project.
+      card.session_count ? ['project sessions', String(card.session_count)] : null,
       card.efficiency_label ? ['new context', card.efficiency_label] : null,
       card.replayed_cost_label ? ['on replay', card.replayed_cost_label] : null,
     ],
@@ -2977,12 +3758,14 @@ function ambientQuiet(data) {
        { label: (100 - Math.round(replayed)) + '% new', tone: 'green' }]
     : [];
 
+  // The Sessions observed tile sits about 150px below this and states the
+  // count with a label on it. Saying it here too was the third copy of one
+  // number on one screen; the sentence leads with what the tile cannot say.
   const sessions = Number(totals.sessions) || 0;
-  let sentence = sessions
-    ? '<b>' + sessions + '</b> session' + (sessions === 1 ? '' : 's') + ' in this window.'
-    : 'No local sessions in this window yet.';
+  let sentence = sessions ? '' : 'No local sessions in this window yet.';
   if (hasSplit) {
-    sentence += ' <b>' + Math.round(replayed) + '%</b> of what they cost went on re-sending history.';
+    sentence += (sentence ? ' ' : '')
+      + '<b>' + Math.round(replayed) + '%</b> of what this window cost went on re-sending history.';
   }
   if (needsReview) {
     sentence += ' <b>' + needsReview + '</b> ' + (needsReview === 1 ? 'is' : 'are')
@@ -3005,9 +3788,14 @@ function ambientQuiet(data) {
       : '')
       + '<button class="btn-quiet" onclick="showView(\'insights\')">Open Improve</button>',
     facts: [
-      totals.sessions ? ['sessions', String(totals.sessions)] : null,
-      totals.tokens_label ? ['tokens', totals.tokens_label] : null,
+      // No 'sessions' entry: the sentence directly above already says
+      // "N sessions in this window", and the Sessions observed tile below says
+      // it a third time. One labelled statement of a number per screen.
+      // The hero is the last session's tokens; this is every session in the
+      // window. Two token totals 200px apart, and only one of them was scoped.
+      totals.tokens_label ? ['tokens this window', totals.tokens_label] : null,
       totals.useful_outcomes ? ['useful', String(totals.useful_outcomes)] : null,
+      // Frozen across every range because it is a rate, not a window total.
       totals.projected_month_label ? ['projected month', totals.projected_month_label] : null,
     ],
   };
@@ -3164,62 +3952,70 @@ function startLiveRefresh() {
   freshnessTimer = window.setInterval(renderFreshness, 5000);
 }
 
-async function load(resetDetail = true, forceRefresh = false) {
-  loadInFlight = true;
+// The button label, the in-flight flag and the next scheduled poll are restored
+// by load()'s finally, never in here. Everything below this line is allowed to
+// throw: one bad field used to leave the button stuck on "Updating...",
+// loadInFlight pinned true, and no refresh ever scheduled again -- an ambient
+// dashboard silently frozen on stale data with no visible error.
+async function loadOnce(resetDetail, forceRefresh) {
   const days = document.getElementById('days').value;
-  const refreshButton = document.getElementById('refreshButton');
-  const previousRefreshText = refreshButton ? refreshButton.textContent : '';
-  if (refreshButton) {
-    refreshButton.disabled = true;
-    refreshButton.textContent = forceRefresh ? 'Refreshing...' : 'Updating...';
-  }
   let data;
   try {
     const summaryRes = await fetch(`/api/summary?days=${days}${forceRefresh ? '&refresh=1' : ''}`);
     data = await summaryRes.json();
   } catch (error) {
-    showToast('Could not load local AIWatcher data.', 'error');
-    if (refreshButton) {
-      refreshButton.disabled = false;
-      refreshButton.textContent = previousRefreshText || 'Refresh data';
-    }
     // Keep trying on the normal cadence: a dashboard that gives up after one
     // failed poll looks identical to one showing current data.
-    loadInFlight = false;
-    scheduleRefresh(nextRefreshDelay(null, forceRefresh));
-    return;
+    showToast('Could not load local AIWatcher data.', 'error');
+    return null;
   }
   renderWatcher(data.watcher || null);
+  setDefaultPromptTool(data);
   renderCacheStatus(data.cache || null);
   const totals = data.totals;
   document.getElementById('windowLabel').textContent = totals.window_label;
   document.getElementById('apiValue').textContent = totals.api_value_label;
   document.getElementById('sessions').textContent = totals.sessions;
   document.getElementById('usefulOutcomes').textContent = totals.useful_outcomes;
-  document.getElementById('costPerUseful').textContent = `${totals.cost_per_useful_change}${totals.inferred_useful_outcomes ? ` · ${totals.inferred_useful_outcomes} to confirm` : ''}`;
-  const survival = data.survival || {};
-  const survivalRow = document.getElementById('costPerSurvivingRow');
-  if (survival.available) {
-    survivalRow.hidden = false;
-    document.getElementById('costPerSurviving').textContent =
-      `${survival.cost_per_surviving_line_label} per surviving line (${survival.survival_pct}% of ${survival.lines_touched} lines still standing)`;
-  } else {
-    survivalRow.hidden = true;
-  }
+  // "value", not "cost": this is API-equivalent, so for anyone on a
+  // subscription no money moved -- the same distinction the metric-neutral rail
+  // on the API-equivalent tile exists to protect. Shortened from "Value per
+  // useful change: X" so it holds one line at a 235px column, which is what
+  // lets four tiles sit across a 1280px window instead of stacking 2x2 and
+  // costing the page 193px of height.
+  document.getElementById('costPerUseful').textContent =
+    `${totals.cost_per_useful_change} value each${totals.inferred_useful_outcomes ? ` · ${totals.inferred_useful_outcomes} to confirm` : ''}`;
+  renderSurvivalTile(data.survival || {});
   document.getElementById('preflightDecisions').textContent = totals.preflight_decisions;
   // Same two-step contract as the runway charts: the tiles' numbers are set
   // first, then SVG is appended into nodes collected by attribute. Absent on
   // the fast shell payload, so every tile is reset rather than left showing the
   // previous window's shape while the full refresh is still running.
   const tileTrends = data.tile_trends || null;
-  document.querySelectorAll('[data-tile-spark]').forEach(node => {
-    node.innerHTML = '';
-    node.hidden = true;
-    const series = tileTrends && tileTrends.series
-      ? tileTrends.series[node.getAttribute('data-tile-spark')]
-      : null;
-    if (series) drawTileSpark(node, series, tileTrends.days);
-  });
+  // A fast shell payload carries no tile_trends, and a forced refresh always
+  // returns the shell -- so clearing on "no data present" meant pressing
+  // "Refresh data" emptied every sparkline and left the tiles collapsed until
+  // some later poll happened to bring them back. The row visibly changed shape
+  // on a button whose whole promise is that nothing changes but the numbers.
+  //
+  // The original worry is still handled: showing the previous window's shape
+  // would be worse than showing none, so a window change still clears. What no
+  // longer clears is a payload that simply has not finished computing.
+  const sparkDays = String(document.getElementById('days').value);
+  const windowChanged = sparkDays !== tileSparkWindow;
+  if (tileTrends || data.summary_complete || windowChanged) {
+    tileSparkWindow = sparkDays;
+    document.querySelectorAll('[data-tile-spark]').forEach(node => {
+      node.innerHTML = '';
+      node.hidden = true;
+      const series = tileTrends && tileTrends.series
+        ? tileTrends.series[node.getAttribute('data-tile-spark')]
+        : null;
+      if (!series || !drawTileSpark(node, series, tileTrends.days)) {
+        drawTileSparkPlaceholder(node);
+      }
+    });
+  }
   receiptCache = data.intervention_receipts || [];
   const handoffDecisions = data.handoff_decisions || [];
   document.getElementById('receiptRows').innerHTML = renderReceiptRows(receiptCache);
@@ -3285,8 +4081,8 @@ async function load(resetDetail = true, forceRefresh = false) {
   document.getElementById('privacy').innerHTML = data.privacy.map(p => `<div class="privacy-item"><span class="privacy-check">&#10003;</span><span>${esc(p)}</span></div>`).join('');
   document.getElementById('projectWindow').textContent = totals.window_label;
   document.getElementById('projectRows').innerHTML = data.projects.length
-    ? data.projects.map(p => `<tr class="clickable" onclick="selectProject(decodeURIComponent(this.dataset.id))" data-id="${encodeURIComponent(p.id)}">
-        <td>${esc(p.short_name || p.name)}</td>
+    ? data.projects.map(p => `<tr class="clickable" data-id="${encodeURIComponent(p.id)}">
+        <td title="${esc(p.name || '')}"><button class="row-open" onclick="selectProject(decodeURIComponent(this.closest('tr').dataset.id))">${esc(projectName({ project_full: p.name || p.short_name }))}</button></td>
         <td>${healthPill(p.health)}</td>
         <td class="mono">${esc(p.sessions)}</td>
         <td class="mono">${esc(p.tokens_label)}</td>
@@ -3295,6 +4091,12 @@ async function load(resetDetail = true, forceRefresh = false) {
       </tr>`).join('')
     : '<tr><td colspan="6"><div class="empty">No local project usage found for this window.</div></td></tr>';
   document.getElementById('insightHeadline').innerHTML = renderInsightHeadline(data.totals);
+  // Always rendered, including at zero. A line that only appears once it has
+  // something to admit is one nobody believes when it does appear.
+  const overhead = data.analyst_overhead || null;
+  document.getElementById('analystOverhead').textContent = overhead
+    ? `${overhead.label} — ${overhead.detail}`
+    : '';
   document.getElementById('insightFeed').innerHTML = renderInsightFeed(data.insights);
   // Same two-step as the runway charts: markup first, SVG appended after, and
   // nodes collected by attribute rather than by a selector built from data.
@@ -3317,17 +4119,40 @@ async function load(resetDetail = true, forceRefresh = false) {
     const todayDigest = document.getElementById('todayDigest');
     if (todayDigest) todayDigest.innerHTML = '<div class="empty">Open Improve for the evidence-backed weekly digest.</div>';
   }
-  if (refreshButton) {
-    refreshButton.disabled = false;
-    refreshButton.textContent = previousRefreshText || 'Refresh data';
-  }
   if (resetDetail && document.getElementById('detailDrawer').classList.contains('open')) closeDrawer();
   renderAmbient(data);
   renderTabState(data);
   lastLoadedAt = Date.now();
   renderFreshness();
-  loadInFlight = false;
-  scheduleRefresh(nextRefreshDelay(data, forceRefresh));
+  return data;
+}
+
+async function load(resetDetail = true, forceRefresh = false) {
+  const refreshButton = document.getElementById('refreshButton');
+  if (refreshButton) {
+    refreshButton.disabled = true;
+    refreshButton.textContent = forceRefresh ? 'Refreshing...' : 'Updating...';
+  }
+  loadInFlight = true;
+  let data = null;
+  try {
+    data = await loadOnce(resetDetail, forceRefresh);
+  } catch (error) {
+    // A render fault must not read as fresh data. Say the screen is stale, and
+    // put the reason somewhere a developer can find it.
+    console.error('AIWatcher: could not render the dashboard', error);
+    showToast('Refresh failed. Showing the data already on screen.', 'error');
+  } finally {
+    if (refreshButton) {
+      refreshButton.disabled = false;
+      // Restored to a literal, never to whatever the label happened to say. The
+      // 10s poll also drives this button: capturing the current text meant a
+      // tick landing mid-refresh saved "Updating..." and restored that forever.
+      refreshButton.textContent = 'Refresh data';
+    }
+    loadInFlight = false;
+    scheduleRefresh(nextRefreshDelay(data, forceRefresh));
+  }
 }
 document.addEventListener('keydown', event => { if (event.key === 'Escape') closeDrawer(); });
 (async () => {

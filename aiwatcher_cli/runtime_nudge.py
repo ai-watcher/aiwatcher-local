@@ -121,7 +121,10 @@ def _macos_foreground_app() -> str | None:
             timeout=1,
             check=False,
         ).stdout.strip()
-    except OSError:
+    # Same hole as the Windows probe below: both calls above carry a 1s timeout,
+    # and TimeoutExpired is a SubprocessError rather than an OSError. A loaded
+    # Mac would crash `aiwatcher watch` exactly the way a loaded Windows box did.
+    except (OSError, subprocess.SubprocessError):
         return None
     if '"name"=' in info:
         return info.split('"name"=', 1)[1].strip().strip('"')
@@ -152,7 +155,13 @@ def _windows_foreground_app() -> str | None:
             # screen every nudge tick.
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         ).stdout.strip()
-    except (AttributeError, OSError):
+    # TimeoutExpired is a SubprocessError, not an OSError, so the timeout above
+    # was raising straight through this handler. That crashed `aiwatcher watch`
+    # on a loaded Windows box -- and #83 put foreground_tool() on the watch path,
+    # which turned a rare CI flake into ten failures in one local run. This
+    # function promises best-effort silence; a busy tasklist is exactly the case
+    # it exists to swallow.
+    except (AttributeError, OSError, subprocess.SubprocessError):
         return None
     if not result or result.startswith("INFO:"):
         return None

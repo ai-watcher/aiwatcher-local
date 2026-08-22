@@ -173,6 +173,15 @@ def _empty_state() -> dict[str, Any]:
         "ambient_interventions": [],
         "sent_notification_keys": [],
         "active_prompt_gate": None,
+        # Second Opinion spends the user's own money on their own key, so
+        # consent is per project and the spend ledger is what the monthly cap
+        # is enforced against.
+        "analyst_consent": {},
+        # Whether the analyst may open files in this project. Off unless asked
+        # for, and separate from consent: agreeing to pay for a second opinion
+        # is not agreeing to let it read your source.
+        "analyst_contents": {},
+        "analyst_runs": [],
         "ui_server": None,
         "watcher_heartbeat": None,
     }
@@ -1403,6 +1412,169 @@ def evidence_snapshots_for_sessions(session_ids: set[str] | None = None) -> dict
 MAX_DECISION_SUMMARY_LENGTH = 200
 MAX_DECISION_REASONING_LENGTH = 500
 MAX_DECISIONS_STORED = 500
+
+
+# What a month of second opinions may cost before the product stops spawning
+# them. Low by design: a run measured at $0.037 means this is roughly 135 of
+# them, which is far more than the gate fires on in a month of real use, and the
+# point of the number is to bound a runaway, not to ration ordinary use.
+ANALYST_MONTHLY_CAP_USD = 5.0
+# And a ceiling on runs, because the dollar cap cannot bind on every host.
+# Codex reports no machine-readable cost -- AIWatcher prices its sessions at $0
+# by design, and a subscription user's really is -- so a dollar-only cap would
+# quietly stop limiting anything the moment Codex became a host. 150 is what the
+# dollar cap buys at the measured price of a run (~$0.035), so the two ceilings
+# mean roughly the same thing and whichever is reached first stops the spawning.
+ANALYST_MONTHLY_RUN_CAP = 150
+MAX_ANALYST_RUNS_STORED = 2000
+
+
+def analyst_consent(project_path: str) -> dict[str, Any] | None:
+    """Whether this project has agreed to pay for second opinions.
+
+    Per project, and asked once. A modal on every prompt would be the kind of
+    consent nobody reads, and this is a decision about one repository's budget
+    rather than about the machine.
+    """
+    key = (project_path or "").strip()
+    if not key:
+        return None
+    try:
+        with _locked_state():
+            granted = _load().get("analyst_consent") or {}
+    except OSError:
+        return None
+    record = granted.get(key)
+    return record if isinstance(record, dict) else None
+
+
+def record_analyst_consent(project_path: str, *, allowed: bool) -> dict[str, Any]:
+    key = (project_path or "").strip()
+    if not key:
+        raise ValueError("project_path is required")
+    record = {
+        "allowed": bool(allowed),
+        "decided_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with _locked_state():
+        data = _load()
+        consent = data.get("analyst_consent")
+        if not isinstance(consent, dict):
+            consent = {}
+        consent[key] = record
+        data["analyst_consent"] = consent
+        _save(data)
+    return record
+
+
+def analyst_contents_allowed(project_path: str) -> bool:
+    """Whether this project lets the analyst read file contents. Off by default.
+
+    Deliberately not folded into consent. Consent answers "may this spend my
+    money"; this answers "may it open my files". A user can reasonably say yes
+    to the first and no to the second, and the Settings copy promises exactly
+    that -- "It sees your prompt and your file paths. Never file contents,
+    unless you turn that on."
+    """
+    key = (project_path or "").strip()
+    if not key:
+        return False
+    try:
+        with _locked_state():
+            allowed = _load().get("analyst_contents") or {}
+    except OSError:
+        return False
+    record = allowed.get(key)
+    return bool(record.get("allowed")) if isinstance(record, dict) else False
+
+
+def record_analyst_contents(project_path: str, *, allowed: bool) -> dict[str, Any]:
+    key = (project_path or "").strip()
+    if not key:
+        raise ValueError("project_path is required")
+    record = {"allowed": bool(allowed), "decided_at": datetime.now(timezone.utc).isoformat()}
+    with _locked_state():
+        data = _load()
+        contents = data.get("analyst_contents")
+        if not isinstance(contents, dict):
+            contents = {}
+        contents[key] = record
+        data["analyst_contents"] = contents
+        _save(data)
+    return record
+
+
+def record_analyst_run(*, project_path: str, cost_usd: float,
+                       session_id: str | None = None) -> dict[str, Any]:
+    """Log what a spawn actually cost, for the cap to be enforced against.
+
+    Recorded from the CLI's own reported cost after the run rather than
+    estimated before it, so the counter the user is shown is the money that
+    actually moved.
+    """
+    record = {
+        "project_path": (project_path or "").strip()[:1000],
+        "session_id": (session_id or "").strip()[:200] or None,
+        "cost_usd": round(max(0.0, float(cost_usd or 0.0)), 6),
+        "ran_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with _locked_state():
+        data = _load()
+        runs = data.get("analyst_runs")
+        if not isinstance(runs, list):
+            runs = []
+        runs.append(record)
+        data["analyst_runs"] = runs[-MAX_ANALYST_RUNS_STORED:]
+        _save(data)
+    return record
+
+
+def analyst_month_spend(now: datetime | None = None) -> dict[str, Any]:
+    """This calendar month's second-opinion spend, and what is left of the cap.
+
+    Calendar month, not a rolling 30 days, because the cap is a budget and a
+    budget is something a person reasons about in months.
+    """
+    moment = now or datetime.now(timezone.utc)
+    start = moment.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    try:
+        with _locked_state():
+            runs = list(_load().get("analyst_runs") or [])
+    except OSError:
+        runs = []
+    spent = 0.0
+    count = 0
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        try:
+            ran_at = datetime.fromisoformat(str(run.get("ran_at")))
+        except (TypeError, ValueError):
+            continue
+        if ran_at.tzinfo is None:
+            ran_at = ran_at.replace(tzinfo=timezone.utc)
+        if ran_at < start:
+            continue
+        spent += float(run.get("cost_usd") or 0.0)
+        count += 1
+    cap = ANALYST_MONTHLY_CAP_USD
+    run_cap = ANALYST_MONTHLY_RUN_CAP
+    by_cost = spent >= cap
+    by_runs = count >= run_cap
+    return {
+        "runs": count,
+        "spent_usd": round(spent, 6),
+        "cap_usd": cap,
+        "run_cap": run_cap,
+        "remaining_usd": round(max(0.0, cap - spent), 6),
+        "remaining_runs": max(0, run_cap - count),
+        # Which ceiling stopped it, so the reason shown can name the real one
+        # rather than quoting dollars at somebody whose host reports none.
+        "capped_by": "cost" if by_cost else ("runs" if by_runs else None),
+        # A hard stop, checked before spawning. Warning after the fact is the
+        # thing this product exists to complain about.
+        "capped": by_cost or by_runs,
+    }
 
 
 def record_decision(

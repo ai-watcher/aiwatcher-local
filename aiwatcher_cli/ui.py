@@ -19,7 +19,11 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
+from . import analyst, prompt_signals
 from .cli import (
+    SEARCH_RANK_FIELDS,
+    SEARCH_RANK_TOPIC,
+    search_field_rank,
     usable_survival_summary,
     _loop_signal,
     _velocity_signal,
@@ -44,6 +48,9 @@ from .local_state import (
     PROMPT_MODIFIED_DECISIONS,
     VALID_OUTCOMES,
     active_prompt_gate,
+    analyst_consent,
+    analyst_contents_allowed,
+    analyst_month_spend,
     companion_skip_active,
     evidence_snapshots_for_sessions,
     get_outcome,
@@ -59,6 +66,9 @@ from .local_state import (
     mark_recent_handoff_receipts_viewed,
     record_companion_skip,
     record_ambient_intervention_action,
+    record_analyst_consent,
+    record_analyst_contents,
+    record_analyst_run,
     record_handoff_decision,
     record_optimize_decision,
     record_evidence_snapshot,
@@ -193,6 +203,23 @@ def _usage_summary(row: LocalSession) -> dict[str, object]:
         "tokens_per_model_call_label": compact_int(round(tokens / calls)) if calls else "not measured",
         "cost_per_model_call_label": money(row.cost_usd / calls) if calls else "not measured",
     }
+
+
+def project_name(path: str | None, segments: int = 2) -> str:
+    """The last *segments* path components, for display in a column.
+
+    Left-truncating a path mid-word ("...s/tadan/Downloads/...") makes a column
+    unscannable, and the part that identifies a project is at the end. Two
+    components rather than one because the leaf alone does not separate
+    aiwatcher-local-public from aiwatcher-local-pr46 at a glance. Kept beside
+    short_path rather than replacing it: that is also used for CLI output.
+    """
+    if not path:
+        return "unknown"
+    parts = [part for part in re.split(r"[\\/]+", str(path)) if part]
+    if not parts:
+        return "unknown"
+    return "/".join(parts[-segments:])
 
 
 def short_path(path: str | None, max_len: int = 54) -> str:
@@ -533,7 +560,9 @@ def _project_health(items: list[LocalSession]) -> dict[str, object]:
     if api_value >= 10 or tool_calls >= 250 or calls >= 250 or tokens >= 1_000_000:
         return {
             "status": "review",
-            "label": "Review",
+            # The column holds states: Critical, Healthy, Limited data. "Review"
+            # was an instruction sitting among them.
+            "label": "Needs review",
             "tone": "warning",
             "reason": "High usage for this window. Check whether the latest sessions produced useful outcomes.",
             "action_label": "Review",
@@ -1154,7 +1183,21 @@ def build_session_search(
                 return status in {"ended", "stale", "unknown"}
             return True
         matched = [row for row in matched if state_matches(row)]
-    matched = sorted(matched, key=lambda row: row.updated_at or row.started_at or MIN_DT, reverse=True)
+    # Recency alone would undo filter_sessions' relevance order, so a search
+    # sorts by where the term matched first and recency second. Without a search
+    # there is nothing to rank on and it stays purely recent-first.
+    needle = (search or "").strip().lower()
+    if needle:
+        matched = sorted(
+            matched,
+            key=lambda row: (
+                search_field_rank(row, needle)
+                if search_field_rank(row, needle) is not None else SEARCH_RANK_TOPIC,
+                -( (row.updated_at or row.started_at or MIN_DT).timestamp() ),
+            ),
+        )
+    else:
+        matched = sorted(matched, key=lambda row: row.updated_at or row.started_at or MIN_DT, reverse=True)
     total_matched = len(matched)
     matched = matched[:SESSION_SEARCH_RESULT_LIMIT]
     window_outcomes = outcomes_for_sessions({row.session_id for row in matched})
@@ -1170,7 +1213,21 @@ def build_session_search(
         "query": {"search": search or "", "outcome": outcome or "", "evidence": evidence or "", "state": state_filter or ""},
         "total_scanned": len(rows),
         "total_matched": total_matched,
-        "sessions": [_session_row_json(row, window_outcomes, evidence_by_session) for row in matched],
+        "sessions": [
+            {
+                **_session_row_json(row, window_outcomes, evidence_by_session),
+                # Named so a reader can see why a row is in the results at all --
+                # "parent folder" is what made a search for one project return
+                # every sibling under the same directory.
+                "match_field": (
+                    SEARCH_RANK_FIELDS.get(
+                        search_field_rank(row, needle)
+                        if search_field_rank(row, needle) is not None else SEARCH_RANK_TOPIC
+                    ) if needle else None
+                ),
+            }
+            for row in matched
+        ],
     }
 
 
@@ -2199,29 +2256,44 @@ def build_journal(days: int = 1) -> dict[str, object]:
     }
 
 
+# The two destinations a health card can send you to. A button names one of
+# these and nothing else, so its label cannot drift from what it does.
+_ACTION_REVIEW = ("Review session", "review")
+_ACTION_FRESH = ("Start fresh", "handoff")
+
+
 def _context_action(health: ContextHealth) -> dict[str, str]:
+    """What the two buttons on a health card say, and where each one goes.
+
+    Label and behaviour used to be decided in different files. This function
+    returned advice -- "Compact", "Keep going" -- as the primary label, while
+    the primary button's handler was hardcoded to open the session review. So
+    three of these four states shipped a button that promised something it did
+    not do. "Compact" was the worst of them: it reads as an instruction the
+    button will carry out, and the control that actually compacts sits directly
+    beside it. In the healthy state the two labels were outright swapped.
+
+    The advice still exists -- it is `reason`, rendered under the buttons. What
+    changed is that it is no longer wearing a button.
+    """
     if health.severity == "critical":
-        return {
-            "label": "Start fresh",
-            "secondary_label": "Fresh Start",
-            "reason": "Critical context pressure is likely to waste turns or miss details.",
-        }
-    if health.is_context_pressure or health.is_high_bloat:
-        return {
-            "label": "Compact",
-            "secondary_label": "Prepare Fresh Start",
-            "reason": "Context is growing; compact before it compounds further.",
-        }
-    if health.is_stale:
-        return {
-            "label": "Review",
-            "secondary_label": "Fresh session",
-            "reason": "The session is old enough that a focused restart may be cleaner.",
-        }
+        primary, secondary = _ACTION_FRESH, _ACTION_REVIEW
+        reason = "Critical context pressure is likely to waste turns or miss details."
+    elif health.is_context_pressure or health.is_high_bloat:
+        primary, secondary = _ACTION_FRESH, _ACTION_REVIEW
+        reason = "Context is growing; compact before it compounds further."
+    elif health.is_stale:
+        primary, secondary = _ACTION_REVIEW, _ACTION_FRESH
+        reason = "The session is old enough that a focused restart may be cleaner."
+    else:
+        primary, secondary = _ACTION_REVIEW, _ACTION_FRESH
+        reason = "Context looks healthy."
     return {
-        "label": "Keep going",
-        "secondary_label": "Review",
-        "reason": "Context looks healthy.",
+        "label": primary[0],
+        "kind": primary[1],
+        "secondary_label": secondary[0],
+        "secondary_kind": secondary[1],
+        "reason": reason,
     }
 
 
@@ -2513,11 +2585,165 @@ def build_prompt_preflight(prompt: str, *, tool: str = "agent", cwd: str | None 
         "findings": result["findings"],
         "suggestions": result["suggestions"],
         "suggested_prompt": result["suggested_prompt"],
+        # Stage 1 output, so the Plan result can separate what was read out of
+        # this prompt from the advice every prompt of this shape receives.
+        "signals": result.get("signals") if isinstance(result.get("signals"), dict) else {},
+        "removals": result.get("removals") if isinstance(result.get("removals"), list) else [],
+        # Itemised so the score can be accounted for. A number a reader cannot
+        # take apart is a number they stop believing, and this one decides
+        # whether the product spends money on a second opinion.
+        "blast": result.get("blast") if isinstance(result.get("blast"), dict) else {},
         "workflow": result.get("workflow") if isinstance(result.get("workflow"), dict) else {},
         "plan_action": _prompt_plan_action(text, result, handoff_bubble),
+        # Whether Stage 2 is worth paying for, decided by the free local
+        # score alone. The verdict travels with Stage 1 so the front end
+        # knows whether to ask for a second opinion without guessing at the
+        # threshold itself -- and so a gated-out prompt can say so rather
+        # than leaving the derived zone silent.
+        "second_opinion": _second_opinion_gate(result),
         "impact_label": impact_label,
         "privacy": "Prompt text is analyzed locally for this response and is not persisted by the Prompt Companion.",
     }
+
+
+# Measured, not guessed: real runs on the small tier came in at $0.037 and
+# $0.028. Stated as a range so it does not read as a quote.
+PRIVACY_CLAIMS = [
+    "Read-only local scan",
+    "No calls of ours. AIWatcher never sends your data anywhere.",
+    "Second opinion runs your own agent, on your machine, with your key.",
+    "It sees your prompt and your file paths. Never file contents, unless you turn "
+    "that on for a project.",
+    "No cloud upload unless you connect Cloud",
+]
+
+# Measured across both hosts, and the spread is real: the same prompt has
+# returned in 17s and in 206s. Stated as a range so it does not read as a
+# quote, and the duration is given as "usually" for the same reason.
+ANALYST_RUN_ESTIMATE_LABEL = "about $0.03-0.04, usually under a minute"
+
+
+def _second_opinion_gate(result: dict[str, object]) -> dict[str, object]:
+    """Stage 1's verdict on whether Stage 2 runs. No spawn happens here.
+
+    Three distinct answers, and none of them is silence: the gate was not
+    reached, there is no CLI to ask, or it is worth asking and the front end
+    should now request it. Spec 8 requires every one of them to leave zones B
+    and C complete, which they do -- this only decides whether zone A is worth
+    filling.
+    """
+    blast = result.get("blast") if isinstance(result.get("blast"), dict) else {}
+    if not blast.get("gate"):
+        return {
+            "gated": False,
+            "available": False,
+            "reason": "Nothing in this prompt matched a signal worth a second opinion.",
+        }
+    detection = analyst.detect(tool=str(result.get("tool") or ""))
+    if not detection.get("available"):
+        return {
+            "gated": True,
+            "available": False,
+            "reason": str(detection.get("reason")
+                          or "Second opinion unavailable. No agent CLI found."),
+        }
+    return {
+        "gated": True,
+        "available": True,
+        "pending": True,
+        "cli": detection.get("cli"),
+        "cli_label": detection.get("label"),
+        # Whether this is the vendor the user is about to prompt, or a stand-in
+        # because theirs has no analyst. Worth saying: it is their bill.
+        "preferred": detection.get("preferred", False),
+        "reason": "",
+    }
+
+
+def build_second_opinion(prompt: str, *, tool: str = "agent",
+                         cwd: str | None = None) -> dict[str, object]:
+    """Stage 2. Only ever reached once Stage 1 has already said yes.
+
+    The gate is re-checked here rather than trusted from the request: the
+    endpoint is reachable directly, and "the cheap analysis decides whether the
+    expensive one runs" is not a rule the client gets to waive.
+    """
+    text = (prompt or "").strip()
+    if not text:
+        return {"available": False, "reason": "prompt is required"}
+    blast = prompt_signals.score_blast_radius(text, cwd=cwd)
+    if not blast.get("gate"):
+        return {
+            "gated": False,
+            "available": False,
+            "reason": "Nothing in this prompt matched a signal worth a second opinion.",
+        }
+    if not cwd:
+        return {
+            "gated": True,
+            "available": False,
+            "reason": "Second opinion needs a workspace path to read the file tree from.",
+        }
+    # Spec 5: a hard stop before the spawn, not a warning after it. A product
+    # whose anchor story is a runaway agent bill does not get to ship a budget
+    # that is only checked on the way out.
+    budget = analyst_month_spend()
+    if budget["capped"]:
+        # Quoting dollars at somebody whose CLI reports none would be the same
+        # defect this codebase keeps finding: a true number answering a question
+        # it was not asked.
+        detail = (f"{money(budget['spent_usd'])} of {money(budget['cap_usd'])}"
+                  if budget.get("capped_by") == "cost"
+                  else f"{budget['runs']} of {budget['run_cap']} runs")
+        return {
+            "gated": True, "available": False, "capped": True, "budget": budget,
+            "reason": f"Second opinion paused. Monthly cap reached ({detail}).",
+        }
+    # Spec 7: asked once per project, with the cost in the question, rather than
+    # a modal on every prompt. Spending someone's money is not something to
+    # infer from them having clicked Plan.
+    consent = analyst_consent(cwd)
+    if consent is None:
+        # Name the agent that would actually run. It is the user's key being
+        # spent, and when their own vendor has no analyst the stand-in is not
+        # something to discover afterwards from a cost chip.
+        found = analyst.detect(tool=tool)
+        host_label = found.get("label") or "your own agent"
+        instead = ("" if found.get("preferred")
+                   else f" {host_label} is standing in, because the tool you picked has no analyst yet.")
+        return {
+            "gated": True, "available": False, "needs_consent": True,
+            "project_path": cwd, "budget": budget,
+            "cli": found.get("cli"), "cli_label": found.get("label"),
+            "preferred": found.get("preferred", False),
+            "estimate_label": ANALYST_RUN_ESTIMATE_LABEL,
+            "reason": (f"A second opinion runs {host_label}, on your machine, with your "
+                       "key. It sees this prompt and your file paths, never file contents. "
+                       f"Typical run: {ANALYST_RUN_ESTIMATE_LABEL}.{instead}"),
+        }
+    if not consent.get("allowed"):
+        return {
+            "gated": True, "available": False, "declined": True,
+            "reason": "Second opinion is turned off for this project.",
+        }
+    paths = analyst.ranked_paths(cwd, prompt_signals.repo_paths(cwd))
+    result = analyst.run(text, project_root=cwd, paths=paths, tool=tool,
+                         read_contents=analyst_contents_allowed(cwd))
+    result["gated"] = True
+    result["tool"] = tool
+    if result.get("available"):
+        # Recorded from what the CLI reported it cost, not from an estimate, so
+        # the counter the cap is enforced against is money that actually moved.
+        try:
+            # 0.0 when the host reports nothing, which is honest for the dollar
+            # total and is exactly why the run counter exists beside it.
+            record_analyst_run(project_path=cwd,
+                               cost_usd=float(result.get("cost_usd") or 0.0),
+                               session_id=result.get("session_id"))
+        except (OSError, ValueError):
+            pass
+    result["budget"] = analyst_month_spend()
+    return result
 
 
 def _prompt_plan_action(
@@ -2599,7 +2825,11 @@ def _prompt_plan_action(
                 or "Current local context has enough pressure that a Fresh Start brief is safer than replaying the chat."
             ),
             "next_step": "Open the session, copy the Fresh Start brief, then paste this planned task into the new chat.",
-            "primary_label": "Open Fresh Start",
+            # One verb opens the Fresh Start drawer, everywhere. "Open Fresh
+            # Start", "Start fresh" and "Try Fresh Start demo" were three names
+            # for one action. (Home's button keeps its own name because it
+            # copies rather than opens.)
+            "primary_label": "Start fresh",
             "primary_url": f"/?session={session_id}",
             "confidence": "observed",
         }
@@ -3224,6 +3454,14 @@ def _change_rows(
             ),
             "survival_pct": survived,
             "survival_label": f"{survived:.0f}%" if survived is not None else "—",
+            # The numeric field is emitted alongside the label because the column
+            # header offers sorting on it. Every other sortable column ships both;
+            # this one shipped only the label, so the header advertised a sort
+            # that had nothing to sort by and silently did nothing when clicked.
+            "usd_per_surviving_line": (
+                round(float(measured["usd_per_surviving_line"]), 6)
+                if measured.get("usd_per_surviving_line") is not None else None
+            ),
             "usd_per_surviving_line_label": (
                 money(float(measured["usd_per_surviving_line"]))
                 if measured.get("usd_per_surviving_line") is not None else "—"
@@ -3618,14 +3856,17 @@ def _insight_feed(
         )
         cards.append({
             "id": "replayed-context",
-            "title": f"{share:.0f}% of your spend went on re-sending conversation history",
+            # The share is window-scoped (total replayed / total window cost over
+            # every session). The body already says "this window"; the headline
+            # did not, and it is the half that gets read.
+            "title": f"{share:.0f}% of this window's spend went on re-sending conversation history",
             "body": (
                 f"{money(replay['total_replayed_usd'])} of {money(window_cost)} this window. The worst session replayed "
                 f"{top['replayed_pct']:.0f}% of its context, {money(top['replayed_usd'])} of its "
                 f"{money(top['session_usd'])}. {closing}"
             ),
             "session_label": (
-                f"{short_path(project_key(top.get('project_path')))} · {top.get('tool') or 'session'}"
+                f"{project_name(project_key(top.get('project_path')))} · {top.get('tool') or 'session'}"
                 if top.get("project_path") else str(top.get("tool") or "session")
             ),
             "impact_usd": replay["total_replayed_usd"],
@@ -4068,6 +4309,65 @@ def _daily_spend_chart(
     }
 
 
+def _split_analyst_overhead(
+    rows: list[LocalSession],
+) -> tuple[list[LocalSession], list[LocalSession]]:
+    """The user's own work, and what AIWatcher spent looking over their shoulder."""
+    user: list[LocalSession] = []
+    overhead: list[LocalSession] = []
+    for row in rows:
+        (overhead if row.analyst_run else user).append(row)
+    return user, overhead
+
+
+def _analyst_overhead(rows: list[LocalSession], days: int) -> dict[str, object]:
+    """The Second Opinion overhead line for this window.
+
+    Always present, including at zero, and it says so in words. A line that
+    appears only once it has something to confess is a line nobody trusts when
+    it does appear -- and "no second opinions ran in this window" is a real
+    answer to the question the line exists to answer.
+
+    Dollars alone would be a true number answering the wrong question. Codex
+    sessions are priced at $0 here by design, and a subscription user's really
+    are free while an API-key user's are not -- the local logs cannot tell those
+    two apart. Measured on this machine: eight analyst runs, four of them priced
+    at nothing, so "$0.14" describes half of them. Tokens are the denominator
+    that holds for every host, so the count of unpriced runs is stated rather
+    than folded into a dollar figure that quietly omits them.
+    """
+    runs = len(rows)
+    cost = sum(row.cost_usd for row in rows)
+    tokens = sum(row.tokens_in + row.tokens_out for row in rows)
+    unpriced = sum(1 for row in rows
+                   if row.cost_usd <= 0 and (row.tokens_in + row.tokens_out) > 0)
+    window = f"last {days} day{'s' if days != 1 else ''}"
+    if not runs:
+        label = "AIWatcher overhead: nothing this window"
+    elif unpriced:
+        label = (f"AIWatcher overhead: {money(cost)} this window, plus "
+                 f"{unpriced} run{'' if unpriced == 1 else 's'} your CLI does not price")
+    else:
+        label = f"AIWatcher overhead: {money(cost)} this window"
+    return {
+        "runs": runs,
+        "cost_usd": round(cost, 6),
+        "cost_label": money(cost),
+        "tokens": tokens,
+        "tokens_label": compact_int(tokens),
+        "unpriced_runs": unpriced,
+        "window_label": window,
+        "label": label,
+        "detail": (
+            f"{runs} second opinion{'' if runs == 1 else 's'} ran in the {window}, "
+            f"on your own agent and your own key, costing {compact_int(tokens)} tokens. "
+            f"Not counted in the totals above."
+            if runs else
+            f"No second opinions ran in the {window}."
+        ),
+    }
+
+
 def build_summary(
     days: int = 7,
     *,
@@ -4098,6 +4398,15 @@ def build_summary(
     _index_events(all_events, complete=True)
     rows = clip_sessions_to_window(all_rows, all_events, since)
     month_rows = clip_sessions_to_window(all_rows, all_events, month_start)
+    # Spec 6. AIWatcher watches Claude Code sessions and Second Opinion
+    # spawns them, so left alone it would report its own analyst runs as the
+    # user's AI spend and inflate every number the product exists to give
+    # them. They are split out here rather than dropped: excluded spend is a
+    # number nobody can audit, and the first question a buyer asks is what
+    # the feature costs. The split reads raw_cwd, because the project path
+    # has already folded the sandbox back into the repository it sits in.
+    rows, analyst_rows = _split_analyst_overhead(rows)
+    month_rows, _ = _split_analyst_overhead(month_rows)
 
     stats = summarize(rows)
     month_stats = summarize(month_rows)
@@ -4292,12 +4601,12 @@ def build_summary(
         "summary_complete": True,
         "_session_index": _session_index_payload(all_rows),
         "days": days,
-        "privacy": [
-            "Read-only local scan",
-            "No LLM calls",
-            "No source or prompt content in summaries",
-            "No cloud upload unless you connect Cloud",
-        ],
+        # Spec 7. "No LLM calls" stopped being true the moment Second Opinion
+        # could spawn one, and a privacy claim that is only true until a
+        # feature ships is worse than no claim. Written honestly the
+        # replacement is the stronger sentence anyway: the point was never
+        # that no model runs, it was that nothing of yours leaves.
+        "privacy": PRIVACY_CLAIMS,
         "totals": {
             "window_label": "Last 24 hours" if days == 1 else f"Last {days} days",
             "sessions": stats["sessions"],
@@ -4339,6 +4648,7 @@ def build_summary(
             rows, all_events, window_outcomes, interventions, since, now,
         ),
         "survival": survival_summary,
+        "analyst_overhead": _analyst_overhead(analyst_rows, days),
         "unbanked": unbanked,
         "changes": changes,
         "changes_meta": changes_meta,
@@ -4603,12 +4913,12 @@ def _build_summary_shell(
         "summary_complete": False,
         "_session_index": _session_index_payload(all_rows),
         "days": days,
-        "privacy": [
-            "Read-only local scan",
-            "No LLM calls",
-            "No source or prompt content in summaries",
-            "No cloud upload unless you connect Cloud",
-        ],
+        # Spec 7. "No LLM calls" stopped being true the moment Second Opinion
+        # could spawn one, and a privacy claim that is only true until a
+        # feature ships is worse than no claim. Written honestly the
+        # replacement is the stronger sentence anyway: the point was never
+        # that no model runs, it was that nothing of yours leaves.
+        "privacy": PRIVACY_CLAIMS,
         "totals": {
             "window_label": "Last 24 hours" if days == 1 else f"Last {days} days",
             "sessions": stats["sessions"],
@@ -5560,6 +5870,9 @@ class UIHandler(BaseHTTPRequestHandler):
         if parsed.path not in {
             "/api/outcome",
             "/api/preflight",
+            "/api/second-opinion",
+            "/api/second-opinion-consent",
+            "/api/second-opinion-contents",
             "/api/ask-aiwatcher",
             "/api/handoff-basic",
             "/api/handoff",
@@ -5593,6 +5906,39 @@ class UIHandler(BaseHTTPRequestHandler):
             response = build_prompt_preflight(prompt, tool=tool, cwd=cwd)
             status = 400 if response.get("error") else 200
             self._send(status, json.dumps(response), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/second-opinion":
+            # Stage 2, on its own request. Stage 1 has already rendered by
+            # the time this is called: the analyst takes 30s on the small
+            # tier, so putting it in /api/preflight would hold a complete
+            # and useful answer hostage to an optional one.
+            prompt = str(payload.get("prompt", ""))
+            tool = str(payload.get("tool", "agent")).strip() or "agent"
+            cwd = str(payload.get("cwd", "")).strip() or None
+            response = build_second_opinion(prompt, tool=tool, cwd=cwd)
+            self._send(200, json.dumps(response), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/second-opinion-consent":
+            project = str(payload.get("project_path", "")).strip()
+            allowed = bool(payload.get("allowed"))
+            if not project:
+                self._send(400, json.dumps({"error": "project_path is required"}),
+                           "application/json; charset=utf-8")
+                return
+            record_analyst_consent(project, allowed=allowed)
+            self._send(200, json.dumps({"allowed": allowed, "project_path": project}),
+                       "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/second-opinion-contents":
+            project = str(payload.get("project_path", "")).strip()
+            allowed = bool(payload.get("allowed"))
+            if not project:
+                self._send(400, json.dumps({"error": "project_path is required"}),
+                           "application/json; charset=utf-8")
+                return
+            record_analyst_contents(project, allowed=allowed)
+            self._send(200, json.dumps({"allowed": allowed, "project_path": project}),
+                       "application/json; charset=utf-8")
             return
         if parsed.path == "/api/ask-aiwatcher":
             question = str(payload.get("question", "")).strip()

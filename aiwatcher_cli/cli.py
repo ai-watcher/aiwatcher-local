@@ -42,6 +42,7 @@ from .companion import (
     uninstall_login_autostart,
 )
 from .evidence_capture import record_missing_evidence_snapshots
+from . import prompt_signals
 from .local_state import (
     COMMAND_GATE_BLOCKED_DECISIONS,
     VALID_OUTCOMES,
@@ -414,6 +415,47 @@ def latest_session(sessions: Iterable[LocalSession]) -> LocalSession | None:
     return max(rows, key=session_sort_key)
 
 
+# How well a session matches a search term, lowest first. Raw substring matching
+# over the whole project path made every ancestor directory a match: on a machine
+# where the projects live under Downloads/AgentWatch/, searching "agentwatch"
+# returned 13 of 14 sessions across three unrelated projects, only one of which
+# is actually named that. Ranking by where the term landed puts the project the
+# user meant at the top without hiding the others, which a hard filter would.
+SEARCH_RANK_IDENTITY = 0    # session id, tool, or model
+SEARCH_RANK_PROJECT_LEAF = 1  # the project's own name
+SEARCH_RANK_PROJECT_TAIL = 2  # its parent directory
+SEARCH_RANK_PROJECT_PATH = 3  # somewhere further up the path
+SEARCH_RANK_TOPIC = 4         # a changed file, from git evidence
+
+SEARCH_RANK_FIELDS = {
+    SEARCH_RANK_IDENTITY: "tool or model",
+    SEARCH_RANK_PROJECT_LEAF: "project",
+    SEARCH_RANK_PROJECT_TAIL: "parent folder",
+    SEARCH_RANK_PROJECT_PATH: "path",
+    SEARCH_RANK_TOPIC: "changed file",
+}
+
+
+def _path_segments(path: str | None) -> list[str]:
+    return [part for part in re.split(r"[\\\\/]+", str(path or "")) if part]
+
+
+def search_field_rank(row: LocalSession, needle: str) -> int | None:
+    """Where *needle* matched on *row*, or None if it did not match a field."""
+    if not needle:
+        return None
+    if needle in " ".join([row.session_id, row.tool, row.model or ""]).lower():
+        return SEARCH_RANK_IDENTITY
+    segments = [part.lower() for part in _path_segments(row.project_path)]
+    if segments and needle in segments[-1]:
+        return SEARCH_RANK_PROJECT_LEAF
+    if len(segments) > 1 and needle in segments[-2]:
+        return SEARCH_RANK_PROJECT_TAIL
+    if needle in str(row.project_path or "").lower():
+        return SEARCH_RANK_PROJECT_PATH
+    return None
+
+
 def filter_sessions(
     sessions: Sequence[LocalSession],
     *,
@@ -437,10 +479,8 @@ def filter_sessions(
     if search:
         needle = search.strip().lower()
 
-        def field_haystack(row: LocalSession) -> str:
-            return " ".join([row.session_id, row.tool, row.model or "", row.project_path or ""]).lower()
-
-        field_matched_ids = {row.session_id for row in rows if needle in field_haystack(row)}
+        ranks = {row.session_id: search_field_rank(row, needle) for row in rows}
+        field_matched_ids = {sid for sid, rank in ranks.items() if rank is not None}
         unmatched = [row for row in rows if row.session_id not in field_matched_ids]
         evidence_by_session = evidence_for_sessions(unmatched) if unmatched else {}
         topic_matched_ids = {
@@ -451,6 +491,9 @@ def filter_sessions(
         }
         matched_ids = field_matched_ids | topic_matched_ids
         rows = [row for row in rows if row.session_id in matched_ids]
+        # Best match first. Ties keep the incoming order, which callers have
+        # already sorted by recency.
+        rows.sort(key=lambda row: ranks.get(row.session_id) if ranks.get(row.session_id) is not None else SEARCH_RANK_TOPIC)
     if outcome:
         recorded = outcomes_for_sessions({row.session_id for row in rows})
         rows = [row for row in rows if (recorded.get(row.session_id) or {}).get("outcome") == outcome]
@@ -1550,10 +1593,26 @@ def build_execution_brief(
     multiple_tasks: bool,
     workflow_recommendation: dict[str, str] | None = None,
     plan_only: bool = False,
+    removals: list[dict[str, object]] | None = None,
 ) -> str:
-    """Preserve the requested outcome while adding only relevant controls."""
+    """Preserve the requested outcome while adding only relevant controls.
+
+    *removals* are removals the prompt asks for (spec 4.1). They are rendered
+    above the guardrails and they change one of them, because the template used
+    to tell an agent not to "expand into unrelated cleanup" even when the
+    cleanup was the stated goal. An agent reading that leaves the adapter in
+    place and reports success.
+    """
+    requested = [item for item in (removals or []) if item.get("requested")]
     lines = ["Task"]
     lines.extend(_brief_task_sections(prompt, cwd=cwd))
+    if requested:
+        # Above the guardrails, so the goal is read before the caution.
+        lines.extend(["", "Requested removals"])
+        for item in requested:
+            what = str(item.get("what") or "").strip()
+            path = str(item.get("path") or "").strip()
+            lines.append(f"- {what}{f' ({path})' if path else ''} — this removal is the goal, not a side effect.")
     lines.extend(["", "Execution approach"])
     if workflow_recommendation:
         lines.append(f"- Recommended workflow: {workflow_recommendation.get('label', 'Continue here')}.")
@@ -1590,10 +1649,14 @@ def build_execution_brief(
     if plan_only:
         lines.append("- Do not claim code was changed or tests were run unless the user later authorizes implementation.")
     else:
-        lines.extend([
-            "- Run the narrowest relevant verification after implementation.",
-            "- Stop when the requested outcome is verified; do not expand into unrelated cleanup.",
-        ])
+        lines.append("- Run the narrowest relevant verification after implementation.")
+        if requested:
+            # Bounds the cleanup instead of forbidding it. "Do not expand into
+            # unrelated cleanup" reads, next to a requested deletion, as
+            # "do not delete".
+            lines.append("- Do not remove anything beyond the removals listed above.")
+        else:
+            lines.append("- Stop when the requested outcome is verified; do not expand into unrelated cleanup.")
     reliable_cwd = _brief_working_directory(cwd)
     if reliable_cwd:
         lines.extend(["", "Working directory", reliable_cwd])
@@ -1671,6 +1734,39 @@ def _is_generated_brief(text: str) -> bool:
         return False
     token = _extract_brief_token(text, "execution_brief")
     return _consume_brief_token_safely(token, "execution_brief")
+
+
+
+_BLAST_FINDING_TEXT = {
+    "destructive_verb": "Prompt asks to {detail} something.",
+    "destructive_verb_narrow": "Prompt asks to {detail}, but nothing broad or sensitive.",
+    "destructive_verb_resolved": "Those words point at real files here ({detail}).",
+    "sensitive_paired": "Destructive or sweeping work in a sensitive area ({detail}).",
+    "sensitive_alone": "Touches a sensitive area ({detail}), but not destructively.",
+    "breadth_word": "Prompt is repo-wide in scope ({detail}).",
+    "scope_5_to_20": "The named nouns resolve to {detail} in this repository.",
+    "scope_over_20": "The named nouns resolve to {detail} in this repository.",
+    "terse": "Change request is very short ({detail}), so \"done\" is undefined.",
+    "guarded": "Reduced: {detail}.",
+    "benign_context": "Documentation, UI copy or test fixtures ({detail}), so blast radius does not apply.",
+}
+
+
+def _blast_finding(reason: dict[str, object]) -> str:
+    template = _BLAST_FINDING_TEXT.get(str(reason.get("signal")), "{detail}")
+    return template.format(detail=str(reason.get("detail") or ""))
+
+
+
+def _blocking_risk(result: dict[str, object]) -> str:
+    """The band that decides refusal, which is not the band that gets displayed.
+
+    analyze_prompt() reports a score including blast radius, because that is the
+    truth about what a prompt would touch. Refusal is a separate policy: a
+    scoring change should not quietly make the product turn more work away.
+    Falls back to the displayed risk for callers that predate the split.
+    """
+    return str(result.get("hook_risk") or result.get("risk") or "low")
 
 
 def _risk_for_score(score: int) -> str:
@@ -2048,7 +2144,12 @@ def analyze_prompt(
     high_impact_targets = (
         r"repo|repository|codebase|workspace|working tree|source tree|"
         r"project(?:\s+(?:folder|directory|root|workspace|repo|repository))?|"
-        r"all files|all code|entire app|whole app|database|db|table|schema|"
+        # "table" on its own is a pricing table, a lookup table, an HTML table.
+        # Requiring the database qualifier costs nothing -- "drop table" and
+        # "truncate table" are matched separately below -- and it removes a
+        # 6-point swing that fired on "the new pricing table and delete the
+        # legacy adapter", where no database is involved at all.
+        r"all files|all code|entire app|whole app|database|(?:database|db|sql)\s+tables?|schema|"
         r"customer data|production data|prod data|account|tenant|environment|"
         r"credentials?|secrets?|api keys?|access tokens?|auth tokens?|bearer tokens?|"
         r"refresh tokens?|session tokens?"
@@ -2114,6 +2215,26 @@ def analyze_prompt(
         suggestions.append("Keep this as an audit: return findings, proposed fix/tests, and wait before changing files.")
         guardrails.append({"icon": "\U0001F6A7", "label": "Review only"})
 
+    # Spec 2: blast radius joins the same points total, so there is one scale
+    # and the UI's "medium at 3, high at 6" keeps meaning what it says. Before
+    # this, the scorer counted prompt shape only -- whether a plan or checkpoint
+    # was named -- and was blind to what the prompt would actually touch.
+    # An execution brief restates the prompt it was generated from, so scoring
+    # its nouns counts the same work twice: once for what the user asked, and
+    # again for the artifact written to make that ask safer. The guardrails the
+    # brief adds are the mitigation, and the existing scorer already reads them.
+    if _looks_like_execution_brief(text):
+        blast = {"points": 0, "reasons": [], "gate": False,
+                 "signals": prompt_signals.scan_prompt(text), "scope": {}}
+    else:
+        blast = prompt_signals.score_blast_radius(text, cwd=cwd, guarded=safety_guardrails)
+    score += blast["points"]
+    # Deliberately not appended to `findings`. A finding pairs with a guardrail
+    # chip one-for-one, and these are observations about blast radius rather
+    # than controls to apply -- mixing them in would produce six findings and
+    # three chips. Zone B renders them from their own field.
+    blast_reasons = [{**reason, "text": _blast_finding(reason)} for reason in blast["reasons"]]
+
     if fresh_start_prompt and not findings:
         findings.append("AIWatcher Fresh Start handoff recognized; safety guardrails are protective context, not destructive intent.")
         suggestions.append("Continue from local evidence with the smallest checkpoint before editing.")
@@ -2122,6 +2243,13 @@ def analyze_prompt(
         suggestions.append("Keep the task scoped and ask for a brief plan before large edits.")
 
     risk = _risk_for_score(score)
+    # Whether the product REFUSES to run a prompt is deliberately not decided by
+    # the same number that describes it. The displayed score now includes blast
+    # radius, which is the honest figure; folding that into the block threshold
+    # would have changed refusal behaviour as a side effect of a scoring fix --
+    # measured at 0% -> 3% of real prompts on this machine. Hooks and gates keep
+    # deciding on prompt shape and the destructive heuristics, exactly as before.
+    hook_risk = _risk_for_score(score - blast["points"])
     semantic_review = None
     if score > 0 or os.environ.get(RISK_REVIEW_CMD_ENV, "").strip():
         score, risk, semantic_review = _apply_external_risk_review(
@@ -2186,6 +2314,7 @@ def analyze_prompt(
         multiple_tasks=multiple_tasks,
         workflow_recommendation=workflow,
         plan_only=plan_only,
+        removals=prompt_signals.requested_removals(text),
     )
     estimated_impact = (
         estimate_prompt_savings(text, risk_score=score, tool=tool, cwd=cwd)
@@ -2193,12 +2322,21 @@ def analyze_prompt(
         else {}
     )
     workflow = {**workflow, "reward": _workflow_reward_label(estimated_impact, workflow)}
+    # Stage 1 output, carried so the Plan result can separate what was observed
+    # locally from what is standard house advice (spec 4, zones B and C). Free
+    # and lexical: no file is read and nothing is spawned to produce it.
+    observed_signals = prompt_signals.scan_prompt(text)
     return {
         "risk": risk,
         "score": score,
         "tool": tool,
         "findings": findings,
         "suggestions": suggestions,
+        "signals": observed_signals,
+        "removals": prompt_signals.requested_removals(text),
+        "blast": {"points": blast["points"], "reasons": blast_reasons,
+                  "gate": blast["gate"], "scope": blast.get("scope") or {}},
+        "hook_risk": hook_risk,
         "guardrails": guardrails,
         "semantic_review": semantic_review or {},
         "workflow": workflow,
@@ -6204,7 +6342,7 @@ def command_preflight(args: argparse.Namespace) -> int:
         return 2
     result = analyze_prompt(prompt, tool=args.tool, cwd=args.cwd or os.getcwd())
     print(render_preflight(result))
-    if result["risk"] == "high" and args.fail_on_high:
+    if _blocking_risk(result) == "high" and args.fail_on_high:
         return 3
     return 0
 
@@ -6250,7 +6388,7 @@ def _choose_preflight_prompt(
 
     can_prompt = sys.stdin.isatty() if interactive is None else interactive
     if not can_prompt:
-        if result["risk"] == "high":
+        if _blocking_risk(result) == "high":
             return None, "blocked"
         return prompt, "original"
 
@@ -6778,7 +6916,7 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
     # Prompt Gate is intentionally interactive for both medium and high risk
     # prompts when the hook was installed with --gate. Low risk still passes
     # unchanged above.
-    if _prompt_gate_requested(args) and result["risk"] in {"medium", "high"}:
+    if _prompt_gate_requested(args) and _blocking_risk(result) in {"medium", "high"}:
         gate = None
         try:
             gate = run_prompt_gate(tool=tool, cwd=cwd, prompt=prompt, result=result)
@@ -6859,7 +6997,7 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
                 return 0
         # If the browser gate times out, fall back to the deterministic hook policy below.
 
-    if result["risk"] == "high":
+    if _blocking_risk(result) == "high":
         _record_hook_intervention(
             tool=tool,
             cwd=cwd,
@@ -6937,7 +7075,7 @@ def command_cursor_hook(args: argparse.Namespace) -> int:
     # Prompt Gate is intentionally interactive for both medium and high risk
     # prompts when the Cursor hook was installed with --gate. Cursor still cannot
     # rewrite prompt text in place, so brief decisions return a resubmission note.
-    if _prompt_gate_requested(args) and result["risk"] in {"medium", "high"}:
+    if _prompt_gate_requested(args) and _blocking_risk(result) in {"medium", "high"}:
         try:
             gate = run_prompt_gate(tool="cursor", cwd=cwd, prompt=prompt, result=result)
         except OSError as exc:

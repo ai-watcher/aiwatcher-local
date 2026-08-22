@@ -207,7 +207,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn('recommended-action action-composer', ui.HTML)
         self.assertIn('recommended-action loading-action', ui.HTML)
         self.assertIn('ai-loading-panel', ui.HTML)
-        self.assertIn("Recommended: continue in a fresh session", ui.HTML)
+        # Sentence case: this sits under an uppercase NEEDS ACTION eyebrow, and
+        # a lowercase headline beneath an uppercase one read as a broken string.
+        self.assertIn("Recommended: Continue in a fresh session", ui.HTML)
         self.assertIn("Build Fresh Start brief", ui.HTML)
         self.assertIn("Fresh Start", ui.HTML)
         self.assertIn("renderIdentityStrip", ui.HTML)
@@ -222,7 +224,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("/api/handoff-basic", ui.HTML)
         self.assertIn("/api/handoff-demo", ui.HTML)
         self.assertIn("openDemoHandoff", ui.HTML)
-        self.assertIn("Try Fresh Start demo", ui.HTML)
+        # One verb opens the drawer. "Open Fresh Start", "Start fresh" and
+        # "Try Fresh Start demo" were three names for the same action.
+        self.assertIn("Try it with sample data", ui.HTML)
         self.assertIn('id="handoffType"', ui.HTML)
         self.assertIn('id="handoffObjective"', ui.HTML)
         self.assertIn('id="handoffSources"', ui.HTML)
@@ -251,7 +255,11 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("/api/runtime-return", ui.HTML)
         self.assertIn("method: 'POST'", ui.HTML)
         self.assertIn("JSON.stringify({session_id: sessionId})", ui.HTML)
-        self.assertIn("primaryId === 'handoff' ? 'btn-primary' : 'btn-quiet'", ui.HTML)
+        # The cluster now shows two controls at rest and folds the rest into
+        # More, so handoff is unconditionally primary when it exists. The
+        # server's recommendation still ranks the no-handoff case.
+        self.assertIn("primaryId === 'optimize_next_prompt' ? 'btn-primary' : 'btn-quiet'", ui.HTML)
+        self.assertIn('class="action-more"', ui.HTML)
         self.assertIn("onclick=\"openHandoff", ui.HTML)
         self.assertIn("watch --notify", ui.HTML)
         self.assertIn("/api/handoff", ui.HTML)

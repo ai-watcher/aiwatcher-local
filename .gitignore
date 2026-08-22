@@ -38,3 +38,8 @@ events.json
 # Environment
 .env
 .env.*
+
+# Second Opinion runs the analyst here, inside the project so the path is
+# stable and reviewable. It holds a throwaway agent's scratch space, never
+# anything worth committing.
+.aiwatcher/

@@ -173,6 +173,12 @@ class LocalSession:
     agent_calls: int = 0
     tool_calls: int = 0
     source_path: str | None = None
+    # The working directory the tool actually logged, before project_path
+    # folded it to a git root. Kept because that folding is lossy in a way
+    # that matters: <project>/.aiwatcher/analyst normalises to <project>,
+    # which would leave AIWatcher unable to tell its own analyst runs from
+    # the user's work and quietly inflate every number it reports.
+    raw_cwd: str | None = None
     notes: list[str] = field(default_factory=list)
     # "cli" | "desktop" | None (host did not report which surface was used).
     surface: str | None = None
@@ -181,6 +187,16 @@ class LocalSession:
     # model for backward compatibility — a session that used more than one model
     # (e.g. Fable then Sonnet) is fully represented here, not just by its last model.
     model_breakdown: dict[str, dict[str, float]] = field(default_factory=dict)
+
+    @property
+    def analyst_run(self) -> bool:
+        """A Second Opinion analyst spawn, not work the user did.
+
+        Reported rather than excluded: hiding it would be dishonest, and it
+        would fail the first time somebody asks what the feature costs.
+        """
+        from . import analyst
+        return analyst.is_analyst_cwd(self.raw_cwd)
 
     @property
     def duration_seconds(self) -> int:
@@ -193,6 +209,8 @@ class LocalSession:
             "session_id": self.session_id,
             "tool": self.tool,
             "project_path": self.project_path,
+            "raw_cwd": self.raw_cwd,
+            "analyst_run": self.analyst_run,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "model": self.model,
@@ -700,6 +718,18 @@ def _codex_user_prompt_text(row_type: str | None, payload: dict[str, Any]) -> st
                     parts.append(item)
     text = "\n".join(part.strip() for part in parts if part and part.strip()).strip()
     return text or None
+
+
+def _dominant_cwd(cwd_counts: dict[str, int], cwd_costs: dict[str, float]) -> str | None:
+    """The working directory this session mostly ran in, unnormalised.
+
+    Ranked the way _choose_project_path ranks its candidates -- by spend
+    first, then by event count -- so the raw path and the attributed project
+    describe the same directory rather than two different ones.
+    """
+    if not cwd_counts:
+        return None
+    return max(cwd_counts, key=lambda cwd: (cwd_costs.get(cwd, 0.0), cwd_counts[cwd]))
 
 
 def _choose_project_path(
@@ -1335,6 +1365,7 @@ def scan_claude_code() -> list[LocalSession]:
                 ))
 
                 session = sessions[-1]
+                session.raw_cwd = _dominant_cwd(cwd_counts, cwd_costs)
                 session.project_path = _choose_project_path(
                     fallback_project_path,
                     cwd_counts,
@@ -1567,6 +1598,10 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
     for path in paths:
         session_id = path.stem
         project_path: str | None = None
+        # The cwd exactly as Codex wrote it. project_path below is the same
+        # value already folded to a git root, which erases the one thing that
+        # tells a Second Opinion analyst run apart from the user's own work.
+        recorded_cwd: str | None = None
         model: str | None = None
         surface: str | None = None
         started_at: datetime | None = None
@@ -1606,6 +1641,7 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
                     row_type = row.get("type")
                     if row_type == "session_meta":
                         session_id = str(payload.get("id") or payload.get("session_id") or session_id)
+                        recorded_cwd = str(payload.get("cwd") or "") or recorded_cwd
                         project_path = _normalize_project_path(str(payload.get("cwd") or "")) or project_path
                         if surface is None:
                             originator = str(payload.get("originator") or "").lower()
@@ -1614,6 +1650,7 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
                             elif "cli" in originator or "tui" in originator:
                                 surface = "cli"
                     elif row_type == "turn_context":
+                        recorded_cwd = str(payload.get("cwd") or "") or recorded_cwd
                         project_path = _normalize_project_path(str(payload.get("cwd") or "")) or project_path
                         model = str(payload.get("model") or model or "codex")
                     elif row_type == "response_item" and payload.get("type") in {
@@ -1699,6 +1736,7 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
             session_id=session_id,
             tool="codex-cli",
             project_path=project_path,
+            raw_cwd=recorded_cwd,
             started_at=started_at or _mtime(path),
             updated_at=updated_at or _mtime(path),
             model=model or "codex",
