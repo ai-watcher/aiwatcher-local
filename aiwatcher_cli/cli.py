@@ -924,6 +924,19 @@ def _fresh_start_intent_text(text: str) -> str:
     generated handoff just because the handoff itself says to be careful.
     Malformed or spoofed handoffs still get scored: any unsectioned or
     non-protective line remains part of the analysis text.
+
+    A line is dropped only when it is BOTH under a protective header AND
+    recognised protective boilerplate. Everything else reaches the scorer.
+
+    That single rule is deliberate. Deciding what to keep by listing the
+    headers worth keeping left nine recognised headers -- among them "Local
+    evidence to inspect", "Why start fresh now" and "Project" -- in neither the
+    intent set nor the protective set, and their contents matched no branch at
+    all, so they were dropped before scoring. A prompt carrying the Fresh Start
+    marker with "Delete the production database..." under one of those headings
+    scored 0 and read as low risk, where the same text unsectioned scored 8.
+    Keeping by default means a heading nobody has classified yet fails towards
+    scoring the text rather than towards hiding it.
     """
     sections: list[str] = []
     current_header: str | None = None
@@ -936,11 +949,7 @@ def _fresh_start_intent_text(text: str) -> str:
             continue
         if current_header in _FRESH_START_PROTECTIVE_HEADERS and _fresh_start_line_is_protective(line):
             continue
-        if current_header is None or current_header in _FRESH_START_INTENT_HEADERS:
-            sections.append(line)
-            continue
-        if current_header in _FRESH_START_PROTECTIVE_HEADERS and not _fresh_start_line_is_protective(line):
-            sections.append(line)
+        sections.append(line)
     if not sections:
         return "Continue the AIWatcher Fresh Start handoff from local repository evidence."
     return "\n".join(sections)

@@ -2192,7 +2192,18 @@ class DashboardWindowTests(unittest.TestCase):
             _health("s2", "/repo/app", 150_000, hours=1),
             _health("s3", "/repo/docs", 100_000, tool="claude-code", hours=1),
         ]
-        with patch.object(ui, "analyze_all_sessions", return_value=health_rows):
+        # identity_label and return_label are derived from _workspace_mode, which
+        # answers "can AIWatcher open this workspace" from the host it runs on:
+        # true if the Cursor or VS Code launcher is on PATH, and true on macOS
+        # regardless. Left to the environment, this test asserted "Likely
+        # workspace"/"Workspace only" and so passed on macOS CI and on any
+        # machine with `code` installed, while failing on Linux and Windows.
+        # The workspace answer is pinned so the assertions below are about the
+        # card carrying the attachment's labels, which is what this test is for.
+        from aiwatcher_cli import runtime_attachment
+
+        with patch.object(ui, "analyze_all_sessions", return_value=health_rows),                 patch.object(runtime_attachment, "_workspace_mode",
+                             return_value=("vscode", "Open the project in VS Code.", True)):
             cards = ui._context_health_cards(rows, [])
 
         self.assertEqual(len(cards), 2)
