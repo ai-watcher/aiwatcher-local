@@ -149,7 +149,12 @@
   </section>
 
   <section id="view-sessions" class="view" hidden>
-    <div class="card" style="margin-bottom:14px">
+    <!-- Two zones once the window is wide enough for both to be real: what is
+         happening right now, beside the work it is happening to. Stacked below
+         1280px, because a 1024px window leaves 721px of content once the nav
+         rail is taken out and the Work table needs 393px of that on its own. -->
+    <div class="watch-shell">
+    <div class="card">
       <div class="section-title">
         <div><h2>Context health</h2><p>Context bloat, runway pressure, and Fresh Start actions for local work.</p></div>
         <span class="note-chip">Actionable sessions</span>
@@ -189,6 +194,7 @@
         </tr></thead>
         <tbody id="sessionRows"></tbody>
       </table></div>
+    </div>
     </div>
   </section>
 

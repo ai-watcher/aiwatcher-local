@@ -352,6 +352,17 @@
        every column is wide, rather than four columns that wrap one card's copy
        and pull the whole row taller. */
     .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: var(--sp-3) 0; }
+    /* Watch composes rather than stacks. Context health and the work list were
+       583px and 995px of a single column, so at 1492x945 the screen was 1592px
+       tall and you could never see both -- and the answer to "is this session
+       in trouble" is only useful next to the work you would act on.
+       align-items: start because the two are different lengths and should be,
+       rather than one stretching to pad out the other. */
+    .watch-shell { display: grid; gap: var(--sp-3); }
+    .watch-shell > .card { margin: 0; }
+    @media (min-width: 1280px) {
+      .watch-shell { grid-template-columns: minmax(0, 0.85fr) minmax(0, 1fr); align-items: start; }
+    }
     @media (min-width: 1280px) { .kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
     /* Headings and <strong> were never given a weight, so they took the UA
        default of 700 -- a fourth weight the stylesheet did not know it had.

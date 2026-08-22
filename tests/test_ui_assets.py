@@ -568,6 +568,49 @@ class HomeStatRowTest(unittest.TestCase):
         self.assertIn("not the selected range", self.js)
 
 
+class HorizontalCompositionTest(unittest.TestCase):
+    """Screens that compose instead of stacking.
+
+    Every view was one column of full-width cards: at 1492x945 the content
+    column is 1189px and --w-prose caps a paragraph at 68ch, so roughly 700px
+    sat empty beside every line of text while the page grew downwards. Watch was
+    1592px tall there -- a 583px health card above a 995px table, never visible
+    at the same time.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+        cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+
+    def test_watch_puts_health_beside_the_work(self):
+        watch = self.html[self.html.index('id="view-sessions"'):]
+        watch = watch[:watch.index("</section>")]
+        self.assertIn('<div class="watch-shell">', watch)
+        # The shell wraps both cards, not one of them.
+        self.assertEqual(watch.count('<div class="card"'), 2)
+
+    def test_the_two_zones_only_form_when_both_fit(self):
+        # A 1024px window leaves 721px of content once the nav rail is out, and
+        # the Work table needs 393px of min-content on its own -- two real zones
+        # do not fit, so below the breakpoint it stacks rather than scrolling
+        # the table sideways.
+        shell = self.css[self.css.index(".watch-shell {"):]
+        shell = shell[:shell.index("@media") + 200]
+        self.assertIn("min-width: 1280px", shell)
+        self.assertIn("grid-template-columns", shell)
+        self.assertIn("align-items: start", shell)
+
+    def test_the_stacked_gap_comes_from_the_grid(self):
+        # The first card carried an inline margin-bottom, which would have added
+        # a stray 14px under the left column once the two sat side by side.
+        watch = self.html[self.html.index('id="view-sessions"'):]
+        watch = watch[:watch.index("</section>")]
+        self.assertNotIn("margin-bottom:14px", watch)
+        shell = self.css[self.css.index(".watch-shell {"):]
+        self.assertIn("gap: var(--sp-3)", shell[:shell.index("}")])
+
+
 class PlanControlTest(unittest.TestCase):
     """The tab is for planning the next prompt. A housekeeping checklist had
     grown to 64% of it, sitting above the tool the tab is named for."""
