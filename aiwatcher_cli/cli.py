@@ -4306,7 +4306,18 @@ def command_report(args: argparse.Namespace) -> int:
         print("\nTop sessions:")
         for top_session in digest["top_sessions"]:
             outcome_label = f" [{top_session['outcome']}]" if top_session["outcome"] else ""
-            print(f"  {top_session['api_value_label']:>10}  {top_session['project']} ({top_session['tool']}){outcome_label}")
+            share = top_session.get("share_pct")
+            share_label = f" {share:>5.1f}%" if share is not None else " " * 6
+            print(
+                f"  {top_session['api_value_label']:>10}{share_label}  "
+                f"{top_session['project']} ({top_session['tool']}){outcome_label}"
+            )
+        window_share = digest.get("top_sessions_share_pct")
+        if window_share is not None:
+            print(
+                f"  These {len(digest['top_sessions'])} cover {window_share}% of the "
+                f"{digest['top_sessions_window_total_label']} spent this window."
+            )
 
     if digest["loop_candidates"] or digest["velocity_candidates"]:
         print("\nLoop/runaway candidates:")

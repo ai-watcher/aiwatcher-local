@@ -210,5 +210,45 @@ class PromptCachePricingTests(unittest.TestCase):
         self.assertGreater(with_cache, counted_only * 15)
 
 
+class CodexFamilyResolvesToPlanBasedTests(unittest.TestCase):
+    """Unknown and plan-based are different claims, and only one is renderable.
+
+    The scanner takes the model straight from the rollout and falls back to the
+    bare string "codex". Before the family catch-alls, anything the table did not
+    name exactly returned None -- indistinguishable from a typo, and not something
+    the dashboard could honestly label as subscription usage.
+    """
+
+    def test_every_codex_shape_the_scanner_can_emit_is_plan_based(self) -> None:
+        for model in ("codex", "gpt-5", "gpt-5-codex", "gpt-5.2-codex", "gpt-5.9-codex"):
+            with self.subTest(model=model):
+                self.assertTrue(is_subscription_model(model), f"{model} fell through to None")
+                self.assertEqual(estimate_cost(model, 1_000_000, 100_000), 0.0)
+
+    def test_catch_alls_do_not_shadow_a_specifically_priced_model(self) -> None:
+        """A prefix must never win over an exact key, or rates go silently to zero."""
+        self.assertEqual(lookup("gpt-4o-mini"), {"in": 0.15, "out": 0.60, "subscription": False})
+        self.assertEqual(lookup("gpt-4o-2024-08-06"), {"in": 2.50, "out": 10.00, "subscription": False})
+        self.assertFalse(is_subscription_model("claude-opus-5"))
+        self.assertGreater(estimate_cost("claude-opus-5", 1_000_000, 0), 0.0)
+
+    def test_an_actually_unknown_model_still_returns_none(self) -> None:
+        """The catch-alls are scoped to families, not a blanket 'everything is free'."""
+        self.assertIsNone(lookup("some-model-nobody-has-heard-of"))
+        self.assertIsNone(lookup(""))
+        self.assertIsNone(lookup(None))
+
+    def test_every_gpt5_entry_is_plan_based(self) -> None:
+        """The prefix catch-all is only safe while this holds — pin it.
+
+        If a priced GPT-5 API SKU is ever added, "gpt-5" as a prefix would swallow
+        it and bill it at zero. This test is the tripwire for that.
+        """
+        for key, rates in MODEL_PRICING.items():
+            if key.startswith("gpt-5"):
+                with self.subTest(model=key):
+                    self.assertTrue(rates["subscription"], f"{key} is priced but would be prefix-matched to zero")
+
+
 if __name__ == "__main__":
     unittest.main()

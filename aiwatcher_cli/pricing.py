@@ -29,10 +29,19 @@ MODEL_PRICING: dict[str, dict[str, float | bool]] = {
     "claude-mythos-5": {"in": 10.00, "out": 50.00, "subscription": False},
     "gpt-4o": {"in": 2.50, "out": 10.00, "subscription": False},
     "gpt-4o-mini": {"in": 0.15, "out": 0.60, "subscription": False},
-    "gpt-5.5": {"in": 0.0, "out": 0.0, "subscription": True},
-    "gpt-5.2-codex": {"in": 0.0, "out": 0.0, "subscription": True},
-    "gpt-5.3-codex": {"in": 0.0, "out": 0.0, "subscription": True},
-    "gpt-5.6-terra": {"in": 0.0, "out": 0.0, "subscription": True},
+    # Family catch-alls, so an unrecognised GPT-5/Codex build resolves to
+    # "known, plan-based" rather than to None.
+    #
+    # `lookup` tries an exact key first and only then scans for a prefix, so these
+    # never shadow a specific entry above -- they catch what the specific keys
+    # miss: the bare "codex" the scanner falls back to when a rollout names no
+    # model, and any build published after this table was last edited. The
+    # distinction matters because None means "unknown model" while subscription
+    # means "known, deliberately unpriced", and only the second is a claim the
+    # dashboard can honestly render. Every GPT-5 entry here is subscription, so a
+    # prefix hit cannot pick up a rate that ought to have been billed.
+    "codex": {"in": 0.0, "out": 0.0, "subscription": True},
+    "gpt-5": {"in": 0.0, "out": 0.0, "subscription": True},
 }
 
 # Prompt-cache rates, as multiples of a model's base input price. Cached reads

@@ -10,9 +10,9 @@ import tempfile
 import threading
 import time
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePath
 from types import SimpleNamespace
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
@@ -61,8 +61,8 @@ from .local_state import (
     state_path,
 )
 from .outcome_evidence import VALID_EVIDENCE_OUTCOMES, build_outcome_evidence, evidence_for_sessions
-from .ledger import Ledger, build_ledger, unbanked_summary
-from .pricing import is_subscription_model
+from .ledger import UNBANKED_OUTSIDE_REPO, Ledger, build_ledger, unbanked_summary
+from .pricing import cache_read_cost, estimate_cost, is_subscription_model
 from .runtime_attachment import (
     RuntimeAttachment,
     perform_runtime_return,
@@ -70,7 +70,13 @@ from .runtime_attachment import (
     safe_runtime_processes,
 )
 from .runtime_nudge import foreground_tool
-from .session_health import ContextHealth, analyze_all_sessions, gate_health_warning
+from .session_health import (
+    CRITICAL_TOKENS_PER_TURN,
+    PRESSURE_TOKENS_PER_TURN,
+    ContextHealth,
+    analyze_all_sessions,
+    gate_health_warning,
+)
 from .scanner import (
     clip_sessions_to_window,
     LocalEvent,
@@ -89,11 +95,27 @@ from .scanner import (
 MAX_REQUEST_BYTES = 64 * 1024
 
 MIN_DT = datetime.min.replace(tzinfo=timezone.utc)
+# Per-turn history shipped per health card. The summary is cached to disk and read
+# on every paint, so this is capped rather than unbounded; 60 turns is well past
+# where a session has already crossed the action threshold.
+CONTEXT_CHART_MAX_TURNS = 60
+# The replay chart keeps far more than the runway chart does, and they are capped
+# apart for a reason. The runway is one line per project and up to five of them
+# ride in a single summary, where the recent shape is the whole question. The
+# replay chart is one session, and its claim is that replay compounds over a
+# session -- which the last sixty turns of a nine-hundred-turn session cannot
+# show, because by then the curve has long since flattened at the top. It stays
+# bounded rather than unbounded: the payload is cached to disk and read on every
+# paint, and no chart needs to be the reason that grows without limit.
+REPLAY_CHART_MAX_TURNS = 1_200
+# A turn writes the conversation to cache, rather than just topping it up, at
+# roughly this size. Below it every ordinary turn would read as a cache write.
+CACHE_WRITE_TURN_TOKENS = 10_000
 SUMMARY_MEMORY_TTL_SECONDS = 45
 SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
 # Bump whenever build_summary's payload shape changes, so a cache written by an
 # older build is discarded instead of rendering blank sections in a newer UI.
-SUMMARY_CACHE_SCHEMA_VERSION = 6
+SUMMARY_CACHE_SCHEMA_VERSION = 7
 SESSION_SNAPSHOT_SCHEMA_VERSION = 1
 SUMMARY_BACKGROUND_COOLDOWN_SECONDS = 8
 SUMMARY_WINDOWS = (1, 7, 30)
@@ -1893,7 +1915,18 @@ def build_weekly_digest(days: int = 7) -> dict[str, object]:
     useful_rows = [row for row in rows if (window_outcomes.get(row.session_id) or {}).get("outcome") == "useful"]
     highest_cost_useful = max(useful_rows, key=lambda row: row.cost_usd, default=None)
 
+    # DIGEST_CANDIDATE_LIMIT is a fixed cap, so the list reads identically whether
+    # these five sessions are most of the window or a rounding error on it -- and the
+    # right next move is opposite in those two cases. Each row carries its share of
+    # window spend, and the panel reports what the five together cover, so the reader
+    # gets the denominator the ranking cannot supply.
+    window_cost = sum(row.cost_usd for row in rows)
     top_sessions = sorted(rows, key=lambda row: row.cost_usd, reverse=True)[:DIGEST_CANDIDATE_LIMIT]
+    top_sessions_share_pct = (
+        round(100.0 * sum(row.cost_usd for row in top_sessions) / window_cost, 1)
+        if window_cost > 0
+        else None
+    )
 
     events_by_session = _events_by_session(rows)
     loop_candidates: list[dict[str, object]] = []
@@ -1968,10 +2001,17 @@ def build_weekly_digest(days: int = 7) -> dict[str, object]:
                 "tool": row.tool,
                 "model": row.model or "unknown",
                 "api_value_label": money(row.cost_usd),
+                # None rather than 0 when the window has no priced spend: a plan-only
+                # window is "not measurable here", which is not the same claim as 0%.
+                "share_pct": (
+                    round(100.0 * row.cost_usd / window_cost, 1) if window_cost > 0 else None
+                ),
                 "outcome": (window_outcomes.get(row.session_id) or {}).get("outcome"),
             }
             for row in top_sessions
         ],
+        "top_sessions_share_pct": top_sessions_share_pct,
+        "top_sessions_window_total_label": money(window_cost),
         "loop_candidates": loop_candidates[:DIGEST_CANDIDATE_LIMIT],
         "velocity_candidates": velocity_candidates[:DIGEST_CANDIDATE_LIMIT],
         "command_gate": {
@@ -2057,7 +2097,14 @@ def _context_action(health: ContextHealth) -> dict[str, str]:
     }
 
 
-def _context_health_card(health: ContextHealth, session: LocalSession | None, *, group: list[ContextHealth]) -> dict[str, object]:
+def _context_health_card(
+    health: ContextHealth,
+    session: LocalSession | None,
+    *,
+    group: list[ContextHealth],
+    turn_series: list[int] | None = None,
+    charted_because_live: bool = False,
+) -> dict[str, object]:
     action = _context_action(health)
     critical_count = sum(1 for item in group if item.severity == "critical")
     warning_count = sum(1 for item in group if item.severity == "warning")
@@ -2065,6 +2112,21 @@ def _context_health_card(health: ContextHealth, session: LocalSession | None, *,
     replayed_cost = sum(item.replayed_cost_usd for item in group if item.bloat_measurable)
     analyzed_cost = sum(item.analyzed_cost_usd for item in group if item.bloat_measurable)
     bloat_measurable = any(item.bloat_measurable for item in group)
+    # When a session is charted for being reachable rather than for being the
+    # worst, the bigger one still exists and the card would otherwise be the only
+    # place it could have been mentioned. Naming it keeps the swap honest.
+    #
+    # Reported as silence, not as an ending. Nothing local can tell a finished
+    # session from one sitting in a tab the user will return to after lunch --
+    # all that was observed is a log that stopped changing, and a session can be
+    # picked up again at any time. So the card says how long it has been quiet
+    # and lets the reader decide what that means.
+    heaviest_item = max(group, key=lambda item: item.latest_turn_tokens, default=None)
+    bigger = (
+        heaviest_item
+        if heaviest_item is not None and heaviest_item.latest_turn_tokens > health.latest_turn_tokens
+        else None
+    )
     runtime_attachment = (
         runtime_attachment_for_session(session, state=session_state(session), processes=[]).to_json()
         if session
@@ -2084,6 +2146,12 @@ def _context_health_card(health: ContextHealth, session: LocalSession | None, *,
     if len(group) > 1:
         context_summary += f" This is the highest-pressure source among {len(group)} same-project sessions."
     return {
+        "charted_because_live": charted_because_live,
+        "bigger_idle_label": compact_int(bigger.latest_turn_tokens) if bigger else None,
+        "bigger_idle_age_label": (
+            (f"{bigger.age_days:.1f}d" if bigger.age_days >= 1 else f"{bigger.age_hours:.0f}h")
+            if bigger else None
+        ),
         "session_id": health.session_id,
         "session_short": short_session_id(health.session_id),
         "tool": health.tool,
@@ -2104,7 +2172,28 @@ def _context_health_card(health: ContextHealth, session: LocalSession | None, *,
             for item in group[:5]
         ],
         "latest_turn_tokens": compact_int(health.latest_turn_tokens),
-        "peak_turn_tokens": compact_int(max(item.peak_turn_tokens for item in group)),
+        # The charted session's own peak, not the project's. These two sit side
+        # by side and the chart draws a "peak N -- already crossed once" line
+        # from it, so a group maximum here claims this session reached a number
+        # another one did. Harmless while the representative was always the
+        # largest session; wrong the moment it is chosen for being reachable
+        # instead. The project-wide view is the session count and the group note.
+        "peak_turn_tokens": compact_int(health.peak_turn_tokens),
+        # Chart inputs. Raw numbers, deliberately suffixed so nothing confuses them
+        # with the formatted strings above. The series is capped because the whole
+        # summary is cached to disk and read on every dashboard paint -- an
+        # uncapped per-turn history would grow without bound on long sessions.
+        "chart": None if turn_series is None else {
+            "turn_series": turn_series[-CONTEXT_CHART_MAX_TURNS:],
+            "latest_turn_tokens_n": health.latest_turn_tokens,
+            "peak_turn_tokens_n": health.peak_turn_tokens,
+            "growth_per_turn_n": round(health.segment_growth_rate),
+            "turns_to_critical": health.turns_to_critical,
+            "turns_since_reset": health.turns_since_reset,
+            "context_resets": health.context_resets,
+            "pressure_tokens_n": PRESSURE_TOKENS_PER_TURN,
+            "critical_tokens_n": CRITICAL_TOKENS_PER_TURN,
+        },
         "estimated_replayed_context_tokens": replayed_tokens,
         "estimated_replayed_context_label": compact_int(replayed_tokens),
         "bloat_measurable": bloat_measurable,
@@ -2138,19 +2227,58 @@ def _context_health_card(health: ContextHealth, session: LocalSession | None, *,
 
 def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) -> list[dict[str, object]]:
     sessions_by_id = {row.session_id: row for row in rows}
+    # Per-turn input, kept raw. Everything else on this card is display-formatted
+    # (compact_int turns 158000 into "158K"), which a chart cannot plot -- so the
+    # series and the projection fields below travel as numbers alongside the
+    # strings the existing card already renders, rather than replacing them.
+    turns_by_session: dict[str, list[int]] = defaultdict(list)
+    for event in sorted(events, key=lambda e: (e.timestamp or MIN_DT)):
+        if event.tokens_in > 0:
+            turns_by_session[event.session_id].append(event.tokens_in)
     grouped: dict[str, list[ContextHealth]] = defaultdict(list)
     for health in analyze_all_sessions(rows, events):
         grouped[project_key(health.project_path)].append(health)
     severity_order = {"critical": 0, "warning": 1, "healthy": 2}
     cards: list[dict[str, object]] = []
+    def _still_reachable(item: ContextHealth) -> bool:
+        """Is this a session you could still act on, or one you have left?"""
+        session = sessions_by_id.get(item.session_id)
+        if session is None:
+            return False
+        return str(session_state(session).get("status")) in {"active", "recent"}
+
     for group in grouped.values():
+        # Severity first, then whether the session is still live, and only then
+        # size. Ranking on size alone charted the biggest number in the project
+        # regardless of whether anyone was still in it: a session left six hours
+        # earlier at 824K outranked the one running right now at 343K, which was
+        # also critical and never appeared. Every button on this card -- start
+        # fresh, hand off, copy a compact prompt -- is an instruction to do
+        # something in that session, and none of them can be carried out in one
+        # that has ended, so the worst *reachable* session is the useful pick.
+        # With nothing live the order is unchanged and the biggest still wins.
         group.sort(key=lambda item: (
             severity_order.get(item.severity, 9),
+            0 if _still_reachable(item) else 1,
             -int(item.latest_turn_tokens * item.bloat_ratio),
             -item.total_input_tokens,
         ))
         representative = group[0]
-        cards.append(_context_health_card(representative, sessions_by_id.get(representative.session_id), group=group))
+        session = sessions_by_id.get(representative.session_id)
+        # Only sources with real per-turn numbers can be plotted against a per-turn
+        # threshold. The Codex DB path exposes a running thread total and nothing
+        # per turn, so its "turns" would be one growing number; the Codex rollout
+        # path reads last_token_usage and does have genuine per-turn prompt sizes,
+        # which is why it deliberately carries no cumulative note and is charted.
+        # Same exclusion _insight_feed already applies via pressure_rows.
+        plottable = session is not None and not has_cumulative_totals(session)
+        cards.append(_context_health_card(
+            representative,
+            session,
+            group=group,
+            turn_series=turns_by_session.get(representative.session_id, []) if plottable else None,
+            charted_because_live=_still_reachable(representative),
+        ))
     cards.sort(key=lambda item: (
         severity_order.get(str(item.get("severity")), 9),
         -int(item.get("estimated_replayed_context_tokens") or 0),
@@ -2553,12 +2681,340 @@ def _window_ledger(events: list[LocalEvent], days: int) -> Ledger | None:
         return None
 
 
+# A short session, in model calls. Set at the top of the shortest length bucket
+# measured locally, which is where the share of sessions producing nothing was
+# highest -- longer sessions land work more often, not less.
+FALSE_START_MAX_CALLS = 15
+# Enough of them to be a habit rather than a bad week. Below this the card stays
+# silent: "3 of 4 were false starts" is a coin flip dressed as a pattern.
+FALSE_START_MIN_SESSIONS = 5
+
+# Capped at the number of non-status hues this palette has. Past that the tail
+# folds into one neutral segment rather than reusing amber or red, which mean
+# something else on every other surface here.
+UNBANKED_CHART_REPOS = 3
+
+# Slices before the tail folds into "Other". A hard limit, not taste: this
+# palette has exactly three hues that do not already mean something -- amber and
+# red are warning and error everywhere else here -- and past about five slices a
+# pie stops being readable regardless of colour.
+COMPOSITION_SLICES = 3
+# One slice this size makes the chart a number in disguise.
+COMPOSITION_DOMINANT_PCT = 95.0
+# Off for now: the chart renders with a caveat instead of withholding itself, so
+# the degenerate case can be reviewed rather than guessed at. Flip to True to
+# have it hide, which is the behaviour the rest of this dashboard prefers.
+COMPOSITION_HIDE_WHEN_DOMINANT = False
+# Below this a scatter is a handful of dots and any pattern in it is imagined.
+MODEL_SCATTER_MIN_POINTS = 8
+
+
+def _composition_chart(rows: list[dict[str, object]]) -> dict[str, object] | None:
+    """Share of total tokens, for a pie beside the ranked bars.
+
+    The bars answer "which is biggest" -- each is sized against the largest, not
+    against the total -- so they cannot say "this one is 79% of everything".
+    That is the only question this adds.
+
+    Measured in tokens for the same reason the bars are: a plan-based tool is
+    priced at zero on purpose, and a share-of-spend view would draw it as absent.
+    """
+    weighted = [row for row in rows if int(row.get("tokens") or 0) > 0]
+    total = sum(int(row.get("tokens") or 0) for row in weighted)
+    if len(weighted) < 2 or total <= 0:
+        return None
+
+    ranked = sorted(weighted, key=lambda row: int(row.get("tokens") or 0), reverse=True)
+    def _legend_label(row: dict[str, object]) -> str:
+        # A legend is read sideways at a glance. Project rows are paths that
+        # share a parent directory, so they differ only in the last few
+        # characters -- exactly what truncation eats. Tool rows are already
+        # names like "claude-code (desktop)" and are left alone.
+        name = str(row.get("name") or row.get("short_name") or "unknown")
+        if "/" in name or "\\" in name:
+            return PurePath(name.replace("\\", "/")).name or name
+        return str(row.get("short_name") or name)
+
+    segments: list[dict[str, object]] = [
+        {
+            "label": _legend_label(row),
+            "title": str(row.get("name") or ""),
+            "tokens": int(row.get("tokens") or 0),
+            "kind": "item",
+        }
+        for row in ranked[:COMPOSITION_SLICES]
+    ]
+    tail = ranked[COMPOSITION_SLICES:]
+    if tail:
+        segments.append({
+            "label": f"{len(tail)} more",
+            "title": ", ".join(str(row.get("short_name") or "") for row in tail[:6]),
+            "tokens": sum(int(row.get("tokens") or 0) for row in tail),
+            "kind": "other",
+        })
+    segments = [segment for segment in segments if int(segment["tokens"]) > 0]
+    if len(segments) < 2:
+        return None
+
+    for segment in segments:
+        segment["pct"] = round(100.0 * int(segment["tokens"]) / total, 1)
+        segment["tokens_label"] = compact_int(int(segment["tokens"]))
+    top = max(float(segment["pct"]) for segment in segments)
+    return {
+        "segments": segments,
+        "total_tokens": total,
+        "total_label": compact_int(total),
+        # Reported rather than acted on, so the caller decides whether a
+        # single-slice chart is withheld or shown with a caveat.
+        "dominant": top >= COMPOSITION_DOMINANT_PCT,
+        "dominant_pct": top,
+        "hide_when_dominant": COMPOSITION_HIDE_WHEN_DOMINANT,
+    }
+
+
+def _model_scatter(rows: list[LocalSession]) -> dict[str, object] | None:
+    """One dot per session: tokens against cost, coloured by model.
+
+    The model-mix card spends three prose branches explaining whether a model
+    costs more per token or is simply pointed at bigger jobs. Plotted, that
+    distinction is geometric and needs no explaining.
+
+    Axes are logarithmic because the data is: locally, sessions span 33K to 382M
+    tokens and six cents to $258. On linear axes every session but the largest
+    collapses into one corner. The trade is that price per token reads as
+    vertical offset rather than slope -- same rate means the same diagonal, and
+    a dearer model sits above a cheaper one rather than climbing more steeply.
+
+    Whether the work landed rides a second channel -- filled or hollow -- rather
+    than colour, which is already carrying model identity. The thing to look for
+    is a hollow dot high up: an expensive session that produced nothing,
+    whichever model ran it.
+
+    Deliberately not a verdict on which model is better value. If the dear model
+    gets the hard problems, it will land less often for reasons that have
+    nothing to do with the model, and nothing local can separate those.
+    """
+    try:
+        snapshots = evidence_snapshots_for_sessions({row.session_id for row in rows})
+    except OSError:
+        snapshots = {}
+
+    priced = [
+        row for row in rows
+        if row.cost_usd > 0 and (row.tokens_in + row.tokens_out) > 0
+    ]
+    if len(priced) < MODEL_SCATTER_MIN_POINTS:
+        return None
+
+    # A plan-based session did real work at a cost local logs cannot know, and a
+    # log axis has no room for zero. Both facts argue against plotting it: put it
+    # on the floor and the chart says the work was nearly free, which is a
+    # stronger claim than "unpriced" and the wrong one. So it is withheld -- and
+    # counted, because a card headed "one dot per session" that quietly draws
+    # fewer is the same silence the replay chart's clipped turns were.
+    unpriced = [
+        row for row in rows
+        if row.cost_usd <= 0 and (row.tokens_in + row.tokens_out) > 0
+    ]
+    unpriced_tokens = sum(row.tokens_in + row.tokens_out for row in unpriced)
+    unpriced_tools: dict[str, int] = defaultdict(int)
+    for row in unpriced:
+        unpriced_tools[_tool_surface_key(row)] += 1
+
+    by_model: dict[str, int] = defaultdict(int)
+    for row in priced:
+        by_model[display_model_name(row.model or "unknown")] += 1
+    if len(by_model) < 2:
+        return None
+    named = [
+        model for model, _ in
+        sorted(by_model.items(), key=lambda item: item[1], reverse=True)[:COMPOSITION_SLICES]
+    ]
+
+    points: list[dict[str, object]] = []
+    for row in priced:
+        model = display_model_name(row.model or "unknown")
+        snapshot = snapshots.get(row.session_id)
+        landed = (
+            isinstance(snapshot, dict)
+            and bool(snapshot.get("commit_shas"))
+            and snapshot.get("inferred_outcome") != "churned"
+        )
+        points.append({
+            "session_id": row.session_id,
+            "model": model if model in named else "other",
+            "model_label": model,
+            "project": project_label(row.project_path),
+            "tokens": row.tokens_in + row.tokens_out,
+            "cost_usd": round(row.cost_usd, 6),
+            "cost_label": money(row.cost_usd),
+            "tokens_label": compact_int(row.tokens_in + row.tokens_out),
+            # None rather than False where nothing was ever looked at, so
+            # "unexamined" cannot be drawn as "produced nothing".
+            "landed": landed if isinstance(snapshot, dict) else None,
+        })
+
+    legend = [{"label": model, "kind": "item"} for model in named]
+    if any(point["model"] == "other" for point in points):
+        legend.append({"label": "other models", "kind": "other"})
+    return {
+        "points": points,
+        "legend": legend,
+        "unexamined": sum(1 for point in points if point["landed"] is None),
+        "unpriced": {
+            "sessions": len(unpriced),
+            "tokens": unpriced_tokens,
+            "tokens_label": compact_int(unpriced_tokens),
+            "tools": [
+                tool for tool, _ in
+                sorted(unpriced_tools.items(), key=lambda item: item[1], reverse=True)
+            ],
+        },
+    }
+
+
+def _tool_model_breakdown(rows: list[LocalSession]) -> dict[str, object] | None:
+    """Which models each tool actually ran, as one stacked bar per tool.
+
+    The two flat lists above it -- by model, by tool -- cannot be crossed by eye.
+    Seeing that Opus is most of your spend and that Claude Code is most of your
+    tokens does not tell you whether Codex is running an expensive model or a
+    cheap one, and that is the question worth asking of a tool you did not pick
+    the model for.
+
+    Models are ranked globally and capped at the palette's three non-status
+    hues, with the rest folded into one neutral bucket. Crucially the colour map
+    is global: a model keeps the same colour in every tool's bar, so the eye can
+    follow it across rows. Colouring per row would make the same model change
+    colour between tools, which is the one thing a reader must never have to
+    second-guess.
+
+    Tokens, not dollars: a plan-based tool is priced at zero on purpose, and
+    this chart exists partly to show what such a tool is doing.
+    """
+    per_tool: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    per_model: dict[str, int] = defaultdict(int)
+    for row in rows:
+        breakdown = row.model_breakdown or {
+            (row.model or "unknown"): {"tokens_in": row.tokens_in, "tokens_out": row.tokens_out}
+        }
+        tool = _tool_surface_key(row)
+        for model_name, stats in breakdown.items():
+            tokens = int(stats.get("tokens_in", 0) or 0) + int(stats.get("tokens_out", 0) or 0)
+            if tokens <= 0:
+                continue
+            key = display_model_name(model_name or "unknown")
+            per_tool[tool][key] += tokens
+            per_model[key] += tokens
+
+    tools = {tool: models for tool, models in per_tool.items() if sum(models.values()) > 0}
+    if len(tools) < 2 and len(per_model) < 2:
+        return None
+
+    # Every tool's own leading model gets named before any runner-up elsewhere.
+    # Ranking globally instead put the three Claude models in the legend and
+    # folded Codex's model into "Other" -- so the one row whose model you did not
+    # choose yourself, which is the row worth looking at, lost its label.
+    ranked_models = sorted(per_model.items(), key=lambda item: item[1], reverse=True)
+    leaders = {max(models.items(), key=lambda item: item[1])[0] for models in tools.values()}
+    named = [model for model, _ in ranked_models if model in leaders][:COMPOSITION_SLICES]
+    for model, _ in ranked_models:
+        if len(named) >= COMPOSITION_SLICES:
+            break
+        if model not in named:
+            named.append(model)
+    tail_count = len(ranked_models) - len(named)
+    legend = [{"label": model, "kind": "item"} for model in named]
+    if tail_count > 0:
+        legend.append({"label": f"{tail_count} more", "kind": "other"})
+
+    rows_out: list[dict[str, object]] = []
+    for tool, models in sorted(tools.items(), key=lambda item: sum(item[1].values()), reverse=True):
+        total = sum(models.values())
+        segments = [
+            {"label": model, "tokens": models.get(model, 0), "kind": "item"}
+            for model in named
+        ]
+        if tail_count > 0:
+            segments.append({
+                "label": f"{tail_count} more",
+                "tokens": sum(count for model, count in models.items() if model not in named),
+                "kind": "other",
+            })
+        for segment in segments:
+            segment["pct"] = round(100.0 * int(segment["tokens"]) / total, 1) if total else 0.0
+            segment["tokens_label"] = compact_int(int(segment["tokens"]))
+        rows_out.append({
+            "tool": tool,
+            "total_tokens": total,
+            "total_label": compact_int(total),
+            "segments": segments,
+            # Named so a reader can see at a glance which tool is on which model
+            # without reading the bar, which is the whole point of crossing them.
+            "top_model": max(models.items(), key=lambda item: item[1])[0] if models else None,
+        })
+    return {"legend": legend, "tools": rows_out}
+
+
+def _unbanked_chart(ledger: Ledger) -> dict[str, object] | None:
+    """Unbanked spend split by *where* it happened, not by why.
+
+    The by-reason split is only ever two buckets, and the card already states
+    both as a headline percentage -- a two-piece bar tells a reader nothing the
+    sentence did not. Splitting by repo grows a segment for every project worked
+    in, and points at something actionable: which repo is accumulating work that
+    never landed.
+
+    Spend outside any repo is a segment rather than a footnote, because it is the
+    one piece with a different fix -- a session started in the wrong directory,
+    not exploration that went nowhere. Every dollar of unbanked_usd is placed, so
+    the segments sum to the headline rather than to some subset of it.
+    """
+    outside = float(ledger.unbanked_by_reason.get(UNBANKED_OUTSIDE_REPO, 0.0) or 0.0)
+    ranked = sorted(ledger.unbanked_by_repo.items(), key=lambda item: item[1], reverse=True)
+    if not ranked and outside <= 0:
+        return None
+
+    # Legend labels are the repo's own name, not its path. A stacked bar's legend
+    # is read sideways at a glance, and three full paths sharing a parent
+    # directory differ only in their last few characters -- exactly the part that
+    # gets truncated. The full path stays available as the row's title.
+    segments: list[dict[str, object]] = [
+        {
+            "label": Path(str(repo)).name or short_path(str(repo)),
+            "title": short_path(str(repo)),
+            "usd": round(spend, 6),
+            "kind": "repo",
+        }
+        for repo, spend in ranked[:UNBANKED_CHART_REPOS]
+        if spend > 0
+    ]
+    tail = sum(spend for _, spend in ranked[UNBANKED_CHART_REPOS:])
+    if tail > 0:
+        segments.append({
+            "label": f"{len(ranked) - UNBANKED_CHART_REPOS} more repos",
+            "usd": round(tail, 6),
+            "kind": "other",
+        })
+    if outside > 0:
+        segments.append({"label": "Outside any repo", "usd": round(outside, 6), "kind": "outside"})
+    if len(segments) < 2:
+        # One segment is a stat, not a chart; the headline already carries it.
+        return None
+    total = sum(float(item["usd"]) for item in segments)
+    for item in segments:
+        item["pct"] = round(100.0 * float(item["usd"]) / total, 1) if total > 0 else 0.0
+        item["label_usd"] = money(float(item["usd"]))
+    return {"segments": segments, "total_usd": round(total, 6), "total_label": money(total)}
+
+
 def _unbanked_card(ledger: Ledger | None) -> dict[str, object]:
     """Spend in this window with no commit behind it."""
     if ledger is None:
         return {"available": False, "reason": "Could not read git history for the active repos."}
 
     card = dict(unbanked_summary(ledger))
+    card["chart"] = _unbanked_chart(ledger)
     card["unbanked_label"] = money(float(card.get("unbanked_usd") or 0))
     card["banked_label"] = money(float(card.get("banked_usd") or 0))
     card["unresolved_label"] = money(float(card.get("unresolved_usd") or 0))
@@ -2827,6 +3283,158 @@ def _recent_handoff_decision_for_session(
     return None
 
 
+def _false_starts_card(all_rows: list[LocalSession]) -> dict[str, object] | None:
+    """Short sessions that produced no commit at all.
+
+    Surfaced because a length chart showed it and then failed to earn a place:
+    across local history the share of sessions that land work does not fall with
+    length, it rises, and the shortest bucket lands least often. The cliff was
+    not the finding; this was.
+
+    Read over all history rather than the selected window. A week holds a
+    handful of sessions, and "3 of 4 were false starts" is a coin flip wearing
+    the clothes of a pattern.
+
+    Deliberately not called waste. A short session with no commit is often a
+    question that was answered, and nothing local can tell that apart from a
+    start that went nowhere -- the same limit the unbanked card states about
+    uncommitted work. The card reports the count and the money and leaves the
+    judgement where it belongs.
+    """
+    try:
+        snapshots = evidence_snapshots_for_sessions({row.session_id for row in all_rows})
+    except OSError:
+        return None
+    if not snapshots:
+        return None
+
+    short = [
+        row for row in all_rows
+        if 0 < row.agent_calls <= FALSE_START_MAX_CALLS
+        and isinstance(snapshots.get(row.session_id), dict)
+    ]
+    if len(short) < FALSE_START_MIN_SESSIONS:
+        return None
+    empty = [row for row in short if not snapshots[row.session_id].get("commit_shas")]
+    if len(empty) < FALSE_START_MIN_SESSIONS:
+        return None
+
+    share = round(100.0 * len(empty) / len(short))
+    spent = sum(row.cost_usd for row in empty)
+    costliest = max(empty, key=lambda row: row.cost_usd, default=None)
+    return {
+        "id": "false-starts",
+        "title": f"{len(empty)} short sessions produced no commit at all",
+        "body": (
+            f"Of {len(short)} sessions running {FALSE_START_MAX_CALLS} model calls or fewer across "
+            f"your recent history, {share}% left nothing behind — {money(spent)} of spend, which is "
+            "small. The count is the point, not the money: some of these answered a question worth "
+            "asking, and nothing local tells that apart from a start that went nowhere. A run of "
+            "them usually means opening in the wrong repo, or asking before scoping."
+        ),
+        # No dollar figure, for the same reason model-mix carries none: the money
+        # is not recoverable. Some of these sessions answered a question worth
+        # asking, so ranking this among the dollar findings would promise a saving
+        # that does not exist -- and short sessions are cheap enough that it would
+        # rank last anyway, reading as trivial when the count is the finding.
+        "impact_usd": None,
+        "session_id": costliest.session_id if costliest else None,
+        "severity": "info",
+    }
+
+
+def _replay_turn_chart(session_id: str, events: list[LocalEvent]) -> dict[str, object] | None:
+    """Per-turn cost for one session, split into new context and replayed history.
+
+    Priced the way replayed_context_cost prices it -- replay at the cache-read
+    rate, not face value -- so the chart and the card it sits under can never
+    quote different totals for the same session.
+
+    Returns None rather than an empty chart when the source reports no cache
+    buckets: a flat zero replay band would read as "this session replayed
+    nothing", when the truth is that nothing was measured.
+    """
+    priced = sorted(
+        (event for event in events if event.session_id == session_id and event.cost_usd > 0),
+        key=lambda event: (event.timestamp or MIN_DT),
+    )
+    turns = priced[-REPLAY_CHART_MAX_TURNS:]
+    # Where the drawn window sits in the session. The axis used to read "turn 1"
+    # for whatever the clip happened to start at, which on this repo's worst
+    # session meant labelling turn 852 as the first one. LocalEvent.turn is no
+    # help -- it repeats across a session rather than counting up -- so position
+    # in the priced sequence is what there is.
+    first_turn_no = len(priced) - len(turns) + 1
+    if len(turns) < 3 or not any(event.cache_read_tokens for event in turns):
+        return None
+
+    replayed: list[float] = []
+    written: list[float] = []
+    fresh: list[float] = []
+    for event in turns:
+        replay_usd = cache_read_cost(event.model, event.cache_read_tokens, event.timestamp)
+        # Writing the conversation to cache is not new context, and folding it
+        # into the fresh band said it was: the worst turn here showed $7.54 of
+        # "new context" against $0.05 of actual new work, out by a factor of 140.
+        #
+        # Priced as a residual rather than from the token count. A write is
+        # billed at 1.25x or 2x the input rate depending on its lifetime, and the
+        # event only carries the two buckets added together, so repricing the
+        # tokens would have to guess which. Everything else in the turn can be
+        # priced exactly, and what is left over is the write -- which also keeps
+        # the three bands summing to the turn's actual cost rather than to an
+        # estimate of it.
+        plain_input = max(0, event.tokens_in - event.cache_read_tokens - event.cache_write_tokens)
+        fresh_usd = estimate_cost(event.model, plain_input, event.tokens_out, when=event.timestamp)
+        write_usd = max(0.0, event.cost_usd - replay_usd - fresh_usd)
+        replayed.append(round(replay_usd, 6))
+        written.append(round(write_usd, 6))
+        fresh.append(round(max(0.0, fresh_usd), 6))
+
+    # Raw series only. The hover text used to arrive as five parallel arrays of
+    # formatted strings, which was affordable at sixty turns and is not at nine
+    # hundred -- the labels are all derivable, so the client formats them and the
+    # payload carries numbers. Four decimal places: the axis tops out well under a
+    # dollar, so this is finer than a pixel, and six was costing bytes per turn to
+    # say nothing.
+    def series(values):
+        return [round(value, 4) for value in values]
+
+    # Seconds from the first drawn turn, rather than a formatted timestamp each.
+    # A session can span days and the axis needs real dates, but 900 date strings
+    # cost more than one start time and an offset apiece.
+    start_at = turns[0].timestamp if turns[0].timestamp else None
+    offsets = [
+        int((event.timestamp - start_at).total_seconds())
+        if event.timestamp and start_at else 0
+        for event in turns
+    ]
+    # Only the turns that actually wrote the conversation down, not a mostly-zero
+    # column: they are about 1.5% of a long session, and they are the only turns
+    # with anything to say that the trend does not already show.
+    write_turns = [
+        {"i": index, "tokens": event.cache_write_tokens}
+        for index, event in enumerate(turns)
+        if event.cache_write_tokens >= CACHE_WRITE_TURN_TOKENS
+    ]
+
+    return {
+        "replayed_usd": series(replayed),
+        "written_usd": series(written),
+        "fresh_usd": series(fresh),
+        "resent_tokens": [event.cache_read_tokens for event in turns],
+        "second_offsets": offsets,
+        "started_at": start_at.astimezone().isoformat() if start_at else None,
+        "write_turns": write_turns,
+        "turns": len(turns),
+        "first_turn_no": first_turn_no,
+        "session_turns": len(priced),
+        "replayed_total_usd": round(sum(replayed), 6),
+        "written_total_usd": round(sum(written), 6),
+        "session_total_usd": round(sum(replayed) + sum(written) + sum(fresh), 6),
+    }
+
+
 def _insight_feed(
     rows: list[LocalSession],
     all_rows: list[LocalSession],
@@ -2861,17 +3469,44 @@ def _insight_feed(
         top = replay["sessions"][0]
         window_cost = sum(row.cost_usd for row in rows)
         share = (replay["total_replayed_usd"] / window_cost * 100) if window_cost > 0 else 0
+        # The chart is one session's turns, and the card never said which. Naming
+        # it also decides what the closing advice can honestly be: "compact this"
+        # is an instruction, and an instruction aimed at a session someone left
+        # hours ago cannot be carried out.
+        #
+        # The session itself is still the worst one, not the worst still-active
+        # one. The money claim above rests on it being the worst, and swapping in
+        # a smaller session to make the advice actionable would leave the
+        # headline resting on a session the card no longer shows.
+        top_session = next((row for row in rows if row.session_id == top["session_id"]), None)
+        top_state = session_state(top_session) if top_session else {}
+        top_live = str(top_state.get("status") or "") in {"active", "recent"}
+        quiet_hours = float(top_state.get("age_seconds") or 0) / 3600
+        quiet_label = f"{quiet_hours / 24:.1f}d" if quiet_hours >= 24 else f"{quiet_hours:.0f}h"
+        closing = (
+            "It is still going, so compacting now is what buys the rest back."
+            if top_live
+            else f"It has been quiet for {quiet_label}, so this is what compacting earlier would have saved."
+        )
         cards.append({
             "id": "replayed-context",
             "title": f"{share:.0f}% of your spend went on re-sending conversation history",
             "body": (
                 f"{money(replay['total_replayed_usd'])} of {money(window_cost)} this window. The worst session replayed "
                 f"{top['replayed_pct']:.0f}% of its context, {money(top['replayed_usd'])} of its "
-                f"{money(top['session_usd'])}. Compacting or starting fresh earlier is what this buys back."
+                f"{money(top['session_usd'])}. {closing}"
+            ),
+            "session_label": (
+                f"{short_path(project_key(top.get('project_path')))} · {top.get('tool') or 'session'}"
+                if top.get("project_path") else str(top.get("tool") or "session")
             ),
             "impact_usd": replay["total_replayed_usd"],
             "session_id": top["session_id"],
             "severity": "high" if share >= 40 else "medium",
+            # Per-turn split for the worst session. The card's own numbers are
+            # session totals, which cannot show the one thing that matters here:
+            # replay is not a flat overhead, it compounds turn by turn.
+            "chart": _replay_turn_chart(top["session_id"], all_events),
         })
 
     pace = pace_vs_baseline(all_events, days=days)
@@ -2889,6 +3524,42 @@ def _insight_feed(
             "impact_usd": excess,
             "session_id": None,
             "severity": "medium" if pace["ratio"] < 2 else "high",
+        })
+
+    feed_now = datetime.now().astimezone()
+    daily_spend = _daily_spend_chart(all_events, feed_now - timedelta(days=days), feed_now)
+    if daily_spend:
+        spikes = daily_spend["spike_count"]
+        # Deliberately unjudged in both title and severity. This dashboard
+        # refuses to call raw spend a failure -- spending more is not a fault on
+        # its own, which is why the API-value tile carries a neutral rail rather
+        # than a red one. The card reports shape, and leaves the verdict on
+        # whether that shape is a problem to the person who spent it.
+        body = (
+            f"Your typical day over the last {daily_spend['baseline_days']} active days ran "
+            f"{daily_spend['band_label']}, around {daily_spend['median_label']}. "
+        )
+        if spikes:
+            body += (
+                f"{spikes} day{'' if spikes == 1 else 's'} in this window went at least "
+                f"{daily_spend['spike_multiple']:g}x past the top of that range. "
+            )
+        else:
+            body += "No day in this window went clearly past it. "
+        body += (
+            "The band is the middle half of your own days, not a budget -- half of any "
+            "stretch falls outside it by definition."
+        )
+        cards.append({
+            "id": "daily_spend",
+            "title": "Where the spend actually landed",
+            "body": body,
+            # None, not 0.0: this card describes shape and claims no saving, and
+            # a "$0.00" beside it reads as a savings estimate that came out empty.
+            "impact_usd": None,
+            "session_id": None,
+            "severity": "info",
+            "chart": daily_spend,
         })
 
     models = model_cost_comparison(all_rows)
@@ -2922,6 +3593,10 @@ def _insight_feed(
             "session_id": None,
             "severity": "info",
         })
+
+    false_starts = _false_starts_card(all_rows)
+    if false_starts:
+        cards.append(false_starts)
 
     if churned:
         cards.append({
@@ -2964,6 +3639,305 @@ def _insight_feed(
     for card in without_impact:
         card["impact_label"] = ""
     return [*with_impact, *without_impact]
+
+
+# A sparkline is only worth its ink once there are a few days to compare. Below
+# this the "trend" is one spike and a flat line, which reads as a shape without
+# being one.
+TILE_SPARK_MIN_ACTIVE_DAYS = 3
+
+
+def _tile_trend_days(since: datetime, now: datetime) -> list[date]:
+    """Every day in the window, including the empty ones.
+
+    Gaps have to be present as zeroes rather than absent: a quiet Sunday that is
+    simply missing from the array pulls Monday left and draws the week shorter
+    than it was.
+    """
+    start, end = since.date(), now.date()
+    return [start + timedelta(days=offset) for offset in range((end - start).days + 1)]
+
+
+def _tile_trends(
+    rows: list[LocalSession],
+    all_events: list[LocalEvent],
+    window_outcomes: dict[str, dict[str, object]],
+    interventions: list[dict[str, Any]],
+    since: datetime,
+    now: datetime,
+) -> dict[str, object] | None:
+    """Daily series behind the four Home metric tiles.
+
+    Bucketed by event timestamp, not by session.started_at. Sessions are clipped
+    to the window for their spend but keep their original start date, so a
+    session opened last month and worked on today would post today's dollars to
+    last month -- off the left edge of the chart entirely. Events carry their own
+    timestamp and their costs sum to the session's, which is the same property
+    clip_sessions_to_window relies on.
+
+    Sessions and outcomes count on the day of their first in-window event, so
+    each session lands on exactly one day and the bars sum to the tile above
+    them. Counting a three-day session on all three days would make the
+    sparkline total more than the number it sits under.
+
+    Outcomes are NOT bucketed by recorded_at. An outcome is stamped when you
+    marked it, so a weekend spent reviewing a fortnight of work would draw a
+    spike on the weekend and empty days across the fortnight -- a chart of
+    reviewing habits wearing the label of a chart of results.
+    """
+    days = _tile_trend_days(since, now)
+    if len(days) < TILE_SPARK_MIN_ACTIVE_DAYS:
+        return None
+    index = {day: position for position, day in enumerate(days)}
+
+    def blank() -> list[float]:
+        return [0.0 for _ in days]
+
+    def slot(moment: datetime | None) -> int | None:
+        """Bucket a timestamp, or None if it falls outside the window.
+
+        The lower bound is compared as a timestamp, not as a date. `since` is a
+        moment mid-morning, so testing only that the date is in range lets in
+        everything that happened earlier on that first day -- spend the tile
+        above has already clipped away, which made the sparkline sum to more
+        than the number it sits under. Day zero stays a part-day in both.
+        """
+        if moment is None:
+            return None
+        stamp = moment.astimezone()
+        if stamp < since:
+            return None
+        return index.get(stamp.date())
+
+    api_value = blank()
+    first_day: dict[str, date] = {}
+    for event in all_events:
+        position = slot(event.timestamp)
+        if position is None:
+            continue
+        api_value[position] += event.cost_usd
+        day = days[position]
+        if event.session_id not in first_day or day < first_day[event.session_id]:
+            first_day[event.session_id] = day
+
+    sessions, useful, judged = blank(), blank(), blank()
+    for row in rows:
+        day = first_day.get(row.session_id)
+        if day is None:
+            # Cursor and the Codex sqlite path emit no per-turn events, so these
+            # rows have nothing to bucket by and would silently vanish from a
+            # chart that sums to the tile. They already carry CLIP_FALLBACK_NOTE
+            # for the same imprecision; fall back to the session's own clock.
+            position = slot(row.started_at) if slot(row.started_at) is not None else slot(row.updated_at)
+            if position is None:
+                continue
+            day = days[position]
+        position = index[day]
+        sessions[position] += 1
+        outcome = (window_outcomes.get(row.session_id) or {}).get("outcome")
+        if outcome:
+            judged[position] += 1
+        if outcome == "useful":
+            useful[position] += 1
+
+    preflight = blank()
+    for row in interventions:
+        try:
+            created = datetime.fromisoformat(str(row.get("created_at", "")))
+        except (TypeError, ValueError):
+            continue
+        position = slot(created)
+        if position is not None:
+            preflight[position] += 1
+
+    # An unjudged session is not a session that produced nothing. Everything
+    # after the last day with a verdict is withheld rather than drawn: a line
+    # falling to zero across the recent tail reads as work that stopped landing,
+    # when it is only work nobody has marked yet. Same call the cost-per-
+    # surviving-line chart makes about its own too-recent tail.
+    judged_through = max((position for position, count in enumerate(judged) if count), default=None)
+
+    def active(values: list[float]) -> int:
+        return sum(1 for value in values if value > 0)
+
+    series: dict[str, object] = {}
+    if active(api_value) >= TILE_SPARK_MIN_ACTIVE_DAYS:
+        series["apiValue"] = {
+            "values": [round(value, 6) for value in api_value],
+            "labels": [money(value) for value in api_value],
+        }
+    if active(sessions) >= TILE_SPARK_MIN_ACTIVE_DAYS:
+        series["sessions"] = {
+            "values": [int(value) for value in sessions],
+            "labels": [f"{int(value)} session{'' if value == 1 else 's'}" for value in sessions],
+        }
+    if active(preflight) >= TILE_SPARK_MIN_ACTIVE_DAYS:
+        series["preflightDecisions"] = {
+            "values": [int(value) for value in preflight],
+            "labels": [f"{int(value)} decision{'' if value == 1 else 's'}" for value in preflight],
+        }
+    if judged_through is not None and active(useful[: judged_through + 1]) >= TILE_SPARK_MIN_ACTIVE_DAYS:
+        entry: dict[str, object] = {
+            "values": [int(value) for value in useful],
+            "labels": [f"{int(value)} useful" for value in useful],
+            "judged_through": judged_through,
+        }
+        if judged_through < len(days) - 1:
+            unjudged = len(days) - 1 - judged_through
+            entry["caveat"] = (
+                f"{unjudged} more recent day{'' if unjudged == 1 else 's'} not judged yet, so not drawn."
+            )
+        series["usefulOutcomes"] = entry
+
+    if not series:
+        return None
+    return {"days": [day.isoformat() for day in days], "series": series}
+
+
+# How many trailing active days form the band, and the floor below which the
+# whole chart is withheld.
+#
+# 12 is where the false-alarm rate falls under 3%. Bootstrapping a band from
+# this repo's own daily spend, a genuinely big day (1.5x the upper edge) is
+# caught 95% of the time at 12 days and 92% at 6 -- but at 6 days one ordinary
+# day in eight is wrongly called a spike. That is the worst failure available
+# here: a new user's first fortnight peppered with false alarms about a tool
+# they are still deciding whether to trust. Past 12 the gain is two points of
+# detection for weeks more waiting.
+SPEND_BASELINE_MIN_ACTIVE_DAYS = 12
+SPEND_BASELINE_TRAILING_DAYS = 14
+# A returning user should not be measured against habits from a quarter ago.
+SPEND_BASELINE_MAX_AGE_DAYS = 60
+# Only days this far past the upper edge are marked. The edge itself is not
+# precise enough to support a finer call: resampling moves it by about half the
+# band's own width even with a month of history, so a day sitting just above it
+# is inside the uncertainty of where "just above" is. At 1.5x the verdict holds
+# 95%+ of the time, which is the whole reason this multiple exists.
+SPEND_SPIKE_MULTIPLE = 1.5
+
+
+def _percentile(values: list[float], fraction: float) -> float:
+    ordered = sorted(values)
+    if not ordered:
+        return 0.0
+    position = (len(ordered) - 1) * fraction
+    low = int(position)
+    high = min(low + 1, len(ordered) - 1)
+    return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
+
+
+def _daily_spend_chart(
+    all_events: list[LocalEvent],
+    since: datetime,
+    now: datetime,
+) -> dict[str, object] | None:
+    """Daily spend against a trailing band of your own recent days.
+
+    Answers the question the window total cannot: which days drove it. Spend is
+    bucketed from events, so a session running across three days contributes to
+    the day each turn actually happened on.
+
+    The band is a percentile range, never mean +/- a standard deviation. Daily
+    spend is heavily skewed -- on this repo's history the mean is $33.71 against
+    a median of $18.20, with a standard deviation of $37.54, which puts the
+    lower edge of such a band at *minus* $3.84. There is no drawing that.
+
+    The band trails rather than being fixed, so it follows drift. Computed once
+    over the whole history, the reference is whatever the user was doing when
+    they started: on a 30-day view here that produced a band centred on $1.28
+    and flagged 10 of 30 days, which is not anomaly detection but the discovery
+    that they use the tool more now than in their first week. A trailing band
+    climbs with them and flags 8, all genuinely large.
+
+    Days with no activity are held apart from days with little. Drawn as zero
+    they would sit below the band and read as restraint where there was only a
+    weekend -- the same reason pace_vs_baseline drops inactive windows instead
+    of averaging them in.
+    """
+    by_day: dict[date, float] = defaultdict(float)
+    for event in all_events:
+        if event.cost_usd <= 0 or not event.timestamp:
+            continue
+        by_day[event.timestamp.astimezone().date()] += event.cost_usd
+
+    active_days = sorted(day for day, spend in by_day.items() if spend > 0)
+    if not active_days:
+        return None
+    plotted = _tile_trend_days(since, now)
+    if len(plotted) < 3:
+        return None
+
+    def band_for(day: date) -> tuple[float, float, float] | None:
+        history = [
+            by_day[past] for past in active_days
+            if past < day and (day - past).days <= SPEND_BASELINE_MAX_AGE_DAYS
+        ][-SPEND_BASELINE_TRAILING_DAYS:]
+        if len(history) < SPEND_BASELINE_MIN_ACTIVE_DAYS:
+            return None
+        return (
+            _percentile(history, 0.25),
+            _percentile(history, 0.50),
+            _percentile(history, 0.75),
+        )
+
+    # The most recent day is the test of whether there is enough history at all.
+    # Without a band there the chart has nothing to say about now, which is what
+    # anyone opening it is asking about.
+    latest = band_for(plotted[-1])
+    if latest is None:
+        return None
+
+    today = now.date()
+    values, labels, lows, mids, highs, active, spikes = [], [], [], [], [], [], []
+    # Formatted alongside the raw numbers rather than instead of them: the chart
+    # plots the figures and the hover text reads the strings, and neither can be
+    # derived from the other on the client without reimplementing money().
+    day_labels, band_labels = [], []
+    for day in plotted:
+        spend = by_day.get(day, 0.0)
+        band = band_for(day)
+        values.append(round(spend, 6))
+        labels.append(money(spend))
+        day_labels.append(day.strftime("%a %d %b"))
+        band_labels.append(f"{money(band[0])} to {money(band[2])}" if band else None)
+        active.append(spend > 0)
+        lows.append(round(band[0], 6) if band else None)
+        mids.append(round(band[1], 6) if band else None)
+        highs.append(round(band[2], 6) if band else None)
+        # Today is still being spent -- by midday a median day has landed under
+        # half its eventual total. That bias runs one way only: the total can
+        # only climb, so a day already past the threshold is past it for good,
+        # while a day that looks quiet may simply be early. Marking a spike on
+        # the partial day is therefore safe; concluding anything from a low one
+        # is not, which is why nothing is ever marked for being below the band.
+        spikes.append(bool(
+            band and spend > 0 and spend >= band[2] * SPEND_SPIKE_MULTIPLE
+        ))
+
+    history_for_latest = [
+        past for past in active_days
+        if past < plotted[-1] and (plotted[-1] - past).days <= SPEND_BASELINE_MAX_AGE_DAYS
+    ][-SPEND_BASELINE_TRAILING_DAYS:]
+    return {
+        "kind": "daily_spend",
+        "days": [day.isoformat() for day in plotted],
+        "day_labels": day_labels,
+        "values": values,
+        "labels": labels,
+        "band_labels": band_labels,
+        "band_low": lows,
+        "band_mid": mids,
+        "band_high": highs,
+        "active": active,
+        "spikes": spikes,
+        "spike_count": sum(spikes),
+        "quiet_days": sum(1 for flag in active if not flag),
+        "baseline_days": len(history_for_latest),
+        "spike_multiple": SPEND_SPIKE_MULTIPLE,
+        "partial_index": plotted.index(today) if today in plotted else None,
+        "band_label": f"{money(latest[0])} to {money(latest[2])}",
+        "median_label": money(latest[1]),
+    }
 
 
 def build_summary(
@@ -3215,12 +4189,27 @@ def build_summary(
             "preflight_decisions": len(interventions),
             "cost_per_useful_change": money(cost_per_useful) if cost_per_useful is not None else "—",
         },
+        # Daily shape behind the four tiles. Absent from the shell payload
+        # below, which never scans events -- the tiles paint their numbers
+        # immediately and grow sparklines when the full refresh lands, rather
+        # than drawing an approximation from session start dates that would
+        # disagree with the real one a second later.
+        "tile_trends": _tile_trends(
+            rows, all_events, window_outcomes, interventions, since, now,
+        ),
         "survival": survival_summary,
         "unbanked": unbanked,
         "changes": changes,
         "changes_meta": changes_meta,
         "projects": projects[:10],
+        "projects_composition": _composition_chart(projects),
         "tools": tools,
+        "tools_composition": _composition_chart(tools),
+        "tool_models": _tool_model_breakdown(rows),
+        # all_rows, not the clipped window: how a model behaves is a question
+        # about your history, and a seven-day slice held too few priced sessions
+        # to plot. Same reason the false-starts card reads all history.
+        "model_scatter": _model_scatter(all_rows),
         "models": models[:10],
         "insights": insights,
         "notes": notes[:5],
@@ -3500,7 +4489,14 @@ def _build_summary_shell(
         },
         "survival": {"available": False, "reason": "Background evidence refresh pending."},
         "projects": projects[:10],
+        "projects_composition": _composition_chart(projects),
         "tools": tools,
+        "tools_composition": _composition_chart(tools),
+        "tool_models": _tool_model_breakdown(rows),
+        # all_rows, not the clipped window: how a model behaves is a question
+        # about your history, and a seven-day slice held too few priced sessions
+        # to plot. Same reason the false-starts card reads all history.
+        "model_scatter": _model_scatter(all_rows),
         "models": models[:10],
         "insights": insights,
         "notes": sorted({note for row in rows for note in row.notes})[:5],
@@ -4345,6 +5341,89 @@ HTML = r"""<!doctype html>
     .metric-blue { --metric: var(--blue); }
     .metric-amber { --metric: var(--amber); }
     .metric-red { --metric: var(--red); }
+    /* For a figure the product deliberately refuses to judge. API-equivalent value
+       is counterfactual -- what these tokens would have cost at API rates -- so for
+       anyone on a subscription no money moved at all, and a red rail claims a loss
+       that did not happen. Spending more is also not a failure on its own: this
+       dashboard judges cost per useful change and cost per surviving line, ratios
+       where a direction is defensible, and leaves the raw total unjudged. Same
+       reason pace_vs_baseline compares you to yourself instead of to a limit. */
+    .metric-neutral { --metric: var(--line-strong); }
+    /* The stroke inherits the tile's own --metric through currentColor rather
+       than choosing a hue. Each sparkline is alone in its card, so there is no
+       sibling series for a colour to distinguish it from, and picking one would
+       either duplicate a token that already means something or invent a fourth. */
+    .metric-spark { color: var(--metric, var(--blue)); margin-top: 10px; margin-bottom: 2px; }
+    .metric-spark svg { display: block; width: 100%; height: 28px; }
+    .metric-spark-caveat { color: var(--muted); font-size: 11px; margin-top: 2px; }
+    /* The decorative rule is pinned to the card's bottom edge and would cut
+       straight through a sparkline placed there. */
+    .metric-card:has(.metric-spark)::after { display: none; }
+    .runway { margin: 12px 0 2px; }
+    .runway-svg { display: block; width: 100%; height: auto; overflow: visible; }
+    .home-runway { display: flex; align-items: center; gap: 14px; margin-top: 10px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface-raised); border-left-width: 3px; }
+    .home-runway.critical { border-left-color: var(--red); }
+    .home-runway.warning { border-left-color: var(--amber); }
+    .home-runway.healthy { border-left-color: var(--green); }
+    .home-runway-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .home-runway-text strong { font-size: .95rem; }
+    .home-runway-text span { color: var(--muted); font-size: .8rem; }
+    .home-runway-spark { margin-left: auto; width: 130px; flex: none; }
+    .runway-mini { display: block; width: 100%; height: 34px; }
+    .bar-note { display: block; font-size: .68rem; color: var(--faint); letter-spacing: .02em; }
+    .scatter-svg { display: block; width: 100%; height: auto; overflow: visible; margin-top: 10px; }
+    .spend-hit { fill: transparent; }
+    .spend-hit:hover { fill: var(--blue-soft); }
+    .scatter-hit { fill: transparent; cursor: pointer; }
+    .scatter-hit:hover { fill: var(--blue-soft); }
+    .scatter-key { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--muted); display: inline-block; flex: none; }
+    .scatter-key.filled { background: var(--muted); }
+    /* Same 0.35 the unexamined dot is drawn at, so the key looks like the mark. */
+    .scatter-key.unexamined { opacity: 0.35; }
+    .tm-legend { margin-bottom: 10px; gap: 6px 16px; }
+    .tm-row { margin-bottom: 12px; }
+    .tm-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
+    .tm-name { font-size: .82rem; }
+    .tm-total { font-size: .78rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .tm-bar { height: 14px; }
+    .tm-bar .stacked-bar { height: 14px; }
+    .tm-solid { height: 14px; border-radius: 3px; }
+    .tm-note { font-size: .7rem; color: var(--faint); margin-top: 4px; }
+    .composition { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; margin: 4px 0 16px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+    .pie-host { flex: none; }
+    .pie-svg { display: block; width: 132px; height: 132px; }
+    .composition-legend { flex: 1 1 200px; min-width: 0; }
+    .composition-legend .bar-legend { display: flex; flex-direction: column; gap: 7px; margin: 0; }
+    .composition-legend .receipt-note { margin-top: 10px; }
+    .unbanked-chart { margin-top: 14px; }
+    .stacked-bar { display: block; width: 100%; height: 30px; }
+    .bar-legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 10px; }
+    .bar-key { display: inline-flex; align-items: center; gap: 7px; font-size: .82rem; color: var(--muted); }
+    .bar-key strong { color: var(--text); font-variant-numeric: tabular-nums; }
+    .bar-swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+    .bar-pct { color: var(--faint); font-variant-numeric: tabular-nums; }
+    .feed-session { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+    .feed-chart { margin: 10px 0 0; }
+    .feed-chart-note { margin: 6px 0 0; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    /* The feed card's title is a <strong>, and `.feed-main strong` blocks it out
+       further down this sheet. A <strong> inside a caption sentence is not a
+       title: left blockified it breaks the sentence around it. Needs the extra
+       class to outrank that later rule, not just to restate display. */
+    .feed-main .feed-chart-note strong { color: var(--text); display: inline; }
+    .feed-chart-sentence { flex: 1 1 100%; }
+    .swatch-blue, .swatch-amber, .swatch-cyan, .swatch-line, .swatch-red, .swatch-dash, .swatch-peak { width: 10px; height: 10px; border-radius: 2px; display: inline-block; flex: none; }
+    .swatch-cyan { background: var(--cyan); }
+    .swatch-red { background: var(--red); }
+    /* Dashed, because that is what the projection is drawn as. A solid chip
+       beside the word "projected" would be the one thing the chart is careful
+       not to say. */
+    .swatch-dash { height: 3px; border-radius: 0; align-self: center;
+      background: repeating-linear-gradient(90deg, var(--blue) 0 3px, transparent 3px 6px); }
+    .swatch-peak { height: 2px; border-radius: 0; align-self: center; background: var(--muted); opacity: .6; }
+    .runway-legend { margin-top: 4px; }
+    .swatch-line { background: var(--line); }
+    .swatch-blue { background: var(--blue); }
+    .swatch-amber { background: var(--amber); }
     .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; font-weight: 700; }
     .value { font-size: 30px; font-weight: 780; margin-top: 10px; font-variant-numeric: tabular-nums; }
     .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
@@ -4511,6 +5590,12 @@ HTML = r"""<!doctype html>
         rgba(11,17,24,.82);
       padding: 14px;
     }
+    /* A link inside a sentence, not a control beside one. The card already
+       carries three buttons; a fourth would read as a fourth action rather than
+       as "this phrase refers to something you can open". */
+    .link-inline { background: none; border: 0; padding: 0; font: inherit; color: var(--blue);
+      text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+    .link-inline:hover { color: var(--text); }
     .muted-card { opacity: .58; }
     .coverage-head, .health-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
     .coverage-status, .health-severity { border-radius: 999px; border: 1px solid var(--line); padding: 4px 8px; font-size: 11px; font-weight: 800; white-space: nowrap; }
@@ -4987,10 +6072,10 @@ HTML = r"""<!doctype html>
     </section>
 
     <section class="grid kpis">
-      <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub">Value per useful change: <span id="costPerUseful">-</span></div><div class="sub" id="costPerSurvivingRow" hidden>Cost per surviving line: <span id="costPerSurviving">-</span></div></div>
-      <div class="card metric-card metric-amber"><div class="label">Preflight decisions</div><div class="value" id="preflightDecisions">-</div><div class="sub"><span id="windowLabel">-</span></div></div>
-      <div class="card metric-card metric-blue"><div class="label">Sessions observed</div><div class="value" id="sessions">-</div><div class="sub">This machine only</div></div>
-      <div class="card metric-card metric-red"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div></div>
+      <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub">Value per useful change: <span id="costPerUseful">-</span></div><div class="sub" id="costPerSurvivingRow" hidden>Cost per surviving line: <span id="costPerSurviving">-</span></div><div class="metric-spark" data-tile-spark="usefulOutcomes" hidden></div></div>
+      <div class="card metric-card metric-amber"><div class="label">Preflight decisions</div><div class="value" id="preflightDecisions">-</div><div class="sub"><span id="windowLabel">-</span></div><div class="metric-spark" data-tile-spark="preflightDecisions" hidden></div></div>
+      <div class="card metric-card metric-blue"><div class="label">Sessions observed</div><div class="value" id="sessions">-</div><div class="sub">This machine only</div><div class="metric-spark" data-tile-spark="sessions" hidden></div></div>
+      <div class="card metric-card metric-neutral"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div><div class="metric-spark" data-tile-spark="apiValue" hidden></div></div>
     </section>
 
     <section class="grid two" style="margin:14px 0">
@@ -5012,7 +6097,11 @@ HTML = r"""<!doctype html>
 
     <section class="grid two">
       <div class="card">
-        <div class="section-title"><div><h2>Projects Driving AI Usage</h2><p>Click a project to inspect local sessions, models, and tools.</p></div></div>
+        <div class="section-title"><div><h2>Projects Driving AI Usage</h2><p>Measured in tokens, so plan-based tools still count. Click a project to inspect local sessions, models, and tools.</p></div></div>
+        <div class="composition" id="projectsComposition" hidden>
+          <div class="pie-host" data-pie="projects"></div>
+          <div class="composition-legend" id="projectsCompositionLegend"></div>
+        </div>
         <div id="projects"></div>
       </div>
       <div class="card">
@@ -5030,7 +6119,14 @@ HTML = r"""<!doctype html>
         <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 4px">By model</h3>
         <div id="models"></div>
         <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:14px 0 4px">By tool</h3>
+        <div class="composition" id="toolsComposition" hidden>
+          <div class="pie-host" data-pie="tools"></div>
+          <div class="composition-legend" id="toolsCompositionLegend"></div>
+        </div>
         <div id="tools"></div>
+        <h3 style="font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:16px 0 2px">Model mix within each tool</h3>
+        <p style="font-size:.7rem;color:var(--faint);margin:0 0 8px">Each bar is that tool's own 100%, so size means proportion, not volume — the token total is on the right.</p>
+        <div id="toolModels" hidden></div>
       </div>
       <div class="card">
         <div class="section-title"><div><h2>Privacy at a glance</h2><p>Your local trust boundary stays visible.</p></div></div>
@@ -5194,6 +6290,15 @@ HTML = r"""<!doctype html>
       <div id="insightHeadline"></div>
       <div id="insightFeed"></div>
     </section>
+    <section class="card" style="margin-bottom:14px" id="modelScatter" hidden>
+      <div class="section-title">
+        <div><h2>Cost against size, one dot per session</h2><p>Both axes are logarithmic, so a dearer model sits higher rather than climbing more steeply. Look for a hollow dot high up: an expensive session that produced nothing. A faded dot is one nobody has judged yet, which is not the same as one that failed. Click any dot to open that session.</p></div>
+      </div>
+      <div class="bar-legend" id="modelScatterLegend"></div>
+      <div data-scatter></div>
+      <p class="receipt-note" id="modelScatterWithheld" hidden></p>
+      <p class="receipt-note">Not a verdict on which model is better value. If the dear model gets the hard problems it will land less often for reasons that have nothing to do with the model, and nothing local separates those.</p>
+    </section>
     <section class="card" style="margin-bottom:14px">
       <div class="section-title">
         <div><h2>Outcomes and guardrails</h2><p>What stuck, and what was caught before it ran.</p></div>
@@ -5283,8 +6388,8 @@ const HANDOFF_TYPES = [
   { id: 'investigation', label: 'Investigation continuation' },
   { id: 'general', label: 'General work continuation' },
 ];
-function maxValue(rows) {
-  return Math.max(0.000001, ...rows.map(r => Number(r.api_value_usd || 0)));
+function maxValue(rows, key = 'api_value_usd') {
+  return Math.max(0.000001, ...rows.map(r => Number(r[key] || 0)));
 }
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -5445,9 +6550,23 @@ function renderHomeContextHealth(rows, status = 'ready') {
   if (status === 'pending') return '<div class="loading">Checking context health...</div>';
   if (!rows.length) return '<div class="empty">No context pressure right now. AIWatcher will nudge when a fresh start or narrower prompt is worth it.</div>';
   const row = rows[0];
+  // Home is the "what now" surface, so it leads with how long you have rather
+  // than how heavy the session is. "Heavy" describes a state; a deadline is the
+  // only form of this anyone acts on, and the full card is two tabs away.
+  const verdict = runwayVerdict(row.chart);
+  const runway = verdict
+    ? `<div class="home-runway ${esc(verdict.severity)}">
+         <div class="home-runway-text">
+           <strong>${esc(verdict.headline)}</strong>
+           <span>${esc(verdict.detail)}</span>
+         </div>
+         <div class="home-runway-spark" data-runway-mini="${esc(row.session_id)}"></div>
+       </div>`
+    : '';
   return `<div class="session-summary">
     <div class="session-title">${esc(row.project)}</div>
     <div class="session-meta">${esc(row.tool)} · ${esc(row.latest_turn_tokens || 'unknown')} latest turn · ${esc(row.severity)}</div>
+    ${runway}
     <p style="margin-top:8px">${esc(row.recommendation || 'Review this session before continuing.')}</p>
     <div class="pill-row"><span class="pill">${esc(row.bloat_label ? row.bloat_label + ' replay' : 'observed signal')}</span>${rows.length > 1 ? `<span class="pill">${esc(rows.length - 1)} more</span>` : ''}</div>
     <div class="copy-row">${row.can_handoff ? `<button class="btn-primary" onclick="openHandoff(${jsArg(row.session_id)})">Build Fresh Start brief</button>` : ''}<button class="btn-quiet" onclick="selectSession(${jsArg(row.session_id)})">Inspect session</button></div>
@@ -6531,10 +7650,20 @@ function renderUnbanked(card) {
   // headline, so the headline would otherwise silently shrink without saying why.
   const unresolved = card.unresolved_usd > 0
     ? `<span class="pill">${esc(card.unresolved_label)} unresolved (git could not read ${esc((card.unresolved_repos || []).length)} repo(s))</span>` : '';
+  // Where the unbanked money went, not why it is unbanked. The why is two
+  // buckets and the headline above already states it; the where grows a segment
+  // per project and is the part you can act on.
+  const chart = card.chart
+    ? `<div class="unbanked-chart">
+         <div class="bar-host" data-unbanked-bar></div>
+         <div class="bar-legend">${stackedBarLegend(card.chart.segments, unbankedColours(card.chart.segments))}</div>
+       </div>`
+    : '';
   return `<div class="headline">
       <span class="headline-figure">${esc(card.unbanked_label)}</span>
       <span class="headline-sub">${esc(card.unbanked_pct)}% of the last ${esc(card.window_days)} days had no commit behind it</span>
     </div>
+    ${chart}
     <div class="mini-grid" style="margin-top:12px">
       <div class="mini"><span class="label">Reached a commit</span><strong>${esc(card.banked_label)}</strong></div>
       <div class="mini"><span class="label">Never did</span><strong>${esc(card.unbanked_label)}</strong></div>
@@ -6548,6 +7677,665 @@ function renderUnbanked(card) {
       Spend banks against the next commit in the same repo within
       ${esc(card.max_lookback_hours)}h; anything older stays unbanked rather than being misattributed.</p>`;
 }
+/* ---------------------------------------------------------------------------
+   Chart core.
+
+   Hand-rolled inline SVG, because the dashboard is one self-contained HTML
+   string with no bundler and no CDN -- adding a chart library to draw a line
+   would cost more than it returns. Everything below is shared by every chart on
+   the page, so a new one is a data shape plus a call, not another forty lines
+   of scale arithmetic.
+
+   Conventions the whole page relies on:
+   - colours come from CSS custom properties, never literals, so both themes work
+   - `vector-effect="non-scaling-stroke"` keeps a 2px line 2px after the viewBox
+     is scaled to the container
+   - every chart ships a table view; nothing is encoded in colour alone
+--------------------------------------------------------------------------- */
+const SVG_NS = 'http://www.w3.org/2000/svg';
+// Past this the projection is drawn no further and the caption says "N+". A
+// straight line forty turns out is already a stretch; a hundred is a fiction.
+const RUNWAY_MAX_PROJECTED_TURNS = 40;
+function svgEl(name, attrs) {
+  const node = document.createElementNS(SVG_NS, name);
+  for (const key in attrs) node.setAttribute(key, attrs[key]);
+  return node;
+}
+function chartToken(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+function chartScale(domainMin, domainMax, rangeMin, rangeMax) {
+  const span = (domainMax - domainMin) || 1;
+  return value => rangeMin + ((value - domainMin) / span) * (rangeMax - rangeMin);
+}
+function chartText(parent, x, y, content, opts) {
+  const options = opts || {};
+  const node = svgEl('text', {
+    x: x, y: y,
+    'text-anchor': options.anchor || 'middle',
+    fill: chartToken(options.fill || '--muted'),
+    'font-family': options.mono === false
+      ? "system-ui, -apple-system, 'Segoe UI', sans-serif"
+      : 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+    'font-size': options.size || 11,
+    'font-weight': options.weight || 400,
+  });
+  node.textContent = content;
+  parent.appendChild(node);
+  return node;
+}
+function chartGrid(parent, plot, ticks, formatValue, yScale) {
+  ticks.forEach(value => {
+    const y = yScale(value);
+    parent.appendChild(svgEl('line', {
+      x1: plot.left, y1: y, x2: plot.right, y2: y,
+      stroke: chartToken('--line'), 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke',
+    }));
+    chartText(parent, plot.left - 8, y + 4, formatValue(value), { anchor: 'end' });
+  });
+}
+function chartPath(points) {
+  return 'M' + points.map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('L');
+}
+function chartLine(parent, points, token, opts) {
+  const options = opts || {};
+  parent.appendChild(svgEl('path', {
+    d: chartPath(points),
+    fill: 'none',
+    stroke: chartToken(token),
+    'stroke-width': options.width || 2,
+    'stroke-linejoin': 'round',
+    'stroke-linecap': 'round',
+    'vector-effect': 'non-scaling-stroke',
+    ...(options.dash ? { 'stroke-dasharray': options.dash } : {}),
+    ...(options.opacity ? { opacity: options.opacity } : {}),
+  }));
+}
+
+/* Runway: how many turns before this session reaches the action threshold.
+   Two things this deliberately does NOT do. It never extrapolates across a
+   context reset -- the projection uses growth since the last one, because a
+   line drawn through a reset predicts a wall the session already stepped back
+   from. And it draws the session peak, because severity fires on `latest > X
+   OR peak > X`: a session that crossed before a reset still reads critical on
+   the card while sitting well below the line now, and hiding that makes the
+   card and the chart look like they disagree. */
+function drawRunway(node, chart) {
+  if (!node || !chart) return;
+  const series = chart.turn_series || [];
+  if (series.length < 3) return;
+
+  const W = 620, H = 190, plot = { left: 46, right: 560, top: 16, bottom: 148 };
+  const projected = chart.turns_to_critical;
+  const projectedTurns = projected === null || projected === undefined
+    ? 0 : Math.min(projected, RUNWAY_MAX_PROJECTED_TURNS);
+  const total = series.length + projectedTurns;
+  const ceiling = Math.max(chart.critical_tokens_n, chart.peak_turn_tokens_n) * 1.12;
+
+  const x = chartScale(0, Math.max(1, total - 1), plot.left, plot.right);
+  const y = chartScale(0, ceiling, plot.bottom, plot.top);
+
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'runway-svg', 'aria-hidden': 'true' });
+
+  // Status bands. These encode state, so they take status colours -- and they
+  // are named in the caption below, never left to hue alone.
+  svg.appendChild(svgEl('rect', {
+    x: plot.left, y: y(chart.critical_tokens_n), width: plot.right - plot.left,
+    height: Math.max(0, y(chart.pressure_tokens_n) - y(chart.critical_tokens_n)),
+    fill: chartToken('--amber'), opacity: 0.12,
+  }));
+  svg.appendChild(svgEl('rect', {
+    x: plot.left, y: y(ceiling), width: plot.right - plot.left,
+    height: Math.max(0, y(chart.critical_tokens_n) - y(ceiling)),
+    fill: chartToken('--red'), opacity: 0.12,
+  }));
+
+  chartGrid(svg, plot, [0, ceiling / 2, ceiling], v => Math.round(v / 1000) + 'K', y);
+
+  [[chart.pressure_tokens_n, '--amber'], [chart.critical_tokens_n, '--red']].forEach(([value, token]) => {
+    svg.appendChild(svgEl('line', {
+      x1: plot.left, y1: y(value), x2: plot.right, y2: y(value),
+      stroke: chartToken(token), 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke',
+    }));
+  });
+
+  // Say what crossing each line means, on the line. A legend tells you which
+  // colour is which; it cannot tell you which way is bad, and the y-axis is in
+  // tokens, where "more" is not obviously worse to anyone who has not been told
+  // that context accumulates. Labelled in place, a data line sitting above both
+  // needs no explaining at all.
+  //
+  // The pressure label is dropped when the two lines are too close to hold
+  // separate text -- on a session running four times the limit they are 7px
+  // apart, and two labels there overlap into one unreadable smear. The action
+  // line is the one that keeps its label, being the one that asks for anything.
+  const labelGap = y(chart.pressure_tokens_n) - y(chart.critical_tokens_n);
+  chartText(svg, plot.left + 6, y(chart.critical_tokens_n) - 5,
+    compactTokens(chart.critical_tokens_n) + ' — act now', { anchor: 'start', fill: '--red', size: 10 });
+  if (labelGap >= 16) {
+    chartText(svg, plot.left + 6, y(chart.pressure_tokens_n) - 5,
+      compactTokens(chart.pressure_tokens_n) + ' — pressure builds', { anchor: 'start', fill: '--amber', size: 10 });
+  }
+
+  // The peak is only worth its own line when it is meaningfully above where the
+  // session sits now -- that is the case severity reads and the chart otherwise
+  // appears to contradict. When the peak IS the current turn, the line would sit
+  // on top of the marker and "already crossed once" would describe the present.
+  const peakIsHistoric = chart.peak_turn_tokens_n > chart.latest_turn_tokens_n * 1.05;
+  if (chart.peak_turn_tokens_n > chart.critical_tokens_n && peakIsHistoric) {
+    svg.appendChild(svgEl('line', {
+      x1: plot.left, y1: y(chart.peak_turn_tokens_n), x2: plot.right, y2: y(chart.peak_turn_tokens_n),
+      stroke: chartToken('--muted'), 'stroke-width': 1, opacity: 0.6, 'vector-effect': 'non-scaling-stroke',
+    }));
+    chartText(svg, plot.left + 6, y(chart.peak_turn_tokens_n) - 6,
+      'peak ' + compactTokens(chart.peak_turn_tokens_n) + ' — already crossed once',
+      { anchor: 'start', fill: '--muted' });
+  }
+
+  chartLine(svg, series.map((v, i) => [x(i), y(v)]), '--blue');
+
+  if (projectedTurns > 0 && chart.growth_per_turn_n > 0) {
+    const from = series[series.length - 1];
+    const forward = [];
+    for (let i = 0; i <= projectedTurns; i++) {
+      forward.push([x(series.length - 1 + i), y(from + chart.growth_per_turn_n * i)]);
+    }
+    // Dashed because it is a projection -- the one thing dashing should mean.
+    chartLine(svg, forward, '--blue', { dash: '5 4', opacity: 0.5 });
+  }
+
+  svg.appendChild(svgEl('circle', {
+    cx: x(series.length - 1), cy: y(series[series.length - 1]), r: 4.5,
+    fill: chartToken('--blue'), stroke: chartToken('--surface'), 'stroke-width': 2,
+  }));
+
+  svg.appendChild(svgEl('line', {
+    x1: plot.left, y1: plot.bottom, x2: plot.right, y2: plot.bottom,
+    stroke: chartToken('--line-strong'), 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke',
+  }));
+  chartText(svg, plot.left, plot.bottom + 18, 'turn 1', { anchor: 'start' });
+  chartText(svg, x(series.length - 1), plot.bottom + 18, 'now');
+  if (projectedTurns > 0) chartText(svg, plot.right, plot.bottom + 18, 'projected', { anchor: 'end' });
+
+  node.innerHTML = '';
+  node.appendChild(svg);
+}
+
+/* The runway verdict as {headline, detail, severity}, so Home and the full card
+   render the same judgement from one place. Two surfaces computing "how long
+   have I got" independently is how they end up disagreeing. */
+function runwayVerdict(chart) {
+  if (!chart || (chart.turn_series || []).length < 3) return null;
+  // turns_to_critical is null for two opposite reasons and they must not share a
+  // sentence: a session already past the threshold is the worst case on the page,
+  // and describing it as "not on a path to" the threshold reads as reassurance.
+  if (chart.turns_to_critical === null || chart.turns_to_critical === undefined) {
+    if (chart.latest_turn_tokens_n >= chart.critical_tokens_n) {
+      return {
+        severity: 'critical',
+        headline: 'Already past the action threshold',
+        detail: `${compactTokens(chart.latest_turn_tokens_n)} per turn against a ${compactTokens(chart.critical_tokens_n)} limit. There is no headroom left to project.`,
+      };
+    }
+    return {
+      severity: 'healthy',
+      headline: 'Not growing right now',
+      detail: 'Context is flat, so there is no threshold to project towards.',
+    };
+  }
+  // The drawn projection is capped, so nothing may quote a number the chart does
+  // not reach -- and past this range the honest reading is "plenty".
+  if (chart.turns_to_critical > RUNWAY_MAX_PROJECTED_TURNS) {
+    return {
+      severity: 'healthy',
+      headline: `${RUNWAY_MAX_PROJECTED_TURNS}+ turns of headroom`,
+      detail: `At ${compactTokens(chart.growth_per_turn_n)}/turn. Far enough out that the exact number is noise.`,
+    };
+  }
+  return {
+    severity: chart.turns_to_critical <= 10 ? 'critical' : 'warning',
+    headline: `≈${chart.turns_to_critical} turn${chart.turns_to_critical === 1 ? '' : 's'} of headroom`,
+    detail: `At ${compactTokens(chart.growth_per_turn_n)}/turn, the growth since this session last shed context.`,
+  };
+}
+/* Names every line on the runway chart. The caption used to carry "Amber is
+   pressure, red is where action is needed" inside a conditional that dropped it
+   on critical cards with no projection left -- so the explanation vanished from
+   exactly the sessions in the worst state, which are the ones a reader most
+   needs to be able to read. Blue was never named anywhere at all.
+
+   Only lines that were actually drawn are listed: drawRunway omits the
+   projection when there is no headroom left, and the peak line when the peak is
+   the current turn, and a legend naming an absent line sends you hunting for it. */
+function runwayLegend(chart) {
+  if (!chart || (chart.turn_series || []).length < 3) return '';
+  const items = [
+    ['swatch-blue', 'Context per turn (higher is worse)'],
+    ['swatch-amber', 'Pressure'],
+    ['swatch-red', 'Action needed'],
+  ];
+  if (chart.turns_to_critical > 0 && chart.growth_per_turn_n > 0) {
+    items.push(['swatch-dash', 'Projected']);
+  }
+  const peakIsHistoric = chart.peak_turn_tokens_n > chart.latest_turn_tokens_n * 1.05;
+  if (chart.peak_turn_tokens_n > chart.critical_tokens_n && peakIsHistoric) {
+    items.push(['swatch-peak', 'Earlier peak']);
+  }
+  return `<p class="feed-chart-note runway-legend">${items
+    .map(([cls, label]) => `<span class="${cls}"></span>${label}`).join(' ')}</p>`;
+}
+function runwayCaption(chart) {
+  const verdict = runwayVerdict(chart);
+  if (!verdict) return '';
+  const resets = chart.context_resets
+    ? ` After ${chart.context_resets} context reset${chart.context_resets === 1 ? '' : 's'}, growth is measured from the latest one only.`
+    : '';
+  // The colours are named by runwayLegend now, unconditionally, so the caption
+  // is free to be only the verdict.
+  return `<p class="receipt-note"><strong>${esc(verdict.headline)}</strong> — ${esc(verdict.detail)}${resets}</p>`;
+}
+
+/* Home's summary is one row, so this is the curve and the threshold and nothing
+   else: no axes, no projection, no labels. It exists to show the shape and let
+   the headline carry the number. */
+function drawRunwayMini(node, chart) {
+  if (!node || !chart) return;
+  const series = chart.turn_series || [];
+  if (series.length < 3) return;
+  const W = 220, H = 34, pad = 2;
+  const ceiling = Math.max(chart.critical_tokens_n, ...series) * 1.05;
+  const x = chartScale(0, series.length - 1, pad, W - pad);
+  const y = chartScale(0, ceiling, H - pad, pad);
+
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'runway-mini', preserveAspectRatio: 'none', 'aria-hidden': 'true' });
+  svg.appendChild(svgEl('line', {
+    x1: pad, y1: y(chart.critical_tokens_n), x2: W - pad, y2: y(chart.critical_tokens_n),
+    stroke: chartToken('--red'), 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke',
+  }));
+  chartLine(svg, series.map((v, i) => [x(i), y(v)]), '--blue', { width: 1.75 });
+  svg.appendChild(svgEl('circle', {
+    cx: x(series.length - 1), cy: y(series[series.length - 1]), r: 2.5,
+    fill: chartToken('--blue'), stroke: chartToken('--surface'), 'stroke-width': 1.5,
+  }));
+  node.innerHTML = '';
+  node.appendChild(svg);
+}
+/* Daily shape under a metric tile. Deliberately unlabelled: there are no axes,
+   no ticks and no gridlines, because the tile already carries the number and
+   the only question left is which way it has been going.
+
+   Colour is inherited (currentColor) from the card's --metric, so the series
+   never picks a token of its own -- see .metric-spark.
+
+   A series may stop short of the right edge. Outcomes only exist for sessions
+   somebody has judged, and drawing a line through the unjudged tail would state
+   that recent work produced nothing when the truth is that nobody has looked at
+   it yet. The tail is shaded and left empty instead, and the caveat says so in
+   words rather than relying on the shading being noticed. */
+function drawTileSpark(node, series, days) {
+  if (!node || !series) return;
+  const values = series.values || [];
+  if (values.length < 3) return;
+  const W = 240, H = 28, pad = 3;
+  // Drawn only as far as there is a verdict; the rest of the axis is still laid
+  // out, so the shaded gap is visibly a gap rather than a shorter chart.
+  const through = Number.isInteger(series.judged_through) ? series.judged_through : values.length - 1;
+  const drawn = values.slice(0, through + 1);
+  if (drawn.length < 2) return;
+  const peak = Math.max(...drawn);
+  if (!(peak > 0)) return;
+
+  const x = chartScale(0, values.length - 1, pad, W - pad);
+  const y = chartScale(0, peak, H - pad, pad);
+  const svg = svgEl('svg', {
+    viewBox: `0 0 ${W} ${H}`, class: 'metric-spark-svg',
+    preserveAspectRatio: 'none', role: 'img',
+  });
+
+  if (through < values.length - 1) {
+    svg.appendChild(svgEl('rect', {
+      x: x(through), y: 0, width: (W - pad) - x(through), height: H,
+      fill: chartToken('--line'), opacity: 0.35,
+    }));
+  }
+
+  const points = drawn.map((value, index) => [x(index), y(value)]);
+  const area = chartPath(points)
+    + `L${x(through).toFixed(1)},${y(0).toFixed(1)}`
+    + `L${x(0).toFixed(1)},${y(0).toFixed(1)}Z`;
+  svg.appendChild(svgEl('path', { d: area, fill: 'currentColor', opacity: 0.16, stroke: 'none' }));
+  svg.appendChild(svgEl('path', {
+    d: chartPath(points), fill: 'none', stroke: 'currentColor',
+    'stroke-width': 1.75, 'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+    'vector-effect': 'non-scaling-stroke',
+  }));
+  svg.appendChild(svgEl('circle', {
+    cx: points[points.length - 1][0], cy: points[points.length - 1][1], r: 2.4,
+    fill: 'currentColor', stroke: chartToken('--surface'), 'stroke-width': 1.5,
+  }));
+
+  // The text alternative, so nothing here is carried by the drawing alone.
+  const labels = series.labels || [];
+  const peakIndex = drawn.indexOf(peak);
+  const summary = `Peak ${labels[peakIndex] || peak} on ${(days || [])[peakIndex] || 'the busiest day'}`
+    + `, ${labels[through] || drawn[drawn.length - 1]} on ${(days || [])[through] || 'the last day drawn'}.`;
+  svg.setAttribute('aria-label', summary);
+  const title = svgEl('title', {});
+  title.textContent = summary;
+  svg.appendChild(title);
+
+  node.innerHTML = '';
+  node.appendChild(svg);
+  if (series.caveat) {
+    const note = document.createElement('div');
+    note.className = 'metric-spark-caveat';
+    note.textContent = series.caveat;
+    node.appendChild(note);
+  }
+  node.hidden = false;
+}
+function compactTokens(n) {
+  if (!n) return '0';
+  // Carries past thousands: the scatter's decade ticks reach hundreds of
+  // millions, and "100000K" is not a number anyone reads.
+  if (n >= 1e9) return +(n / 1e9).toFixed(n >= 1e10 ? 0 : 1) + 'B';
+  if (n >= 1e6) return +(n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M';
+  if (n >= 1000) return Math.round(n / 1000) + 'K';
+  return String(Math.round(n));
+}
+
+/* One horizontal bar split by category, with the legend carrying exact values.
+   Shared rather than local to the unbanked card because it is the same object
+   any part-to-whole question needs. Segment colours come from the caller so
+   identity stays with the entity, never with its rank in the list. */
+/* Share of a whole, which the ranked bars beside it cannot show -- each of those
+   is sized against the largest row, not against the total.
+
+   Slices are separated by a stroke in the surface colour rather than a border,
+   and only slices wide enough to hold one get a label inside; the rest rely on
+   the legend, which carries every value in full. */
+const COMPOSITION_COLOURS = ['--blue', '--cyan', '--green'];
+function compositionColours(segments) {
+  let index = 0;
+  return segments.map(segment =>
+    segment.kind === 'other' ? '--faint' : COMPOSITION_COLOURS[index++ % COMPOSITION_COLOURS.length]);
+}
+function drawPie(node, chart) {
+  if (!node || !chart || !chart.segments || chart.segments.length < 2) return;
+  const colours = compositionColours(chart.segments);
+  const size = 132, r = 62, cx = size / 2, cy = size / 2;
+  const svg = svgEl('svg', { viewBox: `0 0 ${size} ${size}`, class: 'pie-svg', 'aria-hidden': 'true' });
+  let angle = -Math.PI / 2;
+
+  chart.segments.forEach((segment, index) => {
+    const sweep = (segment.pct / 100) * Math.PI * 2;
+    const end = angle + sweep;
+    const large = sweep > Math.PI ? 1 : 0;
+    const x1 = cx + r * Math.cos(angle), y1 = cy + r * Math.sin(angle);
+    const x2 = cx + r * Math.cos(end), y2 = cy + r * Math.sin(end);
+    // A single slice covering the whole circle has identical start and end
+    // points, which collapses the arc to nothing -- draw the circle instead.
+    const path = sweep >= Math.PI * 2 - 0.0001
+      ? svgEl('circle', { cx: cx, cy: cy, r: r, fill: chartToken(colours[index]) })
+      : svgEl('path', {
+          d: `M${cx},${cy}L${x1.toFixed(2)},${y1.toFixed(2)}A${r},${r} 0 ${large} 1 ${x2.toFixed(2)},${y2.toFixed(2)}Z`,
+          fill: chartToken(colours[index]),
+          stroke: chartToken('--surface'), 'stroke-width': 2,
+        });
+    svg.appendChild(path);
+    if (sweep > 0.55) {
+      const mid = angle + sweep / 2;
+      chartText(svg, cx + r * 0.62 * Math.cos(mid), cy + r * 0.62 * Math.sin(mid) + 4,
+        Math.round(segment.pct) + '%', { fill: '--surface', weight: 700, size: 12 });
+    }
+    angle = end;
+  });
+  node.innerHTML = '';
+  node.appendChild(svg);
+}
+function compositionLegend(chart) {
+  if (!chart) return '';
+  const colours = compositionColours(chart.segments);
+  const rows = chart.segments.map((segment, index) => `<span class="bar-key"${segment.title ? ` title="${esc(segment.title)}"` : ''}>
+      <span class="bar-swatch" style="background:var(${colours[index]})"></span>
+      ${esc(segment.label)} <strong>${esc(segment.pct)}%</strong>
+      <span class="bar-pct">${esc(segment.tokens_label)}</span>
+    </span>`).join('');
+  // Said rather than hidden: a chart that is one colour is a number, and the
+  // reader should be told that instead of squinting at it.
+  const caveat = chart.dominant
+    ? `<p class="receipt-note">One slice is ${esc(chart.dominant_pct)}% of the total, so this is really a single figure rather than a breakdown.</p>`
+    : '';
+  return `<div class="bar-legend">${rows}</div>${caveat}`;
+}
+
+/* Markup first, SVG appended after -- the same two-step every chart here uses,
+   because appending into an element that does not exist yet draws nothing. */
+/* One stacked bar per tool, split by model. The colour map is built once from
+   the shared legend and reused for every row, so a model keeps its colour down
+   the whole chart -- the eye follows it across tools, which is the only reason
+   to cross these two lists in the first place. */
+/* Sessions as dots: tokens across, cost up, model by colour, landed by fill.
+
+   Both axes are logarithmic because the data spans four orders of magnitude and
+   would otherwise pile into one corner. The consequence worth knowing while
+   reading it: price per token is a vertical offset here, not a slope. Two models
+   at the same rate lie on the same diagonal; a dearer one sits above a cheaper
+   one rather than climbing faster. */
+function drawModelScatter(node, scatter) {
+  if (!node || !scatter || !scatter.points || !scatter.points.length) return;
+  const colours = compositionColours(scatter.legend);
+  const colourFor = model => {
+    const index = scatter.legend.findIndex(entry => entry.label === model);
+    return colours[index < 0 ? scatter.legend.length - 1 : index];
+  };
+
+  const W = 720, H = 300, plot = { left: 54, right: 700, top: 18, bottom: 236 };
+  const xs = scatter.points.map(p => Math.log10(Math.max(1, p.tokens)));
+  const ys = scatter.points.map(p => Math.log10(Math.max(0.01, p.cost_usd)));
+  const pad = 0.15;
+  const x = chartScale(Math.min(...xs) - pad, Math.max(...xs) + pad, plot.left, plot.right);
+  const y = chartScale(Math.min(...ys) - pad, Math.max(...ys) + pad, plot.bottom, plot.top);
+
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'scatter-svg', 'aria-hidden': 'true' });
+
+  // Decade gridlines, so the log scale is visible rather than implied.
+  for (let decade = Math.ceil(Math.min(...ys)); decade <= Math.floor(Math.max(...ys)); decade++) {
+    const yy = y(decade);
+    svg.appendChild(svgEl('line', {
+      x1: plot.left, y1: yy, x2: plot.right, y2: yy,
+      stroke: chartToken('--line'), 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke',
+    }));
+    chartText(svg, plot.left - 8, yy + 4, '$' + (decade < 0 ? Math.pow(10, decade).toFixed(2) : Math.pow(10, decade)), { anchor: 'end' });
+  }
+  for (let decade = Math.ceil(Math.min(...xs)); decade <= Math.floor(Math.max(...xs)); decade++) {
+    const xx = x(decade);
+    svg.appendChild(svgEl('line', {
+      x1: xx, y1: plot.top, x2: xx, y2: plot.bottom,
+      stroke: chartToken('--line'), 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke',
+    }));
+    chartText(svg, xx, plot.bottom + 18, compactTokens(Math.pow(10, decade)));
+  }
+  chartText(svg, (plot.left + plot.right) / 2, plot.bottom + 38, 'tokens in session');
+
+  const placed = scatter.points.map(point => {
+    const colour = chartToken(colourFor(point.model === 'other' ? 'other models' : point.model));
+    const cx = x(Math.log10(Math.max(1, point.tokens)));
+    const cy = y(Math.log10(Math.max(0.01, point.cost_usd)));
+    // Filled means the work landed. Hollow is deliberately the same size, so
+    // the eye reads outcome and not magnitude from the difference.
+    svg.appendChild(svgEl('circle', {
+      cx: cx, cy: cy, r: 5,
+      fill: point.landed ? colour : 'none',
+      stroke: colour, 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke',
+      opacity: point.landed === null ? 0.35 : 1,
+    }));
+    return { point, cx, cy };
+  });
+
+  // Hit targets are drawn last so they sit above every dot, and are far larger
+  // than the 5px mark -- a scatter you have to hit dead-centre is unusable.
+  // Listeners are attached to nodes rather than written into an onclick string,
+  // so a session id never has to be escaped into markup.
+  placed.forEach(({ point, cx, cy }) => {
+    const hit = svgEl('circle', { cx: cx, cy: cy, r: 12, class: 'scatter-hit' });
+    const outcome = point.landed === null
+      ? 'no evidence recorded yet'
+      : (point.landed ? 'produced a commit still on the branch' : 'produced nothing that lasted');
+    const title = document.createElementNS(SVG_NS, 'title');
+    title.textContent =
+      `${point.project} — ${point.model_label}\n${point.tokens_label} tokens · ${point.cost_label}\n${outcome}\nClick to open this session`;
+    hit.appendChild(title);
+    hit.addEventListener('click', () => selectSession(point.session_id));
+    svg.appendChild(hit);
+  });
+
+  svg.appendChild(svgEl('line', {
+    x1: plot.left, y1: plot.bottom, x2: plot.right, y2: plot.bottom,
+    stroke: chartToken('--line-strong'), 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke',
+  }));
+  node.innerHTML = '';
+  node.appendChild(svg);
+}
+function paintModelScatter(scatter) {
+  const host = document.getElementById('modelScatter');
+  if (!host) return;
+  host.hidden = !scatter;
+  if (!scatter) return;
+  const colours = compositionColours(scatter.legend);
+  // Three outcome states are drawn, so three are named. The faded key only
+  // appears when something is actually faded -- a key for a mark that is not on
+  // the chart invites the reader to hunt for one.
+  const unexamined = scatter.unexamined > 0
+    ? '<span class="bar-key"><span class="scatter-key unexamined"></span>not judged yet</span>'
+    : '';
+  document.getElementById('modelScatterLegend').innerHTML =
+    scatter.legend.map((entry, index) =>
+      `<span class="bar-key"><span class="bar-swatch" style="background:var(${colours[index]})"></span>${esc(entry.label)}</span>`).join('')
+    + '<span class="bar-key"><span class="scatter-key filled"></span>work landed</span>'
+    + '<span class="bar-key"><span class="scatter-key"></span>did not</span>'
+    + unexamined;
+  renderScatterWithheld(scatter.unpriced);
+  drawModelScatter(host.querySelector('[data-scatter]'), scatter);
+}
+
+// Says what the chart is not showing, in the chart's own terms: how many
+// sessions, whose, and how much work they did. Tokens rather than dollars
+// because the dollars are exactly what is missing.
+function renderScatterWithheld(unpriced) {
+  const note = document.getElementById('modelScatterWithheld');
+  if (!note) return;
+  const count = unpriced && unpriced.sessions ? unpriced.sessions : 0;
+  note.hidden = count === 0;
+  if (!count) { note.textContent = ''; return; }
+  // No esc(): this is written with textContent, which escapes for us. Passing
+  // esc'd text through it would print the entities themselves.
+  const tools = unpriced.tools || [];
+  const whose = tools.length
+    ? (tools.length === 1 ? tools[0] : tools.slice(0, -1).join(', ') + ' and ' + tools[tools.length - 1])
+    : 'plan-based tools';
+  note.textContent =
+    `${count} ${count === 1 ? 'session' : 'sessions'} not drawn — ${unpriced.tokens_label} tokens on `
+    + `${whose}, billed by a plan rather than per token. Local logs cannot price them, and a `
+    + `logarithmic cost axis has no floor to put them on; drawn at the bottom they would read as `
+    + `nearly free work rather than unpriced work.`;
+}
+
+function renderToolModels(breakdown) {
+  if (!breakdown || !breakdown.tools || !breakdown.tools.length) return '';
+  const colours = compositionColours(breakdown.legend);
+  const key = breakdown.legend.map((entry, index) =>
+    `<span class="bar-key"><span class="bar-swatch" style="background:var(${colours[index]})"></span>${esc(entry.label)}</span>`).join('');
+  const rows = breakdown.tools.map((tool, index) => `<div class="tm-row">
+      <div class="tm-head">
+        <span class="tm-name">${esc(tool.tool)}</span>
+        <span class="tm-total">${esc(tool.total_label)}</span>
+      </div>
+      <div class="tm-bar" data-tool-models="${index}"></div>
+      <div class="tm-note">${tool.segments.filter(s => s.tokens > 0)
+        .map(s => `${esc(s.label)} ${esc(s.pct)}%`).join(' &middot; ')}</div>
+    </div>`).join('');
+  return `<div class="bar-legend tm-legend">${key}</div>${rows}`;
+}
+function paintToolModels(breakdown) {
+  const host = document.getElementById('toolModels');
+  if (!host) return;
+  host.hidden = !breakdown || !breakdown.tools || !breakdown.tools.length;
+  host.innerHTML = renderToolModels(breakdown);
+  if (host.hidden) return;
+  const colours = compositionColours(breakdown.legend);
+  breakdown.tools.forEach((tool, index) => {
+    // Zero-token segments are dropped before drawing: a model a tool never ran
+    // should contribute no sliver and no 2px gap.
+    const segments = tool.segments.filter(segment => segment.tokens > 0);
+    const segmentColours = segments.map(segment =>
+      colours[breakdown.legend.findIndex(entry => entry.label === segment.label)]);
+    const node = host.querySelector(`[data-tool-models="${index}"]`);
+    if (segments.length === 1) {
+      // drawStackedBar needs two segments to be a stack; one model is a solid
+      // bar, which is the honest picture for a single-model tool.
+      node.innerHTML = `<div class="tm-solid" style="background:var(${segmentColours[0]})"></div>`;
+      return;
+    }
+    drawStackedBar(node, segments.map(s => ({ ...s, usd: s.tokens })), segmentColours);
+  });
+}
+
+function paintComposition(name, chart) {
+  const host = document.getElementById(name + 'Composition');
+  if (!host) return;
+  const withhold = !chart || (chart.dominant && chart.hide_when_dominant);
+  host.hidden = withhold;
+  if (withhold) return;
+  document.getElementById(name + 'CompositionLegend').innerHTML = compositionLegend(chart);
+  drawPie(host.querySelector('[data-pie]'), chart);
+}
+
+function drawStackedBar(node, segments, colours) {
+  if (!node || !segments || segments.length < 2) return;
+  const W = 720, H = 30, gap = 2, radius = 3;
+  const total = segments.reduce((sum, item) => sum + item.usd, 0);
+  if (total <= 0) return;
+
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'stacked-bar', preserveAspectRatio: 'none', 'aria-hidden': 'true' });
+  let x = 0;
+  segments.forEach((segment, index) => {
+    const full = (segment.usd / total) * W;
+    // A 2px surface gap separates segments; never a border, which would read as
+    // part of the data at this height.
+    const width = Math.max(0, full - (index < segments.length - 1 ? gap : 0));
+    svg.appendChild(svgEl('rect', {
+      x: x, y: 0, width: width, height: H, rx: radius,
+      fill: chartToken(colours[index]),
+    }));
+    x += full;
+  });
+  node.innerHTML = '';
+  node.appendChild(svg);
+}
+function stackedBarLegend(segments, colours) {
+  return segments.map((segment, index) => `<span class="bar-key"${segment.title ? ` title="${esc(segment.title)}"` : ''}>
+      <span class="bar-swatch" style="background:var(${colours[index]})"></span>
+      ${esc(segment.label)} <strong>${esc(segment.label_usd)}</strong>
+      <span class="bar-pct">${esc(segment.pct)}%</span>
+    </span>`).join('');
+}
+/* Colour follows what a segment *is*, not where it landed in the list, so a
+   quiet week that drops a repo cannot repaint the survivors. Repos take the
+   three non-status hues in order; the tail is neutral because it is a leftover
+   rather than a project; "outside any repo" takes amber because it is the one
+   segment with a different fix -- a session started in the wrong directory,
+   not exploration that went nowhere. */
+const UNBANKED_REPO_COLOURS = ['--blue', '--cyan', '--green'];
+function unbankedColours(segments) {
+  let repo = 0;
+  return segments.map(segment => {
+    if (segment.kind === 'outside') return '--amber';
+    if (segment.kind === 'other') return '--faint';
+    return UNBANKED_REPO_COLOURS[repo++ % UNBANKED_REPO_COLOURS.length];
+  });
+}
+
 function renderContextHealth(rows) {
   const status = arguments.length > 1 ? arguments[1] : 'ready';
   if (status === 'pending') return '<div class="loading">Checking context health and handoff opportunities...</div>';
@@ -6565,7 +8353,11 @@ function renderContextHealth(rows) {
   </div>` : '';
   return `${batch}<div class="coverage-grid">${rows.map(row => `<div class="health-card" data-project-full="${esc(row.project_full || '')}">
     <div class="health-head">
-      <div><h3>${esc(row.project)}</h3><p>${esc(row.tool)} · ${esc(row.age_label)}${row.session_count > 1 ? ` · ${esc(row.session_count)} sessions` : ''}</p></div>
+      <div><h3>${esc(row.project)}</h3><p>${row.session_count > 1
+        ? `${esc(row.session_count)} sessions here · charted below: <button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${row.charted_because_live
+            ? 'the worst recently active one' : 'the one under most pressure'}</button> (${esc(row.tool)} · last active ${esc(row.age_label)} ago)${row.bigger_idle_label
+            ? ` — a larger one, ${esc(row.bigger_idle_label)}, has been quiet for ${esc(row.bigger_idle_age_label)}` : ''}`
+        : `<button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.tool)} session</button> · last active ${esc(row.age_label)} ago`}</p></div>
       <span class="health-severity ${esc(row.severity)}">${esc(row.severity)}</span>
     </div>
     <div class="identity-strip" style="margin:10px 0">
@@ -6585,6 +8377,9 @@ function renderContextHealth(rows) {
       <div class="mini"><span class="label">Spend on replay</span><strong>${esc(row.bloat_label)}</strong></div>
       <div class="mini"><span class="label">Replay cost</span><strong>${esc(row.replayed_cost_label)}</strong></div>
     </div>
+    <div class="runway" data-runway="${esc(row.session_id)}"></div>
+    ${runwayLegend(row.chart)}
+    ${runwayCaption(row.chart)}
     ${row.session_count > 1 ? `<p class="receipt-note">${esc(row.group_note || `${row.session_count} related sessions need attention.`)} ${row.critical_sessions ? `${esc(row.critical_sessions)} critical.` : ''}</p>` : ''}
     <p>${esc(row.recommendation)}</p>
     <div class="health-actions">
@@ -6594,7 +8389,9 @@ function renderContextHealth(rows) {
       ${row.can_handoff ? `<button class="btn-quiet" data-project="${esc(row.project_full || '')}" onclick="snoozeFreshStartProject(this.dataset.project, this)">Snooze 48h</button>` : ''}
       <button class="btn-quiet" data-compact="${esc(row.compact_prompt || '/compact')}" onclick="copyText(this.dataset.compact, 'Compact prompt copied')">Copy compact prompt</button>
     </div>
-    <p class="receipt-note">${esc(row.action.reason)}</p>
+    <p class="receipt-note">${esc(row.action.reason)}${row.session_count > 1
+      ? ' These act on that one session, not on all ' + esc(row.session_count) + ' in the project.'
+      : ''}</p>
   </div>`).join('')}</div>`;
 }
 function renderCoverage(rows) {
@@ -6644,18 +8441,44 @@ function costliestShare(event, session) {
   const pct = Math.round(part / total * 100);
   return pct >= 1 ? ` · ${pct}% of session cost` : '';
 }
-function bars(rows, valueKey = "api_value_label", kind = "project") {
+/* `weightKey` decides what the bar length means. Projects and models are asked
+   about in money, so they stay on api_value_usd. Tools cannot be: a plan-based
+   tool is priced at zero by design, so sizing its bar by dollars draws Codex and
+   Cursor as empty stubs labelled $0.00 -- indistinguishable from a tool that was
+   never opened, when the truth is that it was used and simply has no invoice.
+   Tokens exist for every tool, so the tool bars are measured in those and show
+   the dollar figure alongside rather than as the length. */
+function bars(rows, valueKey = "api_value_label", kind = "project", weightKey = "api_value_usd") {
   if (!rows.length) return '<div class="empty">No local usage found for this window.</div>';
-  const max = maxValue(rows);
+  const max = maxValue(rows, weightKey);
   return rows.map(row => {
-    const width = Math.max(2, Math.round(Number(row.api_value_usd || 0) / max * 100));
+    const weight = Number(row[weightKey] || 0);
+    // Zero gets no bar at all. A 2% stub for something genuinely unused reads as
+    // a small amount rather than as none.
+    const width = weight > 0 ? Math.max(2, Math.round(weight / max * 100)) : 0;
     const id = encodeURIComponent(row.id || row.name);
     const click = kind === "project" ? `onclick="selectProject(decodeURIComponent(this.dataset.id))" data-id="${id}"` : "";
-    const amount = row.detected_only ? (row.status_label || 'Detected') : row[valueKey];
+    // Both numbers, because neither works alone. A token count is not something
+    // anyone can feel -- "354.7M" means nothing without an anchor -- so the
+    // dollar figure leads wherever there is one. Where there is not, the tokens
+    // lead and say why: plan-based, which is not the same as free or unused.
+    const planBased = !row.detected_only && Number(row.tokens || 0) > 0 && Number(row.api_value_usd || 0) <= 0;
+    let amount;
+    if (row.detected_only) {
+      amount = row.status_label || 'Detected';
+    } else if (planBased) {
+      amount = `${esc(row.tokens_label)}<span class="bar-note">plan-based</span>`;
+    } else if (weightKey === "tokens" && row.tokens_label && row.api_value_label) {
+      amount = `${esc(row.api_value_label)}<span class="bar-note">${esc(row.tokens_label)} tokens</span>`;
+    } else {
+      amount = esc(row[valueKey]);
+    }
+    // `amount` carries markup, so it is interpolated raw below -- every value
+    // inside it is escaped individually above.
     return `<div class="bar-row ${kind === "project" ? "clickable" : ""}" title="${esc(row.name)}" ${click}>
       <div class="bar-label">${esc(row.short_name || row.name)}${kind === "project" && row.health ? ` ${healthPill(row.health)}` : ''}</div>
       <div class="bar-shell"><div class="bar" style="width:${width}%"></div></div>
-      <div class="amount">${esc(amount)}</div>
+      <div class="amount">${amount}</div>
     </div>`;
   }).join('');
 }
@@ -7024,11 +8847,20 @@ function renderReport(report) {
     </div>`);
   }
   if (digest.top_sessions && digest.top_sessions.length) {
+    // The share is what turns a ranking into a decision: a top five worth most of
+    // the window means reviewing five sessions is the whole job, and a top five
+    // worth a tenth of it means the money is spread out and this list is the wrong
+    // place to look. Same five rows either way, so the number has to be on screen.
+    const share = digest.top_sessions_share_pct;
+    const cover = share === null || share === undefined
+      ? ''
+      : `<p class="muted">These ${digest.top_sessions.length} cover ${share}% of the ${esc(digest.top_sessions_window_total_label)} spent this window.</p>`;
     sections.push(`<div class="detail-section">
       <h2>Costliest sessions</h2>
+      ${cover}
       ${digest.top_sessions.map(s => `<div class="digest-row${s.session_id ? ' clickable' : ''}" ${s.session_id ? `onclick="selectSession('${esc(s.session_id)}')"` : ''}>
         <span class="digest-row-label">${esc(s.project)} &middot; ${esc(s.tool)} &middot; ${esc(s.model)}</span>
-        <span class="mono">${esc(s.api_value_label)}</span>
+        <span class="mono">${esc(s.api_value_label)}${s.share_pct === null || s.share_pct === undefined ? '' : ` &middot; ${s.share_pct}%`}</span>
         ${s.outcome ? `<span class="outcome-pill ${esc(s.outcome)}">${esc(s.outcome)}</span>` : '<span class="pill">unreviewed</span>'}
       </div>`).join('')}
     </div>`);
@@ -7083,6 +8915,332 @@ function renderInsightHeadline(totals) {
     ${split}
   </div>`;
 }
+/* Replay compounding: cost per turn, split into what bought new work and what
+   re-sent history you had already paid for. Stacked rather than two free lines,
+   because the height of the stack is the turn's real cost -- the reader needs
+   the total and the composition, and a stack gives both.
+
+   Priced at the cache-read rate upstream, which is why the band stays modest in
+   dollars even when it is most of the tokens. */
+/* Daily spend against a trailing band of the user's own recent days.
+
+   The band's edges are drawn soft, and that is not decoration. Resampling this
+   distribution moves an edge by roughly half the band's own width even with a
+   month of history -- daily AI spend is erratic enough that no realistic amount
+   of data pins a quartile down. A crisp boundary would claim a precision that
+   does not exist and invite reading "just above the line" as a finding.
+
+   For the same reason nothing is marked for merely clearing the edge. Only days
+   at least spike_multiple past it are flagged, which is the point where the
+   verdict survives resampling 95%+ of the time. Nothing is ever marked for
+   falling *below* the band: a low day may be a quiet day, a day off, or simply
+   a day that is not over yet.
+
+   Bars rather than a line, because a line has to pass through days with no
+   activity at some height, and there is no honest height for a day that did not
+   happen. A missing bar is the only mark that means "nothing here". */
+function drawDailySpend(node, chart) {
+  if (!node || !chart) return;
+  const values = chart.values || [];
+  if (values.length < 3) return;
+  const W = 640, H = 190, padL = 52, padR = 12, padT = 12, padB = 26;
+  const plot = { left: padL, right: W - padR, top: padT, bottom: H - padB };
+
+  const ceiling = Math.max(...values, ...chart.band_high.filter(v => v != null)) * 1.08 || 1;
+  const x = chartScale(0, values.length, plot.left, plot.right);
+  const y = chartScale(0, ceiling, plot.bottom, plot.top);
+  const svg = svgEl('svg', {
+    viewBox: `0 0 ${W} ${H}`, class: 'runway-svg', role: 'img',
+  });
+
+  chartGrid(svg, plot, [0, ceiling / 2, ceiling], v => '$' + Math.round(v), y);
+
+  // The band, as a soft ribbon. Segments are broken wherever the baseline is
+  // unavailable, so the earliest days of a window simply have no backdrop
+  // rather than borrowing a later one.
+  let run = [];
+  const flushBand = () => {
+    if (run.length > 1) {
+      const top = run.map(i => [x(i + 0.5), y(chart.band_high[i])]);
+      const bottom = run.map(i => [x(i + 0.5), y(chart.band_low[i])]).reverse();
+      svg.appendChild(svgEl('path', {
+        d: chartPath(top) + 'L' + bottom.map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('L') + 'Z',
+        fill: chartToken('--line'), opacity: 0.55, stroke: 'none',
+      }));
+      chartLine(svg, run.map(i => [x(i + 0.5), y(chart.band_mid[i])]),'--line-strong', { width: 1, dash: '3 3' });
+    }
+    run = [];
+  };
+  values.forEach((_, index) => {
+    if (chart.band_high[index] == null) flushBand();
+    else run.push(index);
+  });
+  flushBand();
+
+  const barWidth = Math.max(2, (x(1) - x(0)) * 0.62);
+  values.forEach((value, index) => {
+    if (!chart.active[index]) return;
+    const height = Math.max(1, y(0) - y(value));
+    svg.appendChild(svgEl('rect', {
+      x: x(index + 0.5) - barWidth / 2, y: y(value), width: barWidth, height: height,
+      fill: chartToken(chart.spikes[index] ? '--cyan' : '--blue'),
+      opacity: index === chart.partial_index ? 0.55 : 1,
+      rx: 1,
+    }));
+    if (chart.spikes[index]) {
+      svg.appendChild(svgEl('circle', {
+        cx: x(index + 0.5), cy: y(value) - 6, r: 2.2, fill: chartToken('--cyan'),
+      }));
+    }
+  });
+
+  // A full-height column per day, transparent, added last so it takes the
+  // pointer. Same reasoning as the scatter's oversized hit circles: a 6px bar
+  // you must hit dead-centre is not a target, and a day with no bar at all has
+  // nothing to aim at otherwise -- which is exactly the day whose tooltip has
+  // something worth saying.
+  values.forEach((value, index) => {
+    const hit = svgEl('rect', {
+      x: x(index), y: plot.top, width: x(1) - x(0), height: plot.bottom - plot.top,
+      class: 'spend-hit',
+    });
+    const lines = [chart.day_labels[index]];
+    if (!chart.active[index]) {
+      lines.push('No recorded activity');
+    } else if (index === chart.partial_index) {
+      lines.push(`${chart.labels[index]} so far — today is still in progress`);
+    } else {
+      lines.push(chart.labels[index]);
+    }
+    lines.push(chart.band_labels[index]
+      ? `Usual for you then: ${chart.band_labels[index]}`
+      : 'Not enough history yet to say what was usual');
+    if (chart.spikes[index]) {
+      lines.push(`At least ${chart.spike_multiple}x past the top of that`);
+    }
+    const title = document.createElementNS(SVG_NS, 'title');
+    title.textContent = lines.join('\n');
+    hit.appendChild(title);
+    svg.appendChild(hit);
+  });
+
+  // Ends only. A tick under every day turns into a smear at thirty.
+  const first = (chart.days[0] || '').slice(5);
+  const last = (chart.days[chart.days.length - 1] || '').slice(5);
+  chartText(svg, x(0.5), plot.bottom + 16, first, { anchor: 'start' });
+  chartText(svg, x(values.length - 0.5), plot.bottom + 16, last, { anchor: 'end' });
+
+  const summary = `Daily spend over ${values.length} days against a typical range of `
+    + `${chart.band_label}. ${chart.spike_count} day${chart.spike_count === 1 ? '' : 's'} `
+    + `at least ${chart.spike_multiple}x past the top of it.`;
+  svg.setAttribute('aria-label', summary);
+  const title = svgEl('title', {});
+  title.textContent = summary;
+  svg.appendChild(title);
+
+  node.innerHTML = '';
+  node.appendChild(svg);
+}
+function dailySpendCaption(chart) {
+  if (!chart) return '';
+  const parts = [];
+  if (chart.spike_count) {
+    parts.push(`<strong>${chart.spike_count}</strong> day${chart.spike_count === 1 ? '' : 's'} ran at least ${chart.spike_multiple}x past the top of your usual range`);
+  }
+  if (chart.quiet_days) {
+    parts.push(`${chart.quiet_days} day${chart.quiet_days === 1 ? '' : 's'} had no recorded activity, drawn as a gap rather than a zero`);
+  }
+  if (chart.partial_index != null) parts.push('today is still in progress');
+  // One span for the whole sentence: .feed-chart-note is a flex row, so loose
+  // text either side of a <strong> would wrap as separate blocks.
+  return `<p class="feed-chart-note"><span class="swatch-blue"></span>Daily spend
+    <span class="swatch-cyan"></span>Well past your usual
+    <span class="swatch-line"></span>Your middle half
+    <span class="feed-chart-sentence">${esc(chart.band_label)} a day, around ${esc(chart.median_label)}${parts.length ? ' — ' + parts.join('; ') : ''}. The band describes your habits, not a budget.</span></p>`;
+}
+
+const REPLAY_MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+/* Turn times arrive as one start plus a seconds offset each, so they are
+   assembled here rather than shipped as nine hundred formatted strings. */
+function replayTurnTime(chart, index) {
+  if (!chart || !chart.started_at) return '';
+  const offset = (chart.second_offsets || [])[index] || 0;
+  const at = new Date(new Date(chart.started_at).getTime() + offset * 1000);
+  if (isNaN(at.getTime())) return '';
+  const pad = value => String(value).padStart(2, '0');
+  return `${at.getDate()} ${REPLAY_MONTHS[at.getMonth()]} ${pad(at.getHours())}:${pad(at.getMinutes())}`;
+}
+/* Three decimals. Turns here sit around forty cents and differ by fractions of
+   one, so money()'s two would print a turn's total and its replayed part as the
+   same number. */
+function turnMoney(value) {
+  return '$' + (value || 0).toFixed(3);
+}
+function drawReplaySplit(node, chart) {
+  if (!node || !chart) return;
+  const fresh = chart.fresh_usd || [], replayed = chart.replayed_usd || [];
+  if (fresh.length < 3) return;
+
+  const W = 640, H = 150, plot = { left: 52, right: 596, top: 12, bottom: 112 };
+  // A cache-write turn is billed at a premium and can cost several times an
+  // ordinary one. Scaling to the maximum lets two such turns flatten every other
+  // turn into an unreadable strip along the axis, hiding the thing the chart
+  // exists to show. So the axis is clipped near the top of the ordinary range and
+  // the overflow is stated in the caption -- clipped, never silently truncated.
+  const written = chart.written_usd || fresh.map(() => 0);
+  const totals = fresh.map((v, i) => v + written[i] + replayed[i]);
+  const ranked = totals.slice().sort((a, b) => a - b);
+  const percentile = ranked[Math.floor(ranked.length * 0.9)] || ranked[ranked.length - 1];
+  const ceiling = Math.max(percentile * 1.25, 0.01);
+  const clipped = totals.filter(v => v > ceiling).length;
+  const x = chartScale(0, fresh.length - 1, plot.left, plot.right);
+  const y = chartScale(0, ceiling, plot.bottom, plot.top);
+  const clamp = value => Math.max(plot.top, y(value));
+
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'runway-svg', 'aria-hidden': 'true' });
+  chartGrid(svg, plot, [0, ceiling / 2, ceiling], v => '$' + v.toFixed(2), y);
+
+  const freshTop = fresh.map((v, i) => [x(i), clamp(v)]);
+  const writeTop = fresh.map((v, i) => [x(i), clamp(v + written[i])]);
+  const stackTop = fresh.map((v, i) => [x(i), clamp(v + written[i] + replayed[i])]);
+  // Mark every turn that runs off the top, so a clipped peak reads as clipped
+  // rather than as a turn that happened to touch the ceiling.
+  totals.forEach((value, i) => {
+    if (value <= ceiling) return;
+    svg.appendChild(svgEl('circle', {
+      cx: x(i), cy: plot.top, r: 2.5, fill: chartToken('--muted'),
+    }));
+  });
+  node.dataset.clipped = String(clipped);
+  const baseline = fresh.map((v, i) => [x(i), plot.bottom]);
+  const area = (top, bottom) =>
+    chartPath(top) + 'L' + bottom.slice().reverse().map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('L') + 'Z';
+
+  // Three bands now, bottom to top: work actually done, the conversation being
+  // written to cache, and the conversation being read back. Only the first is
+  // new -- the other two are the same history paid for twice over, which is the
+  // claim this card makes and could not previously show.
+  svg.appendChild(svgEl('path', { d: area(stackTop, writeTop), fill: chartToken('--amber'), opacity: 0.22 }));
+  svg.appendChild(svgEl('path', { d: area(writeTop, freshTop), fill: chartToken('--cyan'), opacity: 0.22 }));
+  svg.appendChild(svgEl('path', { d: area(freshTop, baseline), fill: chartToken('--blue'), opacity: 0.22 }));
+  // A 2px gap in the surface colour separates the bands -- never a border.
+  chartLine(svg, freshTop, '--surface', { width: 4 });
+  chartLine(svg, freshTop, '--blue');
+  chartLine(svg, writeTop, '--surface', { width: 4 });
+  chartLine(svg, writeTop, '--cyan');
+  chartLine(svg, stackTop, '--amber');
+
+  svg.appendChild(svgEl('line', {
+    x1: plot.left, y1: plot.bottom, x2: plot.right, y2: plot.bottom,
+    stroke: chartToken('--line-strong'), 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke',
+  }));
+  // Time, not turn numbers. A session this long runs across days, and "turn 400"
+  // locates nothing a person remembers; "15 Aug 09:12" does.
+  chartText(svg, plot.left, plot.bottom + 18, replayTurnTime(chart, 0), { anchor: 'start' });
+  chartText(svg, plot.right, plot.bottom + 18, replayTurnTime(chart, fresh.length - 1), { anchor: 'end' });
+
+  // Hover in two parts, because at nine hundred turns one column per turn is
+  // two thirds of a pixel wide -- unhittable, and not worth hitting either,
+  // since turn 437 and turn 438 have nothing to tell apart.
+  //
+  // The trend is sampled at a readable width instead: each column reports the
+  // real turn nearest its centre, so the numbers are exact rather than averaged.
+  // Averaging was the alternative and it would have flattened the one thing
+  // worth stopping on -- a cache write is a single turn costing twenty times its
+  // neighbours, and a mean across fifteen turns turns it into a bump.
+  const replayAhead = [];
+  let ahead = 0;
+  for (let i = replayed.length - 1; i >= 0; i--) { replayAhead[i] = ahead; ahead += replayed[i]; }
+
+  const addTip = (node, index, writeTokens) => {
+    const lines = [`Turn ${(chart.first_turn_no || 1) + index} · ${replayTurnTime(chart, index)}`];
+    const total = fresh[index] + written[index] + replayed[index];
+    if (writeTokens) {
+      lines.push(`${turnMoney(total)} — writing ${compactTokens(writeTokens)} tokens to cache`);
+      lines.push('Storing the conversation so later turns read it back cheaply, not new work being done');
+    } else {
+      lines.push(`${turnMoney(total)}, of which ${turnMoney(replayed[index])} re-sent history`);
+      lines.push(`${compactTokens((chart.resent_tokens || [])[index] || 0)} tokens of conversation re-sent`);
+    }
+    if (index < fresh.length - 1) {
+      lines.push(`${'$' + replayAhead[index].toFixed(2)} more on replay over the ${fresh.length - 1 - index} turns after this`);
+    }
+    const title = document.createElementNS(SVG_NS, 'title');
+    title.textContent = lines.join(String.fromCharCode(10));
+    node.appendChild(title);
+  };
+
+  const span = plot.right - plot.left;
+  const columns = Math.max(2, Math.floor(span / 18));
+  for (let c = 0; c < columns; c++) {
+    const left = plot.left + (span * c) / columns;
+    const width = span / columns;
+    const index = Math.min(fresh.length - 1, Math.max(0, Math.round(
+      ((left + width / 2 - plot.left) / span) * (fresh.length - 1))));
+    const hit = svgEl('rect', {
+      x: left, y: plot.top, width: width, height: plot.bottom - plot.top, class: 'spend-hit',
+    });
+    addTip(hit, index, 0);
+    svg.appendChild(hit);
+  }
+
+  // Cache writes get their own mark and their own target, added last so they win
+  // the pointer. About one turn in seventy, and the only ones whose story the
+  // shape of the line does not already tell.
+  (chart.write_turns || []).forEach(write => {
+    const top = clamp(fresh[write.i] + written[write.i] + replayed[write.i]);
+    svg.appendChild(svgEl('circle', {
+      cx: x(write.i), cy: Math.max(plot.top + 2, top - 5), r: 2.6,
+      fill: chartToken('--cyan'), stroke: chartToken('--surface'), 'stroke-width': 1.5,
+    }));
+    const hit = svgEl('rect', {
+      x: x(write.i) - 6, y: plot.top, width: 12, height: plot.bottom - plot.top, class: 'spend-hit',
+    });
+    addTip(hit, write.i, write.tokens);
+    svg.appendChild(hit);
+  });
+
+  node.innerHTML = '';
+  node.appendChild(svg);
+}
+function feedChartCaption(chart) {
+  if (!chart) return '';
+  return chart.kind === 'daily_spend' ? dailySpendCaption(chart) : replaySplitCaption(chart);
+}
+function replaySplitCaption(chart) {
+  if (!chart) return '';
+  // The share of the session's cost that was replay, which is the claim the card
+  // above makes -- stated here so the chart and the sentence cannot drift.
+  const share = chart.session_total_usd > 0
+    ? Math.round(100 * chart.replayed_total_usd / chart.session_total_usd) : 0;
+  const written = chart.session_total_usd > 0
+    ? Math.round(100 * (chart.written_total_usd || 0) / chart.session_total_usd) : 0;
+  // Writes are stated separately rather than folded into the replay figure. Both
+  // are the same conversation being paid for again, but one is storing it and
+  // one is reading it back, and they behave differently: writes are a few large
+  // spikes, reads are every single turn.
+  const writeNote = written >= 1
+    ? ` A further <strong>${written}%</strong> went on writing it to cache.` : '';
+  return `<p class="feed-chart-note"><span class="swatch-blue"></span>New context
+    <span class="swatch-cyan"></span>Written to cache
+    <span class="swatch-amber"></span>Read back —
+    <span class="feed-chart-sentence"><strong>${share}%</strong> of what this session cost across ${chart.turns} turns
+    went on re-sent history.${writeNote} ${chart.session_turns > chart.turns
+      ? `Showing the last ${chart.turns} of this session's ${chart.session_turns} turns.` : ''}
+    <span data-clip-note></span></span></p>`;
+}
+/* Clipping is decided while drawing, so the note is filled in afterwards rather
+   than guessed at caption time. */
+function annotateClipping(node) {
+  if (!node) return;
+  const note = node.parentElement && node.parentElement.querySelector('[data-clip-note]');
+  const clipped = Number(node.dataset.clipped || 0);
+  if (!note) return;
+  note.textContent = clipped
+    ? `${clipped} cache-write turn${clipped === 1 ? ' runs' : 's run'} past the top of the axis.`
+    : '';
+}
+
 function renderInsightFeed(insights) {
   if (!insights || !insights.length) {
     return '<div class="empty">No notable local signals yet. Keep using AI tools and check back after a few sessions.</div>';
@@ -7092,6 +9250,8 @@ function renderInsightFeed(insights) {
       <div class="feed-main">
         <strong>${esc(card.title)}</strong>
         <p>${esc(card.body)}</p>
+        ${card.session_id && card.session_label ? `<p class="feed-session">Charted: <button class="link-inline" data-session="${esc(card.session_id)}" onclick="event.stopPropagation(); selectSession(this.dataset.session)">${esc(card.session_label)}</button></p>` : ''}
+        ${card.chart ? `<div class="feed-chart" data-feed-chart="${esc(card.id)}"></div>${feedChartCaption(card.chart)}` : ''}
       </div>
       ${card.impact_label ? `<span class="feed-impact mono">${esc(card.impact_label)}</span>` : ''}
     </div>`).join('');
@@ -7175,6 +9335,15 @@ function showView(view) {
   document.querySelectorAll('.view').forEach(node => {
     node.hidden = node.id !== `view-${view}`;
   });
+  // Views swap in place while the window keeps its scroll offset, so arriving
+  // from a card partway down one page dropped you the same distance into the
+  // next one -- "Open Watch" sits well down Home and landed 774px past the
+  // Context health section it was pointing at. Every caller here is a
+  // navigation, and a navigation starts at the top of where it went.
+  // Instant rather than smooth: this is a page change, not a scroll, and
+  // animating a thousand pixels of a page the user never asked to see is worse
+  // than simply being there.
+  window.scrollTo(0, 0);
   const activeView = ({ projects: 'sessions', changes: 'sessions', coverage: 'setup' })[view] || view;
   document.querySelectorAll('.nav-tab').forEach(node => {
     node.classList.toggle('active', node.dataset.view === activeView);
@@ -7334,6 +9503,19 @@ async function load(resetDetail = true, forceRefresh = false) {
     survivalRow.hidden = true;
   }
   document.getElementById('preflightDecisions').textContent = totals.preflight_decisions;
+  // Same two-step contract as the runway charts: the tiles' numbers are set
+  // first, then SVG is appended into nodes collected by attribute. Absent on
+  // the fast shell payload, so every tile is reset rather than left showing the
+  // previous window's shape while the full refresh is still running.
+  const tileTrends = data.tile_trends || null;
+  document.querySelectorAll('[data-tile-spark]').forEach(node => {
+    node.innerHTML = '';
+    node.hidden = true;
+    const series = tileTrends && tileTrends.series
+      ? tileTrends.series[node.getAttribute('data-tile-spark')]
+      : null;
+    if (series) drawTileSpark(node, series, tileTrends.days);
+  });
   receiptCache = data.intervention_receipts || [];
   const handoffDecisions = data.handoff_decisions || [];
   document.getElementById('latestIntervention').innerHTML = renderHomeReceiptSummary(receiptCache[0]);
@@ -7343,7 +9525,32 @@ async function load(resetDetail = true, forceRefresh = false) {
   document.getElementById('contextHealth').innerHTML = renderHomeContextHealth(data.context_health || [], data.context_health_status || 'ready');
   document.getElementById('sessionContextHealth').innerHTML = renderContextHealth(data.context_health || [], data.context_health_status || 'ready');
   document.getElementById('optimizeWorkspaceBody').innerHTML = renderOptimizeWorkspace(data.optimize || null);
+  // SVG is built after the markup lands: the cards are assembled as an HTML
+  // string, and appending nodes into elements that do not exist yet silently
+  // draws nothing. Nodes are collected by attribute rather than looked up by a
+  // selector built from the session id, which is scanner-supplied and would need
+  // escaping to be safe inside one. Runs after both context-health renderers so
+  // it finds the placeholders wherever they were emitted.
+  const runwayNodes = {};
+  document.querySelectorAll('[data-runway]').forEach(node => {
+    runwayNodes[node.getAttribute('data-runway')] = node;
+  });
+  const runwayMiniNodes = {};
+  document.querySelectorAll('[data-runway-mini]').forEach(node => {
+    runwayMiniNodes[node.getAttribute('data-runway-mini')] = node;
+  });
+  (data.context_health || []).forEach(row => {
+    drawRunway(runwayNodes[row.session_id], row.chart);
+    drawRunwayMini(runwayMiniNodes[row.session_id], row.chart);
+  });
   document.getElementById('unbanked').innerHTML = renderUnbanked(data.unbanked);
+  if (data.unbanked && data.unbanked.chart) {
+    drawStackedBar(
+      document.querySelector('[data-unbanked-bar]'),
+      data.unbanked.chart.segments,
+      unbankedColours(data.unbanked.chart.segments),
+    );
+  }
   changeRowsCache = data.changes || [];
   document.getElementById('changeRows').innerHTML = renderChangeRows(changeRowsCache);
   document.getElementById('changeTotals').innerHTML = renderChangeTotals(changeRowsCache, data.changes_meta, data.unbanked);
@@ -7360,9 +9567,13 @@ async function load(resetDetail = true, forceRefresh = false) {
     : '<div class="empty">No local AI session detected yet.</div>';
   const recommendation = data.insights[0];
   document.getElementById('todayRecommendation').innerHTML = renderHomeRecommendation(recommendation);
-  document.getElementById('projects').innerHTML = bars(data.projects, "api_value_label", "project");
+  paintComposition('projects', data.projects_composition);
+  paintComposition('tools', data.tools_composition);
+  paintToolModels(data.tool_models);
+  paintModelScatter(data.model_scatter);
+  document.getElementById('projects').innerHTML = bars(data.projects, "tokens_label", "project", "tokens");
   document.getElementById('models').innerHTML = bars(data.models, "api_value_label", "model");
-  document.getElementById('tools').innerHTML = bars(data.tools, "api_value_label", "tool");
+  document.getElementById('tools').innerHTML = bars(data.tools, "tokens_label", "tool", "tokens");
   document.getElementById('insights').innerHTML = data.insights.length
     ? data.insights.map(i => `<div class="insight"><strong>${esc(i.title)}</strong><p>${esc(i.body)}</p></div>`).join('')
     : '<div class="empty">No notable local signals yet.</div>';
@@ -7383,6 +9594,23 @@ async function load(resetDetail = true, forceRefresh = false) {
     : '<tr><td colspan="6"><div class="empty">No local project usage found for this window.</div></td></tr>';
   document.getElementById('insightHeadline').innerHTML = renderInsightHeadline(data.totals);
   document.getElementById('insightFeed').innerHTML = renderInsightFeed(data.insights);
+  // Same two-step as the runway charts: markup first, SVG appended after, and
+  // nodes collected by attribute rather than by a selector built from data.
+  const feedChartNodes = {};
+  document.querySelectorAll('[data-feed-chart]').forEach(node => {
+    feedChartNodes[node.getAttribute('data-feed-chart')] = node;
+  });
+  (data.insights || []).forEach(card => {
+    if (!card.chart) return;
+    // Dispatch on the chart's own kind. The replay chart predates the field and
+    // carries none, so an absent kind still means that one.
+    if (card.chart.kind === 'daily_spend') {
+      drawDailySpend(feedChartNodes[card.id], card.chart);
+      return;
+    }
+    drawReplaySplit(feedChartNodes[card.id], card.chart);
+    annotateClipping(feedChartNodes[card.id]);
+  });
   if (reportLoadedForDays !== days) {
     const todayDigest = document.getElementById('todayDigest');
     if (todayDigest) todayDigest.innerHTML = '<div class="empty">Open Improve for the evidence-backed weekly digest.</div>';
