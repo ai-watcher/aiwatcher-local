@@ -9,6 +9,7 @@ cannot come back.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import unittest
 from pathlib import Path
@@ -360,6 +361,121 @@ class OverheadLineTest(unittest.TestCase):
         self.assertEqual(line["cost_label"], "$0.07")
         self.assertIn("2 second opinions", line["detail"])
         self.assertIn("last 7 days", line["detail"])
+
+
+class ConsentAndCapTest(unittest.TestCase):
+    """Nothing spawns before the user agrees, and nothing spawns past the cap.
+
+    Both are checked before the spawn rather than after it. A product whose
+    anchor story is a runaway agent bill does not get to ship a budget that is
+    only noticed on the way out.
+    """
+
+    def setUp(self):
+        import tempfile
+        from aiwatcher_cli import local_state
+        self._tmp = tempfile.TemporaryDirectory(prefix="aiw-consent-")
+        self._prev = os.environ.get("AIWATCHER_STATE_FILE")
+        os.environ["AIWATCHER_STATE_FILE"] = str(Path(self._tmp.name) / "state.json")
+        self.local_state = local_state
+        self.project = str(Path(self._tmp.name) / "proj")
+        Path(self.project).mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ.pop("AIWATCHER_STATE_FILE", None)
+        else:
+            os.environ["AIWATCHER_STATE_FILE"] = self._prev
+        self._tmp.cleanup()
+
+    def test_consent_is_unset_until_it_is_answered(self):
+        self.assertIsNone(self.local_state.analyst_consent(self.project))
+
+    def test_consent_is_remembered_per_project(self):
+        self.local_state.record_analyst_consent(self.project, allowed=True)
+        self.assertTrue(self.local_state.analyst_consent(self.project)["allowed"])
+        other = self.project + "-other"
+        self.assertIsNone(self.local_state.analyst_consent(other),
+                          "consent for one repository must not authorise another")
+
+    def test_declining_is_remembered_too(self):
+        # Otherwise "no" means "ask me again on the next prompt".
+        self.local_state.record_analyst_consent(self.project, allowed=False)
+        self.assertFalse(self.local_state.analyst_consent(self.project)["allowed"])
+
+    def test_the_cap_counts_this_month_only(self):
+        import datetime as dt
+        self.local_state.record_analyst_run(project_path=self.project, cost_usd=1.25)
+        spend = self.local_state.analyst_month_spend()
+        self.assertEqual(spend["runs"], 1)
+        self.assertAlmostEqual(spend["spent_usd"], 1.25)
+        self.assertFalse(spend["capped"])
+        # A run from a previous month does not eat this month's budget.
+        with self.local_state._locked_state():
+            data = self.local_state._load()
+            data["analyst_runs"].append({
+                "project_path": self.project, "cost_usd": 99.0,
+                "ran_at": (dt.datetime.now(dt.timezone.utc)
+                           - dt.timedelta(days=70)).isoformat()})
+            self.local_state._save(data)
+        self.assertAlmostEqual(self.local_state.analyst_month_spend()["spent_usd"], 1.25)
+
+    def test_the_cap_trips_at_the_ceiling(self):
+        self.local_state.record_analyst_run(
+            project_path=self.project,
+            cost_usd=self.local_state.ANALYST_MONTHLY_CAP_USD)
+        spend = self.local_state.analyst_month_spend()
+        self.assertTrue(spend["capped"])
+        self.assertEqual(spend["remaining_usd"], 0.0)
+
+    def test_neither_gate_ever_reaches_the_spawn(self):
+        # The point of both is that no process starts, so this asserts on the
+        # runner never being called rather than on the returned reason string.
+        from aiwatcher_cli import ui
+        spawned = []
+
+        def runner(*args):
+            spawned.append(args)
+            raise AssertionError("a spawn happened that should not have")
+
+        original = analyst.run
+        try:
+            analyst.run = lambda *a, **k: original(*a, **{**k, "runner": runner})
+            first = ui.build_second_opinion(
+                "delete every migration across the entire database schema and rewrite auth",
+                cwd=self.project)
+            self.assertTrue(first.get("needs_consent"), first)
+
+            self.local_state.record_analyst_consent(self.project, allowed=False)
+            declined = ui.build_second_opinion(
+                "delete every migration across the entire database schema and rewrite auth",
+                cwd=self.project)
+            self.assertTrue(declined.get("declined"), declined)
+
+            self.local_state.record_analyst_consent(self.project, allowed=True)
+            self.local_state.record_analyst_run(
+                project_path=self.project,
+                cost_usd=self.local_state.ANALYST_MONTHLY_CAP_USD)
+            capped = ui.build_second_opinion(
+                "delete every migration across the entire database schema and rewrite auth",
+                cwd=self.project)
+            self.assertTrue(capped.get("capped"), capped)
+        finally:
+            analyst.run = original
+        self.assertEqual(spawned, [], "no analyst may be spawned by any of the three")
+
+
+class PrivacyClaimTest(unittest.TestCase):
+    def test_the_no_llm_calls_claim_is_gone(self):
+        # Spec 7. It stopped being true the moment this feature could spawn one,
+        # and a privacy claim that is only true until a feature ships is worse
+        # than no claim at all.
+        from aiwatcher_cli import ui
+        claims = " ".join(ui.PRIVACY_CLAIMS)
+        self.assertNotIn("No LLM calls", claims)
+        self.assertIn("never sends your data anywhere", claims)
+        self.assertIn("your own agent", claims)
+        self.assertIn("Never file contents", claims)
 
 
 class CacheKeyTest(unittest.TestCase):

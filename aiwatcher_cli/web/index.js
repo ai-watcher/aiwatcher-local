@@ -276,9 +276,25 @@ function renderDerivedZone(data) {
 // see that this was extracted rather than composed -- and an empty field is
 // omitted rather than rendered as a heading with nothing under it.
 function renderSecondOpinion(second) {
+  if (second && second.needs_consent) {
+    // Spec 7: asked once per project, with the cost in the question. Nothing
+    // has been spawned at this point and nothing will be until this is answered.
+    return derivedZoneShell('unknown', 'your call',
+      `<p class="zone-empty">${esc(second.reason)}</p>
+       <div class="copy-row">
+         <button class="btn-primary" data-project="${esc(second.project_path || '')}"
+           onclick="answerSecondOpinionConsent(this.dataset.project, true)">Ask my agent (${esc(second.estimate_label || 'about $0.04')})</button>
+         <button class="btn-quiet" data-project="${esc(second.project_path || '')}"
+           onclick="answerSecondOpinionConsent(this.dataset.project, false)">Not for this project</button>
+       </div>`);
+  }
   if (!second || !second.available || !second.analysis) {
+    const budget = second && second.budget;
+    const note = second && second.capped && budget
+      ? `<p class="second-opinion-cost mono">${esc(moneyLabel(budget.spent_usd))} of ${esc(moneyLabel(budget.cap_usd))} used this month · ${esc(budget.runs)} run(s)</p>`
+      : '';
     return derivedZoneShell('unknown', 'unavailable',
-      `<p class="zone-empty">${esc((second && second.reason) || 'Second opinion unavailable.')}</p>`);
+      `<p class="zone-empty">${esc((second && second.reason) || 'Second opinion unavailable.')}</p>${note}`);
   }
   const a = second.analysis;
   const list = (items) => `<ul class="prompt-list">${items.map(item => `<li>${esc(item)}</li>`).join('')}</ul>`;
@@ -310,6 +326,10 @@ function renderSecondOpinion(second) {
     parts.push(`<p class="receipt-note">${esc(a.dropped_paths)} path(s) the analyst named do not exist in this repository and were dropped. Confidence lowered a step.</p>`);
   }
   parts.push(secondOpinionCost(second));
+  if (second.budget) {
+    // The counter is visible before the cap bites, not only once it has.
+    parts.push(`<p class="second-opinion-cost mono">${esc(moneyLabel(second.budget.spent_usd))} of ${esc(moneyLabel(second.budget.cap_usd))} used this month · ${esc(second.budget.runs)} run(s)</p>`);
+  }
   // Everything in this zone came from a model, so the dot says "inferred" --
   // never "observed", which is zone B's word for things read off the machine.
   // Low confidence means more than half the prompt's nouns resolved to nothing,
@@ -328,6 +348,27 @@ function secondOpinionCost(second) {
     Number.isFinite(second.cost_usd) ? moneyLabel(second.cost_usd) : '',
   ].filter(Boolean);
   return `<p class="second-opinion-cost mono">${esc(bits.join(' · '))}</p>`;
+}
+// Answering yes spends money, so it is a button the reader pressed, not a
+// consequence of having opened the Plan screen.
+async function answerSecondOpinionConsent(project, allowed) {
+  try {
+    await postJson('/api/second-opinion-consent', { project_path: project, allowed });
+  } catch (error) {
+    showToast('Could not record that choice.', 'error');
+    return;
+  }
+  if (!allowed) {
+    const node = document.getElementById('planDerivedZone');
+    if (node) node.outerHTML = renderSecondOpinion({ reason: 'Second opinion is turned off for this project.' });
+    return;
+  }
+  const node = document.getElementById('planDerivedZone');
+  if (node) node.outerHTML = derivedZoneShell('unknown', 'asking',
+    `<p class="zone-empty">Asking your own agent for a second opinion.</p>
+     <div class="ai-loading-bar" aria-hidden="true"></div>`);
+  loadSecondOpinion(document.getElementById('promptInput').value,
+                    document.getElementById('promptTool').value, project);
 }
 // Spec 4.2 again: if the reader copies the brief before this lands, the copy
 // says so rather than quietly omitting a zone they were told was coming.

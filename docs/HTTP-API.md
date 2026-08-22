@@ -143,7 +143,9 @@ caller's own account, so the server re-checks the local blast-radius gate
 before spawning and will refuse a prompt that does not reach it, whatever the
 request says. Internal, and not a route to build against.
 
-`/api/ask-aiwatcher` answers dashboard-only local questions from
+`/api/second-opinion-consent` records whether one project may pay for second
+opinions. Asked once per project, before the first spawn, with the cost in the
+question. `/api/ask-aiwatcher` answers dashboard-only local questions from
 indexed metadata. `/api/handoff-basic`, `/api/handoff`, and
 `/api/handoff-demo` accept the same dashboard-only Fresh Start options as their
 `GET` forms. `/api/handoff-decision` records which action you took on a Fresh

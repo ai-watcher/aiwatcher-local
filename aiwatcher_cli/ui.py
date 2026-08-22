@@ -48,6 +48,8 @@ from .local_state import (
     PROMPT_MODIFIED_DECISIONS,
     VALID_OUTCOMES,
     active_prompt_gate,
+    analyst_consent,
+    analyst_month_spend,
     companion_skip_active,
     evidence_snapshots_for_sessions,
     get_outcome,
@@ -63,6 +65,8 @@ from .local_state import (
     mark_recent_handoff_receipts_viewed,
     record_companion_skip,
     record_ambient_intervention_action,
+    record_analyst_consent,
+    record_analyst_run,
     record_handoff_decision,
     record_optimize_decision,
     record_evidence_snapshot,
@@ -2457,6 +2461,19 @@ def build_prompt_preflight(prompt: str, *, tool: str = "agent", cwd: str | None 
     }
 
 
+# Measured, not guessed: real runs on the small tier came in at $0.037 and
+# $0.028. Stated as a range so it does not read as a quote.
+PRIVACY_CLAIMS = [
+    "Read-only local scan",
+    "No calls of ours. AIWatcher never sends your data anywhere.",
+    "Second opinion runs your own agent, on your machine, with your key.",
+    "It sees your prompt and your file paths. Never file contents.",
+    "No cloud upload unless you connect Cloud",
+]
+
+ANALYST_RUN_ESTIMATE_LABEL = "about $0.03-0.04 and 30 seconds"
+
+
 def _second_opinion_gate(result: dict[str, object]) -> dict[str, object]:
     """Stage 1's verdict on whether Stage 2 runs. No spawn happens here.
 
@@ -2514,10 +2531,48 @@ def build_second_opinion(prompt: str, *, tool: str = "agent",
             "available": False,
             "reason": "Second opinion needs a workspace path to read the file tree from.",
         }
+    # Spec 5: a hard stop before the spawn, not a warning after it. A product
+    # whose anchor story is a runaway agent bill does not get to ship a budget
+    # that is only checked on the way out.
+    budget = analyst_month_spend()
+    if budget["capped"]:
+        return {
+            "gated": True, "available": False, "capped": True, "budget": budget,
+            "reason": (f"Second opinion paused. Monthly cap reached "
+                       f"({money(budget['spent_usd'])} of {money(budget['cap_usd'])})."),
+        }
+    # Spec 7: asked once per project, with the cost in the question, rather than
+    # a modal on every prompt. Spending someone's money is not something to
+    # infer from them having clicked Plan.
+    consent = analyst_consent(cwd)
+    if consent is None:
+        return {
+            "gated": True, "available": False, "needs_consent": True,
+            "project_path": cwd, "budget": budget,
+            "estimate_label": ANALYST_RUN_ESTIMATE_LABEL,
+            "reason": ("A second opinion runs your own agent, on your machine, with your "
+                       "key. It sees this prompt and your file paths, never file contents. "
+                       f"Typical run: {ANALYST_RUN_ESTIMATE_LABEL}."),
+        }
+    if not consent.get("allowed"):
+        return {
+            "gated": True, "available": False, "declined": True,
+            "reason": "Second opinion is turned off for this project.",
+        }
     paths = analyst.ranked_paths(cwd, prompt_signals.repo_paths(cwd))
     result = analyst.run(text, project_root=cwd, paths=paths)
     result["gated"] = True
     result["tool"] = tool
+    if result.get("available"):
+        # Recorded from what the CLI reported it cost, not from an estimate, so
+        # the counter the cap is enforced against is money that actually moved.
+        try:
+            record_analyst_run(project_path=cwd,
+                               cost_usd=float(result.get("cost_usd") or 0.0),
+                               session_id=result.get("session_id"))
+        except (OSError, ValueError):
+            pass
+    result["budget"] = analyst_month_spend()
     return result
 
 
@@ -4355,12 +4410,12 @@ def build_summary(
         "summary_complete": True,
         "_session_index": _session_index_payload(all_rows),
         "days": days,
-        "privacy": [
-            "Read-only local scan",
-            "No LLM calls",
-            "No source or prompt content in summaries",
-            "No cloud upload unless you connect Cloud",
-        ],
+        # Spec 7. "No LLM calls" stopped being true the moment Second Opinion
+        # could spawn one, and a privacy claim that is only true until a
+        # feature ships is worse than no claim. Written honestly the
+        # replacement is the stronger sentence anyway: the point was never
+        # that no model runs, it was that nothing of yours leaves.
+        "privacy": PRIVACY_CLAIMS,
         "totals": {
             "window_label": "Last 24 hours" if days == 1 else f"Last {days} days",
             "sessions": stats["sessions"],
@@ -4667,12 +4722,12 @@ def _build_summary_shell(
         "summary_complete": False,
         "_session_index": _session_index_payload(all_rows),
         "days": days,
-        "privacy": [
-            "Read-only local scan",
-            "No LLM calls",
-            "No source or prompt content in summaries",
-            "No cloud upload unless you connect Cloud",
-        ],
+        # Spec 7. "No LLM calls" stopped being true the moment Second Opinion
+        # could spawn one, and a privacy claim that is only true until a
+        # feature ships is worse than no claim. Written honestly the
+        # replacement is the stronger sentence anyway: the point was never
+        # that no model runs, it was that nothing of yours leaves.
+        "privacy": PRIVACY_CLAIMS,
         "totals": {
             "window_label": "Last 24 hours" if days == 1 else f"Last {days} days",
             "sessions": stats["sessions"],
@@ -5541,6 +5596,7 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/outcome",
             "/api/preflight",
             "/api/second-opinion",
+            "/api/second-opinion-consent",
             "/api/ask-aiwatcher",
             "/api/handoff-basic",
             "/api/handoff",
@@ -5585,6 +5641,17 @@ class UIHandler(BaseHTTPRequestHandler):
             cwd = str(payload.get("cwd", "")).strip() or None
             response = build_second_opinion(prompt, tool=tool, cwd=cwd)
             self._send(200, json.dumps(response), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/second-opinion-consent":
+            project = str(payload.get("project_path", "")).strip()
+            allowed = bool(payload.get("allowed"))
+            if not project:
+                self._send(400, json.dumps({"error": "project_path is required"}),
+                           "application/json; charset=utf-8")
+                return
+            record_analyst_consent(project, allowed=allowed)
+            self._send(200, json.dumps({"allowed": allowed, "project_path": project}),
+                       "application/json; charset=utf-8")
             return
         if parsed.path == "/api/ask-aiwatcher":
             question = str(payload.get("question", "")).strip()
