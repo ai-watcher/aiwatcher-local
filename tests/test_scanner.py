@@ -167,7 +167,7 @@ class ProjectPathTests(unittest.TestCase):
     def test_tool_storage_path_is_not_treated_as_project(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             storage_root = Path(temp_dir) / ".claude" / "projects"
-            log_project = storage_root / "-Users-chandrakala"
+            log_project = storage_root / "-Users-example"
             log_project.mkdir(parents=True)
             scanner.PROJECT_PATH_CACHE.clear()
             with patch.object(scanner, "CLAUDE_PROJECTS_DIRS", [storage_root]):
@@ -176,7 +176,7 @@ class ProjectPathTests(unittest.TestCase):
 
     def test_claude_task_temp_path_is_not_treated_as_project(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            task_path = Path(temp_dir) / "claude-501" / "-Users-chandrakala" / "session-id" / "tasks"
+            task_path = Path(temp_dir) / "claude-501" / "-Users-example" / "session-id" / "tasks"
             task_path.mkdir(parents=True)
             scanner.PROJECT_PATH_CACHE.clear()
             self.assertIsNone(scanner._normalize_project_path(str(task_path)))

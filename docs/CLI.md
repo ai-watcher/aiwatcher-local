@@ -40,6 +40,7 @@ aiwatcher start [--interval INTERVAL] [--no-ui] [--open-ui]
                 [--ui-port-attempts UI_PORT_ATTEMPTS] [--no-companion]
                 [--no-presence]
                 [--presence-position {bottom-right,bottom-left,top-right,top-left}]
+                [--presence-visibility {always,ai-apps,nudges-only}]
 ```
 
 | Option | Accepts | Default | Description |
@@ -53,6 +54,7 @@ aiwatcher start [--interval INTERVAL] [--no-ui] [--open-ui]
 | `--no-companion` | flag |  | Do not start the Companion |
 | `--no-presence` | flag |  | Start the Companion without the floating presence control |
 | `--presence-position` | `bottom-right`, `bottom-left`, `top-right`, `top-left` | `bottom-right` | Screen corner for the collapsed Companion |
+| `--presence-visibility` | `always`, `ai-apps`, `nudges-only` | `always` | When the Companion is visible: always, only during AI app work, or only for nudges |
 
 ### `aiwatcher setup`
 
@@ -560,6 +562,7 @@ Start the companion in the background
 aiwatcher companion start [--interval INTERVAL] [--presence]
                           [--no-presence]
                           [--presence-position {bottom-right,bottom-left,top-right,top-left}]
+                          [--presence-visibility {always,ai-apps,nudges-only}]
 ```
 
 | Option | Accepts | Default | Description |
@@ -568,6 +571,7 @@ aiwatcher companion start [--interval INTERVAL] [--presence]
 | `--presence` | flag |  | Show the collapsed Companion presence control (default) |
 | `--no-presence` | flag |  | Run background nudges without the floating presence control |
 | `--presence-position` | `bottom-right`, `bottom-left`, `top-right`, `top-left` | `bottom-right` | Screen corner for the collapsed companion |
+| `--presence-visibility` | `always`, `ai-apps`, `nudges-only` | `always` | When the Companion is visible: always, only during AI app work, or only for nudges |
 
 #### `aiwatcher companion status`
 
@@ -617,6 +621,7 @@ Run the companion in the foreground (used by companion start)
 aiwatcher companion run [--interval INTERVAL] [--presence]
                         [--no-presence]
                         [--presence-position {bottom-right,bottom-left,top-right,top-left}]
+                        [--presence-visibility {always,ai-apps,nudges-only}]
 ```
 
 | Option | Accepts | Default | Description |
@@ -625,6 +630,7 @@ aiwatcher companion run [--interval INTERVAL] [--presence]
 | `--presence` | flag |  | Show the collapsed Companion presence control (default) |
 | `--no-presence` | flag |  | Run background nudges without the floating presence control |
 | `--presence-position` | `bottom-right`, `bottom-left`, `top-right`, `top-left` | `bottom-right` | Screen corner for the collapsed companion |
+| `--presence-visibility` | `always`, `ai-apps`, `nudges-only` | `always` | When the Companion is visible: always, only during AI app work, or only for nudges |
 
 ### `aiwatcher statusline`
 

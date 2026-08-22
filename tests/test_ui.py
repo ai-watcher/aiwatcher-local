@@ -101,6 +101,34 @@ class DashboardServeTests(unittest.TestCase):
                 thread.join(timeout=5)
                 server.server_close()
 
+    def test_companion_group_snooze_records_project_cooldowns(self) -> None:
+        server, thread, base = self._serve_one()
+        payload = json.dumps({
+            "state": "control_recommended_group",
+            "projects": ["/repo/app", "/repo/api"],
+        }).encode("utf-8")
+        http_request = request.Request(
+            f"{base}/api/companion-skip",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with patch.object(ui, "record_companion_skip", return_value={}) as record_skip:
+            try:
+                with request.urlopen(http_request, timeout=5) as response:
+                    self.assertEqual(response.status, 200)
+                    body = json.loads(response.read().decode("utf-8"))
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
+        self.assertEqual(body["projects"], 2)
+        keys = [call.kwargs["key"] for call in record_skip.call_args_list]
+        self.assertEqual(keys, [
+            "control_recommended_project:/repo/app",
+            "control_recommended_project:/repo/api",
+        ])
+
         server, thread, base = self._serve_one()
         http_request = request.Request(
             f"{base}/api/handoff-receipts-viewed",
@@ -234,6 +262,11 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("renderHandoffCopied", ui.HTML)
         self.assertIn("Fresh Start ready", ui.HTML)
         self.assertIn("Fresh Start receipt saved", ui.HTML)
+        self.assertIn("Snooze all 48h", ui.HTML)
+        self.assertIn("continueFreshStartProject", ui.HTML)
+        self.assertIn("Inferred intent", ui.HTML)
+        self.assertIn("Context AIWatcher will carry", ui.HTML)
+        self.assertIn("session_short", ui.HTML)
         self.assertNotIn("Copy handoff", ui.HTML)
         self.assertIn("Include prompt excerpt", ui.HTML)
         self.assertIn("Evidence captured", ui.HTML)
@@ -1217,8 +1250,10 @@ class DashboardWindowTests(unittest.TestCase):
             patch.object(ui, "build_summary_cached", return_value={
             "handoff_bubble": {
                 "session_id": "sess-1",
+                "tool": "codex-cli",
                 "severity": "critical",
                 "body": "Context is getting expensive.",
+                "runtime_attachment": {"surface": "cli"},
             },
             "intervention_receipts": [],
             "handoff_decisions": [],
@@ -1226,6 +1261,7 @@ class DashboardWindowTests(unittest.TestCase):
             "watcher": {"running": True},
             }),
             patch.object(ui, "companion_skip_active", return_value=False),
+            patch.object(ui, "foreground_tool", return_value="terminal"),
         ):
             state = ui.build_companion_state()
 
@@ -1241,17 +1277,134 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["skip_session_id"], "sess-1")
         self.assertEqual(state["plan_url"], "/?view=prompt")
 
+    def test_companion_state_does_not_blink_for_fresh_start_when_ai_tool_is_not_foreground(self) -> None:
+        with (
+            patch.object(ui, "build_summary_cached", return_value={
+                "context_health": [{
+                    "session_id": "sess-1",
+                    "project_full": "/repo/app",
+                    "severity": "critical",
+                    "can_handoff": True,
+                }],
+                "handoff_bubble": {
+                    "session_id": "sess-1",
+                    "project_full": "/repo/app",
+                    "tool": "codex-cli",
+                    "severity": "critical",
+                    "body": "Context is getting expensive.",
+                    "runtime_attachment": {"surface": "cli"},
+                },
+                "intervention_receipts": [],
+                "handoff_decisions": [],
+                "insights": [],
+                "watcher": {"running": True},
+            }),
+            patch.object(ui, "companion_skip_active", return_value=False),
+            patch.object(ui, "foreground_tool", return_value="chrome"),
+        ):
+            state = ui.build_companion_state()
+
+        self.assertEqual(state["state"], "watching")
+        self.assertEqual(state["label"], "Watching quietly")
+        self.assertEqual(state["primary_label"], "Console")
+        self.assertIn("Console", state["subtitle"])
+
+    def test_companion_state_groups_multiple_fresh_start_projects(self) -> None:
+        with (
+            patch.object(ui, "build_summary_cached", return_value={
+                "context_health": [
+                    {
+                        "session_id": "sess-1",
+                        "project": "app",
+                        "project_full": "/repo/app",
+                        "tool": "codex-cli",
+                        "severity": "critical",
+                        "can_handoff": True,
+                        "estimated_replayed_context_tokens": 200_000,
+                        "runtime_attachment": {"surface": "cli"},
+                    },
+                    {
+                        "session_id": "sess-2",
+                        "project": "api",
+                        "project_full": "/repo/api",
+                        "tool": "codex-cli",
+                        "severity": "warning",
+                        "can_handoff": True,
+                        "estimated_replayed_context_tokens": 80_000,
+                        "runtime_attachment": {"surface": "cli"},
+                    },
+                ],
+                "handoff_bubble": {
+                    "session_id": "sess-1",
+                    "project_full": "/repo/app",
+                    "tool": "codex-cli",
+                    "severity": "critical",
+                    "body": "Context is getting expensive.",
+                    "runtime_attachment": {"surface": "cli"},
+                },
+                "intervention_receipts": [],
+                "handoff_decisions": [],
+                "insights": [],
+                "watcher": {"running": True},
+            }),
+            patch.object(ui, "companion_skip_active", return_value=False),
+            patch.object(ui, "foreground_tool", return_value="terminal"),
+        ):
+            state = ui.build_companion_state()
+
+        self.assertEqual(state["state"], "control_review")
+        self.assertEqual(state["label"], "Review context")
+        self.assertEqual(state["primary_label"], "Review")
+        self.assertEqual(state["primary_url"], "/?view=sessions#contextHealth")
+        self.assertEqual(state["skip_state"], "control_recommended_group")
+        self.assertEqual(state["fresh_start_project_count"], 2)
+        self.assertIn("/repo/app", state["skip_project"])
+        self.assertIn("/repo/api", state["skip_project"])
+
+    def test_handoff_bubble_skips_project_during_fresh_start_cooldown(self) -> None:
+        rows = [
+            {
+                "session_id": "skipped",
+                "project": "skipped",
+                "project_full": "/repo/skipped",
+                "tool": "codex-cli",
+                "severity": "critical",
+                "can_handoff": True,
+                "estimated_replayed_context_label": "200.0k",
+            },
+            {
+                "session_id": "ready",
+                "project": "ready",
+                "project_full": "/repo/ready",
+                "tool": "codex-cli",
+                "severity": "warning",
+                "can_handoff": True,
+                "estimated_replayed_context_label": "80.0k",
+            },
+        ]
+        with patch.object(
+            ui,
+            "companion_skip_active",
+            side_effect=lambda key: key == "control_recommended_project:/repo/skipped",
+        ):
+            bubble = ui._handoff_bubble(rows)
+
+        self.assertIsNotNone(bubble)
+        self.assertEqual(bubble["session_id"], "ready")
+
     def test_companion_allows_app_level_fresh_start_return(self) -> None:
         with (
             patch.object(ui, "build_summary_cached", return_value={
                 "handoff_bubble": {
                     "session_id": "sess-1",
+                    "tool": "claude-code",
                     "severity": "critical",
                     "body": "Context is getting expensive.",
                     "runtime_attachment": {
                         "available": True,
                         "level": "app",
                         "action_label": "Open Claude",
+                        "surface": "desktop",
                     },
                 },
                 "intervention_receipts": [],
@@ -1260,6 +1413,7 @@ class DashboardWindowTests(unittest.TestCase):
                 "watcher": {"running": True},
             }),
             patch.object(ui, "companion_skip_active", return_value=False),
+            patch.object(ui, "foreground_tool", return_value="claude"),
         ):
             state = ui.build_companion_state()
 
@@ -1362,6 +1516,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["label"], "Prompt Gate")
         self.assertEqual(state["primary_label"], "Review Gate")
         self.assertEqual(state["primary_url"], "http://127.0.0.1:9999/")
+        self.assertEqual(state["continue_label"], "Continue")
+        self.assertEqual(state["continue_action"], "run_original_prompt")
+        self.assertEqual(state["continue_url"], "http://127.0.0.1:9999/")
         mark_seen.assert_called_once_with("gate-1")
 
     def test_companion_state_surfaces_fresh_start_proof_as_passive_status(self) -> None:
@@ -1432,8 +1589,10 @@ class DashboardWindowTests(unittest.TestCase):
             patch.object(ui, "build_summary_cached", return_value={
                 "handoff_bubble": {
                     "session_id": "sess-live",
+                    "tool": "codex-cli",
                     "severity": "critical",
                     "body": "Context is getting expensive.",
+                    "runtime_attachment": {"surface": "cli"},
                 },
                 "intervention_receipts": [],
                 "handoff_decisions": [{
@@ -1445,6 +1604,7 @@ class DashboardWindowTests(unittest.TestCase):
                 "watcher": {"running": True},
             }),
             patch.object(ui, "companion_skip_active", return_value=False),
+            patch.object(ui, "foreground_tool", return_value="terminal"),
         ):
             state = ui.build_companion_state()
 
@@ -1500,7 +1660,7 @@ class DashboardWindowTests(unittest.TestCase):
             state = ui.build_companion_state()
 
         self.assertEqual(state["state"], "watching")
-        self.assertEqual(state["subtitle"], "Fresh Start decision saved")
+        self.assertEqual(state["subtitle"], "Fresh Start snoozed for this project")
 
     def test_companion_state_moves_to_proof_pending_after_fresh_start_copy(self) -> None:
         with (
@@ -1860,6 +2020,26 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(result["plan_action"]["kind"], "prompt_change")
         self.assertEqual(result["plan_action"]["primary_label"], "Copy safer brief")
 
+    def test_prompt_plan_destructive_work_wins_over_ambient_fresh_start(self) -> None:
+        with (
+            patch.object(ui, "build_summary_cached", return_value={
+                "handoff_bubble": {
+                    "session_id": "sess-1",
+                    "body": "Context is getting expensive.",
+                }
+            }),
+            patch("aiwatcher_cli.cli.sessions_since", return_value=[]),
+        ):
+            result = ui.build_prompt_preflight(
+                "AIWatcher Fresh Start brief\n\ndelete the repo",
+                tool="codex",
+                cwd="/repo",
+            )
+
+        self.assertEqual(result["risk"], "high")
+        self.assertEqual(result["plan_action"]["kind"], "prompt_change")
+        self.assertEqual(result["plan_action"]["primary_label"], "Copy safer brief")
+
     def test_prompt_plan_routes_context_pressure_to_fresh_start(self) -> None:
         with (
             patch.object(ui, "build_summary_cached", return_value={
@@ -1995,6 +2175,26 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(len(chart["turn_series"]), ui.CONTEXT_CHART_MAX_TURNS)
         # Keeps the most recent turns, not the oldest — the projection starts here.
         self.assertEqual(chart["turn_series"][-1], 30_000 + 60 * 199)
+
+    def test_prompt_plan_does_not_reopen_fresh_start_for_existing_fresh_start_prompt(self) -> None:
+        with (
+            patch.object(ui, "build_summary_cached", return_value={
+                "handoff_bubble": {
+                    "session_id": "sess-1",
+                    "body": "Context is getting expensive.",
+                }
+            }),
+            patch("aiwatcher_cli.cli.sessions_since", return_value=[]),
+        ):
+            result = ui.build_prompt_preflight(
+                "AIWatcher Fresh Start brief\n\nGoal\n- Continue from local evidence.\n",
+                tool="codex",
+                cwd="/repo",
+            )
+
+        self.assertEqual(result["risk"], "low")
+        self.assertEqual(result["plan_action"]["kind"], "continue")
+        self.assertEqual(result["plan_action"]["primary_label"], "Copy brief")
 
     def test_summary_includes_surface_coverage_and_context_health(self) -> None:
         now = datetime.now(timezone.utc)
@@ -3084,14 +3284,30 @@ class DashboardWindowTests(unittest.TestCase):
             _health("s2", "/repo/app", 150_000, hours=1),
             _health("s3", "/repo/docs", 100_000, tool="claude-code", hours=1),
         ]
-        with patch.object(ui, "analyze_all_sessions", return_value=health_rows):
+        # identity_label and return_label are derived from _workspace_mode, which
+        # answers "can AIWatcher open this workspace" from the host it runs on:
+        # true if the Cursor or VS Code launcher is on PATH, and true on macOS
+        # regardless. Left to the environment, this test asserted "Likely
+        # workspace"/"Workspace only" and so passed on macOS CI and on any
+        # machine with `code` installed, while failing on Linux and Windows.
+        # The workspace answer is pinned so the assertions below are about the
+        # card carrying the attachment's labels, which is what this test is for.
+        from aiwatcher_cli import runtime_attachment
+
+        with patch.object(ui, "analyze_all_sessions", return_value=health_rows),                 patch.object(runtime_attachment, "_workspace_mode",
+                             return_value=("vscode", "Open the project in VS Code.", True)):
             cards = ui._context_health_cards(rows, [])
 
         self.assertEqual(len(cards), 2)
         app_card = next(card for card in cards if card["project"] == "/repo/app")
         self.assertEqual(app_card["session_id"], "s1")
+        self.assertEqual(app_card["session_short"], "s1")
         self.assertEqual(app_card["session_count"], 2)
         self.assertEqual(app_card["critical_sessions"], 2)
+        self.assertIn("highest-pressure source", app_card["context_summary"])
+        self.assertIn("fresh session", app_card["intent_summary"])
+        self.assertIn("Likely workspace", app_card["identity_label"])
+        self.assertIn("Workspace only", app_card["return_label"])
         self.assertIn("2 sessions need attention", app_card["group_note"])
         self.assertEqual(len(app_card["related_sessions"]), 2)
 

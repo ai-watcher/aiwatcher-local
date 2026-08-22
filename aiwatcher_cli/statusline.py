@@ -48,6 +48,7 @@ def _git_head_time(repo: str) -> datetime | None:
             ["git", "-C", repo, "log", "-1", "--format=%ct"],
             check=False, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=3,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
