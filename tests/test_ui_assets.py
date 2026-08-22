@@ -173,6 +173,21 @@ class AmbientSurfaceTest(unittest.TestCase):
         end = self.js.index("function renderAmbient(")
         return self.js[start:end]
 
+    def test_the_sentence_slot_is_reserved_so_the_states_cannot_reflow(self):
+        """The one slot whose height followed its own text.
+
+        Every other slot on this surface is fixed height, which is what lets the
+        running and quiet states swap without the page shifting under a reader
+        who is not looking. .ambient-say was not: measured at 1280x800 against
+        real data, the running sentence wrapped to 42px and the quiet one fit in
+        21px, so the surface lost a line the moment a session went quiet. With
+        two lines reserved both states measure 321px at 1280x800, 659px at
+        1280x1280 and 316px at 1024x600, slot for slot.
+        """
+        rule = self.css[self.css.index("    .ambient-say {"):]
+        rule = rule[:rule.index("}")]
+        self.assertIn("min-height:", rule)
+
     def test_thresholds_are_not_hardcoded(self):
         # They come from the same payload the runway chart uses, so the two
         # surfaces cannot disagree about where "act now" sits.

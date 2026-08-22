@@ -205,6 +205,13 @@
       line-height: 1.5;
       color: var(--muted);
       max-width: 62ch;
+      /* Two lines, reserved, whether or not the sentence needs them. This is
+         the only slot whose height followed its own text: measured at 1280x800
+         the running state's sentence wrapped to 42px and the quiet state's fit
+         in 21px, so the surface moved by a line when a session went quiet under
+         the reader. Everything else here is already fixed-height, which is what
+         lets the two states swap without the page shifting. */
+      min-height: 3em;
     }
     .ambient-say b { color: var(--text); font-weight: var(--fw-med); }
     .ambient-acts { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
