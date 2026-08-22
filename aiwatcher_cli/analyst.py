@@ -83,13 +83,22 @@ class Host:
     # Whether the CLI validates the response against a schema itself. Codex
     # does, via --output-schema, which is why its answers never arrive fenced.
     enforces_schema: bool
+    # Whether we can *enforce* that the analyst reads no file contents, rather
+    # than only asking it to in the prompt. Claude Code can: its permission mode
+    # already refuses a Read outside the working directory (verified against a
+    # project source file), and --disallowedTools closes the inside of the
+    # sandbox too. Codex has no equivalent -- -s read-only governs writes, and a
+    # codex analyst asked for a project file really did shell out to read it.
+    # The distinction is not cosmetic: Settings tells the user "Never file
+    # contents", and that has to mean the same thing on both hosts or say so.
+    enforces_no_reads: bool
 
 
 HOSTS: tuple[Host, ...] = (
     Host("claude-code", "Claude Code", "claude", "haiku",
-         reports_cost=True, enforces_schema=False),
+         reports_cost=True, enforces_schema=False, enforces_no_reads=True),
     Host("codex-cli", "Codex", "codex", "gpt-5.4-mini",
-         reports_cost=False, enforces_schema=True),
+         reports_cost=False, enforces_schema=True, enforces_no_reads=False),
 )
 HOSTS_BY_KEY = {host.key: host for host in HOSTS}
 
@@ -108,6 +117,16 @@ DEFAULT_MODEL = HOSTS[0].default_model
 # How many repository paths to show the analyst. Ranked by commit activity by
 # the caller; the cap is what keeps the prompt (and so the cost) bounded.
 MAX_PATHS = 200
+
+# An analyst that describes a task needs no tools at all. Denying them is what
+# turns "you cannot read file contents" from an instruction into a rule: without
+# this the analyst happily read a file sitting in its own sandbox. Reads outside
+# the sandbox are already refused by the permission mode; this closes the inside.
+NO_TOOLS = "Read Glob Grep Bash Edit Write WebFetch WebSearch Task NotebookEdit"
+
+# What it may use once the user turns contents on, and nothing beyond it: enough
+# to read and search the tree it was given, never to run or change anything.
+CONTENTS_TOOLS = "Read Glob Grep"
 
 MAX_CONCURRENT = 1
 
@@ -269,7 +288,7 @@ RESPONSE_SCHEMA: dict[str, Any] = {
 PROMPT_TEMPLATE = """You are a static analyst. You are NOT going to perform the task below. You are describing it.
 
 You will be given a developer's prompt and a list of file paths from their repository.
-You cannot read file contents and must not ask to.
+{reading_rule}
 
 Return ONLY a JSON object matching the schema below. No prose, no code fences, no preamble.
 
@@ -334,9 +353,18 @@ def ranked_paths(cwd: str | None, paths: tuple[str, ...] | list[str],
     return tuple(sorted(ordered, key=lambda path: (-activity.get(path, 0), path)))
 
 
-def build_prompt(prompt: str, paths: tuple[str, ...] | list[str]) -> str:
+# Off: the analyst is told it cannot read, and on Claude Code it also cannot.
+# On: it may open the files it was listed, and only those.
+NO_READING_RULE = "You cannot read file contents and must not ask to."
+READING_RULE = ("You may open the files listed below to check your answer. Read only "
+                "those paths, and never quote file contents back in your response.")
+
+
+def build_prompt(prompt: str, paths: tuple[str, ...] | list[str], *,
+                 read_contents: bool = False) -> str:
     shown = list(paths)[:MAX_PATHS]
     return PROMPT_TEMPLATE.format(
+        reading_rule=READING_RULE if read_contents else NO_READING_RULE,
         schema=json.dumps(RESPONSE_SCHEMA),
         prompt=prompt.strip(),
         shown=len(shown),
@@ -469,6 +497,7 @@ def run(prompt: str, *, project_root: str | os.PathLike[str],
         timeout: float = TIMEOUT_SECONDS,
         detection: dict[str, Any] | None = None,
         tool: str | None = None,
+        read_contents: bool = False,
         runner: Any = None) -> dict[str, Any]:
     """Spawn one analyst and return a validated result, or an unavailable state.
 
@@ -488,7 +517,7 @@ def run(prompt: str, *, project_root: str | os.PathLike[str],
     except OSError as exc:
         return {"available": False, "reason": f"Second opinion unavailable. {exc}"}
 
-    text = build_prompt(prompt, paths)
+    text = build_prompt(prompt, paths, read_contents=read_contents)
     env = dict(os.environ)
     # Not read by either CLI -- it is a marker for anyone reading a process
     # list, and a second signal beside the sandbox path. The path is what the
@@ -497,7 +526,9 @@ def run(prompt: str, *, project_root: str | os.PathLike[str],
 
     executable = found.get("executable") or host.executable
     try:
-        argv = _prepare(host, executable, chosen_model, sandbox)
+        argv = _prepare(host, executable, chosen_model, sandbox,
+                        read_contents=read_contents,
+                        project_root=Path(project_root).expanduser())
     except OSError as exc:
         return {"available": False, "reason": f"Second opinion unavailable. {exc}"}
 
@@ -535,11 +566,17 @@ def run(prompt: str, *, project_root: str | os.PathLike[str],
         "model": chosen_model,
         "cli": host.key,
         "cli_label": host.label,
+        "contents": read_contents,
+        # Whether "no file contents" was enforced on this run or only asked for.
+        # Codex has no way to deny its own shell, so on that host the claim is a
+        # request the analyst honoured, which is a weaker thing and says so.
+        "contents_enforced": host.enforces_no_reads and not read_contents,
         "duration_ms": elapsed_ms,
     }
 
 
-def _prepare(host: Host, executable: str, model: str, sandbox: Path) -> list[str]:
+def _prepare(host: Host, executable: str, model: str, sandbox: Path,
+             *, read_contents: bool = False, project_root: Path | None = None) -> list[str]:
     """The argv for this host, plus any file it needs written first."""
     if host.key == "codex-cli":
         schema_file = sandbox / "schema.json"
@@ -563,7 +600,21 @@ def _prepare(host: Host, executable: str, model: str, sandbox: Path) -> list[str
             # the entire prompt in the process list.
             "-",
         ]
-    return [executable, "-p", "--output-format", "json", "--model", model]
+    argv = [executable, "-p", "--output-format", "json", "--model", model]
+    if read_contents:
+        # Reading is the point now, but only reading, and only the tree it was
+        # given: --add-dir is what lets it past its sandbox at all, and the
+        # allowlist is what keeps "read the source" from becoming "run things".
+        argv += ["--allowedTools", CONTENTS_TOOLS]
+        if project_root is not None:
+            argv += ["--add-dir", str(project_root)]
+    else:
+        # Without this the analyst can still read anything sitting in its own
+        # sandbox -- verified: it read a file there and quoted it back. The
+        # permission mode already refuses paths outside; this closes the inside,
+        # so "never file contents" is a rule and not a request.
+        argv += ["--disallowedTools", NO_TOOLS]
+    return argv
 
 
 # Codex prints its session id to stderr and nowhere else. Worth keeping: it is

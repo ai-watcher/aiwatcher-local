@@ -177,6 +177,10 @@ def _empty_state() -> dict[str, Any]:
         # consent is per project and the spend ledger is what the monthly cap
         # is enforced against.
         "analyst_consent": {},
+        # Whether the analyst may open files in this project. Off unless asked
+        # for, and separate from consent: agreeing to pay for a second opinion
+        # is not agreeing to let it read your source.
+        "analyst_contents": {},
         "analyst_runs": [],
         "ui_server": None,
         "watcher_heartbeat": None,
@@ -1459,6 +1463,43 @@ def record_analyst_consent(project_path: str, *, allowed: bool) -> dict[str, Any
             consent = {}
         consent[key] = record
         data["analyst_consent"] = consent
+        _save(data)
+    return record
+
+
+def analyst_contents_allowed(project_path: str) -> bool:
+    """Whether this project lets the analyst read file contents. Off by default.
+
+    Deliberately not folded into consent. Consent answers "may this spend my
+    money"; this answers "may it open my files". A user can reasonably say yes
+    to the first and no to the second, and the Settings copy promises exactly
+    that -- "It sees your prompt and your file paths. Never file contents,
+    unless you turn that on."
+    """
+    key = (project_path or "").strip()
+    if not key:
+        return False
+    try:
+        with _locked_state():
+            allowed = _load().get("analyst_contents") or {}
+    except OSError:
+        return False
+    record = allowed.get(key)
+    return bool(record.get("allowed")) if isinstance(record, dict) else False
+
+
+def record_analyst_contents(project_path: str, *, allowed: bool) -> dict[str, Any]:
+    key = (project_path or "").strip()
+    if not key:
+        raise ValueError("project_path is required")
+    record = {"allowed": bool(allowed), "decided_at": datetime.now(timezone.utc).isoformat()}
+    with _locked_state():
+        data = _load()
+        contents = data.get("analyst_contents")
+        if not isinstance(contents, dict):
+            contents = {}
+        contents[key] = record
+        data["analyst_contents"] = contents
         _save(data)
     return record
 

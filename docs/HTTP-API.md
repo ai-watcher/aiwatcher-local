@@ -148,7 +148,10 @@ request says. Internal, and not a route to build against.
 
 `/api/second-opinion-consent` records whether one project may pay for second
 opinions. Asked once per project, before the first spawn, with the cost in the
-question. `/api/ask-aiwatcher` answers dashboard-only local questions from
+question. `/api/second-opinion-contents` records whether the analyst may open
+files in that project rather than only being given their paths. Off unless set,
+and deliberately separate from consent: agreeing to pay for a second opinion is
+not agreeing to let it read your source. `/api/ask-aiwatcher` answers dashboard-only local questions from
 indexed metadata. `/api/handoff-basic`, `/api/handoff`, and
 `/api/handoff-demo` accept the same dashboard-only Fresh Start options as their
 `GET` forms. `/api/handoff-decision` records which action you took on a Fresh

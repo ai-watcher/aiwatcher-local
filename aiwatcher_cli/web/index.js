@@ -360,6 +360,12 @@ function secondOpinionCost(second) {
     second.model ? String(second.model) : '',
     Number.isFinite(second.tokens) && second.tokens ? `${formatCount(second.tokens)} tokens` : '',
     priced ? moneyLabel(second.cost_usd) : 'cost not reported by this CLI',
+    // Spec 7. "contents: on" is the state the user opted into. With it off the
+    // chip says which kind of off: a rule this CLI enforced, or an instruction
+    // it was given and followed. Codex cannot deny its own shell, so on that
+    // host it is the weaker one and does not get to claim the stronger.
+    second.contents ? 'contents: on'
+      : (second.contents_enforced ? 'contents: blocked' : 'contents: not requested'),
   ].filter(Boolean);
   return `<p class="second-opinion-cost mono">${esc(bits.join(' · '))}</p>`;
 }

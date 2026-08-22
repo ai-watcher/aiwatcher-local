@@ -49,6 +49,7 @@ from .local_state import (
     VALID_OUTCOMES,
     active_prompt_gate,
     analyst_consent,
+    analyst_contents_allowed,
     analyst_month_spend,
     companion_skip_active,
     evidence_snapshots_for_sessions,
@@ -66,6 +67,7 @@ from .local_state import (
     record_companion_skip,
     record_ambient_intervention_action,
     record_analyst_consent,
+    record_analyst_contents,
     record_analyst_run,
     record_handoff_decision,
     record_optimize_decision,
@@ -2610,7 +2612,8 @@ PRIVACY_CLAIMS = [
     "Read-only local scan",
     "No calls of ours. AIWatcher never sends your data anywhere.",
     "Second opinion runs your own agent, on your machine, with your key.",
-    "It sees your prompt and your file paths. Never file contents.",
+    "It sees your prompt and your file paths. Never file contents, unless you turn "
+    "that on for a project.",
     "No cloud upload unless you connect Cloud",
 ]
 
@@ -2724,7 +2727,8 @@ def build_second_opinion(prompt: str, *, tool: str = "agent",
             "reason": "Second opinion is turned off for this project.",
         }
     paths = analyst.ranked_paths(cwd, prompt_signals.repo_paths(cwd))
-    result = analyst.run(text, project_root=cwd, paths=paths, tool=tool)
+    result = analyst.run(text, project_root=cwd, paths=paths, tool=tool,
+                         read_contents=analyst_contents_allowed(cwd))
     result["gated"] = True
     result["tool"] = tool
     if result.get("available"):
@@ -5868,6 +5872,7 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/preflight",
             "/api/second-opinion",
             "/api/second-opinion-consent",
+            "/api/second-opinion-contents",
             "/api/ask-aiwatcher",
             "/api/handoff-basic",
             "/api/handoff",
@@ -5921,6 +5926,17 @@ class UIHandler(BaseHTTPRequestHandler):
                            "application/json; charset=utf-8")
                 return
             record_analyst_consent(project, allowed=allowed)
+            self._send(200, json.dumps({"allowed": allowed, "project_path": project}),
+                       "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/second-opinion-contents":
+            project = str(payload.get("project_path", "")).strip()
+            allowed = bool(payload.get("allowed"))
+            if not project:
+                self._send(400, json.dumps({"error": "project_path is required"}),
+                           "application/json; charset=utf-8")
+                return
+            record_analyst_contents(project, allowed=allowed)
             self._send(200, json.dumps({"allowed": allowed, "project_path": project}),
                        "application/json; charset=utf-8")
             return

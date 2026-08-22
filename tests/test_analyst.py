@@ -629,6 +629,102 @@ class ConsentAndCapTest(unittest.TestCase):
         self.assertEqual(spawned, [], "no analyst may be spawned by any of the three")
 
 
+class FileContentsOptInTest(unittest.TestCase):
+    """Spec 7's file-contents switch, and the rule it turns on and off.
+
+    Verified against the real CLI both ways: with contents off the analyst
+    replied BLOCKED and read nothing; with contents on it read a project source
+    file and quoted its first line back. A switch that cannot be shown to do
+    both is decoration.
+    """
+
+    def setUp(self):
+        import tempfile
+        self.sandbox = Path(tempfile.mkdtemp(prefix="aiw-contents-"))
+        self.host = analyst.HOSTS_BY_KEY["claude-code"]
+
+    def _argv(self, contents):
+        return analyst._prepare(self.host, "claude", "haiku", self.sandbox,
+                                read_contents=contents, project_root=Path("/repo"))
+
+    def test_off_denies_the_tools_rather_than_asking_nicely(self):
+        # The permission mode already refuses paths outside the sandbox, but
+        # without this the analyst could still read a file sitting inside it --
+        # observed doing exactly that, quoting a planted marker back.
+        argv = self._argv(False)
+        self.assertIn("--disallowedTools", argv)
+        self.assertIn("Read", argv[argv.index("--disallowedTools") + 1])
+        self.assertNotIn("--allowedTools", argv)
+        self.assertNotIn("--add-dir", argv)
+
+    def test_on_opens_the_tree_it_was_given_and_nothing_else(self):
+        argv = self._argv(True)
+        allowed = argv[argv.index("--allowedTools") + 1]
+        self.assertEqual(allowed, analyst.CONTENTS_TOOLS)
+        for forbidden in ("Bash", "Edit", "Write", "WebFetch"):
+            with self.subTest(tool=forbidden):
+                self.assertNotIn(forbidden, allowed)
+        # --add-dir is what lets it past the sandbox at all.
+        self.assertEqual(argv[argv.index("--add-dir") + 1], str(Path("/repo")))
+        self.assertNotIn("--disallowedTools", argv)
+
+    def test_the_prompt_says_which_rule_is_in_force(self):
+        off = analyst.build_prompt("x", ("a.py",))
+        on = analyst.build_prompt("x", ("a.py",), read_contents=True)
+        self.assertIn("cannot read file contents", off)
+        self.assertNotIn("cannot read file contents", on)
+        self.assertIn("Read only", on)
+
+    def test_a_host_that_cannot_enforce_does_not_claim_it_did(self):
+        # Codex has no way to deny its own shell: -s read-only governs writes,
+        # and a codex analyst asked for a project file really did shell out to
+        # read it. Off means "we asked" there, not "we stopped it", and the
+        # result says so rather than borrowing the stronger word.
+        def runner(argv, text, cwd, env, timeout):
+            (Path(cwd) / "last.json").write_text(json.dumps(_valid()), encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        result = analyst.run("x", project_root=self.sandbox, paths=PATHS,
+                             detection={"available": True, "cli": "codex-cli",
+                                        "executable": "codex"},
+                             read_contents=False, runner=runner)
+        self.assertFalse(result["contents"])
+        self.assertFalse(result["contents_enforced"],
+                         "codex cannot enforce this, so it must not claim to")
+
+    def test_claude_code_off_is_enforced(self):
+        def runner(argv, text, cwd, env, timeout):
+            return subprocess.CompletedProcess(argv, 0, json.dumps(
+                {"result": json.dumps(_valid())}), "")
+
+        result = analyst.run("x", project_root=self.sandbox, paths=PATHS,
+                             detection={"available": True, "cli": "claude-code",
+                                        "executable": "claude"},
+                             read_contents=False, runner=runner)
+        self.assertTrue(result["contents_enforced"])
+
+    def test_contents_are_off_until_a_project_asks(self):
+        import tempfile
+        from aiwatcher_cli import local_state
+        prev = os.environ.get("AIWATCHER_STATE_FILE")
+        tmp = tempfile.TemporaryDirectory(prefix="aiw-contents-state-")
+        os.environ["AIWATCHER_STATE_FILE"] = str(Path(tmp.name) / "state.json")
+        try:
+            self.assertFalse(local_state.analyst_contents_allowed("/repo"))
+            local_state.record_analyst_contents("/repo", allowed=True)
+            self.assertTrue(local_state.analyst_contents_allowed("/repo"))
+            # Per project: one repository's answer is not another's.
+            self.assertFalse(local_state.analyst_contents_allowed("/other"))
+            # And paying for a second opinion is not agreeing to be read.
+            self.assertIsNone(local_state.analyst_consent("/repo"))
+        finally:
+            if prev is None:
+                os.environ.pop("AIWATCHER_STATE_FILE", None)
+            else:
+                os.environ["AIWATCHER_STATE_FILE"] = prev
+            tmp.cleanup()
+
+
 class PrivacyClaimTest(unittest.TestCase):
     def test_the_no_llm_calls_claim_is_gone(self):
         # Spec 7. It stopped being true the moment this feature could spawn one,
@@ -639,7 +735,11 @@ class PrivacyClaimTest(unittest.TestCase):
         self.assertNotIn("No LLM calls", claims)
         self.assertIn("never sends your data anywhere", claims)
         self.assertIn("your own agent", claims)
+        # The contents claim has to carry its own exception now that there is
+        # one. "Never file contents" full stop stopped being true the moment a
+        # switch could turn it on.
         self.assertIn("Never file contents", claims)
+        self.assertIn("unless you turn that on", claims)
 
 
 class CacheKeyTest(unittest.TestCase):
