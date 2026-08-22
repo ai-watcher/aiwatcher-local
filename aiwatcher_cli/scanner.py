@@ -454,6 +454,7 @@ def _git_root(path: str) -> str | None:
             capture_output=True,
             text=True,
             timeout=1,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except Exception:
         return None

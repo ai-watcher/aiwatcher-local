@@ -928,6 +928,7 @@ async function recordHandoffDecision(bubble, decision) {
         decision,
         reason: bubble.reason || bubble.body || '',
         expected_saved_context_tokens: bubble.expected_saved_context_tokens || null,
+        source_project_path: bubble.project_full || '',
         action_channel: 'dashboard',
       })
     });
@@ -1687,7 +1688,7 @@ function healthFacts(row) {
 function healthLeadCard(row) {
   const verdict = runwayVerdict(row.chart);
   const room = headroomLabel(row.chart);
-  return `<div class="health-card lead">
+  return `<div class="health-card lead" data-project-full="${esc(row.project_full || '')}">
     <div class="health-head">
       <div><h3 title="${esc(row.project_full || row.project)}">${esc(healthProjectName(row))}</h3><p>${row.session_count > 1
         ? `${esc(row.session_count)} sessions here \u00b7 charted below: <button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${row.charted_because_live
@@ -1697,14 +1698,27 @@ function healthLeadCard(row) {
       <span class="health-severity ${esc(row.severity)}">${esc(row.severity)}</span>
     </div>
     ${verdict ? `<p class="health-verdict"><strong>${esc(verdict.headline)}</strong> \u2014 ${esc(verdict.detail)}</p>` : ''}
+    <div class="identity-strip">
+      <strong>${esc(row.identity_label || 'Historical log only')}</strong>
+      <span>${esc(row.tool || 'unknown tool')} · ${esc(row.session_short || row.session_id || 'unknown session')}</span>
+      <span>${esc(row.return_label || 'Exact chat unavailable')}</span>
+    </div>
+    <div class="health-evidence">
+      <div class="label">Inferred intent</div>
+      <p>${esc(row.intent_summary || row.action.reason || 'Review this source before carrying context forward.')}</p>
+      <div class="label">Context AIWatcher will carry</div>
+      <p>${esc(row.context_summary || row.recommendation || 'Fresh Start will use local session identity and workspace evidence.')}</p>
+    </div>
     <div class="health-hero"><b>${esc(room.big)}</b><u>${esc(room.sub)}</u>
       <span class="health-now">${esc(row.latest_turn_tokens)} per turn</span></div>
     <div class="meter-host" data-meter="${esc(row.session_id)}"></div>
     <div class="trend-host" data-trend="${esc(row.session_id)}"></div>
     <p class="health-facts">${esc(healthFacts(row))}</p>
     <div class="health-actions">
-      <button class="btn-primary" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.action.label)}</button>
-      ${row.can_handoff ? `<button class="btn-quiet" data-session="${esc(row.session_id)}" onclick="openHandoff(this.dataset.session)">${esc(row.action.secondary_label)}</button>` : ''}
+      ${row.can_handoff ? `<button class="btn-primary" data-session="${esc(row.session_id)}" onclick="openHandoff(this.dataset.session)">Fresh Start</button>` : `<button class="btn-primary" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.action.label)}</button>`}
+      <button class="btn-quiet" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">Inspect</button>
+      ${row.can_handoff ? `<button class="btn-quiet" data-session="${esc(row.session_id)}" data-project="${esc(row.project_full || '')}" onclick="continueFreshStartProject(this.dataset.session, this.dataset.project)">Continue 48h</button>` : ''}
+      ${row.can_handoff ? `<button class="btn-quiet" data-project="${esc(row.project_full || '')}" onclick="snoozeFreshStartProject(this.dataset.project, this)">Snooze 48h</button>` : ''}
       <button class="btn-quiet" data-compact="${esc(row.compact_prompt || '/compact')}" onclick="copyText(this.dataset.compact, 'Compact prompt copied')">Copy compact prompt</button>
     </div>
     <p class="receipt-note">${esc(row.action.reason)}${row.session_count > 1
@@ -1715,7 +1729,7 @@ function healthLeadCard(row) {
 
 function healthQuietRow(row) {
   const room = headroomLabel(row.chart);
-  return `<button class="health-row" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">
+  return `<button class="health-row" data-session="${esc(row.session_id)}" data-project-full="${esc(row.project_full || '')}" onclick="selectSession(this.dataset.session)">
     <span class="health-row-name" title="${esc(row.project_full || row.project)}">${esc(healthProjectName(row))}</span>
     <span class="health-row-trend" data-trend="${esc(row.session_id)}"></span>
     <span class="health-row-now">${esc(row.latest_turn_tokens)}</span>
@@ -1735,7 +1749,16 @@ function renderContextHealth(rows) {
     return bc - ac || bv - av;
   });
   const [lead, ...rest] = ranked;
-  return `<div class="health-stack">${healthLeadCard(lead)}${rest.map(healthQuietRow).join('')}</div>`;
+  const snoozable = ranked.filter(row => row.can_handoff && (row.severity === 'critical' || row.severity === 'warning'));
+  // Only when there is more than one to act on. The pre-redesign header also
+  // carried a heading counting the projects and a "Review list" button; this
+  // layout already shows the count and is itself the review list, so only the
+  // control with no other home survives. Label kept verbatim from #83 -- it is
+  // their copy, and its test is what proves the capability came across.
+  const batch = snoozable.length > 1
+    ? `<div class="health-batch"><button class="btn-quiet" onclick="snoozeVisibleFreshStartProjects(this)">Snooze all 48h</button></div>`
+    : '';
+  return `<div class="health-stack">${batch}${healthLeadCard(lead)}${rest.map(healthQuietRow).join('')}</div>`;
 }
 function renderCoverage(rows) {
   if (!rows.length) return '<div class="empty">Coverage could not be determined on this machine.</div>';
@@ -2644,6 +2667,54 @@ async function quietFreshStartReminders() {
   } catch (error) {
     showToast('Could not quiet Fresh Start reminders yet.', 'error');
   }
+}
+async function snoozeFreshStartProjects(projects, message) {
+  const clean = (projects || []).filter(Boolean);
+  if (!clean.length) {
+    showToast('No reliable project path found to snooze.', 'error');
+    return false;
+  }
+  try {
+    const response = await fetch('/api/companion-skip', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state: 'control_recommended_group', projects: clean }),
+    });
+    if (!response.ok) throw new Error('snooze failed');
+    showToast(message || `Fresh Start snoozed for ${clean.length} project${clean.length === 1 ? '' : 's'} for 48h.`);
+    await load(true, true);
+    return true;
+  } catch (error) {
+    showToast('Could not snooze Fresh Start projects yet.', 'error');
+    return false;
+  }
+}
+async function snoozeFreshStartProject(project, button) {
+  const ok = await snoozeFreshStartProjects([project], 'Fresh Start snoozed for this project for 48h.');
+  if (ok && button) {
+    const card = button.closest('.health-card');
+    if (card) card.classList.add('muted-card');
+  }
+}
+async function snoozeVisibleFreshStartProjects(button) {
+  // Any element carrying a project, not only .health-card. This screen shows
+  // one lead card and the rest as compact rows, so matching on the card class
+  // would have snoozed a single project while the button said it snoozed all.
+  const cards = Array.from(document.querySelectorAll('#sessionContextHealth [data-project-full]'));
+  const projects = [...new Set(cards.map(card => card.dataset.projectFull || '').filter(Boolean))];
+  const ok = await snoozeFreshStartProjects(projects, `Fresh Start snoozed for ${projects.length} project${projects.length === 1 ? '' : 's'} for 48h.`);
+  if (ok && button) button.disabled = true;
+}
+async function continueFreshStartProject(sessionId, project) {
+  await recordHandoffDecision({
+    session_id: sessionId,
+    project_full: project,
+    reason: 'User chose to continue this project from the context review list.',
+    body: 'User chose to continue this project from the context review list.',
+    expected_saved_context_tokens: null,
+  }, 'continue_here');
+  showToast('Fresh Start snoozed for this project for 48h.');
+  await load(true, true);
 }
 function showView(view) {
   document.querySelectorAll('.view').forEach(node => {

@@ -46,6 +46,7 @@ def companion_command(
     *,
     presence: bool = True,
     presence_position: str = "bottom-right",
+    presence_visibility: str = "always",
 ) -> list[str]:
     command = [
         sys.executable,
@@ -57,7 +58,15 @@ def companion_command(
         str(max(15, int(interval_seconds))),
     ]
     if presence:
-        command.extend(["--presence", "--presence-position", presence_position])
+        command.extend(
+            [
+                "--presence",
+                "--presence-position",
+                presence_position,
+                "--presence-visibility",
+                presence_visibility,
+            ]
+        )
     return command
 
 
@@ -79,6 +88,7 @@ def install_login_autostart(
     *,
     presence: bool = True,
     presence_position: str = "bottom-right",
+    presence_visibility: str = "always",
     tray: bool = False,
 ) -> dict[str, Any]:
     """Install best-effort login autostart for the local Companion.
@@ -90,6 +100,7 @@ def install_login_autostart(
         interval_seconds,
         presence=presence,
         presence_position=presence_position,
+        presence_visibility=presence_visibility,
     )
     target = companion_autostart_path()
     try:
@@ -190,6 +201,7 @@ def _terminate_pid(pid: int, *, force: bool = False) -> bool:
                 capture_output=True,
                 timeout=5,
                 check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             return True
         except (OSError, subprocess.TimeoutExpired):
@@ -255,6 +267,7 @@ def start_companion(
     *,
     presence: bool = True,
     presence_position: str = "bottom-right",
+    presence_visibility: str = "always",
 ) -> dict[str, Any]:
     current = get_watcher_status(max_age_seconds=max(45, interval_seconds * 2))
     if current.get("running"):
@@ -277,6 +290,7 @@ def start_companion(
         interval_seconds,
         presence=presence,
         presence_position=presence_position,
+        presence_visibility=presence_visibility,
     )
     kwargs: dict[str, Any] = {
         "stdin": subprocess.DEVNULL,

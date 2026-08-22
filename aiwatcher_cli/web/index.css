@@ -626,6 +626,8 @@
     .link-inline { background: none; border: 0; padding: 0; font: inherit; color: var(--blue);
       text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
     .link-inline:hover { color: var(--text); }
+    .muted-card { opacity: .58; }
+    .health-batch { display: flex; justify-content: flex-end; margin-bottom: 10px; }
     .coverage-head, .health-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
     .coverage-status, .health-severity { border-radius: 999px; border: 1px solid var(--line); padding: 4px 8px; font-size: 11px; font-weight: 800; white-space: nowrap; }
     .coverage-status.automatic, .health-severity.healthy { color: #bff5df; border-color: rgba(53,211,153,.45); background: var(--green-soft); }
@@ -634,6 +636,11 @@
     .coverage-status.companion { color: #dceaff; border-color: rgba(112,167,255,.45); background: var(--blue-soft); }
     .coverage-status.unsupported, .coverage-status.not_detected, .health-severity.critical { color: #ffc4ce; border-color: rgba(242,125,143,.45); background: var(--red-soft); }
     .coverage-detail, .health-detail { display: grid; gap: 6px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .identity-strip { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
+    .identity-strip strong, .identity-strip span { border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; background: rgba(7,12,19,.56); }
+    .identity-strip strong { color: #dceaff; border-color: rgba(112,167,255,.36); }
+    .health-evidence { border: 1px solid rgba(148,163,184,.16); border-radius: 8px; background: rgba(6,11,18,.48); padding: 10px; }
+    .health-evidence p { margin: 3px 0 0; color: var(--muted); }
     .health-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
     .handoff-bubble {
       border-color: rgba(112,167,255,.5);
