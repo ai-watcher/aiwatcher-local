@@ -938,11 +938,11 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     }
 
     func hasPrimaryAction() -> Bool {
-        return ["prompt_gate", "control_recommended", "optimize_available", "clipboard_confirm"].contains(stateName)
+        return ["prompt_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm"].contains(stateName)
     }
 
     func needsAttentionState() -> Bool {
-        return ["prompt_gate", "control_recommended", "optimize_available", "clipboard_confirm"].contains(stateName)
+        return ["prompt_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm"].contains(stateName)
     }
 
     func shouldShowWindow() -> Bool {
@@ -2039,7 +2039,7 @@ def run_native_presence(
             pass
 
     def update_attention_style() -> None:
-        needs_attention = state_var.get() in {"prompt_gate", "control_recommended", "optimize_available", "clipboard_confirm"}
+        needs_attention = state_var.get() in {"prompt_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm"}
         attention_bg = "#ed6a24" if pulse_var.get() else "#b84816"
         quiet_collapsed_bg = "#eef8fb"
         shell_bg = attention_bg if collapsed.get() and needs_attention else (quiet_collapsed_bg if collapsed.get() else "#090d14")

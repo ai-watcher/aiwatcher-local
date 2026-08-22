@@ -48,6 +48,7 @@ from .local_state import (
     ambient_intervention_delivery_allowed,
     active_prompt_gate_seen,
     clear_watcher_heartbeat,
+    companion_skip_active,
     command_hash,
     consume_brief_token,
     evidence_snapshots_for_sessions,
@@ -786,13 +787,28 @@ def _brief_working_directory(cwd: str | None) -> str | None:
 
 
 _HANDOFF_SECTION_HEADERS = {
+    "Goal",
+    "How to continue",
     "Objective",
     "Project",
+    "Workspace",
+    "Source of truth to load first",
+    "Do not lose these constraints",
+    "Acceptance checks",
+    "What appears done",
+    "What remains uncertain",
+    "Recommended next checkpoint",
     "Previous session",
+    "Previous session signals",
     "Why start fresh now",
     "Why hand off now",
+    "Why AIWatcher suggested Fresh Start",
     "Local evidence to inspect",
     "Fresh-session instructions",
+    "Guardrails",
+    "First response required",
+    "Immediate next checkpoint",
+    "Done report",
     "When finished",
 }
 
@@ -824,6 +840,100 @@ def _normalize_handoff_project(lines: Sequence[str]) -> str | None:
         if reliable:
             return reliable
     return None
+
+
+def _is_aiwatcher_fresh_start_prompt(text: str) -> bool:
+    return "AIWatcher fresh-session handoff" in text or "AIWatcher Fresh Start brief" in text
+
+
+_FRESH_START_INTENT_HEADERS = {
+    "Objective",
+    "Goal",
+    "Source of truth to load first",
+    "Do not lose these constraints",
+    "Acceptance checks",
+    "What appears done",
+    "Recommended next checkpoint",
+    "Immediate next checkpoint",
+}
+
+
+_FRESH_START_PROTECTIVE_HEADERS = {
+    "How to continue",
+    "Fresh-session instructions",
+    "Guardrails",
+    "First response required",
+    "Done report",
+    "When finished",
+}
+
+
+def _fresh_start_line_is_protective(line: str) -> bool:
+    lower = line.lower()
+    return any(phrase in lower for phrase in (
+        "do not assume access to the previous chat",
+        "previous chat is intentionally not available",
+        "continue from repository state",
+        "continue from local evidence",
+        "ask one focused clarification",
+        "preserve unrelated",
+        "do not expose secrets",
+        "do not reveal secret",
+        "stop before destructive",
+        "stop before broad refactors",
+        "stop before secret exposure",
+        "stop before unrelated cleanup",
+        "do not replay broad exploration",
+        "state which files or commands",
+        "report changed files",
+        "report verification",
+    ))
+
+
+def _fresh_start_line_is_boilerplate(line: str) -> bool:
+    lower = line.lower()
+    return (
+        not lower
+        or lower == "aiwatcher fresh start brief"
+        or lower == "aiwatcher fresh-session handoff"
+        or lower.startswith("you are starting a fresh ai ")
+        or lower.startswith("target tool:")
+        or lower.startswith("continuation type:")
+        or lower.startswith("- project confidence:")
+        or lower.startswith("- source session:")
+        or lower.startswith("- source tool/model:")
+    )
+
+
+def _fresh_start_intent_text(text: str) -> str:
+    """Return only the intent-bearing parts of an AIWatcher Fresh Start brief.
+
+    Fresh Start briefs intentionally contain safety stop conditions such as
+    "Stop before destructive changes" and "do not expose secrets." Those are
+    protective guardrails, not user intent. Prompt Gate should not block a
+    generated handoff just because the handoff itself says to be careful.
+    Malformed or spoofed handoffs still get scored: any unsectioned or
+    non-protective line remains part of the analysis text.
+    """
+    sections: list[str] = []
+    current_header: str | None = None
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line in _HANDOFF_SECTION_HEADERS:
+            current_header = line
+            continue
+        if _fresh_start_line_is_boilerplate(line):
+            continue
+        if current_header in _FRESH_START_PROTECTIVE_HEADERS and _fresh_start_line_is_protective(line):
+            continue
+        if current_header is None or current_header in _FRESH_START_INTENT_HEADERS:
+            sections.append(line)
+            continue
+        if current_header in _FRESH_START_PROTECTIVE_HEADERS and not _fresh_start_line_is_protective(line):
+            sections.append(line)
+    if not sections:
+        return "Continue the AIWatcher Fresh Start handoff from local repository evidence."
+    return "\n".join(sections)
 
 
 LONG_PROMPT_BRIEF_THRESHOLD = 2500
@@ -876,7 +986,7 @@ def _brief_task_sections(prompt: str, *, cwd: str | None) -> list[str]:
     structured sections instead of pasting the whole brief under Task.
     """
     text = prompt.strip()
-    if "AIWatcher fresh-session handoff" not in text and "AIWatcher Fresh Start brief" not in text:
+    if not _is_aiwatcher_fresh_start_prompt(text):
         if len(text) > LONG_PROMPT_BRIEF_THRESHOLD:
             sections = [
                 "Triage this long request before execution.",
@@ -897,10 +1007,18 @@ def _brief_task_sections(prompt: str, *, cwd: str | None) -> list[str]:
         "Continue the AIWatcher Fresh Start brief from repository state on disk."
     ]
     objective = _structured_section_lines(text, "Objective", max_lines=5)
+    if not objective:
+        objective = _structured_section_lines(text, "Goal", max_lines=6)
     if objective:
         sections.extend(["", "Requested outcome", *objective])
 
     project = _normalize_handoff_project(_structured_section_lines(text, "Project", max_lines=2))
+    if not project:
+        workspace_lines = _structured_section_lines(text, "Workspace", max_lines=5)
+        project = _normalize_handoff_project([
+            line.partition(":")[2].strip() if line.strip().lower().startswith("- project:") else line
+            for line in workspace_lines
+        ])
     if not project:
         project = _brief_working_directory(cwd)
     if project:
@@ -916,9 +1034,25 @@ def _brief_task_sections(prompt: str, *, cwd: str | None) -> list[str]:
     if evidence:
         sections.extend(["", "Local evidence to inspect", *evidence])
 
+    done = _structured_section_lines(text, "What appears done", max_lines=5)
+    if done:
+        sections.extend(["", "What appears done", *done])
+
+    uncertainty = _structured_section_lines(text, "What remains uncertain", max_lines=5)
+    if uncertainty:
+        sections.extend(["", "What remains uncertain", *uncertainty])
+
+    checkpoint = (
+        _structured_section_lines(text, "Recommended next checkpoint", max_lines=6)
+        or _structured_section_lines(text, "Immediate next checkpoint", max_lines=6)
+    )
+    if checkpoint:
+        sections.extend(["", "Recommended next checkpoint", *checkpoint])
+
     handoff_reason = (
         _structured_section_lines(text, "Why start fresh now", max_lines=3)
         or _structured_section_lines(text, "Why hand off now", max_lines=3)
+        or _structured_section_lines(text, "Why AIWatcher suggested Fresh Start", max_lines=3)
     )
     if handoff_reason:
         sections.extend(["", "Supporting pressure context", *handoff_reason])
@@ -1544,11 +1678,12 @@ def _run_external_risk_reviewer(
 ) -> dict[str, object] | None:
     """Optionally ask a user-configured semantic reviewer to re-score risk.
 
-    OSS stays local/offline by default. If a developer or Enterprise deployment
-    explicitly sets AIWATCHER_RISK_REVIEW_CMD, AIWatcher sends the prompt and
-    current deterministic assessment to that command over stdin and expects a
-    small JSON object back. This supports local models such as Ollama, an
-    internal policy model, or a test shim without hardwiring any vendor.
+    OSS stays local/offline by default. This reviewer is optional and only
+    enhances suggestions when a developer or Enterprise deployment explicitly
+    sets AIWATCHER_RISK_REVIEW_CMD. AIWatcher sends the prompt and current
+    deterministic assessment to that command over stdin and expects a small
+    JSON object back. This supports local models such as Ollama, an internal
+    policy model, or a test shim without hardwiring any vendor.
     """
     command = os.environ.get(RISK_REVIEW_CMD_ENV, "").strip()
     if not command:
@@ -1571,7 +1706,10 @@ def _run_external_risk_reviewer(
             "Return JSON only. Fields: risk low|medium|high, score 0-10, "
             "findings array, suggestions array, reason string. Identify broad, "
             "destructive, security-weakening, data-exposure, production, and "
-            "runaway-cost intent even when phrased without obvious keywords."
+            "runaway-cost intent even when phrased without obvious keywords. "
+            "Treat AIWatcher safety guardrails such as 'stop before destructive "
+            "changes' as protective context, not destructive user intent, unless "
+            "the task objective itself asks for the destructive action."
         ),
     }
     try:
@@ -1789,7 +1927,9 @@ def analyze_prompt(
             "suggested_prompt": "",
             "estimated_impact": {},
         }
-    lower = text.lower()
+    fresh_start_prompt = _is_aiwatcher_fresh_start_prompt(text)
+    analysis_text = _fresh_start_intent_text(text) if fresh_start_prompt else text
+    lower = analysis_text.lower()
     findings: list[str] = []
     suggestions: list[str] = []
     guardrails: list[dict[str, str]] = []
@@ -1844,7 +1984,7 @@ def analyze_prompt(
 
     edit_terms = ["change", "modify", "edit", "write", "implement", "refactor", "delete", "migrate", "rename", "add", "update"]
     plan_terms = ["plan first", "do not edit", "inspect first", "propose", "before editing", "ask before"]
-    needs_checkpoint = any(term in lower for term in edit_terms) and not any(term in lower for term in plan_terms)
+    needs_checkpoint = any(re.search(rf"\b{re.escape(term)}\b", lower) for term in edit_terms) and not any(term in lower for term in plan_terms)
     if needs_checkpoint:
         score += 2
         findings.append("Prompt asks for changes without an explicit plan/checkpoint.")
@@ -1943,7 +2083,7 @@ def analyze_prompt(
         suggestions.append("Name the target files, acceptance criteria, and what should stay unchanged.")
         guardrails.append({"icon": "\U0001F3AF", "label": "Vague ask clarified"})
 
-    multiple_tasks = len(text) > 2500
+    multiple_tasks = len(analysis_text) > 2500
     if multiple_tasks:
         score += 2
         findings.append("Prompt is long enough to hide multiple tasks in one request.")
@@ -1955,7 +2095,10 @@ def analyze_prompt(
         suggestions.append("Keep this as an audit: return findings, proposed fix/tests, and wait before changing files.")
         guardrails.append({"icon": "\U0001F6A7", "label": "Review only"})
 
-    if not findings:
+    if fresh_start_prompt and not findings:
+        findings.append("AIWatcher Fresh Start handoff recognized; safety guardrails are protective context, not destructive intent.")
+        suggestions.append("Continue from local evidence with the smallest checkpoint before editing.")
+    elif not findings:
         findings.append("No obvious cost or safety risk found from prompt text alone.")
         suggestions.append("Keep the task scoped and ask for a brief plan before large edits.")
 
@@ -4988,6 +5131,13 @@ VELOCITY_MIN_TOKENS_PER_MINUTE = 12_000.0
 VELOCITY_MIN_WINDOW_TOKENS = 80_000
 VELOCITY_MIN_SPAN_MINUTES = 5.0
 VELOCITY_MIN_RECENT_EVENTS = 5
+FRESH_START_PROJECT_SKIP_PREFIX = "control_recommended_project:"
+
+
+def _fresh_start_project_skip_active(project_path: str | None) -> bool:
+    if not project_path or project_path == "unknown":
+        return False
+    return companion_skip_active(f"{FRESH_START_PROJECT_SKIP_PREFIX}{project_path}")
 
 
 def _loop_signal(events: Sequence[LocalEvent]) -> dict[str, object] | None:
@@ -5261,6 +5411,9 @@ def _print_watch_status_card(
             "-- local estimate, not a real-time quota API"
         )
     print(f"  Recommended: {_watch_action_display(status['action'])} -- {status['reason']}")
+    if status["action"] == "create handoff capsule now" and _fresh_start_project_skip_active(session.project_path):
+        print("  Fresh Start: snoozed for this project; keeping the recommendation in the dashboard only.")
+        return
 
     may_deliver = delivery_session_id is None or delivery_session_id == session.session_id
     if (

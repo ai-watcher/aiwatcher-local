@@ -69,6 +69,7 @@ from .runtime_attachment import (
     runtime_attachment_for_session,
     safe_runtime_processes,
 )
+from .runtime_nudge import foreground_tool
 from .session_health import ContextHealth, analyze_all_sessions, gate_health_warning
 from .scanner import (
     clip_sessions_to_window,
@@ -98,6 +99,7 @@ SUMMARY_BACKGROUND_COOLDOWN_SECONDS = 8
 SUMMARY_WINDOWS = (1, 7, 30)
 ACTIVE_SESSION_MINUTES = 30
 RECENT_SESSION_HOURS = 4
+FRESH_START_PROJECT_COOLDOWN_MINUTES = 2 * 24 * 60
 UNATTRIBUTED_PROJECT = "__unattributed__"
 UNATTRIBUTED_PROJECT_LABEL = "Unattributed sessions"
 
@@ -203,6 +205,69 @@ def is_reliable_project_path(path: str | None) -> bool:
 
 def project_key(path: str | None) -> str:
     return path if is_reliable_project_path(path) else UNATTRIBUTED_PROJECT
+
+
+def fresh_start_project_skip_key(project_path: str | None) -> str | None:
+    """Stable project-level quiet key for Fresh Start nudges."""
+    if not is_reliable_project_path(project_path):
+        return None
+    return f"control_recommended_project:{project_key(project_path)}"
+
+
+def _fresh_start_project_quiet(project_path: str | None) -> bool:
+    key = fresh_start_project_skip_key(project_path)
+    return bool(key and companion_skip_active(key))
+
+
+def _tool_family_label(tool: object) -> str:
+    lower = str(tool or "").lower()
+    if "claude" in lower:
+        return "claude"
+    if "codex" in lower:
+        return "codex"
+    if "cursor" in lower:
+        return "cursor"
+    if "vscode" in lower or "visual studio code" in lower:
+        return "vscode"
+    if "terminal" in lower or "iterm" in lower:
+        return "terminal"
+    return lower.strip()
+
+
+def _foreground_matches_fresh_start_bubble(bubble: dict[str, object]) -> bool:
+    """Only let Companion blink for Fresh Start when the related AI surface is foreground."""
+    active = foreground_tool()
+    if active is None:
+        return False
+    session_tool = _tool_family_label(bubble.get("tool"))
+    runtime = bubble.get("runtime_attachment") if isinstance(bubble.get("runtime_attachment"), dict) else {}
+    surface = str(runtime.get("surface") or "").lower()
+    allowed = {session_tool}
+    if session_tool == "cursor":
+        allowed.add("vscode")
+    if surface == "cli" or str(bubble.get("tool") or "").lower().endswith("-cli"):
+        allowed.add("terminal")
+    return active in {item for item in allowed if item}
+
+
+def _fresh_start_context_candidates(summary: dict[str, object]) -> list[dict[str, object]]:
+    rows = summary.get("context_health") if isinstance(summary.get("context_health"), list) else []
+    candidates: list[dict[str, object]] = []
+    seen_projects: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("severity") not in {"critical", "warning"} or not row.get("can_handoff"):
+            continue
+        project = str(row.get("project_full") or "")
+        if _fresh_start_project_quiet(project):
+            continue
+        project_key_value = project_key(project)
+        if project_key_value in seen_projects:
+            continue
+        seen_projects.add(project_key_value)
+        candidates.append(row)
+    return candidates
 
 
 def project_label(path: str | None, max_len: int = 54) -> str:
@@ -2076,7 +2141,12 @@ def _handoff_bubble(context_health: list[dict[str, object]]) -> dict[str, object
     "continue here", with an honest estimate of context pressure avoided.
     """
     candidate = next(
-        (row for row in context_health if row.get("severity") in {"critical", "warning"} and row.get("can_handoff")),
+        (
+            row for row in context_health
+            if row.get("severity") in {"critical", "warning"}
+            and row.get("can_handoff")
+            and not _fresh_start_project_quiet(str(row.get("project_full") or ""))
+        ),
         None,
     )
     if not candidate:
@@ -2185,22 +2255,6 @@ def _prompt_plan_action(
         "this is done",
         "summarize final",
     ]
-    if isinstance(handoff_bubble, dict) and handoff_bubble.get("session_id"):
-        session_id = str(handoff_bubble.get("session_id"))
-        return {
-            "kind": "fresh_start",
-            "label": "Fresh Start",
-            "title": "Start fresh before sending this",
-            "why": str(
-                handoff_bubble.get("reason")
-                or handoff_bubble.get("body")
-                or "Current local context has enough pressure that a Fresh Start brief is safer than replaying the chat."
-            ),
-            "next_step": "Open the session, copy the Fresh Start brief, then paste this planned task into the new chat.",
-            "primary_label": "Open Fresh Start",
-            "primary_url": f"/?session={session_id}",
-            "confidence": "observed",
-        }
     if any(term in lower for term in close_terms):
         return {
             "kind": "archive",
@@ -2243,6 +2297,27 @@ def _prompt_plan_action(
             "next_step": "Copy the execution brief instead of the original prompt.",
             "primary_label": "Copy safer brief",
             "primary_url": "",
+            "confidence": "observed",
+        }
+    already_fresh_start_prompt = "AIWatcher Fresh Start brief" in prompt or "AIWatcher fresh-session handoff" in prompt
+    if (
+        isinstance(handoff_bubble, dict)
+        and handoff_bubble.get("session_id")
+        and not already_fresh_start_prompt
+    ):
+        session_id = str(handoff_bubble.get("session_id"))
+        return {
+            "kind": "fresh_start",
+            "label": "Fresh Start",
+            "title": "Start fresh before sending this",
+            "why": str(
+                handoff_bubble.get("reason")
+                or handoff_bubble.get("body")
+                or "Current local context has enough pressure that a Fresh Start brief is safer than replaying the chat."
+            ),
+            "next_step": "Open the session, copy the Fresh Start brief, then paste this planned task into the new chat.",
+            "primary_label": "Open Fresh Start",
+            "primary_url": f"/?session={session_id}",
             "confidence": "observed",
         }
     return {
@@ -3747,9 +3822,65 @@ def build_companion_state() -> dict[str, object]:
             "control_url": str(gate.get("url") or "/?view=prompt"),
             "detail": "A hook paused this prompt locally. Review it before the AI tool continues.",
         }
+    fresh_start_candidates = _fresh_start_context_candidates(summary)
+    if len(fresh_start_candidates) > 1:
+        foreground_candidate = next(
+            (row for row in fresh_start_candidates if _foreground_matches_fresh_start_bubble(row)),
+            None,
+        )
+        project_count = len(fresh_start_candidates)
+        critical_count = sum(1 for row in fresh_start_candidates if row.get("severity") == "critical")
+        total_context = sum(int(row.get("estimated_replayed_context_tokens") or 0) for row in fresh_start_candidates)
+        context_label = compact_int(total_context) if total_context else "context"
+        project_lines = [
+            str(row.get("project_full") or "")
+            for row in fresh_start_candidates
+            if row.get("project_full")
+        ]
+        if foreground_candidate is None:
+            return {
+                **base,
+                "state": "watching",
+                "label": "Watching quietly",
+                "subtitle": f"{project_count} projects ready for context review in Console",
+                "primary_label": "Console",
+                "primary_url": "/?view=sessions#contextHealth",
+                "detail": "Fresh Start review is batched in Watch and only blinks while an affected AI surface is foreground.",
+            }
+        return {
+            **base,
+            "state": "control_review",
+            "label": "Review context",
+            "subtitle": (
+                f"{project_count} projects need Fresh Start review"
+                + (f" · {critical_count} critical" if critical_count else "")
+            ),
+            "primary_label": "Review",
+            "primary_action": "open_url",
+            "primary_url": "/?view=sessions#contextHealth",
+            "skip_label": "Snooze",
+            "skip_state": "control_recommended_group",
+            "skip_project": "\n".join(project_lines),
+            "fresh_start_project_count": project_count,
+            "fresh_start_context_label": context_label,
+            "control_url": "/?view=sessions#contextHealth",
+            "watch_url": "/?view=sessions#contextHealth",
+            "detail": "Choose which projects to Fresh Start, continue, or snooze in one batch.",
+        }
     bubble = summary.get("handoff_bubble")
     if isinstance(bubble, dict) and bubble.get("session_id"):
         session_id = str(bubble.get("session_id"))
+        bubble_project = str(bubble.get("project_full") or "")
+        if _fresh_start_project_quiet(bubble_project):
+            return {
+                **base,
+                "state": "watching",
+                "label": "Watching quietly",
+                "subtitle": "Fresh Start snoozed for this project",
+                "primary_label": "Console",
+                "primary_url": "/?view=sessions#contextHealth",
+                "detail": "The project still appears in Watch, but the Companion will not blink for it during the cooldown.",
+            }
         try:
             direct_decisions = recent_handoff_decisions(limit=20)
         except OSError:
@@ -3766,9 +3897,10 @@ def build_companion_state() -> dict[str, object]:
                     **base,
                     "state": "watching",
                     "label": "Watching quietly",
-                    "subtitle": "Fresh Start decision saved",
+                    "subtitle": "Fresh Start snoozed for this project",
                     "primary_label": "Console",
-                    "detail": "AIWatcher will stay quiet for this session unless a new intervention is justified.",
+                    "primary_url": "/?view=sessions#contextHealth",
+                    "detail": "AIWatcher will stay quiet for this project during the cooldown unless a stronger intervention is justified.",
                 }
             if decision in {"new_chat", "copy_handoff"}:
                 if recent_decision.get("receipt_viewed_at"):
@@ -3802,6 +3934,30 @@ def build_companion_state() -> dict[str, object]:
                 "primary_label": "Console",
                 "detail": "The recommendation remains in the Console, but the Companion will stay quiet for now.",
             }
+        if not _foreground_matches_fresh_start_bubble(bubble):
+            health_rows = summary.get("context_health") if isinstance(summary.get("context_health"), list) else []
+            project_count = len({
+                str(row.get("project_full") or row.get("project") or "")
+                for row in health_rows
+                if isinstance(row, dict)
+                and row.get("severity") in {"critical", "warning"}
+                and row.get("can_handoff")
+                and not _fresh_start_project_quiet(str(row.get("project_full") or ""))
+            })
+            subtitle = (
+                f"{project_count} project{'s' if project_count != 1 else ''} ready for context review in Console"
+                if project_count
+                else "Context review waiting in Console"
+            )
+            return {
+                **base,
+                "state": "watching",
+                "label": "Watching quietly",
+                "subtitle": subtitle,
+                "primary_label": "Console",
+                "primary_url": "/?view=sessions#contextHealth",
+                "detail": "Fresh Start nudges only blink when the matching AI tool or terminal is foreground.",
+            }
         return {
             **base,
             "state": "control_recommended",
@@ -3822,7 +3978,7 @@ def build_companion_state() -> dict[str, object]:
             "skip_label": "Skip",
             "skip_state": "control_recommended",
             "skip_session_id": session_id,
-            "skip_project": str(bubble.get("project_full") or ""),
+            "skip_project": bubble_project,
             "control_url": f"/?session={session_id}",
             "watch_url": f"/?session={session_id}",
             "detail": "Control recommendation is based on local context-health evidence.",
@@ -4328,6 +4484,7 @@ HTML = r"""<!doctype html>
         rgba(11,17,24,.82);
       padding: 14px;
     }
+    .muted-card { opacity: .58; }
     .coverage-head, .health-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
     .coverage-status, .health-severity { border-radius: 999px; border: 1px solid var(--line); padding: 4px 8px; font-size: 11px; font-weight: 800; white-space: nowrap; }
     .coverage-status.automatic, .health-severity.healthy { color: #bff5df; border-color: rgba(53,211,153,.45); background: var(--green-soft); }
@@ -6162,6 +6319,7 @@ async function recordHandoffDecision(bubble, decision) {
         decision,
         reason: bubble.reason || bubble.body || '',
         expected_saved_context_tokens: bubble.expected_saved_context_tokens || null,
+        source_project_path: bubble.project_full || '',
         action_channel: 'dashboard',
       })
     });
@@ -6362,7 +6520,18 @@ function renderContextHealth(rows) {
   const status = arguments.length > 1 ? arguments[1] : 'ready';
   if (status === 'pending') return '<div class="loading">Checking context health and handoff opportunities...</div>';
   if (!rows.length) return '<div class="empty">No active context-health warnings. AIWatcher will surface bloat, stale sessions, and handoff opportunities here.</div>';
-  return `<div class="coverage-grid">${rows.map(row => `<div class="health-card">
+  const reviewRows = rows.filter(row => row.can_handoff && (row.severity === 'critical' || row.severity === 'warning'));
+  const batch = reviewRows.length > 1 ? `<div class="verdict-card" style="margin-bottom:12px">
+    <div>
+      <h3>${esc(reviewRows.length)} projects need context review</h3>
+      <p>Choose Fresh Start for the projects you want to continue now, or snooze the rest for 48 hours. Evidence stays visible here.</p>
+    </div>
+    <div class="copy-row">
+      <button class="btn-primary" onclick="showView('sessions')">Review list</button>
+      <button class="btn-quiet" onclick="snoozeVisibleFreshStartProjects(this)">Snooze all 48h</button>
+    </div>
+  </div>` : '';
+  return `${batch}<div class="coverage-grid">${rows.map(row => `<div class="health-card" data-project-full="${esc(row.project_full || '')}">
     <div class="health-head">
       <div><h3>${esc(row.project)}</h3><p>${esc(row.tool)} · ${esc(row.age_label)}${row.session_count > 1 ? ` · ${esc(row.session_count)} sessions` : ''}</p></div>
       <span class="health-severity ${esc(row.severity)}">${esc(row.severity)}</span>
@@ -6376,8 +6545,10 @@ function renderContextHealth(rows) {
     ${row.session_count > 1 ? `<p class="receipt-note">${esc(row.group_note || `${row.session_count} related sessions need attention.`)} ${row.critical_sessions ? `${esc(row.critical_sessions)} critical.` : ''}</p>` : ''}
     <p>${esc(row.recommendation)}</p>
     <div class="health-actions">
-      <button class="btn-primary" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.action.label)}</button>
-      ${row.can_handoff ? `<button class="btn-quiet" data-session="${esc(row.session_id)}" onclick="openHandoff(this.dataset.session)">${esc(row.action.secondary_label)}</button>` : ''}
+      ${row.can_handoff ? `<button class="btn-primary" data-session="${esc(row.session_id)}" onclick="openHandoff(this.dataset.session)">Fresh Start</button>` : `<button class="btn-primary" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.action.label)}</button>`}
+      <button class="btn-quiet" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">Inspect</button>
+      ${row.can_handoff ? `<button class="btn-quiet" data-session="${esc(row.session_id)}" data-project="${esc(row.project_full || '')}" onclick="continueFreshStartProject(this.dataset.session, this.dataset.project)">Continue 48h</button>` : ''}
+      ${row.can_handoff ? `<button class="btn-quiet" data-project="${esc(row.project_full || '')}" onclick="snoozeFreshStartProject(this.dataset.project, this)">Snooze 48h</button>` : ''}
       <button class="btn-quiet" data-compact="${esc(row.compact_prompt || '/compact')}" onclick="copyText(this.dataset.compact, 'Compact prompt copied')">Copy compact prompt</button>
     </div>
     <p class="receipt-note">${esc(row.action.reason)}</p>
@@ -6911,6 +7082,51 @@ async function quietFreshStartReminders() {
   } catch (error) {
     showToast('Could not quiet Fresh Start reminders yet.', 'error');
   }
+}
+async function snoozeFreshStartProjects(projects, message) {
+  const clean = (projects || []).filter(Boolean);
+  if (!clean.length) {
+    showToast('No reliable project path found to snooze.', 'error');
+    return false;
+  }
+  try {
+    const response = await fetch('/api/companion-skip', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state: 'control_recommended_group', projects: clean }),
+    });
+    if (!response.ok) throw new Error('snooze failed');
+    showToast(message || `Fresh Start snoozed for ${clean.length} project${clean.length === 1 ? '' : 's'} for 48h.`);
+    await load(true, true);
+    return true;
+  } catch (error) {
+    showToast('Could not snooze Fresh Start projects yet.', 'error');
+    return false;
+  }
+}
+async function snoozeFreshStartProject(project, button) {
+  const ok = await snoozeFreshStartProjects([project], 'Fresh Start snoozed for this project for 48h.');
+  if (ok && button) {
+    const card = button.closest('.health-card');
+    if (card) card.classList.add('muted-card');
+  }
+}
+async function snoozeVisibleFreshStartProjects(button) {
+  const cards = Array.from(document.querySelectorAll('#sessionContextHealth .health-card[data-project-full]'));
+  const projects = [...new Set(cards.map(card => card.dataset.projectFull || '').filter(Boolean))];
+  const ok = await snoozeFreshStartProjects(projects, `Fresh Start snoozed for ${projects.length} project${projects.length === 1 ? '' : 's'} for 48h.`);
+  if (ok && button) button.disabled = true;
+}
+async function continueFreshStartProject(sessionId, project) {
+  await recordHandoffDecision({
+    session_id: sessionId,
+    project_full: project,
+    reason: 'User chose to continue this project from the context review list.',
+    body: 'User chose to continue this project from the context review list.',
+    expected_saved_context_tokens: null,
+  }, 'continue_here');
+  showToast('Fresh Start snoozed for this project for 48h.');
+  await load(true, true);
 }
 function showView(view) {
   document.querySelectorAll('.view').forEach(node => {
@@ -7906,6 +8122,7 @@ class UIHandler(BaseHTTPRequestHandler):
             session_id = str(payload.get("session_id", "")).strip()
             decision = str(payload.get("decision", "")).strip()
             reason = str(payload.get("reason", "")).strip()
+            source_project_path = str(payload.get("source_project_path", "")).strip()
             action_channel = str(payload.get("action_channel", "dashboard")).strip() or "dashboard"
             expected = payload.get("expected_saved_context_tokens")
             if not session_id:
@@ -7919,19 +8136,20 @@ class UIHandler(BaseHTTPRequestHandler):
                     reason=reason,
                     expected_saved_context_tokens=expected if isinstance(expected, int) else None,
                     action_channel=action_channel,
-                    source_project_path=source_row.project_path if source_row else None,
+                    source_project_path=source_row.project_path if source_row else source_project_path or None,
                 )
                 if decision in {"continue_here", "dismissed"}:
                     record_companion_skip(
                         key=f"control_recommended:{session_id}",
                         reason=f"User chose {decision} for Fresh Start.",
-                        minutes=24 * 60,
+                        minutes=FRESH_START_PROJECT_COOLDOWN_MINUTES,
                     )
-                    if source_row and is_reliable_project_path(source_row.project_path):
+                    project_key_for_skip = fresh_start_project_skip_key(source_row.project_path if source_row else source_project_path)
+                    if project_key_for_skip:
                         record_companion_skip(
-                            key=f"control_recommended_project:{source_row.project_path}",
+                            key=project_key_for_skip,
                             reason=f"User chose {decision} for Fresh Start in this project.",
-                            minutes=24 * 60,
+                            minutes=FRESH_START_PROJECT_COOLDOWN_MINUTES,
                         )
             except ValueError as exc:
                 self._send(400, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")
@@ -8006,6 +8224,31 @@ class UIHandler(BaseHTTPRequestHandler):
                     record_companion_skip(key="proof_pending", reason="User skipped the proof-pending Companion reminder.")
                     self._send(200, json.dumps({"ok": True, "updated": updated}), "application/json; charset=utf-8")
                     return
+                if state in {"control_recommended_group", "control_recommended_project"}:
+                    raw_projects = payload.get("projects")
+                    projects = [str(item).strip() for item in raw_projects] if isinstance(raw_projects, list) else []
+                    if project:
+                        projects.extend(part.strip() for part in project.splitlines())
+                    saved = []
+                    for project_path in projects:
+                        project_key_for_skip = fresh_start_project_skip_key(project_path)
+                        if not project_key_for_skip or project_key_for_skip in saved:
+                            continue
+                        record_companion_skip(
+                            key=project_key_for_skip,
+                            reason="User snoozed Fresh Start review for this project.",
+                            minutes=FRESH_START_PROJECT_COOLDOWN_MINUTES,
+                        )
+                        saved.append(project_key_for_skip)
+                    if not saved:
+                        self._send(
+                            400,
+                            json.dumps({"error": "No reliable project path was supplied for Fresh Start snooze."}),
+                            "application/json; charset=utf-8",
+                        )
+                        return
+                    self._send(200, json.dumps({"ok": True, "projects": len(saved)}), "application/json; charset=utf-8")
+                    return
                 if state == "control_recommended" and session_id:
                     source_row = _find_session_row(session_id)
                     record = record_handoff_decision(
@@ -8018,13 +8261,14 @@ class UIHandler(BaseHTTPRequestHandler):
                     record_companion_skip(
                         key=f"control_recommended:{session_id}",
                         reason="User skipped the Fresh Start Companion nudge.",
-                        minutes=24 * 60,
+                        minutes=FRESH_START_PROJECT_COOLDOWN_MINUTES,
                     )
-                    if project and project != "unknown":
+                    project_key_for_skip = fresh_start_project_skip_key(project)
+                    if project_key_for_skip:
                         record_companion_skip(
-                            key=f"control_recommended_project:{project}",
+                            key=project_key_for_skip,
                             reason="User skipped Fresh Start nudges for this project.",
-                            minutes=24 * 60,
+                            minutes=FRESH_START_PROJECT_COOLDOWN_MINUTES,
                         )
                     self._send(200, json.dumps({"ok": True, "record": record}), "application/json; charset=utf-8")
                     return
