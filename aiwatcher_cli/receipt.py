@@ -47,6 +47,7 @@ def _git(repo: str, args: list[str]) -> str | None:
             ["git", "-C", repo, *args],
             check=False, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None

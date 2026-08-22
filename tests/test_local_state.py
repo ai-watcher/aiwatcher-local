@@ -251,7 +251,7 @@ class LocalStateTests(unittest.TestCase):
         command = (
             "PGPASSWORD=hunter2 psql "
             "postgres://admin:supersecret@prod-db.example.com/app "
-            "--api-key sk-testsecret123456"
+            "--api-key fake-api-key-value"
         )
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")
@@ -272,7 +272,7 @@ class LocalStateTests(unittest.TestCase):
         self.assertIn("--api-key [redacted]", stored["command"])
         self.assertNotIn("hunter2", stored["command"])
         self.assertNotIn("supersecret", stored["command"])
-        self.assertNotIn("sk-testsecret123456", stored["command"])
+        self.assertNotIn("fake-api-key-value", stored["command"])
 
     def test_record_hook_event_stores_session_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

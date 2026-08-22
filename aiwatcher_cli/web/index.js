@@ -1089,6 +1089,7 @@ async function recordHandoffDecision(bubble, decision) {
         decision,
         reason: bubble.reason || bubble.body || '',
         expected_saved_context_tokens: bubble.expected_saved_context_tokens || null,
+        source_project_path: bubble.project_full || '',
         action_channel: 'dashboard',
       })
     });
@@ -1958,7 +1959,18 @@ function renderContextHealth(rows) {
   const status = arguments.length > 1 ? arguments[1] : 'ready';
   if (status === 'pending') return '<div class="loading">Checking context health and handoff opportunities...</div>';
   if (!rows.length) return '<div class="empty">No active context-health warnings. AIWatcher will surface bloat, stale sessions, and handoff opportunities here.</div>';
-  return `<div class="coverage-grid">${rows.map(row => `<div class="health-card">
+  const reviewRows = rows.filter(row => row.can_handoff && (row.severity === 'critical' || row.severity === 'warning'));
+  const batch = reviewRows.length > 1 ? `<div class="verdict-card" style="margin-bottom:12px">
+    <div>
+      <h3>${esc(reviewRows.length)} projects need context review</h3>
+      <p>Choose Fresh Start for the projects you want to continue now, or snooze the rest for 48 hours. Evidence stays visible here.</p>
+    </div>
+    <div class="copy-row">
+      <button class="btn-primary" onclick="showView('sessions')">Review list</button>
+      <button class="btn-quiet" onclick="snoozeVisibleFreshStartProjects(this)">Snooze all 48h</button>
+    </div>
+  </div>` : '';
+  return `${batch}<div class="coverage-grid">${rows.map(row => `<div class="health-card" data-project-full="${esc(row.project_full || '')}">
     <div class="health-head">
       <div><h3>${esc(row.project)}</h3><p>${row.session_count > 1
         ? `${esc(row.session_count)} sessions here · charted below: <button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${row.charted_because_live
@@ -1966,6 +1978,17 @@ function renderContextHealth(rows) {
             ? ` — a larger one, ${esc(row.bigger_idle_label)}, has been quiet for ${esc(row.bigger_idle_age_label)}` : ''}`
         : `<button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.tool)} session</button> · last active ${esc(row.age_label)} ago`}</p></div>
       <span class="health-severity ${esc(row.severity)}">${esc(row.severity)}</span>
+    </div>
+    <div class="identity-strip" style="margin:10px 0">
+      <strong>${esc(row.identity_label || 'Historical log only')}</strong>
+      <span>${esc(row.tool || 'unknown tool')} · ${esc(row.session_short || row.session_id || 'unknown session')}</span>
+      <span>${esc(row.return_label || 'Exact chat unavailable')}</span>
+    </div>
+    <div class="health-evidence" style="margin-bottom:12px">
+      <div class="label">Inferred intent</div>
+      <p>${esc(row.intent_summary || row.action.reason || 'Review this source before carrying context forward.')}</p>
+      <div class="label" style="margin-top:8px">Context AIWatcher will carry</div>
+      <p>${esc(row.context_summary || row.recommendation || 'Fresh Start will use local session identity and workspace evidence.')}</p>
     </div>
     <div class="mini-grid">
       <div class="mini"><span class="label">Latest turn</span><strong>${esc(row.latest_turn_tokens)}</strong></div>
@@ -1979,8 +2002,10 @@ function renderContextHealth(rows) {
     ${row.session_count > 1 ? `<p class="receipt-note">${esc(row.group_note || `${row.session_count} related sessions need attention.`)} ${row.critical_sessions ? `${esc(row.critical_sessions)} critical.` : ''}</p>` : ''}
     <p>${esc(row.recommendation)}</p>
     <div class="health-actions">
-      <button class="btn-primary" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.action.label)}</button>
-      ${row.can_handoff ? `<button class="btn-quiet" data-session="${esc(row.session_id)}" onclick="openHandoff(this.dataset.session)">${esc(row.action.secondary_label)}</button>` : ''}
+      ${row.can_handoff ? `<button class="btn-primary" data-session="${esc(row.session_id)}" onclick="openHandoff(this.dataset.session)">Fresh Start</button>` : `<button class="btn-primary" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.action.label)}</button>`}
+      <button class="btn-quiet" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">Inspect</button>
+      ${row.can_handoff ? `<button class="btn-quiet" data-session="${esc(row.session_id)}" data-project="${esc(row.project_full || '')}" onclick="continueFreshStartProject(this.dataset.session, this.dataset.project)">Continue 48h</button>` : ''}
+      ${row.can_handoff ? `<button class="btn-quiet" data-project="${esc(row.project_full || '')}" onclick="snoozeFreshStartProject(this.dataset.project, this)">Snooze 48h</button>` : ''}
       <button class="btn-quiet" data-compact="${esc(row.compact_prompt || '/compact')}" onclick="copyText(this.dataset.compact, 'Compact prompt copied')">Copy compact prompt</button>
     </div>
     <p class="receipt-note">${esc(row.action.reason)}${row.session_count > 1
@@ -2879,6 +2904,51 @@ async function quietFreshStartReminders() {
   } catch (error) {
     showToast('Could not quiet Fresh Start reminders yet.', 'error');
   }
+}
+async function snoozeFreshStartProjects(projects, message) {
+  const clean = (projects || []).filter(Boolean);
+  if (!clean.length) {
+    showToast('No reliable project path found to snooze.', 'error');
+    return false;
+  }
+  try {
+    const response = await fetch('/api/companion-skip', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state: 'control_recommended_group', projects: clean }),
+    });
+    if (!response.ok) throw new Error('snooze failed');
+    showToast(message || `Fresh Start snoozed for ${clean.length} project${clean.length === 1 ? '' : 's'} for 48h.`);
+    await load(true, true);
+    return true;
+  } catch (error) {
+    showToast('Could not snooze Fresh Start projects yet.', 'error');
+    return false;
+  }
+}
+async function snoozeFreshStartProject(project, button) {
+  const ok = await snoozeFreshStartProjects([project], 'Fresh Start snoozed for this project for 48h.');
+  if (ok && button) {
+    const card = button.closest('.health-card');
+    if (card) card.classList.add('muted-card');
+  }
+}
+async function snoozeVisibleFreshStartProjects(button) {
+  const cards = Array.from(document.querySelectorAll('#sessionContextHealth .health-card[data-project-full]'));
+  const projects = [...new Set(cards.map(card => card.dataset.projectFull || '').filter(Boolean))];
+  const ok = await snoozeFreshStartProjects(projects, `Fresh Start snoozed for ${projects.length} project${projects.length === 1 ? '' : 's'} for 48h.`);
+  if (ok && button) button.disabled = true;
+}
+async function continueFreshStartProject(sessionId, project) {
+  await recordHandoffDecision({
+    session_id: sessionId,
+    project_full: project,
+    reason: 'User chose to continue this project from the context review list.',
+    body: 'User chose to continue this project from the context review list.',
+    expected_saved_context_tokens: null,
+  }, 'continue_here');
+  showToast('Fresh Start snoozed for this project for 48h.');
+  await load(true, true);
 }
 function showView(view) {
   document.querySelectorAll('.view').forEach(node => {
