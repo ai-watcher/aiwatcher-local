@@ -14,6 +14,64 @@ BILLING = "Rewrite the billing module to use the new pricing rules and delete th
 SETTINGS = "Refactor the settings page to use the new design tokens and add tests for the coverage panel"
 
 
+class GateFiresOnRequestsNotConversationTests(unittest.TestCase):
+    """What the gate costs money for, tuned against 774 real local prompts.
+
+    The gate decides whether to spend ~$0.035 on a second opinion. At the point
+    these were written it fired on 9.0% of a real corpus, and the marginal band
+    was almost entirely chat -- because resolved scope and terseness were both
+    counting on their own.
+    """
+
+    def _scope_stub(self, file_count):
+        """A repository where the prompt's nouns match a lot of filenames."""
+        return mock.patch.object(
+            ps, "resolve_scope",
+            return_value={"file_count": file_count, "matched_nouns": ["watch"], "paths": []},
+        )
+
+    def test_naming_files_is_not_a_blast_radius(self):
+        # "I ran the watch --notify" is five words of conversation. In this
+        # repository its nouns matched 32 files, which scored +2 for scope and
+        # +1 for terseness -- exactly the threshold, for a sentence asking for
+        # nothing. Scope describes how much a change would touch, so it needs a
+        # change: a destructive verb or a breadth word.
+        with self._scope_stub(32):
+            result = ps.score_blast_radius("I ran the watch --notify", cwd="/repo")
+        self.assertEqual(result["points"], 0)
+        self.assertFalse(result["gate"])
+
+    def test_scope_still_counts_when_something_is_being_done(self):
+        with self._scope_stub(32):
+            result = ps.score_blast_radius("delete every watch notification", cwd="/repo")
+        self.assertTrue(result["gate"])
+        self.assertIn("scope_over_20", [r["signal"] for r in result["reasons"]])
+
+    def test_a_short_approval_is_not_a_short_change_request(self):
+        # "yea let's go ahead with all fixes based on your order" carries the
+        # breadth word "all" and nothing else; terseness took it from 2 to the
+        # threshold. Terseness is a modifier on a request to change files.
+        with self._scope_stub(0):
+            result = ps.score_blast_radius(
+                "yea let's go ahead with all fixes based on your order", cwd="/repo")
+        self.assertNotIn("terse", [r["signal"] for r in result["reasons"]])
+        self.assertFalse(result["gate"])
+
+    def test_a_short_destructive_request_still_fires(self):
+        # The other half: terseness must keep amplifying a real one.
+        with self._scope_stub(0):
+            result = ps.score_blast_radius("delete all the migrations", cwd="/repo")
+        self.assertIn("terse", [r["signal"] for r in result["reasons"]])
+        self.assertTrue(result["gate"])
+
+    def test_the_prompts_the_gate_exists_for_are_untouched(self):
+        # M2's done-when, re-checked after the tuning: the billing prompt
+        # reaches the medium band and a similarly-phrased refactor does not.
+        with self._scope_stub(0):
+            self.assertTrue(ps.score_blast_radius(BILLING, cwd="/repo")["gate"])
+            self.assertFalse(ps.score_blast_radius(SETTINGS, cwd="/repo")["gate"])
+
+
 class RemovalDetectionTests(unittest.TestCase):
     """Spec 4.1. The brief told an agent not to "expand into unrelated cleanup"
     even when the cleanup was the stated goal, so a cautious agent left the
@@ -172,7 +230,12 @@ class BlastRadiusScoreTests(unittest.TestCase):
         # Compared on the blast contribution, not the total: almost every prompt
         # carries a baseline +2 for naming no plan or checkpoint, which is a
         # statement about prompt shape rather than about what it would touch.
-        self.assertEqual(ps.score_blast_radius("Add a pricing table to the settings page")["points"], 2)
+        # 1, not 2: terseness used to add a point here because a sensitivity
+        # keyword had fired, and it now needs evidence the prompt would change
+        # files -- a destructive verb, or a scope that resolved. This prompt has
+        # neither, and the claim being made is that it scores low and does not
+        # gate, which is unchanged.
+        self.assertEqual(ps.score_blast_radius("Add a pricing table to the settings page")["points"], 1)
         self.assertFalse(ps.score_blast_radius("Add a pricing table to the settings page")["gate"])
         self.assertGreaterEqual(self._score("Drop the users table from the production database")["score"], 6)
 

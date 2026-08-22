@@ -387,15 +387,45 @@ def score_blast_radius(prompt: str, *, cwd: str | None = None, guarded: bool = F
             add("sensitive_alone", ", ".join(sensitive[:4]))
     if breadth:
         add("breadth_word", ", ".join(breadth[:4]))
-    if 5 <= scope["file_count"] <= 20:
-        add("scope_5_to_20", f"{scope['file_count']} files")
-    elif scope["file_count"] > 20:
-        add("scope_over_20", f"{scope['file_count']} files")
+    # Resolved scope says how much a change would touch, which is only a blast
+    # radius if something is being changed. On its own it says the prompt
+    # mentioned words that happen to be filenames -- and in this repository the
+    # product's own domain nouns are filenames. "I ran the watch --notify" is
+    # five words of conversation and matched 32 files, scoring +2 for scope and
+    # +1 for terseness: exactly the gate threshold, for a sentence that asks for
+    # nothing at all.
+    #
+    # Same shape as the rule above it, and for the same reason: a sensitivity
+    # keyword scores fully only alongside a destructive verb or breadth word,
+    # because naming a sensitive area is just describing where you work.
+    # Measured over 774 real local prompts, gating scope this way takes the gate
+    # from firing on 9.0% of them to 7.2%.
+    if destructive or breadth:
+        if 5 <= scope["file_count"] <= 20:
+            add("scope_5_to_20", f"{scope['file_count']} files")
+        elif scope["file_count"] > 20:
+            add("scope_over_20", f"{scope['file_count']} files")
     # Spec 2 scores a short *change request*, not a short prompt. "Explain this
     # function" is three words and asks for nothing to be changed; scoring it
-    # made a read-only question look like risk. Terseness is a modifier on
-    # something else, so it only counts when another signal already fired.
-    if signals["terse"] and reasons:
+    # made a read-only question look like risk.
+    #
+    # "Another signal fired" turned out to be too loose a reading of "change
+    # request". "yea let's go ahead with all fixes based on your order" is an
+    # approval: it carries the breadth word "all" and nothing else, and terseness
+    # took it from 2 to exactly the threshold. So terseness now needs evidence
+    # the prompt would change files -- a destructive verb, or a scope that
+    # resolved -- rather than any signal at all.
+    #
+    # That is deliberately stricter than "change request". "Add a pricing table"
+    # is one and no longer earns the point. Which is fine: terseness is only ever
+    # a modifier, and something this quiet should need its own reason to reach
+    # the gate rather than being carried there by being short.
+    #
+    # 7.2% to 6.6% on the same corpus, and nothing that should fire stopped.
+    change_request = bool(destructive) or any(
+        item["signal"].startswith("scope_") for item in reasons
+    )
+    if signals["terse"] and change_request:
         add("terse", f"{signals['word_count']} words")
 
     total = sum(item["points"] for item in reasons)
