@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import io
 import json
 import os
@@ -186,18 +187,13 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn('id="detailDrawer"', ui.HTML)
         self.assertIn('data-view="prompt"', ui.HTML)
         self.assertIn('data-view="receipts"', ui.HTML)
-        self.assertIn('data-view="coverage"', ui.HTML)
         self.assertIn('data-view="setup"', ui.HTML)
-        self.assertIn('id="latestIntervention"', ui.HTML)
-        self.assertIn('id="actionQueue"', ui.HTML)
         self.assertIn("Needs action", ui.HTML)
-        self.assertIn("buildActionQueue", ui.HTML)
         self.assertIn("Every row says what AIWatcher knows", ui.HTML)
-        self.assertIn('id="contextHealth"', ui.HTML)
         self.assertIn('id="handoffBubble"', ui.HTML)
-        self.assertIn('id="latestHandoffDecision"', ui.HTML)
         self.assertIn('id="handoffDecisionRows"', ui.HTML)
-        self.assertIn('id="coverageRows"', ui.HTML)
+        # The standalone coverage view is gone; Settings holds the one copy.
+        self.assertIn('id="coverageRowsSettings"', ui.HTML)
         self.assertIn('id="setupRows"', ui.HTML)
         self.assertIn('id="promptInput"', ui.HTML)
         self.assertIn("const requestedView = new URLSearchParams(location.search).get('view')", ui.HTML)
@@ -236,13 +232,20 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("handoffPayload", ui.HTML)
         self.assertIn("postJson('/api/handoff'", ui.HTML)
         self.assertIn("if (!isDemo)", ui.HTML)
-        self.assertIn("Proof pending means the brief was copied", ui.HTML)
+        # The dashboard-side copy of this explanation sat in a render function
+        # nothing called, so no user ever saw it. The live one is server-built
+        # and reaches the Prove view as a receipt's proof_reason.
+        self.assertIn("AIWatcher will not claim saved tokens until one is linked",
+                      inspect.getsource(ui))
         self.assertIn("Protection:", ui.HTML)
         self.assertIn("companion/history-only until proven otherwise", ui.HTML)
         self.assertIn("renderSessionSummary", ui.HTML)
         self.assertIn("Loading session identity for", ui.HTML)
         self.assertIn("Building Fresh Start brief", ui.HTML)
-        self.assertIn("Still indexing this session. Retrying", ui.HTML)
+        # Retries now name themselves and count down, because re-entering
+        # selectSession reset the message and made a retry look like a freeze.
+        self.assertIn("Still looking for this session", ui.HTML)
+        self.assertIn("SESSION_LOOKUP_ATTEMPTS", ui.HTML)
         self.assertIn("returnToRuntime", ui.HTML)
         self.assertIn("requestRuntimeReturn", ui.HTML)
         self.assertIn("/api/runtime-return", ui.HTML)
@@ -282,9 +285,10 @@ class DashboardWindowTests(unittest.TestCase):
         """
         self.assertIn('bars(data.tools, "tokens_label", "tool", "tokens")', ui.HTML)
         # Projects too: a project worked on entirely in Codex would otherwise
-        # show $0.00 and an empty bar, which is the same defect one level up. The
-        # card is titled "AI Usage", not spend.
-        self.assertIn('bars(data.projects, "tokens_label", "project", "tokens")', ui.HTML)
+        # show $0.00, which is the same defect one level up. The Home bars are
+        # gone, so the rule now lives on the Projects view's own column -- the
+        # measure has to stay tokens wherever projects are sized.
+        self.assertIn("${esc(p.tokens_label)}", ui.HTML)
         # Models stay in money -- that card is the cost breakdown, and there the
         # plan-based label is what stops $0.00 reading as unused.
         self.assertIn('bars(data.models, "api_value_label", "model")', ui.HTML)
@@ -1206,23 +1210,18 @@ class DashboardWindowTests(unittest.TestCase):
         # take red; the repo ramp is the non-status hues only.
         self.assertIn("const UNBANKED_REPO_COLOURS = ['--blue', '--cyan', '--green'];", ui.HTML)
 
-    def test_home_leads_context_health_with_the_runway_verdict(self) -> None:
-        """Home is the "what now" surface, so it must carry the deadline.
+    def test_the_runway_deadline_is_computed_in_one_place(self) -> None:
+        """One function decides how long a session has.
 
-        The full runway card lives in the Watch view. Home showing only "heavy"
-        describes a state and leaves the urgency to the reader, which is the gap
-        this closes. Both surfaces read runwayVerdict() so they cannot disagree
-        about how long a session has.
+        This used to say "both surfaces read runwayVerdict() so they cannot
+        disagree" -- Home carried a copy of the context-health card. Home is the
+        ambient surface now and no longer does, so there is one reader rather
+        than two. The rule that mattered survives the move: whoever states the
+        deadline derives it here rather than recomputing it, and the two opposite
+        reasons turns_to_critical can be null stay distinguishable.
         """
         self.assertIn("function runwayVerdict(chart)", ui.HTML)
-        self.assertIn("home-runway", ui.HTML)
-        self.assertIn("data-runway-mini", ui.HTML)
-        self.assertIn("drawRunwayMini", ui.HTML)
-        # runwayCaption must be derived from the same verdict rather than
-        # recomputing it -- two surfaces computing this independently is how they
-        # end up quoting different numbers for one session.
-        self.assertIn("const verdict = runwayVerdict(chart);", ui.HTML)
-        # The two opposite null cases stay distinguishable on Home too.
+        self.assertIn("runwayVerdict(row.chart)", ui.HTML)
         self.assertIn("Already past the action threshold", ui.HTML)
         self.assertIn("Not growing right now", ui.HTML)
 
@@ -1236,14 +1235,19 @@ class DashboardWindowTests(unittest.TestCase):
         pace_vs_baseline compares you to yourself rather than to a limit. Pinned
         because a red or amber rail is the default anyone would reach for here.
         """
-        tile = ui.HTML[ui.HTML.index('<div class="label">API-equivalent value</div>') - 200:]
-        tile = tile[:tile.index("Excludes subscription allocation")]
-        self.assertIn("metric-neutral", tile)
-        for judged in ("metric-red", "metric-amber", "metric-green"):
-            self.assertNotIn(judged, tile)
-        # The green rail on useful outcomes is the one the product has earned an
-        # opinion about, so it must survive this rule rather than be swept up by it.
-        self.assertIn('class="card metric-card metric-green"><div class="label">Useful outcomes', ui.HTML)
+        # The figure moved from a Home tile to the ambient surface's quiet-state
+        # hero, so the rule is now that the idle state gets no status colour --
+        # only a running session's context pressure earns one.
+        css = ui.HTML[ui.HTML.index("<style>"):ui.HTML.index("</style>")]
+        for state in ("critical", "warning", "healthy"):
+            with self.subTest(state=state):
+                self.assertIn('.ambient[data-state="%s"]' % state, css)
+        self.assertNotIn('.ambient[data-state="idle"]', css)
+        self.assertIn("api_value_label", ui.HTML)
+        # The carve-out this test used to make -- that useful outcomes keeps its
+        # green rail while the counterfactual total gets none -- no longer has a
+        # subject: the Home metric tiles are gone. If a judged tile returns, it
+        # should earn its colour the way that one did.
 
     def test_companion_state_surfaces_control_recommendation(self) -> None:
         with (
