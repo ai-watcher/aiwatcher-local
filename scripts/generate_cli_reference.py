@@ -55,7 +55,7 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
     (
         "Continuity",
         "Carry context between sessions and tools.",
-        ["handoff", "resume", "log-decision"],
+        ["handoff", "resume", "open-session", "return-session", "log-decision"],
     ),
     (
         "Monitoring",
@@ -144,6 +144,14 @@ EXAMPLES: dict[str, list[str]] = {
     "resume": [
         "aiwatcher resume --target codex --copy",
         "aiwatcher resume --search <your-project> --days 30",
+    ],
+    "open-session": [
+        "aiwatcher open-session aiwatcher://session/<session-id>",
+        "aiwatcher open-session <session-id> --no-open",
+    ],
+    "return-session": [
+        "aiwatcher return-session <session-id>",
+        "aiwatcher return-session aiwatcher://session/<session-id> --json",
     ],
     "log-decision": [
         'aiwatcher log-decision "Use SQLite over JSON files" \\\n'

@@ -15,6 +15,7 @@ import re
 import signal
 import shlex
 import shutil
+import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from socketserver import TCPServer
 import subprocess
@@ -28,7 +29,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from .correlate import link_recent_fresh_start_receipts_to_sessions, link_recent_interventions_to_sessions
 from .companion import (
@@ -103,7 +104,7 @@ from .receipt import (
     rewrite_in_progress,
     survival_note,
 )
-from .runtime_attachment import runtime_attachment_for_session, safe_runtime_processes
+from .runtime_attachment import perform_runtime_return, runtime_attachment_for_session, safe_runtime_processes
 from .runtime_nudge import (
     MAX_ACTIVE_IDLE_SECONDS,
     build_runtime_nudge,
@@ -4758,6 +4759,136 @@ def _watch_ui_base_url() -> str:
     return f"http://{ui_host}:{ui_port}"
 
 
+def _session_id_from_link(value: str | None) -> str | None:
+    text = (value or "").strip()
+    if not text:
+        return None
+    parsed = urlparse(text)
+    if parsed.scheme in {"http", "https"}:
+        params = parse_qs(parsed.query)
+        session_values = params.get("session") or params.get("session_id") or params.get("id")
+        if session_values and session_values[0].strip():
+            return unquote(session_values[0].strip())
+        return None
+    if parsed.scheme == "aiwatcher":
+        params = parse_qs(parsed.query)
+        session_values = params.get("session") or params.get("session_id") or params.get("id")
+        if session_values and session_values[0].strip():
+            return unquote(session_values[0].strip())
+        parts: list[str] = []
+        if parsed.netloc:
+            parts.append(parsed.netloc)
+        parts.extend(part for part in parsed.path.split("/") if part)
+        if parts and parts[0] in {"session", "sessions", "runtime", "return"} and len(parts) >= 2:
+            return unquote(parts[1].strip())
+        if parts:
+            return unquote(parts[-1].strip())
+        return None
+    if parsed.scheme:
+        return None
+    return text
+
+
+def _session_dashboard_url(session_id: str) -> str:
+    return f"{_watch_ui_base_url()}/?session={quote(session_id, safe='')}"
+
+
+def _local_url_available(url: str, *, timeout: float = 0.3) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    host = parsed.hostname or "127.0.0.1"
+    if host in {"0.0.0.0", "::", ""}:
+        host = "127.0.0.1"
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        return False
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _cli_session_runtime_state(session: LocalSession, *, now: datetime | None = None) -> dict[str, object]:
+    stamp = session.updated_at or session.started_at
+    if not stamp:
+        return {"status": "unknown"}
+    now = now or datetime.now(timezone.utc)
+    age_seconds = max(0.0, (now - stamp.astimezone(timezone.utc)).total_seconds())
+    if age_seconds <= 30 * 60:
+        return {"status": "active", "age_seconds": round(age_seconds, 1)}
+    if age_seconds <= 4 * 3600:
+        return {"status": "recent", "age_seconds": round(age_seconds, 1)}
+    return {"status": "historical", "age_seconds": round(age_seconds, 1)}
+
+
+def command_open_session(args: argparse.Namespace) -> int:
+    session_id = _session_id_from_link(args.session)
+    if not session_id:
+        print("Could not find a session id. Use a raw id, ?session=<id>, or aiwatcher://session/<id>.", file=sys.stderr)
+        return 2
+    url = _session_dashboard_url(session_id)
+    if getattr(args, "no_open", False):
+        print(url)
+        return 0
+    if not _local_url_available(url):
+        if getattr(args, "print_url", False):
+            print(url)
+        print("AIWatcher Console is not running. Start it with `aiwatcher start` or `aiwatcher ui`.", file=sys.stderr)
+        return 2
+    try:
+        opened = webbrowser.open(url)
+    except Exception:
+        opened = False
+    if opened:
+        if getattr(args, "print_url", False):
+            print(url)
+        else:
+            print("Opened AIWatcher Console for this session.")
+        return 0
+    if getattr(args, "print_url", False):
+        print(url)
+    print(f"Could not open browser automatically. Open this URL manually: {url}", file=sys.stderr)
+    return 2
+
+
+def _print_json_error(message: str, *, code: str) -> None:
+    print(json.dumps({"ok": False, "error": message, "code": code}, indent=2))
+
+
+def command_return_session(args: argparse.Namespace) -> int:
+    session_id = _session_id_from_link(args.session)
+    if not session_id:
+        message = "Could not find a session id. Use a raw id, ?session=<id>, or aiwatcher://session/<id>."
+        if getattr(args, "json", False):
+            _print_json_error(message, code="invalid_session")
+        else:
+            print(message, file=sys.stderr)
+        return 2
+    session = next((row for row in sessions_since(args.days) if row.session_id == session_id), None)
+    if not session:
+        message = f"No local session found for {session_id!r} in the last {args.days} days."
+        if getattr(args, "json", False):
+            _print_json_error(message, code="session_not_found")
+        else:
+            print(message, file=sys.stderr)
+        return 2
+    attachment = runtime_attachment_for_session(
+        session,
+        state=_cli_session_runtime_state(session),
+        processes=safe_runtime_processes(),
+    )
+    result = perform_runtime_return(attachment)
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2))
+    else:
+        print(str(result.get("message") or attachment.reason))
+        if not attachment.exact_return_available:
+            print(f"Return level: {attachment.exact_return_label}")
+    return 0 if result.get("ok") else 2
+
+
 def _detached_process_kwargs() -> dict[str, Any]:
     kwargs: dict[str, Any] = {"start_new_session": sys.platform != "win32"}
     if sys.platform == "win32":
@@ -8836,6 +8967,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sessions.add_argument("--team", action="store_true", help="Explain team session visibility in AIWatcher Cloud")
     sessions.set_defaults(func=command_sessions)
+
+    open_session = sub.add_parser(
+        "open-session",
+        help="Open the AIWatcher UI for a session id or aiwatcher://session link",
+    )
+    open_session.add_argument(
+        "session",
+        help="Raw session id, AIWatcher UI URL with ?session=, or aiwatcher://session/<id>",
+    )
+    open_session.add_argument("--print", dest="print_url", action="store_true", help="Print the resolved UI URL after opening")
+    open_session.add_argument("--no-open", action="store_true", help="Print the resolved UI URL without opening a browser")
+    open_session.set_defaults(func=command_open_session)
+
+    return_session = sub.add_parser(
+        "return-session",
+        help="Return to the AI runtime for a session when a safe attachment exists",
+    )
+    return_session.add_argument(
+        "session",
+        help="Raw session id, AIWatcher UI URL with ?session=, or aiwatcher://session/<id>",
+    )
+    return_session.add_argument("--days", type=int, default=30, help="How many days back to search for the session")
+    return_session.add_argument("--json", action="store_true", help="Emit the return attempt as JSON")
+    return_session.set_defaults(func=command_return_session)
 
     changes = sub.add_parser("changes", help="Show what each commit cost in AI spend, and $/line")
     changes.add_argument("--days", type=int, default=7, help="How many days of commits to include")
