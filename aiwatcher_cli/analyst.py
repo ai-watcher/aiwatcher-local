@@ -201,6 +201,44 @@ PATHS ({shown} of {total}, ranked by commit activity in the last 30 days):
 """
 
 
+def ranked_paths(cwd: str | None, paths: tuple[str, ...] | list[str],
+                 *, days: int = 30) -> tuple[str, ...]:
+    """Repository paths, most-recently-worked-on first.
+
+    The list is capped before it reaches the analyst, so which 200 of a 5,000
+    file repo it sees decides whether the answer names anything real. Recent
+    commit activity is the best cheap proxy for "the part of the tree this
+    prompt is probably about".
+
+    One extra git call, and unlike prompt_signals.repo_paths this one is not on
+    the hook path -- it only runs once the gate has already decided to spend.
+    A git that fails leaves the order alone rather than failing the run.
+    """
+    ordered = list(paths)
+    if not cwd or not ordered:
+        return tuple(ordered)
+    try:
+        listed = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            ["git", "-C", str(cwd), "log", f"--since={days}.days",
+             "--name-only", "--pretty=format:"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        if getattr(listed, "returncode", 1) != 0:
+            return tuple(ordered)
+        touched = [line.strip() for line in str(getattr(listed, "stdout", "") or "").splitlines()
+                   if line.strip()]
+    except Exception:
+        return tuple(ordered)
+    if not touched:
+        return tuple(ordered)
+    activity: dict[str, int] = {}
+    for path in touched:
+        activity[path] = activity.get(path, 0) + 1
+    # Stable within an activity band, so an unchanged tree produces an unchanged
+    # prompt -- which is what makes the result cache worth having.
+    return tuple(sorted(ordered, key=lambda path: (-activity.get(path, 0), path)))
+
+
 def build_prompt(prompt: str, paths: tuple[str, ...] | list[str]) -> str:
     shown = list(paths)[:MAX_PATHS]
     return PROMPT_TEMPLATE.format(
@@ -394,15 +432,77 @@ def run(prompt: str, *, project_root: str | os.PathLike[str],
     }
 
 
+# How long to wait for a killed process tree to actually go away before giving
+# up on reaping it. Small: by this point the answer is already discarded.
+KILL_GRACE_SECONDS = 5.0
+
+
 def _spawn(argv: list[str], text: str, cwd: Path, env: dict[str, str],
            timeout: float) -> subprocess.CompletedProcess[str]:
-    # The prompt goes in on stdin, never in argv: it would otherwise land in the
-    # process list and in shell history. This is also the only shape that works
-    # -- `-p` is a flag, so a path handed to it is read as the prompt itself.
-    return subprocess.run(  # noqa: S603 - fixed argv, no shell
-        argv, input=text, capture_output=True, text=True,
-        cwd=str(cwd), env=env, timeout=timeout, encoding="utf-8", errors="replace",
+    """Run the analyst with a timeout that actually bounds it.
+
+    `subprocess.run(timeout=...)` does not. On timeout it kills the direct
+    child and then calls communicate() again to reap it, which blocks until the
+    stdout pipe closes -- and the CLI is a launcher whose node grandchildren
+    inherited that pipe. Measured before this was fixed: a 45s timeout returned
+    after 3m54s, with the agent still running.
+
+    So the whole tree gets killed, not just the child it launched, and the reap
+    afterwards is itself bounded.
+
+    The prompt goes in on stdin, never in argv: it would otherwise land in the
+    process list and in shell history. That is also the only shape that works
+    at all -- `-p` is a flag, so a path handed to it is read as the prompt.
+    """
+    creation: dict[str, Any] = {}
+    if os.name == "nt":
+        creation["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        creation["start_new_session"] = True
+    proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+        argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace",
+        cwd=str(cwd), env=env, **creation,
     )
+    try:
+        out, err = proc.communicate(input=text, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        try:
+            proc.communicate(timeout=KILL_GRACE_SECONDS)
+        except (subprocess.TimeoutExpired, ValueError, OSError):
+            # Reaping is best-effort once the tree is dead; the caller has
+            # already been told this run produced nothing.
+            pass
+        raise
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
+def _kill_tree(proc: "subprocess.Popen[str]") -> None:
+    """Kill the analyst and everything it started.
+
+    Killing only the direct child leaves the agent itself running -- it is
+    launched through a wrapper -- so it keeps working, keeps spending, and keeps
+    the pipe open.
+    """
+    if os.name == "nt":
+        try:
+            subprocess.run(  # noqa: S603 - fixed argv, no shell
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True, timeout=KILL_GRACE_SECONDS, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+    else:
+        import signal
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
 
 
 def _unwrap(stdout: str) -> tuple[dict[str, Any], str]:

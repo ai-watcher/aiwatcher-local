@@ -287,6 +287,81 @@ class RunTest(unittest.TestCase):
         self.assertGreater(analyst.TIMEOUT_SECONDS, 30)
 
 
+class TimeoutActuallyBoundsTest(unittest.TestCase):
+    """The timeout has to bound the call, not just the direct child.
+
+    subprocess.run(timeout=...) does not. It kills the child it launched and
+    then reaps it with a second, unbounded communicate() -- which waits for the
+    stdout pipe to close, and the agent CLI is a launcher whose grandchildren
+    inherited that pipe. Measured against the real CLI before this was fixed: a
+    45s timeout returned after 3m54s with the agent still running and still
+    spending.
+    """
+
+    def test_a_leaked_process_tree_does_not_outlive_the_timeout(self):
+        import sys
+        import tempfile
+        import time
+
+        launcher = Path(tempfile.mkdtemp(prefix="aiw-timeout-")) / "slow.py"
+        launcher.write_text(
+            "import subprocess, sys, time\n"
+            # A grandchild that inherits stdout and long outlives the parent:
+            # the exact shape that made the old timeout leak.
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'])\n"
+            "time.sleep(600)\n",
+            encoding="utf-8",
+        )
+        started = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            analyst._spawn([sys.executable, str(launcher)], "x", Path.cwd(), None, 5.0)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 5.0 + analyst.KILL_GRACE_SECONDS + 10.0,
+                        f"the timeout leaked: returned after {elapsed:.1f}s")
+
+
+class OverheadLineTest(unittest.TestCase):
+    """Spec 6. AIWatcher spawns the same kind of session it measures."""
+
+    @staticmethod
+    def _session(session_id: str, cwd: str, cost: float):
+        from aiwatcher_cli.scanner import LocalSession
+        return LocalSession(session_id=session_id, tool="claude-code",
+                            raw_cwd=cwd, cost_usd=cost, tokens_in=100, tokens_out=50)
+
+    def test_analyst_spend_leaves_the_user_totals_alone(self):
+        from aiwatcher_cli import ui
+        rows = [
+            self._session("user-1", "C:/proj", 10.0),
+            self._session("analyst-1", "C:/proj/.aiwatcher/analyst", 0.04),
+            self._session("user-2", "C:/proj", 5.0),
+            self._session("analyst-2", "C:/proj/.aiwatcher/analyst", 0.03),
+        ]
+        user, overhead = ui._split_analyst_overhead(rows)
+        self.assertEqual([r.session_id for r in user], ["user-1", "user-2"])
+        self.assertEqual([r.session_id for r in overhead], ["analyst-1", "analyst-2"])
+        self.assertEqual(sum(r.cost_usd for r in user), 15.0)
+
+    def test_the_line_is_there_even_when_nothing_ran(self):
+        # A line that only appears once it has something to confess is one
+        # nobody believes when it does appear.
+        from aiwatcher_cli import ui
+        empty = ui._analyst_overhead([], 7)
+        self.assertEqual(empty["runs"], 0)
+        self.assertIn("nothing this window", empty["label"])
+        self.assertIn("No second opinions", empty["detail"])
+
+    def test_the_line_counts_what_ran(self):
+        from aiwatcher_cli import ui
+        rows = [self._session("a", "C:/p/.aiwatcher/analyst", 0.04),
+                self._session("b", "C:/p/.aiwatcher/analyst", 0.03)]
+        line = ui._analyst_overhead(rows, 7)
+        self.assertEqual(line["runs"], 2)
+        self.assertEqual(line["cost_label"], "$0.07")
+        self.assertIn("2 second opinions", line["detail"])
+        self.assertIn("last 7 days", line["detail"])
+
+
 class CacheKeyTest(unittest.TestCase):
     def test_the_same_question_is_free_the_second_time(self):
         a = analyst.cache_key("prompt", "rev1", "proj")

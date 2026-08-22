@@ -19,6 +19,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
+from . import analyst, prompt_signals
 from .cli import (
     SEARCH_RANK_FIELDS,
     SEARCH_RANK_TOPIC,
@@ -2445,9 +2446,79 @@ def build_prompt_preflight(prompt: str, *, tool: str = "agent", cwd: str | None 
         "blast": result.get("blast") if isinstance(result.get("blast"), dict) else {},
         "workflow": result.get("workflow") if isinstance(result.get("workflow"), dict) else {},
         "plan_action": _prompt_plan_action(text, result, handoff_bubble),
+        # Whether Stage 2 is worth paying for, decided by the free local
+        # score alone. The verdict travels with Stage 1 so the front end
+        # knows whether to ask for a second opinion without guessing at the
+        # threshold itself -- and so a gated-out prompt can say so rather
+        # than leaving the derived zone silent.
+        "second_opinion": _second_opinion_gate(result),
         "impact_label": impact_label,
         "privacy": "Prompt text is analyzed locally for this response and is not persisted by the Prompt Companion.",
     }
+
+
+def _second_opinion_gate(result: dict[str, object]) -> dict[str, object]:
+    """Stage 1's verdict on whether Stage 2 runs. No spawn happens here.
+
+    Three distinct answers, and none of them is silence: the gate was not
+    reached, there is no CLI to ask, or it is worth asking and the front end
+    should now request it. Spec 8 requires every one of them to leave zones B
+    and C complete, which they do -- this only decides whether zone A is worth
+    filling.
+    """
+    blast = result.get("blast") if isinstance(result.get("blast"), dict) else {}
+    if not blast.get("gate"):
+        return {
+            "gated": False,
+            "available": False,
+            "reason": "Nothing in this prompt matched a signal worth a second opinion.",
+        }
+    detection = analyst.detect()
+    if not detection.get("available"):
+        return {
+            "gated": True,
+            "available": False,
+            "reason": str(detection.get("reason")
+                          or "Second opinion unavailable. No agent CLI found."),
+        }
+    return {
+        "gated": True,
+        "available": True,
+        "pending": True,
+        "cli": detection.get("cli"),
+        "reason": "",
+    }
+
+
+def build_second_opinion(prompt: str, *, tool: str = "agent",
+                         cwd: str | None = None) -> dict[str, object]:
+    """Stage 2. Only ever reached once Stage 1 has already said yes.
+
+    The gate is re-checked here rather than trusted from the request: the
+    endpoint is reachable directly, and "the cheap analysis decides whether the
+    expensive one runs" is not a rule the client gets to waive.
+    """
+    text = (prompt or "").strip()
+    if not text:
+        return {"available": False, "reason": "prompt is required"}
+    blast = prompt_signals.score_blast_radius(text, cwd=cwd)
+    if not blast.get("gate"):
+        return {
+            "gated": False,
+            "available": False,
+            "reason": "Nothing in this prompt matched a signal worth a second opinion.",
+        }
+    if not cwd:
+        return {
+            "gated": True,
+            "available": False,
+            "reason": "Second opinion needs a workspace path to read the file tree from.",
+        }
+    paths = analyst.ranked_paths(cwd, prompt_signals.repo_paths(cwd))
+    result = analyst.run(text, project_root=cwd, paths=paths)
+    result["gated"] = True
+    result["tool"] = tool
+    return result
 
 
 def _prompt_plan_action(
@@ -4008,6 +4079,49 @@ def _daily_spend_chart(
     }
 
 
+def _split_analyst_overhead(
+    rows: list[LocalSession],
+) -> tuple[list[LocalSession], list[LocalSession]]:
+    """The user's own work, and what AIWatcher spent looking over their shoulder."""
+    user: list[LocalSession] = []
+    overhead: list[LocalSession] = []
+    for row in rows:
+        (overhead if row.analyst_run else user).append(row)
+    return user, overhead
+
+
+def _analyst_overhead(rows: list[LocalSession], days: int) -> dict[str, object]:
+    """The Second Opinion overhead line for this window.
+
+    Always present, including at zero, and it says so in words. A line that
+    appears only once it has something to confess is a line nobody trusts when
+    it does appear -- and "no second opinions ran in this window" is a real
+    answer to the question the line is there to answer.
+    """
+    runs = len(rows)
+    cost = sum(row.cost_usd for row in rows)
+    tokens = sum(row.tokens_in + row.tokens_out for row in rows)
+    window = f"last {days} day{'s' if days != 1 else ''}"
+    return {
+        "runs": runs,
+        "cost_usd": round(cost, 6),
+        "cost_label": money(cost),
+        "tokens": tokens,
+        "tokens_label": compact_int(tokens),
+        "window_label": window,
+        "label": (
+            f"AIWatcher overhead: {money(cost)} this window"
+            if runs else "AIWatcher overhead: nothing this window"
+        ),
+        "detail": (
+            f"{runs} second opinion{'' if runs == 1 else 's'} ran in the {window}, "
+            f"on your own agent and your own key. Not counted in the totals above."
+            if runs else
+            f"No second opinions ran in the {window}."
+        ),
+    }
+
+
 def build_summary(
     days: int = 7,
     *,
@@ -4038,6 +4152,15 @@ def build_summary(
     _index_events(all_events, complete=True)
     rows = clip_sessions_to_window(all_rows, all_events, since)
     month_rows = clip_sessions_to_window(all_rows, all_events, month_start)
+    # Spec 6. AIWatcher watches Claude Code sessions and Second Opinion
+    # spawns them, so left alone it would report its own analyst runs as the
+    # user's AI spend and inflate every number the product exists to give
+    # them. They are split out here rather than dropped: excluded spend is a
+    # number nobody can audit, and the first question a buyer asks is what
+    # the feature costs. The split reads raw_cwd, because the project path
+    # has already folded the sandbox back into the repository it sits in.
+    rows, analyst_rows = _split_analyst_overhead(rows)
+    month_rows, _ = _split_analyst_overhead(month_rows)
 
     stats = summarize(rows)
     month_stats = summarize(month_rows)
@@ -4279,6 +4402,7 @@ def build_summary(
             rows, all_events, window_outcomes, interventions, since, now,
         ),
         "survival": survival_summary,
+        "analyst_overhead": _analyst_overhead(analyst_rows, days),
         "unbanked": unbanked,
         "changes": changes,
         "changes_meta": changes_meta,
@@ -5416,6 +5540,7 @@ class UIHandler(BaseHTTPRequestHandler):
         if parsed.path not in {
             "/api/outcome",
             "/api/preflight",
+            "/api/second-opinion",
             "/api/ask-aiwatcher",
             "/api/handoff-basic",
             "/api/handoff",
@@ -5449,6 +5574,17 @@ class UIHandler(BaseHTTPRequestHandler):
             response = build_prompt_preflight(prompt, tool=tool, cwd=cwd)
             status = 400 if response.get("error") else 200
             self._send(status, json.dumps(response), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/second-opinion":
+            # Stage 2, on its own request. Stage 1 has already rendered by
+            # the time this is called: the analyst takes 30s on the small
+            # tier, so putting it in /api/preflight would hold a complete
+            # and useful answer hostage to an optional one.
+            prompt = str(payload.get("prompt", ""))
+            tool = str(payload.get("tool", "agent")).strip() or "agent"
+            cwd = str(payload.get("cwd", "")).strip() or None
+            response = build_second_opinion(prompt, tool=tool, cwd=cwd)
+            self._send(200, json.dumps(response), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/ask-aiwatcher":
             question = str(payload.get("question", "")).strip()

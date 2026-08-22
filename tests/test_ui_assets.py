@@ -316,7 +316,8 @@ class TrimmedHomeTest(unittest.TestCase):
         built_at_runtime = {
             "evidencePanel", "handoffAcceptance", "handoffBrief", "handoffConstraints",
             "handoffObjective", "handoffSources", "handoffStatus", "handoffType",
-            "optimizeReward", "outcomePanel", "promptBrief", "todayDigest",
+            "optimizeReward", "outcomePanel", "planDerivedZone", "promptBrief",
+            "todayDigest",
         }
         ids = set(re.findall(r'id="([\w-]+)"', self.html))
         looked_up = set(re.findall(r"""getElementById\(['"]([\w-]+)['"]\)""", self.js))
@@ -659,6 +660,83 @@ class InsightEvidencePairingTest(unittest.TestCase):
         for name in ("drawDailySpend", "drawReplaySplit"):
             with self.subTest(chart=name):
                 self.assertIn("const W = 640", js_function_source(self.js, name))
+
+
+class SecondOpinionZoneTest(unittest.TestCase):
+    """Zone A, once there is something to put in it.
+
+    Every heading maps to one schema field, so a reader can see the block was
+    extracted rather than composed. The zone had to stay honest while empty for
+    a whole milestone before this; it does not get to stop now that it is full.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+        cls.render = js_function_source(cls.js, "renderSecondOpinion")
+
+    def test_every_heading_is_a_schema_field(self):
+        for heading, field in (
+            ("What this asks for", "a.outcome"),
+            ("Done when", "a.success_check"),
+            ("Likely in scope", "a.scope_paths"),
+            ("Could not locate", "a.unresolved_nouns"),
+            ("Requested removals", "removals"),
+            ("Worth deciding before you send", "a.ambiguities"),
+            ("First checkpoint", "a.first_checkpoint"),
+        ):
+            with self.subTest(heading=heading):
+                self.assertIn(heading, self.render)
+                self.assertIn(field, self.render)
+
+    def test_removals_render_above_the_guardrails(self):
+        # Spec 4.1. A bullet telling the agent not to expand into cleanup must
+        # never sit above the deletion the prompt actually asked for.
+        plan = self.js[self.js.index("function renderDerivedZone("):
+                       self.js.index("async function preflightPrompt(")]
+        self.assertIn("Requested removals", plan)
+        body = self.js[self.js.index("async function preflightPrompt("):]
+        body = body[:body.index(chr(10) + "}")]
+        self.assertLess(body.index("renderDerivedZone(data)"), body.index("renderGuardrailZone(data)"))
+
+    def test_an_empty_field_does_not_become_an_empty_heading(self):
+        # Spec 4: omit the heading entirely when there is nothing under it.
+        for guard in ("(a.scope_paths || []).length",
+                      "(a.unresolved_nouns || []).length",
+                      "(a.ambiguities || []).length"):
+            with self.subTest(guard=guard):
+                self.assertIn(guard, self.render)
+
+    def test_the_run_is_priced_where_it_was_paid_for(self):
+        # Spec 5: on the screen, not buried in Settings.
+        self.assertIn("secondOpinionCost", self.render)
+        cost = js_function_source(self.js, "secondOpinionCost")
+        self.assertIn("cost_usd", cost)
+        self.assertIn("tokens", cost)
+        self.assertIn(".second-opinion-cost", self.css)
+
+    def test_the_confidence_chip_never_claims_observation(self):
+        # Zone B's word for something read off this machine is "observed".
+        # Everything in zone A came from a model, so it may not borrow it.
+        self.assertNotIn("'observed'", self.render)
+        self.assertIn("'inferred'", self.render)
+        self.assertIn("'unknown'", self.render)
+
+    def test_stage_two_never_blocks_stage_one(self):
+        # Spec 4.2: zones B and C are complete and usable throughout. A real
+        # analyst run takes about 30s, so it is a separate request made after
+        # the first result is already on screen.
+        body = self.js[self.js.index("async function preflightPrompt("):]
+        body = body[:body.index(chr(10) + "}")]
+        self.assertLess(body.index("resultNode.innerHTML = `${renderPlanAction"),
+                        body.index("loadSecondOpinion(prompt, tool, cwd)"))
+        self.assertIn("/api/second-opinion", self.js)
+
+    def test_the_gate_decides_the_spend_not_the_click(self):
+        body = self.js[self.js.index("async function preflightPrompt("):]
+        body = body[:body.index(chr(10) + "}")]
+        self.assertIn("(data.second_opinion || {}).pending", body)
 
 
 class PlanControlTest(unittest.TestCase):

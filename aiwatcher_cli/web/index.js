@@ -247,21 +247,103 @@ function renderPlanAction(action) {
 // Zone A. Anything actually derived from this specific prompt. Empty until a
 // second opinion exists to fill it -- but never silent, because an empty zone
 // that says why is what makes the difference between the zones legible.
+function derivedZoneShell(chipClass, chipLabel, body) {
+  return `<section class="detail-section plan-zone plan-zone-derived" id="planDerivedZone">
+    <div class="section-title">
+      <div><h3>From your prompt</h3><p>Worked out from what you wrote, not from a template.</p></div>
+      <span class="confidence-chip ${esc(chipClass)}">${esc(chipLabel)}</span>
+    </div>
+    ${body}
+  </section>`;
+}
 function renderDerivedZone(data) {
   const second = data.second_opinion || {};
+  if (second.pending) {
+    // Spec 4.2: zones B and C are complete and usable throughout, so this waits
+    // in place rather than holding the panel. A real run takes about 30s.
+    return derivedZoneShell('unknown', 'asking',
+      `<p class="zone-empty">Asking your own agent for a second opinion. Zones below are complete already.</p>
+       <div class="ai-loading-bar" aria-hidden="true"></div>`);
+  }
   const gatePassed = Number(data.score || 0) >= RISK_MEDIUM_AT;
   const reason = second.reason
-    || (second.available === false ? 'No analyst is configured on this build.' : '')
     || (gatePassed
         ? 'Local signals reached the medium band, but no analyst is configured on this build.'
         : 'Nothing in this prompt matched a signal worth a second opinion.');
-  return `<section class="detail-section plan-zone plan-zone-derived">
-    <div class="section-title">
-      <div><h3>From your prompt</h3><p>Worked out from what you wrote, not from a template.</p></div>
-      <span class="confidence-chip unknown">unavailable</span>
-    </div>
-    <p class="zone-empty">${esc(reason)}</p>
-  </section>`;
+  return derivedZoneShell('unknown', 'unavailable', `<p class="zone-empty">${esc(reason)}</p>`);
+}
+// Zone A, filled. Every heading here maps to one schema field, so a reader can
+// see that this was extracted rather than composed -- and an empty field is
+// omitted rather than rendered as a heading with nothing under it.
+function renderSecondOpinion(second) {
+  if (!second || !second.available || !second.analysis) {
+    return derivedZoneShell('unknown', 'unavailable',
+      `<p class="zone-empty">${esc((second && second.reason) || 'Second opinion unavailable.')}</p>`);
+  }
+  const a = second.analysis;
+  const list = (items) => `<ul class="prompt-list">${items.map(item => `<li>${esc(item)}</li>`).join('')}</ul>`;
+  const removals = (a.removals || []).filter(item => item && item.requested);
+  const parts = [
+    `<h4>What this asks for</h4><p>${esc(a.outcome)}</p>`,
+    `<h4>Done when</h4><p>${esc(a.success_check)}</p>`,
+  ];
+  if ((a.scope_paths || []).length) {
+    parts.push(`<h4>Likely in scope</h4>${list(a.scope_paths)}`);
+  }
+  if ((a.unresolved_nouns || []).length) {
+    // The highest-value line in the block: a noun with no file behind it is
+    // usually the thing that makes the task bigger than it looks.
+    parts.push(`<h4>Could not locate</h4><div class="pill-row">${a.unresolved_nouns.map(noun =>
+      `<span class="signal-chip sensitive">${esc(noun)}</span>`).join('')}</div>`);
+  }
+  if (removals.length) {
+    // Above the guardrails, always: a bullet telling the agent to avoid cleanup
+    // must never sit above the deletion the prompt actually asked for.
+    parts.push(`<h4>Requested removals</h4><ul class="prompt-list">${removals.map(item =>
+      `<li>${esc(item.what)}${item.path ? ` <span class="sub">${esc(item.path)}</span>` : ''}</li>`).join('')}</ul>`);
+  }
+  if ((a.ambiguities || []).length) {
+    parts.push(`<h4>Worth deciding before you send</h4>${list(a.ambiguities)}`);
+  }
+  parts.push(`<h4>First checkpoint</h4><p>${esc(a.first_checkpoint)}</p>`);
+  if (a.dropped_paths) {
+    parts.push(`<p class="receipt-note">${esc(a.dropped_paths)} path(s) the analyst named do not exist in this repository and were dropped. Confidence lowered a step.</p>`);
+  }
+  parts.push(secondOpinionCost(second));
+  // Everything in this zone came from a model, so the dot says "inferred" --
+  // never "observed", which is zone B's word for things read off the machine.
+  // Low confidence means more than half the prompt's nouns resolved to nothing,
+  // which is nearer to unknown than to inferred, and is the one case where the
+  // colour should stop a reader leaning on it.
+  const tone = a.confidence === 'low' ? 'unknown' : 'inferred';
+  return derivedZoneShell(tone, a.confidence, parts.join(''));
+}
+// Spec 5. On the screen the money was spent on, not buried in Settings.
+function secondOpinionCost(second) {
+  const bits = [
+    'second opinion',
+    second.cli || 'local agent',
+    second.model ? String(second.model) : '',
+    Number.isFinite(second.tokens) && second.tokens ? `${formatCount(second.tokens)} tokens` : '',
+    Number.isFinite(second.cost_usd) ? moneyLabel(second.cost_usd) : '',
+  ].filter(Boolean);
+  return `<p class="second-opinion-cost mono">${esc(bits.join(' · '))}</p>`;
+}
+// Spec 4.2 again: if the reader copies the brief before this lands, the copy
+// says so rather than quietly omitting a zone they were told was coming.
+async function loadSecondOpinion(prompt, tool, cwd) {
+  const node = document.getElementById('planDerivedZone');
+  if (!node) return;
+  let second;
+  try {
+    second = await postJson('/api/second-opinion', { prompt, tool, cwd });
+  } catch (error) {
+    second = { available: false, reason: 'Could not reach the local AIWatcher server.' };
+  }
+  const current = document.getElementById('planDerivedZone');
+  // The reader may have re-run Plan while this was in flight.
+  if (!current || current !== node) return;
+  current.outerHTML = renderSecondOpinion(second);
 }
 
 // Zone B. Stage 1: local, lexical and free, so it never has an unavailable
@@ -346,6 +428,10 @@ async function preflightPrompt() {
       <p style="margin-top:10px">Paste whichever you choose as the next message in your AI tool. If the recommended route is Fresh Start or Fork, open that route first and paste the brief there.</p>
       <p style="margin-top:6px">${esc(data.privacy)}</p>
     </div>`;
+    // Stage 1 is on screen and complete before the expensive half is even
+    // asked for. The gate decided this, not the click: nothing spawns unless
+    // the free local score reached the medium band.
+    if ((data.second_opinion || {}).pending) loadSecondOpinion(prompt, tool, cwd);
   } catch (error) {
     resultNode.innerHTML = '<div class="empty">Could not reach the local AIWatcher server.</div>';
   }
@@ -1280,12 +1366,15 @@ function currencyColumnFormatter(values) {
   // Two decimals everywhere, and anything that would round to zero says so
   // instead. "$0.00" claims the work was free; "<$0.01" is the same fact
   // without the lie, and keeps every cell in the column to one decimal count.
-  return value => {
-    const n = Number(value);
-    if (!Number.isFinite(n)) return '—';
-    if (n > 0 && n < 0.005) return '<$0.01';
-    return '$' + n.toFixed(2);
-  };
+  return moneyLabel;
+}
+// Two decimals, and a real cost that would round to zero says so instead:
+// "$0.00" claims the work was free, "<$0.01" is the same fact without the lie.
+function moneyLabel(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '—';
+  if (n > 0 && n < 0.005) return '<$0.01';
+  return '$' + n.toFixed(2);
 }
 
 function renderChangeRows(rows) {
@@ -3870,6 +3959,12 @@ async function loadOnce(resetDetail, forceRefresh) {
       </tr>`).join('')
     : '<tr><td colspan="6"><div class="empty">No local project usage found for this window.</div></td></tr>';
   document.getElementById('insightHeadline').innerHTML = renderInsightHeadline(data.totals);
+  // Always rendered, including at zero. A line that only appears once it has
+  // something to admit is one nobody believes when it does appear.
+  const overhead = data.analyst_overhead || null;
+  document.getElementById('analystOverhead').textContent = overhead
+    ? `${overhead.label} — ${overhead.detail}`
+    : '';
   document.getElementById('insightFeed').innerHTML = renderInsightFeed(data.insights);
   // Same two-step as the runway charts: markup first, SVG appended after, and
   // nodes collected by attribute rather than by a selector built from data.

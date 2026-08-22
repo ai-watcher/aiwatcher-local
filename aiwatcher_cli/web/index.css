@@ -591,6 +591,9 @@
     .plan-zone h4 { margin: var(--sp-3) 0 var(--sp-1); font-size: var(--fs-2); color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
     .plan-zone-derived { border-left: 3px solid var(--line-strong); }
     .zone-empty { color: var(--muted); font-style: normal; }
+    /* Spec 5: the run is priced on the screen it was paid for, not buried in
+       Settings. Quiet type -- it is a receipt, not a finding. */
+    .second-opinion-cost { color: var(--faint); font-size: var(--fs-1); margin-top: 12px; }
     .plan-zone-guardrails > summary { cursor: pointer; color: var(--muted); font-size: var(--fs-2); padding: var(--sp-2) 0; }
     .plan-zone-guardrails > summary:hover { color: var(--text); }
     .signal-row { margin-top: var(--sp-2); }

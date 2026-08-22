@@ -133,7 +133,17 @@ timeline, git, or prompt enrichment; `/api/handoff` returns the enriched drawer
 payload; `/api/handoff-demo` returns seeded demo data for the in-dashboard Fresh
 Start test flow.
 
-`POST` — `/api/ask-aiwatcher` answers dashboard-only local questions from
+`POST` — `/api/second-opinion` runs the Plan screen's Stage 2 analysis: it
+spawns the user's own agent CLI as a throwaway sibling process in
+`<project>/.aiwatcher/analyst/` and returns a schema-validated description of
+the prompt, or an unavailable state with a reason. It is deliberately a
+separate request from `/api/preflight`, which stays fast and complete on its
+own: a real analyst run takes about 30 seconds. It costs money on the
+caller's own account, so the server re-checks the local blast-radius gate
+before spawning and will refuse a prompt that does not reach it, whatever the
+request says. Internal, and not a route to build against.
+
+`/api/ask-aiwatcher` answers dashboard-only local questions from
 indexed metadata. `/api/handoff-basic`, `/api/handoff`, and
 `/api/handoff-demo` accept the same dashboard-only Fresh Start options as their
 `GET` forms. `/api/handoff-decision` records which action you took on a Fresh
