@@ -70,6 +70,7 @@ from .runtime_attachment import (
     runtime_attachment_for_session,
     safe_runtime_processes,
 )
+from .runtime_nudge import foreground_tool
 from .session_health import (
     CRITICAL_TOKENS_PER_TURN,
     PRESSURE_TOKENS_PER_TURN,
@@ -122,6 +123,7 @@ SUMMARY_BACKGROUND_COOLDOWN_SECONDS = 8
 SUMMARY_WINDOWS = (1, 7, 30)
 ACTIVE_SESSION_MINUTES = 30
 RECENT_SESSION_HOURS = 4
+FRESH_START_PROJECT_COOLDOWN_MINUTES = 2 * 24 * 60
 UNATTRIBUTED_PROJECT = "__unattributed__"
 UNATTRIBUTED_PROJECT_LABEL = "Unattributed sessions"
 
@@ -154,6 +156,13 @@ def compact_int(value: int) -> str:
     if value >= 1_000:
         return f"{value / 1_000:.1f}k"
     return str(value)
+
+
+def short_session_id(session_id: str | None) -> str:
+    value = str(session_id or "")
+    if len(value) <= 16:
+        return value or "unknown"
+    return f"{value[:8]}...{value[-4:]}"
 
 
 def bytes_label(value: int) -> str:
@@ -227,6 +236,69 @@ def is_reliable_project_path(path: str | None) -> bool:
 
 def project_key(path: str | None) -> str:
     return path if is_reliable_project_path(path) else UNATTRIBUTED_PROJECT
+
+
+def fresh_start_project_skip_key(project_path: str | None) -> str | None:
+    """Stable project-level quiet key for Fresh Start nudges."""
+    if not is_reliable_project_path(project_path):
+        return None
+    return f"control_recommended_project:{project_key(project_path)}"
+
+
+def _fresh_start_project_quiet(project_path: str | None) -> bool:
+    key = fresh_start_project_skip_key(project_path)
+    return bool(key and companion_skip_active(key))
+
+
+def _tool_family_label(tool: object) -> str:
+    lower = str(tool or "").lower()
+    if "claude" in lower:
+        return "claude"
+    if "codex" in lower:
+        return "codex"
+    if "cursor" in lower:
+        return "cursor"
+    if "vscode" in lower or "visual studio code" in lower:
+        return "vscode"
+    if "terminal" in lower or "iterm" in lower:
+        return "terminal"
+    return lower.strip()
+
+
+def _foreground_matches_fresh_start_bubble(bubble: dict[str, object]) -> bool:
+    """Only let Companion blink for Fresh Start when the related AI surface is foreground."""
+    active = foreground_tool()
+    if active is None:
+        return False
+    session_tool = _tool_family_label(bubble.get("tool"))
+    runtime = bubble.get("runtime_attachment") if isinstance(bubble.get("runtime_attachment"), dict) else {}
+    surface = str(runtime.get("surface") or "").lower()
+    allowed = {session_tool}
+    if session_tool == "cursor":
+        allowed.add("vscode")
+    if surface == "cli" or str(bubble.get("tool") or "").lower().endswith("-cli"):
+        allowed.add("terminal")
+    return active in {item for item in allowed if item}
+
+
+def _fresh_start_context_candidates(summary: dict[str, object]) -> list[dict[str, object]]:
+    rows = summary.get("context_health") if isinstance(summary.get("context_health"), list) else []
+    candidates: list[dict[str, object]] = []
+    seen_projects: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("severity") not in {"critical", "warning"} or not row.get("can_handoff"):
+            continue
+        project = str(row.get("project_full") or "")
+        if _fresh_start_project_quiet(project):
+            continue
+        project_key_value = project_key(project)
+        if project_key_value in seen_projects:
+            continue
+        seen_projects.add(project_key_value)
+        candidates.append(row)
+    return candidates
 
 
 def project_label(path: str | None, max_len: int = 54) -> str:
@@ -544,6 +616,7 @@ def _worktree_rows(projects: set[str]) -> list[dict[str, object]]:
                 capture_output=True,
                 text=True,
                 timeout=3,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except (OSError, subprocess.TimeoutExpired):
             continue
@@ -1471,6 +1544,21 @@ def _related_active_workspaces(row: LocalSession, *, limit: int = 3) -> list[str
     return workspaces
 
 
+def _same_project_session_count(row: LocalSession) -> int:
+    current = project_key(row.project_path)
+    if current == UNATTRIBUTED_PROJECT:
+        return 1
+    with _SUMMARY_CACHE_LOCK:
+        candidates = list(_SESSION_INDEX.values())
+    session_ids = {
+        candidate.session_id
+        for candidate in candidates
+        if candidate.session_id and project_key(candidate.project_path) == current
+    }
+    session_ids.add(row.session_id)
+    return max(1, len(session_ids))
+
+
 def build_basic_handoff_detail(
     session_id: str,
     days: int = 30,
@@ -1494,6 +1582,7 @@ def build_basic_handoff_detail(
     handoff_type = handoff_type if handoff_type in HANDOFF_TYPE_LABELS else "coding"
     state = session_state(row)
     attachment = runtime_attachment_for_session(row, state=state, processes=safe_runtime_processes())
+    same_project_count = _same_project_session_count(row)
     project = row.project_path if is_reliable_project_path(row.project_path) else "unknown"
     usage = _usage_summary(row)
     warnings = [
@@ -1505,16 +1594,34 @@ def build_basic_handoff_detail(
         "Detailed git, timeline, and prompt evidence is still loading; inspect the repository before editing.",
     ]
     objective_text = objective.strip() if objective and objective.strip() else (
-        "Continue the same user goal from the source workspace, but reconstruct it from local evidence first."
+        "Continue the same user goal from the source workspace, but verify the source session identity before editing."
     )
     next_brief = "\n".join([
         "AIWatcher Fresh Start brief",
         "",
         "You are starting a fresh AI work session from an AIWatcher handoff.",
         "Do not assume access to the previous chat, hidden memory, or unstated decisions.",
-        "Continue from repository state on disk and the source-of-truth evidence below.",
+        "Continue from source-session metadata and workspace state, not from hidden conversation history.",
         f"Target tool: {TARGET_LABELS[target]}.",
         f"Continuation type: {HANDOFF_TYPE_LABELS[handoff_type]}.",
+        "",
+        "Source session identity",
+        f"- Identity confidence: {attachment.identity_label} ({attachment.confidence})",
+        f"- Source session id: {session_id}",
+        f"- Source tool/surface: {row.tool} / {row.surface or 'unknown'}",
+        f"- Source model: {row.model or 'unknown'}",
+        f"- Last observed activity: {row.updated_at.isoformat() if row.updated_at else 'unknown'}",
+        f"- Identity note: {attachment.identity_reason}",
+        f"- Return capability: {attachment.exact_return_label}",
+        f"- Return note: {attachment.exact_return_reason}",
+        *(
+            [
+                f"- Same-project sessions observed: {same_project_count}",
+                "- If this is not the intended source chat, stop and ask the user which session to continue.",
+            ]
+            if same_project_count > 1
+            else []
+        ),
         "",
         "Goal",
         f"- User objective: {objective_text}",
@@ -1544,8 +1651,16 @@ def build_basic_handoff_detail(
         "",
         "Workspace",
         f"- Project: {project}",
-        f"- Source session: {session_id}",
         f"- Source tool/model: {row.tool} / {row.model or 'unknown'}",
+        "",
+        "What remains uncertain",
+        "- Detailed git, timeline, and prompt evidence is still loading.",
+        "- Working-tree files may come from another AI chat or manual edits in the same repository.",
+        *(
+            ["- AIWatcher has not verified the exact active chat. Confirm this handoff matches the intended work before editing."]
+            if attachment.identity_label != "Exact active session"
+            else []
+        ),
         "",
         "Why start fresh",
         *[f"- {item}" for item in warnings],
@@ -1557,7 +1672,9 @@ def build_basic_handoff_detail(
         "- Propose one smallest next checkpoint and wait if the scope is ambiguous or risky.",
         "",
         "Immediate next checkpoint",
+        "- First verify that the source session identity above matches the work the user meant to continue.",
         "- Run `git status --short`.",
+        "- Treat changed files as workspace evidence, not guaranteed proof from this source session.",
         "- Inspect changed files and any source-of-truth files listed above before editing.",
         "- Continue only after that checkpoint is clear; do not replay broad exploration from the old session.",
         "",
@@ -1593,6 +1710,7 @@ def build_basic_handoff_detail(
         "costliest_prompt": None,
         "decisions": [],
         "related_workspaces": [],
+        "same_project_session_count": same_project_count,
         "next_brief": next_brief,
         "runtime_attachment": attachment.to_json(),
         "basic": True,
@@ -1622,6 +1740,7 @@ def build_handoff_detail(
         outcome = get_outcome(session_id)
     except OSError:
         outcome = None
+    attachment = runtime_attachment_for_session(row, state=session_state(row), processes=safe_runtime_processes())
     capsule = build_handoff_capsule(
         row,
         events,
@@ -1634,9 +1753,9 @@ def build_handoff_detail(
         constraints=constraints or [],
         acceptance_criteria=acceptance_criteria or [],
         related_workspaces=_related_active_workspaces(row),
+        runtime_attachment=attachment.to_json(),
+        same_project_session_count=_same_project_session_count(row),
     )
-    attachment = runtime_attachment_for_session(row, state=session_state(row), processes=safe_runtime_processes())
-    capsule["runtime_attachment"] = attachment.to_json()
     return capsule
 
 
@@ -2097,6 +2216,24 @@ def _context_health_card(
         if heaviest_item is not None and heaviest_item.latest_turn_tokens > health.latest_turn_tokens
         else None
     )
+    runtime_attachment = (
+        runtime_attachment_for_session(session, state=session_state(session), processes=[]).to_json()
+        if session
+        else None
+    )
+    identity_label = str((runtime_attachment or {}).get("identity_label") or "Historical log only")
+    return_label = str((runtime_attachment or {}).get("exact_return_label") or "Exact chat unavailable")
+    intent_summary = (
+        "Start a fresh session from this source before continuing broad work."
+        if health.severity == "critical"
+        else "Compact or prepare a Fresh Start before the next broad task."
+    )
+    context_summary = (
+        f"{action['label']} because {health.tool} is replaying about "
+        f"{compact_int(health.latest_turn_tokens)} tokens in the latest turn."
+    )
+    if len(group) > 1:
+        context_summary += f" This is the highest-pressure source among {len(group)} same-project sessions."
     return {
         "charted_because_live": charted_because_live,
         "bigger_idle_label": compact_int(bigger.latest_turn_tokens) if bigger else None,
@@ -2105,6 +2242,7 @@ def _context_health_card(
             if bigger else None
         ),
         "session_id": health.session_id,
+        "session_short": short_session_id(health.session_id),
         "tool": health.tool,
         "project": project_label(health.project_path),
         "project_full": health.project_path,
@@ -2153,13 +2291,13 @@ def _context_health_card(
         "replayed_cost_label": f"${replayed_cost:.2f}" if bloat_measurable else "n/a",
         "analyzed_cost_label": f"${analyzed_cost:.2f}" if bloat_measurable else "n/a",
         "age_label": f"{health.age_days:.1f}d" if health.age_days >= 1 else f"{health.age_hours:.0f}h",
+        "intent_summary": intent_summary,
+        "context_summary": context_summary,
+        "identity_label": identity_label,
+        "return_label": return_label,
         "recommendation": health.recommendations[0] if health.recommendations else "Context is healthy.",
         "action": action,
-        "runtime_attachment": (
-            runtime_attachment_for_session(session, state=session_state(session), processes=[]).to_json()
-            if session
-            else None
-        ),
+        "runtime_attachment": runtime_attachment,
         "updated_at": (
             (session.updated_at or session.started_at).isoformat()
             if session and (session.updated_at or session.started_at)
@@ -2247,7 +2385,12 @@ def _handoff_bubble(context_health: list[dict[str, object]]) -> dict[str, object
     "continue here", with an honest estimate of context pressure avoided.
     """
     candidate = next(
-        (row for row in context_health if row.get("severity") in {"critical", "warning"} and row.get("can_handoff")),
+        (
+            row for row in context_health
+            if row.get("severity") in {"critical", "warning"}
+            and row.get("can_handoff")
+            and not _fresh_start_project_quiet(str(row.get("project_full") or ""))
+        ),
         None,
     )
     if not candidate:
@@ -2356,22 +2499,6 @@ def _prompt_plan_action(
         "this is done",
         "summarize final",
     ]
-    if isinstance(handoff_bubble, dict) and handoff_bubble.get("session_id"):
-        session_id = str(handoff_bubble.get("session_id"))
-        return {
-            "kind": "fresh_start",
-            "label": "Fresh Start",
-            "title": "Start fresh before sending this",
-            "why": str(
-                handoff_bubble.get("reason")
-                or handoff_bubble.get("body")
-                or "Current local context has enough pressure that a Fresh Start brief is safer than replaying the chat."
-            ),
-            "next_step": "Open the session, copy the Fresh Start brief, then paste this planned task into the new chat.",
-            "primary_label": "Open Fresh Start",
-            "primary_url": f"/?session={session_id}",
-            "confidence": "observed",
-        }
     if any(term in lower for term in close_terms):
         return {
             "kind": "archive",
@@ -2414,6 +2541,27 @@ def _prompt_plan_action(
             "next_step": "Copy the execution brief instead of the original prompt.",
             "primary_label": "Copy safer brief",
             "primary_url": "",
+            "confidence": "observed",
+        }
+    already_fresh_start_prompt = "AIWatcher Fresh Start brief" in prompt or "AIWatcher fresh-session handoff" in prompt
+    if (
+        isinstance(handoff_bubble, dict)
+        and handoff_bubble.get("session_id")
+        and not already_fresh_start_prompt
+    ):
+        session_id = str(handoff_bubble.get("session_id"))
+        return {
+            "kind": "fresh_start",
+            "label": "Fresh Start",
+            "title": "Start fresh before sending this",
+            "why": str(
+                handoff_bubble.get("reason")
+                or handoff_bubble.get("body")
+                or "Current local context has enough pressure that a Fresh Start brief is safer than replaying the chat."
+            ),
+            "next_step": "Open the session, copy the Fresh Start brief, then paste this planned task into the new chat.",
+            "primary_label": "Open Fresh Start",
+            "primary_url": f"/?session={session_id}",
             "confidence": "observed",
         }
     return {
@@ -4793,12 +4941,71 @@ def build_companion_state() -> dict[str, object]:
             "primary_label": "Review Gate",
             "primary_action": "open_prompt_gate",
             "primary_url": str(gate.get("url") or "/?view=prompt"),
+            "continue_label": "Continue",
+            "continue_action": "run_original_prompt",
+            "continue_url": str(gate.get("url") or ""),
             "control_url": str(gate.get("url") or "/?view=prompt"),
             "detail": "A hook paused this prompt locally. Review it before the AI tool continues.",
+        }
+    fresh_start_candidates = _fresh_start_context_candidates(summary)
+    if len(fresh_start_candidates) > 1:
+        foreground_candidate = next(
+            (row for row in fresh_start_candidates if _foreground_matches_fresh_start_bubble(row)),
+            None,
+        )
+        project_count = len(fresh_start_candidates)
+        critical_count = sum(1 for row in fresh_start_candidates if row.get("severity") == "critical")
+        total_context = sum(int(row.get("estimated_replayed_context_tokens") or 0) for row in fresh_start_candidates)
+        context_label = compact_int(total_context) if total_context else "context"
+        project_lines = [
+            str(row.get("project_full") or "")
+            for row in fresh_start_candidates
+            if row.get("project_full")
+        ]
+        if foreground_candidate is None:
+            return {
+                **base,
+                "state": "watching",
+                "label": "Watching quietly",
+                "subtitle": f"{project_count} projects ready for context review in Console",
+                "primary_label": "Console",
+                "primary_url": "/?view=sessions#contextHealth",
+                "detail": "Fresh Start review is batched in Watch and only blinks while an affected AI surface is foreground.",
+            }
+        return {
+            **base,
+            "state": "control_review",
+            "label": "Review context",
+            "subtitle": (
+                f"{project_count} projects need Fresh Start review"
+                + (f" · {critical_count} critical" if critical_count else "")
+            ),
+            "primary_label": "Review",
+            "primary_action": "open_url",
+            "primary_url": "/?view=sessions#contextHealth",
+            "skip_label": "Snooze",
+            "skip_state": "control_recommended_group",
+            "skip_project": "\n".join(project_lines),
+            "fresh_start_project_count": project_count,
+            "fresh_start_context_label": context_label,
+            "control_url": "/?view=sessions#contextHealth",
+            "watch_url": "/?view=sessions#contextHealth",
+            "detail": "Choose which projects to Fresh Start, continue, or snooze in one batch.",
         }
     bubble = summary.get("handoff_bubble")
     if isinstance(bubble, dict) and bubble.get("session_id"):
         session_id = str(bubble.get("session_id"))
+        bubble_project = str(bubble.get("project_full") or "")
+        if _fresh_start_project_quiet(bubble_project):
+            return {
+                **base,
+                "state": "watching",
+                "label": "Watching quietly",
+                "subtitle": "Fresh Start snoozed for this project",
+                "primary_label": "Console",
+                "primary_url": "/?view=sessions#contextHealth",
+                "detail": "The project still appears in Watch, but the Companion will not blink for it during the cooldown.",
+            }
         try:
             direct_decisions = recent_handoff_decisions(limit=20)
         except OSError:
@@ -4815,9 +5022,10 @@ def build_companion_state() -> dict[str, object]:
                     **base,
                     "state": "watching",
                     "label": "Watching quietly",
-                    "subtitle": "Fresh Start decision saved",
+                    "subtitle": "Fresh Start snoozed for this project",
                     "primary_label": "Console",
-                    "detail": "AIWatcher will stay quiet for this session unless a new intervention is justified.",
+                    "primary_url": "/?view=sessions#contextHealth",
+                    "detail": "AIWatcher will stay quiet for this project during the cooldown unless a stronger intervention is justified.",
                 }
             if decision in {"new_chat", "copy_handoff"}:
                 if recent_decision.get("receipt_viewed_at"):
@@ -4851,6 +5059,30 @@ def build_companion_state() -> dict[str, object]:
                 "primary_label": "Console",
                 "detail": "The recommendation remains in the Console, but the Companion will stay quiet for now.",
             }
+        if not _foreground_matches_fresh_start_bubble(bubble):
+            health_rows = summary.get("context_health") if isinstance(summary.get("context_health"), list) else []
+            project_count = len({
+                str(row.get("project_full") or row.get("project") or "")
+                for row in health_rows
+                if isinstance(row, dict)
+                and row.get("severity") in {"critical", "warning"}
+                and row.get("can_handoff")
+                and not _fresh_start_project_quiet(str(row.get("project_full") or ""))
+            })
+            subtitle = (
+                f"{project_count} project{'s' if project_count != 1 else ''} ready for context review in Console"
+                if project_count
+                else "Context review waiting in Console"
+            )
+            return {
+                **base,
+                "state": "watching",
+                "label": "Watching quietly",
+                "subtitle": subtitle,
+                "primary_label": "Console",
+                "primary_url": "/?view=sessions#contextHealth",
+                "detail": "Fresh Start nudges only blink when the matching AI tool or terminal is foreground.",
+            }
         return {
             **base,
             "state": "control_recommended",
@@ -4871,7 +5103,7 @@ def build_companion_state() -> dict[str, object]:
             "skip_label": "Skip",
             "skip_state": "control_recommended",
             "skip_session_id": session_id,
-            "skip_project": str(bubble.get("project_full") or ""),
+            "skip_project": bubble_project,
             "control_url": f"/?session={session_id}",
             "watch_url": f"/?session={session_id}",
             "detail": "Control recommendation is based on local context-health evidence.",
@@ -5423,6 +5655,7 @@ class UIHandler(BaseHTTPRequestHandler):
             session_id = str(payload.get("session_id", "")).strip()
             decision = str(payload.get("decision", "")).strip()
             reason = str(payload.get("reason", "")).strip()
+            source_project_path = str(payload.get("source_project_path", "")).strip()
             action_channel = str(payload.get("action_channel", "dashboard")).strip() or "dashboard"
             expected = payload.get("expected_saved_context_tokens")
             if not session_id:
@@ -5436,19 +5669,20 @@ class UIHandler(BaseHTTPRequestHandler):
                     reason=reason,
                     expected_saved_context_tokens=expected if isinstance(expected, int) else None,
                     action_channel=action_channel,
-                    source_project_path=source_row.project_path if source_row else None,
+                    source_project_path=source_row.project_path if source_row else source_project_path or None,
                 )
                 if decision in {"continue_here", "dismissed"}:
                     record_companion_skip(
                         key=f"control_recommended:{session_id}",
                         reason=f"User chose {decision} for Fresh Start.",
-                        minutes=24 * 60,
+                        minutes=FRESH_START_PROJECT_COOLDOWN_MINUTES,
                     )
-                    if source_row and is_reliable_project_path(source_row.project_path):
+                    project_key_for_skip = fresh_start_project_skip_key(source_row.project_path if source_row else source_project_path)
+                    if project_key_for_skip:
                         record_companion_skip(
-                            key=f"control_recommended_project:{source_row.project_path}",
+                            key=project_key_for_skip,
                             reason=f"User chose {decision} for Fresh Start in this project.",
-                            minutes=24 * 60,
+                            minutes=FRESH_START_PROJECT_COOLDOWN_MINUTES,
                         )
             except ValueError as exc:
                 self._send(400, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")
@@ -5523,6 +5757,31 @@ class UIHandler(BaseHTTPRequestHandler):
                     record_companion_skip(key="proof_pending", reason="User skipped the proof-pending Companion reminder.")
                     self._send(200, json.dumps({"ok": True, "updated": updated}), "application/json; charset=utf-8")
                     return
+                if state in {"control_recommended_group", "control_recommended_project"}:
+                    raw_projects = payload.get("projects")
+                    projects = [str(item).strip() for item in raw_projects] if isinstance(raw_projects, list) else []
+                    if project:
+                        projects.extend(part.strip() for part in project.splitlines())
+                    saved = []
+                    for project_path in projects:
+                        project_key_for_skip = fresh_start_project_skip_key(project_path)
+                        if not project_key_for_skip or project_key_for_skip in saved:
+                            continue
+                        record_companion_skip(
+                            key=project_key_for_skip,
+                            reason="User snoozed Fresh Start review for this project.",
+                            minutes=FRESH_START_PROJECT_COOLDOWN_MINUTES,
+                        )
+                        saved.append(project_key_for_skip)
+                    if not saved:
+                        self._send(
+                            400,
+                            json.dumps({"error": "No reliable project path was supplied for Fresh Start snooze."}),
+                            "application/json; charset=utf-8",
+                        )
+                        return
+                    self._send(200, json.dumps({"ok": True, "projects": len(saved)}), "application/json; charset=utf-8")
+                    return
                 if state == "control_recommended" and session_id:
                     source_row = _find_session_row(session_id)
                     record = record_handoff_decision(
@@ -5535,13 +5794,14 @@ class UIHandler(BaseHTTPRequestHandler):
                     record_companion_skip(
                         key=f"control_recommended:{session_id}",
                         reason="User skipped the Fresh Start Companion nudge.",
-                        minutes=24 * 60,
+                        minutes=FRESH_START_PROJECT_COOLDOWN_MINUTES,
                     )
-                    if project and project != "unknown":
+                    project_key_for_skip = fresh_start_project_skip_key(project)
+                    if project_key_for_skip:
                         record_companion_skip(
-                            key=f"control_recommended_project:{project}",
+                            key=project_key_for_skip,
                             reason="User skipped Fresh Start nudges for this project.",
-                            minutes=24 * 60,
+                            minutes=FRESH_START_PROJECT_COOLDOWN_MINUTES,
                         )
                     self._send(200, json.dumps({"ok": True, "record": record}), "application/json; charset=utf-8")
                     return
