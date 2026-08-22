@@ -25,3 +25,7 @@ Documentation = "https://github.com/ai-watcher/aiwatcher-local"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["aiwatcher_cli*"]
+
+[tool.setuptools.package-data]
+# The dashboard front end. Without this the wheel installs but serves nothing.
+aiwatcher_cli = ["web/*.html", "web/*.css", "web/*.js"]
