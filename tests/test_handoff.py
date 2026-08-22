@@ -46,6 +46,12 @@ class HandoffTests(unittest.TestCase):
         self.assertIn("fresh Claude/Codex/Cursor session", rendered)
         self.assertIn("fresh AI coding session", capsule["next_brief"])
         self.assertIn("Do not assume access to the previous chat", capsule["next_brief"])
+        self.assertIn("Summary from previous work", capsule["next_brief"])
+        self.assertIn("Decisions made", capsule["next_brief"])
+        self.assertIn("Current state", capsule["next_brief"])
+        self.assertIn("Open next step", capsule["next_brief"])
+        self.assertIn("Files/evidence to inspect first", capsule["next_brief"])
+        self.assertLess(capsule["next_brief"].index("Summary from previous work"), capsule["next_brief"].index("Source session identity"))
         self.assertIn("git status --short", capsule["next_brief"])
         self.assertIn("smallest next checkpoint", capsule["next_brief"])
         self.assertIn("What appears done", capsule["next_brief"])
@@ -93,6 +99,8 @@ class HandoffTests(unittest.TestCase):
             )
 
         brief = capsule["next_brief"]
+        self.assertIn("Source session match: Likely workspace", brief)
+        self.assertIn("4 same-project sessions were observed", brief)
         self.assertIn("Source session identity", brief)
         self.assertIn("Identity confidence: Likely workspace (medium)", brief)
         self.assertIn("01a00644-0f16-7291-b259-144420adaed1", brief)

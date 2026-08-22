@@ -787,6 +787,11 @@ def _brief_working_directory(cwd: str | None) -> str | None:
 
 
 _HANDOFF_SECTION_HEADERS = {
+    "Summary from previous work",
+    "Decisions made",
+    "Current state",
+    "Open next step",
+    "Files/evidence to inspect first",
     "Goal",
     "How to continue",
     "Objective",
@@ -847,6 +852,11 @@ def _is_aiwatcher_fresh_start_prompt(text: str) -> bool:
 
 
 _FRESH_START_INTENT_HEADERS = {
+    "Summary from previous work",
+    "Decisions made",
+    "Current state",
+    "Open next step",
+    "Files/evidence to inspect first",
     "Objective",
     "Goal",
     "Source of truth to load first",

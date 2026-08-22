@@ -134,6 +134,13 @@ def compact_int(value: int) -> str:
     return str(value)
 
 
+def short_session_id(session_id: str | None) -> str:
+    value = str(session_id or "")
+    if len(value) <= 16:
+        return value or "unknown"
+    return f"{value[:8]}...{value[-4:]}"
+
+
 def bytes_label(value: int) -> str:
     if value >= 1024 ** 3:
         return f"{value / (1024 ** 3):.1f} GB"
@@ -2057,8 +2064,27 @@ def _context_health_card(health: ContextHealth, session: LocalSession | None, *,
     replayed_cost = sum(item.replayed_cost_usd for item in group if item.bloat_measurable)
     analyzed_cost = sum(item.analyzed_cost_usd for item in group if item.bloat_measurable)
     bloat_measurable = any(item.bloat_measurable for item in group)
+    runtime_attachment = (
+        runtime_attachment_for_session(session, state=session_state(session), processes=[]).to_json()
+        if session
+        else None
+    )
+    identity_label = str((runtime_attachment or {}).get("identity_label") or "Historical log only")
+    return_label = str((runtime_attachment or {}).get("exact_return_label") or "Exact chat unavailable")
+    intent_summary = (
+        "Start a fresh session from this source before continuing broad work."
+        if health.severity == "critical"
+        else "Compact or prepare a Fresh Start before the next broad task."
+    )
+    context_summary = (
+        f"{action['label']} because {health.tool} is replaying about "
+        f"{compact_int(health.latest_turn_tokens)} tokens in the latest turn."
+    )
+    if len(group) > 1:
+        context_summary += f" This is the highest-pressure source among {len(group)} same-project sessions."
     return {
         "session_id": health.session_id,
+        "session_short": short_session_id(health.session_id),
         "tool": health.tool,
         "project": project_label(health.project_path),
         "project_full": health.project_path,
@@ -2086,13 +2112,13 @@ def _context_health_card(health: ContextHealth, session: LocalSession | None, *,
         "replayed_cost_label": f"${replayed_cost:.2f}" if bloat_measurable else "n/a",
         "analyzed_cost_label": f"${analyzed_cost:.2f}" if bloat_measurable else "n/a",
         "age_label": f"{health.age_days:.1f}d" if health.age_days >= 1 else f"{health.age_hours:.0f}h",
+        "intent_summary": intent_summary,
+        "context_summary": context_summary,
+        "identity_label": identity_label,
+        "return_label": return_label,
         "recommendation": health.recommendations[0] if health.recommendations else "Context is healthy.",
         "action": action,
-        "runtime_attachment": (
-            runtime_attachment_for_session(session, state=session_state(session), processes=[]).to_json()
-            if session
-            else None
-        ),
+        "runtime_attachment": runtime_attachment,
         "updated_at": (
             (session.updated_at or session.started_at).isoformat()
             if session and (session.updated_at or session.started_at)
@@ -4493,6 +4519,11 @@ HTML = r"""<!doctype html>
     .coverage-status.companion { color: #dceaff; border-color: rgba(112,167,255,.45); background: var(--blue-soft); }
     .coverage-status.unsupported, .coverage-status.not_detected, .health-severity.critical { color: #ffc4ce; border-color: rgba(242,125,143,.45); background: var(--red-soft); }
     .coverage-detail, .health-detail { display: grid; gap: 6px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .identity-strip { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
+    .identity-strip strong, .identity-strip span { border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; background: rgba(7,12,19,.56); }
+    .identity-strip strong { color: #dceaff; border-color: rgba(112,167,255,.36); }
+    .health-evidence { border: 1px solid rgba(148,163,184,.16); border-radius: 8px; background: rgba(6,11,18,.48); padding: 10px; }
+    .health-evidence p { margin: 3px 0 0; color: var(--muted); }
     .health-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
     .handoff-bubble {
       border-color: rgba(112,167,255,.5);
@@ -6535,6 +6566,17 @@ function renderContextHealth(rows) {
     <div class="health-head">
       <div><h3>${esc(row.project)}</h3><p>${esc(row.tool)} · ${esc(row.age_label)}${row.session_count > 1 ? ` · ${esc(row.session_count)} sessions` : ''}</p></div>
       <span class="health-severity ${esc(row.severity)}">${esc(row.severity)}</span>
+    </div>
+    <div class="identity-strip" style="margin:10px 0">
+      <strong>${esc(row.identity_label || 'Historical log only')}</strong>
+      <span>${esc(row.tool || 'unknown tool')} · ${esc(row.session_short || row.session_id || 'unknown session')}</span>
+      <span>${esc(row.return_label || 'Exact chat unavailable')}</span>
+    </div>
+    <div class="health-evidence" style="margin-bottom:12px">
+      <div class="label">Inferred intent</div>
+      <p>${esc(row.intent_summary || row.action.reason || 'Review this source before carrying context forward.')}</p>
+      <div class="label" style="margin-top:8px">Context AIWatcher will carry</div>
+      <p>${esc(row.context_summary || row.recommendation || 'Fresh Start will use local session identity and workspace evidence.')}</p>
     </div>
     <div class="mini-grid">
       <div class="mini"><span class="label">Latest turn</span><strong>${esc(row.latest_turn_tokens)}</strong></div>
