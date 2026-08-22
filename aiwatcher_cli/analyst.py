@@ -31,14 +31,24 @@ import re
 import shutil
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-# Measured, not chosen: a real analyst run took 29.9s wall / 26.2s to first
-# token. The spec's 12s would time out every single call. Stage 2 never blocks
-# the user -- Zone A streams in beneath a complete Zone B -- so a longer ceiling
-# costs patience, not usability, where a short one costs the whole feature.
-TIMEOUT_SECONDS = 45.0
+# Measured, and the measurements are not close together. The same prompt, on the
+# same machine and the same small tier, has come back in 17s and in 206s -- the
+# slow one spent 200s of that before its first token. Codex swings the same way:
+# 17s once, 196s twice an hour later.
+#
+# So this number cannot be a latency budget, because there is no latency to
+# budget for; it is only a bound on a hang. It is set generously on purpose. A
+# ceiling that trips during an ordinary slow spell does not save anything -- the
+# analyst has already consumed the tokens by then, so an early kill pays for the
+# work and throws the answer away. Stage 2 never blocks the user either: zones B
+# and C are complete and on screen throughout.
+#
+# The spec's 12s would have timed out every call ever made.
+TIMEOUT_SECONDS = 240.0
 
 # The sandbox lives inside the project so the path is stable and reviewable.
 # Note this does NOT survive scanner._normalize_project_path, which folds any
@@ -47,9 +57,53 @@ TIMEOUT_SECONDS = 45.0
 SANDBOX_PARTS = (".aiwatcher", "analyst")
 SANDBOX_SUFFIX = "/".join(SANDBOX_PARTS)
 
-# The small, fast tier. Structured extraction does not need the expensive one,
-# and the gate exists to keep this cheap.
-DEFAULT_MODEL = "haiku"
+# Which agent can host the analyst, and how each one has to be driven.
+#
+# Spec 3.1 says to pick the vendor the user is about to prompt, because that is
+# the one installed and authenticated, and that vendor's small, fast tier --
+# structured extraction does not need the expensive one, and the gate exists to
+# keep this cheap.
+#
+# Both shapes here were run against the installed CLIs, not read off the spec.
+# Neither of the spec's two invocations works: `-p` is a boolean flag and
+# `codex exec`'s prompt is positional, so a file path handed to either is taken
+# as the prompt itself. Both take the prompt on stdin instead.
+
+
+@dataclass(frozen=True)
+class Host:
+    key: str
+    label: str
+    executable: str
+    default_model: str
+    # Whether the CLI tells us what the run cost in a machine-readable way.
+    # Claude Code returns total_cost_usd; Codex returns nothing usable, which is
+    # why the monthly ceiling is enforced on run count as well as on dollars.
+    reports_cost: bool
+    # Whether the CLI validates the response against a schema itself. Codex
+    # does, via --output-schema, which is why its answers never arrive fenced.
+    enforces_schema: bool
+
+
+HOSTS: tuple[Host, ...] = (
+    Host("claude-code", "Claude Code", "claude", "haiku",
+         reports_cost=True, enforces_schema=False),
+    Host("codex-cli", "Codex", "codex", "gpt-5.4-mini",
+         reports_cost=False, enforces_schema=True),
+)
+HOSTS_BY_KEY = {host.key: host for host in HOSTS}
+
+# The Plan screen's tool dropdown, mapped to whichever host can serve it. Cursor
+# and the generic option have no analyst of their own yet, so they fall through
+# to whatever is installed rather than claiming to be unavailable.
+TOOL_TO_HOST = {
+    "claude": "claude-code",
+    "claude-code": "claude-code",
+    "codex": "codex-cli",
+    "codex-cli": "codex-cli",
+}
+
+DEFAULT_MODEL = HOSTS[0].default_model
 
 # How many repository paths to show the analyst. Ranked by commit activity by
 # the caller; the cap is what keeps the prompt (and so the cost) bounded.
@@ -64,8 +118,8 @@ class AnalystUnavailable(Exception):
 
 # --- detection ---------------------------------------------------------------
 
-# Cached per machine rather than per call: `claude --version` costs about a
-# second and the answer only changes when the CLI is upgraded.
+# Cached per machine rather than per call: asking a CLI for its version costs
+# about a second each and the answer only changes when one is upgraded.
 _DETECTION_CACHE: dict[str, Any] | None = None
 
 
@@ -74,24 +128,65 @@ def _cache_path() -> Path:
     return home / "analyst-detection.json"
 
 
-def detect(*, refresh: bool = False) -> dict[str, Any]:
-    """Which agent CLI can host the analyst, if any.
+def detect(*, refresh: bool = False, tool: str | None = None,
+           verify: bool = False) -> dict[str, Any]:
+    """Which agent CLI will host the analyst, if any.
 
-    Returns `available: False` with a reason rather than raising, because
-    "no agent CLI found" is a Settings line, not an error.
+    Given the tool the user is about to prompt, prefer that vendor: it is the
+    one they have installed and authenticated, and asking a different vendor for
+    a second opinion on work the first one will do is a stranger thing to
+    charge for. Falls back to whatever else is installed rather than declaring
+    itself unavailable, because any analyst beats none.
+
+    Returns `available: False` with a reason rather than raising -- "no agent
+    CLI found" is a Settings line, not an error.
+    """
+    found = detect_all(refresh=refresh, verify=verify)
+    preferred = TOOL_TO_HOST.get((tool or "").strip().lower())
+    order = [preferred] if preferred else []
+    order += [host.key for host in HOSTS if host.key != preferred]
+    for key in order:
+        entry = found.get(key) or {}
+        if entry.get("available"):
+            return {**entry, "preferred": key == preferred}
+    # Nothing usable: report the preferred vendor's reason if it had one, since
+    # that is the one the user was actually asking about.
+    fallback = (found.get(preferred) if preferred else None) or next(iter(found.values()), {})
+    return {
+        "available": False,
+        "cli": fallback.get("cli"),
+        "reason": fallback.get("reason") or "Second opinion: unavailable, no agent CLI found",
+    }
+
+
+def detect_all(*, refresh: bool = False, verify: bool = False) -> dict[str, dict[str, Any]]:
+    """Every known host and whether it can be used, keyed by host.
+
+    Cheap by default. This is reached from the Plan gate, which runs on every
+    preflight, and asking two CLIs for their version there cost a subprocess
+    each and made an unrelated test time out. Installation is a path lookup;
+    whether the CLI actually works is answered by running it, and a broken one
+    already comes back as spec 8's "CLI returned an error" row.
+
+    `verify=True` does the slow version probe, for Settings and for anywhere
+    the version itself is the thing being reported.
     """
     global _DETECTION_CACHE
     if _DETECTION_CACHE is not None and not refresh:
-        return _DETECTION_CACHE
+        if not verify or all(entry.get("probed_version") or not entry.get("available")
+                             for entry in _DETECTION_CACHE.values()):
+            return _DETECTION_CACHE
     if not refresh:
         try:
             cached = json.loads(_cache_path().read_text(encoding="utf-8"))
-            if isinstance(cached, dict) and cached.get("probed_version"):
-                _DETECTION_CACHE = cached
-                return cached
+            if isinstance(cached, dict) and all(key in cached for key in HOSTS_BY_KEY):
+                if not verify or all(entry.get("probed_version") or not entry.get("available")
+                                     for entry in cached.values()):
+                    _DETECTION_CACHE = cached
+                    return cached
         except (OSError, ValueError):
             pass
-    result = _probe()
+    result = {host.key: _probe(host, verify=verify) for host in HOSTS}
     _DETECTION_CACHE = result
     try:
         path = _cache_path()
@@ -103,35 +198,35 @@ def detect(*, refresh: bool = False) -> dict[str, Any]:
     return result
 
 
-def _probe() -> dict[str, Any]:
-    executable = shutil.which("claude")
+def _probe(host: Host, *, verify: bool = False) -> dict[str, Any]:
+    executable = shutil.which(host.executable)
     if not executable:
         return {
             "available": False,
-            "cli": None,
-            "reason": "Second opinion: unavailable, no agent CLI found",
+            "cli": host.key,
+            "reason": f"Second opinion: unavailable, {host.label} is not installed",
         }
+    base = {
+        "available": True,
+        "cli": host.key,
+        "label": host.label,
+        "executable": executable,
+        "reason": "",
+    }
+    if not verify:
+        return base
     try:
         proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
             [executable, "--version"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=15,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        return {
-            "available": False, "cli": "claude-code", "reason": f"Could not run the agent CLI: {exc}",
-        }
+        return {"available": False, "cli": host.key,
+                "reason": f"Could not run {host.label}: {exc}"}
     if proc.returncode != 0:
-        return {
-            "available": False, "cli": "claude-code",
-            "reason": "Your agent CLI returned an error when asked for its version.",
-        }
-    return {
-        "available": True,
-        "cli": "claude-code",
-        "executable": executable,
-        "probed_version": (proc.stdout or "").strip()[:120],
-        "reason": "",
-    }
+        return {"available": False, "cli": host.key,
+                "reason": f"{host.label} returned an error when asked for its version."}
+    return {**base, "probed_version": (proc.stdout or "").strip()[:120]}
 
 
 # --- the prompt --------------------------------------------------------------
@@ -370,19 +465,22 @@ def cache_key(prompt: str, tree_revision: str, project_id: str) -> str:
 
 def run(prompt: str, *, project_root: str | os.PathLike[str],
         paths: tuple[str, ...] | list[str],
-        model: str = DEFAULT_MODEL,
+        model: str | None = None,
         timeout: float = TIMEOUT_SECONDS,
         detection: dict[str, Any] | None = None,
+        tool: str | None = None,
         runner: Any = None) -> dict[str, Any]:
     """Spawn one analyst and return a validated result, or an unavailable state.
 
     Never raises for an analyst that misbehaves -- every failure in spec 8's
-    matrix comes back as `available: False` with a reason, because Zones B and C
+    matrix comes back as `available: False` with a reason, because zones B and C
     are complete and there is no state in which a Plan run returns nothing.
     """
-    found = detection if detection is not None else detect()
+    found = detection if detection is not None else detect(tool=tool)
     if not found.get("available"):
         return {"available": False, "reason": found.get("reason") or "Second opinion unavailable."}
+    host = HOSTS_BY_KEY.get(str(found.get("cli") or ""), HOSTS[0])
+    chosen_model = model or host.default_model
 
     sandbox = sandbox_dir(project_root)
     try:
@@ -392,12 +490,16 @@ def run(prompt: str, *, project_root: str | os.PathLike[str],
 
     text = build_prompt(prompt, paths)
     env = dict(os.environ)
-    # Not read by the CLI -- it is a marker for anyone reading a process list,
-    # and a second signal beside the sandbox path. The path is what the ledger
-    # actually matches on, because that is what survives into the session log.
+    # Not read by either CLI -- it is a marker for anyone reading a process
+    # list, and a second signal beside the sandbox path. The path is what the
+    # ledger actually matches on, because that is what reaches the session log.
     env["AIWATCHER_ROLE"] = "analyst"
-    argv = [found.get("executable") or "claude", "-p",
-            "--output-format", "json", "--model", model]
+
+    executable = found.get("executable") or host.executable
+    try:
+        argv = _prepare(host, executable, chosen_model, sandbox)
+    except OSError as exc:
+        return {"available": False, "reason": f"Second opinion unavailable. {exc}"}
 
     started = time.monotonic()
     try:
@@ -410,26 +512,82 @@ def run(prompt: str, *, project_root: str | os.PathLike[str],
 
     if proc.returncode != 0:
         return {"available": False,
-                "reason": "Second opinion unavailable. Your agent CLI returned an error.",
+                "reason": f"Second opinion unavailable. {host.label} returned an error.",
                 "stderr": (proc.stderr or "")[:2000]}
 
-    envelope, result_text = _unwrap(proc.stdout or "")
+    envelope, result_text = _read_result(host, proc, sandbox)
     analysis, reason = validate(result_text, paths)
     if analysis is None:
         # Spec 3.4 rule 4: the raw response goes to the local debug log so a
         # malformed analyst can be diagnosed, and the block is dropped whole.
-        return {"available": False, "reason": reason, "raw": (proc.stdout or "")[:4000]}
+        return {"available": False, "reason": reason,
+                "raw": (result_text or proc.stdout or "")[:4000]}
 
     return {
         "available": True,
         "analysis": analysis,
-        "cost_usd": envelope.get("total_cost_usd"),
-        "tokens": _total_tokens(envelope.get("usage") or {}),
+        # None, not 0.0, when the CLI does not report it. "$0.00" would claim
+        # the run was free, and for anyone on an API key it was not.
+        "cost_usd": envelope.get("total_cost_usd") if host.reports_cost else None,
+        "cost_reported": host.reports_cost,
+        "tokens": _total_tokens(envelope.get("usage") or {}) if host.reports_cost else None,
         "session_id": envelope.get("session_id"),
-        "model": model,
-        "cli": found.get("cli"),
+        "model": chosen_model,
+        "cli": host.key,
+        "cli_label": host.label,
         "duration_ms": elapsed_ms,
     }
+
+
+def _prepare(host: Host, executable: str, model: str, sandbox: Path) -> list[str]:
+    """The argv for this host, plus any file it needs written first."""
+    if host.key == "codex-cli":
+        schema_file = sandbox / "schema.json"
+        schema_file.write_text(json.dumps(RESPONSE_SCHEMA), encoding="utf-8")
+        answer_file = sandbox / "last.json"
+        # A stale answer from a previous run would otherwise be read back as
+        # this run's result the moment anything fails before it is rewritten.
+        answer_file.unlink(missing_ok=True)
+        return [
+            executable, "exec",
+            # The sandbox is not a git repository of its own, and read-only is
+            # the tightest of Codex's sandbox policies: an analyst that is only
+            # describing a task has no reason to be able to write anything.
+            "--skip-git-repo-check", "-s", "read-only",
+            "-m", model,
+            # Codex validates the response against the schema itself, which is
+            # why its answers never come back wrapped in a code fence.
+            "--output-schema", str(schema_file),
+            "-o", str(answer_file),
+            # A bare "-" reads the prompt from stdin. Positionally it would put
+            # the entire prompt in the process list.
+            "-",
+        ]
+    return [executable, "-p", "--output-format", "json", "--model", model]
+
+
+# Codex prints its session id to stderr and nowhere else. Worth keeping: it is
+# what ties a line in the overhead ledger back to the analysis it produced.
+_CODEX_SESSION_ID = re.compile(r"session id:\s*([0-9a-fA-F-]{8,})")
+
+
+def _read_result(host: Host, proc: "subprocess.CompletedProcess[str]",
+                 sandbox: Path) -> tuple[dict[str, Any], str]:
+    """The CLI's own metadata, and the model's answer, however that CLI reports it."""
+    if host.key == "codex-cli":
+        envelope: dict[str, Any] = {}
+        match = _CODEX_SESSION_ID.search(proc.stderr or "")
+        if match:
+            envelope["session_id"] = match.group(1)
+        try:
+            answer = (sandbox / "last.json").read_text(encoding="utf-8")
+        except OSError:
+            # Nothing written means nothing to validate. Falling back to stdout
+            # would risk reading a progress line as if it were the answer.
+            answer = ""
+        return envelope, answer
+    return _unwrap(proc.stdout or "")
+
 
 
 # How long to wait for a killed process tree to actually go away before giving

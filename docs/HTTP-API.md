@@ -135,7 +135,10 @@ Start test flow.
 
 `POST` — `/api/second-opinion` runs the Plan screen's Stage 2 analysis: it
 spawns the user's own agent CLI as a throwaway sibling process in
-`<project>/.aiwatcher/analyst/` and returns a schema-validated description of
+`<project>/.aiwatcher/analyst/`. Claude Code and Codex can both host it, and
+the `tool` field picks which — the vendor you are about to prompt is the one
+already installed and authenticated. A vendor with no analyst falls back to
+whichever is installed rather than refusing and returns a schema-validated description of
 the prompt, or an unavailable state with a reason. It is deliberately a
 separate request from `/api/preflight`, which stays fast and complete on its
 own: a real analyst run takes about 30 seconds. It costs money on the

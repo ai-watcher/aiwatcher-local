@@ -1415,6 +1415,13 @@ MAX_DECISIONS_STORED = 500
 # them, which is far more than the gate fires on in a month of real use, and the
 # point of the number is to bound a runaway, not to ration ordinary use.
 ANALYST_MONTHLY_CAP_USD = 5.0
+# And a ceiling on runs, because the dollar cap cannot bind on every host.
+# Codex reports no machine-readable cost -- AIWatcher prices its sessions at $0
+# by design, and a subscription user's really is -- so a dollar-only cap would
+# quietly stop limiting anything the moment Codex became a host. 150 is what the
+# dollar cap buys at the measured price of a run (~$0.035), so the two ceilings
+# mean roughly the same thing and whichever is reached first stops the spawning.
+ANALYST_MONTHLY_RUN_CAP = 150
 MAX_ANALYST_RUNS_STORED = 2000
 
 
@@ -1510,14 +1517,22 @@ def analyst_month_spend(now: datetime | None = None) -> dict[str, Any]:
         spent += float(run.get("cost_usd") or 0.0)
         count += 1
     cap = ANALYST_MONTHLY_CAP_USD
+    run_cap = ANALYST_MONTHLY_RUN_CAP
+    by_cost = spent >= cap
+    by_runs = count >= run_cap
     return {
         "runs": count,
         "spent_usd": round(spent, 6),
         "cap_usd": cap,
+        "run_cap": run_cap,
         "remaining_usd": round(max(0.0, cap - spent), 6),
-        # A hard stop, checked before spawning. Warning after the fact is what
-        # the product exists to complain about.
-        "capped": spent >= cap,
+        "remaining_runs": max(0, run_cap - count),
+        # Which ceiling stopped it, so the reason shown can name the real one
+        # rather than quoting dollars at somebody whose host reports none.
+        "capped_by": "cost" if by_cost else ("runs" if by_runs else None),
+        # A hard stop, checked before spawning. Warning after the fact is the
+        # thing this product exists to complain about.
+        "capped": by_cost or by_runs,
     }
 
 

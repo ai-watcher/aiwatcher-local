@@ -291,7 +291,7 @@ function renderSecondOpinion(second) {
   if (!second || !second.available || !second.analysis) {
     const budget = second && second.budget;
     const note = second && second.capped && budget
-      ? `<p class="second-opinion-cost mono">${esc(moneyLabel(budget.spent_usd))} of ${esc(moneyLabel(budget.cap_usd))} used this month · ${esc(budget.runs)} run(s)</p>`
+      ? `<p class="second-opinion-cost mono">${esc(budgetLabel(budget))}</p>`
       : '';
     return derivedZoneShell('unknown', 'unavailable',
       `<p class="zone-empty">${esc((second && second.reason) || 'Second opinion unavailable.')}</p>${note}`);
@@ -328,7 +328,7 @@ function renderSecondOpinion(second) {
   parts.push(secondOpinionCost(second));
   if (second.budget) {
     // The counter is visible before the cap bites, not only once it has.
-    parts.push(`<p class="second-opinion-cost mono">${esc(moneyLabel(second.budget.spent_usd))} of ${esc(moneyLabel(second.budget.cap_usd))} used this month · ${esc(second.budget.runs)} run(s)</p>`);
+    parts.push(`<p class="second-opinion-cost mono">${esc(budgetLabel(second.budget))}</p>`);
   }
   // Everything in this zone came from a model, so the dot says "inferred" --
   // never "observed", which is zone B's word for things read off the machine.
@@ -338,14 +338,28 @@ function renderSecondOpinion(second) {
   const tone = a.confidence === 'low' ? 'unknown' : 'inferred';
   return derivedZoneShell(tone, a.confidence, parts.join(''));
 }
+// Two ceilings, because one of them cannot bind on every host: Codex prices its
+// runs at nothing we can read, so a dollars-only counter would sit at $0.00
+// however many analysts had run. Both are shown, and either one stops the next.
+function budgetLabel(budget) {
+  const spent = `${moneyLabel(budget.spent_usd)} of ${moneyLabel(budget.cap_usd)}`;
+  const runs = `${formatCount(budget.runs)} of ${formatCount(budget.run_cap)} runs`;
+  return `this month: ${spent} · ${runs}`;
+}
 // Spec 5. On the screen the money was spent on, not buried in Settings.
+//
+// Codex reports no machine-readable cost, and printing "$0.00" for it would
+// claim the run was free -- true for a subscription, false for anyone on an API
+// key, and the local logs cannot tell those two apart. So a host that does not
+// price its own runs says so instead of being given a number it never gave us.
 function secondOpinionCost(second) {
+  const priced = second.cost_reported !== false && Number.isFinite(second.cost_usd);
   const bits = [
     'second opinion',
-    second.cli || 'local agent',
+    second.cli_label || second.cli || 'local agent',
     second.model ? String(second.model) : '',
     Number.isFinite(second.tokens) && second.tokens ? `${formatCount(second.tokens)} tokens` : '',
-    Number.isFinite(second.cost_usd) ? moneyLabel(second.cost_usd) : '',
+    priced ? moneyLabel(second.cost_usd) : 'cost not reported by this CLI',
   ].filter(Boolean);
   return `<p class="second-opinion-cost mono">${esc(bits.join(' · '))}</p>`;
 }

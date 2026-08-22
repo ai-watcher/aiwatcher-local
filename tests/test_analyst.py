@@ -261,11 +261,13 @@ class RunTest(unittest.TestCase):
         self.assertIn("timed out", result["reason"])
 
     def test_a_non_zero_exit_reports_the_cli_not_the_analysis(self):
+        # Named, now that there is more than one host: "your agent CLI" is not
+        # much help to somebody who has both installed.
         def runner(argv, *args):
             return subprocess.CompletedProcess(argv, 1, "", "boom")
         result = self._run(runner)
         self.assertFalse(result["available"])
-        self.assertIn("agent CLI returned an error", result["reason"])
+        self.assertIn("Claude Code returned an error", result["reason"])
 
     def test_a_malformed_response_drops_the_block_and_keeps_the_raw(self):
         def runner(argv, *args):
@@ -281,11 +283,11 @@ class RunTest(unittest.TestCase):
         self.assertFalse(result["available"])
         self.assertIn("no agent CLI found", result["reason"])
 
-    def test_the_timeout_clears_a_measured_run(self):
-        # A real run took 29.9s wall / 26.2s to first token on the small tier,
-        # because the CLI loads ~34k tokens of its own context first. The spec's
-        # 12s would have timed out every call ever made.
-        self.assertGreater(analyst.TIMEOUT_SECONDS, 30)
+    def test_the_timeout_clears_the_slowest_measured_run(self):
+        # The same prompt on the same tier has taken 17s and 206s. The ceiling
+        # bounds a hang; it is not a latency budget, and tripping it during an
+        # ordinary slow spell throws away an answer already paid for.
+        self.assertGreater(analyst.TIMEOUT_SECONDS, 210)
 
 
 class TimeoutActuallyBoundsTest(unittest.TestCase):
@@ -319,6 +321,154 @@ class TimeoutActuallyBoundsTest(unittest.TestCase):
         elapsed = time.monotonic() - started
         self.assertLess(elapsed, 5.0 + analyst.KILL_GRACE_SECONDS + 10.0,
                         f"the timeout leaked: returned after {elapsed:.1f}s")
+
+
+class CodexHostTest(unittest.TestCase):
+    """Codex as a second analyst host.
+
+    Verified against codex-cli 0.146.0: `codex exec --skip-git-repo-check
+    -s read-only -m gpt-5.4-mini --output-schema schema.json -o last.json -`
+    returns schema-valid JSON with no code fence, because Codex validates the
+    response itself rather than being asked nicely in a prompt.
+    """
+
+    def setUp(self):
+        import tempfile
+        self.sandbox = Path(tempfile.mkdtemp(prefix="aiw-codex-")) / ".aiwatcher" / "analyst"
+        self.sandbox.mkdir(parents=True)
+        self.host = analyst.HOSTS_BY_KEY["codex-cli"]
+
+    def test_the_prompt_is_read_from_stdin(self):
+        # `codex exec <file>` takes the prompt positionally, so a path handed to
+        # it is analysed as the literal string. A bare "-" reads stdin, which
+        # also keeps the prompt out of the process list.
+        argv = analyst._prepare(self.host, "codex", "gpt-5.4-mini", self.sandbox)
+        self.assertEqual(argv[-1], "-")
+        self.assertIn("exec", argv)
+
+    def test_it_cannot_write_and_does_not_need_a_repository(self):
+        argv = analyst._prepare(self.host, "codex", "gpt-5.4-mini", self.sandbox)
+        self.assertIn("--skip-git-repo-check", argv)
+        self.assertEqual(argv[argv.index("-s") + 1], "read-only")
+
+    def test_the_schema_is_enforced_by_the_cli(self):
+        argv = analyst._prepare(self.host, "codex", "gpt-5.4-mini", self.sandbox)
+        schema_path = Path(argv[argv.index("--output-schema") + 1])
+        self.assertTrue(schema_path.is_file())
+        self.assertEqual(json.loads(schema_path.read_text(encoding="utf-8")),
+                         analyst.RESPONSE_SCHEMA)
+
+    def test_a_stale_answer_is_never_read_back_as_this_run(self):
+        # -o writes the answer to a file. Left in place, a run that fails before
+        # writing would hand back the previous run's analysis as its own.
+        answer = self.sandbox / "last.json"
+        answer.write_text(json.dumps(_valid(outcome="STALE")), encoding="utf-8")
+        analyst._prepare(self.host, "codex", "gpt-5.4-mini", self.sandbox)
+        self.assertFalse(answer.exists())
+
+    def test_the_answer_comes_from_the_file_not_from_stdout(self):
+        (self.sandbox / "last.json").write_text(json.dumps(_valid()), encoding="utf-8")
+        proc = subprocess.CompletedProcess(
+            ["codex"], 0, "some progress chatter", "session id: 01a02840-7d05-7833-aa7e-e88f4869")
+        envelope, answer = analyst._read_result(self.host, proc, self.sandbox)
+        self.assertIn("outcome", json.loads(answer))
+        self.assertEqual(envelope["session_id"], "01a02840-7d05-7833-aa7e-e88f4869")
+
+    def test_no_answer_file_means_no_answer(self):
+        # Falling back to stdout would risk validating a progress line.
+        proc = subprocess.CompletedProcess(["codex"], 0, '{"outcome": "from stdout"}', "")
+        _, answer = analyst._read_result(self.host, proc, self.sandbox)
+        self.assertEqual(answer, "")
+
+    def test_a_host_that_reports_no_cost_says_so_rather_than_zero(self):
+        # AIWatcher prices Codex sessions at $0 by design, and a subscription
+        # user's really is free -- but an API-key user's is not, and the local
+        # logs cannot tell them apart. "$0.00" would be a claim we cannot make.
+        def runner(argv, text, cwd, env, timeout):
+            (Path(cwd) / "last.json").write_text(json.dumps(_valid()), encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, "", "session id: 01a0284012345678")
+
+        result = analyst.run("x", project_root=self.sandbox.parent.parent, paths=PATHS,
+                             detection={"available": True, "cli": "codex-cli",
+                                        "executable": "codex"},
+                             runner=runner)
+        self.assertTrue(result["available"], result.get("reason"))
+        self.assertIsNone(result["cost_usd"])
+        self.assertFalse(result["cost_reported"])
+        self.assertEqual(result["cli"], "codex-cli")
+        self.assertEqual(result["model"], "gpt-5.4-mini")
+
+
+class HostSelectionTest(unittest.TestCase):
+    """Spec 3.1: ask the vendor the user is about to prompt."""
+
+    BOTH = {
+        "claude-code": {"available": True, "cli": "claude-code", "executable": "claude"},
+        "codex-cli": {"available": True, "cli": "codex-cli", "executable": "codex"},
+    }
+
+    def _detect(self, found, tool):
+        original = analyst.detect_all
+        try:
+            analyst.detect_all = lambda **kwargs: found
+            return analyst.detect(tool=tool)
+        finally:
+            analyst.detect_all = original
+
+    def test_the_selected_vendor_wins_when_it_is_installed(self):
+        for tool, expected in (("codex", "codex-cli"), ("claude", "claude-code")):
+            with self.subTest(tool=tool):
+                chosen = self._detect(self.BOTH, tool)
+                self.assertEqual(chosen["cli"], expected)
+                self.assertTrue(chosen["preferred"])
+
+    def test_a_vendor_with_no_analyst_falls_back_rather_than_refusing(self):
+        # Cursor has no analyst host yet. Any second opinion beats none, but the
+        # answer says it is not the vendor they picked.
+        chosen = self._detect(self.BOTH, "cursor")
+        self.assertTrue(chosen["available"])
+        self.assertFalse(chosen["preferred"])
+
+    def test_it_falls_back_when_the_preferred_vendor_is_missing(self):
+        found = {**self.BOTH, "codex-cli": {"available": False, "cli": "codex-cli",
+                                            "reason": "Codex is not installed"}}
+        chosen = self._detect(found, "codex")
+        self.assertEqual(chosen["cli"], "claude-code")
+        self.assertFalse(chosen["preferred"])
+
+    def test_with_nothing_installed_it_reports_the_vendor_that_was_asked_for(self):
+        found = {
+            "claude-code": {"available": False, "cli": "claude-code", "reason": "Claude Code is not installed"},
+            "codex-cli": {"available": False, "cli": "codex-cli", "reason": "Codex is not installed"},
+        }
+        chosen = self._detect(found, "codex")
+        self.assertFalse(chosen["available"])
+        self.assertIn("Codex", chosen["reason"])
+
+
+class DetectionIsCheapTest(unittest.TestCase):
+    """The Plan gate asks "is there an analyst?" on every preflight."""
+
+    def test_the_gate_does_not_shell_out(self):
+        # Asking two CLIs for their version here cost a subprocess each and made
+        # an unrelated test time out. Installation is a path lookup; whether the
+        # CLI works is answered by running it, and a broken one already comes
+        # back as spec 8's "CLI returned an error" row.
+        calls = []
+        original = subprocess.run
+        try:
+            subprocess.run = lambda *a, **k: calls.append(a) or original(*a, **k)
+            analyst._DETECTION_CACHE = None
+            analyst.detect_all(refresh=True)
+        finally:
+            subprocess.run = original
+            analyst._DETECTION_CACHE = None
+        self.assertEqual(calls, [], "detection spawned a process on the gate path")
+
+    def test_verify_is_what_asks_for_a_version(self):
+        found = analyst._probe(analyst.HOSTS[0], verify=False)
+        if found["available"]:
+            self.assertNotIn("probed_version", found)
 
 
 class OverheadLineTest(unittest.TestCase):
@@ -361,6 +511,20 @@ class OverheadLineTest(unittest.TestCase):
         self.assertEqual(line["cost_label"], "$0.07")
         self.assertIn("2 second opinions", line["detail"])
         self.assertIn("last 7 days", line["detail"])
+        self.assertEqual(line["unpriced_runs"], 0)
+
+    def test_a_dollar_total_never_stands_in_for_runs_it_does_not_cover(self):
+        # Codex sessions are priced at $0 here by design, so on a machine using
+        # both hosts a bare dollar figure describes only half the runs.
+        # Measured: 8 analyst runs, 4 of them unpriced, "$0.14" covering four.
+        from aiwatcher_cli import ui
+        rows = [self._session("claude", "C:/p/.aiwatcher/analyst", 0.14),
+                self._session("codex", "C:/p/.aiwatcher/analyst", 0.0)]
+        line = ui._analyst_overhead(rows, 7)
+        self.assertEqual(line["unpriced_runs"], 1)
+        self.assertIn("does not price", line["label"])
+        # Tokens are the denominator that holds for every host.
+        self.assertIn(line["tokens_label"], line["detail"])
 
 
 class ConsentAndCapTest(unittest.TestCase):

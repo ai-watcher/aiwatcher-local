@@ -2471,7 +2471,10 @@ PRIVACY_CLAIMS = [
     "No cloud upload unless you connect Cloud",
 ]
 
-ANALYST_RUN_ESTIMATE_LABEL = "about $0.03-0.04 and 30 seconds"
+# Measured across both hosts, and the spread is real: the same prompt has
+# returned in 17s and in 206s. Stated as a range so it does not read as a
+# quote, and the duration is given as "usually" for the same reason.
+ANALYST_RUN_ESTIMATE_LABEL = "about $0.03-0.04, usually under a minute"
 
 
 def _second_opinion_gate(result: dict[str, object]) -> dict[str, object]:
@@ -2490,7 +2493,7 @@ def _second_opinion_gate(result: dict[str, object]) -> dict[str, object]:
             "available": False,
             "reason": "Nothing in this prompt matched a signal worth a second opinion.",
         }
-    detection = analyst.detect()
+    detection = analyst.detect(tool=str(result.get("tool") or ""))
     if not detection.get("available"):
         return {
             "gated": True,
@@ -2503,6 +2506,10 @@ def _second_opinion_gate(result: dict[str, object]) -> dict[str, object]:
         "available": True,
         "pending": True,
         "cli": detection.get("cli"),
+        "cli_label": detection.get("label"),
+        # Whether this is the vendor the user is about to prompt, or a stand-in
+        # because theirs has no analyst. Worth saying: it is their bill.
+        "preferred": detection.get("preferred", False),
         "reason": "",
     }
 
@@ -2536,23 +2543,37 @@ def build_second_opinion(prompt: str, *, tool: str = "agent",
     # that is only checked on the way out.
     budget = analyst_month_spend()
     if budget["capped"]:
+        # Quoting dollars at somebody whose CLI reports none would be the same
+        # defect this codebase keeps finding: a true number answering a question
+        # it was not asked.
+        detail = (f"{money(budget['spent_usd'])} of {money(budget['cap_usd'])}"
+                  if budget.get("capped_by") == "cost"
+                  else f"{budget['runs']} of {budget['run_cap']} runs")
         return {
             "gated": True, "available": False, "capped": True, "budget": budget,
-            "reason": (f"Second opinion paused. Monthly cap reached "
-                       f"({money(budget['spent_usd'])} of {money(budget['cap_usd'])})."),
+            "reason": f"Second opinion paused. Monthly cap reached ({detail}).",
         }
     # Spec 7: asked once per project, with the cost in the question, rather than
     # a modal on every prompt. Spending someone's money is not something to
     # infer from them having clicked Plan.
     consent = analyst_consent(cwd)
     if consent is None:
+        # Name the agent that would actually run. It is the user's key being
+        # spent, and when their own vendor has no analyst the stand-in is not
+        # something to discover afterwards from a cost chip.
+        found = analyst.detect(tool=tool)
+        host_label = found.get("label") or "your own agent"
+        instead = ("" if found.get("preferred")
+                   else f" {host_label} is standing in, because the tool you picked has no analyst yet.")
         return {
             "gated": True, "available": False, "needs_consent": True,
             "project_path": cwd, "budget": budget,
+            "cli": found.get("cli"), "cli_label": found.get("label"),
+            "preferred": found.get("preferred", False),
             "estimate_label": ANALYST_RUN_ESTIMATE_LABEL,
-            "reason": ("A second opinion runs your own agent, on your machine, with your "
+            "reason": (f"A second opinion runs {host_label}, on your machine, with your "
                        "key. It sees this prompt and your file paths, never file contents. "
-                       f"Typical run: {ANALYST_RUN_ESTIMATE_LABEL}."),
+                       f"Typical run: {ANALYST_RUN_ESTIMATE_LABEL}.{instead}"),
         }
     if not consent.get("allowed"):
         return {
@@ -2560,13 +2581,15 @@ def build_second_opinion(prompt: str, *, tool: str = "agent",
             "reason": "Second opinion is turned off for this project.",
         }
     paths = analyst.ranked_paths(cwd, prompt_signals.repo_paths(cwd))
-    result = analyst.run(text, project_root=cwd, paths=paths)
+    result = analyst.run(text, project_root=cwd, paths=paths, tool=tool)
     result["gated"] = True
     result["tool"] = tool
     if result.get("available"):
         # Recorded from what the CLI reported it cost, not from an estimate, so
         # the counter the cap is enforced against is money that actually moved.
         try:
+            # 0.0 when the host reports nothing, which is honest for the dollar
+            # total and is exactly why the run counter exists beside it.
             record_analyst_run(project_path=cwd,
                                cost_usd=float(result.get("cost_usd") or 0.0),
                                session_id=result.get("session_id"))
@@ -4151,26 +4174,42 @@ def _analyst_overhead(rows: list[LocalSession], days: int) -> dict[str, object]:
     Always present, including at zero, and it says so in words. A line that
     appears only once it has something to confess is a line nobody trusts when
     it does appear -- and "no second opinions ran in this window" is a real
-    answer to the question the line is there to answer.
+    answer to the question the line exists to answer.
+
+    Dollars alone would be a true number answering the wrong question. Codex
+    sessions are priced at $0 here by design, and a subscription user's really
+    are free while an API-key user's are not -- the local logs cannot tell those
+    two apart. Measured on this machine: eight analyst runs, four of them priced
+    at nothing, so "$0.14" describes half of them. Tokens are the denominator
+    that holds for every host, so the count of unpriced runs is stated rather
+    than folded into a dollar figure that quietly omits them.
     """
     runs = len(rows)
     cost = sum(row.cost_usd for row in rows)
     tokens = sum(row.tokens_in + row.tokens_out for row in rows)
+    unpriced = sum(1 for row in rows
+                   if row.cost_usd <= 0 and (row.tokens_in + row.tokens_out) > 0)
     window = f"last {days} day{'s' if days != 1 else ''}"
+    if not runs:
+        label = "AIWatcher overhead: nothing this window"
+    elif unpriced:
+        label = (f"AIWatcher overhead: {money(cost)} this window, plus "
+                 f"{unpriced} run{'' if unpriced == 1 else 's'} your CLI does not price")
+    else:
+        label = f"AIWatcher overhead: {money(cost)} this window"
     return {
         "runs": runs,
         "cost_usd": round(cost, 6),
         "cost_label": money(cost),
         "tokens": tokens,
         "tokens_label": compact_int(tokens),
+        "unpriced_runs": unpriced,
         "window_label": window,
-        "label": (
-            f"AIWatcher overhead: {money(cost)} this window"
-            if runs else "AIWatcher overhead: nothing this window"
-        ),
+        "label": label,
         "detail": (
             f"{runs} second opinion{'' if runs == 1 else 's'} ran in the {window}, "
-            f"on your own agent and your own key. Not counted in the totals above."
+            f"on your own agent and your own key, costing {compact_int(tokens)} tokens. "
+            f"Not counted in the totals above."
             if runs else
             f"No second opinions ran in the {window}."
         ),

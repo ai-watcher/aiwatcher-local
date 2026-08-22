@@ -1597,6 +1597,10 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
     for path in paths:
         session_id = path.stem
         project_path: str | None = None
+        # The cwd exactly as Codex wrote it. project_path below is the same
+        # value already folded to a git root, which erases the one thing that
+        # tells a Second Opinion analyst run apart from the user's own work.
+        recorded_cwd: str | None = None
         model: str | None = None
         surface: str | None = None
         started_at: datetime | None = None
@@ -1636,6 +1640,7 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
                     row_type = row.get("type")
                     if row_type == "session_meta":
                         session_id = str(payload.get("id") or payload.get("session_id") or session_id)
+                        recorded_cwd = str(payload.get("cwd") or "") or recorded_cwd
                         project_path = _normalize_project_path(str(payload.get("cwd") or "")) or project_path
                         if surface is None:
                             originator = str(payload.get("originator") or "").lower()
@@ -1644,6 +1649,7 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
                             elif "cli" in originator or "tui" in originator:
                                 surface = "cli"
                     elif row_type == "turn_context":
+                        recorded_cwd = str(payload.get("cwd") or "") or recorded_cwd
                         project_path = _normalize_project_path(str(payload.get("cwd") or "")) or project_path
                         model = str(payload.get("model") or model or "codex")
                     elif row_type == "response_item" and payload.get("type") in {
@@ -1729,6 +1735,7 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
             session_id=session_id,
             tool="codex-cli",
             project_path=project_path,
+            raw_cwd=recorded_cwd,
             started_at=started_at or _mtime(path),
             updated_at=updated_at or _mtime(path),
             model=model or "codex",
