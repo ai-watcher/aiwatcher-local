@@ -876,6 +876,8 @@
     .link-inline { background: none; border: 0; padding: 0; font: inherit; color: var(--blue);
       text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
     .link-inline:hover { color: var(--text); }
+    .muted-card { opacity: .58; }
+    .health-batch { display: flex; justify-content: flex-end; margin-bottom: 10px; }
     .coverage-head, .health-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); margin-bottom: 8px; }
     .coverage-status, .health-severity { border-radius: var(--r-pill); border: 1px solid var(--line); padding: 4px 8px; font-size: var(--fs-1); font-weight: var(--fw-bold); white-space: nowrap; }
     .coverage-status.automatic, .health-severity.healthy { color: #bff5df; border-color: rgba(53,211,153,.45); background: var(--green-soft); }
@@ -884,6 +886,14 @@
     .coverage-status.companion { color: #dceaff; border-color: rgba(112,167,255,.45); background: var(--blue-soft); }
     .coverage-status.unsupported, .coverage-status.not_detected, .health-severity.critical { color: #ffc4ce; border-color: rgba(242,125,143,.45); background: var(--red-soft); }
     .coverage-detail, .health-detail { display: grid; gap: var(--sp-1); color: var(--muted); font-size: var(--fs-2); line-height: 1.45; }
+    /* Arrived with main. Put on the scale rather than beside it: raw 12px/999px/8px
+       would reopen the drift the token pass closed, and a test pins it. */
+    .identity-strip { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; color: var(--muted); font-size: var(--fs-2); }
+    .identity-strip strong, .identity-strip span { border: 1px solid var(--line); border-radius: var(--r-pill); padding: 4px 8px; background: rgba(7,12,19,.56); }
+    .identity-strip strong { color: #dceaff; border-color: rgba(112,167,255,.36); }
+    .health-evidence { border: 1px solid rgba(148,163,184,.16); border-radius: var(--r-2); background: rgba(6,11,18,.48); padding: 10px; margin-top: 10px; }
+    .health-evidence .label { font-size: var(--fs-1); }
+    .health-evidence p { margin: 3px 0 0; color: var(--muted); }
     .health-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: 12px; }
     .handoff-bubble {
       border-color: rgba(112,167,255,.5);

@@ -88,6 +88,9 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('primaryButton.layer?.backgroundColor', source)
         self.assertIn('continueButton', source)
         self.assertIn('continueHere', source)
+        self.assertIn('continuePromptGate', source)
+        self.assertIn('"run_original_prompt"', source)
+        self.assertIn('"decision": "run_original"', source)
         self.assertIn('skipButton', source)
         self.assertIn('skipCurrent', source)
         self.assertIn('/api/handoff-decision', source)
@@ -95,6 +98,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('/api/companion-scan', source)
         self.assertIn('/api/handoff-receipts-viewed', source)
         self.assertIn('"prompt_gate"', source)
+        self.assertIn('"control_review"', source)
         self.assertNotIn('"proof_pending", "needs_review"', source)
         self.assertIn('0.93, green: 0.42, blue: 0.14', source)
         self.assertIn('0.91, green: 0.96, blue: 1.00', source)
@@ -125,10 +129,13 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("PresenceAttention.TButton", source)
         self.assertNotIn('"proof_pending", "needs_review"', source)
         self.assertIn("continue_here", source)
+        self.assertIn("run_original_prompt", source)
+        self.assertIn("\"decision\": \"run_original\"", source)
         self.assertIn("skip_current", source)
         self.assertIn("/api/handoff-decision", source)
         self.assertIn("/api/companion-skip", source)
         self.assertIn("/api/handoff-receipts-viewed", source)
+        self.assertIn("control_review", source)
         self.assertIn("cursor=\"fleur\"", source)
         self.assertIn("webbrowser.open(url)", source)
         self.assertIn("webbrowser.open(prompt_url or url)", source)
@@ -151,6 +158,25 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("Click Replace to copy Fresh Start", source)
         self.assertIn("pending_clipboard_override_session_var", source)
         self.assertIn('state_var.get() in {"prompt_gate", "control_recommended", "optimize_available", "clipboard_confirm"}', source)
+        self.assertIn("visibility: str = \"always\"", source)
+        self.assertIn("_foreground_looks_like_ai_work", source)
+        self.assertIn("root.withdraw()", source)
+
+        mac_source = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn("visibilityMode", mac_source)
+        self.assertIn("NSWorkspace.shared.frontmostApplication", mac_source)
+        self.assertIn("foregroundLooksLikeAIWork", mac_source)
+        self.assertIn('visibilityMode == "ai-apps"', mac_source)
+
+    def test_presence_visibility_uses_windows_foreground_api(self) -> None:
+        helper_source = inspect.getsource(native_overlay._windows_foreground_text)
+        main_source = inspect.getsource(native_overlay.main)
+
+        self.assertIn("GetForegroundWindow", helper_source)
+        self.assertIn("GetWindowTextW", helper_source)
+        self.assertIn("tasklist", helper_source)
+        self.assertIn("--visibility", main_source)
+        self.assertIn("visibility=args.visibility", main_source)
 
     def test_macos_tray_has_console_prompt_scan_and_quit(self) -> None:
         source = native_overlay.MACOS_SWIFT_TRAY

@@ -49,6 +49,7 @@ from .local_state import (
     ambient_intervention_delivery_allowed,
     active_prompt_gate_seen,
     clear_watcher_heartbeat,
+    companion_skip_active,
     command_hash,
     consume_brief_token,
     evidence_snapshots_for_sessions,
@@ -829,13 +830,33 @@ def _brief_working_directory(cwd: str | None) -> str | None:
 
 
 _HANDOFF_SECTION_HEADERS = {
+    "Summary from previous work",
+    "Decisions made",
+    "Current state",
+    "Open next step",
+    "Files/evidence to inspect first",
+    "Goal",
+    "How to continue",
     "Objective",
     "Project",
+    "Workspace",
+    "Source of truth to load first",
+    "Do not lose these constraints",
+    "Acceptance checks",
+    "What appears done",
+    "What remains uncertain",
+    "Recommended next checkpoint",
     "Previous session",
+    "Previous session signals",
     "Why start fresh now",
     "Why hand off now",
+    "Why AIWatcher suggested Fresh Start",
     "Local evidence to inspect",
     "Fresh-session instructions",
+    "Guardrails",
+    "First response required",
+    "Immediate next checkpoint",
+    "Done report",
     "When finished",
 }
 
@@ -869,6 +890,114 @@ def _normalize_handoff_project(lines: Sequence[str]) -> str | None:
     return None
 
 
+def _is_aiwatcher_fresh_start_prompt(text: str) -> bool:
+    return "AIWatcher fresh-session handoff" in text or "AIWatcher Fresh Start brief" in text
+
+
+_FRESH_START_INTENT_HEADERS = {
+    "Summary from previous work",
+    "Decisions made",
+    "Current state",
+    "Open next step",
+    "Files/evidence to inspect first",
+    "Objective",
+    "Goal",
+    "Source of truth to load first",
+    "Do not lose these constraints",
+    "Acceptance checks",
+    "What appears done",
+    "Recommended next checkpoint",
+    "Immediate next checkpoint",
+}
+
+
+_FRESH_START_PROTECTIVE_HEADERS = {
+    "How to continue",
+    "Fresh-session instructions",
+    "Guardrails",
+    "First response required",
+    "Done report",
+    "When finished",
+}
+
+
+def _fresh_start_line_is_protective(line: str) -> bool:
+    lower = line.lower()
+    return any(phrase in lower for phrase in (
+        "do not assume access to the previous chat",
+        "previous chat is intentionally not available",
+        "continue from repository state",
+        "continue from local evidence",
+        "ask one focused clarification",
+        "preserve unrelated",
+        "do not expose secrets",
+        "do not reveal secret",
+        "stop before destructive",
+        "stop before broad refactors",
+        "stop before secret exposure",
+        "stop before unrelated cleanup",
+        "do not replay broad exploration",
+        "state which files or commands",
+        "report changed files",
+        "report verification",
+    ))
+
+
+def _fresh_start_line_is_boilerplate(line: str) -> bool:
+    lower = line.lower()
+    return (
+        not lower
+        or lower == "aiwatcher fresh start brief"
+        or lower == "aiwatcher fresh-session handoff"
+        or lower.startswith("you are starting a fresh ai ")
+        or lower.startswith("target tool:")
+        or lower.startswith("continuation type:")
+        or lower.startswith("- project confidence:")
+        or lower.startswith("- source session:")
+        or lower.startswith("- source tool/model:")
+    )
+
+
+def _fresh_start_intent_text(text: str) -> str:
+    """Return only the intent-bearing parts of an AIWatcher Fresh Start brief.
+
+    Fresh Start briefs intentionally contain safety stop conditions such as
+    "Stop before destructive changes" and "do not expose secrets." Those are
+    protective guardrails, not user intent. Prompt Gate should not block a
+    generated handoff just because the handoff itself says to be careful.
+    Malformed or spoofed handoffs still get scored: any unsectioned or
+    non-protective line remains part of the analysis text.
+
+    A line is dropped only when it is BOTH under a protective header AND
+    recognised protective boilerplate. Everything else reaches the scorer.
+
+    That single rule is deliberate. Deciding what to keep by listing the
+    headers worth keeping left nine recognised headers -- among them "Local
+    evidence to inspect", "Why start fresh now" and "Project" -- in neither the
+    intent set nor the protective set, and their contents matched no branch at
+    all, so they were dropped before scoring. A prompt carrying the Fresh Start
+    marker with "Delete the production database..." under one of those headings
+    scored 0 and read as low risk, where the same text unsectioned scored 8.
+    Keeping by default means a heading nobody has classified yet fails towards
+    scoring the text rather than towards hiding it.
+    """
+    sections: list[str] = []
+    current_header: str | None = None
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line in _HANDOFF_SECTION_HEADERS:
+            current_header = line
+            continue
+        if _fresh_start_line_is_boilerplate(line):
+            continue
+        if current_header in _FRESH_START_PROTECTIVE_HEADERS and _fresh_start_line_is_protective(line):
+            continue
+        sections.append(line)
+    if not sections:
+        return "Continue the AIWatcher Fresh Start handoff from local repository evidence."
+    return "\n".join(sections)
+
+
 LONG_PROMPT_BRIEF_THRESHOLD = 2500
 LONG_PROMPT_EXCERPT_CHARS = 1200
 
@@ -892,8 +1021,8 @@ def _long_prompt_topics(text: str) -> list[str]:
         topics.append("- Audit slow-loading session and Fresh Start screens: identify fast first-paint vs deferred evidence gaps.")
     if "fresh" in lower or "new session" in lower or "context" in lower:
         topics.append("- Audit Fresh Start continuation: does one action create the right brief/workspace path without extra context replay?")
-    if "moat" in lower or "strategy" in lower:
-        topics.append("- Check the recommendation against the current AIWatcher OSS moat/strategy before proposing changes.")
+    if "product direction" in lower or "strategy" in lower:
+        topics.append("- Check the recommendation against the current AIWatcher product direction before proposing changes.")
     return topics[:4]
 
 
@@ -919,7 +1048,7 @@ def _brief_task_sections(prompt: str, *, cwd: str | None) -> list[str]:
     structured sections instead of pasting the whole brief under Task.
     """
     text = prompt.strip()
-    if "AIWatcher fresh-session handoff" not in text and "AIWatcher Fresh Start brief" not in text:
+    if not _is_aiwatcher_fresh_start_prompt(text):
         if len(text) > LONG_PROMPT_BRIEF_THRESHOLD:
             sections = [
                 "Triage this long request before execution.",
@@ -940,10 +1069,18 @@ def _brief_task_sections(prompt: str, *, cwd: str | None) -> list[str]:
         "Continue the AIWatcher Fresh Start brief from repository state on disk."
     ]
     objective = _structured_section_lines(text, "Objective", max_lines=5)
+    if not objective:
+        objective = _structured_section_lines(text, "Goal", max_lines=6)
     if objective:
         sections.extend(["", "Requested outcome", *objective])
 
     project = _normalize_handoff_project(_structured_section_lines(text, "Project", max_lines=2))
+    if not project:
+        workspace_lines = _structured_section_lines(text, "Workspace", max_lines=5)
+        project = _normalize_handoff_project([
+            line.partition(":")[2].strip() if line.strip().lower().startswith("- project:") else line
+            for line in workspace_lines
+        ])
     if not project:
         project = _brief_working_directory(cwd)
     if project:
@@ -959,9 +1096,25 @@ def _brief_task_sections(prompt: str, *, cwd: str | None) -> list[str]:
     if evidence:
         sections.extend(["", "Local evidence to inspect", *evidence])
 
+    done = _structured_section_lines(text, "What appears done", max_lines=5)
+    if done:
+        sections.extend(["", "What appears done", *done])
+
+    uncertainty = _structured_section_lines(text, "What remains uncertain", max_lines=5)
+    if uncertainty:
+        sections.extend(["", "What remains uncertain", *uncertainty])
+
+    checkpoint = (
+        _structured_section_lines(text, "Recommended next checkpoint", max_lines=6)
+        or _structured_section_lines(text, "Immediate next checkpoint", max_lines=6)
+    )
+    if checkpoint:
+        sections.extend(["", "Recommended next checkpoint", *checkpoint])
+
     handoff_reason = (
         _structured_section_lines(text, "Why start fresh now", max_lines=3)
         or _structured_section_lines(text, "Why hand off now", max_lines=3)
+        or _structured_section_lines(text, "Why AIWatcher suggested Fresh Start", max_lines=3)
     )
     if handoff_reason:
         sections.extend(["", "Supporting pressure context", *handoff_reason])
@@ -1640,11 +1793,12 @@ def _run_external_risk_reviewer(
 ) -> dict[str, object] | None:
     """Optionally ask a user-configured semantic reviewer to re-score risk.
 
-    OSS stays local/offline by default. If a developer or Enterprise deployment
-    explicitly sets AIWATCHER_RISK_REVIEW_CMD, AIWatcher sends the prompt and
-    current deterministic assessment to that command over stdin and expects a
-    small JSON object back. This supports local models such as Ollama, an
-    internal policy model, or a test shim without hardwiring any vendor.
+    OSS stays local/offline by default. This reviewer is optional and only
+    enhances suggestions when a developer or Enterprise deployment explicitly
+    sets AIWATCHER_RISK_REVIEW_CMD. AIWatcher sends the prompt and current
+    deterministic assessment to that command over stdin and expects a small
+    JSON object back. This supports local models such as Ollama, an internal
+    policy model, or a test shim without hardwiring any vendor.
     """
     command = os.environ.get(RISK_REVIEW_CMD_ENV, "").strip()
     if not command:
@@ -1667,7 +1821,10 @@ def _run_external_risk_reviewer(
             "Return JSON only. Fields: risk low|medium|high, score 0-10, "
             "findings array, suggestions array, reason string. Identify broad, "
             "destructive, security-weakening, data-exposure, production, and "
-            "runaway-cost intent even when phrased without obvious keywords."
+            "runaway-cost intent even when phrased without obvious keywords. "
+            "Treat AIWatcher safety guardrails such as 'stop before destructive "
+            "changes' as protective context, not destructive user intent, unless "
+            "the task objective itself asks for the destructive action."
         ),
     }
     try:
@@ -1885,7 +2042,9 @@ def analyze_prompt(
             "suggested_prompt": "",
             "estimated_impact": {},
         }
-    lower = text.lower()
+    fresh_start_prompt = _is_aiwatcher_fresh_start_prompt(text)
+    analysis_text = _fresh_start_intent_text(text) if fresh_start_prompt else text
+    lower = analysis_text.lower()
     findings: list[str] = []
     suggestions: list[str] = []
     guardrails: list[dict[str, str]] = []
@@ -1940,7 +2099,7 @@ def analyze_prompt(
 
     edit_terms = ["change", "modify", "edit", "write", "implement", "refactor", "delete", "migrate", "rename", "add", "update"]
     plan_terms = ["plan first", "do not edit", "inspect first", "propose", "before editing", "ask before"]
-    needs_checkpoint = any(term in lower for term in edit_terms) and not any(term in lower for term in plan_terms)
+    needs_checkpoint = any(re.search(rf"\b{re.escape(term)}\b", lower) for term in edit_terms) and not any(term in lower for term in plan_terms)
     if needs_checkpoint:
         score += 2
         findings.append("Prompt asks for changes without an explicit plan/checkpoint.")
@@ -2044,7 +2203,7 @@ def analyze_prompt(
         suggestions.append("Name the target files, acceptance criteria, and what should stay unchanged.")
         guardrails.append({"icon": "\U0001F3AF", "label": "Vague ask clarified"})
 
-    multiple_tasks = len(text) > 2500
+    multiple_tasks = len(analysis_text) > 2500
     if multiple_tasks:
         score += 2
         findings.append("Prompt is long enough to hide multiple tasks in one request.")
@@ -2076,7 +2235,10 @@ def analyze_prompt(
     # three chips. Zone B renders them from their own field.
     blast_reasons = [{**reason, "text": _blast_finding(reason)} for reason in blast["reasons"]]
 
-    if not findings:
+    if fresh_start_prompt and not findings:
+        findings.append("AIWatcher Fresh Start handoff recognized; safety guardrails are protective context, not destructive intent.")
+        suggestions.append("Continue from local evidence with the smallest checkpoint before editing.")
+    elif not findings:
         findings.append("No obvious cost or safety risk found from prompt text alone.")
         suggestions.append("Keep the task scoped and ask for a brief plan before large edits.")
 
@@ -2610,8 +2772,18 @@ async function sendDecision(decision) {{
         <h2>${{riskChange}}</h2>
         <div class="impact">${{saved.impact}}</div>
         <p style="margin-top:16px">Return to your AI tool. On Claude hooks, an accepted brief is added beside the original request; cancelling blocks the original request entirely.</p>
+        <p id="close-status" style="margin-top:16px">Closing this local gate tab…</p>
       </section>
     </main>`;
+    setTimeout(() => {{
+      window.close();
+      setTimeout(() => {{
+        const closeStatus = document.getElementById('close-status');
+        if (closeStatus) {{
+          closeStatus.textContent = 'Decision saved. Your browser did not allow AIWatcher to close this tab, so it is safe to close manually.';
+        }}
+      }}, 700);
+    }}, 900);
   }} catch (error) {{
     buttons.forEach(button => button.disabled = false);
     status.textContent = `AIWatcher could not apply this decision: ${{error.message}}. The host may have timed out; return to the AI tool and confirm before continuing.`;
@@ -2805,8 +2977,8 @@ def run_prompt_gate(
     try:
         if ready_callback:
             ready_callback(url)
-        companion_presence_pid = _existing_companion_presence_pid() if open_browser else None
-        if open_browser and companion_presence_pid is None:
+        companion_owns_gate = _companion_can_own_prompt_gate() if open_browser else False
+        if open_browser and not companion_owns_gate:
             try:
                 opened = webbrowser.open(url)
             except Exception:
@@ -2821,13 +2993,14 @@ def run_prompt_gate(
                 except OSError:
                     pass
                 return _fallback_prompt_gate(tool=tool, prompt=prompt, result=result)
-        elif open_browser and companion_presence_pid is not None:
+        elif open_browser and companion_owns_gate:
             # The Companion is meant to be the user's always-visible bridge.
-            # Give it a short chance to observe and blink the active gate. If
-            # the process is stale or not polling, fall back to the classic
-            # temporary browser gate rather than leaving the hook invisible.
+            # Give it a real chance to observe and blink the active gate. The
+            # presence process polls every few seconds, so an aggressive
+            # browser fallback feels like a redirect instead of a nudge.
             seen_by_companion = False
-            deadline = time_module.monotonic() + min(1.5, max(0.2, timeout_seconds / 4))
+            companion_wait_seconds = min(10.0, max(0.5, min(timeout_seconds / 2, timeout_seconds / 6)))
+            deadline = time_module.monotonic() + companion_wait_seconds
             while not decision_event.is_set() and time_module.monotonic() < deadline:
                 try:
                     if active_prompt_gate_seen(gate_id):
@@ -2837,16 +3010,10 @@ def run_prompt_gate(
                     break
                 time_module.sleep(0.1)
             if not seen_by_companion and not decision_event.is_set():
-                try:
-                    opened = webbrowser.open(url)
-                except Exception:
-                    opened = False
-                if not opened:
-                    try:
-                        clear_active_prompt_gate(gate_id)
-                    except OSError:
-                        pass
-                    return _fallback_prompt_gate(tool=tool, prompt=prompt, result=result)
+                # Companion is running, so avoid yanking the user into a
+                # temporary localhost page. If the Companion cannot observe
+                # the gate in time, the hook timeout below fails closed.
+                pass
         if not decision_event.wait(max(1, timeout_seconds)):
             return None
         return dict(state)
@@ -2866,7 +3033,7 @@ def run_prompt_gate(
 # or Cursor expose a separate pre-tool-execution hook AIWatcher could gate
 # through. Rather than guess at an unverified schema and write untested JSON
 # into a real ~/.codex or ~/.cursor config file, this stays Claude-only until
-# that's actually confirmed -- see the docs-repo companion PR for S-19.
+# the host lifecycle API is confirmed and covered by tests.
 def _command_tokens(command: str) -> list[str]:
     try:
         return shlex.split(command, posix=(os.name != "nt"))
@@ -3286,25 +3453,32 @@ def command_start(args: argparse.Namespace) -> int:
     print(f"\nCollected {len(sessions)} sessions from the last 24 hours.")
     print("Run `aiwatcher today` or `python -m aiwatcher_cli today` to see your usage.")
     if not getattr(args, "no_companion", False):
+        presence_requested = not getattr(args, "no_presence", False)
         result = start_companion(
             interval_seconds=getattr(args, "interval", 30),
-            presence=not getattr(args, "no_presence", False),
+            presence=presence_requested,
             presence_position=str(getattr(args, "presence_position", "bottom-right")),
+            presence_visibility=str(getattr(args, "presence_visibility", "always")),
         )
         if result.get("ok"):
             if result.get("already_running"):
                 print(f"Companion already running (PID {result.get('pid')}).")
-                if not getattr(args, "no_presence", False):
-                    ok, detail = _open_native_companion_presence(
-                        _watch_ui_base_url(),
-                        position=str(getattr(args, "presence_position", "bottom-right")),
-                    )
-                    if ok:
-                        print(f"Companion presence opened ({detail}).")
             else:
                 print(f"Companion started (PID {result.get('pid')}).")
-                if not getattr(args, "no_presence", False):
-                    print("A small Companion should appear near the screen edge.")
+            if presence_requested:
+                ok, detail = _open_native_companion_presence(
+                    _watch_ui_base_url(),
+                    position=str(getattr(args, "presence_position", "bottom-right")),
+                    visibility=str(getattr(args, "presence_visibility", "always")),
+                )
+                if ok:
+                    print(f"Companion entry point opened ({detail}).")
+                else:
+                    print(
+                        f"Companion entry point could not open: {detail}. "
+                        "Use the Dashboard UI until the native Companion is available.",
+                        file=sys.stderr,
+                    )
         else:
             print(f"Companion could not start: {result.get('message', 'unknown error')}", file=sys.stderr)
             print("Run `aiwatcher companion start` manually after stopping any legacy watcher.", file=sys.stderr)
@@ -3539,6 +3713,7 @@ def command_companion(args: argparse.Namespace) -> int:
                 interval_seconds=getattr(args, "interval", 30),
                 presence=not bool(getattr(args, "no_presence", False)),
                 presence_position=str(getattr(args, "presence_position", "bottom-right")),
+                presence_visibility=str(getattr(args, "presence_visibility", "always")),
             )
             if not result.get("ok"):
                 print(f"Could not install login autostart: {result.get('message', 'unknown error')}", file=sys.stderr)
@@ -3577,6 +3752,7 @@ def command_companion(args: argparse.Namespace) -> int:
             ok, detail = _open_native_companion_presence(
                 base_url,
                 position=str(getattr(args, "presence_position", "bottom-right")),
+                visibility=str(getattr(args, "presence_visibility", "always")),
             )
             if ok:
                 print(f"AIWatcher companion presence started ({detail}).")
@@ -3600,6 +3776,7 @@ def command_companion(args: argparse.Namespace) -> int:
             interval_seconds=args.interval,
             presence=presence_requested,
             presence_position=str(getattr(args, "presence_position", "bottom-right")),
+            presence_visibility=str(getattr(args, "presence_visibility", "always")),
         )
         if not result.get("ok"):
             print(f"Could not start AIWatcher companion: {result.get('message', 'unknown error')}", file=sys.stderr)
@@ -3612,6 +3789,7 @@ def command_companion(args: argparse.Namespace) -> int:
                 ok, detail = _open_native_companion_presence(
                     _watch_ui_base_url(),
                     position=str(getattr(args, "presence_position", "bottom-right")),
+                    visibility=str(getattr(args, "presence_visibility", "always")),
                 )
                 if ok:
                     presence_available = True
@@ -3811,6 +3989,7 @@ def _post_commit_hook_path(repo: str) -> str | None:
     result = subprocess.run(
         ["git", "-C", repo, "rev-parse", "--git-dir"],
         check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if result.returncode != 0:
         return None
@@ -3837,6 +4016,7 @@ def command_commit_receipt(args: argparse.Namespace) -> int:
             result = subprocess.run(
                 ["git", "-C", repo, "rev-parse", "HEAD"],
                 check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             if result.returncode != 0:
                 if not args.quiet_if_empty:
@@ -4420,7 +4600,10 @@ def _copy_to_clipboard(text: str) -> tuple[bool, str]:
         if not shutil.which(command[0]):
             continue
         try:
-            subprocess.run(command, input=text, text=True, check=True, timeout=3)
+            subprocess.run(
+                command, input=text, text=True, check=True, timeout=3,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
             return True, command[0]
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
             continue
@@ -4649,11 +4832,55 @@ def _companion_tray_pid_path() -> Path:
     return state_path().parent / "companion-tray.pid"
 
 
+# Windows has no signal 0. signal.CTRL_C_EVENT *is* 0, so os.kill(pid, 0)
+# there does not probe for the process -- it asks the console to deliver a
+# Ctrl+C event. The companion daemon runs detached with no console at all, so
+# the call always failed with ERROR_INVALID_HANDLE and every live overlay
+# looked dead. Ask the kernel about the process directly instead.
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_SYNCHRONIZE = 0x00100000
+_WAIT_TIMEOUT = 0x00000102
+_ERROR_ACCESS_DENIED = 5
+
+
+def _windows_pid_is_running(pid: int) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    # Without explicit signatures ctypes truncates the 64-bit handle to an int.
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    handle = kernel32.OpenProcess(
+        _PROCESS_QUERY_LIMITED_INFORMATION | _SYNCHRONIZE, False, pid
+    )
+    if not handle:
+        # The process exists but this process cannot open it. Treat it as
+        # alive so Companion stop/start does not orphan visible overlay windows.
+        return ctypes.get_last_error() == _ERROR_ACCESS_DENIED
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == _WAIT_TIMEOUT
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _pid_is_running(pid: int) -> bool:
     if pid <= 0:
         return False
+    if sys.platform == "win32":
+        try:
+            return _windows_pid_is_running(pid)
+        except (OSError, AttributeError, ValueError):
+            return False
     try:
         os.kill(pid, 0)
+        return True
+    except PermissionError:
+        # The process exists but this process cannot signal it. Treat it as
+        # alive so Companion stop/start does not orphan visible overlay windows.
         return True
     except (OSError, ProcessLookupError):
         return False
@@ -4671,6 +4898,46 @@ def _existing_companion_presence_pid() -> int | None:
     except OSError:
         pass
     return None
+
+
+def _companion_can_own_prompt_gate() -> bool:
+    """Return true when Companion can be the first prompt-gate surface.
+
+    The native presence PID file is the strongest signal, but users can also
+    have the background Companion heartbeat without a readable presence PID
+    after restarts or dev-process churn. In that case the prompt hook should
+    still publish an active gate for Companion before falling back to a browser.
+    """
+    if _existing_companion_presence_pid() is not None:
+        return True
+    try:
+        status = get_watcher_status(max_age_seconds=90)
+    except OSError:
+        status = {}
+    if (
+        isinstance(status, dict)
+        and status.get("running")
+        and status.get("mode") == "companion"
+    ):
+        return True
+    if isinstance(status, dict) and status.get("status") not in {None, "unknown"}:
+        return False
+    # If the main state lock is temporarily held by a scan, the normal status
+    # API can report "unknown" even though the Companion heartbeat is fresh.
+    # Prompt Gate routing is latency-sensitive and read-only here, so tolerate
+    # a best-effort direct read instead of jumping to the browser fallback.
+    try:
+        data = json.loads(state_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    heartbeat = data.get("watcher_heartbeat") if isinstance(data, dict) else None
+    if not isinstance(heartbeat, dict) or heartbeat.get("mode") != "companion":
+        return False
+    try:
+        updated = datetime.fromisoformat(str(heartbeat.get("updated_at"))).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return False
+    return (datetime.now(timezone.utc) - updated).total_seconds() <= 90
 
 
 def _existing_companion_tray_pid() -> int | None:
@@ -4698,6 +4965,7 @@ def _stop_native_companion_presence() -> None:
                 capture_output=True,
                 timeout=5,
                 check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         else:
             os.kill(pid, signal.SIGTERM)
@@ -4720,6 +4988,7 @@ def _stop_native_companion_tray() -> None:
                 capture_output=True,
                 timeout=5,
                 check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         else:
             os.kill(pid, signal.SIGTERM)
@@ -4735,6 +5004,7 @@ def _open_native_companion_presence(
     base_url: str,
     *,
     position: str = "bottom-right",
+    visibility: str = "always",
 ) -> tuple[bool, str]:
     """Launch the collapsed always-available companion entry point."""
     existing_pid = _existing_companion_presence_pid()
@@ -4769,6 +5039,8 @@ def _open_native_companion_presence(
                 prompt_url,
                 "--position",
                 position,
+                "--visibility",
+                visibility,
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -4779,7 +5051,17 @@ def _open_native_companion_presence(
         pid_path.write_text(str(process.pid), encoding="utf-8")
     except OSError as exc:
         return False, str(exc)
-    return True, "native companion presence"
+    for _ in range(10):
+        if process.poll() is not None:
+            try:
+                pid_path.unlink()
+            except OSError:
+                pass
+            return False, "native companion presence exited immediately"
+        if _pid_is_running(process.pid):
+            return True, f"native companion presence PID {process.pid}"
+        time_module.sleep(0.1)
+    return False, "native companion presence did not stay reachable"
 
 
 def _open_native_companion_tray(base_url: str) -> tuple[bool, str]:
@@ -4944,6 +5226,14 @@ def command_handoff(args: argparse.Namespace) -> int:
             return 0
 
     outcome = get_outcome(session.session_id)
+    project = project_key(session.project_path)
+    same_project_session_count = 1
+    if project != UNATTRIBUTED_PROJECT:
+        same_project_session_count = max(
+            1,
+            len({row.session_id for row in rows if row.session_id and project_key(row.project_path) == project}),
+        )
+    attachment = runtime_attachment_for_session(session, processes=safe_runtime_processes())
     capsule = build_handoff_capsule(
         session,
         events_for_session(session.session_id, days=args.days),
@@ -4955,6 +5245,8 @@ def command_handoff(args: argparse.Namespace) -> int:
         source_refs=getattr(args, "source", []),
         constraints=getattr(args, "constraint", []),
         acceptance_criteria=getattr(args, "acceptance", []),
+        runtime_attachment=attachment.to_json(),
+        same_project_session_count=same_project_session_count,
     )
     if args.format == "json":
         rendered = json.dumps(capsule, indent=2)
@@ -5054,6 +5346,13 @@ VELOCITY_MIN_TOKENS_PER_MINUTE = 12_000.0
 VELOCITY_MIN_WINDOW_TOKENS = 80_000
 VELOCITY_MIN_SPAN_MINUTES = 5.0
 VELOCITY_MIN_RECENT_EVENTS = 5
+FRESH_START_PROJECT_SKIP_PREFIX = "control_recommended_project:"
+
+
+def _fresh_start_project_skip_active(project_path: str | None) -> bool:
+    if not project_path or project_path == "unknown":
+        return False
+    return companion_skip_active(f"{FRESH_START_PROJECT_SKIP_PREFIX}{project_path}")
 
 
 def _loop_signal(events: Sequence[LocalEvent]) -> dict[str, object] | None:
@@ -5327,6 +5626,9 @@ def _print_watch_status_card(
             "-- local estimate, not a real-time quota API"
         )
     print(f"  Recommended: {_watch_action_display(status['action'])} -- {status['reason']}")
+    if status["action"] == "create handoff capsule now" and _fresh_start_project_skip_active(session.project_path):
+        print("  Fresh Start: snoozed for this project; keeping the recommendation in the dashboard only.")
+        return
 
     may_deliver = delivery_session_id is None or delivery_session_id == session.session_id
     if (
@@ -5839,11 +6141,7 @@ def command_watch(args: argparse.Namespace) -> int:
         current = get_watcher_status(max_age_seconds=max(30, int(getattr(args, "interval", 60)) * 2))
         current_pid = current.get("pid") if isinstance(current, dict) else None
         if current.get("running") and isinstance(current_pid, int) and current_pid != os.getpid():
-            try:
-                os.kill(current_pid, 0)
-            except (OSError, ProcessLookupError):
-                pass
-            else:
+            if _pid_is_running(current_pid):
                 print(
                     f"AIWatcher ambient Watch is already running (PID {current_pid}). "
                     "Use the existing companion or stop that process before starting another."
@@ -7583,6 +7881,40 @@ def _file_contains(path: str, needle: str) -> bool:
         return False
 
 
+def _file_text(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read()
+    except OSError:
+        return ""
+
+
+def _configured_aiwatcher_source_warnings() -> list[str]:
+    package_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    if os.name == "nt":
+        package_root = package_root.replace("\\", "/")
+    checks = [
+        ("Claude project hook", _claude_settings_path("project"), "claude-hook"),
+        ("Claude user hook", _claude_settings_path("user"), "claude-hook"),
+        ("Codex project hook", _codex_hooks_path("project"), "codex-hook"),
+        ("Codex user hook", _codex_hooks_path("user"), "codex-hook"),
+        ("Cursor project hook", _cursor_hooks_path("project"), "cursor-hook"),
+        ("Cursor user hook", _cursor_hooks_path("user"), "cursor-hook"),
+    ]
+    warnings: list[str] = []
+    for label, path, marker in checks:
+        text = _file_text(path)
+        if marker not in text:
+            continue
+        normalized = text.replace("\\", "/")
+        if package_root not in normalized:
+            warnings.append(
+                f"{label} is installed from a different AIWatcher checkout. Reinstall it from this repo so hooks, "
+                f"Companion, and Prompt Gate use the same code. Path: {path}"
+            )
+    return warnings
+
+
 def _hook_decision_action(decision: object) -> str:
     labels = {
         "context_added": "added brief context (no popup)",
@@ -7684,7 +8016,7 @@ def _hook_status_diagnostics(events: list[dict[str, object]]) -> list[str]:
     }
     stale_after = timedelta(minutes=10)
     now = datetime.now(timezone.utc)
-    diagnostics: list[str] = []
+    diagnostics: list[str] = _configured_aiwatcher_source_warnings()
     for tool in ("claude", "codex", "cursor"):
         if not installed.get(tool):
             continue
@@ -7761,9 +8093,20 @@ def _hook_surface_verification_rows(events: list[dict[str, object]]) -> list[tup
 
 
 def command_hook_status(_args: argparse.Namespace) -> int:
-    events = recent_hook_events(limit=8)
-    interventions = recent_interventions(limit=5, days=7)
+    state_error: OSError | None = None
+    try:
+        events = recent_hook_events(limit=8)
+    except OSError as exc:
+        events = []
+        state_error = exc
+    try:
+        interventions = recent_interventions(limit=5, days=7)
+    except OSError as exc:
+        interventions = []
+        state_error = state_error or exc
     print("AIWatcher hook status\n")
+    if state_error is not None:
+        print(f"Local state unavailable: {state_error}")
     if not events:
         print("No recent hook events recorded.")
         print("Submit a test prompt after installing a Claude, Codex, or Cursor hook, then check again.")
@@ -7804,7 +8147,10 @@ def command_hook_status(_args: argparse.Namespace) -> int:
             if row.get("session_id"):
                 line += f" | session {row['session_id']}"
             print(line)
-    command_decisions = recent_command_decisions(limit=5)
+    try:
+        command_decisions = recent_command_decisions(limit=5)
+    except OSError:
+        command_decisions = []
     if command_decisions:
         print("\nRecent command gate decisions (S-19, Claude Code only)")
         for row in command_decisions:
@@ -7815,7 +8161,10 @@ def command_hook_status(_args: argparse.Namespace) -> int:
             if row.get("session_id"):
                 line += f" | session {row['session_id']}"
             print(line)
-    watch_notifications = recent_watch_notifications(limit=5)
+    try:
+        watch_notifications = recent_watch_notifications(limit=5)
+    except OSError:
+        watch_notifications = []
     if watch_notifications:
         print("\nRecent ambient watch notifications (`aiwatcher watch --notify`)")
         for row in watch_notifications:
@@ -7827,7 +8176,10 @@ def command_hook_status(_args: argparse.Namespace) -> int:
             if row.get("session_id"):
                 line += f" | session {row['session_id']}"
             print(line)
-    handoff_decisions = recent_handoff_decisions(limit=5)
+    try:
+        handoff_decisions = recent_handoff_decisions(limit=5)
+    except OSError:
+        handoff_decisions = []
     if handoff_decisions:
         print("\nRecent Fresh Start decisions")
         for row in handoff_decisions:
@@ -8145,6 +8497,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="bottom-right",
         help="Screen corner for the collapsed Companion",
     )
+    start.add_argument(
+        "--presence-visibility",
+        choices=("always", "ai-apps", "nudges-only"),
+        default="always",
+        help="When the Companion is visible: always, only during AI app work, or only for nudges",
+    )
     start.set_defaults(func=command_start)
     sub.add_parser("setup", help="Show first-run setup, hook, coverage, and ambient watch steps").set_defaults(func=command_setup)
     sub.add_parser("status", help="Show detected tools and local AIWatcher status").set_defaults(func=command_status)
@@ -8163,6 +8521,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("bottom-right", "bottom-left", "top-right", "top-left"),
         default="bottom-right",
         help="Screen corner for the collapsed companion",
+    )
+    companion_start.add_argument(
+        "--presence-visibility",
+        choices=("always", "ai-apps", "nudges-only"),
+        default="always",
+        help="When the Companion is visible: always, only during AI app work, or only for nudges",
     )
     companion_start.set_defaults(func=command_companion)
     companion_sub.add_parser("status", help="Show companion status").set_defaults(func=command_companion)
@@ -8188,6 +8552,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="bottom-right",
         help="Screen corner for the collapsed companion",
     )
+    autostart_install.add_argument(
+        "--presence-visibility",
+        choices=("always", "ai-apps", "nudges-only"),
+        default="always",
+        help="When the Companion is visible after login: always, only during AI app work, or only for nudges",
+    )
     autostart_install.set_defaults(func=command_companion)
     autostart_sub.add_parser("status", help="Show login autostart status").set_defaults(func=command_companion)
     autostart_sub.add_parser("uninstall", help="Remove login autostart").set_defaults(func=command_companion)
@@ -8203,6 +8573,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("bottom-right", "bottom-left", "top-right", "top-left"),
         default="bottom-right",
         help="Screen corner for the collapsed companion",
+    )
+    companion_run.add_argument(
+        "--presence-visibility",
+        choices=("always", "ai-apps", "nudges-only"),
+        default="always",
+        help="When the Companion is visible: always, only during AI app work, or only for nudges",
     )
     companion_run.set_defaults(func=command_companion)
     sub.add_parser("today", help="Show today's local AI usage").set_defaults(func=command_today)

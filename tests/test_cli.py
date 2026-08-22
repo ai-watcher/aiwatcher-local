@@ -139,6 +139,7 @@ class StartCommandCliTests(unittest.TestCase):
             patch.object(cli, "surface_coverage", return_value=coverage),
             patch.object(cli, "_ensure_dashboard_server", return_value="http://127.0.0.1:8765/") as ensure_ui,
             patch.object(cli, "start_companion", return_value={"ok": True, "pid": 123}) as start_companion,
+            patch.object(cli, "_open_native_companion_presence", return_value=(True, "native companion presence PID 456")) as open_presence,
             patch("sys.stdout", new_callable=io.StringIO) as stdout,
         ):
             result = cli.command_start(SimpleNamespace(
@@ -146,6 +147,7 @@ class StartCommandCliTests(unittest.TestCase):
                 no_companion=False,
                 no_presence=False,
                 presence_position="bottom-right",
+                presence_visibility="always",
                 no_ui=False,
                 open_ui=False,
                 ui_host="127.0.0.1",
@@ -159,8 +161,14 @@ class StartCommandCliTests(unittest.TestCase):
             interval_seconds=30,
             presence=True,
             presence_position="bottom-right",
+            presence_visibility="always",
         )
-        self.assertIn("A small Companion should appear", stdout.getvalue())
+        open_presence.assert_called_once_with(
+            cli._watch_ui_base_url(),
+            position="bottom-right",
+            visibility="always",
+        )
+        self.assertIn("Companion entry point opened", stdout.getvalue())
         self.assertIn("Dashboard UI: http://127.0.0.1:8765/", stdout.getvalue())
 
     def test_start_can_skip_companion(self) -> None:
@@ -176,6 +184,7 @@ class StartCommandCliTests(unittest.TestCase):
                 no_companion=True,
                 no_presence=False,
                 presence_position="bottom-right",
+                presence_visibility="always",
                 no_ui=False,
                 open_ui=False,
                 ui_host="127.0.0.1",
@@ -192,6 +201,7 @@ class StartCommandCliTests(unittest.TestCase):
             patch.object(cli, "surface_coverage", return_value=[]),
             patch.object(cli, "_ensure_dashboard_server") as ensure_ui,
             patch.object(cli, "start_companion", return_value={"ok": True, "pid": 123}),
+            patch.object(cli, "_open_native_companion_presence", return_value=(True, "native companion presence PID 456")),
             patch("sys.stdout", new_callable=io.StringIO) as stdout,
         ):
             result = cli.command_start(SimpleNamespace(
@@ -199,6 +209,7 @@ class StartCommandCliTests(unittest.TestCase):
                 no_companion=False,
                 no_presence=False,
                 presence_position="bottom-right",
+                presence_visibility="always",
                 no_ui=True,
                 open_ui=False,
                 ui_host="127.0.0.1",
@@ -215,11 +226,36 @@ class StartCommandCliTests(unittest.TestCase):
             patch.object(cli, "_existing_companion_presence_pid", return_value=123),
             patch.object(cli.subprocess, "Popen") as popen,
         ):
-            ok, detail = cli._open_native_companion_presence("http://127.0.0.1:8765")
+            ok, detail = cli._open_native_companion_presence("http://127.0.0.1:8765", visibility="ai-apps")
 
         self.assertTrue(ok)
         self.assertIn("already running", detail)
         popen.assert_not_called()
+
+    def test_pid_probe_treats_permission_error_as_running(self) -> None:
+        with (
+            patch.object(cli.sys, "platform", "linux"),
+            patch.object(cli.os, "kill", side_effect=PermissionError("denied")),
+        ):
+            self.assertTrue(cli._pid_is_running(12345))
+
+    def test_pid_probe_does_not_signal_on_windows(self) -> None:
+        # signal.CTRL_C_EVENT is 0, so os.kill(pid, 0) on Windows sends a
+        # console event instead of probing. The console-less companion daemon
+        # always failed that call and read every live overlay as dead.
+        with (
+            patch.object(cli.sys, "platform", "win32"),
+            patch.object(cli.os, "kill") as kill,
+            patch.object(cli, "_windows_pid_is_running", return_value=True) as probe,
+        ):
+            self.assertTrue(cli._pid_is_running(12345))
+        kill.assert_not_called()
+        probe.assert_called_once_with(12345)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows process probe")
+    def test_windows_pid_probe_matches_reality(self) -> None:
+        self.assertTrue(cli._pid_is_running(os.getpid()))
+        self.assertFalse(cli._pid_is_running(0x7FFFFFF0))
 
     def test_companion_stop_stops_presence_control(self) -> None:
         with (
@@ -249,6 +285,9 @@ class StartCommandCliTests(unittest.TestCase):
             capture_output=True,
             timeout=5,
             check=False,
+            # Suppressed console: the companion has none of its own, so an
+            # unflagged taskkill would flash a real terminal window.
+            creationflags=getattr(cli.subprocess, "CREATE_NO_WINDOW", 0),
         )
         kill.assert_not_called()
 
@@ -265,16 +304,21 @@ class StartCommandCliTests(unittest.TestCase):
             patch.object(cli, "_existing_companion_presence_pid", return_value=None),
             patch.object(cli.sys, "platform", "win32"),
             patch.object(cli, "_companion_presence_pid_path") as pid_path,
+            patch.object(cli, "_pid_is_running", return_value=True),
             patch.object(cli.subprocess, "Popen") as popen,
         ):
             process = Mock(pid=456)
+            process.poll.return_value = None
             popen.return_value = process
             pid_path.return_value.parent.mkdir.return_value = None
             pid_path.return_value.write_text.return_value = None
-            ok, detail = cli._open_native_companion_presence("http://127.0.0.1:8765")
+            ok, detail = cli._open_native_companion_presence("http://127.0.0.1:8765", visibility="ai-apps")
 
         self.assertTrue(ok)
-        self.assertEqual(detail, "native companion presence")
+        self.assertEqual(detail, "native companion presence PID 456")
+        launched = popen.call_args.args[0]
+        self.assertIn("--visibility", launched)
+        self.assertEqual(launched[launched.index("--visibility") + 1], "ai-apps")
         kwargs = popen.call_args.kwargs
         self.assertFalse(kwargs["start_new_session"])
         self.assertIn("creationflags", kwargs)
@@ -834,7 +878,7 @@ class PromptPreflightTests(unittest.TestCase):
     def test_sessions_search_filters_project_tool_model_or_id(self) -> None:
         rows = [
             session(1, project="/repo/orcha"),
-            session(2, tool="codex-cli", project="/repo/agentwatch"),
+            session(2, tool="codex-cli", project="/repo/archive-tool"),
         ]
         args = SimpleNamespace(days=7, limit=20, team=False, search="orcha", outcome=None, evidence=None)
         output = io.StringIO()
@@ -844,7 +888,7 @@ class PromptPreflightTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertIn("/repo/orcha", output.getvalue())
-        self.assertNotIn("/repo/agentwatch", output.getvalue())
+        self.assertNotIn("/repo/archive-tool", output.getvalue())
 
     def test_sessions_outcome_filter_matches_recorded_outcome_only(self) -> None:
         rows = [session(1, project="/repo/useful"), session(2, project="/repo/rework")]
@@ -892,7 +936,7 @@ class PromptPreflightTests(unittest.TestCase):
 
     def test_resume_uses_most_recent_matching_session(self) -> None:
         rows = [
-            session(1, project="/repo/agentwatch"),
+            session(1, project="/repo/archive-tool"),
             session(2, project="/repo/orcha"),
         ]
         args = SimpleNamespace(
@@ -1016,7 +1060,7 @@ class PromptPreflightTests(unittest.TestCase):
         rows = [
             session(1, project="/repo/orcha"),
             session(2, project="/repo/orcha-old"),
-            session(3, project="/repo/agentwatch"),
+            session(3, project="/repo/archive-tool"),
         ]
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")
@@ -1562,6 +1606,43 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertIn("already held for dashboard", stdout.getvalue())
         self.assertEqual(len(notifications), 1)
         self.assertFalse(notifications[0]["sent"])
+
+    def test_watch_overlay_respects_fresh_start_project_cooldown(self) -> None:
+        row = session(1, project="/repo/orcha")
+        row.agent_calls = 300
+        args = SimpleNamespace(
+            days=1,
+            interval=15,
+            once=True,
+            cost_threshold=5.0,
+            calls_threshold=250,
+            tokens_threshold=500_000,
+            target="generic",
+            notify=False,
+            overlay=True,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(cli, "get_baselines", return_value={}),
+                patch.object(cli, "_watch_status", return_value={
+                    "action": "create handoff capsule now",
+                    "signal_kind": "critical_context",
+                    "reason": "Context pressure.",
+                    "health": None,
+                    "loop": None,
+                    "velocity": None,
+                    "runway": None,
+                }),
+                patch.object(cli, "companion_skip_active", return_value=True),
+                patch.object(cli, "_open_handoff_overlay") as overlay,
+                patch("sys.stdout", io.StringIO()) as stdout,
+            ):
+                cli._print_watch_status_card(row, [row], args, [], {}, {})
+
+        overlay.assert_not_called()
+        self.assertIn("snoozed for this project", stdout.getvalue())
 
     def test_watch_overlay_holds_historical_cli_logs_without_live_runtime(self) -> None:
         row = session(1, project="/repo/orcha")
@@ -2876,7 +2957,7 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         original = (
             "dont work on any code changes, just tell me the plan. "
             "Can you review my chat on handoff linking, slow loading session details, "
-            "and Fresh Start context handoff against the moat strategy?\n\n"
+            "and Fresh Start context handoff against the product direction?\n\n"
             + ("Quoted prior chat and transcript detail. " * 160)
         )
 
@@ -3262,6 +3343,8 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
             self.skipTest("node not available to check JS syntax")
         result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
         page = cli._prompt_gate_html(tool="claude", cwd="/repo", prompt="original prompt text", result=result)
+        self.assertIn("window.close()", page)
+        self.assertIn("Closing this local gate tab", page)
         script = re.search(r"<script>(.*?)</script>", page, re.S).group(1)
         with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as handle:
             handle.write(script)
@@ -3574,6 +3657,140 @@ Fresh-session instructions
         self.assertNotIn("Working directory\n/", brief)
         self.assertLess(brief.index("Requested outcome"), brief.index("Supporting pressure context"))
 
+    def test_fresh_start_guardrails_are_not_treated_as_destructive_intent(self) -> None:
+        handoff = """AIWatcher Fresh Start brief
+
+You are starting a fresh AI coding session. Do not assume access to the previous chat.
+Continue from repository state and local evidence, not from hidden conversation history.
+
+Goal
+- Preserve momentum from the previous session without replaying its bloated context.
+- Reconstruct the work from disk, recent commits, changed files, decisions, and the evidence below.
+- Pick one smallest safe next checkpoint and continue only that checkpoint.
+
+Workspace
+- Project: /repo
+- Project confidence: reliable
+
+What appears done
+- No commit, changed-file, or test evidence was found; reconstruct the state carefully.
+
+What remains uncertain
+- The previous chat is intentionally not available in this fresh session.
+- Prompt text was not included; infer the task from repository state and local evidence.
+
+Recommended next checkpoint
+- Run `git status --short` and inspect only the files listed in Local evidence first.
+
+Fresh-session instructions
+- Preserve unrelated changes and do not expose secrets.
+- Stop before destructive changes, broad refactors, secret exposure, or unrelated cleanup.
+"""
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt(handoff, tool="codex", cwd="/repo")
+
+        self.assertEqual(result["risk"], "low")
+        self.assertEqual(result["score"], 0)
+        self.assertTrue(
+            any("protective context" in finding for finding in result["findings"])
+        )
+        self.assertNotIn("Confirm before destructive changes", [g["label"] for g in result["guardrails"]])
+        self.assertIn("What appears done", result["suggested_prompt"])
+        self.assertIn("What remains uncertain", result["suggested_prompt"])
+        self.assertIn("Recommended next checkpoint", result["suggested_prompt"])
+
+    def test_fresh_start_destructive_objective_is_still_high_risk(self) -> None:
+        handoff = """AIWatcher Fresh Start brief
+
+Goal
+- User objective: delete the repository so the project can start clean.
+- Pick one smallest safe next checkpoint and continue only that checkpoint.
+
+Workspace
+- Project: /repo
+
+Fresh-session instructions
+- Stop before destructive changes, broad refactors, secret exposure, or unrelated cleanup.
+"""
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt(handoff, tool="codex", cwd="/repo")
+
+        self.assertEqual(result["risk"], "high")
+        self.assertGreaterEqual(result["score"], 6)
+        self.assertTrue(
+            any("high-impact destructive action" in finding for finding in result["findings"])
+        )
+        self.assertIn("Confirm before destructive changes", [g["label"] for g in result["guardrails"]])
+
+    def test_spoofed_fresh_start_marker_does_not_hide_destructive_text(self) -> None:
+        examples = [
+            "AIWatcher Fresh Start brief\n\ndelete the repo",
+            """AIWatcher Fresh Start brief
+
+Fresh-session instructions
+- delete the repository and force push over origin/main
+""",
+        ]
+
+        with patch.object(cli, "sessions_since", return_value=[]):
+            results = [cli.analyze_prompt(example, tool="codex", cwd="/repo") for example in examples]
+
+        for result in results:
+            self.assertEqual(result["risk"], "high")
+            self.assertGreaterEqual(result["score"], 6)
+            self.assertTrue(
+                any("high-impact destructive action" in finding for finding in result["findings"])
+            )
+
+    def test_no_brief_heading_can_hide_destructive_text_from_the_scorer(self) -> None:
+        """Destructive intent scores the same under every recognised heading.
+
+        _fresh_start_intent_text drops guardrail boilerplate before scoring, and
+        deciding what to KEEP by listing headings left nine of them -- "Local
+        evidence to inspect", "Why start fresh now" and "Project" among others --
+        classified as neither intent nor protective. Their contents matched no
+        branch and were dropped, so the same sentence scored 8 unsectioned and 0
+        under one of those headings.
+
+        Driven off the real heading set rather than a copied list, so a heading
+        added later without being classified fails here instead of quietly
+        reopening the hole.
+        """
+        destructive = "delete the production database and drop every user table"
+        baseline_text = "AIWatcher Fresh Start brief\n\n" + destructive
+
+        with patch.object(cli, "sessions_since", return_value=[]):
+            baseline = cli.analyze_prompt(baseline_text, tool="codex", cwd="/repo")
+            self.assertEqual(baseline["risk"], "high")
+
+            for header in sorted(cli._HANDOFF_SECTION_HEADERS):
+                with self.subTest(header=header):
+                    text = "AIWatcher Fresh Start brief\n\n%s\n%s\n" % (header, destructive)
+                    result = cli.analyze_prompt(text, tool="codex", cwd="/repo")
+                    self.assertEqual(
+                        result["risk"], "high",
+                        "destructive text under %r was hidden from the scorer" % header,
+                    )
+                    self.assertGreaterEqual(result["score"], baseline["score"])
+
+    def test_a_genuine_brief_is_not_scored_for_its_own_guardrails(self) -> None:
+        """The other half of the same rule, so fixing one cannot undo the other.
+
+        A real Fresh Start brief says "Stop before destructive changes" because
+        AIWatcher put it there. That must not read as the user asking for one.
+        """
+        brief = (
+            "AIWatcher Fresh Start brief\n\n"
+            "Objective\nContinue the refactor already in progress.\n\n"
+            "Guardrails\n"
+            "Stop before destructive changes.\n"
+            "Do not expose secrets.\n"
+            "Preserve unrelated behavior and existing user changes.\n"
+        )
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt(brief, tool="codex", cwd="/repo")
+        self.assertEqual(result["risk"], "low")
+
     def test_cumulative_codex_totals_do_not_trigger_session_pressure_alerts(self) -> None:
         row = session(1, tool="codex-cli")
         row.tokens_in = 500_000_000
@@ -3658,6 +3875,45 @@ class HeadlessPromptGateTests(unittest.TestCase):
         ):
             self.assertTrue(cli._display_available())
 
+    def test_companion_can_own_prompt_gate_from_running_heartbeat(self) -> None:
+        with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=None),
+            patch.object(
+                cli,
+                "get_watcher_status",
+                return_value={"running": True, "mode": "companion", "pid": 123},
+            ),
+        ):
+            self.assertTrue(cli._companion_can_own_prompt_gate())
+
+    def test_companion_can_own_prompt_gate_from_direct_state_read_when_status_lock_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with open(state_file, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "watcher_heartbeat": {
+                        "mode": "companion",
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                }, handle)
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(cli, "_existing_companion_presence_pid", return_value=None),
+                patch.object(cli, "get_watcher_status", side_effect=OSError("locked")),
+            ):
+                self.assertTrue(cli._companion_can_own_prompt_gate())
+
+    def test_companion_does_not_own_prompt_gate_from_legacy_watch_heartbeat(self) -> None:
+        with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=None),
+            patch.object(
+                cli,
+                "get_watcher_status",
+                return_value={"running": True, "status": "running", "mode": "watch", "pid": 123},
+            ),
+        ):
+            self.assertFalse(cli._companion_can_own_prompt_gate())
+
     def test_run_prompt_gate_still_uses_browser_when_display_available(self) -> None:
         probe = socket.socket()
         try:
@@ -3668,7 +3924,7 @@ class HeadlessPromptGateTests(unittest.TestCase):
             probe.close()
         with (
             patch.object(cli, "_display_available", return_value=True),
-            patch.object(cli, "_existing_companion_presence_pid", return_value=None),
+            patch.object(cli, "_companion_can_own_prompt_gate", return_value=False),
             patch.object(cli, "webbrowser") as webbrowser_mock,
         ):
             webbrowser_mock.open.return_value = True
@@ -3707,7 +3963,7 @@ class HeadlessPromptGateTests(unittest.TestCase):
             with (
                 patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
                 patch.object(cli, "_display_available", return_value=True),
-                patch.object(cli, "_existing_companion_presence_pid", return_value=123),
+                patch.object(cli, "_companion_can_own_prompt_gate", return_value=True),
                 patch.object(cli, "webbrowser") as webbrowser_mock,
             ):
                 gate = cli.run_prompt_gate(
@@ -3722,7 +3978,7 @@ class HeadlessPromptGateTests(unittest.TestCase):
         webbrowser_mock.open.assert_not_called()
         self.assertEqual(gate["decision"], "cancel")
 
-    def test_run_prompt_gate_falls_back_to_browser_when_companion_does_not_acknowledge(self) -> None:
+    def test_run_prompt_gate_does_not_redirect_when_companion_acknowledgement_is_slow(self) -> None:
         probe = socket.socket()
         try:
             probe.bind(("127.0.0.1", 0))
@@ -3735,7 +3991,7 @@ class HeadlessPromptGateTests(unittest.TestCase):
             with (
                 patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
                 patch.object(cli, "_display_available", return_value=True),
-                patch.object(cli, "_existing_companion_presence_pid", return_value=123),
+                patch.object(cli, "_companion_can_own_prompt_gate", return_value=True),
                 patch.object(cli, "active_prompt_gate_seen", return_value=False),
                 patch.object(cli, "webbrowser") as webbrowser_mock,
             ):
@@ -3748,7 +4004,7 @@ class HeadlessPromptGateTests(unittest.TestCase):
                     timeout_seconds=1,
                 )
 
-        webbrowser_mock.open.assert_called_once()
+        webbrowser_mock.open.assert_not_called()
         self.assertIsNone(gate)
 
     def test_run_prompt_gate_shows_terminal_gate_when_no_display_and_tty(self) -> None:
@@ -4808,12 +5064,12 @@ class IntegrationConfigTests(unittest.TestCase):
         # to C:Users... there, so the generated command must not contain any
         # backslashes regardless of what sys.executable reports.
         with (
-            patch.object(cli.sys, "executable", r"C:\Users\tadan\Python\python.exe"),
+            patch.object(cli.sys, "executable", r"C:\Users\example\Python\python.exe"),
             patch.object(cli.os, "name", "nt"),
         ):
             command = cli._cli_command_for_current_file()
         self.assertNotIn("\\", command)
-        self.assertIn("C:/Users/tadan/Python/python.exe", command)
+        self.assertIn("C:/Users/example/Python/python.exe", command)
 
     def test_windows_hook_command_quotes_paths_with_spaces(self) -> None:
         with (
@@ -4976,6 +5232,52 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertIn("Codex hook is installed", output)
         self.assertIn("this surface did not invoke the hook", output)
         self.assertIn("Companion -> Plan / Prompt", output)
+
+    def test_hook_status_warns_when_hook_points_at_different_aiwatcher_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_hooks = os.path.join(temp_dir, "hooks.json")
+            with open(codex_hooks, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "hooks": {
+                        "UserPromptSubmit": [
+                            {
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": (
+                                            "PYTHONPATH=/tmp/old-aiwatcher:${PYTHONPATH:-} "
+                                            "python3 -m aiwatcher_cli codex-hook --gate"
+                                        ),
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }, handle)
+            with (
+                patch.object(
+                    cli,
+                    "_claude_settings_path",
+                    side_effect=lambda scope, project_dir=None: os.path.join(temp_dir, f"claude-{scope}.json"),
+                ),
+                patch.object(
+                    cli,
+                    "_codex_hooks_path",
+                    side_effect=lambda scope, project_dir=None: codex_hooks
+                    if scope == "user"
+                    else os.path.join(temp_dir, "codex-project.json"),
+                ),
+                patch.object(
+                    cli,
+                    "_cursor_hooks_path",
+                    side_effect=lambda scope, project_dir=None: os.path.join(temp_dir, f"cursor-{scope}.json"),
+                ),
+            ):
+                warnings = cli._configured_aiwatcher_source_warnings()
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("different AIWatcher checkout", warnings[0])
+        self.assertIn("Reinstall it from this repo", warnings[0])
 
     def test_hook_status_shows_handoff_bubble_decisions(self) -> None:
         with (

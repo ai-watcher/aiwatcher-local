@@ -21,13 +21,21 @@ class CompanionLifecycleTests(unittest.TestCase):
 
         self.assertNotIn("--presence", command)
         self.assertNotIn("--presence-position", command)
+        self.assertNotIn("--presence-visibility", command)
 
     def test_command_can_place_collapsed_presence(self) -> None:
-        command = companion.companion_command(30, presence=True, presence_position="top-left")
+        command = companion.companion_command(
+            30,
+            presence=True,
+            presence_position="top-left",
+            presence_visibility="ai-apps",
+        )
 
         self.assertIn("--presence", command)
         self.assertIn("--presence-position", command)
-        self.assertEqual(command[-1], "top-left")
+        self.assertIn("--presence-visibility", command)
+        self.assertEqual(command[command.index("--presence-position") + 1], "top-left")
+        self.assertEqual(command[command.index("--presence-visibility") + 1], "ai-apps")
 
     def test_tray_command_starts_native_tray_path(self) -> None:
         command = companion.tray_command(10)
@@ -54,7 +62,11 @@ class CompanionLifecycleTests(unittest.TestCase):
             patch.object(companion.Path, "home", return_value=Path(temp_dir)),
             patch.object(companion, "companion_log_path", return_value=Path(temp_dir) / "companion.log"),
         ):
-            installed = companion.install_login_autostart(interval_seconds=10, presence_position="top-left")
+            installed = companion.install_login_autostart(
+                interval_seconds=10,
+                presence_position="top-left",
+                presence_visibility="nudges-only",
+            )
             target = Path(str(installed["path"]))
             content = target.read_text(encoding="utf-8")
             removed = companion.uninstall_login_autostart()
@@ -62,6 +74,7 @@ class CompanionLifecycleTests(unittest.TestCase):
         self.assertTrue(installed["ok"])
         self.assertIn("com.aiwatcher.local.companion", content)
         self.assertIn("top-left", content)
+        self.assertIn("nudges-only", content)
         self.assertTrue(removed["ok"])
         self.assertTrue(removed["removed"])
 
@@ -156,12 +169,14 @@ class CompanionLifecycleTests(unittest.TestCase):
                     interval_seconds=30,
                     presence=True,
                     presence_position="bottom-left",
+                    presence_visibility="ai-apps",
                 )
 
         self.assertTrue(result["ok"])
         launched = popen.call_args.args[0]
         self.assertIn("--presence", launched)
         self.assertIn("bottom-left", launched)
+        self.assertIn("ai-apps", launched)
 
     def test_stop_does_not_kill_a_foreground_watch(self) -> None:
         with (
