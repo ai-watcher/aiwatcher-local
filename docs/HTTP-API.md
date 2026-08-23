@@ -163,6 +163,15 @@ snoozes a non-blocking companion reminder, and
 `/api/runtime-return` asks AIWatcher to open the safest available return target
 for a local session: exact process attachment when a host exposes enough
 metadata, otherwise app/workspace return, otherwise a Fresh Start fallback.
+`/api/session-resume` resolves the tool's own resume command for a session
+(`claude --resume <id>`, `codex resume <id>`) and, with `"launch": true`, opens
+it in a new terminal. Unlike `/api/runtime-return` it does not depend on a live
+process, so it still answers for a session whose terminal has since closed; it
+reopens the conversation elsewhere rather than focusing the original window.
+The command is generated only for verified UUID session ids and is run or copied
+from the recorded project directory when that directory still exists. Tools
+whose ids AIWatcher synthesises rather than reads (Cursor) return `"available":
+false` with the reason.
 These endpoints are called by the dashboard or native companion only.
 
 If you need one of these programmatically, prefer the equivalent CLI command

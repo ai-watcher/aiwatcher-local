@@ -7,7 +7,10 @@ bring the app or workspace forward, but must not claim exact session return.
 
 from __future__ import annotations
 
+import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -43,6 +46,10 @@ class RuntimeAttachment:
     identity_level: str = "historical_log"
     identity_label: str = "Historical log only"
     identity_reason: str = "AIWatcher found local history, but no verified live runtime for this exact AI session."
+    # Set by runtime_attachment_for_session from the tool + session id alone.
+    # Independent of every `available`/level decision above -- see the
+    # "Tool-native resume" section below for why it must not be gated on them.
+    resume_command: list[str] | None = None
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -67,6 +74,17 @@ class RuntimeAttachment:
             "identity_level": self.identity_level,
             "identity_label": self.identity_label,
             "identity_reason": self.identity_reason,
+            "resume_available": bool(self.resume_command),
+            "resume_command": format_resume_command(self.resume_command, cwd=resolve_resume_cwd(self.project_path))
+            if self.resume_command
+            else None,
+            "resume_label": "Resume in terminal" if self.resume_command else "Resume unavailable",
+            "resume_reason": (
+                "Reopens this conversation with its full history in a new terminal. It does not "
+                "focus the window the session originally ran in — no local tool can do that."
+                if self.resume_command
+                else resume_unavailable_reason(self.tool, self.session_id)
+            ),
         }
 
 
@@ -118,6 +136,19 @@ def _matching_process(session: LocalSession, processes: list[RuntimeProcess]) ->
 
 
 def runtime_attachment_for_session(
+    session: LocalSession,
+    *,
+    state: dict[str, object] | None = None,
+    processes: list[RuntimeProcess] | None = None,
+) -> RuntimeAttachment:
+    attachment = _live_attachment_for_session(session, state=state, processes=processes)
+    # Applied to whichever tier came back, including "historical" -- resume is
+    # the one return path that does not depend on the session still being live.
+    attachment.resume_command = resume_command_for_session(session.tool, session.session_id)
+    return attachment
+
+
+def _live_attachment_for_session(
     session: LocalSession,
     *,
     state: dict[str, object] | None = None,
@@ -270,6 +301,142 @@ def runtime_attachment_for_session(
             else "AIWatcher sees a recent local session, but cannot open a safe workspace or exact chat target on this platform."
         ),
     )
+
+
+# --- Tool-native resume ---------------------------------------------------
+#
+# Everything above answers "can AIWatcher reach the running tool?" and depends
+# on a live process, a window handle, or a host deep link. Resume answers a
+# different question -- "can the reader get this conversation back?" -- and
+# needs none of that. Claude Code and Codex both reopen a past conversation
+# from their own session id, and the id AIWatcher stores IS that id: Claude's
+# transcript filename stem, Codex's rollout payload id. Both were checked
+# against real local logs and are plain UUIDs.
+#
+# So this is deliberately NOT gated on RuntimeAttachment.available. A session
+# that ended three days ago in a terminal that has since been closed still
+# resumes; that is the whole point, and gating it on freshness would throw
+# away the only return path that survives a closed terminal. It is also the
+# only one that works on Windows, where processes._read_ps_rows() returns []
+# unconditionally and no attachment tier above "historical" can ever fire.
+#
+# What it does NOT do: focus the window the session came from. It reopens the
+# conversation in a NEW terminal. Claude Code's claude-cli:// URL handler
+# accepts only repo/cwd/prefill -- there is no session route -- so nothing
+# local can raise the original window. Every label here therefore says
+# "Resume", never "Return to"; the button must answer the question it asks.
+#
+# Cursor is deliberately absent: scanner builds those ids as f"cursor-{dir}"
+# from a log directory name, so there is no id Cursor would recognise.
+_RESUME_COMMANDS: dict[str, tuple[str, ...]] = {
+    "claude": ("claude", "--resume"),
+    "claude-code": ("claude", "--resume"),
+    "codex": ("codex", "resume"),
+    "codex-cli": ("codex", "resume"),
+}
+
+_RESUME_SESSION_ID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+_NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+
+
+def _valid_resume_session_id(session_id: str | None) -> bool:
+    return bool(_RESUME_SESSION_ID_RE.fullmatch((session_id or "").strip()))
+
+
+def resume_command_for_session(tool: str | None, session_id: str | None) -> list[str] | None:
+    """The tool's own resume command for this session, or None if it has none."""
+    prefix = _RESUME_COMMANDS.get((tool or "").strip().lower())
+    session_id = (session_id or "").strip()
+    if not prefix or not _valid_resume_session_id(session_id):
+        return None
+    return [*prefix, session_id]
+
+
+def resume_unavailable_reason(tool: str | None, session_id: str | None = None) -> str:
+    if session_id and not _valid_resume_session_id(session_id):
+        return (
+            "AIWatcher will only resume Claude/Codex conversations with a verified UUID session id. "
+            "Use the Fresh Start brief instead of running an untrusted resume command."
+        )
+    label = (tool or "").strip() or "This tool"
+    return (
+        f"{label} does not expose a local resume command, so AIWatcher cannot reopen this "
+        "conversation. Use the Fresh Start brief to carry the context into a new session."
+    )
+
+
+def resolve_resume_cwd(path: str | None) -> str | None:
+    if not path:
+        return None
+    normalized = os.path.expanduser(path.strip())
+    if not normalized:
+        return None
+    if sys.platform != "win32":
+        normalized = os.path.abspath(normalized)
+    if os.path.isdir(normalized):
+        return normalized
+    return None
+
+
+def format_resume_command(
+    command: list[str] | None,
+    *,
+    cwd: str | None = None,
+    platform: str | None = None,
+) -> str | None:
+    if not command:
+        return None
+    platform = platform or sys.platform
+    if platform == "win32":
+        display = subprocess.list2cmdline(command)
+        if cwd:
+            return f'cd /d "{cwd}" && {display}'
+        return display
+    display = shlex.join(command)
+    if cwd:
+        return f"cd {shlex.quote(cwd)} && {display}"
+    return display
+
+
+def launch_resume_command(command: list[str], *, cwd: str | None = None) -> dict[str, object]:
+    """Open the resume command in a new terminal window.
+
+    Copying the command is the guaranteed path and always stays offered --
+    this is only the convenience on top. It must fail loudly enough for the
+    caller to fall back to copying, rather than leave the reader believing a
+    terminal opened somewhere off screen.
+    """
+    if not command:
+        return {"ok": False, "message": "No resume command is available for this session."}
+    cwd = resolve_resume_cwd(cwd)
+    display = format_resume_command(command, cwd=cwd) or ""
+    if not shutil.which(command[0]):
+        return {
+            "ok": False,
+            "message": f"`{command[0]}` is not on this machine's PATH. Copy the command and run it where it is.",
+        }
+    try:
+        if sys.platform == "win32":
+            # A new console rather than `start`: the child owns its own window
+            # and there is no cmd quoting layer between us and the argv.
+            subprocess.Popen(command, cwd=cwd, creationflags=_NEW_CONSOLE)
+            return {"ok": True, "message": f"Opened a new terminal running `{display}`."}
+        if sys.platform == "darwin":
+            script = f"tell application \"Terminal\" to do script {json.dumps(display)}"
+            subprocess.Popen(
+                ["osascript", "-e", script],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return {"ok": True, "message": f"Opened Terminal running `{display}`."}
+    except OSError as exc:
+        return {"ok": False, "message": f"Could not open a terminal: {exc}. Copy the command instead."}
+    return {
+        "ok": False,
+        "message": "AIWatcher cannot open a terminal for you on this platform. Copy the command instead.",
+    }
 
 
 def safe_runtime_processes() -> list[RuntimeProcess]:
