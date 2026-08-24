@@ -188,6 +188,61 @@ class AmbientSurfaceTest(unittest.TestCase):
         rule = rule[:rule.index("}")]
         self.assertIn("min-height:", rule)
 
+    def test_the_context_row_is_reserved_so_the_states_cannot_reflow(self):
+        """The same defect as the sentence slot, one row up.
+
+        The context row carries different amounts of text in the two states:
+        the running one names the project, the tool and a live count, the quiet
+        one is shorter. Measured against real local data at 12px with a 16px
+        gap, laid out on one line the row needs 429px quiet, 458px running with
+        a short path, and 667px running with a long one -- against a container
+        that is 946px inside a 1280px window. Between roughly 1001px and 763px
+        of window the running state has wrapped and the quiet state has not, so
+        the surface moves by a line exactly when a session starts or stops.
+
+        That band is ordinary working width for a surface that shares a screen
+        with an editor, which is why this is reserved rather than left to the
+        text. Two lines covers every case measured, including 28px against 14px
+        at 560px.
+        """
+        rule = self.css[self.css.index("    .ambient-top {"):]
+        rule = rule[:rule.index("}")]
+        self.assertIn("min-height:", rule)
+
+    def test_the_bloat_sentence_says_whose_spend_it_is(self):
+        """Instance 7 of the recurring defect, pinned so it cannot come back.
+
+        `bloat_label` is one session's ratio -- ui.py builds it from
+        health.bloat_ratio, the representative session -- while
+        `replayed_cost_label` beside it is a project total, summed across the
+        whole group in _context_health_card. Printed together under a hero that
+        is also one session, "86% of what it has cost went on re-sending
+        history, $791.49 so far" read as one measurement of one thing; on real
+        data the percentage covered one session and the dollars covered
+        thirteen.
+
+        The percentage stays and says whose it is. The project-wide dollar is
+        not relabelled, it leaves -- it is already in the facts row as "on
+        replay", and one sentence cannot carry both scopes honestly.
+        """
+        source = self._ambient_source()
+        # Just the sentence expression. Scoping to the whole renderer would trip
+        # on the comment above it, which quotes the old wording to explain it,
+        # and on the facts row, where the project-wide dollar legitimately still
+        # appears under its own "on replay" label.
+        start = source.index("const bloat =")
+        sentence = source[start:source.index(";", start)]
+
+        self.assertIn("of this session's spend", sentence)
+        # The unscoped wording is what let one session's percentage and the
+        # project's dollars read as one measurement.
+        self.assertNotIn("of what it has cost", sentence)
+        # The project total must not come back into this sentence. One sentence,
+        # one scope -- relabelling the pair with the larger scope would make the
+        # percentage wrong instead, which is two instances of the defect rather
+        # than none.
+        self.assertNotIn("replayed_cost_label", sentence)
+
     def test_thresholds_are_not_hardcoded(self):
         # They come from the same payload the runway chart uses, so the two
         # surfaces cannot disagree about where "act now" sits.

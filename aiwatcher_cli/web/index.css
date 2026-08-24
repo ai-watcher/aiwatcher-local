@@ -169,6 +169,26 @@
       font-family: var(--mono);
       font-size: var(--fs-2);
       color: var(--faint);
+      /* Two lines, reserved, for the same reason .ambient-say reserves three
+         ems below: the running and quiet states put different amounts of text
+         in this row, so without a reservation the surface moves by a line the
+         moment a session starts or stops under a reader who is not looking.
+
+         Measured against real local data. Laid out on one line, including the
+         freshness stamp and the space between the two columns, the row needs —
+
+             quiet ("no session running - last was claude-code")   429px
+             running, short path (". 1 of 3 live")                 458px
+             running, long path (". 1 of 13 live")                 667px
+
+         The container is 946px inside a 1280px window, so it narrows with the
+         window. Between roughly 1001px and 763px of window the running state
+         has wrapped to two lines and the quiet state has not -- that band is
+         ordinary working width, not an edge case, and this surface competes
+         with an editor for the screen. Two lines covers every case measured;
+         at 560px the longest running row still came to 28px against the quiet
+         state's 14px. */
+      min-height: 2.4em;
     }
     .ambient-top b { color: var(--muted); font-weight: var(--fw-normal); }
     .ambient-hero {
@@ -230,6 +250,11 @@
     @media (max-width: 560px) {
       .ambient { padding: 16px; }
       .ambient-hero { font-size: var(--fs-6); }
+      /* No deeper reservation here. An earlier draft of this change also named
+         the charted session in that row, which needed a third line at this
+         width; without it the longest running row measures 28px against the
+         quiet state's 14px, so the two lines reserved above already cover it
+         and a third would be reserved for text that cannot appear. */
     }
 
     .freshness {
