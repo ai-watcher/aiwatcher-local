@@ -3892,3 +3892,108 @@ class InsightFeedRankingTests(unittest.TestCase):
         ids = [c["id"] for c in feed]
         self.assertTrue(all(ids))
         self.assertEqual(len(ids), len(set(ids)))
+
+
+class LivePresencePayloadTests(unittest.TestCase):
+    """What the dashboard is told about sessions running right now."""
+
+    def _rows(self, now):
+        return [
+            LocalSession(
+                session_id="busy",
+                tool="claude-code",
+                project_path="/repo/a",
+                started_at=now - timedelta(hours=2),
+                updated_at=now - timedelta(seconds=20),
+                tokens_in=100,
+                tokens_out=50,
+                cost_usd=0.1,
+            ),
+            LocalSession(
+                session_id="paused",
+                tool="codex-cli",
+                project_path="/repo/b",
+                started_at=now - timedelta(hours=1),
+                updated_at=now - timedelta(minutes=6),
+                tokens_in=100,
+                tokens_out=50,
+                cost_usd=0.1,
+            ),
+            LocalSession(
+                session_id="finished",
+                tool="claude-code",
+                project_path="/repo/c",
+                started_at=now - timedelta(days=2),
+                updated_at=now - timedelta(days=2),
+                tokens_in=200,
+                tokens_out=100,
+                cost_usd=0.2,
+            ),
+        ]
+
+    def test_the_summary_carries_who_is_running(self):
+        now = datetime.now(timezone.utc)
+        with (
+            patch.object(ui, "scan_all", return_value=self._rows(now)),
+            patch.object(ui, "discover_tools", return_value={}),
+        ):
+            summary = ui.build_summary(7)
+
+        presence = summary["presence"]
+        self.assertEqual(presence["working"], 1)
+        self.assertEqual(presence["quiet"], 1)
+        self.assertEqual(presence["live"], 2)
+        self.assertEqual({row["tool"] for row in presence["tools"]}, {"claude-code", "codex-cli"})
+
+    def test_the_count_does_not_move_when_the_window_does(self):
+        # Whether something is running right now is not a question about the
+        # last seven days. A count that changed with the dropdown would be
+        # answering a different question from the one its label asks.
+        now = datetime.now(timezone.utc)
+        with (
+            patch.object(ui, "scan_all", return_value=self._rows(now)),
+            patch.object(ui, "discover_tools", return_value={}),
+        ):
+            day = ui.build_summary(1)
+            month = ui.build_summary(30)
+
+        self.assertEqual(day["presence"]["live"], month["presence"]["live"])
+
+    def test_the_first_paint_carries_it_too(self):
+        # The strip is on every view, so it must not appear a second late.
+        now = datetime.now(timezone.utc)
+        with patch.object(ui, "discover_tools", return_value={}):
+            shell = ui._build_summary_shell(7, all_rows=self._rows(now))
+        self.assertEqual(shell["presence"]["live"], 2)
+
+    def test_the_payload_states_its_scope(self):
+        with (
+            patch.object(ui, "scan_all", return_value=[]),
+            patch.object(ui, "discover_tools", return_value={}),
+        ):
+            summary = ui.build_summary(7)
+        self.assertEqual(summary["presence"]["scope"], "this machine")
+
+    def test_analyst_spawns_are_counted_but_marked(self):
+        now = datetime.now(timezone.utc)
+        rows = self._rows(now) + [
+            LocalSession(
+                session_id="analyst",
+                tool="claude-code",
+                project_path="/repo/a",
+                raw_cwd="/repo/a/.aiwatcher/analyst",
+                started_at=now - timedelta(minutes=5),
+                updated_at=now - timedelta(seconds=15),
+                tokens_in=10,
+                tokens_out=5,
+                cost_usd=0.01,
+            ),
+        ]
+        with (
+            patch.object(ui, "scan_all", return_value=rows),
+            patch.object(ui, "discover_tools", return_value={}),
+        ):
+            summary = ui.build_summary(7)
+
+        self.assertEqual(summary["presence"]["live"], 3)
+        self.assertEqual(summary["presence"]["analyst_runs"], 1)

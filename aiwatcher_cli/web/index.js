@@ -774,6 +774,65 @@ function renderWatcher(watcher) {
   commandText.textContent = watcherCommand || 'aiwatcher watch';
   start.hidden = false;
 }
+// ---------------------------------------------------------------------------
+// What is running right now.
+//
+// The strip states sessions, never sub-agents: a sub-agent runs inside its
+// parent's session, so counting it here would inflate the one number this line
+// exists to give. It also only ever sees this machine -- another computer, or a
+// cloud session, writes nothing locally -- which is why the copy says "on this
+// machine" rather than implying a total.
+//
+// Nothing live means nothing rendered. A permanent "0 running" would be a row
+// of zeros on an idle machine, and this strip is on every view.
+// ---------------------------------------------------------------------------
+function presenceText(presence) {
+  const tools = (presence && presence.tools) || [];
+  return tools
+    .filter(tool => tool.live > 0)
+    .map(tool => {
+      const bits = [];
+      if (tool.working) bits.push(tool.working + ' working');
+      if (tool.quiet) bits.push(tool.quiet + ' quiet');
+      // AIWatcher spawns its own sessions for Second Opinion. Counted --
+      // hiding what a feature costs is the thing this product refuses to do --
+      // but named on the tool it belongs to. Floated to the end of the line it
+      // read as a comment on whichever tool happened to be listed last.
+      const mine = Number(tool.analyst_runs) || 0;
+      const note = mine
+        ? ' <span class="presence-note">(' + mine + " is AIWatcher's own)</span>"
+        : '';
+      return esc(tool.label || tool.tool) + ' ' + bits.join(', ') + note;
+    })
+    .join('  ·  ');
+}
+
+function renderPresence(presence) {
+  const node = document.getElementById('presenceStrip');
+  if (!node) return;
+  const live = Number(presence && presence.live) || 0;
+  if (!live) {
+    node.hidden = true;
+    node.textContent = '';
+    return;
+  }
+  // Total first, breakdown after. This line ellipsises on a narrow window --
+  // the normal case for a dashboard sharing a screen with an editor -- and with
+  // the breakdown leading, the truncation swallowed the second tool whole and
+  // read as though the first was all of it. Leading with the total means
+  // running out of room costs detail, never the headline.
+  // Skipped at one session, where "1 live · Claude 1 working" says it twice.
+  const lead = live > 1 ? live + ' live  ·  ' : '';
+  // Scope trails, after its own separator: mid-line it read as a qualifier on
+  // whichever tool happened to be listed last rather than on the whole count.
+  const markup = lead + presenceText(presence)
+    + '  <span class="presence-note presence-scope">·  on this machine</span>';
+  if (node.dataset.markup === markup) return;
+  node.dataset.markup = markup;
+  node.innerHTML = markup;
+  node.hidden = false;
+}
+
 function renderCacheStatus(cache) {
   const status = document.getElementById('cacheStatus');
   if (!cache) {
@@ -3678,8 +3737,13 @@ function ambientScaleLabels(items) {
     + '</div>';
 }
 
-function ambientRunning(card) {
+// `presence` is passed in so the panel can admit it is talking about one
+// session out of several. It picked the worst reachable one and said nothing
+// about the rest, which reads as "this is what is happening" when it is
+// really "this is the worst of what is happening".
+function ambientRunning(card, presence) {
   const chart = card.chart || {};
+  const liveCount = Number(presence && presence.live) || 0;
   const latest = chart.latest_turn_tokens_n || 0;
   const peak = chart.peak_turn_tokens_n || latest;
   const pressure = chart.pressure_tokens_n || 0;
@@ -3718,7 +3782,8 @@ function ambientRunning(card) {
     state: severity,
     hero: esc(card.latest_turn_tokens || ''),
     heroUnit: 'tokens / turn',
-    context: esc(card.project || '') + (card.tool ? ' &middot; <b>' + esc(card.tool) + '</b>' : ''),
+    context: esc(card.project || '') + (card.tool ? ' &middot; <b>' + esc(card.tool) + '</b>' : '')
+      + (liveCount > 1 ? ' &middot; 1 of ' + liveCount + ' live' : ''),
     meter: meterSvg([{ value: latest, colour: tone }], marks, trackMax) + ambientScaleLabels(scale),
     sentence: runway + bloat,
     actions: (card.can_handoff
@@ -3743,6 +3808,7 @@ function ambientRunning(card) {
 
 function ambientQuiet(data) {
   const totals = data.totals || {};
+  const liveCount = Number(data.presence && data.presence.live) || 0;
   // Spend-weighted, because the sentence below says "of what they cost". The
   // token-weighted figure reads ~98% for every window and would make that
   // sentence wrong by about thirty points.
@@ -3777,9 +3843,16 @@ function ambientQuiet(data) {
     state: 'idle',
     hero: last ? esc(last.tokens) : esc(totals.tokens_label || '-'),
     heroUnit: last ? 'tokens in the last session' : 'tokens this window',
-    context: last
-      ? 'no session running · last was ' + esc(last.tool || 'a local tool')
-      : 'no session running',
+    // "no session running" was asserted from the absence of a *chartable*
+    // session, not from the absence of a session. A Codex thread exposes a
+    // running total and no per-turn numbers, so it is live and unplottable at
+    // once -- and this line called it idle. Say what is true instead.
+    context: liveCount
+      ? liveCount + (liveCount === 1 ? ' session running' : ' sessions running')
+        + ' · no per-turn numbers to show'
+      : last
+        ? 'no session running · last was ' + esc(last.tool || 'a local tool')
+        : 'no session running',
     meter: segments.length ? meterSvg(segments, [], 100) + ambientScaleLabels(scale) : '',
     sentence: sentence,
     actions: (needsReview
@@ -3805,7 +3878,7 @@ function renderAmbient(data) {
   const node = document.getElementById('ambient');
   if (!node) return;
   const live = liveHealthCard(data);
-  const model = live ? ambientRunning(live) : ambientQuiet(data);
+  const model = live ? ambientRunning(live, data.presence || null) : ambientQuiet(data);
   const facts = (model.facts || []).filter(Boolean)
     .map(pair => '<span>' + esc(pair[0]) + ' <b>' + esc(pair[1]) + '</b></span>').join('');
 
@@ -3972,6 +4045,7 @@ async function loadOnce(resetDetail, forceRefresh) {
   renderWatcher(data.watcher || null);
   setDefaultPromptTool(data);
   renderCacheStatus(data.cache || null);
+  renderPresence(data.presence || null);
   const totals = data.totals;
   document.getElementById('windowLabel').textContent = totals.window_label;
   document.getElementById('apiValue').textContent = totals.api_value_label;

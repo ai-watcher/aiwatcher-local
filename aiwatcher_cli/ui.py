@@ -86,7 +86,7 @@ from .runtime_attachment import (
     safe_runtime_processes,
 )
 from .runtime_nudge import foreground_tool
-from .session_presence import LIVE_WINDOW_MINUTES
+from .session_presence import LIVE_WINDOW_MINUTES, live_presence
 from .session_health import (
     CRITICAL_TOKENS_PER_TURN,
     PRESSURE_TOKENS_PER_TURN,
@@ -4604,6 +4604,12 @@ def build_summary(
         "cache_schema_version": SUMMARY_CACHE_SCHEMA_VERSION,
         "summary_complete": True,
         "_session_index": _session_index_payload(all_rows),
+        # all_rows, not the window-clipped rows: whether something is
+        # running right now does not change because you switched the
+        # dropdown to 24 hours. Analyst spawns are still in here and stay
+        # flagged rather than filtered, so AIWatcher's own live sessions
+        # cannot pass as the user's.
+        "presence": live_presence(all_rows, now=now),
         "days": days,
         # Spec 7. "No LLM calls" stopped being true the moment Second Opinion
         # could spawn one, and a privacy claim that is only true until a
@@ -4916,6 +4922,11 @@ def _build_summary_shell(
         # placeholders, so this payload must never reach the disk cache.
         "summary_complete": False,
         "_session_index": _session_index_payload(all_rows),
+        # Same figure, from the cached snapshot, so it can only be behind
+        # and never ahead: a session started since the snapshot is missing
+        # rather than invented, and one that ended reads quiet rather than
+        # working. The background refresh corrects both within a tick.
+        "presence": live_presence(all_rows, now=now),
         "days": days,
         # Spec 7. "No LLM calls" stopped being true the moment Second Opinion
         # could spawn one, and a privacy claim that is only true until a

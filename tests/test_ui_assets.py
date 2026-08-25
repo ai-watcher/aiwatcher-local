@@ -1802,3 +1802,83 @@ class CorrectnessSweepTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LivePresenceStripTests(unittest.TestCase):
+    """The line that says what is running right now."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+
+    def test_the_strip_exists_and_is_painted(self):
+        self.assertIn('id="presenceStrip"', self.html)
+        self.assertIn("function renderPresence(", self.js)
+        self.assertIn("renderPresence(data.presence", self.js)
+
+    def test_nothing_live_renders_nothing(self):
+        # A permanent "0 running" on an idle machine, on every view.
+        source = js_function_source(self.js, "renderPresence")
+        self.assertIn("node.hidden = true", source)
+
+    def test_the_count_carries_no_status_colour(self):
+        # Colour is a claim. The only thing on the ambient surface that earns
+        # one is a running session's context pressure -- a number of running
+        # sessions is neither good news nor bad.
+        rule = self.css[self.css.index("    .presence-strip {"):]
+        rule = rule[:rule.index("}")]
+        for token in ("--green", "--red", "--amber"):
+            with self.subTest(token=token):
+                self.assertNotIn(token, rule)
+
+    def test_it_says_whose_machine_it_is_counting(self):
+        # Sessions on another computer or in the cloud write nothing locally,
+        # so this count is never a total.
+        source = js_function_source(self.js, "renderPresence")
+        self.assertIn("on this machine", source)
+
+    def test_aiwatchers_own_sessions_are_declared(self):
+        # Second Opinion spawns a real session. Counted, because hiding what a
+        # feature costs is the thing this product refuses to do -- but labelled,
+        # so it cannot pass as work the developer started.
+        source = js_function_source(self.js, "presenceText")
+        self.assertIn("analyst_runs", source)
+        self.assertIn("AIWatcher's own", source)
+
+    def test_dom_is_not_rewritten_when_nothing_changed(self):
+        source = js_function_source(self.js, "renderPresence")
+        self.assertIn("dataset.markup", source)
+
+    def test_the_panel_admits_it_is_showing_one_of_several(self):
+        # It picks the worst reachable session. Saying nothing about the others
+        # reads as "this is what is happening" rather than "this is the worst".
+        source = js_function_source(self.js, "ambientRunning")
+        self.assertIn("liveCount", source)
+        self.assertIn("of ' + liveCount + ' live", source)
+
+    def test_the_total_leads_so_truncation_cannot_hide_a_tool(self):
+        # The line ellipsises on a narrow window, which is the normal case here.
+        # With the per-tool breakdown leading, the truncation swallowed the
+        # second tool whole and read as though the first was all of it.
+        source = js_function_source(self.js, "renderPresence")
+        self.assertIn("live > 1", source)
+        self.assertIn("' live", source)
+
+    def test_the_watcher_pill_does_not_lose_room_to_the_count(self):
+        # Measured at 700px: the count pushed the pill down to "Wat", hiding
+        # whether the watcher was running or stopped. A status claim must not
+        # lose space to a count.
+        self.assertIn(".runtime-copy .cache-pill { flex: none; }", self.css)
+        rule = self.css[self.css.index("    .presence-strip {"):]
+        rule = rule[:rule.index("}")]
+        self.assertIn("flex: 0 1 auto", rule)
+        self.assertIn("text-overflow: ellipsis", rule)
+
+    def test_quiet_state_does_not_claim_an_idle_machine_while_sessions_run(self):
+        # It asserted "no session running" from the absence of a *chartable*
+        # session. A Codex thread is live and unplottable at the same time.
+        source = js_function_source(self.js, "ambientQuiet")
+        self.assertIn("liveCount", source)
+        self.assertIn("sessions running", source)

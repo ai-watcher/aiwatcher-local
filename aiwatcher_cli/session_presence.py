@@ -66,6 +66,20 @@ UNMEASURABLE_TOOLS: dict[str, str] = {
 
 _NO_STAMP_REASON = "This tool did not expose a session timestamp."
 
+# Display names for the strip. Elsewhere the dashboard prints the raw tool
+# id, which is fine inside a card that has already named its subject; in a
+# one-line count across tools it reads as debug output. Unknown ids fall
+# through unchanged rather than being guessed at.
+TOOL_LABELS: dict[str, str] = {
+    "claude-code": "Claude",
+    "codex-cli": "Codex",
+    "cursor": "Cursor",
+}
+
+
+def tool_label(tool: str) -> str:
+    return TOOL_LABELS.get((tool or "").lower(), tool or "unknown tool")
+
 
 @dataclass(frozen=True)
 class SessionPresence:
@@ -192,6 +206,7 @@ def presence_by_tool(rows: list[SessionPresence]) -> list[dict[str, object]]:
     for row in rows:
         bucket = tools.setdefault(row.tool, {
             "tool": row.tool,
+            "label": tool_label(row.tool),
             "working": 0,
             "quiet": 0,
             "live": 0,

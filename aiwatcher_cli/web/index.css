@@ -240,6 +240,33 @@
     }
     .runtime-copy { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
     .runtime-copy strong { white-space: nowrap; }
+    /* Neutral by design. The dot marks 'there is something here', not a
+       verdict -- the only thing on the ambient surface that earns a status
+       colour is a running session's context pressure.
+       It shrinks, and the watcher pill beside it does not. Pinned the other
+       way round at 700px this line pushed the pill down to "Wat", hiding
+       whether the watcher was running or stopped -- a status claim losing
+       room to a count. Ellipsis needs a block box, so this is inline-block
+       and the dot is an inline ::before rather than a flex item. */
+    .runtime-copy .cache-pill { flex: none; }
+    .presence-strip {
+      flex: 0 1 auto; min-width: 0;
+      display: inline-block;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-family: var(--mono); font-size: var(--fs-1);
+      font-variant-numeric: tabular-nums;
+      color: var(--muted);
+    }
+    .presence-strip::before {
+      content: ""; display: inline-block;
+      width: 5px; height: 5px; border-radius: 50%;
+      background: var(--faint);
+      margin-right: var(--sp-2); vertical-align: middle;
+    }
+    .presence-strip .presence-note { color: var(--faint); }
+    /* First thing dropped when the row is tight: the Sessions observed tile
+       on Home carries the same scope, and the counts themselves do not. */
+    @media (max-width: 900px) { .presence-scope { display: none; } }
     .runtime-copy span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .runtime-source {
       display: grid; grid-template-columns: 110px 1fr; gap: var(--sp-2); align-items: start;
