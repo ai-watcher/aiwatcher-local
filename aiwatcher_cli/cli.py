@@ -75,6 +75,7 @@ from .local_state import (
     record_evidence_snapshot,
     record_intervention,
     record_hook_event,
+    record_session_waiting,
     record_notification_sent,
     record_outcome,
     record_survival_check,
@@ -3593,6 +3594,12 @@ def setup_checklist() -> list[dict[str, str]]:
             "status": "optional",
         },
         {
+            "title": "Tell me when a session is waiting on me",
+            "why": "Claude Code reports when it needs permission, so the dashboard can say which session is blocked instead of guessing from a quiet log.",
+            "command": "aiwatcher install-claude-activity-hook --write --scope user",
+            "status": "optional",
+        },
+        {
             "title": "Install Claude dangerous-command gate",
             "why": "Reviews destructive shell commands before Claude Code runs them; Claude Code CLI only.",
             "command": "aiwatcher install-claude-command-gate --write --scope user",
@@ -6566,6 +6573,11 @@ def _hook_payload_and_prompt(args: argparse.Namespace) -> tuple[dict[str, object
         payload = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError:
         payload = {}
+    # Valid JSON is not necessarily an object. A payload of "[]" parsed fine and
+    # then went straight into .get(), taking the hook down with an
+    # AttributeError -- and a hook that raises is a hook that failed the host.
+    if not isinstance(payload, dict):
+        payload = {}
     return payload, _extract_prompt_from_hook(payload)
 
 
@@ -7022,6 +7034,57 @@ def _command_prompt_hook(args: argparse.Namespace, *, tool: str) -> int:
     return 0
 
 
+# Claude Code fires Notification when it needs permission to act, and when it
+# has been left waiting for input. Both mean the same thing to a developer who
+# walked away: this session cannot continue without you.
+#
+# Why an event and not inference: a transcript that has been quiet for ninety
+# seconds is byte-for-byte identical whether the agent is blocked on a prompt or
+# running a slow test. Guessing produces false alarms, and an alert that cries
+# wolf is muted within a day.
+#
+# Cost: this boots the CLI, measured at ~104ms warm. Notification fires a few
+# times per turn, not per tool call, so it is invisible beside a turn that takes
+# seconds. The same could not be said of PreToolUse, which is why nothing here
+# hangs off that event.
+_WAITING_PERMISSION_HINTS = ("permission", "approve", "allow", "confirm")
+
+
+def _waiting_kind(message: str) -> str:
+    """Classify what the session is waiting for, without keeping what it said.
+
+    The message can quote a command, a file path, or the prompt itself, and this
+    product's claim is that prompt content is not persisted. A classification is
+    not the text: only the bucket is stored.
+    """
+    lowered = (message or "").lower()
+    return "permission" if any(hint in lowered for hint in _WAITING_PERMISSION_HINTS) else "input"
+
+
+def command_claude_activity_hook(args: argparse.Namespace) -> int:
+    """Record that a Claude Code session is waiting on its developer.
+
+    Never fails the host. A monitoring hook that returns non-zero, or writes
+    anything to stdout Claude might read as instructions, would make AIWatcher
+    the reason someone's session misbehaved -- which is a far worse outcome than
+    missing one signal.
+    """
+    payload, _ = _hook_payload_and_prompt(args)
+    session_id = str(payload.get("session_id") or payload.get("sessionId") or "").strip()
+    if not session_id:
+        return 0
+    try:
+        record_session_waiting(
+            session_id=session_id,
+            tool="claude-code",
+            kind=_waiting_kind(str(payload.get("message") or "")),
+            cwd=str(payload.get("cwd") or "") or None,
+        )
+    except Exception:
+        return 0
+    return 0
+
+
 def command_claude_hook(args: argparse.Namespace) -> int:
     return _command_prompt_hook(args, tool="claude")
 
@@ -7231,6 +7294,68 @@ def _remove_claude_hook(settings: dict[str, object]) -> tuple[dict[str, object],
         hooks["UserPromptSubmit"] = filtered
     else:
         hooks.pop("UserPromptSubmit", None)
+    if hooks:
+        settings["hooks"] = hooks
+    else:
+        settings.pop("hooks", None)
+    return settings, True
+
+
+def _merge_claude_activity_hook(settings: dict[str, object], command: str) -> dict[str, object]:
+    """Register the Notification hook that reports a session waiting on you.
+
+    Its own event and its own entry, so installing or removing it cannot
+    disturb the prompt gate or the command gate -- and so `hook-status` can say
+    which one stopped firing.
+    """
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+    event_hooks = hooks.get("Notification")
+    if not isinstance(event_hooks, list):
+        event_hooks = []
+    event_hooks = [
+        item for item in event_hooks
+        if not (
+            isinstance(item, dict)
+            and any(
+                isinstance(hook, dict) and "claude-activity-hook" in str(hook.get("command", ""))
+                for hook in item.get("hooks", [])
+            )
+        )
+    ]
+    event_hooks.append({"hooks": [{
+        "type": "command",
+        "command": f"{command} claude-activity-hook",
+    }]})
+    hooks["Notification"] = event_hooks
+    settings["hooks"] = hooks
+    return settings
+
+
+def _remove_claude_activity_hook(settings: dict[str, object]) -> tuple[dict[str, object], bool]:
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return settings, False
+    event_hooks = hooks.get("Notification")
+    if not isinstance(event_hooks, list):
+        return settings, False
+    filtered = [
+        item for item in event_hooks
+        if not (
+            isinstance(item, dict)
+            and any(
+                isinstance(hook, dict) and "claude-activity-hook" in str(hook.get("command", ""))
+                for hook in item.get("hooks", [])
+            )
+        )
+    ]
+    if len(filtered) == len(event_hooks):
+        return settings, False
+    if filtered:
+        hooks["Notification"] = filtered
+    else:
+        hooks.pop("Notification", None)
     if hooks:
         settings["hooks"] = hooks
     else:
@@ -7521,6 +7646,62 @@ def command_install_claude_command_gate(args: argparse.Namespace) -> int:
         handle.write("\n")
     print(f"Installed AIWatcher Claude Code PreToolUse command gate at {settings_path}")
     print("Restart Claude Code so it picks up the new hook, then try a blocklisted command to verify.")
+    return 0
+
+
+def command_install_claude_activity_hook(args: argparse.Namespace) -> int:
+    """Install the Notification hook behind 'waiting on you'."""
+    command = args.command or _cli_command_for_current_file()
+    snippet = _merge_claude_activity_hook({}, command)
+    if not args.write:
+        print("Add this to your Claude Code settings JSON:")
+        print(json.dumps(snippet, indent=2))
+        print("\nProject-local path: .claude/settings.local.json")
+        print("User-global path: ~/.claude/settings.json")
+        print("\nIt records only that a session is waiting, and what kind of wait it is.")
+        print("No message text, no prompt content, and nothing leaves this machine.")
+        return 0
+
+    settings_path = _claude_settings_path(args.scope, args.project_dir)
+    os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+    existing: dict[str, object] = {}
+    if os.path.exists(settings_path):
+        with open(settings_path, "r", encoding="utf-8") as handle:
+            try:
+                existing = json.load(handle)
+            except json.JSONDecodeError:
+                backup = settings_path + ".aiwatcher.bak"
+                shutil.copyfile(settings_path, backup)
+                print(f"Existing settings were not valid JSON. Backed up to {backup}.")
+    merged = _merge_claude_activity_hook(existing, command)
+    with open(settings_path, "w", encoding="utf-8") as handle:
+        json.dump(merged, handle, indent=2)
+        handle.write("\n")
+    print(f"Installed AIWatcher Claude Code activity hook at {settings_path}")
+    print("Restart Claude Code so it picks up the new hook.")
+    print("The dashboard will show a session as waiting on you once it asks for permission.")
+    return 0
+
+
+def command_uninstall_claude_activity_hook(args: argparse.Namespace) -> int:
+    settings_path = _claude_settings_path(args.scope, args.project_dir)
+    if not os.path.exists(settings_path):
+        print(f"No Claude settings file found at {settings_path}.")
+        return 0
+    try:
+        with open(settings_path, "r", encoding="utf-8") as handle:
+            settings = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Could not read Claude settings at {settings_path}: {exc}", file=sys.stderr)
+        return 2
+    updated, removed = _remove_claude_activity_hook(settings)
+    if not removed:
+        print(f"No AIWatcher activity hook found in {settings_path}.")
+        return 0
+    with open(settings_path, "w", encoding="utf-8") as handle:
+        json.dump(updated, handle, indent=2)
+        handle.write("\n")
+    print(f"Removed AIWatcher activity hook from {settings_path}")
     return 0
 
 
@@ -8904,6 +9085,29 @@ def build_parser() -> argparse.ArgumentParser:
     uninstall_command_gate.add_argument("--project-dir", help="Project to target with --scope project; defaults to the current directory")
     uninstall_command_gate.set_defaults(func=command_uninstall_claude_command_gate)
 
+    install_activity_hook = sub.add_parser(
+        "install-claude-activity-hook",
+        help="Print or install the Claude Code activity hook, so AIWatcher can tell you when a session is waiting on you",
+    )
+    install_activity_hook.add_argument("--write", action="store_true", help="Write the hook into Claude settings")
+    install_activity_hook.add_argument(
+        "--scope", choices=["project", "user"], default="user",
+        help="Write to your user-level Claude settings (default) or this project's",
+    )
+    install_activity_hook.add_argument("--project-dir", help="Project to target with --scope project; defaults to the current directory")
+    install_activity_hook.add_argument("--command", help="AIWatcher command to put in Claude settings")
+    install_activity_hook.set_defaults(func=command_install_claude_activity_hook)
+
+    uninstall_activity_hook = sub.add_parser(
+        "uninstall-claude-activity-hook", help="Remove the AIWatcher Claude Code activity hook",
+    )
+    uninstall_activity_hook.add_argument(
+        "--scope", choices=["project", "user"], default="user",
+        help="Remove from your user-level Claude settings (default) or this project's",
+    )
+    uninstall_activity_hook.add_argument("--project-dir", help="Project to target with --scope project; defaults to the current directory")
+    uninstall_activity_hook.set_defaults(func=command_uninstall_claude_activity_hook)
+
     install_decision_log = sub.add_parser(
         "install-claude-decision-log",
         help="Print or install a personal Claude Code convention for logging rejected decisions",
@@ -8996,7 +9200,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
-    if arguments and arguments[0] in {"claude-hook", "codex-hook", "cursor-hook", "claude-pretooluse-hook"}:
+    if arguments and arguments[0] in {
+        "claude-hook", "codex-hook", "cursor-hook", "claude-pretooluse-hook",
+        "claude-activity-hook",
+    }:
         hook_parser = argparse.ArgumentParser(add_help=False)
         hook_parser.add_argument("--text")
         hook_parser.add_argument("--gate", action="store_true")
@@ -9006,6 +9213,7 @@ def main(argv: list[str] | None = None) -> int:
             "codex-hook": command_codex_hook,
             "cursor-hook": command_cursor_hook,
             "claude-pretooluse-hook": command_claude_pretooluse_hook,
+            "claude-activity-hook": command_claude_activity_hook,
         }
         handler = handlers[arguments[0]]
         return int(handler(hook_args))

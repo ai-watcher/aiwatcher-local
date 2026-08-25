@@ -271,6 +271,10 @@
        silently outranked a lone class selector, so this rendered grey and
        looked correct in the diff. */
     .presence-strip .presence-clash { color: var(--amber); }
+    /* Scoped for the same reason as the clash rule above. Read rather than
+       amber: this is not a risk to weigh, it is a session stopped and
+       waiting, and it should pull the eye ahead of everything beside it. */
+    .presence-strip .presence-alert { color: var(--red); font-weight: var(--fw-med); }
     /* First thing dropped when the row is tight: the Sessions observed tile
        on Home carries the same scope, and the counts themselves do not. */
     @media (max-width: 900px) { .presence-scope { display: none; } }

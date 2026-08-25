@@ -792,6 +792,7 @@ function presenceText(presence) {
     .filter(tool => tool.live > 0)
     .map(tool => {
       const bits = [];
+      if (tool.waiting) bits.push(tool.waiting + ' waiting');
       if (tool.working) bits.push(tool.working + ' working');
       if (tool.quiet) bits.push(tool.quiet + ' quiet');
       // AIWatcher spawns its own sessions for Second Opinion. Counted --
@@ -805,6 +806,28 @@ function presenceText(presence) {
       return esc(tool.label || tool.tool) + ' ' + bits.join(', ') + note;
     })
     .join('  ·  ');
+}
+
+// A session that has stopped and cannot continue without you. This is the only
+// state here that does not come from a timestamp -- the tool reports it through
+// a hook -- which is why it is the only one allowed to say "it needs you"
+// rather than "it went quiet". Everything else on this line is an observation;
+// this one is a request.
+//
+// It leads, ahead of even the shared-tree warning: that one predicts work you
+// might lose, this one is time you are losing now.
+function waitingMarkup(presence) {
+  const blocked = ((presence && presence.sessions) || [])
+    .filter(row => row.state === 'waiting')
+    .sort((a, b) => (b.idle_seconds || 0) - (a.idle_seconds || 0));
+  if (!blocked.length) return '';
+  // The longest wait, not the count of them: how long you have been the
+  // bottleneck is the part that should make you go and look.
+  const longest = esc(String(blocked[0].label || 'waiting on you').replace('waiting ', ''));
+  const text = blocked.length === 1
+    ? 'waiting on you ' + longest
+    : blocked.length + ' waiting on you, longest ' + longest;
+  return '<span class="presence-alert">' + text + '</span>  ·  ';
 }
 
 // Two live sessions in one checkout can overwrite each other with no git
@@ -841,7 +864,7 @@ function renderPresence(presence) {
   const lead = live > 1 ? live + ' live  ·  ' : '';
   // Scope trails, after its own separator: mid-line it read as a qualifier on
   // whichever tool happened to be listed last rather than on the whole count.
-  const markup = collisionMarkup(presence) + lead + presenceText(presence)
+  const markup = waitingMarkup(presence) + collisionMarkup(presence) + lead + presenceText(presence)
     + '  <span class="presence-note presence-scope">·  on this machine</span>';
   if (node.dataset.markup === markup) return;
   node.dataset.markup = markup;

@@ -184,6 +184,11 @@ def _empty_state() -> dict[str, Any]:
         "analyst_runs": [],
         "ui_server": None,
         "watcher_heartbeat": None,
+        # One record per session, latest wins: {session_id: {at, tool, kind}}.
+        # A dict rather than a log because only the most recent signal can
+        # still be true, and a per-session log would grow without ever being
+        # read past its head.
+        "session_waiting": {},
     }
 
 
@@ -253,6 +258,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("active_prompt_gate", None)
     data.setdefault("ui_server", None)
     data.setdefault("watcher_heartbeat", None)
+    data.setdefault("session_waiting", {})
     return data
 
 
@@ -395,6 +401,90 @@ def record_hook_event(
         })
         data["hook_events"] = data["hook_events"][-50:]
         _save(data)
+
+
+# A signal older than this is not evidence of anything: the session was closed,
+# the machine slept, or the reader was never running. Pruned on write so the
+# store cannot grow on a machine where nothing reads it.
+WAITING_SIGNAL_TTL_SECONDS = 24 * 3600
+MAX_WAITING_SIGNALS = 200
+
+
+def record_session_waiting(
+    *,
+    session_id: str,
+    tool: str,
+    kind: str,
+    cwd: str | None = None,
+) -> None:
+    """Note that a session asked for the developer's attention.
+
+    Called from a hook the tool runs when it needs permission or has been left
+    waiting for input. Deliberately stores no message text: what a session is
+    asking for can quote a file path, a command, or a prompt, and this product's
+    claim is that prompt content is analyzed locally and not persisted. `kind` is
+    a classification of that message, not the message.
+    """
+    now = datetime.now(timezone.utc)
+    with _locked_state():
+        data = _load()
+        waiting = data.get("session_waiting")
+        if not isinstance(waiting, dict):
+            waiting = {}
+        fresh: dict[str, Any] = {}
+        for key, value in waiting.items():
+            if not isinstance(value, dict):
+                continue
+            stamp = _parse_waiting_stamp(value.get("at"))
+            if stamp and (now - stamp).total_seconds() <= WAITING_SIGNAL_TTL_SECONDS:
+                fresh[key] = value
+        fresh[session_id] = {
+            "at": now.isoformat(),
+            "tool": tool,
+            "kind": kind,
+            "cwd": cwd,
+        }
+        if len(fresh) > MAX_WAITING_SIGNALS:
+            fresh = dict(
+                sorted(
+                    fresh.items(),
+                    key=lambda item: str(item[1].get("at") or ""),
+                    reverse=True,
+                )[:MAX_WAITING_SIGNALS]
+            )
+        data["session_waiting"] = fresh
+        _save(data)
+
+
+def _parse_waiting_stamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+
+
+def session_waiting_signals() -> dict[str, dict[str, Any]]:
+    """Latest attention signal per session, newest value only.
+
+    Returns an empty mapping rather than raising when the store cannot be read:
+    a reader that cannot see the signals should report nothing waiting, never
+    take down the surface that was going to display them.
+    """
+    try:
+        data = _load()
+    except (StateReadError, OSError):
+        return {}
+    waiting = data.get("session_waiting")
+    if not isinstance(waiting, dict):
+        return {}
+    return {
+        str(key): value
+        for key, value in waiting.items()
+        if isinstance(value, dict) and value.get("at")
+    }
 
 
 def record_active_prompt_gate(

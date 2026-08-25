@@ -27,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from .local_state import session_waiting_signals
 from .processes import seconds_label
 # _git_root, not project_path. project_path deliberately folds Claude's
 # throwaway agent worktrees back into the repository they were cut from, so
@@ -108,7 +109,7 @@ class SessionPresence:
 
     @property
     def live(self) -> bool:
-        return self.state in {"working", "quiet"}
+        return self.state in {"waiting", "working", "quiet"}
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -147,12 +148,54 @@ def _unmeasurable(session: LocalSession, reason: str) -> SessionPresence:
     )
 
 
+def _waiting_since(
+    signal: dict[str, object] | None,
+    *,
+    last_write: datetime,
+    now: datetime,
+) -> float | None:
+    """How long this session has been waiting, or None if it is not.
+
+    Two ways a signal stops being true, and both matter more than the signal
+    itself. The session wrote something after it: approving a permission
+    produces the tool result, so a later write means the developer already
+    answered and no event is needed to say so. Or the signal has aged past the
+    live window: the session was closed, or the machine slept, and a hook
+    cannot send an event for a process that is gone. Hook state that nothing
+    corrects is hook state that eventually lies.
+    """
+    if not signal:
+        return None
+    raw = signal.get("at")
+    if not isinstance(raw, str):
+        return None
+    try:
+        stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    stamp = stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+    if last_write > stamp:
+        return None
+    waited = (now - stamp).total_seconds()
+    if waited < 0 or waited > LIVE_WINDOW_MINUTES * 60:
+        return None
+    return waited
+
+
 def presence_for_session(
     session: LocalSession,
     *,
     now: datetime | None = None,
+    waiting: dict[str, object] | None = None,
 ) -> SessionPresence:
-    """Classify one session by how long ago it last wrote."""
+    """Classify one session by how long ago it last wrote.
+
+    `waiting` is this session's latest attention signal, if the tool reported
+    one. It outranks every other state: a session blocked on you is the only
+    thing here you can act on right now, and it is the only state that does not
+    come from a timestamp -- which is why it is the only one that can be
+    trusted to mean "it needs you" rather than "it went quiet".
+    """
     reason = UNMEASURABLE_TOOLS.get((session.tool or "").lower())
     if reason:
         return _unmeasurable(session, reason)
@@ -167,7 +210,12 @@ def presence_for_session(
     # idle time would sort ahead of every real session.
     idle = max(0.0, (current - stamp).total_seconds())
 
-    if idle <= WORKING_SECONDS:
+    waited = _waiting_since(waiting, last_write=stamp, now=current)
+    if waited is not None:
+        state = "waiting"
+        label = "waiting on you" if waited < 60 else f"waiting {seconds_label(int(waited))}"
+        idle = waited
+    elif idle <= WORKING_SECONDS:
         state, label = "working", "working"
     elif idle <= LIVE_WINDOW_MINUTES * 60:
         # Coarse on purpose, and through the same helper the process list uses
@@ -193,11 +241,18 @@ def presence_for_sessions(
     sessions: list[LocalSession],
     *,
     now: datetime | None = None,
+    waiting: dict[str, dict[str, object]] | None = None,
 ) -> list[SessionPresence]:
     """Classify every session, worst-idle last so callers can take the head."""
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    rows = [presence_for_session(session, now=current) for session in sessions]
-    order = {"working": 0, "quiet": 1, "unmeasurable": 2, "gone": 3}
+    # Read once, not once per session: this is a locked file, and a payload with
+    # forty sessions in it would otherwise take the lock forty times.
+    signals = session_waiting_signals() if waiting is None else waiting
+    rows = [
+        presence_for_session(session, now=current, waiting=signals.get(session.session_id))
+        for session in sessions
+    ]
+    order = {"waiting": 0, "working": 1, "quiet": 2, "unmeasurable": 3, "gone": 4}
     rows.sort(key=lambda row: (order.get(row.state, 9), row.idle_seconds or 0.0))
     return rows
 
@@ -214,6 +269,7 @@ def presence_by_tool(rows: list[SessionPresence]) -> list[dict[str, object]]:
         bucket = tools.setdefault(row.tool, {
             "tool": row.tool,
             "label": tool_label(row.tool),
+            "waiting": 0,
             "working": 0,
             "quiet": 0,
             "live": 0,
@@ -226,7 +282,7 @@ def presence_by_tool(rows: list[SessionPresence]) -> list[dict[str, object]]:
             bucket["reason"] = None
         elif not bucket["measurable"] and bucket["reason"] is None:
             bucket["reason"] = row.reason
-        if row.state in {"working", "quiet"}:
+        if row.state in {"waiting", "working", "quiet"}:
             bucket[row.state] = int(bucket[row.state]) + 1
             bucket["live"] = int(bucket["live"]) + 1
             if row.analyst_run:
@@ -298,6 +354,7 @@ def live_presence(
     sessions: list[LocalSession],
     *,
     now: datetime | None = None,
+    waiting: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, object]:
     """The whole answer, ready for a caller to render.
 
@@ -305,18 +362,20 @@ def live_presence(
     parent's session and counting it here would inflate the one number this
     payload exists to state.
     """
-    rows = presence_for_sessions(sessions, now=now)
+    rows = presence_for_sessions(sessions, now=now, waiting=waiting)
     tools = presence_by_tool(rows)
     collisions = working_tree_collisions(sessions, rows)
+    blocked = sum(1 for row in rows if row.state == "waiting")
     working = sum(1 for row in rows if row.state == "working")
     quiet = sum(1 for row in rows if row.state == "quiet")
     return {
         "sessions": [row.to_json() for row in rows if row.state != "gone"],
         "tools": tools,
         "collisions": collisions,
+        "waiting": blocked,
         "working": working,
         "quiet": quiet,
-        "live": working + quiet,
+        "live": blocked + working + quiet,
         "analyst_runs": sum(1 for row in rows if row.live and row.analyst_run),
         # Callers must not present these counts as a total. Nothing here can
         # see another machine or a cloud session.

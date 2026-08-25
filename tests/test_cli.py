@@ -5504,3 +5504,109 @@ class CliReferenceDocsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClaudeActivityHookTests(unittest.TestCase):
+    """The Notification hook behind 'waiting on you'."""
+
+    def setUp(self):
+        self._home = tempfile.mkdtemp()
+        self._previous = os.environ.get("AIWATCHER_HOME")
+        os.environ["AIWATCHER_HOME"] = self._home
+
+    def tearDown(self):
+        if self._previous is None:
+            os.environ.pop("AIWATCHER_HOME", None)
+        else:
+            os.environ["AIWATCHER_HOME"] = self._previous
+        shutil.rmtree(self._home, ignore_errors=True)
+
+    def _run(self, payload):
+        args = argparse.Namespace(text=None)
+        with patch.object(cli, "_read_stdin_text", return_value=payload):
+            return cli.command_claude_activity_hook(args)
+
+    def test_it_records_a_waiting_session(self):
+        code = self._run(json.dumps({
+            "session_id": "abc",
+            "cwd": "/repo",
+            "hook_event_name": "Notification",
+            "message": "Claude needs your permission to use Bash",
+        }))
+        self.assertEqual(code, 0)
+        signals = local_state.session_waiting_signals()
+        self.assertIn("abc", signals)
+        self.assertEqual(signals["abc"]["kind"], "permission")
+
+    def test_it_keeps_no_message_text(self):
+        # The message can quote a command, a path, or the prompt itself, and the
+        # product's claim is that prompt content is not persisted. Only the
+        # classification is stored.
+        secret = "Claude needs permission to read /home/dev/.env.production"
+        self._run(json.dumps({"session_id": "abc", "message": secret}))
+        stored = json.dumps(local_state.session_waiting_signals())
+        self.assertNotIn(".env.production", stored)
+        self.assertNotIn(secret, stored)
+
+    def test_idle_waits_are_classified_apart_from_permission(self):
+        self._run(json.dumps({"session_id": "abc", "message": "Claude is waiting for your input"}))
+        self.assertEqual(local_state.session_waiting_signals()["abc"]["kind"], "input")
+
+    def test_a_second_signal_replaces_the_first(self):
+        self._run(json.dumps({"session_id": "abc", "message": "waiting for your input"}))
+        self._run(json.dumps({"session_id": "abc", "message": "needs your permission"}))
+        signals = local_state.session_waiting_signals()
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals["abc"]["kind"], "permission")
+
+    def test_it_never_fails_the_host(self):
+        # A monitoring hook that returns non-zero makes AIWatcher the reason
+        # someone's session misbehaved, which is far worse than missing a signal.
+        for payload in ("", "not json", "[]", json.dumps({"no_session": True})):
+            with self.subTest(payload=payload):
+                self.assertEqual(self._run(payload), 0)
+
+    def test_it_writes_nothing_to_stdout(self):
+        # Claude reads hook stdout. Anything printed here is text it may act on.
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            self._run(json.dumps({"session_id": "abc", "message": "needs permission"}))
+        self.assertEqual(buffer.getvalue(), "")
+
+    def test_the_installer_registers_its_own_event(self):
+        # Its own event and entry, so installing or removing it cannot disturb
+        # the prompt gate or the command gate.
+        merged = cli._merge_claude_activity_hook({}, "aiwatcher")
+        self.assertIn("Notification", merged["hooks"])
+        self.assertNotIn("UserPromptSubmit", merged["hooks"])
+        self.assertIn("claude-activity-hook", json.dumps(merged))
+
+    def test_installing_twice_does_not_duplicate_it(self):
+        once = cli._merge_claude_activity_hook({}, "aiwatcher")
+        twice = cli._merge_claude_activity_hook(once, "aiwatcher")
+        self.assertEqual(len(twice["hooks"]["Notification"]), 1)
+
+    def test_it_leaves_other_hooks_alone_when_removed(self):
+        settings = cli._merge_claude_hook({}, "aiwatcher")
+        settings = cli._merge_claude_activity_hook(settings, "aiwatcher")
+        updated, removed = cli._remove_claude_activity_hook(settings)
+        self.assertTrue(removed)
+        self.assertNotIn("Notification", updated["hooks"])
+        self.assertIn("UserPromptSubmit", updated["hooks"])
+
+    def test_removing_when_absent_is_not_an_error(self):
+        _, removed = cli._remove_claude_activity_hook({"hooks": {}})
+        self.assertFalse(removed)
+
+
+class HookPayloadParsingTests(unittest.TestCase):
+    def test_valid_json_that_is_not_an_object_is_not_trusted(self):
+        # "[]" parses fine and then went straight into .get(), taking every
+        # hook down with an AttributeError. A hook that raises failed the host.
+        for raw in ("[]", '["a"]', '"text"', "12", "null"):
+            with self.subTest(raw=raw):
+                args = argparse.Namespace(text=None)
+                with patch.object(cli, "_read_stdin_text", return_value=raw):
+                    payload, prompt = cli._hook_payload_and_prompt(args)
+                self.assertIsInstance(payload, dict)
+                self.assertEqual(prompt, "")

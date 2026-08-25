@@ -382,3 +382,101 @@ class WorkingTreeCollisionOnDiskTests(unittest.TestCase):
                 now=NOW,
             )["collisions"]
         self.assertEqual(found, [])
+
+
+class WaitingOnYouTests(unittest.TestCase):
+    """The one state that comes from an event rather than a timestamp."""
+
+    def _signal(self, session_id="s1", *, minutes_ago=5.0, kind="permission"):
+        return {session_id: {
+            "at": (NOW - timedelta(minutes=minutes_ago)).isoformat(),
+            "tool": "claude-code",
+            "kind": kind,
+        }}
+
+    def test_a_signal_makes_the_session_waiting(self):
+        row = session(seconds_ago=6 * 60)
+        presence = presence_for_session(
+            row, now=NOW, waiting=self._signal()["s1"],
+        )
+        self.assertEqual(presence.state, "waiting")
+        self.assertEqual(presence.label, "waiting 5m")
+        self.assertTrue(presence.live)
+
+    def test_a_wait_under_a_minute_carries_no_number(self):
+        # "waiting 0m" reads as broken.
+        presence = presence_for_session(
+            session(seconds_ago=90), now=NOW,
+            waiting=self._signal(minutes_ago=0.4)["s1"],
+        )
+        self.assertEqual(presence.label, "waiting on you")
+
+    def test_a_later_write_clears_it_without_needing_an_event(self):
+        # Approving a permission produces the tool result, so a write after the
+        # signal means the developer already answered. No "unblocked" event
+        # exists, and waiting for one would leave the alert stuck on.
+        presence = presence_for_session(
+            session(seconds_ago=60), now=NOW,
+            waiting=self._signal(minutes_ago=5)["s1"],
+        )
+        self.assertEqual(presence.state, "working")
+
+    def test_a_signal_older_than_the_live_window_is_ignored(self):
+        # The session was closed or the machine slept. A hook cannot send an
+        # event for a process that is gone, so nothing would ever clear this.
+        presence = presence_for_session(
+            session(seconds_ago=3 * 3600), now=NOW,
+            waiting=self._signal(minutes_ago=90)["s1"],
+        )
+        self.assertNotEqual(presence.state, "waiting")
+
+    def test_a_malformed_signal_is_ignored_rather_than_trusted(self):
+        for bad in ({}, {"at": None}, {"at": "not-a-date"}, {"at": 12345}):
+            with self.subTest(bad=bad):
+                presence = presence_for_session(session(seconds_ago=6 * 60), now=NOW, waiting=bad)
+                self.assertEqual(presence.state, "quiet")
+
+    def test_a_signal_from_the_future_is_not_a_wait(self):
+        presence = presence_for_session(
+            session(seconds_ago=6 * 60), now=NOW,
+            waiting=self._signal(minutes_ago=-5)["s1"],
+        )
+        self.assertNotEqual(presence.state, "waiting")
+
+    def test_waiting_sorts_ahead_of_working(self):
+        rows = presence_for_sessions(
+            [session("busy", seconds_ago=5), session("s1", seconds_ago=6 * 60)],
+            now=NOW,
+            waiting=self._signal(),
+        )
+        self.assertEqual([row.session_id for row in rows], ["s1", "busy"])
+
+    def test_the_payload_counts_it_separately(self):
+        payload = live_presence(
+            [session("s1", seconds_ago=6 * 60), session("busy", seconds_ago=5)],
+            now=NOW,
+            waiting=self._signal(),
+        )
+        self.assertEqual(payload["waiting"], 1)
+        self.assertEqual(payload["working"], 1)
+        self.assertEqual(payload["live"], 2)
+        by_tool = {row["tool"]: row for row in payload["tools"]}
+        self.assertEqual(by_tool["claude-code"]["waiting"], 1)
+
+    def test_no_signals_means_nothing_waiting(self):
+        payload = live_presence([session("s1", seconds_ago=6 * 60)], now=NOW, waiting={})
+        self.assertEqual(payload["waiting"], 0)
+        self.assertEqual(payload["sessions"][0]["state"], "quiet")
+
+    def test_a_waiting_session_still_counts_as_a_tree_sharer(self):
+        # It is stopped, not gone. Whatever it had half-written is still there
+        # to be overwritten by the session that is working.
+        found = live_presence(
+            [session("s1", raw_cwd="/repo", seconds_ago=6 * 60),
+             session("busy", raw_cwd="/repo", seconds_ago=5)],
+            now=NOW,
+            waiting=self._signal(),
+        )["collisions"]
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["live"], 2)
+        self.assertEqual(found[0]["working"], 1)

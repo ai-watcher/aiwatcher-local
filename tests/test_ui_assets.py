@@ -1921,3 +1921,33 @@ class WorkingTreeCollisionStripTests(unittest.TestCase):
         for token in ("--green", "--red", "--amber"):
             with self.subTest(token=token):
                 self.assertNotIn(token, strip)
+
+
+class WaitingOnYouStripTests(unittest.TestCase):
+    """The state that comes from the tool rather than from a timestamp."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+
+    def test_it_leads_everything_else(self):
+        # The shared-tree warning predicts work you might lose; this is time you
+        # are losing now, and the line truncates from the right.
+        source = js_function_source(self.js, "renderPresence")
+        self.assertIn("waitingMarkup(presence) + collisionMarkup(presence)", source)
+
+    def test_nothing_waiting_renders_nothing(self):
+        source = js_function_source(self.js, "waitingMarkup")
+        self.assertIn("if (!blocked.length) return ''", source)
+
+    def test_it_leads_with_the_longest_wait(self):
+        # How long you have been the bottleneck is the part that makes you look.
+        source = js_function_source(self.js, "waitingMarkup")
+        self.assertIn("idle_seconds", source)
+        self.assertIn("sort(", source)
+
+    def test_it_is_the_loudest_thing_on_the_line(self):
+        alert = self.css[self.css.index("    .presence-strip .presence-alert {"):]
+        alert = alert[:alert.index("}")]
+        self.assertIn("var(--red)", alert)
