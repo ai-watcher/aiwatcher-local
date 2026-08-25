@@ -23,6 +23,21 @@ MIN_IDLE_SECONDS = 8
 MAX_ACTIVE_IDLE_SECONDS = 15 * 60
 REQUIRED_OBSERVATIONS = 2
 
+# How long a session must have been waiting before this interrupts you.
+#
+# Every other signal here is held unless the tool it is about is in front of
+# you: nagging about a session you are not in is noise. This one inverts that,
+# because the whole value is that you are somewhere else and do not know. What
+# replaces the foreground check is dwell time -- at the keyboard you answer a
+# permission prompt in seconds, so a wait past a minute means you are not
+# looking at it. That is more reliable than foreground detection, which cannot
+# tell which of three Claude windows you are actually in.
+#
+# STOPGAP in the same sense as WORKING_SECONDS: 60s is reasoned, not measured,
+# and biased long because a notification that arrives while you are mid-answer
+# is the one that gets the feature muted.
+WAITING_NOTIFY_SECONDS = 60
+
 
 @dataclass(frozen=True)
 class RuntimeNudge:
@@ -41,6 +56,11 @@ class RuntimeNudge:
 
 
 _PRESENTATIONS: dict[str, tuple[str, str, str]] = {
+    "session_blocked": (
+        "A session is waiting for you",
+        "Return to session",
+        "return_session",
+    ),
     "critical_context": (
         "Context is getting expensive",
         "Copy Fresh Start brief",
@@ -229,7 +249,15 @@ def build_runtime_nudge(
     surface = (session.surface or "").lower()
 
     hold_reason: str | None = None
-    if enforce_pause and idle_seconds < MIN_IDLE_SECONDS:
+    if signal_kind == "session_blocked":
+        # Deliberately none of the checks below. The foreground rule would hold
+        # this exactly when it matters, and MAX_ACTIVE_IDLE_SECONDS would go
+        # quiet at fifteen minutes -- by which point the wait is the most
+        # expensive thing on the machine. The tool told us it is blocked, so
+        # the only question left is whether you have had time to answer.
+        if idle_seconds < WAITING_NOTIFY_SECONDS:
+            hold_reason = "waiting less than a minute; you may still be answering it"
+    elif enforce_pause and idle_seconds < MIN_IDLE_SECONDS:
         hold_reason = "waiting for a pause between AI turns"
     elif idle_seconds > MAX_ACTIVE_IDLE_SECONDS:
         hold_reason = "session activity is too old for an ambient interruption"
@@ -262,7 +290,14 @@ def build_runtime_nudge(
         primary_mode="inspect" if action == "recover_loop" else "copy",
         eligible=hold_reason is None,
         hold_reason=hold_reason,
-        required_observations=REQUIRED_OBSERVATIONS if enforce_pause else 1,
+        # A reported event needs no second sighting. REQUIRED_OBSERVATIONS
+        # exists to confirm signals inferred from noisy timestamps; holding a
+        # blocked session for a second poll only adds latency to the one
+        # signal whose whole value is arriving before you notice yourself.
+        required_observations=(
+            1 if signal_kind == "session_blocked"
+            else REQUIRED_OBSERVATIONS if enforce_pause else 1
+        ),
         idle_seconds=idle_seconds,
         foreground_tool=active_tool,
     )

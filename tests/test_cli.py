@@ -5610,3 +5610,62 @@ class HookPayloadParsingTests(unittest.TestCase):
                     payload, prompt = cli._hook_payload_and_prompt(args)
                 self.assertIsInstance(payload, dict)
                 self.assertEqual(prompt, "")
+
+
+class BlockedSessionWatchStatusTests(unittest.TestCase):
+    """'Waiting on you' as a watch signal."""
+
+    def _session(self, *, minutes_idle: float = 6.0):
+        return LocalSession(
+            session_id="s1",
+            tool="claude-code",
+            surface="cli",
+            project_path="/repo",
+            updated_at=datetime.now(timezone.utc) - timedelta(minutes=minutes_idle),
+        )
+
+    def _signal(self, *, minutes_ago: float = 5.0):
+        return {"s1": {
+            "at": (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).isoformat(),
+            "tool": "claude-code",
+            "kind": "permission",
+        }}
+
+    def _status(self, session, waiting):
+        return cli._watch_status(
+            session, [], [session],
+            cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000,
+            waiting=waiting,
+        )
+
+    def test_a_waiting_session_becomes_its_own_signal(self):
+        status = self._status(self._session(), self._signal())
+        self.assertEqual(status["signal_kind"], "session_blocked")
+        self.assertEqual(status["action"], "return to session")
+        self.assertIn("cannot continue", str(status["reason"]))
+
+    def test_it_outranks_context_pressure(self):
+        # Pressure is a cost you are choosing. This is a stop, and you are the
+        # thing holding it up.
+        session = self._session(minutes_idle=6)
+        without = self._status(session, {})
+        with_signal = self._status(session, self._signal())
+        self.assertNotEqual(without["signal_kind"], "session_blocked")
+        self.assertEqual(with_signal["signal_kind"], "session_blocked")
+
+    def test_a_signal_the_session_has_already_moved_past_is_ignored(self):
+        # Same reconciliation as the dashboard: a write after the signal means
+        # the developer already answered.
+        status = self._status(self._session(minutes_idle=1), self._signal(minutes_ago=5))
+        self.assertNotEqual(status["signal_kind"], "session_blocked")
+
+    def test_the_wait_timestamp_rides_along_for_deduping(self):
+        # Without it the notification key is per session per action, and every
+        # wait after the first is silent.
+        status = self._status(self._session(), self._signal())
+        self.assertTrue(status["waiting_at"])
+
+    def test_no_signals_leaves_every_other_verdict_alone(self):
+        status = self._status(self._session(), {})
+        self.assertIsNone(status["waiting_at"])
+        self.assertNotEqual(status["action"], "return to session")

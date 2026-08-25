@@ -4006,7 +4006,17 @@ function liveHealthCard(data) {
   return cards.find(card => card.charted_because_live) || null;
 }
 
+function waitingSessions(data) {
+  return ((data.presence && data.presence.sessions) || [])
+    .filter(row => row.state === 'waiting')
+    .sort((a, b) => (b.idle_seconds || 0) - (a.idle_seconds || 0));
+}
+
 function tabStateFor(data) {
+  // A session waiting on you outranks context pressure. Pressure is a cost you
+  // are choosing; a blocked session is a stop, and this tab is behind an editor
+  // most of the day -- if anything is going to interrupt from there, it is this.
+  if (waitingSessions(data).length) return 'critical';
   // Severity comes from the handoff bubble when there is one, because that is the
   // same judgement the page itself leads with -- the tab must never disagree with
   // the surface behind it.
@@ -4022,8 +4032,16 @@ function renderTabState(data) {
   const state = tabStateFor(data);
   const live = liveHealthCard(data);
   const totals = data.totals || {};
+  const blocked = waitingSessions(data);
   let title;
-  if (live && live.latest_turn_tokens) {
+  if (blocked.length) {
+    // Front-loaded: a browser tab shows perhaps twenty characters, and the
+    // whole point is that this reads without switching to it.
+    const wait = String(blocked[0].label || 'waiting').replace('waiting ', '');
+    title = blocked.length === 1
+      ? `Waiting ${wait} · AIWatcher`
+      : `${blocked.length} waiting · AIWatcher`;
+  } else if (live && live.latest_turn_tokens) {
     const mark = state === 'critical' ? '⚠ ' : '';
     title = mark + live.latest_turn_tokens + '/turn · AIWatcher';
   } else if (totals.api_value_label) {

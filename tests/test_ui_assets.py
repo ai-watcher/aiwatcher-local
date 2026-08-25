@@ -1951,3 +1951,28 @@ class WaitingOnYouStripTests(unittest.TestCase):
         alert = self.css[self.css.index("    .presence-strip .presence-alert {"):]
         alert = alert[:alert.index("}")]
         self.assertIn("var(--red)", alert)
+
+
+class WaitingTabTests(unittest.TestCase):
+    """The tab is the surface for most of the working day."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+
+    def test_a_waiting_session_outranks_context_pressure_in_the_tab(self):
+        # Pressure is a cost you are choosing; a blocked session is a stop.
+        source = js_function_source(self.js, "tabStateFor")
+        self.assertIn("waitingSessions(data).length", source)
+        self.assertIn("return 'critical'", source)
+
+    def test_the_title_leads_with_the_wait(self):
+        # A browser tab shows perhaps twenty characters, and the whole point is
+        # that it reads without switching to it.
+        source = js_function_source(self.js, "renderTabState")
+        self.assertIn("Waiting ${wait}", source)
+
+    def test_the_title_still_falls_back_when_nothing_waits(self):
+        source = js_function_source(self.js, "renderTabState")
+        self.assertIn("latest_turn_tokens", source)
+        self.assertIn("api_value_label", source)

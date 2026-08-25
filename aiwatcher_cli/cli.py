@@ -76,6 +76,7 @@ from .local_state import (
     record_intervention,
     record_hook_event,
     record_session_waiting,
+    session_waiting_signals,
     record_notification_sent,
     record_outcome,
     record_survival_check,
@@ -140,6 +141,7 @@ from .scanner import (
     surface_coverage,
 )
 from .session_health import analyze_session_health
+from .session_presence import presence_for_session
 
 
 CLOUD_URL = "https://www.getaiwatcher.com"
@@ -5457,6 +5459,7 @@ def _watch_status(
     cost_threshold: float,
     calls_threshold: int,
     tokens_threshold: int,
+    waiting: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, object]:
     """Combine context health + loop + velocity + runway signals into one recommended action.
 
@@ -5477,7 +5480,25 @@ def _watch_status(
     action = "continue"
     signal_kind = "healthy"
     reason = "No urgent local signal detected."
-    if health is not None and health.severity == "critical":
+    waiting_at: str | None = None
+
+    # Ahead of every inferred signal, because it is the only one the tool
+    # actually reported and the only one where the developer is the thing
+    # holding the work up. Context pressure is a cost you are choosing; this is
+    # a stop. Routed through presence rather than read straight from the store
+    # so it inherits the same reconciliation -- a later write clears it, and a
+    # signal past the live window is dropped.
+    signals = session_waiting_signals() if waiting is None else waiting
+    blocked = presence_for_session(session, waiting=signals.get(session.session_id))
+    if blocked.state == "waiting":
+        action = "return to session"
+        signal_kind = "session_blocked"
+        waiting_at = str((signals.get(session.session_id) or {}).get("at") or "")
+        reason = (
+            f"{blocked.label.capitalize()}. This session stopped and cannot continue "
+            "until you answer it."
+        )
+    elif health is not None and health.severity == "critical":
         action = "create handoff capsule now"
         signal_kind = "critical_context"
         reason = health.recommendations[0] if health.recommendations else "Context health is critical."
@@ -5526,6 +5547,7 @@ def _watch_status(
         "action": action,
         "signal_kind": signal_kind,
         "reason": reason,
+        "waiting_at": waiting_at,
     }
 
 
@@ -5643,7 +5665,12 @@ def _print_watch_status_card(
         and (getattr(args, "notify", False) or getattr(args, "overlay", False))
         and status["action"] != "continue"
     ):
+        # The wait's own timestamp, so a session that blocks, is answered, and
+        # blocks again is two notifications rather than one. Without it the key
+        # is per session per action, and every wait after the first is silent.
         key = f"{session.session_id}:{status['action']}"
+        if status.get("waiting_at"):
+            key = f"{key}:{status['waiting_at']}"
         persist_key = f"{key}:{stamp.isoformat()}"
         is_recent = stamp != MIN_DT and (datetime.now(timezone.utc) - stamp).total_seconds() <= 30 * 60
         attachment = runtime_attachment_for_session(
@@ -6097,9 +6124,11 @@ def _select_runtime_nudge_session(
 ) -> str | None:
     """Pick one active intervention for this poll across local sessions."""
     severity_rank = {"critical": 2, "warning": 1, "healthy": 0}
-    action_rank = {"recover_loop": 5, "fresh_chat": 4, "switch_tool": 3, "continue_focused": 2}
+    action_rank = {"return_session": 6, "recover_loop": 5, "fresh_chat": 4, "switch_tool": 3, "continue_focused": 2}
     candidates: list[tuple[tuple[int, int, int, datetime], str]] = []
     now = datetime.now(timezone.utc)
+    # Read once for the whole poll rather than once per session.
+    waiting_signals = session_waiting_signals()
     for session in rows[:12]:
         status = _watch_status(
             session,
@@ -6108,6 +6137,7 @@ def _select_runtime_nudge_session(
             cost_threshold=args.cost_threshold,
             calls_threshold=args.calls_threshold,
             tokens_threshold=args.tokens_threshold,
+            waiting=waiting_signals,
         )
         if status["action"] == "continue":
             continue
