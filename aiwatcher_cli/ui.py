@@ -86,6 +86,7 @@ from .runtime_attachment import (
     safe_runtime_processes,
 )
 from .runtime_nudge import foreground_tool
+from .session_presence import LIVE_WINDOW_MINUTES
 from .session_health import (
     CRITICAL_TOKENS_PER_TURN,
     PRESSURE_TOKENS_PER_TURN,
@@ -136,7 +137,10 @@ SUMMARY_CACHE_SCHEMA_VERSION = 7
 SESSION_SNAPSHOT_SCHEMA_VERSION = 1
 SUMMARY_BACKGROUND_COOLDOWN_SECONDS = 8
 SUMMARY_WINDOWS = (1, 7, 30)
-ACTIVE_SESSION_MINUTES = 30
+# One definition of "live", shared with session_presence, which subdivides
+# this window into working/quiet. Aliased rather than duplicated so the two
+# surfaces cannot drift into disagreeing about when a session stops counting.
+ACTIVE_SESSION_MINUTES = LIVE_WINDOW_MINUTES
 RECENT_SESSION_HOURS = 4
 FRESH_START_PROJECT_COOLDOWN_MINUTES = 2 * 24 * 60
 UNATTRIBUTED_PROJECT = "__unattributed__"
