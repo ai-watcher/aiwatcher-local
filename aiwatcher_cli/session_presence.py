@@ -28,7 +28,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .processes import seconds_label
-from .scanner import LocalSession
+# _git_root, not project_path. project_path deliberately folds Claude's
+# throwaway agent worktrees back into the repository they were cut from, so
+# two isolated agents would share it -- the exact opposite of what a
+# same-checkout test needs. The git root of the directory the tool actually
+# recorded is the real answer: a linked worktree reports itself, a subfolder
+# reports its repo, and a deleted agent worktree reports nothing and falls
+# back to its own unique path.
+from .scanner import LocalSession, _git_root
 
 
 # How long after its last write a session still counts as working.
@@ -230,6 +237,63 @@ def presence_by_tool(rows: list[SessionPresence]) -> list[dict[str, object]]:
     )
 
 
+def _tree_key(session: LocalSession) -> str | None:
+    """Which checkout on disk this session is editing."""
+    cwd = (session.raw_cwd or "").strip()
+    if not cwd:
+        return None
+    return _git_root(cwd) or cwd
+
+
+def working_tree_collisions(
+    sessions: list[LocalSession],
+    rows: list[SessionPresence],
+) -> list[dict[str, object]]:
+    """Live sessions sharing one checkout, which can silently overwrite work.
+
+    The failure this names: one session reads a file, another saves it, the
+    first writes its stale copy back. Git never sees two versions -- there is
+    one working tree and the last writer wins -- so nothing conflicts and the
+    change is simply gone. Neither tool can see the other, which is why nothing
+    else on the machine warns about it.
+
+    At least one session has to be *working*. Two sessions both sitting idle in
+    a repo are not writing to it, and a warning that fires on every pair of
+    parked sessions is one that gets ignored before it ever catches anything
+    real.
+
+    Analyst spawns are left out: Second Opinion runs in a sandbox under the
+    repository, so counting it would fire this on any project AIWatcher had
+    looked at, against a session the user did not start.
+    """
+    live = {row.session_id: row for row in rows if row.live and not row.analyst_run}
+    groups: dict[str, list[tuple[LocalSession, SessionPresence]]] = {}
+    for session in sessions:
+        row = live.get(session.session_id)
+        if row is None:
+            continue
+        key = _tree_key(session)
+        if key:
+            groups.setdefault(key, []).append((session, row))
+
+    found: list[dict[str, object]] = []
+    for key, members in groups.items():
+        if len(members) < 2:
+            continue
+        working = [row for _, row in members if row.state == "working"]
+        if not working:
+            continue
+        found.append({
+            "path": key,
+            "label": key.rstrip("/").rsplit("/", 1)[-1].rsplit("\\", 1)[-1] or key,
+            "live": len(members),
+            "working": len(working),
+            "sessions": [row.session_id for _, row in members],
+            "tools": sorted({tool_label(session.tool) for session, _ in members}),
+        })
+    return sorted(found, key=lambda item: (-int(item["live"]), str(item["label"])))
+
+
 def live_presence(
     sessions: list[LocalSession],
     *,
@@ -243,11 +307,13 @@ def live_presence(
     """
     rows = presence_for_sessions(sessions, now=now)
     tools = presence_by_tool(rows)
+    collisions = working_tree_collisions(sessions, rows)
     working = sum(1 for row in rows if row.state == "working")
     quiet = sum(1 for row in rows if row.state == "quiet")
     return {
         "sessions": [row.to_json() for row in rows if row.state != "gone"],
         "tools": tools,
+        "collisions": collisions,
         "working": working,
         "quiet": quiet,
         "live": working + quiet,

@@ -807,6 +807,22 @@ function presenceText(presence) {
     .join('  ·  ');
 }
 
+// Two live sessions in one checkout can overwrite each other with no git
+// conflict to show for it -- one working tree, last writer wins. It leads the
+// line rather than trailing it: the line ellipsises from the right, and the one
+// clause here that predicts lost work must not be the first thing dropped.
+function collisionMarkup(presence) {
+  const clashes = (presence && presence.collisions) || [];
+  if (!clashes.length) return '';
+  const first = clashes[0];
+  const more = clashes.length > 1 ? ' +' + (clashes.length - 1) + ' more' : '';
+  const why = first.live + ' live sessions share this working tree ('
+    + (first.tools || []).join(', ') + '). Edits from one can overwrite the '
+    + "other's, and git sees one tree so nothing conflicts.";
+  return '<span class="presence-clash" title="' + esc(why) + '">'
+    + first.live + ' sharing ' + esc(first.label) + esc(more) + '</span>  ·  ';
+}
+
 function renderPresence(presence) {
   const node = document.getElementById('presenceStrip');
   if (!node) return;
@@ -825,7 +841,7 @@ function renderPresence(presence) {
   const lead = live > 1 ? live + ' live  ·  ' : '';
   // Scope trails, after its own separator: mid-line it read as a qualifier on
   // whichever tool happened to be listed last rather than on the whole count.
-  const markup = lead + presenceText(presence)
+  const markup = collisionMarkup(presence) + lead + presenceText(presence)
     + '  <span class="presence-note presence-scope">·  on this machine</span>';
   if (node.dataset.markup === markup) return;
   node.dataset.markup = markup;

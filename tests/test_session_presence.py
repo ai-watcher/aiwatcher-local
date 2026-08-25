@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 
@@ -227,3 +230,155 @@ class SharedBoundaryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkingTreeCollisionTests(unittest.TestCase):
+    """Live sessions sharing one checkout, which can overwrite each other."""
+
+    def _collisions(self, rows):
+        return live_presence(rows, now=NOW)["collisions"]
+
+    def test_two_working_sessions_in_one_tree_are_reported(self):
+        found = self._collisions([
+            session("a", raw_cwd="/repo"),
+            session("b", raw_cwd="/repo"),
+        ])
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["live"], 2)
+        self.assertEqual(found[0]["working"], 2)
+        self.assertEqual(sorted(found[0]["sessions"]), ["a", "b"])
+
+    def test_different_trees_do_not_collide(self):
+        self.assertEqual(
+            self._collisions([
+                session("a", raw_cwd="/repo-one"),
+                session("b", raw_cwd="/repo-two"),
+            ]),
+            [],
+        )
+
+    def test_separate_worktrees_of_one_repo_do_not_collide(self):
+        # A linked worktree is its own checkout with its own files. This is the
+        # good practice the feature must not punish -- and the reason the key is
+        # the real git root rather than project_path, which folds an agent's
+        # throwaway worktree back into the repo it came from.
+        self.assertEqual(
+            self._collisions([
+                session("a", raw_cwd="/repo"),
+                session("b", raw_cwd="/repo/.claude/worktrees/agent-1"),
+            ]),
+            [],
+        )
+
+    def test_two_idle_sessions_are_not_a_collision(self):
+        # Neither is writing. Firing on every pair of parked sessions is how a
+        # warning gets ignored before it ever catches anything real.
+        self.assertEqual(
+            self._collisions([
+                session("a", raw_cwd="/repo", seconds_ago=9 * 60),
+                session("b", raw_cwd="/repo", seconds_ago=11 * 60),
+            ]),
+            [],
+        )
+
+    def test_one_working_beside_one_quiet_still_counts(self):
+        found = self._collisions([
+            session("a", raw_cwd="/repo", seconds_ago=10),
+            session("b", raw_cwd="/repo", seconds_ago=9 * 60),
+        ])
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["working"], 1)
+        self.assertEqual(found[0]["live"], 2)
+
+    def test_an_ended_session_is_not_a_sharer(self):
+        self.assertEqual(
+            self._collisions([
+                session("a", raw_cwd="/repo"),
+                session("b", raw_cwd="/repo", seconds_ago=5 * 3600),
+            ]),
+            [],
+        )
+
+    def test_analyst_spawns_do_not_trigger_it(self):
+        # Second Opinion runs in a sandbox under the repository, so counting it
+        # would fire this on any project AIWatcher had looked at, against a
+        # session the user never started.
+        self.assertEqual(
+            self._collisions([
+                session("mine", raw_cwd="/repo"),
+                session("analyst", raw_cwd="/repo/.aiwatcher/analyst"),
+            ]),
+            [],
+        )
+
+    def test_it_spans_tools(self):
+        # Claude and Codex in one tree collide exactly as well as two Claudes.
+        found = self._collisions([
+            session("a", tool="claude-code", raw_cwd="/repo"),
+            session("b", tool="codex-cli", raw_cwd="/repo"),
+        ])
+        self.assertEqual(found[0]["tools"], ["Claude", "Codex"])
+
+    def test_a_session_with_no_recorded_directory_is_skipped(self):
+        # Unknown is not the same as shared, and guessing here would accuse a
+        # developer of something that is not happening.
+        self.assertEqual(
+            self._collisions([
+                session("a", raw_cwd="/repo"),
+                session("b", raw_cwd=None),
+            ]),
+            [],
+        )
+
+    def test_the_label_names_the_checkout(self):
+        found = self._collisions([
+            session("a", raw_cwd="/home/dev/aiwatcher-local"),
+            session("b", raw_cwd="/home/dev/aiwatcher-local"),
+        ])
+        self.assertEqual(found[0]["label"], "aiwatcher-local")
+
+
+class WorkingTreeCollisionOnDiskTests(unittest.TestCase):
+    """The same question against a real repository on disk.
+
+    Every other collision test compares paths that do not exist, so it never
+    reaches the git lookup and passes on string equality alone. Folding a
+    subdirectory into its repository is the whole reason that lookup is there.
+    """
+
+    def test_a_subdirectory_shares_its_repository(self):
+        with tempfile.TemporaryDirectory() as root:
+            subprocess.run(["git", "init", "-q", root], check=True)
+            nested = os.path.join(root, "src", "deep")
+            os.makedirs(nested)
+            found = live_presence(
+                [
+                    session("a", raw_cwd=root),
+                    session("b", raw_cwd=nested),
+                ],
+                now=NOW,
+            )["collisions"]
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["live"], 2)
+
+    def test_two_checkouts_of_one_repository_stay_apart(self):
+        with tempfile.TemporaryDirectory() as base:
+            main = os.path.join(base, "main")
+            subprocess.run(["git", "init", "-q", main], check=True)
+            subprocess.run(
+                ["git", "-C", main, "commit", "-q", "--allow-empty", "-m", "root"],
+                check=True,
+                env={**os.environ,
+                     "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                     "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
+            )
+            linked = os.path.join(base, "feature")
+            subprocess.run(
+                ["git", "-C", main, "worktree", "add", "-q", "-b", "feature", linked],
+                check=True,
+            )
+            found = live_presence(
+                [session("a", raw_cwd=main), session("b", raw_cwd=linked)],
+                now=NOW,
+            )["collisions"]
+        self.assertEqual(found, [])

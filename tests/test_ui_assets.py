@@ -1882,3 +1882,42 @@ class LivePresenceStripTests(unittest.TestCase):
         source = js_function_source(self.js, "ambientQuiet")
         self.assertIn("liveCount", source)
         self.assertIn("sessions running", source)
+
+
+class WorkingTreeCollisionStripTests(unittest.TestCase):
+    """The warning that two live sessions share one checkout."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+
+    def test_the_warning_leads_the_line(self):
+        # The line ellipsises from the right. The one clause here that predicts
+        # lost work must not be the first thing dropped.
+        source = js_function_source(self.js, "renderPresence")
+        self.assertIn("collisionMarkup(presence) + lead", source)
+
+    def test_nothing_shared_renders_nothing(self):
+        source = js_function_source(self.js, "collisionMarkup")
+        self.assertIn("if (!clashes.length) return ''", source)
+
+    def test_it_says_what_the_risk_is(self):
+        # "2 sharing repo" states a fact. What the reader needs is that one can
+        # overwrite the other with nothing to show for it.
+        source = js_function_source(self.js, "collisionMarkup")
+        self.assertIn("overwrite", source)
+        self.assertIn("title=", source)
+
+    def test_only_the_warning_carries_colour(self):
+        # The counts beside it stay neutral: how many sessions are running is
+        # neither good news nor bad.
+        # Scoped: `.runtime-copy span` sets --muted at a higher specificity
+        # than a lone class, so a bare .presence-clash renders grey.
+        clash = self.css[self.css.index("    .presence-strip .presence-clash {"):]
+        self.assertIn("var(--amber)", clash[:clash.index("}")])
+        strip = self.css[self.css.index("    .presence-strip {"):]
+        strip = strip[:strip.index("}")]
+        for token in ("--green", "--red", "--amber"):
+            with self.subTest(token=token):
+                self.assertNotIn(token, strip)

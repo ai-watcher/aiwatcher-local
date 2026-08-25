@@ -264,6 +264,13 @@
       margin-right: var(--sp-2); vertical-align: middle;
     }
     .presence-strip .presence-note { color: var(--faint); }
+    /* The one clause on this line that carries a colour, because it is the
+       one that predicts lost work. The counts beside it stay neutral: how
+       many sessions are running is neither good news nor bad. */
+    /* Scoped, not bare: `.runtime-copy span` sets --muted at (0,1,1) and
+       silently outranked a lone class selector, so this rendered grey and
+       looked correct in the diff. */
+    .presence-strip .presence-clash { color: var(--amber); }
     /* First thing dropped when the row is tight: the Sessions observed tile
        on Home carries the same scope, and the counts themselves do not. */
     @media (max-width: 900px) { .presence-scope { display: none; } }
