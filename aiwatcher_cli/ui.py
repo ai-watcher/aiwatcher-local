@@ -43,6 +43,7 @@ from .metrics import (
     replayed_context_cost,
 )
 from .local_state import (
+    session_waiting_signals,
     COMMAND_GATE_BLOCKED_DECISIONS,
     MAX_COMMAND_DECISIONS_STORED,
     PROMPT_MODIFIED_DECISIONS,
@@ -86,7 +87,12 @@ from .runtime_attachment import (
     safe_runtime_processes,
 )
 from .runtime_nudge import foreground_tool
-from .session_presence import LIVE_WINDOW_MINUTES, live_presence, tool_label
+from .session_presence import (
+    LIVE_WINDOW_MINUTES,
+    live_presence,
+    presence_for_sessions,
+    tool_label,
+)
 from .session_health import (
     CRITICAL_TOKENS_PER_TURN,
     PRESSURE_TOKENS_PER_TURN,
@@ -5322,11 +5328,24 @@ def build_companion_state() -> dict[str, object]:
     # matching active session has a justified action". A blocked session is the
     # most justified action the product has, and until this branch existed it
     # was the one case the Companion sat quiet through.
-    presence = summary.get("presence")
+    # Computed here, not read from `summary`. The summary is an aggregate about
+    # a seven-day window and is cached accordingly -- 45s in memory, six hours
+    # on disk -- which is correct for spend totals and wrong for a fact about
+    # this second. Served from that cache, "waiting on you" could be hours old,
+    # and the Companion would sit quiet through the wait it exists to report.
+    #
+    # presence_for_sessions rather than live_presence: this only needs the
+    # waiting rows, and live_presence also resolves working trees for the
+    # collision check, which shells out to git per directory.
+    try:
+        waiting_signals = session_waiting_signals()
+    except OSError:
+        waiting_signals = {}
     waiting_rows = [
-        row for row in (presence.get("sessions") or [])
-        if isinstance(row, dict) and row.get("state") == "waiting"
-    ] if isinstance(presence, dict) else []
+        row.to_json()
+        for row in presence_for_sessions(_cached_session_rows(), waiting=waiting_signals)
+        if row.state == "waiting"
+    ] if waiting_signals else []
     if waiting_rows:
         # Longest wait first: how long you have been the bottleneck is the part
         # worth reading, and with several waiting the count goes in the sentence
