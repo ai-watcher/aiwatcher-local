@@ -937,12 +937,15 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         updateAppearance()
     }
 
+    // session_waiting belongs in both lists. Left out, the widget renders the
+    // words "Waiting on you" in its calm style with no button -- saying
+    // something urgent while looking like nothing is happening.
     func hasPrimaryAction() -> Bool {
-        return ["prompt_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm"].contains(stateName)
+        return ["prompt_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm", "session_waiting"].contains(stateName)
     }
 
     func needsAttentionState() -> Bool {
-        return ["prompt_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm"].contains(stateName)
+        return ["prompt_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm", "session_waiting"].contains(stateName)
     }
 
     func shouldShowWindow() -> Bool {
@@ -1993,7 +1996,10 @@ def run_native_presence(
             schedule_auto_collapse(10000)
 
     def has_primary_action() -> bool:
-        return state_var.get() in {"prompt_gate", "control_recommended", "optimize_available", "clipboard_confirm"}
+        return state_var.get() in {
+            "prompt_gate", "control_recommended", "optimize_available", "clipboard_confirm",
+            "session_waiting",
+        }
 
     def should_show_window() -> bool:
         if has_primary_action():
@@ -2039,7 +2045,10 @@ def run_native_presence(
             pass
 
     def update_attention_style() -> None:
-        needs_attention = state_var.get() in {"prompt_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm"}
+        needs_attention = state_var.get() in {
+            "prompt_gate", "control_recommended", "control_review", "optimize_available",
+            "clipboard_confirm", "session_waiting",
+        }
         attention_bg = "#ed6a24" if pulse_var.get() else "#b84816"
         quiet_collapsed_bg = "#eef8fb"
         shell_bg = attention_bg if collapsed.get() and needs_attention else (quiet_collapsed_bg if collapsed.get() else "#090d14")
