@@ -5488,7 +5488,11 @@ def _watch_status(
     # a stop. Routed through presence rather than read straight from the store
     # so it inherits the same reconciliation -- a later write clears it, and a
     # signal past the live window is dropped.
-    signals = session_waiting_signals() if waiting is None else waiting
+    #
+    # Passed in, never read from disk here. A classifier that reaches for global
+    # state on its own is one whose result depends on the machine it ran on, and
+    # the callers already thread every other per-poll input the same way.
+    signals = waiting or {}
     blocked = presence_for_session(session, waiting=signals.get(session.session_id))
     if blocked.state == "waiting":
         action = "return to session"
@@ -5606,6 +5610,7 @@ def _print_watch_status_card(
     delivery_session_id: str | None = None,
     active_foreground_tool: str | None = None,
     runtime_processes: list[RuntimeProcess] | None = None,
+    waiting_signals: dict[str, dict[str, object]] | None = None,
 ) -> None:
     status = _watch_status(
         session,
@@ -5614,6 +5619,7 @@ def _print_watch_status_card(
         cost_threshold=args.cost_threshold,
         calls_threshold=args.calls_threshold,
         tokens_threshold=args.tokens_threshold,
+        waiting=waiting_signals if waiting_signals is not None else session_waiting_signals(),
     )
     health = status["health"]
     loop = status["loop"]
@@ -6242,6 +6248,7 @@ def command_watch(args: argparse.Namespace) -> int:
                 all_events = events_by_session(rows, days=args.days)
                 runtime_processes = safe_runtime_processes()
                 active_tool = foreground_tool()
+                waiting_signals = session_waiting_signals()
                 delivery_session_id = _select_runtime_nudge_session(
                     rows,
                     all_events,
@@ -6259,6 +6266,7 @@ def command_watch(args: argparse.Namespace) -> int:
                     delivery_session_id=delivery_session_id or "",
                     active_foreground_tool=active_tool,
                     runtime_processes=runtime_processes,
+                    waiting_signals=waiting_signals,
                 )
 
                 if delivery_session_id and delivery_session_id != rows[0].session_id:
@@ -6278,6 +6286,7 @@ def command_watch(args: argparse.Namespace) -> int:
                             delivery_session_id=delivery_session_id,
                             active_foreground_tool=active_tool,
                             runtime_processes=runtime_processes,
+                            waiting_signals=waiting_signals,
                         )
 
                 interesting: list[LocalSession] = []

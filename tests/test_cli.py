@@ -5669,3 +5669,20 @@ class BlockedSessionWatchStatusTests(unittest.TestCase):
         status = self._status(self._session(), {})
         self.assertIsNone(status["waiting_at"])
         self.assertNotEqual(status["action"], "return to session")
+
+
+class WatchStatusIsolationTests(unittest.TestCase):
+    def test_the_classifier_does_not_reach_for_global_state(self):
+        # A classifier that reads the disk on its own returns a different answer
+        # depending on the machine it ran on, and its callers already thread
+        # every other per-poll input explicitly.
+        session = LocalSession(
+            session_id="s1", tool="claude-code",
+            updated_at=datetime.now(timezone.utc) - timedelta(minutes=6),
+        )
+        with patch.object(cli, "session_waiting_signals", side_effect=AssertionError("read the store")):
+            status = cli._watch_status(
+                session, [], [session],
+                cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000,
+            )
+        self.assertNotEqual(status["signal_kind"], "session_blocked")
