@@ -35,11 +35,11 @@ owner:
 ## The recurring defect: a true number that answers the wrong question
 
 This is the failure mode this codebase produces over and over. It has been
-found and fixed **six** separate times. Every instance was a number that was
+found and fixed **seven** separate times. Every instance was a number that was
 arithmetically correct and was printed as the answer to a question it does not
 answer.
 
-The six, so you can recognise the seventh:
+The seven, so you can recognise the eighth:
 
 1. **`tokens >= 500000` judged a session expensive.** A *per-turn* pressure bar
    applied to a *cumulative* session total. It fired for 65% of sessions, so it
@@ -57,6 +57,14 @@ The six, so you can recognise the seventh:
    reads dominate the count and it separates nothing. Copy saying "of what they
    cost" needs `replayed_spend_share_pct` (spend-weighted, ~40–70%, which does
    discriminate).
+7. **The ambient sentence mixed two scopes under one "it".** `bloat_label` is
+   *one* session's ratio — `ui.py` builds it from `health.bloat_ratio`, the
+   representative session — while the `replayed_cost_label` printed beside it
+   is a *project* total, summed across the whole group in
+   `_context_health_card`. Directly under a hero that is also one session,
+   "86% of what it has cost went on re-sending history, $791.49 so far" read
+   as a single measurement of a single thing. The percentage covered one
+   session; the dollars covered thirteen.
 
 ### The rule
 
@@ -68,8 +76,10 @@ comment next to it:
 1. **What question does the label ask?** Write it as a sentence with a question
    mark.
 2. **What is the number's unit and scope?** Per-turn or cumulative? Tokens or
-   dollars? This session, this window, or all time? Mismatches here are
-   instances 1, 2 and 6.
+   dollars? This session, this project, this window, or all time? Mismatches
+   here are instances 1, 2, 6 and 7 — over half of them. See *Scope* below,
+   because a card can hold both scopes at once and the field names do not say
+   which is which.
 3. **What is it compared against, and where did that come from?** If a
    threshold is a round number someone chose, say so in the comment (see
    *Thresholds* below).
@@ -80,6 +90,39 @@ comment next to it:
    a status colour, and must not become a pill by flowing through a template
    (instances 3 and 4). Unmeasurable is a distinct state from measured-and-fine,
    and it must be *shown* as unmeasurable with the reason why.
+
+### Scope: when a card mixes session and project, say so on the figure
+
+Most surfaces here draw from a `context_health` card, and that card is **two
+scopes in one object**. `latest_turn_tokens`, `peak_turn_tokens`,
+`bloat_label`, `efficiency_label` and everything under `chart` describe the one
+representative session (`health.*`). `session_count`, `critical_sessions`,
+`replayed_cost_label`, `analyzed_cost_label` and
+`estimated_replayed_context_label` are summed across the whole group. Nothing
+in the field names tells you which is which — `bloat_label` and
+`replayed_cost_label` sit adjacent and are different scopes.
+
+So:
+
+- **Put the scope on the figure, not in a heading above it.** A reader scanning
+  a hero and a sentence beneath it will not carry a scope down from a card
+  title. `"86% of this session's spend"` and `"project sessions 13"` work;
+  `"86% of what it has cost"` does not.
+- **One sentence, one scope.** If two figures belong to different scopes, they
+  need two sentences or two rows. Relabelling the pair with whichever scope is
+  larger makes the smaller one wrong — that is how you turn one instance of
+  this defect into two.
+- **Name the member, not just the group.** A per-session figure under a line
+  that identifies only the project reads as project-wide. `healthLeadCard` is
+  the pattern: "N sessions here · charted below: the worst recently active
+  one". The ambient surface does **not** do this yet: its context row is one
+  line and already spends that line on a live *count* ("1 of 3 live"), which is
+  a different scope again — sessions running now, versus sessions in this
+  project. Printing both would put two denominators side by side with nothing
+  saying which is which, so which one that row should carry is still open.
+- **Check the scope in `ui.py`, not the field name.** `health.bloat_ratio`
+  versus `sum(... for item in group)` is a one-line read and it is the only
+  thing that settles it.
 
 ### Not-measurable is a first-class state
 

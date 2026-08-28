@@ -3853,15 +3853,41 @@ function ambientRunning(card, presence) {
         ? 'It is already past the ' + compactTokens(critical) + ' threshold, so there is no headroom left to project.'
         : '')
     : 'About <b>' + chart.turns_to_critical + ' turns</b> of headroom at the current rate.';
+  // Scope. These two figures are not the same scope and the old wording put
+  // them under one unscoped "it": bloat_label is ONE session's ratio -- ui.py
+  // builds it from health.bloat_ratio, the representative session -- while
+  // replayed_cost_label is a project total, summed across the whole group in
+  // _context_health_card. Sitting directly under a hero that is also one
+  // session, "86% of what it has cost ... $791.49 so far" read as a single
+  // measurement of a single thing; on live data the percentage covered one
+  // session and the dollars covered thirteen.
+  //
+  // The percentage stays and says whose it is. The project-wide dollar moves
+  // out rather than being relabelled: it is already in the facts row below as
+  // "on replay", and one sentence cannot honestly carry both scopes without
+  // getting long enough to wrap to a third line, which the equal-height
+  // contract does not have room for.
   const bloat = card.bloat_measurable && card.bloat_label
-    ? ' <b>' + esc(card.bloat_label) + '</b> of what it has cost went on re-sending history'
-      + (card.replayed_cost_label ? ', ' + esc(card.replayed_cost_label) + ' so far.' : '.')
+    ? " <b>" + esc(card.bloat_label) + "</b> of this session's spend went on re-sending history."
     : '';
 
   return {
     state: severity,
     hero: esc(card.latest_turn_tokens || ''),
     heroUnit: 'tokens / turn',
+    // This row still does not say *which* session the hero belongs to. The
+    // original of this commit added "worst active of N here" from
+    // card.session_count, which answers that; it is deliberately not taken
+    // here, because the row is one line and already carries a count.
+    //
+    // The two counts are different scopes -- liveCount is sessions running
+    // right now, card.session_count is sessions in this project -- so printing
+    // both would sit two denominators side by side with nothing saying which
+    // is which. That is the defect this very commit exists to fix, so it is
+    // not worth introducing a second instance of it to close the first.
+    //
+    // Which of the two this row should carry is a product decision, tracked
+    // with the surface restructure rather than settled by whoever merged last.
     context: esc(card.project || '') + (card.tool ? ' &middot; <b>' + esc(card.tool) + '</b>' : '')
       + (liveCount > 1 ? ' &middot; 1 of ' + liveCount + ' live' : ''),
     meter: meterSvg([{ value: latest, colour: tone }], marks, trackMax) + ambientScaleLabels(scale),

@@ -43,3 +43,7 @@ events.json
 # stable and reviewable. It holds a throwaway agent's scratch space, never
 # anything worth committing.
 .aiwatcher/
+
+# Per-developer dev-server config for the Claude Code browser preview.
+# Generated locally and full of machine-specific ports and absolute paths.
+.claude/launch.json
