@@ -2908,6 +2908,9 @@ function healthRow(row, waitingById, index) {
 }
 function renderContextHealth(rows, statusArg, presence) {
   const status = arguments.length > 1 ? arguments[1] : 'ready';
+  rows = (rows || []).filter(row => !quietedFreshStartProjects.has(String((row && (row.project_full || row.project)) || '')));
+  // Keyed by session so the rank and the reason read the same source; a second
+  // list here would be a second thing to keep in step with presence.
   const waitingById = new Map(
     (((presence || {}).sessions) || [])
       .filter(entry => entry.state === 'waiting')
@@ -4207,6 +4210,7 @@ let freshStartReceiptsMarkedViewed = false;
 // session it opened. Watch ranks; the drawer diagnoses -- and the diagnosis
 // lives in this payload, not in /api/session.
 let contextHealthCache = [];
+const quietedFreshStartProjects = new Set();
 let sessionRowsCache = [];
 let changeRowsCache = [];
 let sessionSort = { key: 'updated_at', dir: 'desc' };
@@ -4259,6 +4263,7 @@ async function snoozeFreshStartProjects(projects, message) {
       body: JSON.stringify({ state: 'control_recommended_group', projects: clean }),
     });
     if (!response.ok) throw new Error('snooze failed');
+    clean.forEach(project => quietedFreshStartProjects.add(project));
     showToast(message || `Fresh Start snoozed for ${clean.length} project${clean.length === 1 ? '' : 's'} for 48h.`);
     await load(true, true);
     return true;

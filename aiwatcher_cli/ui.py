@@ -2563,6 +2563,11 @@ def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) ->
         # path reads last_token_usage and does have genuine per-turn prompt sizes,
         # which is why it deliberately carries no cumulative note and is charted.
         # Same exclusion _insight_feed already applies via pressure_rows.
+        if (
+            representative.severity in {"critical", "warning"}
+            and _fresh_start_project_quiet(representative.project_path)
+        ):
+            continue
         plottable = session is not None and not has_cumulative_totals(session)
         cards.append(_context_health_card(
             representative,

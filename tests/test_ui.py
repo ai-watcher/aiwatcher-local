@@ -3791,6 +3791,58 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("2 sessions need attention", app_card["group_note"])
         self.assertEqual(len(app_card["related_sessions"]), 2)
 
+    def test_context_health_hides_projects_during_fresh_start_cooldown(self) -> None:
+        now = datetime.now(timezone.utc)
+        rows = [
+            LocalSession(session_id="quiet", tool="codex-cli", project_path="/repo/quiet", updated_at=now),
+            LocalSession(session_id="ready", tool="codex-cli", project_path="/repo/ready", updated_at=now),
+        ]
+
+        def _health(session_id: str, project_path: str) -> ui.ContextHealth:
+            return ui.ContextHealth(
+                session_id=session_id,
+                tool="codex-cli",
+                project_path=project_path,
+                age_hours=1,
+                age_days=1 / 24,
+                event_count=4,
+                total_input_tokens=400_000,
+                total_output_tokens=1_000,
+                latest_turn_tokens=200_000,
+                peak_turn_tokens=200_000,
+                avg_turn_tokens=200_000,
+                growth_rate=1_000,
+                bloat_ratio=0.98,
+                efficiency_pct=2.0,
+                bloat_measurable=True,
+                replayed_cost_usd=0.25,
+                analyzed_cost_usd=0.5,
+                latest_turn_replayed_tokens=196_000,
+                is_stale=False,
+                is_critical_stale=False,
+                is_context_pressure=True,
+                is_context_critical=True,
+                is_high_bloat=True,
+                is_extreme_bloat=True,
+                severity="critical",
+                recommendations=["Start a fresh session before continuing."],
+            )
+
+        with (
+            patch.object(ui, "analyze_all_sessions", return_value=[
+                _health("quiet", "/repo/quiet"),
+                _health("ready", "/repo/ready"),
+            ]),
+            patch.object(
+                ui,
+                "companion_skip_active",
+                side_effect=lambda key: key == "control_recommended_project:/repo/quiet",
+            ),
+        ):
+            cards = ui._context_health_cards(rows, [])
+
+        self.assertEqual([card["project_full"] for card in cards], ["/repo/ready"])
+
     def test_session_detail_degrades_when_state_snapshot_read_fails(self) -> None:
         now = datetime.now(timezone.utc)
         row = LocalSession(

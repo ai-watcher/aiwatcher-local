@@ -1386,6 +1386,13 @@ class PlanControlTest(unittest.TestCase):
         self.assertIn("visibleFreshStartProjects()", body)
         self.assertIn("Context review quieted for the visible projects for 48h.", body)
 
+    def test_context_health_hides_locally_quieted_projects(self):
+        self.assertIn("const quietedFreshStartProjects = new Set()", self.js)
+        self.assertIn("clean.forEach(project => quietedFreshStartProjects.add(project))", self.js)
+        body = self.js[self.js.index("function renderContextHealth"):]
+        body = body[:body.index(chr(10) + "}")]
+        self.assertIn("quietedFreshStartProjects.has", body)
+
 
 class SettingsTest(unittest.TestCase):
     """Settings was 4.2 screens, most of it a nine-tool table and an eleven-step
