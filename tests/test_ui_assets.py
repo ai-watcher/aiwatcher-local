@@ -796,6 +796,65 @@ class HorizontalCompositionTest(unittest.TestCase):
         self.assertNotIn("margin-bottom:14px", watch)
 
 
+class ProveLeadsWithItsClaimTest(unittest.TestCase):
+    """Prove was two tables of receipts.
+
+    A log answers "what happened". "Was any of this worth it" needs an
+    argument, and the argument was already written -- _unbanked_card builds a
+    headline and a caption -- and rendered nowhere near this surface. Claim
+    first, then the numbers that back it, then the receipts that evidence
+    those.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+        start = cls.html.index('<section id="view-receipts"')
+        cls.prove = cls.html[start:cls.html.index('<section id="view-insights"')]
+        cls.claim = js_function_source(cls.js, "renderProveClaim")
+
+    def test_the_claim_comes_before_the_numbers_and_the_receipts(self):
+        for later in ('class="grid kpis"', 'id="report"', 'id="handoffDecisionRows"'):
+            with self.subTest(later=later):
+                self.assertLess(
+                    self.prove.index('id="proveClaim"'), self.prove.index(later),
+                    "the claim must lead; %s should follow it" % later)
+
+    def test_the_claim_is_the_sentence_the_server_already_writes(self):
+        # Not a second copy of the same wording in JS, which would drift from
+        # the one in _unbanked_card and disagree with the Changes ledger.
+        self.assertIn("unbanked.headline", self.claim)
+        self.assertIn("unbanked.caption", self.claim)
+        self.assertIn("headline", inspect.getsource(ui._unbanked_card))
+
+    def test_the_figure_is_not_printed_twice(self):
+        """The headline sentence opens with the amount, so setting the amount
+        beside it as a headline figure rendered "$64.52 -- $64.52 of the last 7
+        days has no commit behind it"."""
+        self.assertNotIn("headline-figure", self.claim)
+
+    def test_the_claim_carries_no_status_colour(self):
+        """There is no baseline for how much unbanked spend is too much --
+        exploration that goes nowhere is how the work gets done -- so a rail
+        would assert a judgment nothing here can support."""
+        for variant in ("verdict-card high", "verdict-card useful"):
+            with self.subTest(variant=variant):
+                self.assertNotIn(variant, self.claim)
+
+    def test_unmeasurable_says_why_instead_of_showing_zero(self):
+        self.assertIn("unbanked.reason", self.claim)
+        self.assertIn("survival.reason", self.claim)
+        self.assertIn("available", self.claim)
+
+    def test_coverage_is_stated_with_the_claim_not_only_under_the_tables(self):
+        # "80% of spend is measured, the rest is too recent to judge" is the
+        # reason to believe the figures, not a hedge to bury beneath them.
+        self.assertIn("cost_coverage_pct", self.claim)
+        self.assertIn("changes_too_recent", self.claim)
+        self.assertIn("floor", self.claim)
+
+
 class ImproveIsAdviceOnlyTest(unittest.TestCase):
     """Improve was three products under one name.
 

@@ -3182,6 +3182,60 @@ function renderReport(report) {
     ${sections.join('')}
     <p class="receipt-note">API-equivalent value, not invoice spend. Outcomes are inferred from local signals, not guaranteed truth. Based on local logs only, not live provider quota.</p>`;
 }
+/* Prove's claim, and the coverage behind it.
+ *
+ * The surface was two tables of receipts: a log, which answers "what happened",
+ * and not an argument, which is what "was any of this worth it" needs. The
+ * argument was already written and rendering nowhere near here -- the server
+ * builds `unbanked.headline` and its caption in _unbanked_card, and the caption
+ * is careful about the thing that matters: uncommitted work in progress looks
+ * exactly like exploration that went nowhere, and this cannot tell them apart.
+ *
+ * Coverage leads rather than trails. On a surface whose job is to be believed,
+ * "80% of spend is measured and the rest is too recent to judge" is not a
+ * hedge to bury under the tables -- it is the reason to trust the figures above
+ * it. A proving surface that only reports its wins is the one nobody believes.
+ */
+function renderProveClaim(unbanked, survival) {
+  const parts = [];
+
+  if (unbanked && unbanked.available && unbanked.headline) {
+    // The sentence carries the figure, so it is not also set beside it as a
+    // headline number: the server's headline already opens with the amount,
+    // and a figure next to it printed "$64.52 -- $64.52 of the last 7 days
+    // has no commit behind it". One labelled statement of a number.
+    //
+    // No status rail. There is no baseline for how much unbanked spend is too
+    // much -- exploration that goes nowhere is how the work gets done -- and
+    // colouring it would assert a judgment nothing here can support.
+    parts.push(`<div class="verdict-card">
+      <h3>${esc(unbanked.headline)}</h3>
+      <p>${esc(unbanked.caption || '')}</p>
+    </div>`);
+  } else {
+    // Unmeasurable is its own state, with the reason, never a zero.
+    parts.push(`<div class="empty">${esc((unbanked && unbanked.reason)
+      || 'Spend cannot be attributed to commits in this window yet.')}</div>`);
+  }
+
+  if (survival && survival.available) {
+    const tooRecent = survival.changes_too_recent
+      ? ` ${esc(survival.changes_too_recent)} newer `
+        + (survival.changes_too_recent === 1 ? 'change is' : 'changes are')
+        + ` not old enough to judge yet, worth ${esc(survival.too_recent_label)}.`
+      : '';
+    parts.push(`<p class="receipt-note"><strong>What this is based on.</strong>
+      ${esc(survival.cost_coverage_pct)}% of spend in the last ${esc(survival.window_days)} days is
+      measured, across ${esc(survival.changes_measured)} changes old enough to judge.${tooRecent}
+      Survival is a floor, not a verdict: reformatting and refactoring move attribution away from
+      the original change, so the true figure is at least this good and never worse.</p>`);
+  } else if (survival && survival.reason) {
+    parts.push(`<p class="receipt-note"><strong>What this is based on.</strong>
+      ${esc(survival.reason)}</p>`);
+  }
+
+  return parts.join('');
+}
 function renderInsightHeadline(totals) {
   const split = totals.replayed_tokens_label && totals.replayed_share_pct
     ? `<span class="pill">${esc(totals.new_tokens_label)} new &middot; ${esc(totals.replayed_tokens_label)} replayed (${esc(totals.replayed_share_pct)}%)</span>`
@@ -4184,6 +4238,11 @@ async function loadOnce(resetDetail, forceRefresh) {
   document.getElementById('costPerUseful').textContent =
     `${totals.cost_per_useful_change} value each${totals.inferred_useful_outcomes ? ` · ${totals.inferred_useful_outcomes} to confirm` : ''}`;
   renderSurvivalTile(data.survival || {});
+  // Prove's claim reads the same two objects the Changes ledger and the
+  // survival tile already read: no new payload, just the argument they were
+  // always evidence for, stated where it is asked.
+  document.getElementById('proveClaim').innerHTML =
+    renderProveClaim(data.unbanked, data.survival);
   document.getElementById('preflightDecisions').textContent = totals.preflight_decisions;
   // Same two-step contract as the runway charts: the tiles' numbers are set
   // first, then SVG is appended into nodes collected by attribute. Absent on

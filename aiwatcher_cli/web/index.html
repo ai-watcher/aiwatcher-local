@@ -305,6 +305,18 @@
   </section>
 
   <section id="view-receipts" class="view" hidden>
+    <!-- The claim, above the numbers that back it and the receipts that
+         evidence those. This surface answers "was any of this worth it", and a
+         reader arriving at two tables of decisions has to assemble the answer
+         themselves. Conclusion first, then support, then detail. -->
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title">
+        <div><h2>Was any of this worth it?</h2><p>What the spend bought, what it did not, and how much of it can be judged yet.</p></div>
+        <span class="note-chip local">Local only</span>
+      </div>
+      <div id="proveClaim"></div>
+    </section>
+
     <!-- Moved from Home, together and unchanged. These four answer "was the
          spend worth it", which is this surface's question and not Home's, and
          they are the claim the receipt tables below are evidence for -- the
