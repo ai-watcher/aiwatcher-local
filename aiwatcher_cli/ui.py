@@ -82,7 +82,12 @@ from .ledger import UNBANKED_OUTSIDE_REPO, Ledger, build_ledger, unbanked_summar
 from .pricing import cache_read_cost, estimate_cost, is_subscription_model
 from .runtime_attachment import (
     RuntimeAttachment,
+    format_resume_command,
+    launch_resume_command,
     perform_runtime_return,
+    resolve_resume_cwd,
+    resume_command_for_session,
+    resume_unavailable_reason,
     runtime_attachment_for_session,
     safe_runtime_processes,
 )
@@ -1627,6 +1632,41 @@ def build_runtime_return(session_id: str, days: int = 30) -> dict[str, object]:
     state = session_state(row)
     attachment = runtime_attachment_for_session(row, state=state, processes=safe_runtime_processes())
     return perform_runtime_return(attachment)
+
+
+def build_session_resume(session_id: str, days: int = 30, *, launch: bool = False) -> dict[str, object]:
+    """Resolve the tool's own resume command for one session.
+
+    Deliberately does not consult session_state or runtime processes: resume
+    works on a session that ended days ago in a terminal since closed, which
+    is the case the live-attachment tiers cannot serve at all.
+
+    `command` is always returned when one exists, whether or not `launch`
+    succeeded, so the front end can fall back to copying it.
+    """
+    row = _find_session_row(session_id, days=days)
+    if not row:
+        return {"ok": False, "available": False, "error": "session not found"}
+    command = resume_command_for_session(row.tool, row.session_id)
+    if not command:
+        return {"ok": False, "available": False, "message": resume_unavailable_reason(row.tool, row.session_id)}
+    cwd = resolve_resume_cwd(row.project_path)
+    display = format_resume_command(command, cwd=cwd) or ""
+    result: dict[str, object] = {
+        "ok": True,
+        "available": True,
+        "tool": row.tool,
+        "cwd": cwd,
+        "command": display,
+        "message": f"Copy this into a terminal: `{display}`",
+    }
+    if launch:
+        # launch_resume_command owns ok/message from here: a failed spawn must
+        # report itself so the reader copies instead of assuming a window opened.
+        result.update(launch_resume_command(command, cwd=row.project_path))
+        result["available"] = True
+        result["command"] = display
+    return result
 
 
 def _related_active_workspaces(row: LocalSession, *, limit: int = 3) -> list[str]:
@@ -5972,6 +6012,7 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/companion-skip",
             "/api/ambient-intervention-action",
             "/api/runtime-return",
+            "/api/session-resume",
         }:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
@@ -6121,6 +6162,23 @@ class UIHandler(BaseHTTPRequestHandler):
             result = build_runtime_return(session_id, days)
             self._send(
                 200 if result.get("ok") or result.get("error") != "session not found" else 404,
+                json.dumps(result),
+                "application/json; charset=utf-8",
+            )
+            return
+        if parsed.path == "/api/session-resume":
+            session_id = str(payload.get("session_id", payload.get("id", ""))).strip()
+            if not session_id:
+                self._send(400, json.dumps({"error": "session_id is required"}), "application/json; charset=utf-8")
+                return
+            raw_days = payload.get("days", 30)
+            try:
+                days = max(1, min(90, int(raw_days)))
+            except (TypeError, ValueError):
+                days = 30
+            result = build_session_resume(session_id, days, launch=bool(payload.get("launch")))
+            self._send(
+                404 if result.get("error") == "session not found" else 200,
                 json.dumps(result),
                 "application/json; charset=utf-8",
             )

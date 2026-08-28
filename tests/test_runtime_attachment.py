@@ -5,7 +5,13 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 from aiwatcher_cli.processes import RuntimeProcess
-from aiwatcher_cli.runtime_attachment import perform_runtime_return, runtime_attachment_for_session
+from aiwatcher_cli.runtime_attachment import (
+    format_resume_command,
+    launch_resume_command,
+    perform_runtime_return,
+    resume_command_for_session,
+    runtime_attachment_for_session,
+)
 from aiwatcher_cli.scanner import LocalSession
 
 
@@ -199,6 +205,116 @@ class RuntimeAttachmentTests(unittest.TestCase):
             stderr=-3,
         )
         self.assertIn("exact chat", result["message"])
+
+
+class SessionResumeTests(unittest.TestCase):
+    """Resume is the return path that does not depend on a live runtime."""
+
+    def test_resume_command_uses_each_tool_s_own_session_id(self) -> None:
+        self.assertEqual(
+            resume_command_for_session("claude-code", "7da4ef23-2861-4431-be0d-fcb2a852cc6c"),
+            ["claude", "--resume", "7da4ef23-2861-4431-be0d-fcb2a852cc6c"],
+        )
+        self.assertEqual(
+            resume_command_for_session("codex-cli", "01a02a55-4450-7450-b0a6-d987ca454245"),
+            ["codex", "resume", "01a02a55-4450-7450-b0a6-d987ca454245"],
+        )
+
+    def test_cursor_has_no_resume_because_its_ids_are_synthesised(self) -> None:
+        # scanner builds these as f"cursor-{log_dir.name}" -- not an id Cursor
+        # would recognise, so claiming a resume would be a lie.
+        self.assertIsNone(resume_command_for_session("cursor", "cursor-abc123"))
+        self.assertIsNone(resume_command_for_session("claude-code", ""))
+        self.assertIsNone(resume_command_for_session("claude-code", "old-session"))
+        self.assertIsNone(resume_command_for_session("codex-cli", "abc; echo bad"))
+
+    def test_historical_session_still_offers_resume(self) -> None:
+        """The regression that matters: resume must not inherit the live gate.
+
+        A session whose terminal has since been closed lands on the
+        'historical' tier with available=False. That is correct for opening a
+        workspace and wrong for resuming a conversation.
+        """
+        session_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        session = LocalSession(
+            session_id=session_id,
+            tool="claude-code",
+            project_path="/repo",
+            updated_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        )
+
+        attachment = runtime_attachment_for_session(session, state={"status": "stale"}, processes=[])
+
+        self.assertEqual(attachment.level, "historical")
+        self.assertFalse(attachment.available)
+        payload = attachment.to_json()
+        self.assertTrue(payload["resume_available"])
+        self.assertEqual(payload["resume_command"], f"claude --resume {session_id}")
+
+    def test_resume_label_does_not_claim_to_return_you_to_the_original_window(self) -> None:
+        session = LocalSession(
+            session_id="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            tool="claude-code",
+            project_path="/repo",
+            updated_at=datetime.now(timezone.utc),
+        )
+        payload = runtime_attachment_for_session(session, state={"status": "active"}, processes=[]).to_json()
+        self.assertEqual(payload["resume_label"], "Resume in terminal")
+        self.assertIn("does not", str(payload["resume_reason"]).lower())
+
+    def test_launch_reports_failure_instead_of_claiming_a_window_opened(self) -> None:
+        with patch("aiwatcher_cli.runtime_attachment.shutil.which", return_value=None):
+            result = launch_resume_command(["claude", "--resume", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"])
+        self.assertFalse(result["ok"])
+        self.assertIn("PATH", str(result["message"]))
+
+    def test_launch_falls_back_when_the_platform_has_no_terminal_path(self) -> None:
+        with (
+            patch("aiwatcher_cli.runtime_attachment.shutil.which", return_value="/usr/bin/claude"),
+            patch("aiwatcher_cli.runtime_attachment.sys.platform", "linux"),
+        ):
+            result = launch_resume_command(["claude", "--resume", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"])
+        self.assertFalse(result["ok"])
+        self.assertIn("Copy the command", str(result["message"]))
+
+    def test_resume_command_display_quotes_shell_values_and_cwd(self) -> None:
+        session_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        self.assertEqual(
+            format_resume_command(["claude", "--resume", session_id], cwd="/tmp/My Repo", platform="darwin"),
+            f"cd '/tmp/My Repo' && claude --resume {session_id}",
+        )
+        self.assertEqual(
+            format_resume_command(["codex", "resume", session_id], cwd=r"C:\Users\Me\My Repo", platform="win32"),
+            f'cd /d "C:\\Users\\Me\\My Repo" && codex resume {session_id}',
+        )
+
+    def test_macos_launch_quotes_malicious_argument_before_applescript(self) -> None:
+        with (
+            patch("aiwatcher_cli.runtime_attachment.shutil.which", return_value="/usr/bin/claude"),
+            patch("aiwatcher_cli.runtime_attachment.sys.platform", "darwin"),
+            patch("aiwatcher_cli.runtime_attachment.subprocess.Popen") as popen,
+        ):
+            result = launch_resume_command(["claude", "--resume", "abc; echo bad"])
+
+        self.assertTrue(result["ok"])
+        script = popen.call_args.args[0][2]
+        self.assertIn("claude --resume 'abc; echo bad'", script)
+        self.assertNotIn("claude --resume abc; echo bad", script)
+
+    def test_windows_launch_uses_argv_and_recorded_workspace(self) -> None:
+        session_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        with (
+            patch("aiwatcher_cli.runtime_attachment.os.path.isdir", return_value=True),
+            patch("aiwatcher_cli.runtime_attachment.shutil.which", return_value=r"C:\Tools\codex.exe"),
+            patch("aiwatcher_cli.runtime_attachment.sys.platform", "win32"),
+            patch("aiwatcher_cli.runtime_attachment.subprocess.Popen") as popen,
+        ):
+            result = launch_resume_command(["codex", "resume", session_id], cwd=r"C:\Users\Me\My Repo")
+
+        self.assertTrue(result["ok"])
+        popen.assert_called_once()
+        self.assertEqual(popen.call_args.args[0], ["codex", "resume", session_id])
+        self.assertEqual(popen.call_args.kwargs["cwd"], r"C:\Users\Me\My Repo")
 
 
 if __name__ == "__main__":

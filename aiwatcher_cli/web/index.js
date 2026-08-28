@@ -602,6 +602,40 @@ async function returnToRuntime(sessionId) {
     showToast('Could not reach the local AIWatcher server.', 'error');
   }
 }
+// Resume reopens the CONVERSATION in a new terminal via the tool's own
+// `--resume`. It is offered whatever the live-attachment tier above says,
+// because it is the one return path that survives a closed terminal -- and on
+// Windows it is the only one that can fire at all.
+//
+// Launching a terminal is the convenience; copying the command always works.
+// A failed launch therefore falls back to the clipboard rather than reporting
+// a window that never opened.
+async function resumeSession(sessionId, launch = true) {
+  try {
+    const res = await fetch('/api/session-resume', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({session_id: sessionId, launch})
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      showToast(data.error || 'Could not find this local session.', 'error');
+      return;
+    }
+    if (!data.available) {
+      showToast(data.message || 'This tool has no local resume command.', 'error');
+      return;
+    }
+    if (data.ok && launch) {
+      showToast(data.message || 'Opened a terminal running this session.', 'success');
+      return;
+    }
+    const copied = await copyText(data.command, 'Resume command copied — paste it in a terminal');
+    if (copied && launch) showToast(data.message || 'Could not open a terminal; command copied instead.', 'error');
+  } catch (error) {
+    showToast('Could not reach the local AIWatcher server.', 'error');
+  }
+}
 function openDrawer(title) {
   const content = document.getElementById('detailContent');
   if (content) content.aiwSettled = null;
@@ -716,6 +750,12 @@ function runtimeReturnPanel(runtime, sourcePath) {
   const action = available
     ? `<button class="btn-quiet" data-session="${esc(runtime.session_id || '')}" onclick="returnToRuntime(this.dataset.session)">${esc(runtime.action_label || 'Open workspace')}</button>`
     : `<span class="action-note">No exact return — ${esc(exactReason)}</span>`;
+  // "Resume in terminal", never "Return to session": this reopens the
+  // conversation somewhere new, and the label has to say which.
+  const resumeAction = runtime.resume_available
+    ? `<button class="btn-quiet" data-session="${esc(runtime.session_id || '')}" onclick="resumeSession(this.dataset.session)">${esc(runtime.resume_label || 'Resume in terminal')}</button>`
+      + `<button class="btn-quiet" data-session="${esc(runtime.session_id || '')}" onclick="resumeSession(this.dataset.session, false)">Copy resume command</button>`
+    : '';
   return `<section class="detail-section runtime-return">
     <details class="aiw-details">
       <summary>Return, share, and source log</summary>
@@ -724,8 +764,9 @@ function runtimeReturnPanel(runtime, sourcePath) {
           <div><h3>Return target</h3><p>${esc(reason)}</p></div>
           <span class="session-state ${available ? 'active' : 'ended'}">${esc(targetLabel)}</span>
         </div>
-        <div class="copy-row">${action}<button class="btn-quiet" data-source="${esc(source)}" onclick="copyText(this.dataset.source, 'Session log path copied')">Copy log path</button></div>
+        <div class="copy-row">${resumeAction}${action}<button class="btn-quiet" data-source="${esc(source)}" onclick="copyText(this.dataset.source, 'Session log path copied')">Copy log path</button></div>
         <div class="runtime-source">
+          <strong>Resume</strong><span>${esc(runtime.resume_reason || 'No local resume command for this tool.')}</span>
           <strong>Last activity</strong><span>${esc(updated ? dateLabel(updated) : 'unknown')}</span>
           <strong>Identity</strong><span>${esc(identityReason)}</span>
           <strong>Session log</strong><span>${esc(source)}</span>
