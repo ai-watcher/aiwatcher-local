@@ -73,24 +73,19 @@
          starts or ends -- peripheral vision notices movement, not content. -->
     <section id="ambient" class="ambient" aria-live="polite" hidden></section>
 
-    <!-- A standing summary of the window, under the panel about right now. Cut
-         with the rest of Home on the grounds that each number appears elsewhere,
-         which was true and missed the point: four numbers in four places is not
-         the same as four numbers in one glance. Three, not four -- preflight
-         decisions moved to Prove and duplicating it back would undo that. -->
-    <section class="grid kpis" style="margin-top:14px">
-      <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub" id="costPerUseful">-</div><div class="metric-spark" data-tile-spark="usefulOutcomes" hidden></div></div>
-      <!-- Promoted out of the Useful outcomes card, where it was a second metric
-           reading as a footnote to the first: a whole sentence carrying a rate, a
-           base and a window, which made that one card 53px taller than its
-           neighbours and set the height of the row. It is the other ratio this
-           dashboard is willing to judge, so it gets a slot, not a sentence. The
-           green rail is the shared identity of the two outcome-quality ratios,
-           not a claim about the value -- it is green at every value. -->
-      <div class="card metric-card metric-green"><div class="label">Cost per surviving line</div><div class="value" id="costPerSurviving">-</div><div class="sub" id="costPerSurvivingSub">-</div><div class="metric-spark" id="survivalMeter" hidden></div></div>
-      <div class="card metric-card metric-blue"><div class="label">Sessions observed</div><div class="value" id="sessions">-</div><div class="sub">This machine only</div><div class="metric-spark" data-tile-spark="sessions" hidden></div></div>
-      <div class="card metric-card metric-neutral"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div><div class="metric-spark" data-tile-spark="apiValue" hidden></div></div>
-    </section>
+    <!-- The window summary that used to sit here is on Prove now. It was moved
+         once before on the grounds that each number appears elsewhere, and
+         restored with the right objection: four numbers in four places is not
+         the same as four numbers in one glance. That objection still stands and
+         this move does not reopen it -- the four travel together and are still
+         read across, they are simply read across on the surface that asks the
+         question they answer.
+
+         Home asks "is something happening right now that I should deal with".
+         Cost per useful change and cost per surviving line answer "was the
+         spend worth it", which is a question you ask at the end of a period,
+         not mid-task with an editor open. On Prove they stop being a standing
+         summary and become the evidence under a claim. -->
 
     <!-- Receipt only, and hidden until you act. The alert this element used to
          carry was the same critical-context message the ambient surface now
@@ -254,6 +249,35 @@
   </section>
 
   <section id="view-receipts" class="view" hidden>
+    <!-- Moved from Home, together and unchanged. These four answer "was the
+         spend worth it", which is this surface's question and not Home's, and
+         they are the claim the receipt tables below are evidence for -- the
+         two had been on separate screens, so Home carried figures with no
+         backing and Prove carried backing with no figures.
+
+         The ids are load()'s, not this section's: it writes them by
+         getElementById and data-tile-spark, so the row keeps filling from
+         where it always did. They stay in one row for the reason they were
+         restored to Home in the first place -- four numbers in four places is
+         not four numbers in one glance.
+
+         They sit above the receipts and below nothing yet. The sentence that
+         should lead this surface -- the unbanked headline, already written in
+         the payload -- is a separate change. -->
+    <section class="grid kpis" style="margin-bottom:14px">
+      <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub" id="costPerUseful">-</div><div class="metric-spark" data-tile-spark="usefulOutcomes" hidden></div></div>
+      <!-- Promoted out of the Useful outcomes card, where it was a second metric
+           reading as a footnote to the first: a whole sentence carrying a rate, a
+           base and a window, which made that one card 53px taller than its
+           neighbours and set the height of the row. It is the other ratio this
+           dashboard is willing to judge, so it gets a slot, not a sentence. The
+           green rail is the shared identity of the two outcome-quality ratios,
+           not a claim about the value -- it is green at every value. -->
+      <div class="card metric-card metric-green"><div class="label">Cost per surviving line</div><div class="value" id="costPerSurviving">-</div><div class="sub" id="costPerSurvivingSub">-</div><div class="metric-spark" id="survivalMeter" hidden></div></div>
+      <div class="card metric-card metric-blue"><div class="label">Sessions observed</div><div class="value" id="sessions">-</div><div class="sub">This machine only</div><div class="metric-spark" data-tile-spark="sessions" hidden></div></div>
+      <div class="card metric-card metric-neutral"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div><div class="metric-spark" data-tile-spark="apiValue" hidden></div></div>
+    </section>
+
     <!-- The preflight count used to be a standalone card floating above this
          one with nothing connecting them (P3-4). It is an inline stat on the
          card it describes. Both ids are kept: load() writes to them. -->
