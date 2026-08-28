@@ -37,6 +37,10 @@
   <section class="runtime-strip" aria-live="polite">
     <div class="runtime-copy">
       <span id="watcherPill" class="cache-pill building">Watcher unknown</span>
+      <!-- What is running right now, per tool. Hidden when nothing is, so an
+           idle machine does not carry a permanent row of zeros. No status
+           colour: a count of running sessions is neither good nor bad news. -->
+      <span id="presenceStrip" class="presence-strip" hidden></span>
       <span id="cacheStatus">Loading local index...</span>
       <span id="freshness" class="freshness" aria-live="off"></span>
     </div>

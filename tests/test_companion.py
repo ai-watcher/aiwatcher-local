@@ -5,7 +5,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from aiwatcher_cli import companion
+from datetime import datetime, timedelta, timezone
+
+from aiwatcher_cli import companion, ui
+from aiwatcher_cli.scanner import LocalSession
 
 
 class CompanionLifecycleTests(unittest.TestCase):
@@ -254,3 +257,160 @@ class CompanionLifecycleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WaitingSessionCompanionTests(unittest.TestCase):
+    """The Companion's whole job is saying when something needs you."""
+
+    # Presence is built here from real sessions and real signals rather than
+    # stubbed into the summary, because the summary is exactly where it must
+    # not come from: it is cached for six hours on disk, and this state is a
+    # fact about right now.
+    def _summary(self, **extra):
+        return {
+            "totals": {"window_label": "Last 7 days", "sessions": 3},
+            "watcher": {"running": True},
+            **extra,
+        }
+
+    def _session(self, session_id="abc", *, project="/repo/aiwatcher-local", idle_minutes=9.0):
+        return LocalSession(
+            session_id=session_id,
+            tool="claude-code",
+            project_path=project,
+            raw_cwd=project,
+            updated_at=datetime.now(timezone.utc) - timedelta(minutes=idle_minutes),
+        )
+
+    def _signal(self, session_id="abc", *, minutes_ago=7.0):
+        return {session_id: {
+            "at": (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).isoformat(),
+            "tool": "claude-code",
+            "kind": "permission",
+        }}
+
+    def _state(self, summary, *, sessions=(), signals=None, gate=None):
+        with (
+            patch.object(ui, "build_summary_cached", return_value=summary),
+            patch.object(ui, "active_prompt_gate", return_value=gate),
+            patch.object(ui, "_cached_session_rows", return_value=list(sessions)),
+            patch.object(ui, "session_waiting_signals", return_value=signals or {}),
+        ):
+            return ui.build_companion_state()
+
+    def test_a_waiting_session_takes_over_the_companion(self):
+        # It used to read "Watching quietly - 7 days: 3 sessions" while a
+        # session sat blocked, which is the one case this surface must not miss.
+        state = self._state(self._summary(), sessions=[self._session()], signals=self._signal())
+        self.assertEqual(state["state"], "session_waiting")
+        self.assertEqual(state["label"], "Waiting on you")
+        self.assertIn("7m", state["subtitle"])
+        self.assertIn("Claude", state["subtitle"])
+
+    def test_the_subtitle_fits_the_widget(self):
+        # The widget truncates at 46 characters. A full project path spends
+        # thirty of them on a prefix identical for every project, and the first
+        # real render cut the project name off the end.
+        for minutes, project in (
+            (7.0, "/Users/dannylo/very-long-project-name-here"),
+            (0.2, "/Users/dannylo/aiwatcher-local"),
+        ):
+            with self.subTest(project=project):
+                state = self._state(
+                    self._summary(),
+                    sessions=[self._session(project=project, idle_minutes=minutes + 2)],
+                    signals=self._signal(minutes_ago=minutes),
+                )
+                self.assertLessEqual(len(str(state["subtitle"])), 46)
+                self.assertIn(project.rsplit("/", 1)[-1][:12], str(state["subtitle"]))
+
+    def test_a_sub_minute_wait_reads_as_a_sentence(self):
+        # The per-session label is "waiting on you" under a minute, and pasting
+        # that in gave "Claude - aiwatcher-local - on you".
+        state = self._state(self._summary(), sessions=[self._session(idle_minutes=0.5)], signals=self._signal(minutes_ago=0.3))
+        self.assertNotIn("on you", str(state["subtitle"]))
+
+    def test_it_offers_a_way_into_the_session(self):
+        state = self._state(self._summary(), sessions=[self._session("sess-42")], signals=self._signal("sess-42"))
+        self.assertEqual(state["primary_action"], "open_url")
+        self.assertIn("sess-42", str(state["primary_url"]))
+        self.assertEqual(state["primary_session_id"], "sess-42")
+
+    def test_the_prompt_gate_still_outranks_it(self):
+        # There AIWatcher is itself holding a prompt, and nothing proceeds
+        # until the developer answers.
+        state = self._state(
+            self._summary(), sessions=[self._session()], signals=self._signal(),
+            gate={"id": "g1", "tool": "claude-code", "risk": "high", "url": "/?view=prompt"},
+        )
+        self.assertEqual(state["state"], "prompt_gate")
+
+    def test_it_outranks_every_advisory_state(self):
+        # Fresh start, proof and optimize are advice about work still moving.
+        state = self._state(
+            self._summary(optimize={"status": "needs_action",
+                                    "top": {"project": "/repo", "summary": "stale worktrees"}}),
+            sessions=[self._session()], signals=self._signal(),
+        )
+        self.assertEqual(state["state"], "session_waiting")
+
+    def test_the_longest_wait_leads(self):
+        state = self._state(
+            self._summary(),
+            sessions=[self._session("short", idle_minutes=3.0), self._session("long", idle_minutes=17.0)],
+            signals={**self._signal("short", minutes_ago=2.0), **self._signal("long", minutes_ago=15.0)},
+        )
+        self.assertIn("15m", state["subtitle"])
+        self.assertEqual(state["primary_session_id"], "long")
+
+    def test_several_waiting_sessions_say_so(self):
+        state = self._state(
+            self._summary(),
+            sessions=[self._session("a", idle_minutes=17.0), self._session("b", idle_minutes=3.0)],
+            signals={**self._signal("a", minutes_ago=15.0), **self._signal("b", minutes_ago=2.0)},
+        )
+        self.assertIn("2 sessions", state["subtitle"])
+        self.assertIn("15m", state["subtitle"])
+
+    def test_nothing_waiting_leaves_the_companion_alone(self):
+        state = self._state(self._summary(), sessions=[self._session("busy", idle_minutes=0.1)], signals={})
+        self.assertNotEqual(state["state"], "session_waiting")
+
+    def test_an_unreadable_signal_store_does_not_break_it(self):
+        with (
+            patch.object(ui, "build_summary_cached", return_value=self._summary()),
+            patch.object(ui, "active_prompt_gate", return_value=None),
+            patch.object(ui, "_cached_session_rows", return_value=[]),
+            patch.object(ui, "session_waiting_signals", side_effect=OSError("locked")),
+        ):
+            self.assertNotEqual(ui.build_companion_state()["state"], "session_waiting")
+
+    def test_it_does_not_read_the_cached_summary_for_this(self):
+        # The summary is cached for six hours on disk. Served from there, a
+        # wait that started thirty seconds ago would not appear until the cache
+        # turned over, and the Companion would sit quiet through it.
+        stale = self._summary(presence={"sessions": [
+            {"session_id": "ghost", "state": "waiting", "label": "waiting 3h",
+             "idle_seconds": 10800.0, "tool": "claude-code", "project_path": "/repo/old"},
+        ]})
+        state = self._state(stale, sessions=[], signals={})
+        self.assertNotEqual(state["state"], "session_waiting")
+
+
+class WaitingWidgetAttentionTests(unittest.TestCase):
+    """A state the widget does not know about renders calmly."""
+
+    @classmethod
+    def setUpClass(cls):
+        from aiwatcher_cli import native_overlay
+
+        cls.source = Path(native_overlay.__file__).read_text(encoding="utf-8")
+
+    def test_both_widgets_treat_it_as_needing_attention(self):
+        # Left out of these lists it would print "Waiting on you" in the calm
+        # style with no button -- urgent words, idle appearance.
+        for marker in ("func hasPrimaryAction()", "func needsAttentionState()",
+                       "def has_primary_action()", "needs_attention = state_var.get()"):
+            with self.subTest(marker=marker):
+                block = self.source[self.source.index(marker):]
+                self.assertIn("session_waiting", block[:400])

@@ -194,3 +194,64 @@ class RuntimeNudgeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BlockedSessionNudgeTests(unittest.TestCase):
+    """The one signal whose value is that you are somewhere else."""
+
+    def _nudge(self, *, idle_seconds: float, foreground: str | None = "code", kind: str = "session_blocked"):
+        now = datetime.now(timezone.utc)
+        session = LocalSession(
+            session_id="s1",
+            tool="claude-code",
+            surface="cli",
+            updated_at=now - timedelta(seconds=idle_seconds),
+        )
+        attachment = RuntimeAttachment(
+            session_id="s1", level="historical", mode="none", label="",
+            action_label="", available=False, confidence="low", reason="",
+            tool="claude-code",
+        )
+        return build_runtime_nudge(
+            session,
+            {"signal_kind": kind, "reason": "Waiting on you."},
+            attachment,
+            now=now,
+            active_foreground_tool=foreground,
+        )
+
+    def test_it_interrupts_even_when_you_are_in_another_app(self):
+        # Every other signal is held unless its tool is in front of you.
+        # Inverted here: being elsewhere is the entire reason this exists.
+        nudge = self._nudge(idle_seconds=6 * 60, foreground="code")
+        self.assertTrue(nudge.eligible, nudge.hold_reason)
+        self.assertEqual(nudge.title, "A session is waiting for you")
+
+    def test_the_same_situation_still_holds_a_context_warning(self):
+        # Proves the inversion is scoped to this signal and did not loosen the
+        # policy for everything else.
+        nudge = self._nudge(idle_seconds=6 * 60, foreground="code", kind="critical_context")
+        self.assertFalse(nudge.eligible)
+
+    def test_a_short_wait_is_held(self):
+        # At the keyboard you answer in seconds. Interrupting mid-answer is how
+        # this feature gets muted.
+        nudge = self._nudge(idle_seconds=20)
+        self.assertFalse(nudge.eligible)
+        self.assertIn("still be answering", nudge.hold_reason or "")
+
+    def test_a_long_wait_still_interrupts(self):
+        # MAX_ACTIVE_IDLE_SECONDS would go quiet at fifteen minutes, which is
+        # when the wait has cost the most.
+        nudge = self._nudge(idle_seconds=45 * 60)
+        self.assertTrue(nudge.eligible, nudge.hold_reason)
+
+    def test_it_needs_no_second_sighting(self):
+        # REQUIRED_OBSERVATIONS confirms signals inferred from noisy timestamps.
+        # This one was reported by the tool; a confirmation poll is pure latency.
+        self.assertEqual(self._nudge(idle_seconds=6 * 60).required_observations, 1)
+
+    def test_it_offers_a_way_back(self):
+        nudge = self._nudge(idle_seconds=6 * 60)
+        self.assertEqual(nudge.primary_label, "Return to session")
+        self.assertEqual(nudge.action, "return_session")

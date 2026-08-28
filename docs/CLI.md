@@ -22,7 +22,7 @@ anywhere. See [Privacy](../README.md#privacy) for the full contract.
 - [Prompt review and launch](#prompt-review-and-launch) -- `preflight`, `codex`, `claude`
 - [Continuity](#continuity) -- `handoff`, `resume`, `log-decision`
 - [Monitoring](#monitoring) -- `watch`, `companion`, `statusline`, `processes`, `run`
-- [Hooks and wrappers](#hooks-and-wrappers) -- `install-claude-hook`, `uninstall-claude-hook`, `install-claude-command-gate`, `uninstall-claude-command-gate`, `install-claude-decision-log`, `uninstall-claude-decision-log`, `install-codex-hook`, `uninstall-codex-hook`, `install-cursor-hook`, `uninstall-cursor-hook`, `install-codex-wrapper`, `uninstall-codex-wrapper`, `install-commit-hook`, `uninstall-commit-hook`, `install-statusline`, `uninstall-statusline`, `hook-status`
+- [Hooks and wrappers](#hooks-and-wrappers) -- `install-claude-hook`, `uninstall-claude-hook`, `install-claude-command-gate`, `uninstall-claude-command-gate`, `install-claude-activity-hook`, `uninstall-claude-activity-hook`, `install-claude-decision-log`, `uninstall-claude-decision-log`, `install-codex-hook`, `uninstall-codex-hook`, `install-cursor-hook`, `uninstall-cursor-hook`, `install-codex-wrapper`, `uninstall-codex-wrapper`, `install-commit-hook`, `uninstall-commit-hook`, `install-statusline`, `uninstall-statusline`, `hook-status`
 - [Data and integrations](#data-and-integrations) -- `export`, `mcp`, `ui`
 - [Internal hook commands](#internal-hook-commands)
 
@@ -827,6 +827,51 @@ aiwatcher uninstall-claude-command-gate --scope user
 | `--scope` | `project`, `user` | `project` | Remove from this project's Claude settings or your user-level settings |
 | `--project-dir` | text |  | Project to target with --scope project; defaults to the current directory |
 
+### `aiwatcher install-claude-activity-hook`
+
+Print or install the Claude Code activity hook, so AIWatcher can tell you when a session is waiting on you
+
+```sh
+aiwatcher install-claude-activity-hook [--write]
+                                       [--scope {project,user}]
+                                       [--project-dir PROJECT_DIR]
+                                       [--command COMMAND]
+```
+
+Examples:
+
+```sh
+aiwatcher install-claude-activity-hook                    # print, write nothing
+aiwatcher install-claude-activity-hook --write
+```
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--write` | flag |  | Write the hook into Claude settings |
+| `--scope` | `project`, `user` | `user` | Write to your user-level Claude settings (default) or this project's |
+| `--project-dir` | text |  | Project to target with --scope project; defaults to the current directory |
+| `--command` | text |  | AIWatcher command to put in Claude settings |
+
+### `aiwatcher uninstall-claude-activity-hook`
+
+Remove the AIWatcher Claude Code activity hook
+
+```sh
+aiwatcher uninstall-claude-activity-hook [--scope {project,user}]
+                                         [--project-dir PROJECT_DIR]
+```
+
+Example:
+
+```sh
+aiwatcher uninstall-claude-activity-hook --scope project
+```
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--scope` | `project`, `user` | `user` | Remove from your user-level Claude settings (default) or this project's |
+| `--project-dir` | text |  | Project to target with --scope project; defaults to the current directory |
+
 ### `aiwatcher install-claude-decision-log`
 
 Print or install a personal Claude Code convention for logging rejected decisions
@@ -1154,3 +1199,4 @@ recognizable.
 | `aiwatcher codex-hook` | Codex prompt handler. Accepts `--text` and `--gate`. |
 | `aiwatcher cursor-hook` | Cursor prompt handler. Accepts `--text` and `--gate`. |
 | `aiwatcher claude-pretooluse-hook` | Claude Code PreToolUse dangerous-command gate. Accepts `--text` and `--gate`. |
+| `aiwatcher claude-activity-hook` | Claude Code Notification handler. Records that a session is waiting on you, and nothing it said. |

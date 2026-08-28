@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePath
 from types import SimpleNamespace
 from typing import Any, Callable
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
 from . import analyst, prompt_signals
@@ -43,6 +43,7 @@ from .metrics import (
     replayed_context_cost,
 )
 from .local_state import (
+    session_waiting_signals,
     COMMAND_GATE_BLOCKED_DECISIONS,
     MAX_COMMAND_DECISIONS_STORED,
     PROMPT_MODIFIED_DECISIONS,
@@ -86,6 +87,12 @@ from .runtime_attachment import (
     safe_runtime_processes,
 )
 from .runtime_nudge import foreground_tool
+from .session_presence import (
+    LIVE_WINDOW_MINUTES,
+    live_presence,
+    presence_for_sessions,
+    tool_label,
+)
 from .session_health import (
     CRITICAL_TOKENS_PER_TURN,
     PRESSURE_TOKENS_PER_TURN,
@@ -136,7 +143,10 @@ SUMMARY_CACHE_SCHEMA_VERSION = 7
 SESSION_SNAPSHOT_SCHEMA_VERSION = 1
 SUMMARY_BACKGROUND_COOLDOWN_SECONDS = 8
 SUMMARY_WINDOWS = (1, 7, 30)
-ACTIVE_SESSION_MINUTES = 30
+# One definition of "live", shared with session_presence, which subdivides
+# this window into working/quiet. Aliased rather than duplicated so the two
+# surfaces cannot drift into disagreeing about when a session stops counting.
+ACTIVE_SESSION_MINUTES = LIVE_WINDOW_MINUTES
 RECENT_SESSION_HOURS = 4
 FRESH_START_PROJECT_COOLDOWN_MINUTES = 2 * 24 * 60
 UNATTRIBUTED_PROJECT = "__unattributed__"
@@ -4600,6 +4610,12 @@ def build_summary(
         "cache_schema_version": SUMMARY_CACHE_SCHEMA_VERSION,
         "summary_complete": True,
         "_session_index": _session_index_payload(all_rows),
+        # all_rows, not the window-clipped rows: whether something is
+        # running right now does not change because you switched the
+        # dropdown to 24 hours. Analyst spawns are still in here and stay
+        # flagged rather than filtered, so AIWatcher's own live sessions
+        # cannot pass as the user's.
+        "presence": live_presence(all_rows, now=now),
         "days": days,
         # Spec 7. "No LLM calls" stopped being true the moment Second Opinion
         # could spawn one, and a privacy claim that is only true until a
@@ -4912,6 +4928,11 @@ def _build_summary_shell(
         # placeholders, so this payload must never reach the disk cache.
         "summary_complete": False,
         "_session_index": _session_index_payload(all_rows),
+        # Same figure, from the cached snapshot, so it can only be behind
+        # and never ahead: a session started since the snapshot is missing
+        # rather than invented, and one that ended reads quiet rather than
+        # working. The background refresh corrects both within a tick.
+        "presence": live_presence(all_rows, now=now),
         "days": days,
         # Spec 7. "No LLM calls" stopped being true the moment Second Opinion
         # could spawn one, and a privacy claim that is only true until a
@@ -5296,6 +5317,74 @@ def build_companion_state() -> dict[str, object]:
             "control_url": str(gate.get("url") or "/?view=prompt"),
             "detail": "A hook paused this prompt locally. Review it before the AI tool continues.",
         }
+    # Second only to the prompt gate, and ahead of every advisory state below.
+    # The gate outranks it because there AIWatcher is itself holding a prompt
+    # and nothing proceeds until the developer answers. Everything after this
+    # -- fresh start, proof, optimize -- is advice about work that is still
+    # moving. A session that has stopped and cannot continue without you is the
+    # one thing on this surface you are actually blocking.
+    #
+    # This widget's own detail line promises it will "interrupt only when a
+    # matching active session has a justified action". A blocked session is the
+    # most justified action the product has, and until this branch existed it
+    # was the one case the Companion sat quiet through.
+    # Computed here, not read from `summary`. The summary is an aggregate about
+    # a seven-day window and is cached accordingly -- 45s in memory, six hours
+    # on disk -- which is correct for spend totals and wrong for a fact about
+    # this second. Served from that cache, "waiting on you" could be hours old,
+    # and the Companion would sit quiet through the wait it exists to report.
+    #
+    # presence_for_sessions rather than live_presence: this only needs the
+    # waiting rows, and live_presence also resolves working trees for the
+    # collision check, which shells out to git per directory.
+    try:
+        waiting_signals = session_waiting_signals()
+    except OSError:
+        waiting_signals = {}
+    waiting_rows = [
+        row.to_json()
+        for row in presence_for_sessions(_cached_session_rows(), waiting=waiting_signals)
+        if row.state == "waiting"
+    ] if waiting_signals else []
+    if waiting_rows:
+        # Longest wait first: how long you have been the bottleneck is the part
+        # worth reading, and with several waiting the count goes in the sentence
+        # rather than replacing the duration.
+        waiting_rows.sort(key=lambda row: float(row.get("idle_seconds") or 0.0), reverse=True)
+        first = waiting_rows[0]
+        session_id = str(first.get("session_id") or "")
+        waited = str(first.get("label") or "").replace("waiting ", "", 1).strip()
+        # Basename, not the path. The widget truncates its subtitle at 46
+        # characters, and "/Users/dannylo/aiwatcher-local" spends thirty of them
+        # on a prefix that is the same for every project the developer has --
+        # measured on the real surface, where the project name was the part
+        # being cut. The label above already says what is happening; this line
+        # only has to say which session and for how long.
+        raw_project = str(first.get("project_path") or "").rstrip("/")
+        project = raw_project.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] or "this machine"
+        tool = tool_label(str(first.get("tool") or ""))
+        if len(waiting_rows) == 1:
+            subtitle = f"{tool} · {project}" + (f" · {waited}" if waited and waited != "on you" else "")
+        else:
+            subtitle = f"{len(waiting_rows)} sessions · longest {waited or project}"
+        return {
+            **base,
+            "state": "session_waiting",
+            "label": "Waiting on you",
+            "title": "Waiting on you",
+            "subtitle": subtitle,
+            # Opens the session in the dashboard, which carries the Return
+            # control already. The widgets bind runtime-return to the Fresh
+            # Start path only, and adding an action to two UI toolkits -- one of
+            # them Swift that cannot be built or run here -- to save a click is
+            # a trade in the wrong direction.
+            "primary_label": "Open session",
+            "primary_action": "open_url",
+            "primary_session_id": session_id,
+            "primary_url": f"/?session={quote(session_id, safe='')}" if session_id else "/",
+            "detail": "This session asked for permission and has done nothing since.",
+        }
+
     fresh_start_candidates = _fresh_start_context_candidates(summary)
     if len(fresh_start_candidates) > 1:
         foreground_candidate = next(

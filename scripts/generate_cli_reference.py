@@ -74,6 +74,8 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
             "uninstall-claude-hook",
             "install-claude-command-gate",
             "uninstall-claude-command-gate",
+            "install-claude-activity-hook",
+            "uninstall-claude-activity-hook",
             "install-claude-decision-log",
             "uninstall-claude-decision-log",
             "install-codex-hook",
@@ -159,6 +161,11 @@ EXAMPLES: dict[str, list[str]] = {
     "install-codex-hook": ["aiwatcher install-codex-hook --write"],
     "install-cursor-hook": ["aiwatcher install-cursor-hook --write"],
     "install-codex-wrapper": ["aiwatcher install-codex-wrapper --write --shell-rc ~/.bashrc"],
+    "install-claude-activity-hook": [
+        "aiwatcher install-claude-activity-hook                    # print, write nothing",
+        "aiwatcher install-claude-activity-hook --write",
+    ],
+    "uninstall-claude-activity-hook": ["aiwatcher uninstall-claude-activity-hook --scope project"],
     "install-claude-command-gate": [
         "aiwatcher install-claude-command-gate                    # print, write nothing",
         "aiwatcher install-claude-command-gate --write --scope user",
@@ -186,6 +193,7 @@ INTERNAL_COMMANDS: list[tuple[str, str]] = [
     ("codex-hook", "Codex prompt handler. Accepts `--text` and `--gate`."),
     ("cursor-hook", "Cursor prompt handler. Accepts `--text` and `--gate`."),
     ("claude-pretooluse-hook", "Claude Code PreToolUse dangerous-command gate. Accepts `--text` and `--gate`."),
+    ("claude-activity-hook", "Claude Code Notification handler. Records that a session is waiting on you, and nothing it said."),
 ]
 
 HEADER = """<!--

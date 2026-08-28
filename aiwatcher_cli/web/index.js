@@ -774,6 +774,104 @@ function renderWatcher(watcher) {
   commandText.textContent = watcherCommand || 'aiwatcher watch';
   start.hidden = false;
 }
+// ---------------------------------------------------------------------------
+// What is running right now.
+//
+// The strip states sessions, never sub-agents: a sub-agent runs inside its
+// parent's session, so counting it here would inflate the one number this line
+// exists to give. It also only ever sees this machine -- another computer, or a
+// cloud session, writes nothing locally -- which is why the copy says "on this
+// machine" rather than implying a total.
+//
+// Nothing live means nothing rendered. A permanent "0 running" would be a row
+// of zeros on an idle machine, and this strip is on every view.
+// ---------------------------------------------------------------------------
+function presenceText(presence) {
+  const tools = (presence && presence.tools) || [];
+  return tools
+    .filter(tool => tool.live > 0)
+    .map(tool => {
+      const bits = [];
+      if (tool.waiting) bits.push(tool.waiting + ' waiting');
+      if (tool.working) bits.push(tool.working + ' working');
+      if (tool.quiet) bits.push(tool.quiet + ' quiet');
+      // AIWatcher spawns its own sessions for Second Opinion. Counted --
+      // hiding what a feature costs is the thing this product refuses to do --
+      // but named on the tool it belongs to. Floated to the end of the line it
+      // read as a comment on whichever tool happened to be listed last.
+      const mine = Number(tool.analyst_runs) || 0;
+      const note = mine
+        ? ' <span class="presence-note">(' + mine + " is AIWatcher's own)</span>"
+        : '';
+      return esc(tool.label || tool.tool) + ' ' + bits.join(', ') + note;
+    })
+    .join('  ·  ');
+}
+
+// A session that has stopped and cannot continue without you. This is the only
+// state here that does not come from a timestamp -- the tool reports it through
+// a hook -- which is why it is the only one allowed to say "it needs you"
+// rather than "it went quiet". Everything else on this line is an observation;
+// this one is a request.
+//
+// It leads, ahead of even the shared-tree warning: that one predicts work you
+// might lose, this one is time you are losing now.
+function waitingMarkup(presence) {
+  const blocked = ((presence && presence.sessions) || [])
+    .filter(row => row.state === 'waiting')
+    .sort((a, b) => (b.idle_seconds || 0) - (a.idle_seconds || 0));
+  if (!blocked.length) return '';
+  // The longest wait, not the count of them: how long you have been the
+  // bottleneck is the part that should make you go and look.
+  const longest = esc(String(blocked[0].label || 'waiting on you').replace('waiting ', ''));
+  const text = blocked.length === 1
+    ? 'waiting on you ' + longest
+    : blocked.length + ' waiting on you, longest ' + longest;
+  return '<span class="presence-alert">' + text + '</span>  ·  ';
+}
+
+// Two live sessions in one checkout can overwrite each other with no git
+// conflict to show for it -- one working tree, last writer wins. It leads the
+// line rather than trailing it: the line ellipsises from the right, and the one
+// clause here that predicts lost work must not be the first thing dropped.
+function collisionMarkup(presence) {
+  const clashes = (presence && presence.collisions) || [];
+  if (!clashes.length) return '';
+  const first = clashes[0];
+  const more = clashes.length > 1 ? ' +' + (clashes.length - 1) + ' more' : '';
+  const why = first.live + ' live sessions share this working tree ('
+    + (first.tools || []).join(', ') + '). Edits from one can overwrite the '
+    + "other's, and git sees one tree so nothing conflicts.";
+  return '<span class="presence-clash" title="' + esc(why) + '">'
+    + first.live + ' sharing ' + esc(first.label) + esc(more) + '</span>  ·  ';
+}
+
+function renderPresence(presence) {
+  const node = document.getElementById('presenceStrip');
+  if (!node) return;
+  const live = Number(presence && presence.live) || 0;
+  if (!live) {
+    node.hidden = true;
+    node.textContent = '';
+    return;
+  }
+  // Total first, breakdown after. This line ellipsises on a narrow window --
+  // the normal case for a dashboard sharing a screen with an editor -- and with
+  // the breakdown leading, the truncation swallowed the second tool whole and
+  // read as though the first was all of it. Leading with the total means
+  // running out of room costs detail, never the headline.
+  // Skipped at one session, where "1 live · Claude 1 working" says it twice.
+  const lead = live > 1 ? live + ' live  ·  ' : '';
+  // Scope trails, after its own separator: mid-line it read as a qualifier on
+  // whichever tool happened to be listed last rather than on the whole count.
+  const markup = waitingMarkup(presence) + collisionMarkup(presence) + lead + presenceText(presence)
+    + '  <span class="presence-note presence-scope">·  on this machine</span>';
+  if (node.dataset.markup === markup) return;
+  node.dataset.markup = markup;
+  node.innerHTML = markup;
+  node.hidden = false;
+}
+
 function renderCacheStatus(cache) {
   const status = document.getElementById('cacheStatus');
   if (!cache) {
@@ -3678,8 +3776,13 @@ function ambientScaleLabels(items) {
     + '</div>';
 }
 
-function ambientRunning(card) {
+// `presence` is passed in so the panel can admit it is talking about one
+// session out of several. It picked the worst reachable one and said nothing
+// about the rest, which reads as "this is what is happening" when it is
+// really "this is the worst of what is happening".
+function ambientRunning(card, presence) {
   const chart = card.chart || {};
+  const liveCount = Number(presence && presence.live) || 0;
   const latest = chart.latest_turn_tokens_n || 0;
   const peak = chart.peak_turn_tokens_n || latest;
   const pressure = chart.pressure_tokens_n || 0;
@@ -3718,7 +3821,8 @@ function ambientRunning(card) {
     state: severity,
     hero: esc(card.latest_turn_tokens || ''),
     heroUnit: 'tokens / turn',
-    context: esc(card.project || '') + (card.tool ? ' &middot; <b>' + esc(card.tool) + '</b>' : ''),
+    context: esc(card.project || '') + (card.tool ? ' &middot; <b>' + esc(card.tool) + '</b>' : '')
+      + (liveCount > 1 ? ' &middot; 1 of ' + liveCount + ' live' : ''),
     meter: meterSvg([{ value: latest, colour: tone }], marks, trackMax) + ambientScaleLabels(scale),
     sentence: runway + bloat,
     actions: (card.can_handoff
@@ -3743,6 +3847,7 @@ function ambientRunning(card) {
 
 function ambientQuiet(data) {
   const totals = data.totals || {};
+  const liveCount = Number(data.presence && data.presence.live) || 0;
   // Spend-weighted, because the sentence below says "of what they cost". The
   // token-weighted figure reads ~98% for every window and would make that
   // sentence wrong by about thirty points.
@@ -3777,9 +3882,16 @@ function ambientQuiet(data) {
     state: 'idle',
     hero: last ? esc(last.tokens) : esc(totals.tokens_label || '-'),
     heroUnit: last ? 'tokens in the last session' : 'tokens this window',
-    context: last
-      ? 'no session running · last was ' + esc(last.tool || 'a local tool')
-      : 'no session running',
+    // "no session running" was asserted from the absence of a *chartable*
+    // session, not from the absence of a session. A Codex thread exposes a
+    // running total and no per-turn numbers, so it is live and unplottable at
+    // once -- and this line called it idle. Say what is true instead.
+    context: liveCount
+      ? liveCount + (liveCount === 1 ? ' session running' : ' sessions running')
+        + ' · no per-turn numbers to show'
+      : last
+        ? 'no session running · last was ' + esc(last.tool || 'a local tool')
+        : 'no session running',
     meter: segments.length ? meterSvg(segments, [], 100) + ambientScaleLabels(scale) : '',
     sentence: sentence,
     actions: (needsReview
@@ -3805,7 +3917,7 @@ function renderAmbient(data) {
   const node = document.getElementById('ambient');
   if (!node) return;
   const live = liveHealthCard(data);
-  const model = live ? ambientRunning(live) : ambientQuiet(data);
+  const model = live ? ambientRunning(live, data.presence || null) : ambientQuiet(data);
   const facts = (model.facts || []).filter(Boolean)
     .map(pair => '<span>' + esc(pair[0]) + ' <b>' + esc(pair[1]) + '</b></span>').join('');
 
@@ -3894,7 +4006,17 @@ function liveHealthCard(data) {
   return cards.find(card => card.charted_because_live) || null;
 }
 
+function waitingSessions(data) {
+  return ((data.presence && data.presence.sessions) || [])
+    .filter(row => row.state === 'waiting')
+    .sort((a, b) => (b.idle_seconds || 0) - (a.idle_seconds || 0));
+}
+
 function tabStateFor(data) {
+  // A session waiting on you outranks context pressure. Pressure is a cost you
+  // are choosing; a blocked session is a stop, and this tab is behind an editor
+  // most of the day -- if anything is going to interrupt from there, it is this.
+  if (waitingSessions(data).length) return 'critical';
   // Severity comes from the handoff bubble when there is one, because that is the
   // same judgement the page itself leads with -- the tab must never disagree with
   // the surface behind it.
@@ -3910,8 +4032,16 @@ function renderTabState(data) {
   const state = tabStateFor(data);
   const live = liveHealthCard(data);
   const totals = data.totals || {};
+  const blocked = waitingSessions(data);
   let title;
-  if (live && live.latest_turn_tokens) {
+  if (blocked.length) {
+    // Front-loaded: a browser tab shows perhaps twenty characters, and the
+    // whole point is that this reads without switching to it.
+    const wait = String(blocked[0].label || 'waiting').replace('waiting ', '');
+    title = blocked.length === 1
+      ? `Waiting ${wait} · AIWatcher`
+      : `${blocked.length} waiting · AIWatcher`;
+  } else if (live && live.latest_turn_tokens) {
     const mark = state === 'critical' ? '⚠ ' : '';
     title = mark + live.latest_turn_tokens + '/turn · AIWatcher';
   } else if (totals.api_value_label) {
@@ -3972,6 +4102,7 @@ async function loadOnce(resetDetail, forceRefresh) {
   renderWatcher(data.watcher || null);
   setDefaultPromptTool(data);
   renderCacheStatus(data.cache || null);
+  renderPresence(data.presence || null);
   const totals = data.totals;
   document.getElementById('windowLabel').textContent = totals.window_label;
   document.getElementById('apiValue').textContent = totals.api_value_label;

@@ -157,7 +157,14 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("Clipboard has text", source)
         self.assertIn("Click Replace to copy Fresh Start", source)
         self.assertIn("pending_clipboard_override_session_var", source)
-        self.assertIn('state_var.get() in {"prompt_gate", "control_recommended", "optimize_available", "clipboard_confirm"}', source)
+        # Asserted per state rather than as one literal set: the previous form
+        # pinned the exact spelling of the line, so adding a state broke it for
+        # formatting reasons rather than behavioural ones.
+        primary_states = source[source.index("def has_primary_action()"):][:400]
+        for state in ("prompt_gate", "control_recommended", "optimize_available",
+                      "clipboard_confirm", "session_waiting"):
+            with self.subTest(state=state):
+                self.assertIn(state, primary_states)
         self.assertIn("visibility: str = \"always\"", source)
         self.assertIn("_foreground_looks_like_ai_work", source)
         self.assertIn("root.withdraw()", source)
