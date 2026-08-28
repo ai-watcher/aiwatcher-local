@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+# Import the tests package for its side effect: it points AIWATCHER_HOME at a
+# throwaway directory. Without it, single-file discovery can write hook events
+# into the developer's real ~/.aiwatcher ledger.
+import tests  # noqa: F401
+
 import argparse
 import contextlib
 import importlib.util
