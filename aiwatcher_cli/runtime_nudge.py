@@ -94,6 +94,31 @@ _PRESENTATIONS: dict[str, tuple[str, str, str]] = {
 }
 
 
+# Signal kinds the always-on-top Companion bar has a state of its own for.
+#
+# The bar is fed by `ui.build_companion_state`, which is a different function
+# reached by a different route and never sees a RuntimeNudge. It renders
+# `session_waiting` for a blocked session and the Fresh Start states for
+# context pressure, so for those three kinds it really is the delivery
+# surface. It has no state for a loop, a velocity spike, runway, or generic
+# usage pressure -- for those, the bar sitting on "Watching quietly" is not
+# coverage, it is silence.
+#
+# This exists because `_open_handoff_overlay` suppressed *every* signal
+# whenever the bar was running, on the assumption that the bar covered them
+# all. It does not, so the four kinds absent from this set reached no surface
+# at all: detected, judged, phrased, and then dropped.
+#
+# Keep this in step with the branches in `build_companion_state`. A kind added
+# here that the bar cannot draw goes silent; a kind left out that the bar does
+# draw is shown twice.
+COMPANION_BAR_SIGNAL_KINDS = frozenset({
+    "session_blocked",
+    "critical_context",
+    "warning_context",
+})
+
+
 def presentation_for_signal(signal_kind: str, reason: str) -> dict[str, str]:
     title, primary_label, action = _PRESENTATIONS.get(signal_kind, _PRESENTATIONS["usage_pressure"])
     return {

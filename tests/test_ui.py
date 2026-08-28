@@ -31,12 +31,81 @@ from aiwatcher_cli.local_state import (
 from aiwatcher_cli.scanner import LocalEvent, LocalSession, SurfaceCoverage
 
 
+# Enough of a browser to run the real overlay script and read back what it drew.
+# The alternative is asserting on the source, which is how the page came to
+# render "No Fresh Start needed right now" for a loop without anyone noticing.
+STUBS = """
+let drawn = '';
+const node = {
+  set innerHTML(value) { drawn = value; },
+  get innerHTML() { return drawn; },
+  onclick: null,
+};
+globalThis.document = { getElementById: () => node };
+globalThis.window = {
+  location: { search: '?session=sess-1&intervention=fp-1', href: '' },
+  setTimeout: () => {},
+  close: () => {},
+};
+globalThis.navigator = { clipboard: { writeText: async () => {} } };
+globalThis.fetch = async (url) => {
+  if (String(url).startsWith('/api/ambient-intervention?')) {
+    return { ok: true, json: async () => ({
+      fingerprint: 'fp-1',
+      session_id: 'sess-1',
+      signal_kind: 'loop',
+      action: 'recover_loop',
+      severity: 'critical',
+      reason: 'The same tool call repeated 9 times.',
+      title: 'Possible loop detected',
+      primary_label: 'Inspect and stop',
+    }) };
+  }
+  if (String(url).startsWith('/api/summary')) {
+    return { json: async () => ({ handoff_bubble: null, context_health: [] }) };
+  }
+  return { ok: true, json: async () => ({}) };
+};
+"""
+
+TAIL = """
+await new Promise(resolve => globalThis.queueMicrotask(() => setTimeout(resolve, 60)));
+console.log(drawn);
+"""
+
+
 class DashboardServeTests(unittest.TestCase):
     def _serve_one(self):
         server = ui.ThreadingHTTPServer(("127.0.0.1", 0), ui.UIHandler)
         thread = threading.Thread(target=server.handle_request)
         thread.start()
         return server, thread, f"http://127.0.0.1:{server.server_address[1]}"
+
+    def test_ambient_intervention_serves_the_shared_nudge_wording(self) -> None:
+        """The overlay renders from this, so the wording ships from
+        _PRESENTATIONS rather than from a second copy inside overlay.js. The
+        copy that used to live there had no entry for a blocked session."""
+        server, thread, base = self._serve_one()
+        record = {
+            "fingerprint": "fp-1",
+            "session_id": "sess-1",
+            "signal_kind": "session_blocked",
+            "action": "return_session",
+            "severity": "warning",
+            "reason": "This session asked for permission and has done nothing since.",
+            "state": "pending",
+            "expected_savings": None,
+        }
+        with patch.object(ui, "get_ambient_intervention", return_value=record):
+            try:
+                with request.urlopen(f"{base}/api/ambient-intervention?id=fp-1", timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
+        self.assertEqual(payload["title"], "A session is waiting for you")
+        self.assertEqual(payload["primary_label"], "Return to session")
 
     def test_runtime_return_requires_post(self) -> None:
         server, thread, base = self._serve_one()
@@ -1981,8 +2050,12 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("/api/ambient-intervention-action", ui.OVERLAY_HTML)
         self.assertIn("/api/ambient-intervention?id=", ui.OVERLAY_HTML)
         self.assertIn("Copy Fresh Start brief", ui.OVERLAY_HTML)
-        self.assertIn("Copy focused next step", ui.OVERLAY_HTML)
-        self.assertIn("Inspect and stop", ui.OVERLAY_HTML)
+        # The per-signal wording is no longer pinned here. It used to be, which
+        # is what made the second copy of _PRESENTATIONS in overlay.js look
+        # maintained while it silently lost its entry for a blocked session.
+        # The page now reads both from the intervention payload.
+        self.assertIn("intervention.title", ui.OVERLAY_HTML)
+        self.assertIn("intervention.primary_label", ui.OVERLAY_HTML)
         self.assertIn("Loading this session evidence", ui.OVERLAY_HTML)
         self.assertIn("Local session", ui.OVERLAY_HTML)
         self.assertIn("Last activity:", ui.OVERLAY_HTML)
@@ -2003,6 +2076,30 @@ class DashboardWindowTests(unittest.TestCase):
         finally:
             os.unlink(script_path)
         self.assertEqual(completed.returncode, 0, f"Overlay inline JS has a syntax error:\n{completed.stderr}")
+
+    def test_overlay_renders_a_signal_that_has_no_fresh_start_bubble(self) -> None:
+        """handoff_bubble is built from context health alone, so a loop, a
+        velocity spike, or a waiting session has none behind it. The page used
+        to fall through to "No Fresh Start needed right now" -- the opposite of
+        the signal that opened the window -- and nothing caught it because the
+        overlay was unreachable whenever the Companion bar was running."""
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not available to run the overlay script")
+        script = re.search(r"<script>(.*?)</script>", ui.OVERLAY_HTML, re.S).group(1)
+        harness = STUBS + script + TAIL
+        with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False, encoding="utf-8") as handle:
+            handle.write(harness)
+            script_path = handle.name
+        try:
+            completed = subprocess.run([node, script_path], capture_output=True, text=True)
+        finally:
+            os.unlink(script_path)
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("Possible loop detected", completed.stdout)
+        self.assertIn("Inspect and stop", completed.stdout)
+        self.assertNotIn("No Fresh Start needed right now", completed.stdout)
 
     def test_prompt_plan_routes_broad_codex_work_to_fork(self) -> None:
         with (

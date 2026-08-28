@@ -100,6 +100,15 @@ async function dismissIntervention() {
   await recordAmbientAction('dismiss');
   renderSaved('Dismissed for this session state');
 }
+// Which button handler an action wants. This stays here because it names
+// functions on this page; the wording does not, and no longer lives here.
+const PRIMARY_MODES = {
+  return_session: 'inspect',
+  recover_loop: 'inspect',
+  continue_focused: 'focused',
+  fresh_chat: 'fresh_chat',
+  switch_tool: 'fresh_chat',
+};
 function interventionPresentation(bubble, intervention) {
   if (!intervention) {
     return {
@@ -111,19 +120,16 @@ function interventionPresentation(bubble, intervention) {
     };
   }
   const action = intervention.action || 'fresh_chat';
-  const options = {
-    fresh_chat: ['Context is getting expensive', 'Copy Fresh Start brief', 'fresh_chat'],
-    recover_loop: ['Possible loop detected', 'Inspect and stop', 'inspect'],
-    continue_focused: ['Focus the next checkpoint', 'Copy focused next step', 'focused'],
-    switch_tool: ['Usage runway is getting low', 'Copy Fresh Start brief', 'fresh_chat'],
-  };
-  const selected = options[action] || ['AIWatcher found something to review', 'Inspect', 'inspect'];
   return {
-    title: selected[0],
+    // Title and label come from _PRESENTATIONS via /api/ambient-intervention.
+    // The copy that used to sit here was keyed on action rather than signal
+    // kind, so it could not tell a velocity spike from a heavy session, and it
+    // had no entry at all for a waiting session.
+    title: intervention.title || bubble.title || 'AIWatcher found something to review',
     body: intervention.reason || bubble.body,
     severity: intervention.severity || bubble.severity,
-    primaryLabel: selected[1],
-    primaryMode: selected[2],
+    primaryLabel: intervention.primary_label || 'Inspect',
+    primaryMode: PRIMARY_MODES[action] || 'inspect',
   };
 }
 function shortSessionId(value) {
@@ -134,17 +140,32 @@ function renderBubble(bubble, intervention) {
   const presentation = interventionPresentation(bubble, intervention);
   const runtime = bubble.runtime_attachment || {};
   const identityLabel = runtime.identity_label || runtime.label || 'Local session';
-  const surface = runtime.surface || 'unknown surface';
-  const last = bubble.updated_at ? new Date(bubble.updated_at).toLocaleString() : 'unknown';
+  // Only what was actually observed. An intervention record carries a session
+  // id and nothing else, so the old fixed template printed "unknown tool ·
+  // unknown surface · unknown workspace · sess-1 / Last activity: unknown" --
+  // four claims of ignorance where one identifier is the whole honest answer.
+  const identityParts = [
+    bubble.tool || runtime.tool,
+    runtime.surface,
+    bubble.project || runtime.project_path,
+    shortSessionId(bubble.session_id || runtime.session_id),
+  ].filter(Boolean);
+  const last = bubble.updated_at ? new Date(bubble.updated_at).toLocaleString() : '';
+  const lastLine = last ? `<br>Last activity: ${esc(last)}` : '';
+  // The signal's own sentence is already the subtitle. Printing it again below
+  // the identity block read as two findings when there is one.
+  const detail = bubble.reason
+    || (intervention ? '' : 'Use a Fresh Start brief to preserve the outcome without carrying the full chat history.');
+  const detailLine = detail && detail !== presentation.body ? `<p>${esc(detail)}</p>` : '';
   const tags = (bubble.tags || []).map(tag => `<span class="tag">${esc(tag)}</span>`).join('');
   document.getElementById('bubble').innerHTML = `<div class="top">
     <div><h1>${esc(presentation.title || 'AIWatcher found something to review')}</h1><p>${esc(presentation.body || 'Review the local evidence before continuing.')}</p></div>
     <span class="badge">${esc(presentation.severity || 'warning')}</span>
   </div>
   <div class="body">
-    <div class="identity"><strong>${esc(identityLabel)}</strong><br>${esc(bubble.tool || runtime.tool || 'unknown tool')} · ${esc(surface)} · ${esc(bubble.project || runtime.project_path || 'unknown workspace')} · ${esc(shortSessionId(bubble.session_id || runtime.session_id))}<br>Last activity: ${esc(last)}</div>
+    <div class="identity"><strong>${esc(identityLabel)}</strong><br>${identityParts.map(esc).join(' · ')}${lastLine}</div>
     <div class="tags">${tags}</div>
-    <p>${esc(bubble.reason || 'Use a Fresh Start brief to preserve the outcome without carrying the full chat history.')}</p>
+    ${detailLine}
     <div class="actions">
       <button class="primary" id="primaryAction">${esc(presentation.primaryLabel)}</button>
       ${presentation.primaryMode === 'inspect' ? '' : '<button id="inspect">Inspect</button>'}
@@ -186,6 +207,18 @@ async function load() {
           health.bloat_measurable ? [`${health.bloat_label} of spend replayed`] : []),
       };
     }
+  }
+  // A loop, a velocity spike, runway pressure, or a waiting session has no
+  // Fresh Start bubble behind it -- handoff_bubble is built from context
+  // health alone. Without this the page fell through to "No Fresh Start needed
+  // right now", which is the opposite of the signal that opened the window.
+  if (!bubble && intervention) {
+    bubble = {
+      session_id: intervention.session_id || wanted || '',
+      severity: intervention.severity || 'warning',
+      body: intervention.reason || '',
+      reason: intervention.reason || '',
+    };
   }
   if (wanted && (!bubble || bubble.session_id !== wanted) && data.context_health_status === 'pending') {
     document.getElementById('bubble').innerHTML = `<div class="top"><div><h1>Loading this session evidence</h1><p>AIWatcher is still building the local context-health index for this deep link.</p></div><span class="badge">checking</span></div>

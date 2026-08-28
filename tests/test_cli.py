@@ -324,7 +324,11 @@ class StartCommandCliTests(unittest.TestCase):
         self.assertIn("creationflags", kwargs)
         pid_path.return_value.write_text.assert_called_with("456", encoding="utf-8")
 
-    def test_persistent_presence_owns_runtime_overlay_delivery(self) -> None:
+    def test_persistent_presence_owns_the_signals_it_can_actually_draw(self) -> None:
+        """Deferring to the bar is right for a kind the bar has a state for --
+        context pressure becomes its Fresh Start states. It used to defer for
+        every kind regardless, including the ones build_companion_state cannot
+        render, which is how a loop reached no surface at all."""
         with (
             patch.object(cli, "_existing_companion_presence_pid", return_value=123),
             patch.object(cli, "_open_native_handoff_overlay") as native_overlay,
@@ -335,6 +339,7 @@ class StartCommandCliTests(unittest.TestCase):
                 body="Context pressure",
                 severity="critical",
                 brief_text="Fresh Start brief",
+                signal_kind="critical_context",
             )
 
         self.assertTrue(ok)
@@ -1675,6 +1680,49 @@ class PromptPreflightTests(unittest.TestCase):
         overlay.assert_not_called()
         self.assertIn("held for dashboard", stdout.getvalue())
         self.assertFalse(notifications[0]["sent"])
+
+    def test_open_handoff_overlay_defers_signals_the_companion_bar_presents(self) -> None:
+        with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=4242),
+            patch.object(cli, "_open_native_handoff_overlay") as native,
+            patch.object(cli.webbrowser, "open") as browser_open,
+        ):
+            ok, detail = cli._open_handoff_overlay(
+                "http://127.0.0.1:8765/overlay?session=session-1",
+                signal_kind="session_blocked",
+            )
+
+        self.assertTrue(ok)
+        self.assertIn("session_blocked", detail)
+        native.assert_not_called()
+        browser_open.assert_not_called()
+
+    def test_open_handoff_overlay_delivers_signals_the_companion_bar_cannot_show(self) -> None:
+        """build_companion_state has no loop state, so a running bar is silence
+        rather than coverage. This used to return True without opening anything,
+        which is why the log said "Overlay: opened" and no window existed."""
+        with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=4242),
+            patch.object(cli, "_open_native_handoff_overlay", return_value=(True, "native desktop window")) as native,
+            patch.object(cli.webbrowser, "open") as browser_open,
+        ):
+            ok, detail = cli._open_handoff_overlay(
+                "http://127.0.0.1:8765/overlay?session=session-1",
+                signal_kind="loop",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "native desktop window")
+        native.assert_called_once()
+        browser_open.assert_not_called()
+
+    def test_companion_bar_signal_kinds_are_real_signal_kinds(self) -> None:
+        from aiwatcher_cli import runtime_nudge
+
+        self.assertTrue(
+            runtime_nudge.COMPANION_BAR_SIGNAL_KINDS.issubset(set(runtime_nudge._PRESENTATIONS)),
+            "a kind here that no detector emits silently suppresses nothing and hides the real set",
+        )
 
     def test_open_handoff_overlay_prefers_native_companion(self) -> None:
         with (
