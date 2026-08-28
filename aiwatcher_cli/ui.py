@@ -6956,7 +6956,12 @@ class UIHandler(BaseHTTPRequestHandler):
             session_id = str(payload.get("session_id", "")).strip()
             decision = str(payload.get("decision", "")).strip()
             reason = str(payload.get("reason", "")).strip()
-            source_project_path = str(payload.get("source_project_path", "")).strip()
+            source_project_path = str(
+                payload.get("source_project_path")
+                or payload.get("project_full")
+                or payload.get("project")
+                or ""
+            ).strip()
             action_channel = str(payload.get("action_channel", "dashboard")).strip() or "dashboard"
             expected = payload.get("expected_saved_context_tokens")
             if not session_id:

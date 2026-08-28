@@ -1377,6 +1377,15 @@ class PlanControlTest(unittest.TestCase):
         self.assertIn("Nothing is stopped from this dashboard", self.js)
         self.assertIn(".runtime-review-card", self.css)
 
+    def test_context_review_continue_quiets_the_visible_batch(self):
+        self.assertIn("function visibleFreshStartProjects", self.js)
+        body = self.js[self.js.index("async function continueFreshStartProject"):]
+        body = body[:body.index(chr(10) + "}")]
+        self.assertIn("const saved = await recordHandoffDecision", body)
+        self.assertIn("if (!saved)", body)
+        self.assertIn("visibleFreshStartProjects()", body)
+        self.assertIn("Context review quieted for the visible projects for 48h.", body)
+
 
 class SettingsTest(unittest.TestCase):
     """Settings was 4.2 screens, most of it a nine-tool table and an eleven-step

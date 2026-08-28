@@ -1690,9 +1690,9 @@ function handoffDecisionBubble(sessionId) {
   };
 }
 async function recordHandoffDecision(bubble, decision) {
-  if (!bubble || !bubble.session_id) return;
+  if (!bubble || !bubble.session_id) return false;
   try {
-    await fetch('/api/handoff-decision', {
+    const response = await fetch('/api/handoff-decision', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1704,8 +1704,10 @@ async function recordHandoffDecision(bubble, decision) {
         action_channel: 'dashboard',
       })
     });
+    return response.ok;
   } catch (error) {
-    // Decision receipts should never block the user's flow.
+    // Callers decide whether a failed receipt save should block their flow.
+    return false;
   }
 }
 async function startFreshFromBubble(sessionId) {
@@ -4265,25 +4267,43 @@ async function snoozeFreshStartProjects(projects, message) {
     return false;
   }
 }
-async function snoozeVisibleFreshStartProjects(button) {
-  // Any element carrying a project. Matching on a card class would have
-  // snoozed a single project while the button said it snoozed all -- and there
-  // are no cards on this screen any more, only ranked rows.
+async function snoozeFreshStartProject(project, button) {
+  const ok = await snoozeFreshStartProjects([project], 'Fresh Start snoozed for this project for 48h.');
+  if (ok && button) {
+    const card = button.closest('.health-card');
+    if (card) card.classList.add('muted-card');
+  }
+}
+function visibleFreshStartProjects() {
+  // Any element carrying a project, not only .health-card. This screen shows
+  // one lead card and the rest as compact rows, so matching on the card class
+  // would have snoozed a single project while the button said it snoozed all.
   const cards = Array.from(document.querySelectorAll('#sessionContextHealth [data-project-full]'));
-  const projects = [...new Set(cards.map(card => card.dataset.projectFull || '').filter(Boolean))];
+  return [...new Set(cards.map(card => card.dataset.projectFull || '').filter(Boolean))];
+}
+async function snoozeVisibleFreshStartProjects(button) {
+  const projects = visibleFreshStartProjects();
   const ok = await snoozeFreshStartProjects(projects, `Fresh Start snoozed for ${projects.length} project${projects.length === 1 ? '' : 's'} for 48h.`);
   if (ok && button) button.disabled = true;
 }
 async function continueFreshStartProject(sessionId, project) {
-  await recordHandoffDecision({
+  const saved = await recordHandoffDecision({
     session_id: sessionId,
     project_full: project,
     reason: 'User chose to continue this project from the context review list.',
     body: 'User chose to continue this project from the context review list.',
     expected_saved_context_tokens: null,
   }, 'continue_here');
-  showToast('Fresh Start snoozed for this project for 48h.');
-  await load(true, true);
+  if (!saved) {
+    showToast('Could not save the Fresh Start decision yet.', 'error');
+    return;
+  }
+  const projects = visibleFreshStartProjects();
+  const quieted = await snoozeFreshStartProjects(
+    projects.length ? projects : [project],
+    'Context review quieted for the visible projects for 48h.'
+  );
+  if (!quieted) await load(true, true);
 }
 function showView(view) {
   document.querySelectorAll('.view').forEach(node => {

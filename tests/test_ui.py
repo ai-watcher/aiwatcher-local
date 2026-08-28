@@ -312,6 +312,10 @@ class DashboardServeTests(unittest.TestCase):
             "control_recommended_project:/repo/app",
             "control_recommended_project:/repo/api",
         ])
+        self.assertTrue(all(
+            call.kwargs["minutes"] == ui.FRESH_START_PROJECT_COOLDOWN_MINUTES
+            for call in record_skip.call_args_list
+        ))
 
         server, thread, base = self._serve_one()
         http_request = request.Request(
@@ -326,6 +330,35 @@ class DashboardServeTests(unittest.TestCase):
             finally:
                 thread.join(timeout=5)
                 server.server_close()
+
+    def test_handoff_decision_accepts_project_full_alias_for_cooldown(self) -> None:
+        server, thread, base = self._serve_one()
+        payload = json.dumps({
+            "session_id": "sess-1",
+            "decision": "continue_here",
+            "project_full": "/repo/app",
+        }).encode("utf-8")
+        http_request = request.Request(
+            f"{base}/api/handoff-decision",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with (
+            patch.object(ui, "_find_session_row", return_value=None),
+            patch.object(ui, "record_handoff_decision", return_value={}) as record_decision,
+            patch.object(ui, "record_companion_skip", return_value={}) as record_skip,
+        ):
+            try:
+                with request.urlopen(http_request, timeout=5) as response:
+                    self.assertEqual(response.status, 200)
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
+        self.assertEqual(record_decision.call_args.kwargs["source_project_path"], "/repo/app")
+        keys = [call.kwargs["key"] for call in record_skip.call_args_list]
+        self.assertIn("control_recommended_project:/repo/app", keys)
 
 
 class DashboardWindowTests(unittest.TestCase):
