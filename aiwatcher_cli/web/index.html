@@ -120,19 +120,10 @@
         <div id="promptResult" class="prompt-result"><div class="empty">Run Plan to choose the safest next route before sending the prompt.</div></div>
       </div>
     </div>
-    <!-- Housekeeping, not planning. It was 64% of this tab, above the tool the
-         tab is named for, so it now opens on demand with its count in the
-         summary. The link to planning is real -- you clear clutter before
-         carrying context forward -- but it is the preamble, not the point. -->
-    <section id="optimizeWorkspace" class="card" style="margin-top:14px">
-      <details class="aiw-details">
-        <summary><span id="optimizeWorkspaceSummary">Optimize workspace</span></summary>
-        <div class="details-body">
-          <p class="optimize-lede">Review stale chats, pending Fresh Starts, AI worktrees, and runtime clutter before carrying context forward. <span class="note-chip local">Local only</span></p>
-          <div id="optimizeWorkspaceBody"><div class="empty">Loading workspace cleanup evidence...</div></div>
-        </div>
-      </details>
-    </section>
+    <!-- The Optimize workspace queue was here, collapsed, having already been
+         demoted once for being 64% of a tab named for something else. It is on
+         Control now: it is not planning, it is the acting the loop's third
+         stage exists for. -->
   </section>
 
   <section id="view-projects" class="view" hidden>
@@ -241,11 +232,32 @@
         <div><h2>Control</h2><p>What you can do about what the other surfaces just told you.</p></div>
         <span class="note-chip local">Local only</span>
       </div>
-      <div class="empty">Nothing to act on has moved here yet. Fresh Start is still on Home, the
-        workspace cleanup queue is still on Plan, and per-session actions are still in the session
-        drawer. This section collects them so acting on a warning does not mean remembering which
-        page it lives on.</div>
+      <div class="empty">Fresh Start is still on Home and per-session actions are still in the
+        session drawer. They move here next, so acting on a warning does not mean remembering
+        which page the action lives on.</div>
     </div>
+
+    <!-- Moved from Plan. It had been demoted there already -- collapsed behind
+         a summary, because it was 64% of a tab named for planning -- which
+         treated the symptom. Reviewing stale chats, pending Fresh Starts, AI
+         worktrees and runtime clutter is not preparation for a prompt, it is
+         the acting this stage is named for, and the only reason it lived on
+         Plan is that Plan was the nearest surface that existed.
+
+         Left expanded rather than collapsed: it was folded away for competing
+         with the prompt tool, and here there is nothing to compete with. The
+         ids are load()'s -- it writes optimizeWorkspaceSummary and
+         optimizeWorkspaceBody by getElementById -- so the card fills exactly as
+         it did on Plan, and #optimizeWorkspace still resolves as a deep link
+         target, now under ?view=control. -->
+    <section id="optimizeWorkspace" class="card" style="margin-top:14px">
+      <div class="section-title">
+        <div><h2 id="optimizeWorkspaceSummary">Optimize workspace</h2>
+          <p class="optimize-lede">Stale chats, pending Fresh Starts, AI worktrees, and runtime clutter worth clearing.</p></div>
+        <span class="note-chip local">Local only</span>
+      </div>
+      <div id="optimizeWorkspaceBody"><div class="empty">Loading workspace cleanup evidence...</div></div>
+    </section>
   </section>
 
   <section id="view-receipts" class="view" hidden>

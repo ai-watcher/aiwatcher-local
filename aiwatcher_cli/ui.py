@@ -5187,7 +5187,7 @@ def answer_local_question(question: str, days: int = 7) -> dict[str, object]:
                 confidence="Observed/inferred from local session history",
                 bullets=bullets,
                 actions=[
-                    _ask_action("Review Optimize", "/?view=prompt#optimizeWorkspace"),
+                    _ask_action("Review Optimize", "/?view=control#optimizeWorkspace"),
                     _ask_action("Open Work", "/?view=sessions"),
                 ],
             )
@@ -5632,7 +5632,7 @@ def build_companion_state() -> dict[str, object]:
                 "title": "Optimize workspace",
                 "subtitle": str(top.get("summary") or optimize.get("summary") or "Cleanup opportunity found."),
                 "primary_label": "Review",
-                "primary_url": "/?view=prompt#optimizeWorkspace",
+                "primary_url": "/?view=control#optimizeWorkspace",
                 "skip_label": "Skip",
                 "skip_state": "optimize_available",
                 "skip_project": project,

@@ -308,6 +308,21 @@ class NavigationTest(unittest.TestCase):
     def test_nav_entries_all_point_at_real_views(self):
         self.assertEqual(self.nav_views - self.views, set())
 
+    def test_deep_link_allowlist_covers_every_view(self):
+        """`?view=<id>` is filtered against a hardcoded list before showView is
+        called, so a view missing from it is reachable by clicking and silently
+        unreachable by link -- which is how a nudge or a docs link becomes a
+        no-op that looks like a working URL. Control shipped in exactly that
+        state for one commit.
+        """
+        allowed = set(re.findall(
+            r"'([\w-]+)'",
+            re.search(r"\[([^\]]*)\]\.includes\(requestedView\)", self.js).group(1)))
+        self.assertEqual(
+            self.views - allowed, set(),
+            "these views cannot be reached by ?view= link: %s"
+            % sorted(self.views - allowed))
+
     def test_the_highlight_does_not_lie(self):
         # Anything remapped here highlights a section other than the one you are
         # in; only the documented exception may do that.
@@ -850,19 +865,45 @@ class SecondOpinionZoneTest(unittest.TestCase):
 
 
 class PlanControlTest(unittest.TestCase):
-    """The tab is for planning the next prompt. A housekeeping checklist had
-    grown to 64% of it, sitting above the tool the tab is named for."""
+    """Plan is for planning the next prompt. A housekeeping checklist had grown
+    to 64% of it, sitting above the tool the tab is named for.
+
+    Collapsing it treated the symptom. The queue is on Control now -- clearing
+    stale chats and worktrees is not preparation for a prompt, it is the acting
+    the loop's third stage is named for, and the only reason it lived on Plan
+    is that Plan was the nearest surface that existed.
+    """
 
     @classmethod
     def setUpClass(cls):
         cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
         cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
 
-    def test_housekeeping_opens_on_demand(self):
+    def _view(self, name, nxt):
+        start = self.html.index('<section id="view-%s"' % name)
+        return self.html[start:self.html.index('<section id="view-%s"' % nxt)]
+
+    def test_the_queue_is_on_control_not_plan(self):
+        self.assertIn('id="optimizeWorkspace"', self._view("control", "receipts"))
+        self.assertNotIn('id="optimizeWorkspace"', self._view("prompt", "projects"))
+
+    def test_the_queue_is_not_collapsed_where_it_belongs(self):
+        """It was folded behind a summary for competing with the prompt tool.
+        On Control there is nothing to compete with, so hiding a queue of things
+        to do behind a click would be inherited caution rather than a reason."""
         card = self.html[self.html.index('id="optimizeWorkspace"'):]
         card = card[:card.index("</section>")]
-        self.assertIn("<details", card)
+        self.assertNotIn("<details", card)
         self.assertIn("optimizeWorkspaceSummary", card)
+
+    def test_the_deep_link_target_still_resolves(self):
+        """The Companion nudge's Review button and older ask answers both link
+        to #optimizeWorkspace. Moving the section without moving the links is
+        how a nudge's only action becomes a no-op."""
+        self.assertIn("view=control#optimizeWorkspace", inspect.getsource(ui))
+        self.assertNotIn("view=prompt#optimizeWorkspace", inspect.getsource(ui))
+        hash_branch = self.js[self.js.index("location.hash === '#optimizeWorkspace'"):]
+        self.assertIn("showView('control')", hash_branch[:400])
 
     def test_the_summary_carries_the_count(self):
         # A collapsed card with a bare title hides whether there is anything in it.

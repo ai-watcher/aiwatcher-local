@@ -4357,14 +4357,21 @@ document.addEventListener('keydown', event => { if (event.key === 'Escape') clos
   startLiveRefresh();
   await load();
   const requestedView = new URLSearchParams(location.search).get('view');
-  if (requestedView && ['today','prompt','sessions','projects','changes','receipts','insights','setup'].includes(requestedView)) {
+  // Every view id, or a ?view= deep link at one of them silently does nothing.
+  // test_deep_link_allowlist_covers_every_view pins this against the markup so
+  // adding a section cannot quietly leave it unreachable by link.
+  if (requestedView && ['today','prompt','sessions','control','projects','changes','receipts','insights','setup'].includes(requestedView)) {
     showView(requestedView);
     if (requestedView === 'prompt') {
       document.getElementById('promptInput').focus();
     }
   }
   if (location.hash === '#optimizeWorkspace') {
-    showView('prompt');
+    // The queue moved from Plan to Control. Links to the bare hash are still
+    // honoured -- the Companion nudge's Review button and older ask answers
+    // both emit them -- so this resolves the target rather than the tab it
+    // used to live on.
+    showView('control');
     window.setTimeout(() => document.getElementById('optimizeWorkspace').scrollIntoView({ block: 'start' }), 50);
   }
   if (new URLSearchParams(location.search).get('ask') === '1') {
