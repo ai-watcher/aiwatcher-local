@@ -421,8 +421,12 @@ class TrimmedHomeTest(unittest.TestCase):
     receipt slot that stays hidden until you act."""
 
     # Each of these lived on Home and now lives somewhere it is not repeated.
+    # The value is where it is *now*, not where it went first: Models and Tools
+    # went Home -> Improve, and then Improve -> Projects when Improve was cut
+    # back to advice. A section can be moved twice and this should follow it
+    # rather than record the first hop and rot.
     MOVED = {
-        "Models and Tools": "view-insights",
+        "Models and Tools": "view-projects",
         "Privacy at a glance": "view-setup",
         # Lowercase because it is no longer a tile label: the count folded into
         # the Fresh Start receipts subtitle, where it reads as a sentence
@@ -790,6 +794,70 @@ class HorizontalCompositionTest(unittest.TestCase):
         watch = self.html[self.html.index('id="view-watch"'):]
         watch = watch[:watch.index("</section>")]
         self.assertNotIn("margin-bottom:14px", watch)
+
+
+class ImproveIsAdviceOnlyTest(unittest.TestCase):
+    """Improve was three products under one name.
+
+    Its job is "what is the one behaviour I should change next". Alongside that
+    it carried a scatter plot, a model-and-tool breakdown, and an outcomes
+    report -- none of which tell you what to change. Outcomes and guardrails is
+    evidence about what happened, so it is Prove's. The scatter and the
+    breakdowns answer "where did the spend go", which is the same question the
+    Projects table answers on a different axis, so they are Projects'. The
+    scatter says as much itself: explicitly not a verdict on which model is
+    better value.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+
+    def _view(self, name, nxt):
+        start = self.html.index('<section id="view-%s"' % name)
+        return self.html[start:self.html.index('<section id="view-%s"' % nxt)]
+
+    def test_improve_keeps_the_headline_and_the_feed(self):
+        improve = self._view("insights", "setup")
+        self.assertIn('id="insightHeadline"', improve)
+        self.assertIn('id="insightFeed"', improve)
+        # Second Opinion's own cost stays beside the spend it reports on.
+        self.assertIn('id="analystOverhead"', improve)
+
+    def test_analysis_and_evidence_have_left_improve(self):
+        improve = self._view("insights", "setup")
+        for gone in ('id="modelScatter"', 'id="models"', 'id="toolModels"', 'id="report"'):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, improve)
+
+    def test_they_landed_where_their_question_is_asked(self):
+        projects = self._view("projects", "watch")
+        for moved in ('id="modelScatter"', 'id="models"', 'id="toolModels"'):
+            with self.subTest(moved=moved):
+                self.assertIn(moved, projects)
+        self.assertIn('id="report"', self._view("receipts", "insights"))
+
+    def test_the_model_mix_is_not_nested_in_the_pie_it_can_outlive(self):
+        """`toolsComposition` was never closed, so the model-mix heading and
+        #toolModels sat inside it.
+
+        paintComposition hides that container whenever one tool dominates the
+        pie -- and it took the model-mix section down with it, silently
+        overruling paintToolModels, which had just decided independently that it
+        had rows worth showing. Two decisions, one accidentally vetoing the
+        other, because of a missing closing tag.
+        """
+        projects = self._view("projects", "watch")
+        start = projects.index('id="toolsComposition"')
+        composition = projects[start:projects.index('id="toolModels"')]
+        # The container closes before the model mix begins.
+        self.assertIn("</div>", composition)
+        opened = composition.count("<div")
+        closed = composition.count("</div>")
+        self.assertEqual(
+            opened, closed,
+            "toolsComposition does not close before #toolModels, so hiding the "
+            "pie hides the model mix with it")
 
 
 class InsightEvidencePairingTest(unittest.TestCase):

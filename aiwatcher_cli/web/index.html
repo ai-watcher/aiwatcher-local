@@ -138,6 +138,35 @@
         <tbody id="projectRows"></tbody>
       </table></div>
     </div>
+
+    <!-- Both moved from Improve, where they were analysis filed under advice.
+         They answer "where did the spend go" -- the same question the table
+         above answers, on a different axis -- and neither tells you what to
+         change, which is what Improve is for. The scatter says so itself: it
+         is explicitly not a verdict on which model is better value. -->
+    <section class="card" style="margin-bottom:14px" id="modelScatter" hidden>
+      <div class="section-title">
+        <div><h2>Cost against size, one dot per session</h2><p>Both axes are logarithmic, so a dearer model sits higher rather than climbing more steeply. Look for a hollow dot high up: an expensive session that produced nothing. A faded dot is one nobody has judged yet, which is not the same as one that failed. Click any dot to open that session.</p></div>
+      </div>
+      <div class="bar-legend" id="modelScatterLegend"></div>
+      <div data-scatter></div>
+      <p class="receipt-note" id="modelScatterWithheld" hidden></p>
+      <p class="receipt-note">Not a verdict on which model is better value. If the dear model gets the hard problems it will land less often for reasons that have nothing to do with the model, and nothing local separates those.</p>
+    </section>
+    <section class="card" style="margin-top:14px">
+      <div class="section-title"><div><h2>Models and Tools</h2><p>Where the spend went, by model and by tool.</p></div></div>
+        <h3 style="font-size:var(--fs-2);font-weight:var(--fw-med);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 4px">By model</h3>
+        <div id="models"></div>
+        <h3 style="font-size:var(--fs-2);font-weight:var(--fw-med);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:14px 0 4px">By tool</h3>
+        <div class="composition" id="toolsComposition" hidden>
+          <div class="pie-host" data-pie="tools"></div>
+          <div class="composition-legend" id="toolsCompositionLegend"></div>
+          <div id="tools"></div>
+        </div>
+        <h3 style="font-size:var(--fs-2);font-weight:var(--fw-med);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:16px 0 2px">Model mix within each tool</h3>
+        <p style="font-size:var(--fs-1);color:var(--faint);margin:0 0 8px">Each bar is that tool's own 100%, so size means proportion, not volume &mdash; the token total is on the right.</p>
+        <div id="toolModels" hidden></div>
+    </section>
   </section>
 
   <!-- Triage, and only triage: which session needs you, and which one first.
@@ -305,6 +334,18 @@
       <div class="card metric-card metric-neutral"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div><div class="metric-spark" data-tile-spark="apiValue" hidden></div></div>
     </section>
 
+    <!-- Moved from Improve. "What stuck, and what was caught before it ran" is
+         evidence about what happened, which is this surface's question; on
+         Improve it sat beside advice about what to do next and answered a
+         different one. It reads between the summary above and the receipts
+         below because that is its altitude: coarser than a receipt row, finer
+         than a ratio. -->
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title">
+        <div><h2>Outcomes and guardrails</h2><p>What stuck, and what was caught before it ran.</p></div>
+      </div>
+      <div id="report"></div>
+    </section>
     <!-- The preflight count used to be a standalone card floating above this
          one with nothing connecting them (P3-4). It is an inline stat on the
          card it describes. Both ids are kept: load() writes to them. -->
@@ -343,40 +384,11 @@
       <p id="analystOverhead" class="receipt-note"></p>
       <div id="insightFeed"></div>
     </section>
-    <section class="card" style="margin-bottom:14px" id="modelScatter" hidden>
-      <div class="section-title">
-        <div><h2>Cost against size, one dot per session</h2><p>Both axes are logarithmic, so a dearer model sits higher rather than climbing more steeply. Look for a hollow dot high up: an expensive session that produced nothing. A faded dot is one nobody has judged yet, which is not the same as one that failed. Click any dot to open that session.</p></div>
-      </div>
-      <div class="bar-legend" id="modelScatterLegend"></div>
-      <div data-scatter></div>
-      <p class="receipt-note" id="modelScatterWithheld" hidden></p>
-      <p class="receipt-note">Not a verdict on which model is better value. If the dear model gets the hard problems it will land less often for reasons that have nothing to do with the model, and nothing local separates those.</p>
-    </section>
-    <section class="card" style="margin-bottom:14px">
-      <div class="section-title">
-        <div><h2>Outcomes and guardrails</h2><p>What stuck, and what was caught before it ran.</p></div>
-      </div>
-      <div id="report"></div>
-    </section>
     <p class="receipt-note" style="margin-top:4px">
       Read-only local scan &middot; no LLM calls &middot; no source or prompt content in summaries &middot;
       nothing leaves this machine unless you connect Cloud.
     </p>
-    <section class="card" style="margin-top:14px">
-      <div class="section-title"><div><h2>Models and Tools</h2><p>Where the spend went, by model and by tool.</p></div></div>
-        <h3 style="font-size:var(--fs-2);font-weight:var(--fw-med);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 4px">By model</h3>
-        <div id="models"></div>
-        <h3 style="font-size:var(--fs-2);font-weight:var(--fw-med);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:14px 0 4px">By tool</h3>
-        <div class="composition" id="toolsComposition" hidden>
-          <div class="pie-host" data-pie="tools"></div>
-          <div class="composition-legend" id="toolsCompositionLegend"></div>
-          <div id="tools"></div>
-        <h3 style="font-size:var(--fs-2);font-weight:var(--fw-med);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:16px 0 2px">Model mix within each tool</h3>
-        <p style="font-size:var(--fs-1);color:var(--faint);margin:0 0 8px">Each bar is that tool's own 100%, so size means proportion, not volume &mdash; the token total is on the right.</p>
-        <div id="toolModels" hidden></div>
-    </section>
   </section>
-
   <section id="view-setup" class="view" hidden>
     <section class="card" style="margin-bottom:14px">
       <div class="section-title"><div><h2>Privacy at a glance</h2><p>Your local trust boundary stays visible.</p></div></div>
