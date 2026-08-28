@@ -304,6 +304,7 @@ These are enough for a normal first week:
 | `hook-status` | Verify whether Claude, Codex, or Cursor actually invoked AIWatcher |
 | `today` | Show today's local usage by tool, model, project, and API-equivalent value |
 | `sessions` | Search and review recent local AI sessions |
+| `open-session <id-or-link>` | Open the Console directly to one AIWatcher session |
 | `preflight "..."` | Review a prompt manually before pasting or running it |
 | `outcome useful` | Mark the latest session as useful, rework, or abandoned |
 | `ui` | Run the Console dashboard in the foreground for debugging |
@@ -316,7 +317,7 @@ Use these once the basics are working:
 | Area | Commands |
 | --- | --- |
 | Companion and runtime watch | `companion start`, `companion status`, `companion stop`, `watch --once`, `watch --overlay`, `processes --stale-only` |
-| Fresh Start and continuity | `handoff`, `resume --target codex --copy`, `log-decision`, `journal`, `timeline`, `last` |
+| Fresh Start and continuity | `handoff`, `resume --target codex --copy`, `open-session`, `return-session`, `log-decision`, `journal`, `timeline`, `last` |
 | Spend and change evidence | `changes`, `commit-receipt`, `install-commit-hook`, `install-statusline`, `statusline`, `report`, `tools`, `projects` |
 | Setup and integrations | `install-claude-hook`, `install-codex-hook`, `install-cursor-hook`, `install-claude-command-gate`, `install-codex-wrapper`, the matching uninstall commands, `mcp`, `export` |
 | Launch helpers | `codex`, `claude`, `run` |
@@ -334,6 +335,8 @@ For common workflows:
 - **Stop the Companion:** `companion stop`
 - **Mark a result:** `outcome useful`, `outcome rework`, or `outcome abandoned`
 - **Build a Fresh Start brief:** `handoff --session-id <session-id> --target codex --copy`
+- **Open one session in the Console:** `open-session aiwatcher://session/<session-id>`
+- **Return toward the AI tool:** `return-session <session-id>` opens the exact chat only when a trusted runtime link exists; otherwise it reports the honest fallback level.
 - **Continue older work:** `resume --search <project-fragment> --target claude --copy`
 - **Review commit cost:** `changes --days 30` or `commit-receipt`
 - **Export local evidence:** `export --format json --days 30`

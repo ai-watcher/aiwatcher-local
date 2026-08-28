@@ -20,7 +20,7 @@ anywhere. See [Privacy](../README.md#privacy) for the full contract.
 - [Getting started](#getting-started) -- `start`, `setup`, `status`, `doctor`
 - [Daily loop](#daily-loop) -- `today`, `last`, `timeline`, `journal`, `sessions`, `changes`, `commit-receipt`, `outcome`, `report`, `tools`, `projects`
 - [Prompt review and launch](#prompt-review-and-launch) -- `preflight`, `codex`, `claude`
-- [Continuity](#continuity) -- `handoff`, `resume`, `log-decision`
+- [Continuity](#continuity) -- `handoff`, `resume`, `open-session`, `return-session`, `log-decision`
 - [Monitoring](#monitoring) -- `watch`, `companion`, `statusline`, `processes`, `run`
 - [Hooks and wrappers](#hooks-and-wrappers) -- `install-claude-hook`, `uninstall-claude-hook`, `install-claude-command-gate`, `uninstall-claude-command-gate`, `install-claude-activity-hook`, `uninstall-claude-activity-hook`, `install-claude-decision-log`, `uninstall-claude-decision-log`, `install-codex-hook`, `uninstall-codex-hook`, `install-cursor-hook`, `uninstall-cursor-hook`, `install-codex-wrapper`, `uninstall-codex-wrapper`, `install-commit-hook`, `uninstall-commit-hook`, `install-statusline`, `uninstall-statusline`, `hook-status`
 - [Data and integrations](#data-and-integrations) -- `export`, `mcp`, `ui`
@@ -467,6 +467,54 @@ aiwatcher resume --search <your-project> --days 30
 | `--source` | repeatable |  | Source-of-truth file, URL, PR, or artifact the fresh session should read first; repeatable |
 | `--constraint` | repeatable |  | Non-negotiable constraint or known bad path the fresh session must preserve; repeatable |
 | `--acceptance` | repeatable |  | Acceptance check the fresh session should use before calling the work done; repeatable |
+
+### `aiwatcher open-session`
+
+Open the AIWatcher UI for a session id or aiwatcher://session link
+
+```sh
+aiwatcher open-session [--print] [--no-open] session
+```
+
+Examples:
+
+```sh
+aiwatcher open-session aiwatcher://session/<session-id>
+aiwatcher open-session <session-id> --no-open
+```
+
+| Argument | Accepts | Description |
+| --- | --- | --- |
+| `session` | text | Raw session id, AIWatcher UI URL with ?session=, or aiwatcher://session/<id> |
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--print` | flag |  | Print the resolved UI URL after opening |
+| `--no-open` | flag |  | Print the resolved UI URL without opening a browser |
+
+### `aiwatcher return-session`
+
+Return to the AI runtime for a session when a safe attachment exists
+
+```sh
+aiwatcher return-session [--days DAYS] [--json] session
+```
+
+Examples:
+
+```sh
+aiwatcher return-session <session-id>
+aiwatcher return-session aiwatcher://session/<session-id> --json
+```
+
+| Argument | Accepts | Description |
+| --- | --- | --- |
+| `session` | text | Raw session id, AIWatcher UI URL with ?session=, or aiwatcher://session/<id> |
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--days` | integer | `30` | How many days back to search for the session |
+| `--json` | flag |  | Emit the return attempt as JSON |
 
 ### `aiwatcher log-decision`
 

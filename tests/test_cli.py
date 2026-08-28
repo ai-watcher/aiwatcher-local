@@ -368,6 +368,187 @@ class ProjectAttributionCliTests(unittest.TestCase):
         self.assertNotIn("  /", lines[1])
 
 
+class SessionDeepLinkCliTests(unittest.TestCase):
+    def test_session_id_from_aiwatcher_and_dashboard_links(self) -> None:
+        self.assertEqual(cli._session_id_from_link("session-abc"), "session-abc")
+        self.assertEqual(cli._session_id_from_link("aiwatcher://session/session-abc"), "session-abc")
+        self.assertEqual(cli._session_id_from_link("aiwatcher://session?id=session-abc"), "session-abc")
+        self.assertEqual(cli._session_id_from_link("http://127.0.0.1:8765/?session=session-abc"), "session-abc")
+        self.assertIsNone(cli._session_id_from_link("file:///tmp/session-abc"))
+
+    def test_open_session_follows_recorded_ui_port_and_rewrites_loopback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_ui_server("0.0.0.0", 9123)
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(cli, "_local_url_available", return_value=True),
+                patch.object(cli.webbrowser, "open", return_value=True) as browser,
+                patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                result = cli.command_open_session(SimpleNamespace(
+                    session="aiwatcher://session/session-abc",
+                    print_url=False,
+                    no_open=False,
+                ))
+
+        self.assertEqual(result, 0)
+        browser.assert_called_once_with("http://127.0.0.1:9123/?session=session-abc")
+        self.assertIn("Opened AIWatcher Console", stdout.getvalue())
+
+    def test_open_session_print_url_has_a_distinct_success_output(self) -> None:
+        with (
+            patch.object(cli, "get_ui_server", return_value={"host": "127.0.0.1", "port": 8888}),
+            patch.object(cli, "_local_url_available", return_value=True),
+            patch.object(cli.webbrowser, "open", return_value=True) as browser,
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_open_session(SimpleNamespace(
+                session="session-xyz",
+                print_url=True,
+                no_open=False,
+            ))
+
+        self.assertEqual(result, 0)
+        browser.assert_called_once_with("http://127.0.0.1:8888/?session=session-xyz")
+        self.assertEqual(stdout.getvalue().strip(), "http://127.0.0.1:8888/?session=session-xyz")
+
+    def test_open_session_refuses_to_open_dead_console_port(self) -> None:
+        with (
+            patch.object(cli, "get_ui_server", return_value={"host": "127.0.0.1", "port": 65530}),
+            patch.object(cli, "_local_url_available", return_value=False),
+            patch.object(cli.webbrowser, "open") as browser,
+            patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            result = cli.command_open_session(SimpleNamespace(
+                session="session-xyz",
+                print_url=False,
+                no_open=False,
+            ))
+
+        self.assertEqual(result, 2)
+        browser.assert_not_called()
+        self.assertIn("AIWatcher Console is not running", stderr.getvalue())
+
+    def test_open_session_handles_browser_open_exception(self) -> None:
+        with (
+            patch.object(cli, "get_ui_server", return_value={"host": "127.0.0.1", "port": 8888}),
+            patch.object(cli, "_local_url_available", return_value=True),
+            patch.object(cli.webbrowser, "open", side_effect=RuntimeError("bad browser")),
+            patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            result = cli.command_open_session(SimpleNamespace(
+                session="session-xyz",
+                print_url=False,
+                no_open=False,
+            ))
+
+        self.assertEqual(result, 2)
+        self.assertIn("Could not open browser automatically", stderr.getvalue())
+
+    def test_open_session_no_open_prints_url_without_browser(self) -> None:
+        with (
+            patch.object(cli, "get_ui_server", return_value={"host": "127.0.0.1", "port": 8888}),
+            patch.object(cli.webbrowser, "open") as browser,
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_open_session(SimpleNamespace(
+                session="http://127.0.0.1:8765/?session=session-xyz",
+                print_url=False,
+                no_open=True,
+            ))
+
+        self.assertEqual(result, 0)
+        browser.assert_not_called()
+        self.assertEqual(stdout.getvalue().strip(), "http://127.0.0.1:8888/?session=session-xyz")
+
+    def test_return_session_json_reports_invalid_link_as_json(self) -> None:
+        with (
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            result = cli.command_return_session(SimpleNamespace(session="file:///tmp/session-1", days=30, json=True))
+
+        self.assertEqual(result, 2)
+        payload = json.loads(stdout.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["code"], "invalid_session")
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_return_session_json_reports_missing_session_as_json(self) -> None:
+        with (
+            patch.object(cli, "sessions_since", return_value=[]),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            result = cli.command_return_session(SimpleNamespace(session="session-missing", days=30, json=True))
+
+        self.assertEqual(result, 2)
+        payload = json.loads(stdout.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["code"], "session_not_found")
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_return_session_uses_exact_runtime_attachment_when_available(self) -> None:
+        row = session(1, tool="codex-cli")
+        process = RuntimeProcess(
+            pid=123,
+            ppid=1,
+            age_seconds=60,
+            state="S",
+            tool="Codex",
+            command="codex --session-id session-1 --deep-link codex://chat/session-1",
+            cwd="/repo",
+            session_id=row.session_id,
+            deep_link="codex://chat/session-1",
+        )
+        with (
+            patch.object(cli, "sessions_since", return_value=[row]),
+            patch.object(cli, "safe_runtime_processes", return_value=[process]),
+            patch.object(cli, "perform_runtime_return", return_value={"ok": True, "message": "Opened exact chat link."}) as runtime_return,
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_return_session(SimpleNamespace(session="session-1", days=30, json=False))
+
+        self.assertEqual(result, 0)
+        attachment = runtime_return.call_args.args[0]
+        self.assertTrue(attachment.exact_return_available)
+        self.assertEqual(attachment.deep_link, "codex://chat/session-1")
+        self.assertIn("Opened exact chat link.", stdout.getvalue())
+
+    def test_return_session_passes_freshness_so_live_tiers_are_reachable(self) -> None:
+        row = session(1, tool="cursor")
+
+        with (
+            patch.object(cli, "sessions_since", return_value=[row]),
+            patch.object(cli, "safe_runtime_processes", return_value=[]),
+            patch("aiwatcher_cli.runtime_attachment.shutil.which", return_value="/usr/bin/code"),
+            patch.object(cli, "perform_runtime_return", return_value={"ok": True, "message": "Opened workspace."}) as runtime_return,
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            result = cli.command_return_session(SimpleNamespace(session="session-1", days=30, json=False))
+
+        self.assertEqual(result, 0)
+        attachment = runtime_return.call_args.args[0]
+        self.assertEqual(attachment.level, "workspace")
+        self.assertTrue(attachment.available)
+
+    def test_return_session_still_reports_a_genuinely_stale_session_as_historical(self) -> None:
+        row = session(1, tool="cursor", age_days=9)
+
+        with (
+            patch.object(cli, "sessions_since", return_value=[row]),
+            patch.object(cli, "safe_runtime_processes", return_value=[]),
+            patch("aiwatcher_cli.runtime_attachment.shutil.which", return_value="/usr/bin/code"),
+            patch("sys.stdout", new_callable=io.StringIO),
+            patch("sys.stderr", new_callable=io.StringIO),
+        ):
+            result = cli.command_return_session(SimpleNamespace(session="session-1", days=30, json=False))
+
+        self.assertEqual(result, 2)
+
+
 class PromptSavingsBaselineTests(unittest.TestCase):
     """P0-3: prompt gate must read cached baselines, never rescan history live."""
 
