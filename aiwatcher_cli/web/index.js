@@ -4366,13 +4366,26 @@ document.addEventListener('keydown', event => { if (event.key === 'Escape') clos
       document.getElementById('promptInput').focus();
     }
   }
-  if (location.hash === '#optimizeWorkspace') {
-    // The queue moved from Plan to Control. Links to the bare hash are still
-    // honoured -- the Companion nudge's Review button and older ask answers
-    // both emit them -- so this resolves the target rather than the tab it
-    // used to live on.
-    showView('control');
-    window.setTimeout(() => document.getElementById('optimizeWorkspace').scrollIntoView({ block: 'start' }), 50);
+  // Deep links carry a #target as well as ?view=: the Companion's nudges point
+  // at the card that explains the nudge, not merely the page holding it.
+  //
+  // Native anchor scrolling cannot do this. Every view is hidden at load and
+  // only revealed once showView runs, so the browser looks for the target,
+  // finds nothing, and has stopped caring by the time it exists. #contextHealth
+  // was emitted by seven links and never worked for exactly that reason -- and
+  // for a second one, since no element carried that id at all.
+  //
+  // The owning view is derived from the element rather than kept in a mapping
+  // beside it: a second list is a second thing to forget when a card moves, and
+  // cards have moved. This also replaces the hand-written #optimizeWorkspace
+  // branch, which was the only target that ever worked because it was the only
+  // one someone had written a special case for.
+  const hashTarget = location.hash ? document.getElementById(location.hash.slice(1)) : null;
+  if (hashTarget) {
+    const owner = hashTarget.closest('.view');
+    if (owner) showView(owner.id.replace(/^view-/, ''));
+    // After the view is visible, or there is nothing laid out to scroll to.
+    window.setTimeout(() => hashTarget.scrollIntoView({ block: 'start' }), 50);
   }
   if (new URLSearchParams(location.search).get('ask') === '1') {
     openAskPanel();

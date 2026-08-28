@@ -149,7 +149,11 @@
        to put on the screen you reach because something is wrong. It is its own
        view under Projects now, and the two-zone grid is gone with it. -->
   <section id="view-watch" class="view" hidden>
-    <div class="card">
+    <!-- The card carries the deep-link target seven Companion nudges have
+         always pointed at. It sits here rather than on the div the rows render
+         into, so arriving puts the heading at the top of the window instead of
+         the first row with its explanation scrolled off. -->
+    <div class="card" id="contextHealth">
       <div class="section-title">
         <div><h2>Context health</h2><p>Context bloat, runway pressure, and Fresh Start actions for local work.</p></div>
         <span class="note-chip">Actionable sessions</span>

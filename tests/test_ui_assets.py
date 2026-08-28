@@ -308,6 +308,41 @@ class NavigationTest(unittest.TestCase):
     def test_nav_entries_all_point_at_real_views(self):
         self.assertEqual(self.nav_views - self.views, set())
 
+    def test_every_deep_link_target_exists_in_the_markup(self):
+        """`?view=x#target` links are built in ui.py and the targets live in
+        index.html, and nothing connected the two.
+
+        #contextHealth was emitted by seven links -- Companion nudge
+        primary_urls, control_url and watch_url -- against an element that was
+        called sessionContextHealth. It had never resolved. A rename or a moved
+        card breaks these silently, because the link still opens the right page
+        and simply fails to go anywhere on it.
+        """
+        emitted = set(re.findall(r'"/\?view=[\w-]+#([\w-]+)"', inspect.getsource(ui)))
+        self.assertTrue(emitted, "no deep links found -- has the URL shape changed?")
+        # Comments stripped first. A comment explaining a target mentions the id
+        # in full, which would satisfy a plain substring check and let the real
+        # attribute be renamed out from under these links -- the exact bug this
+        # test exists for, passing because someone documented it.
+        markup = re.sub(r"<!--.*?-->", "", self.html, flags=re.S)
+        missing = {t for t in emitted if 'id="%s"' % t not in markup}
+        self.assertEqual(
+            missing, set(),
+            "ui.py links to these anchors and no element carries them: %s"
+            % sorted(missing))
+
+    def test_deep_link_targets_are_resolved_in_js_not_by_the_browser(self):
+        """Views are hidden at load, so a native anchor jump finds nothing and
+        gives up before showView reveals the target. Every target has to be
+        resolved after the view is shown -- generically, because the one
+        hand-written branch that did this was the only anchor that worked."""
+        source = self.js[self.js.index("location.hash ?"):]
+        source = source[:source.index("\n  }") + 4]
+        self.assertIn("closest('.view')", source)
+        self.assertIn("scrollIntoView", source)
+        # A per-target branch is the thing this replaced.
+        self.assertNotIn("location.hash === '#", self.js)
+
     def test_deep_link_allowlist_covers_every_view(self):
         """`?view=<id>` is filtered against a hardcoded list before showView is
         called, so a view missing from it is reachable by clicking and silently
@@ -901,14 +936,20 @@ class PlanControlTest(unittest.TestCase):
         self.assertNotIn("<details", card)
         self.assertIn("optimizeWorkspaceSummary", card)
 
-    def test_the_deep_link_target_still_resolves(self):
+    def test_the_deep_link_points_at_the_view_that_holds_it(self):
         """The Companion nudge's Review button and older ask answers both link
         to #optimizeWorkspace. Moving the section without moving the links is
-        how a nudge's only action becomes a no-op."""
+        how a nudge's only action becomes a no-op.
+
+        How the anchor is resolved is not this test's business -- that is
+        generic now, and NavigationTest owns it. This owns the pairing: the link
+        names control, and control is where the target lives.
+        """
         self.assertIn("view=control#optimizeWorkspace", inspect.getsource(ui))
         self.assertNotIn("view=prompt#optimizeWorkspace", inspect.getsource(ui))
-        hash_branch = self.js[self.js.index("location.hash === '#optimizeWorkspace'"):]
-        self.assertIn("showView('control')", hash_branch[:400])
+        control = self.html[self.html.index('<section id="view-control"'):]
+        control = control[:control.index('<section id="view-receipts"')]
+        self.assertIn('id="optimizeWorkspace"', control)
 
     def test_the_summary_carries_the_count(self):
         # A collapsed card with a bare title hides whether there is anything in it.
