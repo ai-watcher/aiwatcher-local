@@ -293,6 +293,9 @@ class NavigationTest(unittest.TestCase):
         cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
         cls.views = set(re.findall(r'<section id="view-([\w-]+)"', cls.html))
         nav = re.search(r'<nav class="product-nav".*?</nav>', cls.html, re.S).group(0)
+        # Kept whole as well as as a set: order and nesting carry meaning here,
+        # and the loop-contiguity test needs both.
+        cls.nav_html = nav
         cls.nav_views = set(re.findall(r'data-view="([\w-]+)"', nav))
 
     def test_every_view_is_reachable_from_the_nav(self):
@@ -315,14 +318,51 @@ class NavigationTest(unittest.TestCase):
         remapped = set(re.findall(r"(\w+):", remap))
         self.assertEqual(remapped, set(self.BORROWS_HIGHLIGHT))
 
-    def test_subviews_are_nested_not_promoted(self):
-        # The top level stays six verb-named destinations; Projects and the
-        # Changes ledger read as views within Watch.
-        for view in ("projects", "changes"):
-            with self.subTest(view=view):
-                self.assertRegex(
-                    self.html,
-                    r'class="nav-tab nav-sub" data-view="%s"' % view)
+    def test_the_changes_ledger_is_nested_under_what_it_evidences(self):
+        # Per-commit cost and survival is the drill-down behind Prove's claim,
+        # so it reads as a view within Prove rather than a destination of its
+        # own. It used to nest under Watch, which put a retrospective table
+        # inside a live-triage stage.
+        self.assertRegex(
+            self.html, r'class="nav-tab nav-sub" data-view="changes"')
+
+    def test_projects_is_top_level_not_nested(self):
+        # Projects answers "where is the spend going" -- a lens you drop into
+        # from anywhere, not a stage you pass through. Nested under Watch it
+        # also sat *inside* the loop sequence; see the contiguity test below,
+        # which is the real reason this moved.
+        self.assertRegex(self.html, r'class="nav-tab" data-view="projects"')
+        self.assertNotRegex(
+            self.html, r'class="nav-tab nav-sub" data-view="projects"')
+
+    def test_the_loop_stages_are_contiguous_in_the_nav(self):
+        """The five stages the README defines are the product's spine and its
+        vocabulary, so the nav must not interleave anything else with them.
+
+        Projects and the Changes ledger used to sit between Watch and Prove,
+        breaking the sequence a reader is meant to internalise. Control had no
+        entry at all, so the stage where the product actually acts was
+        reachable only from buttons inside other pages.
+        """
+        order = [m for m in re.findall(r'data-view="([\w-]+)"', self.nav_html)]
+        stages = ["prompt", "sessions", "control", "receipts", "insights"]
+        positions = [order.index(s) for s in stages]
+
+        self.assertEqual(
+            positions, sorted(positions),
+            "the loop stages are out of order in the nav: %s" % order)
+
+        # Sub-views hang off their parent stage and do not break the run; any
+        # other top-level entry between two stages does.
+        subs = set(re.findall(
+            r'class="nav-tab nav-sub" data-view="([\w-]+)"', self.nav_html))
+        between = [
+            v for v in order[positions[0]:positions[-1] + 1]
+            if v not in stages and v not in subs
+        ]
+        self.assertEqual(
+            between, [],
+            "these sit inside the loop sequence without being stages: %s" % between)
 
 
 class TrimmedHomeTest(unittest.TestCase):

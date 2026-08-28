@@ -58,10 +58,11 @@
     <button class="nav-tab active" data-view="today" onclick="showView('today')">Home</button>
     <button class="nav-tab" data-view="prompt" onclick="showView('prompt')">Plan</button>
     <button class="nav-tab" data-view="sessions" onclick="showView('sessions')">Watch</button>
-    <button class="nav-tab nav-sub" data-view="projects" onclick="showView('projects')">Projects</button>
-    <button class="nav-tab nav-sub" data-view="changes" onclick="showView('changes')">Changes ledger</button>
+    <button class="nav-tab" data-view="control" onclick="showView('control')">Control</button>
     <button class="nav-tab" data-view="receipts" onclick="showView('receipts')">Prove</button>
+    <button class="nav-tab nav-sub" data-view="changes" onclick="showView('changes')">Changes ledger</button>
     <button class="nav-tab" data-view="insights" onclick="showView('insights')">Improve</button>
+    <button class="nav-tab" data-view="projects" onclick="showView('projects')">Projects</button>
     <button class="nav-tab" data-view="setup" onclick="showView('setup')">Settings</button>
   </nav>
 
@@ -226,6 +227,29 @@
         rebasing rewrites a commit's date, and keying off that stranded the spend behind it. Survival is only measured
         for changes old enough to judge and costly enough to reach the sampling budget — a blank means not measured,
         not "did not survive". It is a floor either way: reformatting moves attribution away from the original change.</p>
+    </div>
+  </section>
+
+  <!-- Stage three of the loop the README defines: Plan, Watch, Control, Prove,
+       Improve. It is the only stage with no nav entry, so the one moment the
+       product exists for -- doing something about what it just told you -- is
+       reachable only if you already know that Fresh Start lives on Home, the
+       cleanup queue lives on Plan, and the session actions live in the drawer.
+
+       The shell lands first, deliberately empty of moved content: reparenting
+       the nav is one reviewable change, and relocating the queue and the
+       actions into it is another. What it says now is what it will do, not a
+       placeholder pretending to be finished. -->
+  <section id="view-control" class="view" hidden>
+    <div class="card">
+      <div class="section-title">
+        <div><h2>Control</h2><p>What you can do about what the other surfaces just told you.</p></div>
+        <span class="note-chip local">Local only</span>
+      </div>
+      <div class="empty">Nothing to act on has moved here yet. Fresh Start is still on Home, the
+        workspace cleanup queue is still on Plan, and per-session actions are still in the session
+        drawer. This section collects them so acting on a warning does not mean remembering which
+        page it lives on.</div>
     </div>
   </section>
 
