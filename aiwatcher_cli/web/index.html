@@ -395,19 +395,36 @@
       <div class="privacy-grid" id="privacy"></div>
     </section>
 
+    <!-- Out of the fold, and directly under the promise it qualifies. Privacy
+         at a glance says what AIWatcher will not do; this says what it can
+         actually see, which is the other half of the same answer and the half
+         that admits limits -- Cursor is installed but keeps no local cost
+         history, so it is listed as detected and not measured rather than
+         quietly dropped.
+
+         Someone deciding whether to keep this running wants both halves at
+         once. One click away is not far, but it is far enough that the
+         reassuring half was visible by default and the qualifying half was
+         not. The heading is the count element, so it reads "Surface coverage
+         (2 of 4 gated automatically)" rather than needing a summary line to
+         say whether there is anything inside. -->
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title">
+        <div><h2 id="coverageSummary">Surface coverage</h2><p>Detected tools, hook confidence, and what AIWatcher can honestly measure.</p></div>
+        <span class="note-chip local">Local only</span>
+      </div>
+      <div id="coverageRowsSettings" class="coverage-grid"></div>
+    </section>
+
     <div class="card">
       <div class="section-title">
         <div><h2>Settings</h2><p>Setup, coverage, privacy, and local companion behavior.</p></div>
         <span class="note-chip local">Local only</span>
       </div>
       <p class="receipt-note">Ambient Watch starts with the dashboard by default. For standalone mode, run <code>aiwatcher watch --notify --overlay --interval 60</code>.</p>
-      <details class="aiw-details">
-        <summary><span id="coverageSummary">Surface coverage</span></summary>
-        <div class="details-body">
-          <p class="optimize-lede">Detected tools, hook confidence, and what AIWatcher can honestly measure.</p>
-          <div id="coverageRowsSettings" class="coverage-grid"></div>
-        </div>
-      </details>
+      <!-- Setup steps stay folded. They are recommendations about what to
+           install next, not a statement about what the tool can see, so they
+           do not carry the weight coverage does. -->
       <details class="aiw-details">
         <summary><span id="setupSummary">Setup steps</span></summary>
         <div class="details-body">

@@ -1059,11 +1059,39 @@ class SettingsTest(unittest.TestCase):
         self.assertNotIn("showView('coverage')", self.html)
         self.assertNotIn("showView('coverage')", self.js)
 
-    def test_reference_material_opens_on_demand(self):
-        for anchor in ("coverageSummary", "setupSummary"):
-            with self.subTest(section=anchor):
-                self.assertIn(anchor, self.html)
-                self.assertIn(anchor, self.js)
+    def _details_bodies(self):
+        setup = self.html[self.html.index('<section id="view-setup"'):]
+        return re.findall(r"<details.*?</details>", setup, re.S)
+
+    def test_setup_steps_open_on_demand(self):
+        # Recommendations about what to install next. Reference material you
+        # consult, so it folds.
+        self.assertIn("setupSummary", self.html)
+        self.assertIn("setupSummary", self.js)
+        self.assertTrue(
+            any("setupSummary" in d for d in self._details_bodies()),
+            "setup steps should still be behind a details")
+
+    def test_coverage_is_not_behind_a_fold(self):
+        """What AIWatcher can see is the other half of what it promises not to
+        do, and the half that admits limits -- Cursor is detected and not
+        measured, and that has to be as visible as the reassurance above it.
+
+        One click away is not far. It was far enough that the reassuring half
+        rendered by default and the qualifying half did not.
+        """
+        self.assertIn("coverageSummary", self.html)
+        self.assertIn("coverageSummary", self.js)
+        self.assertFalse(
+            any("coverageSummary" in d for d in self._details_bodies()),
+            "surface coverage is folded again; it qualifies the privacy card "
+            "and should render with it")
+
+    def test_the_coverage_heading_carries_the_gated_count(self):
+        # A bare "Surface coverage" lets a reader assume the tools listed are
+        # the tools covered. The count is what stops that.
+        self.assertIn('<h2 id="coverageSummary"', self.html)
+        self.assertIn("gated automatically", self.js)
 
     def test_summaries_count_what_the_payload_actually_carries(self):
         """Guessed field names reported "0 of 10 gated" and "0 of 11 done" --

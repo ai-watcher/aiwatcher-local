@@ -4253,8 +4253,12 @@ async function loadOnce(resetDetail, forceRefresh) {
   updateSortIndicators('change', changeSort, ['committed_at', 'project', 'cost_usd', 'lines_changed', 'usd_per_line', 'survival_pct', 'usd_per_surviving_line']);
   const coverage = data.coverage || [];
   document.getElementById('coverageRowsSettings').innerHTML = renderCoverage(coverage);
-  // Counts on the summaries: a folded section with a bare title hides whether
-  // there is anything inside, and these two are the whole of Settings.
+  // Counts on both headings. Setup steps is still folded, and a folded section
+  // with a bare title hides whether there is anything inside. Coverage is not
+  // folded any more -- it sits under the privacy card, whose promise it
+  // qualifies -- but the count earns its place there for a different reason:
+  // "2 of 4 gated automatically" is the honest headline, and a bare "Surface
+  // coverage" would let a reader assume the four are covered.
   const gated = coverage.filter(row => row.status === 'automatic').length;
   const coverageSummary = document.getElementById('coverageSummary');
   if (coverageSummary) {
