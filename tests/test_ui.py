@@ -2109,6 +2109,26 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Do not delete", inventory["top"]["checklist"])
         self.assertIn("/repo/app", inventory["top"]["checklist"])
 
+    def test_optimize_inventory_surfaces_stale_runtime_review_plan(self) -> None:
+        runtime = SimpleNamespace(stale=True, rss_kb=147251)
+        with (
+            patch.object(ui, "safe_runtime_processes", return_value=[runtime]),
+            patch.object(ui, "_worktree_rows", return_value=[]),
+            patch.object(ui, "recent_optimize_decisions", return_value=[]),
+        ):
+            inventory = ui.build_optimize_inventory([], outcomes={}, handoff_decisions=[])
+
+        self.assertEqual(inventory["status"], "needs_action")
+        self.assertEqual(inventory["top"]["kind"], "stale_processes")
+        self.assertEqual(inventory["top"]["project"], "Local machine")
+        self.assertEqual(inventory["top"]["review_command"], "aiwatcher processes --stale-only")
+        self.assertIn("143.8 MB RSS observed", inventory["top"]["impact_label"])
+        self.assertIn("not provider billing", inventory["top"]["evidence"])
+        self.assertIn("not model/API spend", inventory["top"]["resource_note"])
+        self.assertIn("prompt/source content", inventory["top"]["privacy_note"])
+        self.assertIn("Run: aiwatcher processes --stale-only", inventory["top"]["safe_review_steps"])
+        self.assertIn("Leave unknown processes alone", inventory["top"]["checklist"])
+
     def test_detected_tools_are_listed_without_measured_spend(self) -> None:
         rows = [{
             "name": "claude-code (desktop)",

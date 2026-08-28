@@ -185,6 +185,14 @@ async function copyText(value, label = 'Copied') {
     return false;
   }
 }
+async function copyOptimizeRuntimeCommand(command, button = null) {
+  lastPressedButton = button || pressedButton();
+  const copied = await copyText(command || 'aiwatcher processes --stale-only', 'Review command copied');
+  if (copied) {
+    const row = button && button.closest ? button.closest('.runtime-review-card') : null;
+    if (row) row.classList.add('review-command-copied');
+  }
+}
 async function recordOptimizeDecision(decision, project = '', impact = '', button = null) {
   try {
     const res = await fetch('/api/optimize-decision', {
@@ -1883,6 +1891,9 @@ function renderOptimizeWorkspace(optimize) {
     <p class="receipt-note" style="margin-bottom:12px">AIWatcher cannot archive or delete anything for you. Review one item, act only in the owning app, then mark it reviewed to quiet the nudge for 24 hours.</p>
     <div class="action-queue">${candidates.map(item => {
       const itemChecklist = item.checklist || checklist;
+      if (item.kind === 'stale_processes') {
+        return renderRuntimeOptimizeCard(item, itemChecklist);
+      }
       return `<div class="action-row ${item.tokens_at_risk ? 'medium' : 'low'}">
       <div>
         <div class="action-title">${esc(item.title)} <span class="pill">${esc(item.evidence_label || 'Observed')}</span></div>
@@ -1900,6 +1911,38 @@ function renderOptimizeWorkspace(optimize) {
     <div class="copy-row" style="margin-top:12px">
       <button class="btn-quiet" onclick="copyText(${jsArg(checklist)}, 'Global review queue copied')">Copy all review items</button>
     </div>`;
+}
+function renderRuntimeOptimizeCard(item, itemChecklist) {
+  const steps = Array.isArray(item.safe_review_steps) && item.safe_review_steps.length
+    ? item.safe_review_steps
+    : ['Run: aiwatcher processes --stale-only', 'Confirm each process is not attached to live AI work.', 'Stop only stale/orphaned runtimes you recognize.', 'Leave unknown processes alone.'];
+  const command = item.review_command || 'aiwatcher processes --stale-only';
+  return `<div class="action-row low runtime-review-card">
+    <div>
+      <div class="action-title">${esc(item.title || 'Review stale AI runtimes')} <span class="pill local">Local machine</span></div>
+      <p>${esc(item.why_inactive || 'Local process metadata shows AI-related runtimes with stale/orphan signals.')}</p>
+      <div class="runtime-review-grid">
+        <div class="mini"><span class="label">Goal</span><strong>${esc(item.title || 'Review stale AI runtimes')}</strong></div>
+        <div class="mini"><span class="label">Evidence</span><strong>${esc(item.evidence_label || 'Observed')}</strong><span class="mini-note">${esc(item.evidence || 'Observed from local process metadata, not provider billing.')}</span></div>
+        <div class="mini"><span class="label">Impact signal</span><strong>${esc(item.impact_label || 'runtime clutter')}</strong><span class="mini-note">${esc(item.resource_note || 'RSS/CPU are local machine resources, not model/API spend.')}</span></div>
+      </div>
+      <div class="runtime-command">
+        <span class="label">Review command</span>
+        <code>${esc(command)}</code>
+      </div>
+      <ol class="runtime-review-steps">
+        ${steps.map(step => `<li>${esc(step)}</li>`).join('')}
+      </ol>
+      <p class="receipt-note">${esc(item.privacy_note || 'This checklist uses local metadata only. It does not include prompt/source content.')}</p>
+      <p class="receipt-note">Nothing is stopped from this dashboard. Run the command, confirm live work is not attached, then stop only a runtime you recognize.</p>
+    </div>
+    <div class="actions">
+      <button class="btn-primary" onclick="copyOptimizeRuntimeCommand(${jsArg(command)}, this)">Copy command</button>
+      <button class="btn-quiet" onclick="copyText(${jsArg(itemChecklist)}, 'Safe review steps copied')">${esc(item.action_label || 'Copy safe review steps')}</button>
+      <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('marked_done', this.dataset.project, this.dataset.impact, this)">Reviewed</button>
+      <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('skipped', this.dataset.project, this.dataset.impact, this)">Skip</button>
+    </div>
+  </div>`;
 }
 /* ---------------------------------------------------------------------------
    Chart core.

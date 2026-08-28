@@ -979,6 +979,7 @@ def build_optimize_inventory(
         stale_processes = []
     if stale_processes:
         rss_kb = sum(process.rss_kb or 0 for process in stale_processes)
+        review_command = "aiwatcher processes --stale-only"
         candidates.append({
             "id": "stale-processes",
             "kind": "stale_processes",
@@ -993,7 +994,16 @@ def build_optimize_inventory(
             "tokens_at_risk": 0,
             "session_count": len(stale_processes),
             "updated_label": "now",
-            "action_label": "Copy cleanup checklist",
+            "action_label": "Copy safe review steps",
+            "review_command": review_command,
+            "resource_note": "RSS/CPU are local machine resources, not model/API spend.",
+            "privacy_note": "This checklist uses local metadata only. It does not include prompt/source content.",
+            "safe_review_steps": [
+                f"Run: {review_command}",
+                "Confirm each process is not attached to live AI work.",
+                "Stop only stale/orphaned runtimes you recognize.",
+                "Leave unknown processes alone.",
+            ],
         })
 
     candidates = _group_pending_fresh_starts(candidates)
