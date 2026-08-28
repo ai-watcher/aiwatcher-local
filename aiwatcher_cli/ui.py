@@ -5188,7 +5188,7 @@ def answer_local_question(question: str, days: int = 7) -> dict[str, object]:
                 bullets=bullets,
                 actions=[
                     _ask_action("Review Optimize", "/?view=control#optimizeWorkspace"),
-                    _ask_action("Open Work", "/?view=sessions"),
+                    _ask_action("Open Sessions", "/?view=sessions"),
                 ],
             )
         return _ask_answer(
@@ -5206,7 +5206,7 @@ def answer_local_question(question: str, days: int = 7) -> dict[str, object]:
             latest = str(row.get("latest_turn_tokens") or row.get("latest_turn_tokens_label") or "unknown")
             recommendation = str(row.get("recommendation") or "Use a narrower prompt or Fresh Start before continuing.")
             session_id = str(row.get("session_id") or "")
-            actions = [_ask_action("Open Watch", "/?view=sessions")]
+            actions = [_ask_action("Open Watch", "/?view=watch")]
             if session_id:
                 actions.insert(0, _ask_action("Inspect Session", f"/?session={session_id}"))
             if row.get("can_handoff") and session_id:
@@ -5447,7 +5447,7 @@ def build_companion_state() -> dict[str, object]:
                 "label": "Watching quietly",
                 "subtitle": f"{project_count} projects ready for context review in Console",
                 "primary_label": "Console",
-                "primary_url": "/?view=sessions#contextHealth",
+                "primary_url": "/?view=watch#contextHealth",
                 "detail": "Fresh Start review is batched in Watch and only blinks while an affected AI surface is foreground.",
             }
         return {
@@ -5460,14 +5460,14 @@ def build_companion_state() -> dict[str, object]:
             ),
             "primary_label": "Review",
             "primary_action": "open_url",
-            "primary_url": "/?view=sessions#contextHealth",
+            "primary_url": "/?view=watch#contextHealth",
             "skip_label": "Snooze",
             "skip_state": "control_recommended_group",
             "skip_project": "\n".join(project_lines),
             "fresh_start_project_count": project_count,
             "fresh_start_context_label": context_label,
-            "control_url": "/?view=sessions#contextHealth",
-            "watch_url": "/?view=sessions#contextHealth",
+            "control_url": "/?view=watch#contextHealth",
+            "watch_url": "/?view=watch#contextHealth",
             "detail": "Choose which projects to Fresh Start, continue, or snooze in one batch.",
         }
     bubble = summary.get("handoff_bubble")
@@ -5481,7 +5481,7 @@ def build_companion_state() -> dict[str, object]:
                 "label": "Watching quietly",
                 "subtitle": "Fresh Start snoozed for this project",
                 "primary_label": "Console",
-                "primary_url": "/?view=sessions#contextHealth",
+                "primary_url": "/?view=watch#contextHealth",
                 "detail": "The project still appears in Watch, but the Companion will not blink for it during the cooldown.",
             }
         try:
@@ -5502,7 +5502,7 @@ def build_companion_state() -> dict[str, object]:
                     "label": "Watching quietly",
                     "subtitle": "Fresh Start snoozed for this project",
                     "primary_label": "Console",
-                    "primary_url": "/?view=sessions#contextHealth",
+                    "primary_url": "/?view=watch#contextHealth",
                     "detail": "AIWatcher will stay quiet for this project during the cooldown unless a stronger intervention is justified.",
                 }
             if decision in {"new_chat", "copy_handoff"}:
@@ -5558,7 +5558,7 @@ def build_companion_state() -> dict[str, object]:
                 "label": "Watching quietly",
                 "subtitle": subtitle,
                 "primary_label": "Console",
-                "primary_url": "/?view=sessions#contextHealth",
+                "primary_url": "/?view=watch#contextHealth",
                 "detail": "Fresh Start nudges only blink when the matching AI tool or terminal is foreground.",
             }
         return {

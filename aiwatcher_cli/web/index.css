@@ -422,26 +422,12 @@
        every column is wide, rather than four columns that wrap one card's copy
        and pull the whole row taller. */
     .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: var(--sp-3) 0; }
-    /* Watch composes rather than stacks. Context health and the work list were
-       583px and 995px of a single column, so at 1492x945 the screen was 1592px
-       tall and you could never see both -- and the answer to "is this session
-       in trouble" is only useful next to the work you would act on.
-       align-items: start because the two are different lengths and should be,
-       rather than one stretching to pad out the other. */
-    .watch-shell { display: grid; gap: var(--sp-3); }
-    .watch-shell > .card { margin: 0; }
-    /* Split evenly, and the breakpoint is set by the one hard constraint: the
-       work table must never scroll sideways. Its min-content is 393px, so with
-       68px of card padding a column below ~461px would clip it. At 1300 the
-       content area is ~997px and an even split gives each card ~493px.
-       The facts strip above wants ~584px to hold one line, which no split of a
-       1300px window can give it -- and tuning the breakpoint to that number
-       would be tuning to today's dollar figures, since the strip's width grows
-       with the values in it. It wraps between its two scopes instead, never
-       inside one (see .health-facts). At 1492 it fits on one line again. */
-    @media (min-width: 1300px) {
-      .watch-shell { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
-    }
+    /* .watch-shell was here: a two-column grid above 1300px that put Context
+       health beside the work table, because at 1492x945 the two stacked to
+       1592px and you could never see both at once. That was the right fix for a
+       view holding both. The table is its own view under Projects now, so Watch
+       is one card, and a grid whose breakpoint exists to fit a second column
+       would be reserving space for something that cannot arrive. */
     @media (min-width: 1280px) { .kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
     /* Headings and <strong> were never given a weight, so they took the UA
        default of 700 -- a fourth weight the stylesheet did not know it had.

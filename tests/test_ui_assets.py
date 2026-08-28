@@ -360,7 +360,7 @@ class NavigationTest(unittest.TestCase):
         reachable only from buttons inside other pages.
         """
         order = [m for m in re.findall(r'data-view="([\w-]+)"', self.nav_html)]
-        stages = ["prompt", "sessions", "control", "receipts", "insights"]
+        stages = ["prompt", "watch", "control", "receipts", "insights"]
         positions = [order.index(s) for s in stages]
 
         self.assertEqual(
@@ -710,22 +710,27 @@ class HorizontalCompositionTest(unittest.TestCase):
         cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
         cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
 
-    def test_watch_puts_health_beside_the_work(self):
-        watch = self.html[self.html.index('id="view-sessions"'):]
-        watch = watch[:watch.index("</section>")]
-        self.assertIn('<div class="watch-shell">', watch)
-        # The shell wraps both cards, not one of them.
-        self.assertEqual(watch.count('<div class="card"'), 2)
+    def test_watch_is_one_zone_now_that_the_table_has_left(self):
+        """The two-zone shell put health beside the work table on the reasoning
+        that "what is happening right now" belongs next to "the work it is
+        happening to". Composing beat stacking, and that was right for a view
+        holding both.
 
-    def test_the_two_zones_only_form_when_the_table_still_fits(self):
-        # The hard constraint is the work table: 393px of min-content plus 68px
-        # of card padding, so a column under ~461px would clip it. Below the
-        # breakpoint the view stacks rather than scrolling the table sideways.
-        shell = self.css[self.css.index(".watch-shell {"):]
-        shell = shell[:shell.index("@media") + 260]
-        self.assertIn("min-width: 1300px", shell)
-        self.assertIn("grid-template-columns", shell)
-        self.assertIn("align-items: start", shell)
+        It holds one thing now. Searching sessions is a sit-down task -- its
+        search can fall back to a per-session git lookup taking seconds -- and
+        it is a whole view under Projects, so Watch is triage alone and there is
+        no second zone to compose with. The grid and its 1300px breakpoint
+        existed to make two real columns; keeping them for one card would
+        reserve a column for something that cannot arrive.
+        """
+        watch = self.html[self.html.index('id="view-watch"'):]
+        watch = watch[:watch.index("</section>")]
+        self.assertNotIn('<div class="watch-shell">', watch)
+        self.assertEqual(watch.count('<div class="card"'), 1)
+        self.assertIn('id="sessionContextHealth"', watch)
+        # The rule, not the name: the comment left in its place still says what
+        # was there and why it went, which is worth keeping.
+        self.assertNotIn(".watch-shell {", self.css)
 
     def test_the_facts_strip_can_only_break_between_scopes(self):
         # Item 5 removed a 68ch prose cap that broke this data strip mid-phrase,
@@ -742,14 +747,14 @@ class HorizontalCompositionTest(unittest.TestCase):
         container = container[:container.index("}")]
         self.assertIn("flex-wrap: wrap", container)
 
-    def test_the_stacked_gap_comes_from_the_grid(self):
-        # The first card carried an inline margin-bottom, which would have added
-        # a stray 14px under the left column once the two sat side by side.
-        watch = self.html[self.html.index('id="view-sessions"'):]
+    def test_watch_carries_no_stray_inline_margin(self):
+        # The health card once carried an inline margin-bottom, which added a
+        # stray 14px under the left column when the two zones sat side by side.
+        # The zones are gone; the inline margin should not come back with a
+        # second card, so this outlives the grid it was written for.
+        watch = self.html[self.html.index('id="view-watch"'):]
         watch = watch[:watch.index("</section>")]
         self.assertNotIn("margin-bottom:14px", watch)
-        shell = self.css[self.css.index(".watch-shell {"):]
-        self.assertIn("gap: var(--sp-3)", shell[:shell.index("}")])
 
 
 class InsightEvidencePairingTest(unittest.TestCase):

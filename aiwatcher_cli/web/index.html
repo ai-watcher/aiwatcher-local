@@ -57,12 +57,13 @@
   <nav class="product-nav" aria-label="AIWatcher Local sections">
     <button class="nav-tab active" data-view="today" onclick="showView('today')">Home</button>
     <button class="nav-tab" data-view="prompt" onclick="showView('prompt')">Plan</button>
-    <button class="nav-tab" data-view="sessions" onclick="showView('sessions')">Watch</button>
+    <button class="nav-tab" data-view="watch" onclick="showView('watch')">Watch</button>
     <button class="nav-tab" data-view="control" onclick="showView('control')">Control</button>
     <button class="nav-tab" data-view="receipts" onclick="showView('receipts')">Prove</button>
     <button class="nav-tab nav-sub" data-view="changes" onclick="showView('changes')">Changes ledger</button>
     <button class="nav-tab" data-view="insights" onclick="showView('insights')">Improve</button>
     <button class="nav-tab" data-view="projects" onclick="showView('projects')">Projects</button>
+    <button class="nav-tab nav-sub" data-view="sessions" onclick="showView('sessions')">Sessions</button>
     <button class="nav-tab" data-view="setup" onclick="showView('setup')">Settings</button>
   </nav>
 
@@ -139,12 +140,15 @@
     </div>
   </section>
 
-  <section id="view-sessions" class="view" hidden>
-    <!-- Two zones once the window is wide enough for both to be real: what is
-         happening right now, beside the work it is happening to. Stacked below
-         1280px, because a 1024px window leaves 721px of content once the nav
-         rail is taken out and the Work table needs 393px of that on its own. -->
-    <div class="watch-shell">
+  <!-- Triage, and only triage: which session needs you, and which one first.
+       The Work table used to sit beside this in a two-zone grid, on the
+       reasoning that "what is happening right now" belongs next to "the work it
+       is happening to". They are two jobs, though, and only one of them is
+       urgent -- searching sessions is a sit-down task whose search can fall
+       back to a per-session git lookup taking seconds, which is not something
+       to put on the screen you reach because something is wrong. It is its own
+       view under Projects now, and the two-zone grid is gone with it. -->
+  <section id="view-watch" class="view" hidden>
     <div class="card">
       <div class="section-title">
         <div><h2>Context health</h2><p>Context bloat, runway pressure, and Fresh Start actions for local work.</p></div>
@@ -152,9 +156,17 @@
       </div>
       <div id="sessionContextHealth"></div>
     </div>
+  </section>
+
+  <!-- The Work table, lifted out of Watch. It keeps the id `sessions` because
+       every link that says ?view=sessions without a #contextHealth hash meant
+       this table -- "Open Work", "Review Sessions", and the drawer's "Find real
+       sessions" -- and because showView keys its lazy load off that id. Watch
+       took the id `watch`, which is what its nav entry has always said. -->
+  <section id="view-sessions" class="view" hidden>
     <div class="card">
       <div class="section-title">
-        <div><h2>Work</h2><p>Search sessions, inspect projects, review changes, and continue prior local AI work. Prompt text is shown for your own review only, never uploaded.</p></div>
+        <div><h2>Sessions</h2><p>Search sessions, inspect projects, and continue prior local AI work. Prompt text is shown for your own review only, never uploaded.</p></div>
         <span class="note-chip local">Local only</span>
       </div>
       <div class="session-filters">
@@ -185,7 +197,6 @@
         </tr></thead>
         <tbody id="sessionRows"></tbody>
       </table></div>
-    </div>
     </div>
   </section>
 

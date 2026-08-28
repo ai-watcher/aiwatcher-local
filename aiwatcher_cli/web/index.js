@@ -4360,7 +4360,7 @@ document.addEventListener('keydown', event => { if (event.key === 'Escape') clos
   // Every view id, or a ?view= deep link at one of them silently does nothing.
   // test_deep_link_allowlist_covers_every_view pins this against the markup so
   // adding a section cannot quietly leave it unreachable by link.
-  if (requestedView && ['today','prompt','sessions','control','projects','changes','receipts','insights','setup'].includes(requestedView)) {
+  if (requestedView && ['today','prompt','watch','sessions','control','projects','changes','receipts','insights','setup'].includes(requestedView)) {
     showView(requestedView);
     if (requestedView === 'prompt') {
       document.getElementById('promptInput').focus();

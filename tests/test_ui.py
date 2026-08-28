@@ -1367,7 +1367,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["state"], "control_review")
         self.assertEqual(state["label"], "Review context")
         self.assertEqual(state["primary_label"], "Review")
-        self.assertEqual(state["primary_url"], "/?view=sessions#contextHealth")
+        self.assertEqual(state["primary_url"], "/?view=watch#contextHealth")
         self.assertEqual(state["skip_state"], "control_recommended_group")
         self.assertEqual(state["fresh_start_project_count"], 2)
         self.assertIn("/repo/app", state["skip_project"])
