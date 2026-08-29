@@ -78,7 +78,13 @@ from .local_state import (
     state_path,
 )
 from .outcome_evidence import VALID_EVIDENCE_OUTCOMES, build_outcome_evidence, evidence_for_sessions
-from .ledger import UNBANKED_OUTSIDE_REPO, Ledger, build_ledger, unbanked_summary
+from .ledger import (
+    UNBANKED_OUTSIDE_REPO,
+    Ledger,
+    build_ledger,
+    checkpoint_distance,
+    unbanked_summary,
+)
 from .pricing import cache_read_cost, estimate_cost, is_subscription_model
 from .runtime_attachment import (
     RuntimeAttachment,
@@ -144,7 +150,7 @@ SUMMARY_MEMORY_TTL_SECONDS = 45
 SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
 # Bump whenever build_summary's payload shape changes, so a cache written by an
 # older build is discarded instead of rendering blank sections in a newer UI.
-SUMMARY_CACHE_SCHEMA_VERSION = 7
+SUMMARY_CACHE_SCHEMA_VERSION = 8
 SESSION_SNAPSHOT_SCHEMA_VERSION = 1
 SUMMARY_BACKGROUND_COOLDOWN_SECONDS = 8
 SUMMARY_WINDOWS = (1, 7, 30)
@@ -3416,6 +3422,39 @@ def _unbanked_chart(ledger: Ledger) -> dict[str, object] | None:
     return {"segments": segments, "total_usd": round(total, 6), "total_label": money(total)}
 
 
+def _checkpoint_card(
+    ledger: Ledger | None,
+    events: list[LocalEvent],
+    cards: list[dict[str, object]],
+) -> dict[str, object]:
+    """Checkpoint distance for the session Home is charting.
+
+    Scoped to the charted session's repo rather than the whole machine: the
+    figure sits under a hero that is one session, and a distance summed across
+    every repo would be the scope defect this dashboard keeps producing.
+    """
+    if ledger is None:
+        return {"available": False, "reason": "Could not read git history for the active repos."}
+    live = next((card for card in cards if card.get("charted_because_live")), None)
+    if live is None:
+        return {"available": False, "reason": "No live session to measure from."}
+    repo = str(live.get("project_full") or "")
+    if not repo:
+        return {"available": False, "reason": "The charted session has no resolved project path."}
+    card = dict(checkpoint_distance(ledger, events, repo))
+    if card.get("available"):
+        hours = float(card.get("hours_since") or 0)
+        card["elapsed_label"] = (
+            f"{hours / 24:.1f}d" if hours >= 24
+            else (f"{hours:.0f}h" if hours >= 1 else f"{hours * 60:.0f}m")
+        )
+        card["spend_label"] = money(float(card.get("spend_usd") or 0))
+        baseline = card.get("baseline") or {}
+        if isinstance(baseline, dict) and baseline.get("available"):
+            baseline["median_label"] = money(float(baseline.get("median_usd") or 0))
+    return card
+
+
 def _unbanked_card(ledger: Ledger | None) -> dict[str, object]:
     """Spend in this window with no commit behind it."""
     if ledger is None:
@@ -4725,6 +4764,12 @@ def build_summary(
         "watcher": get_watcher_status(),
         "context_health": context_health,
         "context_health_status": "ready",
+        # Distance from the last checkpoint in the repo the charted session is
+        # working in. Home's question is "is something happening right now that
+        # I should deal with", and this is the only spend figure that can be
+        # answered honestly in the present tense -- see checkpoint_distance for
+        # why the obvious one, live unbanked spend, cannot be.
+        "checkpoint": _checkpoint_card(window_ledger, all_events, context_health),
         "optimize": optimize,
         "handoff_bubble": handoff_bubble,
         "handoff_decisions": handoff_decisions,
@@ -5000,6 +5045,9 @@ def _build_summary_shell(
             "cost_per_useful_change": money(cost_per_useful) if cost_per_useful is not None else "—",
         },
         "survival": {"available": False, "reason": "Background evidence refresh pending."},
+        # Same shape as the real payload's, so the front end reads one contract
+        # rather than distinguishing "not computed yet" from "not present".
+        "checkpoint": {"available": False, "reason": "Background evidence refresh pending."},
         "projects": projects[:10],
         "projects_composition": _composition_chart(projects),
         "tools": tools,

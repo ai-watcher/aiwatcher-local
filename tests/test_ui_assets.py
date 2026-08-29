@@ -7,7 +7,7 @@ from types import SimpleNamespace
 BS = chr(92)
 import unittest
 
-from aiwatcher_cli import ui
+from aiwatcher_cli import ledger, ui
 
 
 NEXT_FUNCTION = chr(10) + "function "
@@ -794,6 +794,75 @@ class HorizontalCompositionTest(unittest.TestCase):
         watch = self.html[self.html.index('id="view-watch"'):]
         watch = watch[:watch.index("</section>")]
         self.assertNotIn("margin-bottom:14px", watch)
+
+
+class CheckpointDistanceSurfaceTest(unittest.TestCase):
+    """Home's one honest present-tense spend figure.
+
+    The obvious one -- how much of today's spend is unbanked -- cannot exist:
+    build_ledger banks an event against the first commit at or after it, so
+    everything inside the lookback is provisionally unbanked and flips the
+    moment you commit. It would fire on every developer every afternoon for the
+    ordinary state of having uncommitted work, which is instance 1's failure
+    exactly: a signal that fires for everyone sorts nothing.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+        start = cls.html.index('<section id="view-today"')
+        cls.home = cls.html[start:cls.html.index('<section id="view-prompt"')]
+        cls.render = js_function_source(cls.js, "renderCheckpoint")
+
+    def test_it_lives_on_home(self):
+        self.assertIn('id="checkpoint"', self.home)
+
+    def test_the_threshold_is_the_owners_own_median(self):
+        """A fixed dollar figure would be a number someone picked. Each change
+        banks the spend since the one before it, so the per-change costs already
+        are the between-commit distribution -- median, not mean, so one
+        expensive afternoon does not set the bar the other days are judged by.
+        """
+        source = inspect.getsource(ledger.checkpoint_distance)
+        self.assertIn("median", source)
+        self.assertIn("MIN_CHECKPOINT_BASELINE", source)
+        # And it withholds rather than falling back to a constant.
+        self.assertIn('"available": False', source)
+
+    def test_it_states_a_distance_and_not_a_verdict(self):
+        # No status rail: being far from a commit is a normal part of a working
+        # afternoon, and colouring it would assert a judgment nothing supports.
+        for claim in ("critical", "warning", "rail-crit", "severity"):
+            with self.subTest(claim=claim):
+                self.assertNotIn(claim, self.render)
+
+    def test_an_unavailable_baseline_still_shows_the_distance(self):
+        # The distance is a fact even when there is nothing to compare it to.
+        self.assertIn("baseline.available", self.render)
+        self.assertIn("card.elapsed_label", self.render)
+        self.assertIn("baseline.reason", self.render)
+
+    def test_no_live_session_hides_the_card_rather_than_emptying_it(self):
+        # An ambient surface should not carry a permanent row about nothing.
+        self.assertIn("host.hidden = true", self.render)
+        self.assertIn("no live session", self.render)
+
+    def test_both_payload_paths_carry_the_same_contract(self):
+        """The pending first-paint payload is a different dict from the real
+        one. A key present in one and absent in the other makes the front end
+        distinguish "not computed yet" from "not present"."""
+        source = inspect.getsource(ui)
+        self.assertIn('"checkpoint": _checkpoint_card(', source)
+        self.assertIn(
+            '"checkpoint": {"available": False, "reason": "Background evidence refresh pending."}',
+            source)
+
+    def test_the_cache_schema_was_bumped_for_the_new_key(self):
+        # A cache written by an older build would otherwise be served to a newer
+        # UI with this section missing, which is what the constant's own comment
+        # says the bump is for.
+        self.assertGreaterEqual(ui.SUMMARY_CACHE_SCHEMA_VERSION, 8)
 
 
 class ProveLeadsWithItsClaimTest(unittest.TestCase):

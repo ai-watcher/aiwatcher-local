@@ -3182,6 +3182,52 @@ function renderReport(report) {
     ${sections.join('')}
     <p class="receipt-note">API-equivalent value, not invoice spend. Outcomes are inferred from local signals, not guaranteed truth. Based on local logs only, not live provider quota.</p>`;
 }
+/* How far this repo is from its last commit.
+ *
+ * Present tense, which is what Home asks for, and deliberately not a verdict.
+ * The tempting figure here is "how much of today's spend is unbanked", and it
+ * cannot honestly exist: the ledger banks an event against the first commit at
+ * or after it, so everything inside the 12-hour lookback is provisionally
+ * unbanked and flips the moment you commit. A tile built on that would fire on
+ * every developer every afternoon for the ordinary state of having uncommitted
+ * work, and a signal that fires for everyone sorts nothing.
+ *
+ * Distance is answerable now. It states a fact and leaves the judgment to the
+ * reader -- except where there is a real baseline to compare against, and that
+ * baseline is the developer's own median spend between commits, never a round
+ * number someone picked. No status rail either way: being far from a commit is
+ * a normal part of a working afternoon.
+ */
+function renderCheckpoint(card) {
+  const host = document.getElementById('checkpoint');
+  if (!host) return;
+  // No live session to measure from is not a state worth a permanent empty row
+  // on the ambient surface; an unmeasurable-but-live one is, because then the
+  // reader is looking at a session and the absence needs a reason.
+  if (!card || (!card.available && !card.reason)) { host.hidden = true; return; }
+  if (!card.available) {
+    if (/no live session/i.test(card.reason || '')) { host.hidden = true; return; }
+    host.hidden = false;
+    host.innerHTML = `<div class="section-title"><div><h2>Since your last commit</h2></div></div>
+      <div class="empty">${esc(card.reason)}</div>`;
+    return;
+  }
+
+  const baseline = card.baseline || {};
+  const comparison = baseline.available && baseline.ratio
+    ? ` &middot; <b>${esc(baseline.ratio)}×</b> your usual ${esc(baseline.median_label)} between commits`
+    : '';
+  const caveat = baseline.available ? '' : `<p class="receipt-note">${esc(baseline.reason || '')}</p>`;
+
+  host.hidden = false;
+  host.innerHTML = `<div class="section-title">
+      <div><h2>Since your last commit</h2><p>${esc(card.last_commit_sha)} &middot; ${esc(card.last_commit_subject)}</p></div>
+      <span class="note-chip local">Local only</span>
+    </div>
+    <p class="ambient-say"><b>${esc(card.elapsed_label)}</b> and <b>${esc(card.spend_label)}</b>
+      across ${esc(card.events_since)} call${card.events_since === 1 ? '' : 's'}${comparison}.</p>
+    ${caveat}`;
+}
 /* Prove's claim, and the coverage behind it.
  *
  * The surface was two tables of receipts: a log, which answers "what happened",
@@ -4260,6 +4306,7 @@ async function loadOnce(resetDetail, forceRefresh) {
   document.getElementById('costPerUseful').textContent =
     `${totals.cost_per_useful_change} value each${totals.inferred_useful_outcomes ? ` · ${totals.inferred_useful_outcomes} to confirm` : ''}`;
   renderSurvivalTile(data.survival || {});
+  renderCheckpoint(data.checkpoint);
   // Prove's claim reads the same two objects the Changes ledger and the
   // survival tile already read: no new payload, just the argument they were
   // always evidence for, stated where it is asked.

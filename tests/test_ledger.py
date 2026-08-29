@@ -859,3 +859,116 @@ class CostPerSurvivingLineTests(unittest.TestCase):
             result = cost_per_surviving_line(led, now=now)
 
         self.assertTrue(result["is_floor"])
+
+
+class CheckpointDistanceTests(unittest.TestCase):
+    """How far this repo is from its last commit, in time and in money.
+
+    The metric exists because the obvious present-tense figure -- how much of
+    today's spend is unbanked -- cannot honestly be computed. build_ledger banks
+    an event against the first commit at or after it, so everything inside
+    max_lookback_hours is provisionally unbanked and may flip the moment you
+    commit. A tile built on that would fire on every developer every afternoon
+    for the ordinary state of having uncommitted work.
+    """
+
+    def _repo(self, temp_dir: str, now: datetime):
+        init_repo(temp_dir)
+        return temp_dir
+
+    def test_it_measures_from_the_last_commit_not_the_first(self):
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self._repo(temp_dir, now)
+            commit(temp_dir, "a.py", "a", "first", when=now - timedelta(hours=30))
+            commit(temp_dir, "b.py", "b", "second", when=now - timedelta(hours=3))
+            events = [
+                # Before the last commit: banked against it, not counted here.
+                event(temp_dir, cost=5.0, when=now - timedelta(hours=4)),
+                # After it: this is the distance.
+                event(temp_dir, cost=2.0, when=now - timedelta(hours=2)),
+                event(temp_dir, cost=1.5, when=now - timedelta(hours=1)),
+            ]
+            led = build_ledger(events, days=7, now=now)
+            card = ledger_module.checkpoint_distance(led, events, temp_dir, now=now)
+
+        self.assertTrue(card["available"])
+        self.assertEqual(card["last_commit_subject"], "second")
+        self.assertAlmostEqual(card["spend_usd"], 3.5, places=6)
+        self.assertEqual(card["events_since"], 2)
+        self.assertAlmostEqual(card["hours_since"], 3.0, delta=0.2)
+
+    def test_spend_in_another_repo_does_not_count_against_this_one(self):
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as mine, tempfile.TemporaryDirectory() as other:
+            init_repo(mine)
+            init_repo(other)
+            commit(mine, "a.py", "a", "mine", when=now - timedelta(hours=2))
+            commit(other, "a.py", "a", "theirs", when=now - timedelta(hours=2))
+            events = [
+                event(mine, cost=1.0, when=now - timedelta(hours=1), session="a"),
+                event(other, cost=90.0, when=now - timedelta(hours=1), session="b"),
+            ]
+            led = build_ledger(events, days=7, now=now)
+            card = ledger_module.checkpoint_distance(led, events, mine, now=now)
+
+        self.assertAlmostEqual(card["spend_usd"], 1.0, places=6)
+
+    def test_no_commits_here_is_unmeasurable_with_a_reason(self):
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_repo(temp_dir)
+            events = [event(temp_dir, cost=4.0, when=now - timedelta(hours=1))]
+            led = build_ledger(events, days=7, now=now)
+            card = ledger_module.checkpoint_distance(led, events, temp_dir, now=now)
+
+        self.assertFalse(card["available"])
+        self.assertIn("no checkpoint", card["reason"])
+        # Never a zero standing in for "cannot say".
+        self.assertNotIn("spend_usd", card)
+
+    def test_the_baseline_withholds_itself_until_it_is_a_median(self):
+        """Two commits divided by each other is not a distribution. Below the
+        minimum the distance still renders -- it is a fact -- but without a
+        claim about whether it is unusual."""
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_repo(temp_dir)
+            commit(temp_dir, "a.py", "a", "one", when=now - timedelta(hours=20))
+            commit(temp_dir, "b.py", "b", "two", when=now - timedelta(hours=10))
+            events = [
+                event(temp_dir, cost=3.0, when=now - timedelta(hours=21)),
+                event(temp_dir, cost=3.0, when=now - timedelta(hours=11)),
+                event(temp_dir, cost=9.0, when=now - timedelta(hours=1)),
+            ]
+            led = build_ledger(events, days=7, now=now)
+            card = ledger_module.checkpoint_distance(led, events, temp_dir, now=now)
+
+        self.assertTrue(card["available"])
+        self.assertFalse(card["baseline"]["available"])
+        self.assertIn("costed commits", card["baseline"]["reason"])
+        self.assertNotIn("ratio", card["baseline"])
+
+    def test_the_baseline_is_a_median_of_the_owner_not_a_constant(self):
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_repo(temp_dir)
+            # Four costed commits at 1, 1, 1 and 100 dollars. The mean would be
+            # 25.75 and one afternoon would set the bar; the median is 1.
+            costs = [1.0, 1.0, 1.0, 100.0]
+            events = []
+            for index, cost in enumerate(costs):
+                at = now - timedelta(hours=40 - index * 8)
+                events.append(event(temp_dir, cost=cost, when=at, session=f"s{index}"))
+                commit(temp_dir, f"f{index}.py", str(index), f"c{index}",
+                       when=at + timedelta(minutes=5))
+            events.append(event(temp_dir, cost=4.0, when=now - timedelta(hours=1), session="live"))
+            led = build_ledger(events, days=7, now=now)
+            card = ledger_module.checkpoint_distance(led, events, temp_dir, now=now)
+
+        baseline = card["baseline"]
+        self.assertTrue(baseline["available"])
+        self.assertEqual(baseline["changes"], 4)
+        self.assertAlmostEqual(baseline["median_usd"], 1.0, places=6)
+        # 4 dollars against a 1 dollar median: four times the usual distance.
+        self.assertAlmostEqual(baseline["ratio"], 4.0, places=2)
