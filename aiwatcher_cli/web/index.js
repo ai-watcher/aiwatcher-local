@@ -3572,10 +3572,32 @@ function annotateClipping(node) {
     : '';
 }
 
+/* One recommendation, and the rest on request.
+ *
+ * The screen is called Improve and its job is "what is the one behaviour I
+ * should change next". Seven findings ranked by money is a ranking, not an
+ * answer: a list of everything is advice about nothing, and the reader has to
+ * do the choosing the ranking was supposed to do for them.
+ *
+ * _insight_feed already orders by impact_usd, so the first card is the one the
+ * money says matters. Nothing is dropped -- the remainder folds, with its count
+ * in the summary, because a fold with a bare title hides whether there is
+ * anything behind it. The threshold for reading further should be a click, not
+ * a scroll past six things you did not ask about.
+ */
 function renderInsightFeed(insights) {
   if (!insights || !insights.length) {
     return '<div class="empty">No notable local signals yet. Keep using AI tools and check back after a few sessions.</div>';
   }
+  const [first, ...rest] = insights;
+  const lead = renderInsightRows([first]);
+  if (!rest.length) return lead;
+  return lead + `<details class="aiw-details">
+    <summary><span>${rest.length} more signal${rest.length === 1 ? '' : 's'}, ranked below this one</span></summary>
+    <div class="details-body">${renderInsightRows(rest)}</div>
+  </details>`;
+}
+function renderInsightRows(insights) {
   return insights.map(card => `<div class="feed-row ${esc(card.severity || 'info')}${card.session_id ? ' clickable' : ''}"
       ${card.session_id ? `onclick="selectSession('${esc(card.session_id)}')"` : ''}>
       <div class="feed-main${card.chart ? ' has-evidence' : ''}">

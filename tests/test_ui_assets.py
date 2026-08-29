@@ -871,10 +871,32 @@ class ImproveIsAdviceOnlyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
 
     def _view(self, name, nxt):
         start = self.html.index('<section id="view-%s"' % name)
         return self.html[start:self.html.index('<section id="view-%s"' % nxt)]
+
+    def test_improve_leads_with_one_recommendation(self):
+        """Seven findings ranked by money is a ranking, not an answer.
+
+        _insight_feed already orders by impact_usd, so the first card is the one
+        the money says matters and the reader should not have to do the choosing
+        the ranking already did. Nothing is dropped -- the rest fold.
+        """
+        feed = js_function_source(self.js, "renderInsightFeed")
+        self.assertIn("const [first, ...rest] = insights", feed)
+        self.assertIn("<details", feed)
+        # The count is in the summary: a fold with a bare title hides whether
+        # there is anything behind it.
+        self.assertIn("rest.length", feed)
+        self.assertIn("ranked below this one", feed)
+        # And the ranking it relies on is the server's, not re-derived here.
+        self.assertIn("impact_usd", inspect.getsource(ui._insight_feed))
+
+    def test_a_single_signal_does_not_get_an_empty_fold(self):
+        feed = js_function_source(self.js, "renderInsightFeed")
+        self.assertIn("if (!rest.length) return lead;", feed)
 
     def test_improve_keeps_the_headline_and_the_feed(self):
         improve = self._view("insights", "setup")
@@ -935,7 +957,9 @@ class InsightEvidencePairingTest(unittest.TestCase):
     def test_the_claim_and_its_evidence_are_separate_containers(self):
         # Grid auto-placement cannot put a title, a paragraph and a chart into
         # two columns in the right order, so the two halves are wrapped.
-        feed = js_function_source(self.js, "renderInsightFeed")
+        # renderInsightRows, not renderInsightFeed: the feed decides how many
+        # rows to show and folds the rest, the rows decide their own shape.
+        feed = js_function_source(self.js, "renderInsightRows")
         self.assertIn('class="feed-says"', feed)
         self.assertIn('class="feed-shows"', feed)
         # Only rows that actually carry a chart become two columns.
