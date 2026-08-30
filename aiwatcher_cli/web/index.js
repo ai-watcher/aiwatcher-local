@@ -2625,24 +2625,35 @@ function headroomLabel(chart) {
 function healthRow(row, waitingById, index) {
   const reason = healthReason(row, waitingById);
   const room = headroomLabel(row.chart);
+  // Fresh Start is a different action from opening the session, so it stops the
+  // click reaching the row underneath it.
   const action = row.can_handoff
-    ? `<button class="btn-primary" onclick="startFreshFromBubble('${esc(row.session_id)}')">Fresh Start</button>`
-    : `<button class="btn-quiet" onclick="selectSession('${esc(row.session_id)}')">Review</button>`;
-  // A div, not a button. The row carries its own controls, and a button inside
-  // a button is invalid -- the old lead card was a div for the same reason.
-  // The title is the thing you click to open the session.
+    ? `<button class="btn-primary" onclick="event.stopPropagation(); startFreshFromBubble('${esc(row.session_id)}')">Fresh Start</button>`
+    : `<button class="btn-quiet" onclick="event.stopPropagation(); selectSession('${esc(row.session_id)}')">Review</button>`;
+  // The whole row opens the session: the reason and the numbers are as much a
+  // description of it as the title is, and a target the width of the card is
+  // easier to hit than a phrase inside it.
+  //
+  // A div rather than a button, because it contains buttons and that nesting is
+  // invalid -- the old lead card was a div for the same reason. The div carries
+  // the click for the mouse; the title stays a real button so the row is still
+  // reachable and announced by keyboard, which a div with an onclick is not.
+  // The title carries no handler of its own -- activating it, by mouse or by
+  // Enter, bubbles to the row, so there is one handler rather than two that
+  // could come to differ. No role on the row: it would announce a button
+  // containing buttons.
   //
   // The row carries rank, severity and one reason, and nothing else. Inferred
   // intent, the context a Fresh Start would carry, the meter and the facts
-  // strip all still render -- in the drawer this title opens. Watch answers
+  // strip all still render -- in the drawer this row opens. Watch answers
   // "which one first"; the drawer answers "what is going on in it".
-  return `<div class="health-rank-row" data-project-full="${esc(row.project_full || '')}">
+  return `<div class="health-rank-row" data-project-full="${esc(row.project_full || '')}"
+    data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">
     <span class="rank-n">${index + 1}</span>
     <span class="rank-dot ${esc(row.severity)}"></span>
     <span class="rank-main">
       <span class="rank-who">
-        <button class="link-inline rank-title" data-session="${esc(row.session_id)}"
-          onclick="selectSession(this.dataset.session)">${esc(healthProjectName(row))} &middot; ${esc(row.tool || 'unknown tool')}</button>
+        <button class="link-inline rank-title" type="button">${esc(healthProjectName(row))} &middot; ${esc(row.tool || 'unknown tool')}</button>
         <span class="rank-id">${esc(row.session_short || row.session_id || 'unknown session')}</span>
       </span>
       ${reason ? `<span class="rank-why">${reason}</span>` : ''}

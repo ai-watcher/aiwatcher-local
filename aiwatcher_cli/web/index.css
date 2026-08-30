@@ -1133,6 +1133,7 @@
       padding: 12px 14px; border: 1px solid var(--line);
       border-radius: var(--r-2); background: var(--surface); color: var(--text);
     }
+    .health-rank-row { cursor: pointer; }
     .health-rank-row:hover { background: var(--surface-hover); }
     .rank-n { font-family: var(--mono); font-size: var(--fs-2); color: var(--faint); font-variant-numeric: tabular-nums; }
     .rank-dot { width: 8px; height: 8px; border-radius: var(--r-pill); background: var(--faint); }

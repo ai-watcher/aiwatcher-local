@@ -1622,6 +1622,30 @@ class WatchRanksAndTheDrawerDiagnosesTest(unittest.TestCase):
         self.assertIn("(meterNodes[row.session_id] || []).forEach(node => drawMeter(node, row.chart))", self.js)
         self.assertIn("(trendNodes[row.session_id] || []).forEach(node => drawTrend(node, row.chart))", self.js)
 
+    def test_the_whole_row_opens_the_session(self):
+        """The title was the only target, and it is the shortest thing on a row
+        the width of the card. The reason and the numbers describe the same
+        session, so the whole row carries the click."""
+        self.assertIn('onclick="selectSession(this.dataset.session)"', self.row)
+        # The controls inside it do something else, so they must not fall
+        # through to it.
+        for control in ("startFreshFromBubble", "Review"):
+            with self.subTest(control=control):
+                head = self.row[:self.row.index(control)]
+                self.assertIn("event.stopPropagation()", head[head.rindex("<button"):])
+        # A div, because it contains buttons -- and no role on it, or it
+        # announces a button containing buttons. Matched against the code with
+        # the comments stripped: the comment says the same words.
+        code = "\n".join(line for line in self.row.split("\n")
+                         if not line.lstrip().startswith("//"))
+        self.assertNotIn("role=", code)
+        # The title stays a real button: a div with an onclick is not reachable
+        # or announced by keyboard. It carries no handler of its own, so
+        # activating it bubbles to the one on the row.
+        self.assertIn('class="link-inline rank-title" type="button"', code)
+        title = code[code.index("rank-title"):]
+        self.assertNotIn("onclick", title[:title.index("</button>")])
+
     def test_the_row_names_the_session_it_opens(self):
         # A project can hold several sessions and the row is about exactly one
         # of them; the title alone says only the project and the tool.
