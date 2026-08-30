@@ -351,29 +351,15 @@
       height: 34px; width: auto; flex: none;
       color: var(--brand-ink);
     }
-    /* The wordmark, set to match the logo's own lettering rather than the page's.
-       Measured off the artwork at a 900px render: the stem of the "I" is 0.26 of
-       the cap height, which is a black weight, and the tie sits at 0.61 of the
-       cap, centred on it.
-
-       The face itself cannot be matched -- the dashboard makes no external
-       requests, so there is no webfont to reach for, and the artwork's face is
-       not one any system ships. What carries across is the weight, the tracking
-       and the tie. */
-    .wordmark {
-      display: flex; align-items: baseline; gap: 0;
-      font-weight: var(--fw-bold); letter-spacing: -.015em;
-    }
-    .wordmark-tie {
-      /* 0.84em wide by 0.44em tall, with the artwork's gaps either side. Aligned
-         to the middle of the cap band rather than the baseline, which is where
-         the artwork puts it. */
-      width: .84em; height: .44em; flex: none;
-      margin: 0 .33em 0 .38em; align-self: center;
-    }
-    /* "Local" is a qualifier on the product, not part of the lockup, and is set
-       to read as one: same size, stepped down in weight and colour. */
-    .wordmark-local { margin-left: .38em; font-weight: var(--fw-med); color: var(--muted); }
+    /* The wordmark. The artwork's typeface cannot be matched -- the dashboard
+       makes no external requests, so there is no webfont to reach for, and the
+       face is not one any system ships. What carries across is the weight and
+       the tracking, measured off the artwork at a 900px render: the stem of the
+       "I" is 0.26 of the cap height, which is a black weight. */
+    .wordmark { font-weight: var(--fw-bold); letter-spacing: -.015em; }
+    /* "Local" is a qualifier on the product, not part of the name, and is set to
+       read as one: same size, stepped down in weight and colour. */
+    .wordmark-local { font-weight: var(--fw-med); color: var(--muted); }
     .brand-copy { min-width: 0; }
     .brand-copy p { margin-top: 2px; font-size: var(--fs-2); }
     .status-badge {

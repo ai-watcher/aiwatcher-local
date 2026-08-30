@@ -40,24 +40,10 @@
       </svg>
       <div class="brand-copy">
         <div class="actions">
-          <!-- The wordmark. "AI (tie) Watcher" is the lockup; "Local" is the
-               product qualifier that separates this from the Enterprise link two
-               controls away, so it follows the lockup rather than joining it.
-               aria-label carries the real product name -- read as marked up, the
-               parts would be announced as three words. -->
-          <h1 class="wordmark" aria-label="AIWatcher Local">
-            <span aria-hidden="true">AI</span>
-            <!-- The tie is drawn, not typed. U+221E renders at whatever weight
-                 the reader's fallback font happens to have, which is a different
-                 mark on every machine; this is the ring language of the logo at a
-                 fixed weight. -->
-            <svg class="wordmark-tie" viewBox="0 0 84 44" fill="none" aria-hidden="true">
-              <path d="M42 22C38 11 31 6.5 22 6.5C13.44 6.5 6.5 13.44 6.5 22C6.5 30.56 13.44 37.5 22 37.5C31 37.5 38 33 42 22C46 11 53 6.5 62 6.5C70.56 6.5 77.5 13.44 77.5 22C77.5 30.56 70.56 37.5 62 37.5C53 37.5 46 33 42 22Z"
-                    stroke="var(--brand-blue)" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-            <span aria-hidden="true">Watcher</span>
-            <span class="wordmark-local" aria-hidden="true">Local</span>
-          </h1>
+          <!-- The wordmark. "Local" is the product qualifier that separates
+               this from the Enterprise link two controls away, so it follows the
+               name rather than joining it. -->
+          <h1 class="wordmark">AIWatcher <span class="wordmark-local">Local</span></h1>
           <span class="status-badge"><span class="status-dot"></span>Private and local</span>
         </div>
         <p>Your AI coding work, outcomes, and improvement signals.</p>
