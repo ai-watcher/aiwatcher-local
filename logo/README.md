@@ -18,11 +18,34 @@ original from 99.1% to 89.5%.
 The ink ring is drawn in front and is opaque — it occludes the blue ring rather
 than notching it.
 
+## The wordmark
+
+The lockup is **AI (tie) Watcher**. "Local" is a qualifier on the product -- it
+separates this from the Enterprise link two controls away in the header -- so it
+follows the lockup rather than joining it, at the same size, stepped down in
+weight and colour.
+
+The artwork's typeface cannot be matched. The dashboard makes no external
+requests, so there is no webfont to reach for, and the face is not one any
+system ships. What carries across is measured off the artwork at a 900px render:
+the stem of the "I" is 0.26 of the cap height (a black weight), the tie is 0.61
+of the cap and centred on it, and the gaps either side are 0.53 and 0.46 of the
+cap.
+
+The tie is drawn as SVG rather than typed as U+221E. The glyph renders at
+whatever weight the reader's fallback font happens to have, which would make the
+wordmark a different mark on every machine.
+
+If the face matters more than the page weight, a subset of it could be embedded
+in the stylesheet as a base64 `@font-face` -- that stays self-contained and makes
+no request. It needs the font's name and a licence that permits embedding.
+
 ## Where it is used
 
 | Surface | Form | Kept in step by |
 |---|---|---|
 | Dashboard header | inline `<svg>` in `aiwatcher_cli/web/index.html` | `test_the_brand_mark_is_the_logo` |
+| Dashboard wordmark | markup + CSS in `index.html` / `index.css` | `test_the_wordmark_still_says_the_product_name` |
 | Dashboard favicon | data-URI SVG in `index.html` and `faviconFor()` in `index.js` | `test_the_favicon_is_the_mark_carrying_the_state` |
 | Browser extension | `browser-extension/icons/icon{16,48,128}.png` | `render_icons.py` |
 

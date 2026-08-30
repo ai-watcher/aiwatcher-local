@@ -1586,6 +1586,43 @@ class BrandMarkTest(unittest.TestCase):
         self.assertIn("--brand-ink:  #141314;", self.css)
         self.assertIn("--brand-ink:  #DCE6F6;", self.css)
 
+    def test_the_wordmark_still_says_the_product_name(self):
+        """The heading is built from parts now -- "AI", a drawn tie, "Watcher",
+        "Local" -- and read as marked up that is three words, not the product's
+        name. Nothing else in the page states it, so the label carries it."""
+        head = self.html[self.html.index('class="wordmark"'):]
+        head = head[:head.index("</h1>")]
+        self.assertIn('aria-label="AIWatcher Local"', self.html)
+        for part in ("AI", "Watcher", "Local"):
+            with self.subTest(part=part):
+                self.assertIn(">%s<" % part, head)
+        # The pieces are decoration over that label, not a second reading of it.
+        self.assertEqual(head.count('aria-hidden="true"'), 4)
+
+    def test_the_tie_is_drawn_rather_than_typed(self):
+        """U+221E renders at whatever weight the reader's fallback font happens
+        to have, which makes the wordmark a different mark on every machine. The
+        page ships no webfont -- it makes no external requests at all -- so the
+        glyph is the one thing here that cannot be left to the font stack."""
+        self.assertNotIn("\u221e", self.html)
+        tie = self.html[self.html.index('class="wordmark-tie"'):]
+        tie = tie[:tie.index("</svg>")]
+        self.assertIn('stroke="var(--brand-blue)"', tie)
+        self.assertIn('stroke-linecap="round"', tie)
+
+    def test_local_sits_outside_the_lockup(self):
+        # The lockup is "AI (tie) Watcher". "Local" is the qualifier that
+        # separates this from the Enterprise link two controls away, so it is
+        # set to read as a qualifier rather than as part of the name.
+        self.assertIn(".wordmark-local {", self.css)
+        rule = self.css[self.css.index(".wordmark-local {"):]
+        rule = rule[:rule.index("}")]
+        self.assertIn("--fw-med", rule)
+        self.assertIn("var(--muted)", rule)
+        # And the weight it steps down from is the wordmark's own.
+        wordmark = self.css[self.css.index(".wordmark {"):]
+        self.assertIn("--fw-bold", wordmark[:wordmark.index("}")])
+
     def test_the_favicon_is_the_mark_carrying_the_state(self):
         """The favicon is the only part of the tab that reads once the title is
         truncated, so becoming the logo must not cost the state signal. The ring
