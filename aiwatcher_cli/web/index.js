@@ -2498,13 +2498,43 @@ function healthProjectName(row) {
   return projectName(row);
 }
 
-function healthRank(row) {
-  // Worst first: anything past the limit outranks anything below it, and within
+function healthRank(row, waiting) {
+  // "Which one needs you first" -- so a session that is literally waiting on
+  // your input outranks a bigger one that is still making progress. Size was
+  // the only key here, which answered "which is worst" instead: a session
+  // blocked on a question you have not seen is the one that cannot continue
+  // without you, whatever its per-turn number.
+  //
+  // Then the old order, unchanged: past the limit outranks below it, and within
   // each group the bigger per-turn number leads.
   const chart = row.chart || {};
   const critical = chart.critical_tokens_n || Infinity;
   const latest = chart.latest_turn_tokens_n || 0;
-  return [latest >= critical ? 1 : 0, latest];
+  return [waiting && waiting.has(row.session_id) ? 1 : 0, latest >= critical ? 1 : 0, latest];
+}
+/* Why this row sits where it does.
+ *
+ * The ranking is three keys deep and none of them were visible: a reader saw
+ * an order and had to trust it. Each reason states the key that actually put
+ * the row here, in the same precedence the sort uses, so the explanation
+ * cannot drift from the ordering it explains.
+ */
+function healthReason(row, waitingById) {
+  const entry = waitingById && waitingById.get(row.session_id);
+  if (entry) {
+    const mins = Math.round((entry.idle_seconds || 0) / 60);
+    return mins >= 1
+      ? `Waiting on you for ${mins}m.`
+      : 'Waiting on you.';
+  }
+  const chart = row.chart || {};
+  const critical = chart.critical_tokens_n || 0;
+  const latest = chart.latest_turn_tokens_n || 0;
+  if (critical && latest >= critical) {
+    return `Past the ${compactTokens(critical)} limit at ${esc(row.latest_turn_tokens)} per turn.`;
+  }
+  if (latest) return `Highest per-turn here at ${esc(row.latest_turn_tokens)}.`;
+  return '';
 }
 
 function headroomLabel(chart) {
@@ -2556,7 +2586,7 @@ function runHealthAction(kind, sessionId) {
   return kind === 'handoff' ? openHandoff(sessionId) : selectSession(sessionId);
 }
 
-function healthLeadCard(row) {
+function healthLeadCard(row, waitingById) {
   const verdict = runwayVerdict(row.chart);
   const room = headroomLabel(row.chart);
   return `<div class="health-card lead" data-project-full="${esc(row.project_full || '')}">
@@ -2568,6 +2598,8 @@ function healthLeadCard(row) {
         : `<button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.tool)} session</button> \u00b7 last active ${esc(row.age_label)} ago`}</p></div>
       <span class="health-severity ${esc(row.severity)}">${esc(row.severity)}</span>
     </div>
+    ${(() => { const why = healthReason(row, waitingById);
+      return why ? `<p class="health-why"><b>First:</b> ${why}</p>` : ''; })()}
     ${verdict ? `<p class="health-verdict"><strong>${esc(verdict.headline)}</strong> \u2014 ${esc(verdict.detail)}</p>` : ''}
     <div class="identity-strip">
       <strong>${esc(row.identity_label || 'Historical log only')}</strong>
@@ -2598,10 +2630,12 @@ function healthLeadCard(row) {
   </div>`;
 }
 
-function healthQuietRow(row) {
+function healthQuietRow(row, waitingById) {
   const room = headroomLabel(row.chart);
   return `<button class="health-row" data-session="${esc(row.session_id)}" data-project-full="${esc(row.project_full || '')}" onclick="selectSession(this.dataset.session)">
-    <span class="health-row-name" title="${esc(row.project_full || row.project)}">${esc(healthProjectName(row))}</span>
+    <span class="health-row-name" title="${esc(row.project_full || row.project)}">${esc(healthProjectName(row))}
+      ${(() => { const why = healthReason(row, waitingById);
+        return why ? `<i class="health-row-why">${why}</i>` : ''; })()}</span>
     <span class="health-row-trend" data-trend="${esc(row.session_id)}"></span>
     <span class="health-row-now">${esc(row.latest_turn_tokens)}</span>
     <span class="health-row-room">${esc(room.big)}</span>
@@ -2609,15 +2643,22 @@ function healthQuietRow(row) {
   </button>`;
 }
 
-function renderContextHealth(rows) {
+function renderContextHealth(rows, statusArg, presence) {
   const status = arguments.length > 1 ? arguments[1] : 'ready';
+  // Keyed by session so the rank and the reason read the same source; a second
+  // list here would be a second thing to keep in step with presence.
+  const waitingById = new Map(
+    (((presence || {}).sessions) || [])
+      .filter(entry => entry.state === 'waiting')
+      .map(entry => [entry.session_id, entry]));
   if (status === 'pending') return '<div class="loading">Checking context health and handoff opportunities...</div>';
   if (!rows.length) return '<div class="empty">No active context-health warnings. AIWatcher will surface bloat, stale sessions, and handoff opportunities here.</div>';
   // One project is worth acting on; the rest are worth knowing about. Four cards
   // of equal weight gave the eye nowhere to start.
   const ranked = rows.slice().sort((a, b) => {
-    const [ac, av] = healthRank(a), [bc, bv] = healthRank(b);
-    return bc - ac || bv - av;
+    const ar = healthRank(a, new Set(waitingById.keys()));
+    const br = healthRank(b, new Set(waitingById.keys()));
+    return br[0] - ar[0] || br[1] - ar[1] || br[2] - ar[2];
   });
   const [lead, ...rest] = ranked;
   const snoozable = ranked.filter(row => row.can_handoff && (row.severity === 'critical' || row.severity === 'warning'));
@@ -2629,7 +2670,7 @@ function renderContextHealth(rows) {
   const batch = snoozable.length > 1
     ? `<div class="health-batch"><button class="btn-quiet" onclick="snoozeVisibleFreshStartProjects(this)">Snooze all 48h</button></div>`
     : '';
-  return `<div class="health-stack">${batch}${healthLeadCard(lead)}${rest.map(healthQuietRow).join('')}</div>`;
+  return `<div class="health-stack">${batch}${healthLeadCard(lead, waitingById)}${rest.map(row => healthQuietRow(row, waitingById)).join('')}</div>`;
 }
 function renderCoverage(rows) {
   if (!rows.length) return '<div class="empty">Coverage could not be determined on this machine.</div>';
@@ -4346,7 +4387,8 @@ async function loadOnce(resetDetail, forceRefresh) {
   const handoffDecisions = data.handoff_decisions || [];
   document.getElementById('receiptRows').innerHTML = renderReceiptRows(receiptCache);
   document.getElementById('handoffDecisionRows').innerHTML = renderHandoffDecisionRows(handoffDecisions);
-  document.getElementById('sessionContextHealth').innerHTML = renderContextHealth(data.context_health || [], data.context_health_status || 'ready');
+  document.getElementById('sessionContextHealth').innerHTML =
+    renderContextHealth(data.context_health || [], data.context_health_status || 'ready', data.presence);
   document.getElementById('optimizeWorkspaceBody').innerHTML = renderOptimizeWorkspace(data.optimize || null);
   // The summary has to carry the count, or a collapsed card hides the fact that
   // there is anything in it at all.

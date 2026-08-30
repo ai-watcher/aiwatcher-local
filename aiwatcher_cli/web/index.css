@@ -908,7 +908,16 @@
       background: var(--surface); color: var(--text);
     }
     .health-row:hover { background: var(--surface-hover); }
-    .health-row-name { font-size: var(--fs-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* Two lines now: the project, and why this row is ranked where it is. The
+       name keeps its ellipsis; the reason wraps rather than truncating, because
+       a half-shown reason is worse than none. */
+    .health-row-name { font-size: var(--fs-2); overflow: hidden; min-width: 0; }
+    .health-row-name > i {
+      display: block; font-style: normal; font-size: var(--fs-1);
+      color: var(--muted); margin-top: 2px;
+    }
+    .health-why { font-size: var(--fs-2); color: var(--muted); margin: 10px 0 0; }
+    .health-why b { color: var(--text); font-weight: var(--fw-med); }
     .health-row-trend { display: block; }
     .health-row-trend .trend-svg { height: 26px; }
     .health-row-now, .health-row-room { font-family: var(--mono); font-size: var(--fs-2); color: var(--muted); font-variant-numeric: tabular-nums; }

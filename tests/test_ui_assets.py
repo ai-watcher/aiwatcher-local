@@ -796,6 +796,61 @@ class HorizontalCompositionTest(unittest.TestCase):
         self.assertNotIn("margin-bottom:14px", watch)
 
 
+class WatchRanksByWhoNeedsYouTest(unittest.TestCase):
+    """Watch's job statement is "which one do I deal with first".
+
+    It was ranked, at two levels -- the server orders cards by severity and
+    replayed context, and healthRank re-ranks past-the-limit first, then size.
+    Both answer "which is worst". Neither looked at whether a session was
+    blocked waiting for the developer, which is the one signal that literally
+    means someone needs you: a session stopped on a question you have not seen
+    cannot continue without you, whatever its per-turn number.
+
+    presence already carries it. Watch simply never asked.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.rank = js_function_source(cls.js, "healthRank")
+        cls.reason = js_function_source(cls.js, "healthReason")
+
+    def test_waiting_is_the_first_rank_key(self):
+        self.assertIn("waiting.has(row.session_id) ? 1 : 0", self.rank)
+        # And it comes before the pressure keys, not after them.
+        self.assertLess(
+            self.rank.index("waiting.has"), self.rank.index("latest >= critical"))
+
+    def test_the_pressure_order_is_unchanged_beneath_it(self):
+        # Adding a key on top should not disturb the ranking that was already
+        # reasoned about: past the limit, then bigger per turn.
+        self.assertIn("latest >= critical ? 1 : 0", self.rank)
+        self.assertIn("latest", self.rank)
+
+    def test_every_row_says_why_it_sits_where_it_does(self):
+        """Three keys deep and none of them were visible: a reader saw an order
+        and had to trust it."""
+        self.assertIn("Waiting on you", self.reason)
+        self.assertIn("Past the", self.reason)
+        self.assertIn("Highest per-turn here", self.reason)
+
+    def test_the_reason_follows_the_same_precedence_as_the_sort(self):
+        # Or the explanation drifts from the ordering it explains.
+        waiting = self.reason.index("Waiting on you")
+        past = self.reason.index("Past the")
+        highest = self.reason.index("Highest per-turn here")
+        self.assertLess(waiting, past)
+        self.assertLess(past, highest)
+
+    def test_the_rank_and_the_reason_read_one_source(self):
+        # A second list of waiting sessions would be a second thing to keep in
+        # step with presence.
+        render = js_function_source(self.js, "renderContextHealth")
+        self.assertIn("waitingById", render)
+        self.assertIn("entry.state === 'waiting'", render)
+        self.assertIn("data.presence", self.js)
+
+
 class CheckpointDistanceSurfaceTest(unittest.TestCase):
     """Home's one honest present-tense spend figure.
 
