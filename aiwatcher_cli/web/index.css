@@ -34,162 +34,214 @@
       --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
 
-    /* ---- Palette -------------------------------------------------------
-       Every colour the stylesheet is allowed to know about, named for the job
-       it does rather than for the component that first needed it. Values here
-       are the ones this dashboard already shipped: this block is structure,
-       not a redesign, so nothing on screen moves. Swapping these values for
-       another palette, and adding a light one, is a later change that this
-       block is what makes possible.
+    /* ---- Palette: dark ---------------------------------------------------
+       Adminator v4, which is the palette the port study measured, with one
+       value deliberately not taken. Adminator ships --t-light #64748B; it is
+       slate-500, chosen to sit on white, and on its own --bg-card it measures
+       3.6:1. This dashboard's existing #78869a measures 4.63:1 on the same
+       ground, so the quiet tier keeps the value the app already validated.
 
-       The names follow Adminator v4's, because that is the palette the port
-       study measured and the one we intend to adopt -- matching them now means
-       the swap is a value change and not a rename.                          */
-    :root {
+       Everything a theme can change lives here. Nothing below this block
+       names a colour.                                                       */
+    :root, :root[data-theme="dark"] {
       color-scheme: dark;
 
-      --bg-body: #070b11;
-      --bg-card: #101720;
-      --bg-muted: #151e2a;
-      --bg-hover: #1a2533;
+      --bg-body: #0B1120;
+      --bg-card: #141B2D;
+      --bg-muted: #1A2237;
+      --bg-hover: #1C2438;
 
-      --t-base: #f7f9fc;
-      --t-muted: #aab7c8;
+      --t-base: #F1F5F9;
+      --t-muted: #94A3B8;
       --t-light: #78869a;
 
-      --border: #263346;
-      /* Not "border-soft". Adminator's soft tier is *darker* than its base,
-         while this dashboard's strong tier is *lighter* than its base -- 70.6
-         against 49.6 in relative luminance. Aliasing one to the other would
-         make every emphasised rule render fainter than an ordinary one, which
-         is the opposite of what the name promises. */
+      --border: #222C42;
+      /* Adminator has no strong tier -- its soft one runs the other way -- so
+         this keeps the value this dashboard validated. */
       --border-strong: #354963;
 
-      --success: #43d9a3;  --success-soft: rgba(67, 217, 163, .12);
-      --primary: #65a7ff;  --primary-soft: rgba(101, 167, 255, .14);
-      --info:    #58d7e8;  --info-soft:    rgba(88, 215, 232, .11);
-      --warning: #f2bf6b;  --warning-soft: rgba(242, 191, 107, .13);
-      --danger:  #f2778f;  --danger-soft:  rgba(242, 119, 143, .13);
+      --success: #34D399;  --success-soft: rgba(52,211,153,.12);
+      --primary: #60A5FA;  --primary-soft: rgba(96,165,250,.14);
+      --info:    #38BDF8;  --info-soft:    rgba(56,189,248,.11);
+      --warning: #FBBF24;  --warning-soft: rgba(251,191,36,.13);
+      --danger:  #F87171;  --danger-soft:  rgba(248,113,113,.13);
 
-      /* The drawer is its own ground: a darker sheet laid over the page, so it
-         does not simply inherit the card colours. */
-      --sheet-bg: #080d14;
-      --sheet-surface: #0e151f;
-      --sheet-ink: #111a26;
-      --sheet-line: rgba(148, 163, 184, .14);
-      --sheet-line-strong: rgba(133, 169, 220, .30);
-      --sheet-glow: rgba(101, 167, 255, .18);
+      --sheet-bg: #080D18;
+      --sheet-surface: #101728;
+      --sheet-ink: #161E32;
+      --sheet-line: rgba(148,163,184,.14);
+      --sheet-line-strong: rgba(133,169,220,.30);
+      --sheet-glow: rgba(96,165,250,.18);
 
-      /* Hues as component triplets, so an alpha variant reads the same source
-         as the solid one. Four of these unify a near-duplicate the stylesheet
-         had drifted into -- #70a7ff beside --blue #65a7ff, and three like it --
-         at most 14/255 on one channel, which is why nobody noticed and why they
-         should not both exist. */
-      --blue-rgb: 101,167,255;
-      --green-rgb: 67,217,163;
-      --amber-rgb: 242,191,107;
-      --red-rgb: 242,119,143;
-      --cyan-rgb: 88,215,232;
+      --blue-rgb: 96,165,250;
+      --green-rgb: 52,211,153;
+      --amber-rgb: 251,191,36;
+      --red-rgb: 248,113,113;
+      --cyan-rgb: 56,189,248;
 
-      /* Washes and grounds. --sheen is the light wash that lifts a card off
-         the page; it has to invert under a light palette, or every hover and
-         active state silently disappears. */
+      /* The wash that lifts a card off the page. It inverts under light: a
+         white wash on a white card is absent, and 30 uses of it carry hover
+         and active feedback. */
       --sheen-rgb: 255,255,255;
       --shadow-rgb: 0,0,0;
       --hairline-rgb: 148,163,184;
       --hairline-lift-rgb: 133,169,220;
-      --well-rgb: 5,9,14;
-      --scrim-rgb: 10,16,24;
+      --well-rgb: 5,9,20;
+      --scrim-rgb: 11,17,32;
 
-      /* One-off grounds at their exact values: gradient stops and scrims a
-         step or two apart. Collapsing them onto a shared token would flatten
-         the gradients they exist to make. */
-      --tint-green-rgb: 16,27,23;
-      --tint-red-rgb: 34,17,24;
-      --blue-deep-rgb: 18,70,140;
+      --tint-green-rgb: 15,42,32;
+      --tint-red-rgb: 43,20,20;
+      --blue-deep-rgb: 15,40,71;
       --blue-mid-rgb: 47,111,189;
       --blue-mid2-rgb: 49,108,180;
       --blue-soft-rgb: 86,157,231;
-      --blue-pale-rgb: 126,176,241;
-      --blue-lift-rgb: 135,168,255;
+      --blue-pale-rgb: 147,197,253;
+      --blue-lift-rgb: 147,197,253;
 
-      /* Three tiers, replacing fourteen one-off values that sat between
-         --text (luminance 249) and --muted (181) -- a 68-step canyon with
-         nothing declared inside it, so everyone who needed a step invented
-         one. Two of them differed by a single step per channel. Chosen from
-         the values already present to minimise the worst move: nothing
-         shifts more than 18/255. */
-      --text-bright: #dce6f6;
-      --text-quiet: #bdc9d9;
-      --text-dim: #94a3b8;
-
-      /* Grounds and inks, the same story: eleven and fifteen one-offs, most
-         used once. Worst move 8/255 and 9/255. */
-      --ground-deep: #080d13;
-      --ground-mid: #111b28;
-      --ground-lift: #222d3b;
-      --ink-deep-rgb: 7,12,19;
-      --ink-mid-rgb: 16,23,32;
+      --text-bright: #DCE6F6;
+      --text-quiet: #BDC9D9;
+      --text-dim: #94A3B8;
+      --ground-deep: #080D18;
+      --ground-mid: #141B2D;
+      --ground-lift: #222C42;
+      --ink-deep-rgb: 8,13,24;
+      --ink-mid-rgb: 20,27,45;
       --ink-lift-rgb: 42,55,75;
+      --surface-warning: #2B1F08;
+      --surface-danger: #2B1414;
 
-      /* Not grounds. These two carry a hue -- amber and red -- and read as
-         warning and error surfaces, so folding them into a neutral scale
-         would drop the tint that is the whole point of them. */
-      --surface-warning: #181710;
-      --surface-danger: #2a171d;
+      --on-success: #A7F3D0;  --on-success-lift: #A7F3D0;
+      --on-success-quiet: #6EE7B7; --on-success-bright: #D1FAE5;
+      --on-warning: #FDE68A;  --on-warning-lift: #FDE68A;  --on-warning-bright: #FEF3C7;
+      --on-danger: #FECACA;   --on-danger-lift: #FECACA;   --on-danger-bright: #FEE2E2;
+      --on-brand: #BFDBFE;    --on-brand-lift: #BFDBFE;    --on-brand-bright: #DBEAFE;
+      --on-brand-quiet: #BFDBFE; --on-brand-action: #DBEAFE;
 
-      /* Text sitting on a semantic fill. Not invertible: #bff5df on a light
-         green fill is unreadable, so a light palette needs real values here
-         rather than a flipped version of these. */
-      --on-success: #bff5df;
-      --on-success-lift: #c9f8e5;
-      --on-success-quiet: #b8f0e0;
-      --on-success-bright: #eafff5;
-      --on-warning: #ffe2a4;
-      --on-warning-lift: #f7dd9c;
-      --on-warning-bright: #fff3dc;
-      --on-danger: #ffc4ce;
-      --on-danger-lift: #ffd8df;
-      --on-danger-bright: #ffe3e8;
-      --on-brand: #dceaff;
-      --on-brand-lift: #dcebff;
-      --on-brand-bright: #e7f0ff;
-      --on-brand-quiet: #d4e7ff;
-      --on-brand-action: #ddecff;
+      /* The handoff receipt is a light card inside a dark UI, so it reads as a
+         printed slip. Under light it has to invert the other way or the effect
+         is silently deleted. */
+      --invert-bg: #FFFFFF;   --invert-hover: #F8FAFC;
+      --invert-text: #0F172A; --invert-muted: #475569;
+      --invert-line: #CBD5E1; --invert-line-soft: #E2E8F0;
+      --invert-ink: #334155;  --invert-line-hover: #94A3B8;
+      --invert-tint: #EFF6FF; --invert-head: #1D4ED8;
 
-      /* Tiers the stylesheet uses but never declared, sitting between --text
-         and --muted -- a gap 77 steps wide, which is why so many one-off
-         values grew in it. Exactly what shipped; whether this many tiers
-         should exist is its own decision, and a visible one. */
+      --on-accent: #FFFFFF;
+      --btn-bg: #2563EB;      --btn-line: #60A5FA;
+      --btn-bg-hover: #1D4ED8; --btn-line-hover: #93C5FD;
+      --btn-line-quiet: #3B82F6; --btn-line-row: #3d6594;
+      --pulse-line: #93C5FD;  --accent-fallback: #60A5FA;
+      --metric-green-fallback: #059669;
+      --btn-line-hover-quiet: #475569;
+      --alert-red: #F87171;   --alert-amber: #FBBF24;
+    }
 
-      /* The handoff receipt is an inverted card -- white in a dark UI, to read
-         as a printed slip. Under a light palette it inverts the other way. */
-      --invert-bg: #ffffff;
-      --invert-hover: #f8fbff;
-      --invert-text: #172237;
-      --invert-muted: #4b5870;
-      --invert-line: #c5d7ee;
-      --invert-line-soft: #bfd2ec;
-      --invert-ink: #37445a;
-      --invert-line-hover: #8fb6e8;
-      --invert-tint: #eaf2ff;
-      --invert-head: #1f5fa8;
+    /* ---- Palette: light --------------------------------------------------
+       Not a mechanical inversion. Three groups had to be measured rather than
+       flipped, and the port study is where those numbers come from.
 
-      /* Solid controls and alert fills. */
-      --btn-bg: #2f6fbd;
-      --btn-line: #5594df;
-      --btn-bg-hover: #397dce;
-      --btn-line-hover: #86bdff;
-      --btn-line-quiet: #4377b5;
-      --btn-line-row: #3d6594;
-      --pulse-line: #9fc8ff;
-      --accent-fallback: #4f8cff;
-      --metric-green-fallback: #2e9e5b;
-      --btn-line-hover-quiet: #53647a;
-      --alert-red: #d9534f;
-      --alert-amber: #e0a800;
+       The quiet text tiers are darkened from what Adminator ships. Its
+       #64748B / #94A3B8 pair is measured against plain white, where the second
+       does not pass at all (2.56:1) -- and this dashboard puts quiet text on
+       wells and tinted rows far more than on white, which costs another half
+       stop.
 
-      /* Grounds, at their exact values. */
+       The semantic hues drop a step because several are used as *text*, not
+       as fills: #10B981 on white is 2.54:1.
+
+       And the sheen inverts, or every hover state disappears.               */
+    :root[data-theme="light"] {
+      color-scheme: light;
+
+      --bg-body: #F0F4F8;
+      --bg-card: #FFFFFF;
+      --bg-muted: #F1F5F9;
+      --bg-hover: #F8FAFC;
+
+      --t-base: #1E293B;
+      --t-muted: #556174;
+      --t-light: #64707F;
+
+      --border: #E4E8EF;
+      --border-strong: #CBD5E1;
+
+      --success: #047857;  --success-soft: rgba(4,120,87,.10);
+      --primary: #2563EB;  --primary-soft: rgba(37,99,235,.10);
+      --info:    #0284C7;  --info-soft:    rgba(2,132,199,.10);
+      --warning: #B45309;  --warning-soft: rgba(180,83,9,.10);
+      /* red-700 rather than red-600: as *text* on the card ground the
+         lighter step measured 4.37:1, just under AA. */
+      --danger:  #B91C1C;  --danger-soft:  rgba(185,28,28,.10);
+
+      --sheet-bg: #E9EEF5;
+      --sheet-surface: #FFFFFF;
+      --sheet-ink: #F1F5F9;
+      --sheet-line: rgba(71,85,105,.16);
+      --sheet-line-strong: rgba(71,85,105,.30);
+      --sheet-glow: rgba(37,99,235,.16);
+
+      --blue-rgb: 37,99,235;
+      --green-rgb: 4,120,87;
+      --amber-rgb: 180,83,9;
+      --red-rgb: 185,28,28;
+      --cyan-rgb: 2,132,199;
+
+      /* Inverted: a dark wash, so a hover still reads as a change. */
+      --sheen-rgb: 15,23,42;
+      --shadow-rgb: 15,23,42;
+      --hairline-rgb: 71,85,105;
+      --hairline-lift-rgb: 71,85,105;
+      /* Adminator's --bg-muted rather than #E2E8F0. A recess only has to read
+         as a recess, and the darker value was the single biggest source of
+         contrast failures for quiet text sitting on it. */
+      --well-rgb: 241,245,249;
+      --scrim-rgb: 240,244,248;
+
+      --tint-green-rgb: 236,253,245;
+      --tint-red-rgb: 254,242,242;
+      --blue-deep-rgb: 239,246,255;
+      --blue-mid-rgb: 59,130,246;
+      --blue-mid2-rgb: 37,99,235;
+      --blue-soft-rgb: 37,99,235;
+      --blue-pale-rgb: 29,78,216;
+      --blue-lift-rgb: 37,99,235;
+
+      --text-bright: #334155;
+      --text-quiet: #475569;
+      --text-dim: #64707F;
+      --ground-deep: #E9EEF5;
+      --ground-mid: #F1F5F9;
+      --ground-lift: #E2E8F0;
+      --ink-deep-rgb: 233,238,245;
+      --ink-mid-rgb: 241,245,249;
+      --ink-lift-rgb: 226,232,240;
+      --surface-warning: #FFFBEB;
+      --surface-danger: #FEF2F2;
+
+      /* Text on a semantic fill has to go dark here. A pale mint on a pale
+         mint tint is not low contrast, it is invisible. */
+      --on-success: #065F46;  --on-success-lift: #065F46;
+      --on-success-quiet: #047857; --on-success-bright: #064E3B;
+      --on-warning: #92400E;  --on-warning-lift: #92400E;  --on-warning-bright: #78350F;
+      --on-danger: #991B1B;   --on-danger-lift: #991B1B;   --on-danger-bright: #7F1D1D;
+      --on-brand: #1E40AF;    --on-brand-lift: #1E40AF;    --on-brand-bright: #1E3A8A;
+      --on-brand-quiet: #1D4ED8; --on-brand-action: #1E40AF;
+
+      /* The receipt inverts the other way: a dark slip on a light page. */
+      --invert-bg: #0F172A;   --invert-hover: #1E293B;
+      --invert-text: #F8FAFC; --invert-muted: #94A3B8;
+      --invert-line: #334155; --invert-line-soft: #1E293B;
+      --invert-ink: #CBD5E1;  --invert-line-hover: #475569;
+      --invert-tint: #1E293B; --invert-head: #93C5FD;
+
+      --on-accent: #FFFFFF;
+      --btn-bg: #2563EB;      --btn-line: #1D4ED8;
+      --btn-bg-hover: #1D4ED8; --btn-line-hover: #1E40AF;
+      --btn-line-quiet: #93C5FD; --btn-line-row: #BFDBFE;
+      --pulse-line: #2563EB;  --accent-fallback: #2563EB;
+      --metric-green-fallback: #047857;
+      --btn-line-hover-quiet: #94A3B8;
+      --alert-red: #B91C1C;   --alert-amber: #B45309;
     }
 
     /* ---- Aliases -------------------------------------------------------
@@ -503,7 +555,7 @@
     button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
     button:disabled { cursor: not-allowed; opacity: .62; }
     .actions { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; }
-    .btn-primary { background: var(--btn-bg); border-color: var(--btn-line); color: white; }
+    .btn-primary { background: var(--btn-bg); border-color: var(--btn-line); color: var(--on-accent); }
     .btn-primary:hover { background: var(--btn-bg-hover); border-color: var(--btn-line-hover); }
     .btn-quiet { background: transparent; border-color: var(--line); color: var(--text-bright); }
     .link-button {
@@ -560,13 +612,13 @@
     /* The rail starts and stops with the group rather than running past it. */
     .nav-sub:first-of-type::before { top: var(--sp-1); }
     .nav-sub:last-of-type::before { bottom: var(--sp-1); }
-    .nav-sub.active { color: white; }
+    .nav-sub.active { color: var(--t-base); }
     .nav-tab:hover { background: rgba(var(--sheen-rgb), .035); border-color: rgba(var(--hairline-rgb), .10); }
     .nav-tab.active {
       background:
         linear-gradient(135deg, rgba(var(--blue-rgb), .24), rgba(var(--cyan-rgb), .10)),
         rgba(var(--ink-lift-rgb), .82);
-      color: white;
+      color: var(--t-base);
       border-color: rgba(var(--blue-pale-rgb), .30);
       box-shadow: inset 3px 0 0 var(--blue), inset 0 1px 0 rgba(var(--sheen-rgb), .06), 0 8px 18px rgba(var(--shadow-rgb), .10);
     }
@@ -768,7 +820,7 @@
     .value { font-size: var(--fs-6); font-weight: var(--fw-bold); margin-top: 10px; font-variant-numeric: tabular-nums; }
     .sub { color: var(--muted); font-size: var(--fs-2); margin-top: 4px; }
     .session-summary { margin-top: 16px; }
-    .session-title { font-size: var(--fs-4); color: white; font-weight: var(--fw-med); overflow-wrap: anywhere; }
+    .session-title { font-size: var(--fs-4); color: var(--t-base); font-weight: var(--fw-med); overflow-wrap: anywhere; }
     .session-meta { margin-top: 5px; color: var(--muted); }
     .session-actions { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-top: 18px; }
     .recommended-action {
@@ -797,7 +849,7 @@
     }
     .action-composer-head { display: grid; gap: var(--sp-1); }
     .action-composer-head h3 { display: flex; align-items: center; gap: var(--sp-2); margin: 0; font-size: var(--fs-2); color: var(--on-warning-lift); text-transform: uppercase; letter-spacing: .06em; }
-    .action-composer-head strong { display: block; color: white; font-size: var(--fs-5); line-height: 1.15; letter-spacing: 0; text-transform: none; }
+    .action-composer-head strong { display: block; color: var(--t-base); font-size: var(--fs-5); line-height: 1.15; letter-spacing: 0; text-transform: none; }
     .action-evidence { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
     .action-evidence .pill { background: rgba(var(--well-rgb), .38); }
     .action-buttons { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
@@ -893,7 +945,7 @@
       font-weight: var(--fw-bold);
       box-shadow: inset 0 1px 0 rgba(var(--sheen-rgb), .05);
     }
-    .ai-loading-panel strong { display: block; color: white; margin-bottom: 2px; }
+    .ai-loading-panel strong { display: block; color: var(--t-base); margin-bottom: 2px; }
     .ai-loading-panel p { font-size: var(--fs-2); }
     .ai-loading-bar {
       position: relative;
@@ -949,7 +1001,7 @@
     .bar-row.clickable, tr.clickable { cursor: pointer; }
     .bar-row.clickable { border-radius: var(--r-1); }
     .bar-row.clickable:hover { background: rgba(var(--sheen-rgb), .03); }
-    .bar-row.clickable:hover .bar-label, tr.clickable:hover td { color: white; }
+    .bar-row.clickable:hover .bar-label, tr.clickable:hover td { color: var(--t-base); }
     .bar-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-bright); }
     .bar-shell { height: 8px; background: var(--ground-deep); border-radius: var(--r-2); overflow: hidden; border: 1px solid var(--ground-lift); }
     .bar { height: 100%; background: var(--blue); border-radius: var(--r-2); min-width: 2px; }
@@ -966,7 +1018,7 @@
     .feed-row.high .feed-main { border-left-color: var(--red); }
     .feed-row.medium .feed-main { border-left-color: var(--amber); }
     .feed-row.info .feed-main { border-left-color: var(--line-strong); }
-    .feed-main strong { display: block; color: white; margin-bottom: 4px; }
+    .feed-main strong { display: block; color: var(--t-base); margin-bottom: 4px; }
     .feed-main p { margin: 0; color: var(--muted); line-height: 1.5; }
     .feed-impact { font-size: var(--fs-4); white-space: nowrap; padding-top: 1px; }
     /* A finding's claim and the chart that evidences it, side by side.
@@ -1010,7 +1062,7 @@
     .split-legend { display: flex; gap: var(--sp-3); flex-wrap: wrap; font-size: var(--fs-2); color: var(--muted); }
     .split-legend span { display: flex; align-items: center; gap: var(--sp-1); }
     .split-legend i { width: 9px; height: 9px; border-radius: var(--r-pill); display: block; }
-    .insight strong { display: block; margin-bottom: 3px; color: white; }
+    .insight strong { display: block; margin-bottom: 3px; color: var(--t-base); }
     .pill-row { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: 12px; }
     .pill { border: 1px solid var(--line); background: var(--ground-deep); border-radius: var(--r-pill); padding: 5px 9px; color: var(--text-quiet); font-size: var(--fs-1); }
     .action-queue { display: grid; gap: var(--sp-2); position: relative; z-index: 1; }
@@ -1042,7 +1094,7 @@
     .action-row.high { border-left-color: var(--amber); }
     .action-row.medium { border-left-color: var(--blue); }
     .action-row.low { border-left-color: var(--green); }
-    .action-title { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; font-weight: var(--fw-bold); color: white; }
+    .action-title { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; font-weight: var(--fw-bold); color: var(--t-base); }
     .action-row p { margin: 6px 0 0; color: var(--muted); line-height: 1.45; }
     .action-meta { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: 10px; }
     .action-row .actions { justify-content: flex-end; }
@@ -1202,7 +1254,7 @@
       font-weight: inherit;
       text-align: inherit;
     }
-    .sort-head:hover { background: transparent; color: white; }
+    .sort-head:hover { background: transparent; color: var(--t-base); }
     /* A project row opens a drawer, so the thing that opens it is a button and
        reachable by keyboard. The Watch health rows were already done this way;
        Projects was left as a <tr onclick> with no role and no tab stop. */
@@ -1320,7 +1372,7 @@
       box-shadow: inset 0 1px 0 rgba(var(--sheen-rgb), .025);
     }
     .session-hero-fact span { display: block; color: var(--muted); font-size: var(--fs-1); text-transform: uppercase; letter-spacing: .06em; font-weight: var(--fw-bold); }
-    .session-hero-fact strong { display: block; margin-top: 7px; font-size: var(--fs-4); line-height: 1.18; color: white; overflow-wrap: anywhere; }
+    .session-hero-fact strong { display: block; margin-top: 7px; font-size: var(--fs-4); line-height: 1.18; color: var(--t-base); overflow-wrap: anywhere; }
     .session-hero-status { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: 11px; }
     .session-meter { margin-top: 10px; }
     .session-meter-track { height: 7px; border-radius: var(--r-pill); overflow: hidden; border: 1px solid rgba(var(--hairline-rgb), .18); background: rgba(var(--ink-deep-rgb), .62); }
@@ -1532,7 +1584,7 @@
     .evidence-dot { width: 19px; height: 19px; border-radius: var(--r-pill); border: 1px solid rgba(var(--blue-rgb), .54); background: rgba(var(--blue-rgb), .16); box-shadow: 0 0 0 4px rgba(var(--blue-rgb), .05); margin-top: 1px; }
     .evidence-node.verified .evidence-dot, .evidence-node.observed .evidence-dot { border-color: rgba(var(--green-rgb), .56); background: rgba(var(--green-rgb), .18); }
     .evidence-node.inferred .evidence-dot { border-color: rgba(var(--amber-rgb), .56); background: rgba(var(--amber-rgb), .18); }
-    .evidence-copy strong { display: flex; gap: var(--sp-2); align-items: center; color: white; font-size: var(--fs-3); }
+    .evidence-copy strong { display: flex; gap: var(--sp-2); align-items: center; color: var(--t-base); font-size: var(--fs-3); }
     .evidence-copy p { margin-top: 3px; font-size: var(--fs-2); color: var(--muted); }
     .prompt-opt-in { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-2); background: var(--surface-raised); font-size: var(--fs-2); color: var(--text-bright); cursor: pointer; }
     .prompt-opt-in input { width: 15px; height: 15px; accent-color: var(--blue, var(--accent-fallback)); }
@@ -1560,7 +1612,7 @@
     .ask-message { border: 1px solid var(--line); border-radius: var(--r-2); padding: 11px 12px; background: rgba(var(--well-rgb), .46); }
     .ask-message.user { justify-self: end; max-width: 88%; background: rgba(var(--blue-rgb), .13); border-color: rgba(var(--blue-rgb), .28); }
     .ask-message.aiw { border-left: 3px solid var(--green); }
-    .ask-message strong { display: block; margin-bottom: 5px; color: white; }
+    .ask-message strong { display: block; margin-bottom: 5px; color: var(--t-base); }
     .ask-message ul { margin: 8px 0 0; padding-left: 18px; color: var(--text-bright); line-height: 1.45; }
     .ask-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: 10px; }
     .ask-actions a { text-decoration: none; border: 1px solid rgba(var(--blue-rgb), .38); border-radius: var(--r-2); padding: 7px 9px; color: var(--on-brand); background: rgba(var(--blue-rgb), .10); font-size: var(--fs-2); font-weight: var(--fw-bold); }

@@ -3251,6 +3251,42 @@ function renderReport(report) {
  * look impressive would contradict the one thing this product sells, on the
  * very first thing anyone sees.
  */
+/* Theme.
+ *
+ * Follows the operating system until the reader chooses, and then keeps that
+ * choice -- a dashboard left open on a second monitor should not flip when the
+ * OS crosses its own sunset. The stored value is the only state; the attribute
+ * on <html> is derived from it on every load, so a second window opened later
+ * agrees with the first.
+ *
+ * Set before first paint in the inline bootstrap below, not here, or the page
+ * renders dark and then snaps to light in front of the reader.
+ */
+function currentTheme() {
+  try {
+    const stored = localStorage.getItem('aiw-theme');
+    if (stored === 'light' || stored === 'dark') return stored;
+  } catch (error) {
+    // Private windows and blocked site data throw on access rather than
+    // returning null. Following the OS is the right answer there anyway.
+  }
+  return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches
+    ? 'light' : 'dark';
+}
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  const button = document.getElementById('themeToggle');
+  if (!button) return;
+  // The label is the action, not the state: a button reading "Light" while the
+  // page is light gives the reader nothing to press for.
+  button.textContent = theme === 'light' ? 'Dark' : 'Light';
+  button.setAttribute('aria-pressed', theme === 'light' ? 'true' : 'false');
+}
+function toggleTheme() {
+  const next = currentTheme() === 'light' ? 'dark' : 'light';
+  try { localStorage.setItem('aiw-theme', next); } catch (error) { /* choice lasts this page */ }
+  applyTheme(next);
+}
 function renderFirstRun(card) {
   const host = document.getElementById('firstRunBody');
   if (!host) return;
@@ -4680,6 +4716,10 @@ async function load(resetDetail = true, forceRefresh = false) {
 document.addEventListener('keydown', event => { if (event.key === 'Escape') closeDrawer(); });
 (async () => {
   startLiveRefresh();
+  // The attribute is already set by the inline bootstrap; this syncs the
+  // button's label to it, which the bootstrap cannot do because the button
+  // does not exist yet.
+  applyTheme(currentTheme());
   await load();
   const requestedView = new URLSearchParams(location.search).get('view');
   // Every view id, or a ?view= deep link at one of them silently does nothing.

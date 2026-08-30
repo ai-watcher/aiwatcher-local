@@ -8,6 +8,21 @@
        A link element has to exist for that swap to have somewhere to land, and
        the inline default keeps the page self-contained with no second request. -->
   <link id="favicon" rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23070b11'/%3E%3Ccircle cx='16' cy='16' r='7' fill='%2378869a'/%3E%3C/svg%3E" />
+  <!-- Before the stylesheet, and inline on purpose: the attribute has to be on
+       <html> for the first paint, or the page renders in one theme and snaps to
+       the other in front of the reader. Small enough to duplicate the read that
+       currentTheme() does properly later. -->
+  <script>
+    (function () {
+      var t;
+      try { t = localStorage.getItem('aiw-theme'); } catch (e) { t = null; }
+      if (t !== 'light' && t !== 'dark') {
+        t = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches
+          ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
   <style>@@INCLUDE:index.css@@</style>
 </head>
 <body>
@@ -29,6 +44,10 @@
         <option value="7" selected>Last 7 days</option>
         <option value="30">Last 30 days</option>
       </select>
+      <!-- Follows the OS until you say otherwise; the label states what a click
+           does, not what is currently on. aria-pressed carries the state for a
+           reader that cannot see which way the page went. -->
+      <button id="themeToggle" class="btn-quiet" aria-pressed="false" onclick="toggleTheme()">Light</button>
       <button id="refreshButton" class="btn-quiet" onclick="load(false, true)">Refresh data</button>
       <a class="link-button" href="https://www.getaiwatcher.com" target="_blank" rel="noreferrer">Enterprise</a>
     </div>
