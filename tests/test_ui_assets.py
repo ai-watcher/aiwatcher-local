@@ -1879,7 +1879,7 @@ class DesignScaleTest(unittest.TestCase):
         counts. Both are checked against the rule they actually declare.
         """
         rows = re.findall(r'class="grid kpis"[^>]*>(.*?)</section>', self.html, re.S)
-        self.assertEqual(len(rows), 2, "expected a stat row on Home and on Prove")
+        self.assertGreaterEqual(len(rows), 3, "expected stat rows on Home, Control and Prove")
 
         fixed = re.findall(r"\.kpis \{[^}]*grid-template-columns:\s*([^;]+);", self.css)
         self.assertTrue(fixed, "the stat row declares no columns")
@@ -1898,11 +1898,17 @@ class DesignScaleTest(unittest.TestCase):
         # Home's tiles withhold themselves rather than showing a zero, so the
         # count is 0 to 3 at runtime. A fixed rule would leave a hole exactly
         # when a tile had nothing honest to say.
-        home = next(r for r in rows if "presenceTile" in r)
-        self.assertGreater(home.count('class="card metric-card'), 0)
-        home_rule = re.search(r"#homeStrip \{[^}]*grid-template-columns:\s*([^;]+);", self.css)
-        self.assertIsNotNone(home_rule, "Home's strip declares no columns of its own")
-        self.assertIn("auto-fit", home_rule.group(1))
+        # Home and Control both hold tiles that withhold themselves rather than
+        # showing a zero, so their counts are 0 to 3 at runtime. A fixed rule
+        # would leave a hole exactly when a tile had nothing honest to say.
+        for name, marker in (("homeStrip", "presenceTile"), ("controlStrip", "gateTile")):
+            with self.subTest(strip=name):
+                row = next(r for r in rows if marker in r)
+                self.assertGreater(row.count('class="card metric-card'), 0)
+                rule = re.search(
+                    r"#%s[^{]*\{[^}]*grid-template-columns:\s*([^;]+);" % name, self.css)
+                self.assertIsNotNone(rule, "%s declares no columns of its own" % name)
+                self.assertIn("auto-fit", rule.group(1))
 
     def test_root_declares_a_font_family(self):
         # Without it :root computed to Times New Roman and only body caught Inter.

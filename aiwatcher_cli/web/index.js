@@ -3341,6 +3341,55 @@ async function dismissFirstRun(goHome) {
   }
   if (goHome) showView('today');
 }
+/* Control's strip: three facts that each end in something you can do.
+ *
+ * Every value here is already in the payload -- the handoff bubble knows what a
+ * Fresh Start would save, coverage knows whether anything is gated, totals
+ * knows how many decisions this window produced. What was missing was a place
+ * to read them together, which is what the stage is for.
+ */
+function renderControlStrip(data) {
+  const bubble = data.handoff_bubble || null;
+  const fresh = document.getElementById('freshStartTile');
+  if (fresh) {
+    if (bubble && bubble.saved_context_label) {
+      fresh.className = 'card metric-card '
+        + (bubble.severity === 'critical' ? 'metric-red' : 'metric-amber');
+      fresh.hidden = false;
+      fresh.innerHTML = `<div class="label">Fresh Start ready</div>
+        <div class="value">${esc(bubble.saved_context_label)}</div>
+        <div class="sub">context saved if you start fresh &middot;
+          <button class="link-inline" onclick="startFreshFromBubble('${esc(bubble.session_id)}')">copy brief</button></div>`;
+    } else { fresh.hidden = true; }
+  }
+
+  const gate = document.getElementById('gateTile');
+  if (gate) {
+    const coverage = data.coverage || [];
+    const gated = coverage.filter(row => row.status === 'automatic').length;
+    // Off is the state worth colouring: nothing is being reviewed before it
+    // runs, which is the one thing this stage exists to change.
+    gate.className = 'card metric-card ' + (gated ? 'metric-green' : 'metric-amber');
+    gate.hidden = !coverage.length;
+    gate.innerHTML = `<div class="label">Gate</div>
+      <div class="value">${gated ? 'On' : 'Off'}</div>
+      <div class="sub">${gated
+        ? `${esc(gated)} of ${esc(coverage.length)} tools gated automatically`
+        : 'Nothing is reviewed before it runs &middot; <button class="link-inline" onclick="showView(\'setup\')">see coverage</button>'}</div>`;
+  }
+
+  const decisions = document.getElementById('decisionsTile');
+  if (decisions) {
+    const n = Number((data.totals || {}).preflight_decisions) || 0;
+    decisions.hidden = !n;
+    // No colour. A count of decisions is neither good news nor bad.
+    decisions.className = 'card metric-card metric-neutral';
+    decisions.innerHTML = `<div class="label">Decisions made</div>
+      <div class="value">${esc(n)}</div>
+      <div class="sub">${esc((data.totals || {}).window_label || 'this window')} &middot;
+        <button class="link-inline" onclick="showView('receipts')">receipts on Prove</button></div>`;
+  }
+}
 function renderCheckpoint(card) {
   const host = document.getElementById('checkpoint');
   if (!host) return;
@@ -4525,6 +4574,7 @@ async function loadOnce(resetDetail, forceRefresh) {
   renderCheckpoint(data.checkpoint);
   renderPresenceTile(data.presence);
   renderWasteTile(data.optimize);
+  renderControlStrip(data);
   // Routed from the payload rather than a stored client flag: the server
   // already knows whether anything is gated and whether the screen was
   // dismissed, and a second source of truth here would drift from it. Only on

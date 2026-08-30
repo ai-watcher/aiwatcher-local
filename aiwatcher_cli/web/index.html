@@ -317,15 +317,16 @@
        actions into it is another. What it says now is what it will do, not a
        placeholder pretending to be finished. -->
   <section id="view-control" class="view" hidden>
-    <div class="card">
-      <div class="section-title">
-        <div><h2>Control</h2><p>What you can do about what the other surfaces just told you.</p></div>
-        <span class="note-chip local">Local only</span>
-      </div>
-      <div class="empty">Fresh Start is still on Home and per-session actions are still in the
-        session drawer. They move here next, so acting on a warning does not mean remembering
-        which page the action lives on.</div>
-    </div>
+    <!-- What you can act on, read across. Three facts that each end in a verb:
+         how much context a Fresh Start would save, whether anything is being
+         reviewed before it runs, and how many decisions this window produced.
+         The placeholder that stood here said the actions were still elsewhere,
+         which was true and is not a surface. -->
+    <section class="grid kpis" id="controlStrip">
+      <div class="card metric-card metric-neutral" id="freshStartTile" hidden></div>
+      <div class="card metric-card metric-neutral" id="gateTile" hidden></div>
+      <div class="card metric-card metric-neutral" id="decisionsTile" hidden></div>
+    </section>
 
     <!-- Moved from Plan. It had been demoted there already -- collapsed behind
          a summary, because it was 64% of a tab named for planning -- which

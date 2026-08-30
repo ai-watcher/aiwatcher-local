@@ -290,7 +290,14 @@
     }
     body.drawer-open { overflow: hidden; }
     main {
-      width: min(100%, 1780px);
+      /* The cap is set by the widest thing that has to fit, not by the widest
+         monitor. Content is this minus 192px of rail, 40px of gap and 72px of
+         padding, so 1520 leaves a 1216px column -- enough for the two-column
+         compositions and for a table to breathe, and not so much that a card
+         holding one paragraph stretches three times past it. At the old 1780
+         the column reached 1492px while --w-prose held text at 514, so most of
+         every prose card was empty. */
+      width: min(100%, 1520px);
       margin: 0 auto;
       padding: 28px 36px 32px;
       display: grid;
@@ -650,8 +657,8 @@
        worth cleaning up -- so the count is 0 to 3 at runtime and a fixed column
        rule would leave a gap where a tile withheld itself. auto-fit collapses
        the empty tracks and the survivors fill the row. */
-    #homeStrip { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
-    #homeStrip:not(:has(> :not([hidden]))) { display: none; }
+    #homeStrip, #controlStrip { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    #homeStrip:not(:has(> :not([hidden]))), #controlStrip:not(:has(> :not([hidden]))) { display: none; }
     /* Headings and <strong> were never given a weight, so they took the UA
        default of 700 -- a fourth weight the stylesheet did not know it had.
        600 matches where the explicit 650/700/720 rules already landed. */
