@@ -31,33 +31,86 @@
          was catching every node. */
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 
-      color-scheme: dark;
-      --bg: #070b11;
-      --surface: #101720;
-      --surface-raised: #151e2a;
-      --surface-hover: #1a2533;
-      --text: #f7f9fc;
-      --muted: #aab7c8;
-      --faint: #78869a;
-      --line: #263346;
-      --line-strong: #354963;
-      --green: #43d9a3;
-      --green-soft: rgba(67, 217, 163, .12);
-      --blue: #65a7ff;
-      --blue-soft: rgba(101, 167, 255, .14);
-      --cyan: #58d7e8;
-      --cyan-soft: rgba(88, 215, 232, .11);
-      --amber: #f2bf6b;
-      --amber-soft: rgba(242, 191, 107, .13);
-      --red: #f2778f;
-      --red-soft: rgba(242, 119, 143, .13);
-      --drawer-bg: #080d14;
-      --drawer-surface: #0e151f;
-      --drawer-ink: #111a26;
-      --drawer-line: rgba(148, 163, 184, .14);
-      --drawer-line-strong: rgba(133, 169, 220, .30);
-      --drawer-glow: rgba(101, 167, 255, .18);
       --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    /* ---- Palette -------------------------------------------------------
+       Every colour the stylesheet is allowed to know about, named for the job
+       it does rather than for the component that first needed it. Values here
+       are the ones this dashboard already shipped: this block is structure,
+       not a redesign, so nothing on screen moves. Swapping these values for
+       another palette, and adding a light one, is a later change that this
+       block is what makes possible.
+
+       The names follow Adminator v4's, because that is the palette the port
+       study measured and the one we intend to adopt -- matching them now means
+       the swap is a value change and not a rename.                          */
+    :root {
+      color-scheme: dark;
+
+      --bg-body: #070b11;
+      --bg-card: #101720;
+      --bg-muted: #151e2a;
+      --bg-hover: #1a2533;
+
+      --t-base: #f7f9fc;
+      --t-muted: #aab7c8;
+      --t-light: #78869a;
+
+      --border: #263346;
+      /* Not "border-soft". Adminator's soft tier is *darker* than its base,
+         while this dashboard's strong tier is *lighter* than its base -- 70.6
+         against 49.6 in relative luminance. Aliasing one to the other would
+         make every emphasised rule render fainter than an ordinary one, which
+         is the opposite of what the name promises. */
+      --border-strong: #354963;
+
+      --success: #43d9a3;  --success-soft: rgba(67, 217, 163, .12);
+      --primary: #65a7ff;  --primary-soft: rgba(101, 167, 255, .14);
+      --info:    #58d7e8;  --info-soft:    rgba(88, 215, 232, .11);
+      --warning: #f2bf6b;  --warning-soft: rgba(242, 191, 107, .13);
+      --danger:  #f2778f;  --danger-soft:  rgba(242, 119, 143, .13);
+
+      /* The drawer is its own ground: a darker sheet laid over the page, so it
+         does not simply inherit the card colours. */
+      --sheet-bg: #080d14;
+      --sheet-surface: #0e151f;
+      --sheet-ink: #111a26;
+      --sheet-line: rgba(148, 163, 184, .14);
+      --sheet-line-strong: rgba(133, 169, 220, .30);
+      --sheet-glow: rgba(101, 167, 255, .18);
+    }
+
+    /* ---- Aliases -------------------------------------------------------
+       The names the rest of this stylesheet and index.js already use, pointed
+       at the palette above. Names only, never values, so one alias block
+       serves every palette -- which is what lets a theme change touch one
+       block instead of two hundred rules.                                   */
+    :root {
+      --bg:             var(--bg-body);
+      --surface:        var(--bg-card);
+      --surface-raised: var(--bg-muted);
+      --surface-hover:  var(--bg-hover);
+
+      --text:  var(--t-base);
+      --muted: var(--t-muted);
+      --faint: var(--t-light);
+
+      --line:        var(--border);
+      --line-strong: var(--border-strong);
+
+      --green: var(--success);  --green-soft: var(--success-soft);
+      --blue:  var(--primary);  --blue-soft:  var(--primary-soft);
+      --cyan:  var(--info);     --cyan-soft:  var(--info-soft);
+      --amber: var(--warning);  --amber-soft: var(--warning-soft);
+      --red:   var(--danger);   --red-soft:   var(--danger-soft);
+
+      --drawer-bg:          var(--sheet-bg);
+      --drawer-surface:     var(--sheet-surface);
+      --drawer-ink:         var(--sheet-ink);
+      --drawer-line:        var(--sheet-line);
+      --drawer-line-strong: var(--sheet-line-strong);
+      --drawer-glow:        var(--sheet-glow);
     }
     * { box-sizing: border-box; }
     html { min-width: 320px; }
