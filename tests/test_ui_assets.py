@@ -1989,6 +1989,25 @@ class DesignScaleTest(unittest.TestCase):
         cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
         cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
 
+    def test_the_sticky_header_paints_the_page_it_covers(self):
+        """The header was a flat --bg over a body that is a gradient. At the top
+        of the page the body is nearer --ground-deep, so the header sat on it as
+        a visible lighter strip in both themes.
+
+        It has to stay opaque, because content scrolls under it -- so it repeats
+        the body's own ground, fixed to the viewport like the body's, which puts
+        the slice it paints exactly over the slice it covers."""
+        self.assertIn("--page-ground:", self.css)
+        header = self.css[self.css.index("\n    header {"):]
+        header = header[:header.index("\n    }")]
+        self.assertIn("background: var(--page-ground)", header)
+        self.assertIn("background-attachment: fixed", header)
+        # And the body reads the same declaration, so the two cannot drift.
+        body = self.css[self.css.index("\n    body {"):]
+        body = body[:body.index("\n    }")]
+        self.assertIn("background: var(--page-ground)", body)
+        self.assertIn("background-attachment: fixed", body)
+
     def test_the_scales_are_defined(self):
         for token in ("--fs-1", "--fs-2", "--fs-3", "--fs-4", "--fs-5", "--fs-6", "--fs-hero",
                       "--fw-normal", "--fw-med", "--fw-bold",
