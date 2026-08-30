@@ -920,18 +920,29 @@ class WatchRanksByWhoNeedsYouTest(unittest.TestCase):
 
     def test_every_row_says_why_it_sits_where_it_does(self):
         """Three keys deep and none of them were visible: a reader saw an order
-        and had to trust it."""
+        and had to trust it.
+
+        The middle rung used to spell out the past-the-limit sentence here.
+        That made healthReason a second place the deadline was worked out --
+        the defect test_the_runway_deadline_is_computed_in_one_place exists to
+        stop -- so it now defers to runwayVerdict, which owns that wording. The
+        rung is still there; it is quoted from the one source instead."""
         self.assertIn("Waiting on you", self.reason)
-        self.assertIn("Past the", self.reason)
+        self.assertIn("runwayVerdict(row.chart)", self.reason)
         self.assertIn("Highest per-turn here", self.reason)
+        verdict = js_function_source(self.js, "runwayVerdict")
+        self.assertIn("past the action threshold", verdict)
 
     def test_the_reason_follows_the_same_precedence_as_the_sort(self):
         # Or the explanation drifts from the ordering it explains.
         waiting = self.reason.index("Waiting on you")
-        past = self.reason.index("Past the")
+        past = self.reason.index("runwayVerdict(row.chart)")
         highest = self.reason.index("Highest per-turn here")
         self.assertLess(waiting, past)
         self.assertLess(past, highest)
+        # And each of the three rungs returns, so a lower one cannot outrank a
+        # higher one by falling through to it.
+        self.assertEqual(self.reason.count("return"), 3)
 
     def test_the_rank_and_the_reason_read_one_source(self):
         # A second list of waiting sessions would be a second thing to keep in
@@ -1479,15 +1490,28 @@ class WatchTest(unittest.TestCase):
         self.assertIn("Math.min(...series)", trend)
 
     def test_the_worst_project_leads(self):
+        """The lead card and the quiet rows underneath it were two shapes for
+        one list, and the split forced a decision -- which single session is
+        worth a card -- that the ranking already answers. One row shape now,
+        numbered, worst first. The rule the split existed to serve is unchanged
+        and still tested: the worst thing is the first thing you read."""
         rank = js_function_source(self.js, "healthRank")
         self.assertIn("latest >= critical", rank)
-        self.assertIn("healthLeadCard", self.js)
-        self.assertIn("healthQuietRow", self.js)
+        self.assertNotIn("healthLeadCard", self.js)
+        self.assertNotIn("healthQuietRow", self.js)
+        render = js_function_source(self.js, "renderContextHealth")
+        self.assertIn("healthRank(a, keys)", render)
+        self.assertIn("healthRow(row, waitingById, i)", render)
+        # Numbered from the sorted list, so the position a reader sees is the
+        # position the ranking assigned.
+        row = js_function_source(self.js, "healthRow")
+        self.assertIn("${index + 1}", row)
 
     def test_the_verdict_comes_before_the_marks(self):
-        # Same rule as the session drawer: reach the conclusion, then show the
-        # evidence for it.
-        card = js_function_source(self.js, "healthLeadCard")
+        # Same rule as the session drawer -- and now literally in it. The meter
+        # and the trend moved to the drawer with the rest of the diagnosis, so
+        # this is where "conclusion, then the evidence for it" is enforced.
+        card = js_function_source(self.js, "renderSessionContextHealth")
         self.assertLess(card.index("health-verdict"), card.index("meter-host"))
         self.assertLess(card.index("meter-host"), card.index("trend-host"))
 
@@ -1498,13 +1522,110 @@ class WatchTest(unittest.TestCase):
                      "function runwayCaption(", "drawRunwayMini"):
             with self.subTest(symbol=name):
                 self.assertNotIn(name, self.js)
-        # runwayVerdict survives: the lead card still states the deadline.
+        # runwayVerdict survives: the ranked row's reason and the drawer's
+        # health section both state the deadline through it.
         self.assertIn("function runwayVerdict(", self.js)
 
     def test_projects_are_named_not_pathed(self):
         self.assertIn("function healthProjectName(", self.js)
-        card = js_function_source(self.js, "healthLeadCard")
-        self.assertIn("healthProjectName(row)", card)
+        row = js_function_source(self.js, "healthRow")
+        self.assertIn("healthProjectName(row)", row)
+
+
+class WatchRanksAndTheDrawerDiagnosesTest(unittest.TestCase):
+    """Watch answered two questions in one surface: which session to deal with
+    first, and what is wrong inside the leading one. The second is a diagnosis,
+    and it was only ever available for whichever session happened to rank first
+    -- open any other one and the meter, the trend and the facts strip were not
+    on offer at all.
+
+    Splitting them gives every session the same diagnosis, at the cost of a
+    click. These tests pin the split so a later change cannot quietly put half
+    the diagnosis back on the list and leave the other half in the drawer.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.row = js_function_source(cls.js, "healthRow")
+        cls.drawer = js_function_source(cls.js, "renderSessionContextHealth")
+
+    def test_one_quantity_gets_one_number(self):
+        """The row put "110 turns" in its headroom column beside a reason that
+        read "40+ turns of headroom". Both were true -- the verdict caps at the
+        end of the drawn projection and the column did not -- and side by side
+        they read as a contradiction over a number the chart never reaches."""
+        room = js_function_source(self.js, "headroomLabel")
+        self.assertIn("turns > RUNWAY_MAX_PROJECTED_TURNS", room)
+        self.assertIn("${RUNWAY_MAX_PROJECTED_TURNS}+ turns", room)
+        # And the drawer states it once, in the verdict, rather than repeating
+        # the same two facts as a stat block underneath it.
+        self.assertNotIn("health-hero", self.drawer)
+        self.assertNotIn("headroomLabel", self.drawer)
+        # The session review's own Room left line projected past the end of the
+        # drawn chart too, and now sits in the same drawer as it.
+        verdict = js_function_source(self.js, "verdictLines")
+        self.assertIn("p.turns_to_critical > RUNWAY_MAX_PROJECTED_TURNS", verdict)
+
+    def test_growth_per_turn_is_not_dressed_as_turn_size(self):
+        """runwayVerdict's healthy branch read "At 827/turn" -- the growth rate
+        -- directly above a Room left line reading "115.6k per turn", the turn
+        size. Two quantities differing by two orders of magnitude, phrased the
+        same way, one under the other."""
+        verdict = js_function_source(self.js, "runwayVerdict")
+        # Every branch that quotes the rate says it is a rate.
+        self.assertEqual(
+            verdict.count("Growing ${compactTokens(chart.growth_per_turn_n)}/turn"),
+            verdict.count("growth_per_turn_n"))
+
+    def test_the_diagnosis_lives_in_the_drawer(self):
+        # Matched on the whole attribute, so renaming a class cannot leave the
+        # assertion passing on a prefix of the old name.
+        for mark in ('class="health-verdict"', 'class="meter-host"',
+                     'class="trend-host"', 'class="health-facts"',
+                     "Inferred intent", "Context AIWatcher will carry"):
+            with self.subTest(mark=mark):
+                self.assertIn(mark, self.drawer)
+                self.assertNotIn(mark, self.row)
+
+    def test_the_row_carries_the_ranking_and_nothing_else(self):
+        # Rank, severity, who it is, why it sits there, and the one action.
+        for mark in ('class="rank-n"', "rank-dot", "rank-title",
+                     'class="rank-why"', 'class="rank-act"'):
+            with self.subTest(mark=mark):
+                self.assertIn(mark, self.row)
+
+    def test_the_drawer_reads_the_payload_watch_already_fetched(self):
+        """A second fetch would be a second answer to the same question, and
+        the two could disagree about a session's headroom."""
+        self.assertIn("contextHealthCache = data.context_health || []", self.js)
+        self.assertIn("contextHealthCache", self.drawer)
+        self.assertNotIn("fetch(", self.drawer)
+
+    def test_the_drawer_paints_what_it_wrote(self):
+        # The load loop paints the page. A drawer opened between loads has to
+        # paint its own placeholders or the meter and trend stay empty.
+        self.assertIn("function paintDrawerHealth(", self.js)
+        paint = js_function_source(self.js, "paintDrawerHealth")
+        self.assertIn("drawMeter(", paint)
+        self.assertIn("drawTrend(", paint)
+        # Scoped to the drawer, so it cannot repaint the ranked row's sparkline
+        # with a stale chart.
+        self.assertIn("getElementById('detailContent')", paint)
+
+    def test_one_session_may_own_more_than_one_placeholder(self):
+        """With the drawer open across a refresh, a session id has two hosts --
+        its ranked-row sparkline and the drawer's. Keyed one node per id, the
+        second overwrote the first and one of them was left blank."""
+        self.assertIn("(meterNodes[node.getAttribute('data-meter')] ||= []).push(node)", self.js)
+        self.assertIn("(trendNodes[node.getAttribute('data-trend')] ||= []).push(node)", self.js)
+        self.assertIn("(meterNodes[row.session_id] || []).forEach(node => drawMeter(node, row.chart))", self.js)
+        self.assertIn("(trendNodes[row.session_id] || []).forEach(node => drawTrend(node, row.chart))", self.js)
+
+    def test_the_row_names_the_session_it_opens(self):
+        # A project can hold several sessions and the row is about exactly one
+        # of them; the title alone says only the project and the tool.
+        self.assertIn("row.session_short", self.row)
 
 
 class WindowSummaryTest(unittest.TestCase):
@@ -1696,11 +1817,17 @@ class HealthCardActionTest(unittest.TestCase):
                 self.assertTrue(action["reason"])
 
     def test_the_button_dispatches_on_the_kind_it_was_given(self):
-        self.assertIn("function runHealthAction", self.js)
+        """runHealthAction and healthActionButton were the indirection between
+        a row and its control. The ranked row writes the control inline, so the
+        kind and the handler are one expression and cannot disagree -- which is
+        what the indirection was there to guarantee."""
+        self.assertNotIn("function runHealthAction", self.js)
+        self.assertNotIn("function healthActionButton", self.js)
         self.assertNotIn('onclick="selectSession(this.dataset.session)">${esc(row.action.label)}', self.js)
-        button = js_function_source(self.js, "healthActionButton")
+        row = js_function_source(self.js, "healthRow")
         # Offering "Start fresh" where no handoff exists would be the same bug again.
-        self.assertIn("row.can_handoff", button)
+        self.assertIn("row.can_handoff", row)
+        self.assertLess(row.index("row.can_handoff"), row.index("startFreshFromBubble"))
 
 
 class FalseAffordanceTest(unittest.TestCase):

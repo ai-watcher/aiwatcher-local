@@ -999,7 +999,7 @@
        of 168 of them, which is the same as being on none: a column only reads
        as a column when the digits share a grid. */
     td.num, th.num { text-align: right; white-space: nowrap; }
-    td.num, td.mono, .num, .value, .mini strong, .health-hero b, .ambient-hero,
+    td.num, td.mono, .num, .value, .mini strong, .ambient-hero,
     .ambient-facts b, .blast-points, .trend-tick, .trend-value {
       font-variant-numeric: tabular-nums;
     }
@@ -1121,12 +1121,38 @@
     /* ---- Watch: one project expanded, the rest as rows -------------------
        Four cards of equal weight gave the eye nowhere to start. */
     .health-stack { display: flex; flex-direction: column; gap: var(--sp-2); }
-    .health-card.lead { border-color: rgba(var(--red-rgb), .30); }
+    .health-tally { display: flex; justify-content: flex-end; }
+    /* One shape per row, ranked. The number is what makes the eye start at the
+       top -- the lead card did that by being six times taller, which cost the
+       comparison the list exists for. */
+    .health-rank-row {
+      display: grid;
+      grid-template-columns: 20px 8px minmax(0, 1fr) 120px 84px auto;
+      align-items: center; gap: var(--sp-3);
+      width: 100%; text-align: left;
+      padding: 12px 14px; border: 1px solid var(--line);
+      border-radius: var(--r-2); background: var(--surface); color: var(--text);
+    }
+    .health-rank-row:hover { background: var(--surface-hover); }
+    .rank-n { font-family: var(--mono); font-size: var(--fs-2); color: var(--faint); font-variant-numeric: tabular-nums; }
+    .rank-dot { width: 8px; height: 8px; border-radius: var(--r-pill); background: var(--faint); }
+    .rank-dot.critical { background: var(--red); }
+    .rank-dot.warning { background: var(--amber); }
+    .rank-dot.healthy { background: var(--green); }
+    .rank-main { min-width: 0; display: flex; flex-direction: column; gap: var(--sp-1); }
+    .rank-title { font-weight: var(--fw-med); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .rank-who { display: flex; align-items: baseline; gap: var(--sp-2); min-width: 0; }
+    .rank-id { font-size: var(--fs-1); color: var(--faint); font-family: var(--mono); white-space: nowrap; }
+    .rank-why { font-size: var(--fs-2); color: var(--muted); line-height: 1.45; }
+    .rank-room { font-family: var(--mono); font-size: var(--fs-2); color: var(--muted); text-align: right; }
+    .rank-trend { display: block; }
+    @media (max-width: 1100px) {
+      /* The trend and the headroom are the first to go: the rank, the reason
+         and the action are what the row is for. */
+      .health-rank-row { grid-template-columns: 20px 8px minmax(0, 1fr) auto; }
+      .rank-trend, .rank-room { display: none; }
+    }
     .health-verdict { margin: 0; font-size: var(--fs-3); line-height: 1.5; color: var(--text); max-width: 62ch; }
-    .health-hero { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--sp-1) var(--sp-2); margin: 2px 0; }
-    .health-hero b { font-size: var(--fs-5); font-weight: var(--fw-med); letter-spacing: -.02em; color: var(--text); }
-    .health-hero u { text-decoration: none; font-size: var(--fs-2); color: var(--muted); }
-    .health-now { margin-left: auto; font-family: var(--mono); font-size: var(--fs-2); color: var(--muted); font-variant-numeric: tabular-nums; }
 
     /* the meter is comparable across projects; the trend deliberately is not */
     .meter-host { position: relative; }
@@ -1203,7 +1229,7 @@
       .health-row-trend, .health-row-room { display: none; }
     }
 
-    .coverage-card, .health-card {
+    .coverage-card {
       border: 1px solid var(--line);
       border-radius: var(--r-2);
       background:
@@ -1217,7 +1243,6 @@
     .link-inline { background: none; border: 0; padding: 0; font: inherit; color: var(--blue);
       text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
     .link-inline:hover { color: var(--text); }
-    .muted-card { opacity: .58; }
     .health-batch { display: flex; justify-content: flex-end; margin-bottom: 10px; }
     .coverage-head, .health-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); margin-bottom: 8px; }
     .coverage-status, .health-severity { border-radius: var(--r-pill); border: 1px solid var(--line); padding: 4px 8px; font-size: var(--fs-1); font-weight: var(--fw-bold); white-space: nowrap; }
@@ -1232,6 +1257,8 @@
     .identity-strip { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; color: var(--muted); font-size: var(--fs-2); }
     .identity-strip strong, .identity-strip span { border: 1px solid var(--line); border-radius: var(--r-pill); padding: 4px 8px; background: rgba(var(--ink-deep-rgb), .56); }
     .identity-strip strong { color: var(--on-brand); border-color: rgba(var(--blue-rgb), .36); }
+    .session-health .health-facts { margin: var(--sp-2) 0 0; }
+    .session-health .meter-host, .session-health .trend-host { margin-top: var(--sp-2); }
     .health-evidence { border: 1px solid rgba(var(--hairline-rgb), .16); border-radius: var(--r-2); background: rgba(var(--ink-deep-rgb), .48); padding: 10px; margin-top: 10px; }
     .health-evidence .label { font-size: var(--fs-1); }
     .health-evidence p { margin: 3px 0 0; color: var(--muted); }
