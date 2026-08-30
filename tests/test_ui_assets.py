@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import re
+import pathlib
 from types import SimpleNamespace
 
 BS = chr(92)
@@ -1530,6 +1531,96 @@ class WatchTest(unittest.TestCase):
         self.assertIn("function healthProjectName(", self.js)
         row = js_function_source(self.js, "healthRow")
         self.assertIn("healthProjectName(row)", row)
+
+
+class BrandMarkTest(unittest.TestCase):
+    """The mark lives in three places at once and none of them can reference a
+    file: the dashboard is spliced into one self-contained page, and the wheel
+    ships only web/*.{html,css,js}. So the geometry is duplicated by necessity,
+    and these assert the copies still say the same thing.
+
+    logo/aiwatcher-mark.svg is the source of truth. The supplied artwork was a
+    raster in an SVG wrapper, so the mark was refitted as real vector -- see
+    logo/README.md for the numbers and how they were arrived at.
+    """
+
+    # Both rings: 300 outer width, 40 stroke, 85 outer corner radius. The height
+    # difference between them is the part most likely to be "tidied" by someone
+    # who assumes it is a mistake, so it is pinned explicitly.
+    BLUE_RING = 'x="20" y="20" width="260" height="220" rx="65"'
+    INK_RING = 'x="149" y="137" width="260" height="192" rx="65"'
+
+    @classmethod
+    def setUpClass(cls):
+        cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.source = (pathlib.Path(ui.__file__).resolve().parent.parent
+                      / "logo" / "aiwatcher-mark.svg").read_text(encoding="utf-8")
+
+    def test_the_source_of_truth_exists_and_is_vector(self):
+        """The artwork it replaced was a base64 PNG inside an SVG shell, which
+        is not a vector file however it is named."""
+        self.assertIn(self.BLUE_RING, self.source)
+        self.assertIn(self.INK_RING, self.source)
+        self.assertNotIn("<image", self.source)
+        self.assertNotIn("base64", self.source)
+
+    def test_the_brand_mark_is_the_logo(self):
+        # Not a monogram in a tinted tile. The tile put a second blue behind the
+        # ring's own blue and was a container the mark does not need.
+        self.assertIn(self.BLUE_RING, self.html)
+        self.assertIn(self.INK_RING, self.html)
+        self.assertNotIn('class="brand-mark" aria-hidden="true">AW<', self.html)
+        # currentColor is what lets the ink ring invert; a fixed ink would
+        # disappear against the dark page.
+        mark = self.html[self.html.index('class="brand-mark"'):]
+        mark = mark[:mark.index("</svg>")]
+        self.assertIn('stroke="currentColor"', mark)
+        self.assertIn('stroke="var(--brand-blue)"', mark)
+
+    def test_the_ink_inverts_and_the_blue_does_not(self):
+        # The blue is the brand and holds in both themes -- 3.15:1 against the
+        # dark ground, past the 3:1 floor for a graphic. The ink cannot hold.
+        self.assertEqual(self.css.count("--brand-blue: #0052F5;"), 2)
+        self.assertIn("--brand-ink:  #141314;", self.css)
+        self.assertIn("--brand-ink:  #DCE6F6;", self.css)
+
+    def test_the_favicon_is_the_mark_carrying_the_state(self):
+        """The favicon is the only part of the tab that reads once the title is
+        truncated, so becoming the logo must not cost the state signal. The ring
+        that is brand blue at rest is the ring that turns amber or red."""
+        favicon = js_function_source(self.js, "faviconFor")
+        self.assertIn("stroke='\" + colour + \"'", favicon)
+        self.assertIn("x='20' y='20' width='260' height='220' rx='65'", favicon)
+        # ...and it is the blue ring that takes it. The ink ring carries no
+        # stroke of its own here -- it is coloured by the style block, which is
+        # what lets it invert.
+        ink = favicon[favicon.index("class='ink'"):]
+        self.assertNotIn("stroke='", ink[:ink.index("/>")])
+        self.assertIn("x='149' y='137' width='260' height='192' rx='65'", favicon)
+        # No status dot competing with the mark at 16px, and no dark tile.
+        self.assertNotIn("<circle", favicon)
+        self.assertNotIn("#070b11", favicon)
+
+    def test_the_favicon_ink_survives_a_dark_tab_strip(self):
+        """Drawn in the brand's near-black it vanished on a dark strip, leaving
+        half a mark. The favicon cannot read the page's theme -- it is not on the
+        page -- so it asks the browser directly, and falls back to the near-black
+        the default light strips want."""
+        self.assertIn("@media(prefers-color-scheme:dark){.ink{stroke:#DCE6F6}}", self.js)
+        self.assertIn(".ink{stroke:#141314}", self.js)
+        # The markup default carries it too, or the first paint is half a mark
+        # for every dark-themed browser until the first refresh.
+        self.assertIn("prefers-color-scheme", self.html)
+
+    def test_the_resting_favicon_is_the_brand_blue(self):
+        # idle used to be a grey dot. At rest the mark is simply the mark.
+        self.assertIn("const FAVICON_REST_BLUE = '#0052F5';", self.js)
+        self.assertNotIn("idle: '#78869a'", self.js)
+        # The default in the markup matches the resting state, or the tab
+        # flickers from one mark to another on every load.
+        self.assertIn("%23" + "0052F5", self.html)
 
 
 class WatchRanksAndTheDrawerDiagnosesTest(unittest.TestCase):

@@ -98,6 +98,9 @@
       --blue-pale-rgb: 147,197,253;
       --blue-lift-rgb: 147,197,253;
 
+      --brand-blue: #0052F5;
+      --brand-ink:  #DCE6F6;
+
       --text-bright: #DCE6F6;
       --text-quiet: #BDC9D9;
       --text-dim: #94A3B8;
@@ -205,6 +208,9 @@
       --blue-soft-rgb: 37,99,235;
       --blue-pale-rgb: 29,78,216;
       --blue-lift-rgb: 37,99,235;
+
+      --brand-blue: #0052F5;
+      --brand-ink:  #141314;
 
       --text-bright: #334155;
       --text-quiet: #475569;
@@ -336,14 +342,14 @@
     h3 { margin: 0; font-size: var(--fs-4); line-height: 1.3; }
     p { color: var(--muted); line-height: 1.5; margin: 0; }
     .brand { display: flex; align-items: center; gap: var(--sp-3); min-width: 0; }
+    /* The mark stands on its own ground. It used to be an "AW" monogram in a
+       tinted, bordered tile -- a container the real mark does not need, and one
+       that put a second blue behind the ring's blue. Sized by height so the
+       rings keep their proportions; currentColor is what inverts the ink ring
+       between themes. */
     .brand-mark {
-      display: grid; place-items: center; width: 38px; height: 38px;
-      border: 1px solid rgba(var(--blue-rgb), .58); border-radius: var(--r-2);
-      background:
-        linear-gradient(135deg, rgba(var(--cyan-rgb), .20), rgba(var(--green-rgb), .16), rgba(var(--blue-rgb), .18)),
-        rgba(var(--scrim-rgb), .88);
-      color: var(--on-brand-bright); font-weight: var(--fw-bold);
-      box-shadow: inset 0 1px 0 rgba(var(--sheen-rgb), .10), 0 14px 34px rgba(var(--blue-deep-rgb), .18);
+      height: 34px; width: auto; flex: none;
+      color: var(--brand-ink);
     }
     .brand-copy { min-width: 0; }
     .brand-copy p { margin-top: 2px; font-size: var(--fs-2); }

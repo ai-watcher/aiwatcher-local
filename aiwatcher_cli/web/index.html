@@ -4,10 +4,11 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>AIWatcher Local</title>
-  <!-- Replaced at runtime with a state-coloured data: URI (see renderTabState).
-       A link element has to exist for that swap to have somewhere to land, and
-       the inline default keeps the page self-contained with no second request. -->
-  <link id="favicon" rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23070b11'/%3E%3Ccircle cx='16' cy='16' r='7' fill='%2378869a'/%3E%3C/svg%3E" />
+  <!-- Replaced at runtime with a state-coloured data: URI (see faviconFor):
+       the blue ring is the one that turns amber or red. A link element has to
+       exist for that swap to have somewhere to land, and the inline default
+       keeps the page self-contained with no second request. -->
+  <link id="favicon" rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%27-10%20-10%20449%20369%27%20fill%3D%27none%27%3E%3Cstyle%3E.ink%7Bstroke%3A%23141314%7D%40media%28prefers-color-scheme%3Adark%29%7B.ink%7Bstroke%3A%23DCE6F6%7D%7D%3C%2Fstyle%3E%3Crect%20x%3D%2720%27%20y%3D%2720%27%20width%3D%27260%27%20height%3D%27220%27%20rx%3D%2765%27%20stroke%3D%27%230052F5%27%20stroke-width%3D%2740%27%2F%3E%3Crect%20class%3D%27ink%27%20x%3D%27149%27%20y%3D%27137%27%20width%3D%27260%27%20height%3D%27192%27%20rx%3D%2765%27%20stroke-width%3D%2740%27%2F%3E%3C%2Fsvg%3E" />
   <!-- Before the stylesheet, and inline on purpose: the attribute has to be on
        <html> for the first paint, or the page renders in one theme and snaps to
        the other in front of the reader. Small enough to duplicate the read that
@@ -29,7 +30,14 @@
 <main>
   <header>
     <div class="brand">
-      <div class="brand-mark" aria-hidden="true">AW</div>
+      <!-- The mark, inline. The page is spliced into one self-contained file and
+           serves no external assets, so this cannot be a <img src>. Source of
+           truth is logo/aiwatcher-mark.svg; the only change here is that the ink
+           ring reads currentColor so it can invert for the dark theme. -->
+      <svg class="brand-mark" viewBox="0 0 429 349" fill="none" aria-hidden="true">
+        <rect x="20" y="20" width="260" height="220" rx="65" stroke="var(--brand-blue)" stroke-width="40"/>
+        <rect x="149" y="137" width="260" height="192" rx="65" stroke="currentColor" stroke-width="40"/>
+      </svg>
       <div class="brand-copy">
         <div class="actions">
           <h1>AIWatcher Local</h1>

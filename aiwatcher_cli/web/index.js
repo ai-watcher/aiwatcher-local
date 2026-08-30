@@ -4453,7 +4453,9 @@ const REFRESH_HIDDEN_MS = 60000;
 const REFRESH_CATCHUP_MS = 1800;   // first poll after the watcher starts rebuilding
 const REFRESH_CATCHUP_FACTOR = 1.5;
 
-const TAB_COLOURS = { critical: '#f2778f', warning: '#f2bf6b', healthy: '#43d9a3', idle: '#78869a' };
+const FAVICON_REST_BLUE = '#0052F5';
+// idle drops out: the resting mark is the brand's own blue, not a grey dot.
+const TAB_COLOURS = { critical: '#f2778f', warning: '#f2bf6b', healthy: '#43d9a3' };
 
 let refreshTimer = null;
 let freshnessTimer = null;
@@ -4487,11 +4489,29 @@ function nextRefreshDelay(data, forceRefresh) {
   return idle;
 }
 
+/* The mark, with the blue ring carrying the state colour.
+ *
+ * The favicon is not decoration here: it is the only part of the tab that reads
+ * at a glance when the title is truncated to twenty characters. So the shape
+ * became the logo without giving that up -- the ring that is brand blue at rest
+ * is the ring that turns amber or red, rather than a status dot competing with
+ * the mark at 16px.
+ *
+ * The ink ring inverts on its own. A favicon sits on the browser's tab strip
+ * rather than on the page, so it cannot follow the page's theme -- and drawn in
+ * the brand's near-black it disappeared entirely on a dark strip, leaving half
+ * a mark. Browsers that do not resolve the query fall back to the near-black,
+ * which is what the light strips they ship by default want.
+ */
+const FAVICON_INK = '<style>.ink{stroke:#141314}'
+  + '@media(prefers-color-scheme:dark){.ink{stroke:#DCE6F6}}</style>';
+
 function faviconFor(state) {
-  const colour = TAB_COLOURS[state] || TAB_COLOURS.idle;
-  const svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>"
-    + "<rect width='32' height='32' rx='7' fill='#070b11'/>"
-    + "<circle cx='16' cy='16' r='7' fill='" + colour + "'/></svg>";
+  const colour = TAB_COLOURS[state] || FAVICON_REST_BLUE;
+  const svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='-10 -10 449 369' fill='none'>"
+    + FAVICON_INK
+    + "<rect x='20' y='20' width='260' height='220' rx='65' stroke='" + colour + "' stroke-width='40'/>"
+    + "<rect class='ink' x='149' y='137' width='260' height='192' rx='65' stroke-width='40'/></svg>";
   return 'data:image/svg+xml,' + encodeURIComponent(svg);
 }
 
