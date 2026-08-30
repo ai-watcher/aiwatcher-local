@@ -78,6 +78,7 @@ from .local_state import (
     state_path,
 )
 from .outcome_evidence import VALID_EVIDENCE_OUTCOMES, build_outcome_evidence, evidence_for_sessions
+from .local_state import dismiss_first_run, first_run_dismissed_at
 from .ledger import (
     UNBANKED_OUTSIDE_REPO,
     Ledger,
@@ -151,6 +152,16 @@ SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
 # Bump whenever build_summary's payload shape changes, so a cache written by an
 # older build is discarded instead of rendering blank sections in a newer UI.
 SUMMARY_CACHE_SCHEMA_VERSION = 8
+
+# POST endpoints whose only fact is that they happened, so they carry no JSON
+# body and are exempt from the content-type check. Named rather than written
+# inline: a second `not in {...}` inside do_POST is also what the route parser
+# in test_cli reads to find the supported endpoints, and an inline set here
+# shadowed the real list.
+_POST_WITHOUT_BODY = frozenset({
+    "/api/handoff-receipts-viewed",
+    "/api/first-run-dismissed",
+})
 SESSION_SNAPSHOT_SCHEMA_VERSION = 1
 SUMMARY_BACKGROUND_COOLDOWN_SECONDS = 8
 SUMMARY_WINDOWS = (1, 7, 30)
@@ -3455,6 +3466,71 @@ def _checkpoint_card(
     return card
 
 
+def _first_run_card(
+    *,
+    sessions: int,
+    spend_label: str,
+    window_label: str,
+    replayed_spend_share_pct: object,
+    coverage: list[dict[str, object]],
+    unbanked: dict[str, object],
+    ledger: Ledger | None,
+) -> dict[str, object]:
+    """The screen a machine sees once, before anything is gated.
+
+    Deliberately outside the nav: it is a moment in a journey, not a
+    destination, and you should not be able to navigate back to your own
+    onboarding a month later.
+
+    Two cases, and they fail in opposite directions if you only design for one.
+    AIWatcher reads history that already exists, so somebody who has been using
+    Claude Code for months is met with everything at once at the moment they
+    understand least. Somebody genuinely new is met with nine empty states, none
+    of which say when anything will appear. The first gets a finding about
+    themselves; the second gets a status report about their machine.
+
+    Neither gets invented numbers. "Not measurable" is a first-class state in
+    this product and there is a written rule against a figure that answers the
+    wrong question -- breaking both on the very first screen anyone sees would
+    cost more than the polish gains.
+    """
+    gated = [row for row in coverage if row.get("status") == "automatic"]
+    dismissed = first_run_dismissed_at()
+    if dismissed:
+        return {"show": False, "reason": "Already dismissed.", "dismissed_at": dismissed}
+    if gated:
+        # The one action this screen exists to prompt is already done.
+        return {"show": False, "reason": "A tool is already gated automatically."}
+
+    card: dict[str, object] = {
+        "show": True,
+        "reason": None,
+        "gate_installed": False,
+        # Named so the copy can say what it can and cannot see, rather than
+        # implying the listed tools are the covered ones.
+        "readable": [str(row.get("tool")) for row in coverage
+                     if row.get("status") in {"automatic", "limited"}],
+        "unmeasured": [
+            {"tool": str(row.get("tool")), "why": str(row.get("status_label") or "")}
+            for row in coverage if row.get("status") not in {"automatic", "limited"}
+        ],
+        "repos": len(ledger.repos) if ledger else 0,
+        "sessions": sessions,
+    }
+    if sessions <= 0:
+        card["kind"] = "new"
+        return card
+
+    # History already on the machine, so the finding needs no configuration to
+    # produce and is about them rather than about the product.
+    card["kind"] = "has_history"
+    card["spend_label"] = spend_label
+    card["window_label"] = window_label
+    card["replayed_spend_share_pct"] = replayed_spend_share_pct
+    card["unbanked_label"] = unbanked.get("unbanked_label") if unbanked.get("available") else None
+    return card
+
+
 def _unbanked_card(ledger: Ledger | None) -> dict[str, object]:
     """Spend in this window with no commit behind it."""
     if ledger is None:
@@ -4770,6 +4846,15 @@ def build_summary(
         # answered honestly in the present tense -- see checkpoint_distance for
         # why the obvious one, live unbanked spend, cannot be.
         "checkpoint": _checkpoint_card(window_ledger, all_events, context_health),
+        "first_run": _first_run_card(
+            sessions=int(stats["sessions"]),
+            spend_label=money(float(stats["api_value_usd"])),
+            window_label="Last 24 hours" if days == 1 else f"Last {days} days",
+            replayed_spend_share_pct=replayed_spend_share,
+            coverage=[row.to_json() for row in surface_coverage(all_rows)],
+            unbanked=unbanked,
+            ledger=window_ledger,
+        ),
         "optimize": optimize,
         "handoff_bubble": handoff_bubble,
         "handoff_decisions": handoff_decisions,
@@ -5048,6 +5133,10 @@ def _build_summary_shell(
         # Same shape as the real payload's, so the front end reads one contract
         # rather than distinguishing "not computed yet" from "not present".
         "checkpoint": {"available": False, "reason": "Background evidence refresh pending."},
+        # Never on the first paint: deciding to show onboarding needs coverage
+        # and history, and guessing wrong here means flashing an install screen
+        # at someone who installed months ago.
+        "first_run": {"show": False, "reason": "Background evidence refresh pending."},
         "projects": projects[:10],
         "projects_composition": _composition_chart(projects),
         "tools": tools,
@@ -6056,6 +6145,7 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/handoff-demo",
             "/api/handoff-decision",
             "/api/handoff-receipts-viewed",
+            "/api/first-run-dismissed",
             "/api/optimize-decision",
             "/api/companion-skip",
             "/api/ambient-intervention-action",
@@ -6065,7 +6155,7 @@ class UIHandler(BaseHTTPRequestHandler):
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
-        if content_type != "application/json" and parsed.path != "/api/handoff-receipts-viewed":
+        if content_type != "application/json" and parsed.path not in _POST_WITHOUT_BODY:
             self._send(415, json.dumps({"error": "Content-Type must be application/json"}), "application/json; charset=utf-8")
             return
         try:
@@ -6275,6 +6365,20 @@ class UIHandler(BaseHTTPRequestHandler):
                 )
                 return
             self._send(200, json.dumps(record), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/first-run-dismissed":
+            # No body: the only fact is that it happened, and the timestamp is
+            # the server's rather than the page's.
+            try:
+                at = dismiss_first_run()
+            except OSError as exc:
+                self._send(
+                    500,
+                    json.dumps({"error": f"Could not record the first-run dismissal: {exc}"}),
+                    "application/json; charset=utf-8",
+                )
+                return
+            self._send(200, json.dumps({"ok": True, "dismissed_at": at}), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/handoff-receipts-viewed":
             try:

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 BS = chr(92)
 import unittest
 
-from aiwatcher_cli import ledger, ui
+from aiwatcher_cli import ledger, local_state, ui
 
 
 NEXT_FUNCTION = chr(10) + "function "
@@ -281,11 +281,31 @@ class NavigationTest(unittest.TestCase):
     """Three views used to be reachable only from buttons inside other pages, and
     the sidebar highlighted a section you were not in when you landed on them."""
 
-    # Every view now owns its nav entry. Coverage used to borrow this one: it was
-    # a separate page duplicating 36 of its 38 sentences from Settings, and its
+    # Views that borrow another section's highlight. Coverage used to: it was a
+    # separate page duplicating 36 of its 38 sentences from Settings, and its
     # only way in was a button inside Settings pointing at content two lines
-    # further down the same page.
+    # further down the same page. Empty now, and distinct from NO_NAV_ENTRY --
+    # borrowing a highlight and having none at all are different exceptions.
     BORROWS_HIGHLIGHT: dict[str, str] = {}
+
+    # Views with no nav entry, on purpose. A named list rather than a relaxed
+    # rule: a check that skipped any view lacking an entry would protect
+    # nothing, and the next unreachable page would pass silently -- which is
+    # the defect this class exists for. A second entry should need the same
+    # argument the first one did.
+    NO_NAV_ENTRY: dict[str, str] = {
+        "first-run": (
+            "Shown once, on a machine where nothing is gated yet, then never "
+            "again. A nav entry would be a permanent way back into your own "
+            "onboarding, which has nothing to say after the first visit. It is "
+            "a moment in a journey rather than a destination, so it is routed "
+            "from the payload -- the server knows whether anything is gated and "
+            "whether it was dismissed -- and dismissed to a server-side "
+            "timestamp so a second window or a restart does not re-show it. It "
+            "stays in the ?view= allowlist: a URL someone types deliberately is "
+            "not the same as a button sitting in the sidebar forever."
+        ),
+    }
 
     @classmethod
     def setUpClass(cls):
@@ -299,7 +319,8 @@ class NavigationTest(unittest.TestCase):
         cls.nav_views = set(re.findall(r'data-view="([\w-]+)"', nav))
 
     def test_every_view_is_reachable_from_the_nav(self):
-        unreachable = self.views - self.nav_views - set(self.BORROWS_HIGHLIGHT)
+        unreachable = (self.views - self.nav_views
+                       - set(self.BORROWS_HIGHLIGHT) - set(self.NO_NAV_ENTRY))
         self.assertEqual(
             unreachable, set(),
             "these views have no nav entry, so they are reachable only from "
@@ -794,6 +815,74 @@ class HorizontalCompositionTest(unittest.TestCase):
         watch = self.html[self.html.index('id="view-watch"'):]
         watch = watch[:watch.index("</section>")]
         self.assertNotIn("margin-bottom:14px", watch)
+
+
+class FirstRunTest(unittest.TestCase):
+    """The screen a machine sees once, before anything is gated.
+
+    There are two first runs and designing for one fails the other. AIWatcher
+    reads history that already exists, so an established user meets months of
+    data at the moment they understand least; someone genuinely new meets nine
+    empty states, none of which say when anything will appear.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+        cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+        cls.render = js_function_source(cls.js, "renderFirstRun")
+        cls.card = inspect.getsource(ui._first_run_card)
+
+    def test_both_first_runs_are_designed_for(self):
+        self.assertIn("card.kind === 'has_history'", self.render)
+        self.assertIn("No AI sessions recorded yet", self.render)
+        # And the server decides which, from whether there is history at all.
+        self.assertIn('card["kind"] = "new"', self.card)
+        self.assertIn('card["kind"] = "has_history"', self.card)
+        # The established branch is about them, not about the product.
+        self.assertIn("spend_label", self.render)
+        self.assertIn("never reached a commit", self.render)
+
+    def test_it_shows_what_cannot_be_measured_too(self):
+        # Cursor is installed but keeps no local cost history. Dropping it so
+        # the list looks better would be the opposite of this product's pitch.
+        self.assertIn("unmeasured", self.card)
+        self.assertIn("unmeasured", self.render)
+
+    def test_no_sample_data_anywhere_in_it(self):
+        """Inventing figures to make an empty first screen look impressive
+        would contradict the one thing this product sells, on the very first
+        thing anyone sees. Every number comes from the payload."""
+        for invented in ("$0.00", "example", "sample", "demo"):
+            with self.subTest(invented=invented):
+                self.assertNotIn(invented, self.render)
+
+    def test_it_stops_showing_once_the_gate_is_on(self):
+        # The screen exists to prompt one action. Once that action is done it
+        # has nothing left to say.
+        self.assertIn('status") == "automatic"', self.card)
+        self.assertIn("already gated automatically", self.card)
+
+    def test_dismissal_outlives_the_tab(self):
+        """"Shown once" cannot live in a variable that dies with the page: a
+        second window would re-show what the first just dismissed."""
+        self.assertIn("/api/first-run-dismissed", self.js)
+        self.assertIn("first_run_dismissed_at", inspect.getsource(ui))
+        self.assertTrue(hasattr(local_state, "dismiss_first_run"))
+
+    def test_it_is_routed_from_the_payload_not_a_client_flag(self):
+        # The server already knows whether anything is gated and whether it was
+        # dismissed; a second source of truth here would drift from it.
+        self.assertIn("data.first_run", self.js)
+        self.assertIn("firstRunRouted", self.js)
+
+    def test_the_rail_is_actually_hidden_not_merely_marked_hidden(self):
+        """[hidden] is only display:none by user-agent default, and any explicit
+        display beats it. .product-nav sets one, so the rail set its hidden
+        attribute and stayed on screen."""
+        self.assertIn(".product-nav[hidden] { display: none; }", self.css)
+        self.assertIn("rail.hidden = view === 'first-run'", self.js)
 
 
 class WatchRanksByWhoNeedsYouTest(unittest.TestCase):

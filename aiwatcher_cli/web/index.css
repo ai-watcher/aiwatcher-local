@@ -916,6 +916,24 @@
       display: block; font-style: normal; font-size: var(--fs-1);
       color: var(--muted); margin-top: 2px;
     }
+    /* [hidden] is only display:none by user-agent default, which any explicit
+       display beats -- and .product-nav sets one. The rail set its hidden
+       attribute on the first-run screen and stayed on screen anyway. */
+    .product-nav[hidden] { display: none; }
+
+    /* First run. One column, capped at reading width: this is the only screen
+       in the product that is read rather than scanned. */
+    .first-run { max-width: 640px; margin: 0 auto; }
+    .first-run-find { font-size: var(--fs-5); line-height: 1.35; margin: 10px 0 0; }
+    .first-run-find b { font-weight: var(--fw-med); }
+    .first-run-note { color: var(--muted); font-size: var(--fs-2); margin: 12px 0 0; }
+    .first-run-list { margin: 12px 0 0; padding-left: 18px; color: var(--muted); line-height: 1.6; }
+    .first-run-list b { color: var(--text); font-weight: var(--fw-normal); }
+    .first-run-gate {
+      background: var(--surface-raised); border-radius: var(--r-2);
+      padding: 12px 14px; margin-top: 16px; font-size: var(--fs-2); color: var(--muted);
+    }
+    .first-run-gate b { display: block; color: var(--text); margin-bottom: 2px; }
     .health-why { font-size: var(--fs-2); color: var(--muted); margin: 10px 0 0; }
     .health-why b { color: var(--text); font-weight: var(--fw-med); }
     .health-row-trend { display: block; }

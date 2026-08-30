@@ -3239,6 +3239,72 @@ function renderReport(report) {
  * number someone picked. No status rail either way: being far from a commit is
  * a normal part of a working afternoon.
  */
+/* The screen a machine sees once, before anything is gated.
+ *
+ * Two cases, and designing for only one fails the other. AIWatcher reads
+ * history that already exists, so an established user meets everything at once
+ * at the moment they understand least; a genuinely new one meets nine empty
+ * states, none of which say when anything will appear. The first gets a finding
+ * about themselves, the second a status report about their machine.
+ *
+ * No sample data in either. Inventing figures to make an empty first screen
+ * look impressive would contradict the one thing this product sells, on the
+ * very first thing anyone sees.
+ */
+function renderFirstRun(card) {
+  const host = document.getElementById('firstRunBody');
+  if (!host) return;
+  const readable = (card.readable || []).map(esc).join(', ');
+  const unmeasured = (card.unmeasured || [])
+    .map(row => `<li><b>${esc(row.tool)}</b> — ${esc(row.why)}</li>`).join('');
+
+  const finding = card.kind === 'has_history'
+    ? `<p class="first-run-find">You have spent <b>${esc(card.spend_label)}</b> in the
+         ${esc(String(card.window_label || '').toLowerCase())}, across
+         <b>${esc(card.sessions)}</b> sessions.${card.replayed_spend_share_pct
+           ? ` <b>${esc(Math.round(card.replayed_spend_share_pct))}%</b> of it went on re-sending
+               context you had already sent.` : ''}${card.unbanked_label
+           ? ` <b>${esc(card.unbanked_label)}</b> never reached a commit.` : ''}</p>
+       <p class="first-run-note">Read from history already on this machine. Nothing was uploaded
+         and nothing was configured to produce it.</p>`
+    : `<p class="first-run-find">AIWatcher is reading this machine.</p>
+       <ul class="first-run-list">
+         ${readable ? `<li><b>${readable}</b> — readable here.</li>` : ''}
+         ${unmeasured}
+         ${card.repos ? `<li><b>${esc(card.repos)}</b> git repos found.</li>` : ''}
+         <li>No AI sessions recorded yet.</li>
+       </ul>
+       <p class="first-run-note">Cost and survival figures appear after a few sessions. Survival
+         needs commits about a week old before it means anything.</p>`;
+
+  host.innerHTML = `<span class="eyebrow">First run</span>
+    ${finding}
+    <div class="first-run-gate">
+      <b>Nothing is reviewed before it runs yet.</b>
+      Turning on the gate is what lets AIWatcher stop the next expensive prompt instead of
+      reporting on it afterwards.
+    </div>
+    <div class="actions">
+      <button class="btn-primary" onclick="showView('setup'); dismissFirstRun()">Show me how</button>
+      <button class="btn-quiet" onclick="dismissFirstRun(true)">Skip to the dashboard</button>
+    </div>`;
+}
+/* Dismissal is recorded on the server, not in this tab.
+ *
+ * A timestamp in local state, so a second window does not re-show what the
+ * first one just dismissed and a restart does not either. It is also why the
+ * decision survives: the screen is meant to be seen once, and "once" cannot be
+ * kept in a variable that dies with the page.
+ */
+async function dismissFirstRun(goHome) {
+  try {
+    await fetch('/api/first-run-dismissed', { method: 'POST' });
+  } catch (error) {
+    // Never block leaving the screen on a write. The worst case is seeing it
+    // again, which is better than being stuck on it.
+  }
+  if (goHome) showView('today');
+}
 function renderCheckpoint(card) {
   const host = document.getElementById('checkpoint');
   if (!host) return;
@@ -3698,6 +3764,8 @@ function renderInsightRows(insights) {
       ${card.impact_label ? `<span class="feed-impact mono">${esc(card.impact_label)}</span>` : ''}
     </div>`).join('');
 }
+// One decision per page load; see the call site.
+let firstRunRouted = false;
 let sessionsLoadedForDays = null;
 let reportLoadedForDays = null;
 let reportLoading = false;
@@ -3793,6 +3861,12 @@ function showView(view) {
   document.querySelectorAll('.view').forEach(node => {
     node.hidden = node.id !== `view-${view}`;
   });
+  // The first-run screen hides the rail rather than merely going unhighlighted
+  // in it. It is shown once and left once; a sidebar behind it would invite
+  // wandering off before the one action it exists for, and every destination
+  // in that rail is still empty on the machine it is shown to.
+  const rail = document.querySelector('.product-nav');
+  if (rail) rail.hidden = view === 'first-run';
   // Views swap in place while the window keeps its scroll offset, so arriving
   // from a card partway down one page dropped you the same distance into the
   // next one -- "Open Watch" sits well down Home and landed 774px past the
@@ -4348,6 +4422,16 @@ async function loadOnce(resetDetail, forceRefresh) {
     `${totals.cost_per_useful_change} value each${totals.inferred_useful_outcomes ? ` · ${totals.inferred_useful_outcomes} to confirm` : ''}`;
   renderSurvivalTile(data.survival || {});
   renderCheckpoint(data.checkpoint);
+  // Routed from the payload rather than a stored client flag: the server
+  // already knows whether anything is gated and whether the screen was
+  // dismissed, and a second source of truth here would drift from it. Only on
+  // the first paint of a page load -- re-showing it under someone mid-session
+  // because a refresh arrived would be the opposite of "shown once".
+  if (!firstRunRouted) {
+    firstRunRouted = true;
+    const firstRun = data.first_run || {};
+    if (firstRun.show) { renderFirstRun(firstRun); showView('first-run'); }
+  }
   // Prove's claim reads the same two objects the Changes ledger and the
   // survival tile already read: no new payload, just the argument they were
   // always evidence for, stated where it is asked.
@@ -4534,7 +4618,7 @@ document.addEventListener('keydown', event => { if (event.key === 'Escape') clos
   // Every view id, or a ?view= deep link at one of them silently does nothing.
   // test_deep_link_allowlist_covers_every_view pins this against the markup so
   // adding a section cannot quietly leave it unreachable by link.
-  if (requestedView && ['today','prompt','watch','sessions','control','projects','changes','receipts','insights','setup'].includes(requestedView)) {
+  if (requestedView && ['today','prompt','watch','sessions','control','projects','changes','receipts','insights','setup','first-run'].includes(requestedView)) {
     showView(requestedView);
     if (requestedView === 'prompt') {
       document.getElementById('promptInput').focus();

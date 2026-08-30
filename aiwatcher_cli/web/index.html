@@ -67,6 +67,18 @@
     <button class="nav-tab" data-view="setup" onclick="showView('setup')">Settings</button>
   </nav>
 
+  <!-- Shown once, on a machine where nothing is gated yet, and deliberately
+       absent from the nav: this is a moment in a journey, not a destination,
+       and you should not be able to navigate back to your own onboarding a
+       month later. NavigationTest exempts it by name and says why -- see
+       BORROWS_HIGHLIGHT there -- so the every-view-needs-a-nav-entry rule keeps
+       applying to everything else. -->
+  <section id="view-first-run" class="view" hidden>
+    <div class="card first-run">
+      <div id="firstRunBody"></div>
+    </div>
+  </section>
+
   <section id="view-today" class="view">
     <!-- The ambient surface. Five slots, in a fixed order, filled by renderAmbient:
          hero number, meter, one sentence, one action, fact row. The running and
