@@ -104,21 +104,6 @@
       /* One-off grounds at their exact values: gradient stops and scrims a
          step or two apart. Collapsing them onto a shared token would flatten
          the gradients they exist to make. */
-      --ink-1-rgb: 3,7,12;
-      --ink-2-rgb: 6,11,17;
-      --ink-3-rgb: 6,11,18;
-      --ink-4-rgb: 7,12,18;
-      --ink-5-rgb: 7,12,19;
-      --ink-6-rgb: 9,14,22;
-      --ink-7-rgb: 11,16,23;
-      --ink-8-rgb: 11,17,24;
-      --ink-9-rgb: 13,19,28;
-      --ink-10-rgb: 16,23,32;
-      --ink-11-rgb: 17,25,35;
-      --ink-12-rgb: 17,25,36;
-      --ink-13-rgb: 18,27,39;
-      --ink-14-rgb: 42,55,75;
-      --ink-15-rgb: 7,18,32;
       --tint-green-rgb: 16,27,23;
       --tint-red-rgb: 34,17,24;
       --blue-deep-rgb: 18,70,140;
@@ -127,6 +112,31 @@
       --blue-soft-rgb: 86,157,231;
       --blue-pale-rgb: 126,176,241;
       --blue-lift-rgb: 135,168,255;
+
+      /* Three tiers, replacing fourteen one-off values that sat between
+         --text (luminance 249) and --muted (181) -- a 68-step canyon with
+         nothing declared inside it, so everyone who needed a step invented
+         one. Two of them differed by a single step per channel. Chosen from
+         the values already present to minimise the worst move: nothing
+         shifts more than 18/255. */
+      --text-bright: #dce6f6;
+      --text-quiet: #bdc9d9;
+      --text-dim: #94a3b8;
+
+      /* Grounds and inks, the same story: eleven and fifteen one-offs, most
+         used once. Worst move 8/255 and 9/255. */
+      --ground-deep: #080d13;
+      --ground-mid: #111b28;
+      --ground-lift: #222d3b;
+      --ink-deep-rgb: 7,12,19;
+      --ink-mid-rgb: 16,23,32;
+      --ink-lift-rgb: 42,55,75;
+
+      /* Not grounds. These two carry a hue -- amber and red -- and read as
+         warning and error surfaces, so folding them into a neutral scale
+         would drop the tint that is the whole point of them. */
+      --surface-warning: #181710;
+      --surface-danger: #2a171d;
 
       /* Text sitting on a semantic fill. Not invertible: #bff5df on a light
          green fill is unreadable, so a light palette needs real values here
@@ -151,20 +161,6 @@
          and --muted -- a gap 77 steps wide, which is why so many one-off
          values grew in it. Exactly what shipped; whether this many tiers
          should exist is its own decision, and a visible one. */
-      --text-1: #eef4fc;
-      --text-2: #dce8f8;
-      --text-3: #dce6f6;
-      --text-4: #d9e5f5;
-      --text-5: #d9e4f2;
-      --text-6: #d8e4f4;
-      --text-7: #d5deea;
-      --text-8: #cbd7e8;
-      --text-9: #c8d3e1;
-      --text-10: #bdc9d9;
-      --text-11: #b9c6d8;
-      --text-12: #b6c2d2;
-      --text-13: #94a3b8;
-      --text-14: #93a2b8;
 
       /* The handoff receipt is an inverted card -- white in a dark UI, to read
          as a printed slip. Under a light palette it inverts the other way. */
@@ -194,17 +190,6 @@
       --alert-amber: #e0a800;
 
       /* Grounds, at their exact values. */
-      --ground-1: #0b1118;
-      --ground-2: #080e15;
-      --ground-3: #0b1119;
-      --ground-4: #05080d;
-      --ground-5: #111b28;
-      --ground-6: #181710;
-      --ground-7: #080d13;
-      --ground-8: #0d131b;
-      --ground-9: #18212c;
-      --ground-10: #2a171d;
-      --ground-11: #222d3b;
     }
 
     /* ---- Aliases -------------------------------------------------------
@@ -245,7 +230,7 @@
       background:
         radial-gradient(circle at 10% -10%, rgba(var(--cyan-rgb), .12), transparent 34%),
         radial-gradient(circle at 82% 0%, rgba(var(--green-rgb), .08), transparent 30%),
-        linear-gradient(180deg, var(--ground-3) 0%, var(--bg) 44%, var(--ground-4) 100%);
+        linear-gradient(180deg, var(--ground-deep) 0%, var(--bg) 44%, var(--ground-deep) 100%);
       background-attachment: fixed;
       color: var(--text);
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -520,7 +505,7 @@
     .actions { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; }
     .btn-primary { background: var(--btn-bg); border-color: var(--btn-line); color: white; }
     .btn-primary:hover { background: var(--btn-bg-hover); border-color: var(--btn-line-hover); }
-    .btn-quiet { background: transparent; border-color: var(--line); color: var(--text-7); }
+    .btn-quiet { background: transparent; border-color: var(--line); color: var(--text-bright); }
     .link-button {
       text-decoration: none;
       border: 1px solid var(--btn-line-quiet);
@@ -538,14 +523,14 @@
       border-radius: var(--r-2);
       background:
         linear-gradient(180deg, rgba(var(--sheen-rgb), .035), transparent),
-        rgba(var(--ink-9-rgb), .88);
+        rgba(var(--ink-mid-rgb), .88);
       box-shadow: inset 0 1px 0 rgba(var(--sheen-rgb), .035), 0 18px 40px rgba(var(--shadow-rgb), .13);
     }
     .nav-tab {
       display: flex; align-items: center; justify-content: flex-start;
       width: 100%; text-align: left; min-height: 42px; border: 1px solid transparent;
       background: transparent; border-radius: var(--r-2); padding: 10px 12px;
-      color: var(--text-12); font-size: var(--fs-3); font-weight: var(--fw-med);
+      color: var(--text-quiet); font-size: var(--fs-3); font-weight: var(--fw-med);
       white-space: nowrap;
     }
     /* Nested under Watch: these are views within a section, not peers of it, so
@@ -580,7 +565,7 @@
     .nav-tab.active {
       background:
         linear-gradient(135deg, rgba(var(--blue-rgb), .24), rgba(var(--cyan-rgb), .10)),
-        rgba(var(--ink-14-rgb), .82);
+        rgba(var(--ink-lift-rgb), .82);
       color: white;
       border-color: rgba(var(--blue-pale-rgb), .30);
       box-shadow: inset 3px 0 0 var(--blue), inset 0 1px 0 rgba(var(--sheen-rgb), .06), 0 8px 18px rgba(var(--shadow-rgb), .10);
@@ -623,7 +608,7 @@
     .card {
       background:
         linear-gradient(180deg, rgba(var(--sheen-rgb), .035), rgba(var(--sheen-rgb), .006)),
-        rgba(var(--ink-10-rgb), .92);
+        rgba(var(--ink-mid-rgb), .92);
       border: 1px solid rgba(var(--hairline-rgb), .18);
       border-radius: var(--r-2);
       padding: 18px;
@@ -636,7 +621,7 @@
       border-color: rgba(var(--hairline-lift-rgb), .30);
       background:
         radial-gradient(circle at 10% -12%, rgba(var(--blue-rgb), .12), transparent 30%),
-        linear-gradient(180deg, rgba(var(--ink-12-rgb), .98), rgba(var(--ink-7-rgb), .98));
+        linear-gradient(180deg, rgba(var(--ink-mid-rgb), .98), rgba(var(--ink-deep-rgb), .98));
       box-shadow: inset 0 1px 0 rgba(var(--sheen-rgb), .035), 0 18px 44px rgba(var(--shadow-rgb), .18);
     }
     .home-command-card::before {
@@ -653,13 +638,13 @@
       border-color: rgba(var(--blue-rgb), .32);
       background:
         linear-gradient(135deg, rgba(var(--blue-rgb), .12), rgba(var(--cyan-rgb), .04) 44%, transparent 64%),
-        var(--ground-5);
+        var(--ground-mid);
     }
     .attention-card {
       border-color: rgba(var(--amber-rgb), .34);
       background:
         linear-gradient(135deg, rgba(var(--amber-rgb), .10), transparent 56%),
-        var(--ground-6);
+        var(--surface-warning);
     }
     .metric-card { min-height: 116px; position: relative; overflow: hidden; }
     .metric-card::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--metric, var(--blue)); }
@@ -793,13 +778,13 @@
       animation: recommendationPulse 1.3s ease-out 1;
     }
     .recommended-action h3 { font-size: var(--fs-3); margin-bottom: 5px; }
-    .recommended-action p { color: var(--text-11); }
+    .recommended-action p { color: var(--text-quiet); }
     .recommended-action.loading-action {
       animation: none;
       border-left-color: rgba(var(--blue-rgb), .54);
       background:
         linear-gradient(135deg, rgba(var(--blue-rgb), .08), transparent 54%),
-        rgba(var(--ink-4-rgb), .24);
+        rgba(var(--ink-deep-rgb), .24);
     }
     .action-kicker { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-bottom: 10px; }
     .action-composer {
@@ -808,7 +793,7 @@
       border-left-color: var(--amber);
       background:
         linear-gradient(135deg, rgba(var(--amber-rgb), .09), transparent 48%),
-        rgba(var(--ink-4-rgb), .22);
+        rgba(var(--ink-deep-rgb), .22);
     }
     .action-composer-head { display: grid; gap: var(--sp-1); }
     .action-composer-head h3 { display: flex; align-items: center; gap: var(--sp-2); margin: 0; font-size: var(--fs-2); color: var(--on-warning-lift); text-transform: uppercase; letter-spacing: .06em; }
@@ -879,7 +864,7 @@
       background: rgba(var(--sheen-rgb), .06); border: 1px solid var(--line);
       color: var(--text); user-select: all; overflow-wrap: anywhere;
     }
-    .tool-link-note { margin-top: 10px; font-size: var(--fs-2); color: var(--text-13); }
+    .tool-link-note { margin-top: 10px; font-size: var(--fs-2); color: var(--text-dim); }
     .ai-loading-panel {
       display: grid;
       grid-template-columns: 34px minmax(0, 1fr);
@@ -902,7 +887,7 @@
       color: var(--on-brand);
       background:
         linear-gradient(135deg, rgba(var(--green-rgb), .20), rgba(var(--blue-rgb), .18)),
-        rgba(var(--ink-6-rgb), .9);
+        rgba(var(--ink-deep-rgb), .9);
       border: 1px solid rgba(var(--blue-rgb), .32);
       font-size: var(--fs-2);
       font-weight: var(--fw-bold);
@@ -916,7 +901,7 @@
       height: 6px;
       margin-top: 10px;
       border-radius: var(--r-pill);
-      background: rgba(var(--ink-1-rgb), .72);
+      background: rgba(var(--ink-deep-rgb), .72);
       border: 1px solid rgba(var(--hairline-rgb), .16);
     }
     .ai-loading-bar::before {
@@ -965,10 +950,10 @@
     .bar-row.clickable { border-radius: var(--r-1); }
     .bar-row.clickable:hover { background: rgba(var(--sheen-rgb), .03); }
     .bar-row.clickable:hover .bar-label, tr.clickable:hover td { color: white; }
-    .bar-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); }
-    .bar-shell { height: 8px; background: var(--ground-7); border-radius: var(--r-2); overflow: hidden; border: 1px solid var(--ground-11); }
+    .bar-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-bright); }
+    .bar-shell { height: 8px; background: var(--ground-deep); border-radius: var(--r-2); overflow: hidden; border: 1px solid var(--ground-lift); }
     .bar { height: 100%; background: var(--blue); border-radius: var(--r-2); min-width: 2px; }
-    .amount { text-align: right; color: var(--text-3); font-variant-numeric: tabular-nums; }
+    .amount { text-align: right; color: var(--text-bright); font-variant-numeric: tabular-nums; }
     .insight { border-left: 3px solid var(--amber); padding: 8px 0 8px 13px; margin: 12px 0; }
     .headline { display: flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap; margin: 4px 0 16px; }
     .headline-figure { font-size: var(--fs-6); font-weight: var(--fw-med); letter-spacing: 0; }
@@ -1027,7 +1012,7 @@
     .split-legend i { width: 9px; height: 9px; border-radius: var(--r-pill); display: block; }
     .insight strong { display: block; margin-bottom: 3px; color: white; }
     .pill-row { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: 12px; }
-    .pill { border: 1px solid var(--line); background: var(--ground-1); border-radius: var(--r-pill); padding: 5px 9px; color: var(--text-10); font-size: var(--fs-1); }
+    .pill { border: 1px solid var(--line); background: var(--ground-deep); border-radius: var(--r-pill); padding: 5px 9px; color: var(--text-quiet); font-size: var(--fs-1); }
     .action-queue { display: grid; gap: var(--sp-2); position: relative; z-index: 1; }
     .action-row {
       position: relative;
@@ -1152,7 +1137,7 @@
       border-radius: var(--r-2);
       background:
         linear-gradient(180deg, rgba(var(--sheen-rgb), .025), transparent),
-        rgba(var(--ink-8-rgb), .82);
+        rgba(var(--ink-deep-rgb), .82);
       padding: 14px;
     }
     /* A link inside a sentence, not a control beside one. The card already
@@ -1174,9 +1159,9 @@
     /* Arrived with main. Put on the scale rather than beside it: raw 12px/999px/8px
        would reopen the drift the token pass closed, and a test pins it. */
     .identity-strip { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; color: var(--muted); font-size: var(--fs-2); }
-    .identity-strip strong, .identity-strip span { border: 1px solid var(--line); border-radius: var(--r-pill); padding: 4px 8px; background: rgba(var(--ink-5-rgb), .56); }
+    .identity-strip strong, .identity-strip span { border: 1px solid var(--line); border-radius: var(--r-pill); padding: 4px 8px; background: rgba(var(--ink-deep-rgb), .56); }
     .identity-strip strong { color: var(--on-brand); border-color: rgba(var(--blue-rgb), .36); }
-    .health-evidence { border: 1px solid rgba(var(--hairline-rgb), .16); border-radius: var(--r-2); background: rgba(var(--ink-3-rgb), .48); padding: 10px; margin-top: 10px; }
+    .health-evidence { border: 1px solid rgba(var(--hairline-rgb), .16); border-radius: var(--r-2); background: rgba(var(--ink-deep-rgb), .48); padding: 10px; margin-top: 10px; }
     .health-evidence .label { font-size: var(--fs-1); }
     .health-evidence p { margin: 3px 0 0; color: var(--muted); }
     .health-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: 12px; }
@@ -1184,7 +1169,7 @@
       border-color: rgba(var(--blue-rgb), .5);
       background: var(--invert-tint);
       color: var(--invert-text);
-      box-shadow: 0 10px 26px rgba(var(--ink-15-rgb), .18);
+      box-shadow: 0 10px 26px rgba(var(--ink-mid-rgb), .18);
     }
     .handoff-bubble h2 { color: var(--invert-head); }
     .handoff-bubble p, .handoff-bubble .sub { color: var(--invert-muted); }
@@ -1245,7 +1230,7 @@
     .digest-row:last-child { border-bottom: 0; }
     .digest-row.clickable { cursor: pointer; }
     .digest-row.clickable:hover { background: rgba(var(--sheen-rgb), .03); }
-    .digest-row .digest-row-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); }
+    .digest-row .digest-row-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-bright); }
     .detail-section { padding: 20px 0; border-bottom: 1px solid var(--line); }
     .detail-section:last-child { border-bottom: 0; }
     .session-review-shell {
@@ -1254,7 +1239,7 @@
       border-radius: var(--r-2);
       background:
         radial-gradient(circle at 16% -8%, rgba(var(--blue-rgb), .11), transparent 28%),
-        linear-gradient(180deg, rgba(var(--ink-13-rgb), .96), rgba(var(--ink-7-rgb), .98));
+        linear-gradient(180deg, rgba(var(--ink-mid-rgb), .96), rgba(var(--ink-deep-rgb), .98));
       overflow: hidden;
       box-shadow: inset 0 1px 0 rgba(var(--sheen-rgb), .035), 0 18px 44px rgba(var(--shadow-rgb), .28);
       animation: sessionSurfaceIn .22s ease-out both;
@@ -1289,12 +1274,12 @@
       gap: var(--sp-2);
       border: 1px solid rgba(var(--hairline-lift-rgb), .24);
       border-radius: var(--r-2);
-      background: rgba(var(--ink-2-rgb), .42);
+      background: rgba(var(--ink-deep-rgb), .42);
       padding: 12px;
       margin: 12px 0;
     }
     .session-identity-row { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
-    .session-identity-main { min-width: 0; flex: 1; color: var(--text-6); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .session-identity-main { min-width: 0; flex: 1; color: var(--text-bright); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .session-id-chip { font: 700 12px/1.1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--on-warning-lift); border: 1px solid rgba(var(--amber-rgb), .42); background: rgba(var(--amber-rgb), .12); border-radius: var(--r-pill); padding: 6px 9px; white-space: nowrap; }
     /* Replaces the four-fact hero grid: only context pressure varies enough to
        earn the space, and the rest each had their own section directly below. */
@@ -1338,10 +1323,10 @@
     .session-hero-fact strong { display: block; margin-top: 7px; font-size: var(--fs-4); line-height: 1.18; color: white; overflow-wrap: anywhere; }
     .session-hero-status { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: 11px; }
     .session-meter { margin-top: 10px; }
-    .session-meter-track { height: 7px; border-radius: var(--r-pill); overflow: hidden; border: 1px solid rgba(var(--hairline-rgb), .18); background: rgba(var(--ink-1-rgb), .62); }
+    .session-meter-track { height: 7px; border-radius: var(--r-pill); overflow: hidden; border: 1px solid rgba(var(--hairline-rgb), .18); background: rgba(var(--ink-deep-rgb), .62); }
     .session-meter-fill { height: 100%; width: var(--meter-width, 0%); border-radius: inherit; background: linear-gradient(90deg, var(--green), var(--amber), var(--red)); }
     .session-meter-label { display: flex; justify-content: space-between; gap: var(--sp-2); color: var(--muted); font-size: var(--fs-1); margin-top: 6px; }
-    .confidence-chip { display: inline-flex; align-items: center; gap: var(--sp-1); border: 1px solid var(--drawer-line); border-radius: var(--r-pill); padding: 5px 8px; font-size: var(--fs-1); font-weight: var(--fw-bold); color: var(--text-8); background: rgba(var(--well-rgb), .28); }
+    .confidence-chip { display: inline-flex; align-items: center; gap: var(--sp-1); border: 1px solid var(--drawer-line); border-radius: var(--r-pill); padding: 5px 8px; font-size: var(--fs-1); font-weight: var(--fw-bold); color: var(--text-quiet); background: rgba(var(--well-rgb), .28); }
     .confidence-chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--blue); }
     .confidence-chip.verified::before, .confidence-chip.observed::before { background: var(--green); }
     .confidence-chip.inferred::before { background: var(--amber); }
@@ -1382,7 +1367,7 @@
     .verdict-card.high { border-left-color: var(--amber); background: rgba(var(--amber-rgb), .06); }
     .verdict-card.useful { border-left-color: var(--green); background: rgba(var(--green-rgb), .06); }
     .verdict-card h3 { font-size: var(--fs-3); margin: 0 0 8px; }
-    .verdict-card ul { margin: 10px 0 0; padding-left: 18px; color: var(--text-5); line-height: 1.45; }
+    .verdict-card ul { margin: 10px 0 0; padding-left: 18px; color: var(--text-bright); line-height: 1.45; }
     /* A section whose only content is a collapsed summary is a one-line control,
        so it should not also carry a full section's padding -- nine of them at
        full height was most of a screen of nothing but summaries. */
@@ -1392,7 +1377,7 @@
     #optimizeWorkspace { padding: 8px 0; }
     #optimizeWorkspace > details.aiw-details { margin-top: 0; }
     details.aiw-details { border: 1px solid var(--drawer-line); border-radius: var(--r-2); background: rgba(var(--well-rgb), .22); margin-top: 12px; }
-    details.aiw-details summary { cursor: pointer; padding: 12px 14px; color: var(--text-3); font-weight: var(--fw-bold); }
+    details.aiw-details summary { cursor: pointer; padding: 12px 14px; color: var(--text-bright); font-weight: var(--fw-bold); }
     details.aiw-details[open] summary { border-bottom: 1px solid var(--drawer-line); }
     .details-body { padding: 14px; }
     .insight-list { margin: 8px 0 0; padding-left: 18px; }
@@ -1433,7 +1418,7 @@
     .section-title p { font-size: var(--fs-2); }
     .mono { font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .privacy-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-2); }
-    .privacy-item { display: flex; align-items: center; gap: var(--sp-2); color: var(--text-9); padding: 10px 0; }
+    .privacy-item { display: flex; align-items: center; gap: var(--sp-2); color: var(--text-quiet); padding: 10px 0; }
     .privacy-check { color: var(--green); font-weight: var(--fw-bold); }
     .prompt-shell { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, .86fr); gap: var(--sp-4); align-items: start; }
     .prompt-box, .brief-box {
@@ -1444,7 +1429,7 @@
       border-radius: var(--r-2);
       background:
         linear-gradient(180deg, rgba(var(--sheen-rgb), .018), transparent),
-        var(--ground-2);
+        var(--ground-deep);
       color: var(--text);
       padding: 14px;
       font: var(--fs-2)/1.55 var(--mono);
@@ -1453,7 +1438,7 @@
     .prompt-box:focus, .brief-box:focus { outline: 2px solid var(--blue); outline-offset: 2px; }
     .prompt-form-row { display: grid; grid-template-columns: minmax(160px, .24fr) minmax(0, 1fr); gap: var(--sp-2); margin: 12px 0; }
     .prompt-result { margin-top: 14px; }
-    .risk-card { border-left: 3px solid var(--amber); padding: 14px; border-radius: var(--r-2); background: rgba(var(--ink-11-rgb), .86); }
+    .risk-card { border-left: 3px solid var(--amber); padding: 14px; border-radius: var(--r-2); background: rgba(var(--ink-mid-rgb), .86); }
     .risk-card.high { border-left-color: var(--red); background: rgba(var(--tint-red-rgb), .86); }
     .risk-card.low { border-left-color: var(--green); background: rgba(var(--tint-green-rgb), .86); }
     .risk-card h3 { font-size: var(--fs-4); margin-bottom: 8px; }
@@ -1474,8 +1459,8 @@
     .plan-route-card.fork { border-left-color: var(--blue); }
     .plan-route-card h3 { font-size: var(--fs-4); margin: 0; }
     .plan-route-card .plan-label { width: fit-content; }
-    .plan-next-step { color: var(--text-2); }
-    .prompt-list { margin: 10px 0 0; padding-left: 18px; color: var(--text-5); line-height: 1.55; }
+    .plan-next-step { color: var(--text-bright); }
+    .prompt-list { margin: 10px 0 0; padding-left: 18px; color: var(--text-bright); line-height: 1.55; }
     .copy-row { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: 12px; }
     .handoff-cta {
       margin-top: 16px;
@@ -1494,7 +1479,7 @@
       padding: 14px;
       border: 1px solid var(--line);
       border-radius: var(--r-2);
-      background: var(--ground-1);
+      background: var(--ground-deep);
       display: grid;
       gap: var(--sp-3);
     }
@@ -1507,7 +1492,7 @@
       width: 100%;
       border: 1px solid var(--line-strong);
       border-radius: var(--r-2);
-      background: var(--ground-2);
+      background: var(--ground-deep);
       color: var(--text);
       padding: 9px 10px;
       font: inherit;
@@ -1533,11 +1518,11 @@
       padding-top: 10px;
     }
     .fresh-preview-row:first-child { border-top: 0; padding-top: 0; }
-    .fresh-preview-row strong { color: var(--text-4); font-size: var(--fs-2); text-transform: uppercase; letter-spacing: .06em; }
-    .fresh-preview-row p { color: var(--text-1); overflow-wrap: anywhere; }
+    .fresh-preview-row strong { color: var(--text-bright); font-size: var(--fs-2); text-transform: uppercase; letter-spacing: .06em; }
+    .fresh-preview-row p { color: var(--text-bright); overflow-wrap: anywhere; }
     .receipt-widget { border-color: rgba(var(--green-rgb), .34); background: linear-gradient(135deg, rgba(var(--green-rgb), .10), rgba(var(--well-rgb), .30)); }
     .receipt-steps { display: grid; gap: var(--sp-2); margin-top: 10px; }
-    .receipt-step { display: flex; gap: var(--sp-2); align-items: flex-start; color: var(--text-6); }
+    .receipt-step { display: flex; gap: var(--sp-2); align-items: flex-start; color: var(--text-bright); }
     .receipt-step span { display: grid; place-items: center; width: 20px; height: 20px; border-radius: var(--r-pill); background: rgba(var(--green-rgb), .16); border: 1px solid rgba(var(--green-rgb), .38); color: var(--on-success); font-size: var(--fs-1); font-weight: var(--fw-bold); flex: none; }
     .evidence-rail { display: grid; gap: 0; margin-top: 12px; }
     .evidence-node { position: relative; display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: var(--sp-2); padding: 0 0 14px; animation: evidenceNodeIn .22s ease-out both; }
@@ -1549,9 +1534,9 @@
     .evidence-node.inferred .evidence-dot { border-color: rgba(var(--amber-rgb), .56); background: rgba(var(--amber-rgb), .18); }
     .evidence-copy strong { display: flex; gap: var(--sp-2); align-items: center; color: white; font-size: var(--fs-3); }
     .evidence-copy p { margin-top: 3px; font-size: var(--fs-2); color: var(--muted); }
-    .prompt-opt-in { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-2); background: var(--surface-raised); font-size: var(--fs-2); color: var(--text-7); cursor: pointer; }
+    .prompt-opt-in { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-2); background: var(--surface-raised); font-size: var(--fs-2); color: var(--text-bright); cursor: pointer; }
     .prompt-opt-in input { width: 15px; height: 15px; accent-color: var(--blue, var(--accent-fallback)); }
-    .prompt-opt-in .hint { flex-basis: 100%; color: var(--text-14); font-size: var(--fs-2); }
+    .prompt-opt-in .hint { flex-basis: 100%; color: var(--text-dim); font-size: var(--fs-2); }
     .ask-backdrop { position: fixed; inset: 0; background: rgba(var(--shadow-rgb), .48); opacity: 0; pointer-events: none; transition: opacity .18s ease; z-index: 24; }
     .ask-backdrop.open { opacity: 1; pointer-events: auto; }
     .ask-panel {
@@ -1561,7 +1546,7 @@
       padding: 16px; border: 1px solid rgba(var(--blue-rgb), .38); border-radius: var(--r-2);
       background:
         linear-gradient(135deg, rgba(var(--green-rgb), .10), rgba(var(--blue-rgb), .10) 42%, transparent),
-        var(--ground-1);
+        var(--ground-deep);
       box-shadow: 0 22px 60px rgba(var(--shadow-rgb), .52), inset 0 1px 0 rgba(var(--sheen-rgb), .04);
       transform: translateY(18px); opacity: 0; visibility: hidden; transition: transform .18s ease, opacity .18s ease, visibility .18s ease;
     }
@@ -1576,13 +1561,13 @@
     .ask-message.user { justify-self: end; max-width: 88%; background: rgba(var(--blue-rgb), .13); border-color: rgba(var(--blue-rgb), .28); }
     .ask-message.aiw { border-left: 3px solid var(--green); }
     .ask-message strong { display: block; margin-bottom: 5px; color: white; }
-    .ask-message ul { margin: 8px 0 0; padding-left: 18px; color: var(--text-5); line-height: 1.45; }
+    .ask-message ul { margin: 8px 0 0; padding-left: 18px; color: var(--text-bright); line-height: 1.45; }
     .ask-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: 10px; }
     .ask-actions a { text-decoration: none; border: 1px solid rgba(var(--blue-rgb), .38); border-radius: var(--r-2); padding: 7px 9px; color: var(--on-brand); background: rgba(var(--blue-rgb), .10); font-size: var(--fs-2); font-weight: var(--fw-bold); }
     .ask-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--sp-2); align-items: end; }
     .ask-form textarea {
       width: 100%; min-height: 46px; max-height: 110px; resize: vertical;
-      border: 1px solid var(--line-strong); border-radius: var(--r-2); background: var(--ground-2);
+      border: 1px solid var(--line-strong); border-radius: var(--r-2); background: var(--ground-deep);
       color: var(--text); padding: 10px; font: inherit;
     }
     .drawer-backdrop { position: fixed; inset: 0; background: rgba(var(--shadow-rgb), .62); opacity: 0; pointer-events: none; transition: opacity .18s ease; z-index: 20; }
@@ -1602,7 +1587,7 @@
     .outcome-control { padding: 18px 20px; border: 0; border-bottom: 1px solid var(--drawer-line); border-radius: 0; background: transparent; }
     .outcome-control h3 { font-size: var(--fs-3); }
     .outcome-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-2); margin-top: 12px; }
-    .outcome-button { min-height: 38px; background: var(--ground-8); }
+    .outcome-button { min-height: 38px; background: var(--ground-deep); }
     .outcome-button.useful { color: var(--on-success); border-color: rgba(var(--green-rgb), .45); }
     .outcome-button.rework { color: var(--on-warning); border-color: rgba(var(--amber-rgb), .45); }
     .outcome-button.abandoned { color: var(--on-danger); border-color: rgba(var(--red-rgb), .45); }
@@ -1610,12 +1595,12 @@
     .outcome-button.selected.useful { background: rgba(var(--green-rgb), .28); box-shadow: inset 0 0 0 2px var(--green); color: var(--on-success-bright); }
     .outcome-button.selected.rework { background: rgba(var(--amber-rgb), .28); box-shadow: inset 0 0 0 2px var(--amber); color: var(--on-warning-bright); }
     .outcome-button.selected.abandoned { background: rgba(var(--red-rgb), .28); box-shadow: inset 0 0 0 2px var(--red); color: var(--on-danger-bright); }
-    .toast { position: fixed; right: 20px; top: calc(var(--header-h) + var(--sp-3)); z-index: 30; max-width: 420px; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: var(--r-2); background: var(--ground-9); color: var(--text); box-shadow: 0 12px 32px rgba(var(--shadow-rgb), .35); opacity: 0; transform: translateY(12px); pointer-events: none; transition: opacity .18s ease, transform .18s ease; }
+    .toast { position: fixed; right: 20px; top: calc(var(--header-h) + var(--sp-3)); z-index: 30; max-width: 420px; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: var(--r-2); background: var(--ground-mid); color: var(--text); box-shadow: 0 12px 32px rgba(var(--shadow-rgb), .35); opacity: 0; transform: translateY(12px); pointer-events: none; transition: opacity .18s ease, transform .18s ease; }
     /* Moved under the header from the bottom-right corner, where it was
        partly clipped by the window edge and far from every button. */
     button.copied { border-color: rgba(var(--green-rgb), .55); color: var(--green); }
     .toast.show { opacity: 1; transform: translateY(0); }
-    .toast.error { border-color: rgba(var(--red-rgb), .55); background: var(--ground-10); }
+    .toast.error { border-color: rgba(var(--red-rgb), .55); background: var(--surface-danger); }
     /* Drawer content lands 0.2s-4.5s after the panel opens, so a bare swap
        reads as a jump rather than a resolve. Only the blocks that actually
        changed carry this (see setDrawerContent in index.js); the global
