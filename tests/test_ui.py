@@ -241,7 +241,12 @@ class DashboardWindowTests(unittest.TestCase):
         # and reaches the Prove view as a receipt's proof_reason.
         self.assertIn("AIWatcher will not claim saved tokens until one is linked",
                       inspect.getsource(ui))
+        # Stated once beneath the coverage table rather than on all ten rows:
+        # what "automatic" or "companion only" means is a property of the
+        # status, not of the tool, so repeating it per row was ten copies of
+        # five sentences.
         self.assertIn("Protection:", ui.HTML)
+        self.assertIn("coverage-legend", ui.HTML)
         self.assertIn("companion/history-only until proven otherwise", ui.HTML)
         self.assertIn("renderSessionSummary", ui.HTML)
         self.assertIn("Loading session identity for", ui.HTML)

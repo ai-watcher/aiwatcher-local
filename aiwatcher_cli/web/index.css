@@ -1106,6 +1106,18 @@
     .action-meta { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: 10px; }
     .action-row .actions { justify-content: flex-end; }
     .coverage-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-3); }
+    /* The coverage table. Rows align on one axis so ten tools can be compared
+       rather than read one card at a time; the quiet second line in a cell is
+       the prose that used to be a labelled row of its own. */
+    .coverage-table td { vertical-align: top; }
+    .coverage-table td strong { display: block; }
+    .cell-note {
+      display: block; margin-top: 3px; font-size: var(--fs-1);
+      color: var(--muted); line-height: 1.45; font-weight: var(--fw-normal);
+      max-width: 42ch; white-space: normal;
+    }
+    /* The status pill sizes to its text in a cell rather than stretching. */
+    .coverage-table .coverage-status { display: inline-block; }
     /* ---- Watch: one project expanded, the rest as rows -------------------
        Four cards of equal weight gave the eye nowhere to start. */
     .health-stack { display: flex; flex-direction: column; gap: var(--sp-2); }

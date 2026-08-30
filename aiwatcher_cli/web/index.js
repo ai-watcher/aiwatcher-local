@@ -2670,32 +2670,59 @@ function renderContextHealth(rows, statusArg, presence) {
   const batch = snoozable.length > 1
     ? `<div class="health-batch"><button class="btn-quiet" onclick="snoozeVisibleFreshStartProjects(this)">Snooze all 48h</button></div>`
     : '';
-  return `<div class="health-stack">${batch}${healthLeadCard(lead, waitingById)}${rest.map(row => healthQuietRow(row, waitingById)).join('')}</div>`;
+  // healthFacts carried these per project, under a card that no longer exists.
+  // The severity counts are the part that was not already on Home's facts row,
+  // and they belong at the top of the list they describe.
+  const critical = ranked.filter(r => r.severity === 'critical').length;
+  const warning = ranked.filter(r => r.severity === 'warning').length;
+  const tally = [critical ? `${critical} critical` : '', warning ? `${warning} warning` : '']
+    .filter(Boolean).join(' \u00b7 ');
+  const head = tally
+    ? `<div class="health-tally"><span class="health-severity ${critical ? 'critical' : 'warning'}">${esc(tally)}</span></div>`
+    : '';
+  return `<div class="health-stack">${head}${batch}${ranked.map((row, i) => healthRow(row, waitingById, i)).join('')}</div>`;
+}
+function coverageGate(row) {
+  // The gate column answers "is anything intercepted before it runs", which is
+  // a different question from how much history exists. Derived from the status
+  // rather than the prose, so it cannot disagree with the pill beside it.
+  const map = {
+    automatic: ['Automatic', 'automatic'],
+    limited: ['Unverified', 'unverified'],
+    unverified: ['Unverified', 'unverified'],
+    companion: ['Companion only', 'companion'],
+    not_detected: ['Not detected', 'not_detected'],
+    unsupported: ['Not supported', 'unsupported'],
+  };
+  const [label, cls] = map[row.status] || ['Unknown', 'unverified'];
+  return `<span class="coverage-status ${esc(cls)}">${esc(label)}</span>`;
 }
 function renderCoverage(rows) {
   if (!rows.length) return '<div class="empty">Coverage could not be determined on this machine.</div>';
-  const modeCopy = {
-    automatic: 'Protected automatically when the tool invokes its hook.',
-    companion: 'Companion/manual protection. AIWatcher can help, but it is not intercepting this surface directly.',
-    limited: 'Partial coverage. Treat findings as local evidence, not full control.',
-    unverified: 'Not verified on this machine yet. Run the suggested check before trusting protection claims.',
-    not_detected: 'Tool not detected. Install or open the tool, then refresh coverage.',
-    unsupported: 'No direct hook known. Use Prompt Companion or history-only review.',
-  };
-  return rows.map(row => `<div class="coverage-card">
-    <div class="coverage-head">
-      <h3>${esc(row.label)}</h3>
-      <span class="coverage-status ${esc(row.status)}">${esc(row.status_label)}</span>
-    </div>
-    <div class="coverage-detail">
-      <div><strong>Protection:</strong> ${esc(modeCopy[row.status] || 'Local evidence only until verified.')}</div>
-      <div><strong>Gate:</strong> ${esc(row.automatic_gate)}</div>
-      <div><strong>History:</strong> ${esc(row.history)}</div>
-      <div><strong>Sessions:</strong> ${esc(row.session_count)}</div>
-      <div><strong>Next:</strong> ${esc(row.action)}</div>
-      <div>${esc(row.detail)}</div>
-    </div>
-  </div>`).join('');
+  return `<div class="table-wrap"><table class="coverage-table">
+    <thead><tr>
+      <th>Tool</th><th>Coverage</th><th>Gate</th><th class="num">Sessions</th><th>Next</th>
+    </tr></thead>
+    <tbody>${rows.map(row => `<tr>
+      <td>
+        <strong>${esc(row.label)}</strong>
+        ${row.detail ? `<span class="cell-note">${esc(row.detail)}</span>` : ''}
+      </td>
+      <td>
+        <span class="coverage-status ${esc(row.status)}">${esc(row.status_label)}</span>
+        ${row.history ? `<span class="cell-note">${esc(row.history)}</span>` : ''}
+      </td>
+      <td>${coverageGate(row)}</td>
+      <td class="num">${esc(row.session_count)}</td>
+      <td><span class="cell-note">${esc(row.action || '')}</span></td>
+    </tr>`).join('')}</tbody>
+  </table></div>
+  <p class="receipt-note coverage-legend">
+    <strong>Protection:</strong> <b>Automatic</b> is intercepted when the tool invokes its hook.
+    <b>Unverified</b> means history is visible but interception has not been proven on this exact
+    surface. <b>Companion only</b> means AIWatcher can help, but is not intercepting directly.
+    <b>Not detected</b> and <b>Not supported</b> claim nothing.
+  </p>`;
 }
 function renderSetup(rows) {
   if (!rows.length) return '<div class="empty">Setup checklist unavailable.</div>';

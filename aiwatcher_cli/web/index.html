@@ -472,7 +472,12 @@
         <div><h2 id="coverageSummary">Surface coverage</h2><p>Detected tools, hook confidence, and what AIWatcher can honestly measure.</p></div>
         <span class="note-chip local">Local only</span>
       </div>
-      <div id="coverageRowsSettings" class="coverage-grid"></div>
+      <!-- Not .coverage-grid any more. That is a two-column card grid, and
+           coverage is a table now -- it made the table one grid item and the
+           legend beneath it another, so they sat side by side and the table
+           rendered at half width. Setup steps below still use the grid,
+           because those are cards. -->
+      <div id="coverageRowsSettings"></div>
     </section>
 
     <div class="card">
