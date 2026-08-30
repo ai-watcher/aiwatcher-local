@@ -706,8 +706,10 @@ class HomeStatRowTest(unittest.TestCase):
         cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
         cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
         cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
-        start = cls.html.index('class="grid kpis"')
-        cls.row = cls.html[start:cls.html.index("</section>", start)]
+        # The window summary specifically, which is on Prove -- Home's strip is
+        # also a .grid.kpis now and comes first in the document.
+        rows = re.findall(r'class="grid kpis"[^>]*>(.*?)</section>', cls.html, re.S)
+        cls.row = next(r for r in rows if "costPerSurviving" in r)
 
     def test_one_supporting_line_per_card(self):
         # Two cards' worth of supporting copy in one card is what set the row's
@@ -982,10 +984,17 @@ class CheckpointDistanceSurfaceTest(unittest.TestCase):
                 self.assertNotIn(claim, self.render)
 
     def test_an_unavailable_baseline_still_shows_the_distance(self):
-        # The distance is a fact even when there is nothing to compare it to.
+        """The distance is a fact even with nothing to compare it against.
+
+        It says why there is no comparison, but not in the server's own words:
+        that reason is a full sentence, and in a tile meant to be read across a
+        row it made this one taller than its neighbours. The count is the part
+        that answers "why not yet".
+        """
         self.assertIn("baseline.available", self.render)
         self.assertIn("card.elapsed_label", self.render)
-        self.assertIn("baseline.reason", self.render)
+        self.assertIn("no usual distance yet", self.render)
+        self.assertIn("baseline.changes", self.render)
 
     def test_no_live_session_hides_the_card_rather_than_emptying_it(self):
         # An ambient surface should not carry a permanent row about nothing.
@@ -1859,23 +1868,41 @@ class DesignScaleTest(unittest.TestCase):
         self.assertIn("--w-prose", self.css)
         self.assertIn("p, .empty, .lede, .prompt-list li { max-width: var(--w-prose); }", self.css)
 
-    def test_the_stat_row_fills_its_container(self):
-        # repeat(4, ...) with three children left a quarter-width hole that read
-        # as a card which had failed to load. The guard is the property, not the
-        # spelling: however many columns the row declares at any width, the cards
-        # have to divide into them evenly or the last row has a gap in it.
-        cards = self.html.count('class="card metric-card')
-        self.assertEqual(cards, 4)
-        declared = re.findall(r"\.kpis \{[^}]*grid-template-columns:\s*([^;]+);", self.css)
-        self.assertTrue(declared, "the stat row declares no columns")
-        for value in declared:
+    def test_the_stat_rows_fill_their_containers(self):
+        """repeat(4, ...) with three children left a quarter-width hole that read
+        as a card which had failed to load.
+
+        The guard is the property, not the spelling: however many columns a row
+        declares at any width, its cards have to divide into them evenly. There
+        are two rows now and they solve it differently -- Prove's four are a
+        fixed count, Home's hide themselves at runtime, so it sizes rather than
+        counts. Both are checked against the rule they actually declare.
+        """
+        rows = re.findall(r'class="grid kpis"[^>]*>(.*?)</section>', self.html, re.S)
+        self.assertEqual(len(rows), 2, "expected a stat row on Home and on Prove")
+
+        fixed = re.findall(r"\.kpis \{[^}]*grid-template-columns:\s*([^;]+);", self.css)
+        self.assertTrue(fixed, "the stat row declares no columns")
+        prove = next(r for r in rows if "costPerSurviving" in r)
+        prove_cards = prove.count('class="card metric-card')
+        self.assertEqual(prove_cards, 4)
+        for value in fixed:
             with self.subTest(columns=value.strip()):
                 if "auto-fit" in value or "auto-fill" in value:
                     continue
                 repeated = re.match(r"repeat\((\d+),", value.strip())
                 count = int(repeated.group(1)) if repeated else len(value.split())
-                self.assertEqual(cards % count, 0,
-                                 "%d cards do not fill %d columns" % (cards, count))
+                self.assertEqual(prove_cards % count, 0,
+                                 "%d cards do not fill %d columns" % (prove_cards, count))
+
+        # Home's tiles withhold themselves rather than showing a zero, so the
+        # count is 0 to 3 at runtime. A fixed rule would leave a hole exactly
+        # when a tile had nothing honest to say.
+        home = next(r for r in rows if "presenceTile" in r)
+        self.assertGreater(home.count('class="card metric-card'), 0)
+        home_rule = re.search(r"#homeStrip \{[^}]*grid-template-columns:\s*([^;]+);", self.css)
+        self.assertIsNotNone(home_rule, "Home's strip declares no columns of its own")
+        self.assertIn("auto-fit", home_rule.group(1))
 
     def test_root_declares_a_font_family(self):
         # Without it :root computed to Times New Roman and only body caught Inter.

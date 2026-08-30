@@ -3308,32 +3308,77 @@ async function dismissFirstRun(goHome) {
 function renderCheckpoint(card) {
   const host = document.getElementById('checkpoint');
   if (!host) return;
-  // No live session to measure from is not a state worth a permanent empty row
-  // on the ambient surface; an unmeasurable-but-live one is, because then the
-  // reader is looking at a session and the absence needs a reason.
   if (!card || (!card.available && !card.reason)) { host.hidden = true; return; }
   if (!card.available) {
+    // No live session is not worth a permanent tile; an unmeasurable one is,
+    // because then the reader is looking at a session and the gap needs a
+    // reason rather than a blank.
     if (/no live session/i.test(card.reason || '')) { host.hidden = true; return; }
     host.hidden = false;
-    host.innerHTML = `<div class="section-title"><div><h2>Since your last commit</h2></div></div>
-      <div class="empty">${esc(card.reason)}</div>`;
+    host.innerHTML = `<div class="label">Since last commit</div>
+      <div class="value">--</div>
+      <div class="sub">${esc(card.reason)}</div>`;
     return;
   }
-
   const baseline = card.baseline || {};
-  const comparison = baseline.available && baseline.ratio
-    ? ` &middot; <b>${esc(baseline.ratio)}×</b> your usual ${esc(baseline.median_label)} between commits`
-    : '';
-  const caveat = baseline.available ? '' : `<p class="receipt-note">${esc(baseline.reason || '')}</p>`;
-
+  const sub = baseline.available && baseline.ratio
+    ? `${esc(card.spend_label)} spent &middot; <b>${esc(baseline.ratio)}×</b> your usual ${esc(baseline.median_label)}`
+    // The full reason is a sentence and belongs where there is room for one.
+    // In a tile it just makes this one taller than its neighbours, and the row
+    // is meant to be read across.
+    : `${esc(card.spend_label)} spent &middot; no usual distance yet`
+      + (baseline.changes !== undefined
+          ? ` (${esc(baseline.changes)} costed commits, needs 4)` : '');
+  // Amber only once past the usual distance. Below it this is an ordinary
+  // working afternoon, and a rail would assert a judgment nothing supports.
+  host.className = 'card metric-card '
+    + (baseline.available && baseline.ratio >= 2 ? 'metric-amber' : 'metric-neutral');
   host.hidden = false;
-  host.innerHTML = `<div class="section-title">
-      <div><h2>Since your last commit</h2><p>${esc(card.last_commit_sha)} &middot; ${esc(card.last_commit_subject)}</p></div>
-      <span class="note-chip local">Local only</span>
-    </div>
-    <p class="ambient-say"><b>${esc(card.elapsed_label)}</b> and <b>${esc(card.spend_label)}</b>
-      across ${esc(card.events_since)} call${card.events_since === 1 ? '' : 's'}${comparison}.</p>
-    ${caveat}`;
+  host.innerHTML = `<div class="label">Since last commit</div>
+    <div class="value">${esc(card.elapsed_label)}</div>
+    <div class="sub">${sub}</div>`;
+}
+/* What is running, right now.
+ *
+ * presence has carried this since the session-badges work; Home never showed
+ * it. "Waiting on you" leads when there is one, because a blocked session is
+ * the only state here that cannot continue without the reader.
+ */
+function renderPresenceTile(presence) {
+  const host = document.getElementById('presenceTile');
+  if (!host) return;
+  const live = Number(presence && presence.live) || 0;
+  if (!live) { host.hidden = true; return; }
+  const waiting = Number(presence.waiting) || 0;
+  const working = Number(presence.working) || 0;
+  const quiet = Number(presence.quiet) || 0;
+  const parts = [];
+  if (waiting) parts.push(`<b>${esc(waiting)} waiting on you</b>`);
+  if (working) parts.push(`${esc(working)} working`);
+  if (quiet) parts.push(`${esc(quiet)} quiet`);
+  host.className = 'card metric-card ' + (waiting ? 'metric-amber' : 'metric-blue');
+  host.hidden = false;
+  host.innerHTML = `<div class="label">Running now</div>
+    <div class="value">${esc(live)}</div>
+    <div class="sub">${parts.join(' &middot; ')}</div>`;
+}
+/* Waste sitting around: stale chats, pending Fresh Starts, abandoned worktrees,
+ * runtime clutter. A signal here and the queue on Control -- a review queue is
+ * a sit-down task and does not belong on a surface read from four feet away,
+ * but the fact that it has items in it is present tense.
+ */
+function renderWasteTile(optimize) {
+  const host = document.getElementById('wasteTile');
+  if (!host) return;
+  const items = ((optimize && optimize.candidates) || []).length;
+  if (!optimize || !items) { host.hidden = true; return; }
+  const impact = optimize.impact_label ? esc(optimize.impact_label) : 'no measured impact';
+  host.className = 'card metric-card '
+    + (optimize.status === 'needs_action' ? 'metric-amber' : 'metric-neutral');
+  host.hidden = false;
+  host.innerHTML = `<div class="label">Worth cleaning up</div>
+    <div class="value">${esc(items)}</div>
+    <div class="sub">${impact} &middot; <button class="link-inline" onclick="showView('control')">review on Control</button></div>`;
 }
 /* Prove's claim, and the coverage behind it.
  *
@@ -3361,9 +3406,29 @@ function renderProveClaim(unbanked, survival) {
     // No status rail. There is no baseline for how much unbanked spend is too
     // much -- exploration that goes nowhere is how the work gets done -- and
     // colouring it would assert a judgment nothing here can support.
-    parts.push(`<div class="verdict-card">
-      <h3>${esc(unbanked.headline)}</h3>
-      <p>${esc(unbanked.caption || '')}</p>
+    // The claim, and the split it is a claim about, side by side. Stating a
+    // share without showing it makes the reader take the number on trust on the
+    // one surface whose whole job is to be believed.
+    const pct = Number(unbanked.unbanked_pct) || 0;
+    parts.push(`<div class="claim-pair">
+      <div class="verdict-card">
+        <h3>${esc(unbanked.headline)}</h3>
+        <p>${esc(unbanked.caption || '')}</p>
+      </div>
+      <div class="claim-evidence">
+        <span class="claim-figure">${esc(unbanked.unbanked_label)}</span>
+        <div class="split-bar" role="img" aria-label="${esc(unbanked.banked_label)} reached a commit, ${esc(unbanked.unbanked_label)} did not">
+          <i style="width:${(100 - pct).toFixed(1)}%;background:var(--blue)"></i>
+          <i style="width:${pct.toFixed(1)}%;background:var(--amber)"></i>
+        </div>
+        <div class="split-legend">
+          <span><i style="background:var(--blue)"></i>Reached a commit &middot; ${esc(unbanked.banked_label)}</span>
+          <span><i style="background:var(--amber)"></i>No commit behind it &middot; ${esc(unbanked.unbanked_label)}</span>
+        </div>
+        <p class="receipt-note">A commit banks the spend that preceded it, within
+          ${esc(unbanked.max_lookback_hours || 12)} hours. Anything with no commit after it, or whose
+          next commit came too late, stays unbanked.</p>
+      </div>
     </div>`);
   } else {
     // Unmeasurable is its own state, with the reason, never a zero.
@@ -4422,6 +4487,8 @@ async function loadOnce(resetDetail, forceRefresh) {
     `${totals.cost_per_useful_change} value each${totals.inferred_useful_outcomes ? ` · ${totals.inferred_useful_outcomes} to confirm` : ''}`;
   renderSurvivalTile(data.survival || {});
   renderCheckpoint(data.checkpoint);
+  renderPresenceTile(data.presence);
+  renderWasteTile(data.optimize);
   // Routed from the payload rather than a stored client flag: the server
   // already knows whether anything is gated and whether the screen was
   // dismissed, and a second source of truth here would drift from it. Only on

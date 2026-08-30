@@ -429,6 +429,13 @@
        is one card, and a grid whose breakpoint exists to fit a second column
        would be reserving space for something that cannot arrive. */
     @media (min-width: 1280px) { .kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+    /* Home's strip sizes itself instead of counting. Its tiles hide rather than
+       show a zero -- nothing running, no checkpoint to measure from, nothing
+       worth cleaning up -- so the count is 0 to 3 at runtime and a fixed column
+       rule would leave a gap where a tile withheld itself. auto-fit collapses
+       the empty tracks and the survivors fill the row. */
+    #homeStrip { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    #homeStrip:not(:has(> :not([hidden]))) { display: none; }
     /* Headings and <strong> were never given a weight, so they took the UA
        default of 700 -- a fourth weight the stylesheet did not know it had.
        600 matches where the explicit 650/700/720 rules already landed. */
@@ -823,6 +830,22 @@
         align-items: start;
       }
     }
+    /* A claim beside the evidence for it. The feed's version of this waits for
+       1480px because its chart has a 640px canvas; this one carries a bar and a
+       legend, which stay readable much narrower, so it splits at 980 -- the
+       width where the claim itself still has 280px to sit in. Stacked below
+       that rather than squeezed. */
+    .claim-pair { display: grid; gap: var(--sp-4); align-items: start; }
+    @media (min-width: 980px) {
+      .claim-pair { grid-template-columns: minmax(280px, 1fr) minmax(320px, 1.15fr); }
+    }
+    .claim-evidence { display: flex; flex-direction: column; gap: var(--sp-2); }
+    .claim-figure { font-family: var(--mono); font-size: var(--fs-5); text-align: right; }
+    .split-bar { display: flex; height: 14px; border-radius: var(--r-1); overflow: hidden; background: var(--surface-raised); }
+    .split-bar i { display: block; height: 100%; }
+    .split-legend { display: flex; gap: var(--sp-3); flex-wrap: wrap; font-size: var(--fs-2); color: var(--muted); }
+    .split-legend span { display: flex; align-items: center; gap: var(--sp-1); }
+    .split-legend i { width: 9px; height: 9px; border-radius: var(--r-pill); display: block; }
     .insight strong { display: block; margin-bottom: 3px; color: white; }
     .pill-row { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: 12px; }
     .pill { border: 1px solid var(--line); background: #0b1118; border-radius: var(--r-pill); padding: 5px 9px; color: #bdc9d9; font-size: var(--fs-1); }

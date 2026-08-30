@@ -100,12 +100,20 @@
          not mid-task with an editor open. On Prove they stop being a standing
          summary and become the evidence under a claim. -->
 
-    <!-- Distance from the last checkpoint in the repo the charted session is
-         working in. Present tense, like everything else on this surface: a
-         fact about right now, with an obvious action and no verdict attached.
-         Hidden rather than empty when there is no live session to measure
-         from, so the surface does not carry a permanent row about nothing. -->
-    <section id="checkpoint" class="card" style="margin-top:14px" hidden></section>
+    <!-- Three present-tense facts, read across. Each answers this surface's
+         question -- is something happening right now that I should deal with --
+         from a different angle: what is running, how far from a checkpoint, and
+         what is sitting around costing nothing useful.
+
+         A row rather than three stacked cards, for the same reason the window
+         summary is a row on Prove: three numbers in three places is not three
+         numbers in one glance. Each hides itself rather than showing a zero, so
+         an idle machine does not carry a permanent row about nothing. -->
+    <section class="grid kpis" id="homeStrip" style="margin-top:14px">
+      <div class="card metric-card metric-blue" id="presenceTile" hidden></div>
+      <div class="card metric-card metric-neutral" id="checkpoint" hidden></div>
+      <div class="card metric-card metric-neutral" id="wasteTile" hidden></div>
+    </section>
 
     <!-- Receipt only, and hidden until you act. The alert this element used to
          carry was the same critical-context message the ambient surface now
