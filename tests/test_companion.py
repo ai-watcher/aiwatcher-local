@@ -26,6 +26,28 @@ class CompanionLifecycleTests(unittest.TestCase):
         self.assertNotIn("--presence-position", command)
         self.assertNotIn("--presence-visibility", command)
 
+    def test_disabled_presence_survives_the_relaunch(self) -> None:
+        """`companion start` relaunches itself in the background, so the flag has
+        to be readable by the copy. Omitting --presence is not enough: the child
+        only reads --no-presence and defaults to presence on, so the bar came
+        back for everyone who asked for it to be off."""
+        from aiwatcher_cli.cli import build_parser
+
+        command = companion.companion_command(30, presence=False)
+        self.assertIn("--no-presence", command)
+
+        child = build_parser().parse_args(command[command.index("companion"):])
+        self.assertTrue(child.no_presence)
+
+    def test_enabled_presence_does_not_disable_itself(self) -> None:
+        from aiwatcher_cli.cli import build_parser
+
+        command = companion.companion_command(30, presence=True)
+        self.assertNotIn("--no-presence", command)
+
+        child = build_parser().parse_args(command[command.index("companion"):])
+        self.assertFalse(child.no_presence)
+
     def test_command_can_place_collapsed_presence(self) -> None:
         command = companion.companion_command(
             30,

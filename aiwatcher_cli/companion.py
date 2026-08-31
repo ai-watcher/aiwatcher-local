@@ -67,6 +67,17 @@ def companion_command(
                 presence_visibility,
             ]
         )
+    else:
+        # Omitting --presence is not the same as asking for no presence. The
+        # child parses its own flags and only reads --no-presence, defaulting
+        # to presence on, so dropping the flag here silently re-enabled the
+        # floating bar for every caller that asked for it to be off:
+        # `companion start --no-presence`, `companion autostart install
+        # --no-presence`, and `companion tray start` (which passes
+        # presence=False explicitly). The advice in tray_status() below, which
+        # tells unsupported platforms to run `companion start --no-presence`,
+        # could not work until this was passed through.
+        command.append("--no-presence")
     return command
 
 
