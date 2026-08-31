@@ -44,13 +44,16 @@ _SIGNAL_ALIASES = {
     "low_runway": "runway",
     "quota": "runway",
     "insight": "generic",
+    "waiting": "session_blocked",
+    "blocked": "session_blocked",
+    "session_waiting": "session_blocked",
 }
 
 
 def _normalize_signal_kind(value: str | None) -> str:
     normalized = (value or "generic").strip().lower().replace("-", "_").replace(" ", "_")
     normalized = _SIGNAL_ALIASES.get(normalized, normalized)
-    return normalized if normalized in {"critical_context", "loop", "velocity", "runway", "generic"} else "generic"
+    return normalized if normalized in {"session_blocked", "critical_context", "loop", "velocity", "runway", "generic"} else "generic"
 
 
 def overlay_config(
@@ -62,7 +65,19 @@ def overlay_config(
 ) -> OverlayConfig:
     """Return truthful, signal-specific copy and behavior for the companion."""
     kind = _normalize_signal_kind(signal_kind)
-    if kind == "critical_context":
+    if kind == "session_blocked":
+        # Not a handoff. The session is alive and stopped on a permission
+        # prompt, so the useful act is to get back to it and answer -- a brief
+        # pasted into a fresh chat abandons work that only needed a yes.
+        config = OverlayConfig(
+            kind,
+            "A session is waiting for you",
+            "Return to session",
+            "return_to_session",
+            "return",
+            "This session stopped and cannot continue until you answer it.",
+        )
+    elif kind == "critical_context":
         action = "copy_brief_and_open_runtime" if action_endpoint_available and runtime_action_available else "copy_fresh_brief"
         default_label = "Open tool + copy brief" if action == "copy_brief_and_open_runtime" else "Copy fresh-session brief"
         config = OverlayConfig(
@@ -214,6 +229,31 @@ func requestRuntimeReturn() {
     URLSession.shared.dataTask(with: request).resume()
 }
 
+// The return-mode button has to report what happened, so unlike the call above
+// this one waits and keeps the reason. Not gated on runtimeActionAvailable:
+// the server decides, and its refusal is the message we want to show.
+func requestRuntimeReturnResult() -> (ok: Bool, message: String) {
+    guard let url = URL(string: "\(baseURL)/api/runtime-return") else {
+        return (false, "no dashboard URL")
+    }
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try? JSONSerialization.data(withJSONObject: ["session_id": sid])
+    let sem = DispatchSemaphore(value: 0)
+    var ok = false
+    var message = ""
+    URLSession.shared.dataTask(with: request) { data, _, _ in
+        defer { sem.signal() }
+        guard let data = data,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        ok = (json["ok"] as? Bool) ?? false
+        message = (json["message"] as? String) ?? (json["error"] as? String) ?? ""
+    }.resume()
+    _ = sem.wait(timeout: .now() + 4)
+    return (ok, message)
+}
+
 func fetchHandoffBrief() -> String? {
     if !briefFile.isEmpty,
        let value = try? String(contentsOfFile: briefFile, encoding: .utf8),
@@ -343,6 +383,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func primaryAction() {
+        if primaryMode == "return" {
+            postInterventionAction("acted")
+            let result = requestRuntimeReturnResult()
+            if result.ok {
+                finish(result.message.isEmpty ? "Opened your AI tool. Answer it there to continue." : result.message)
+            } else {
+                // Say why, and leave the evidence one click away. Reporting a
+                // return that did not happen is the failure this mode exists
+                // to stop.
+                openDashboardSession()
+                let reason = result.message.isEmpty ? "" : " (\(result.message))"
+                finish("Could not reach the tool from here\(reason). Opened the session in AIWatcher instead.")
+            }
+            return
+        }
         if primaryMode == "inspect" {
             inspectSession()
             finish("Opened the evidence. Review it before continuing the run.")
@@ -374,6 +429,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func inspectSession() {
         postInterventionAction("acted")
+        openDashboardSession()
+    }
+
+    func openDashboardSession() {
         let encoded = sid.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         let inspect = "\(baseURL)/?session=\(encoded)"
         if let url = URL(string: inspect) {
@@ -1207,6 +1266,20 @@ def _record_intervention_action(
         _request_json(f"{base}/api/ambient-intervention-action", payload)
     except (OSError, urllib.error.URLError, json.JSONDecodeError):
         return
+
+
+def _runtime_return_result(base: str, session_id: str) -> dict[str, object]:
+    """Like _request_runtime_return, but keeps the reason.
+
+    A button whose whole job is returning you to the session has to be able to
+    say why it could not, so the bool is not enough here.
+    """
+    if not session_id:
+        return {"ok": False, "message": "no session id"}
+    try:
+        return _request_json(f"{base}/api/runtime-return", {"session_id": session_id})
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        return {"ok": False, "message": str(exc)}
 
 
 def _request_runtime_return(base: str, session_id: str) -> bool:
@@ -2297,7 +2370,30 @@ def run_native_overlay(
         webbrowser.open(f"{base}/?session={urllib.parse.quote(session_id)}")
         show_saved("Opened the evidence. Review it before continuing the run.")
 
+    def return_to_session() -> None:
+        """Focus the tool the session is already in.
+
+        No clipboard: this signal is not a handoff. When there is nothing to
+        attach to, say why and leave the dashboard one click away rather than
+        reporting a return that did not happen.
+        """
+        _record_intervention_action(base, intervention_fingerprint, "acted")
+        result = _runtime_return_result(base, session_id)
+        if result.get("ok"):
+            show_saved(str(result.get("message") or "Opened your AI tool. Answer it there to continue."))
+            return
+        reason = str(result.get("message") or result.get("error") or "").strip()
+        webbrowser.open(f"{base}/?session={urllib.parse.quote(session_id)}")
+        show_saved(
+            f"Could not reach the tool from here ({reason}). Opened the session in AIWatcher instead."
+            if reason
+            else "Could not reach the tool from here. Opened the session in AIWatcher instead."
+        )
+
     def primary_action() -> None:
+        if primary_mode == "return":
+            return_to_session()
+            return
         if primary_mode == "inspect":
             inspect_session()
             return

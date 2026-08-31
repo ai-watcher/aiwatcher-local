@@ -31,21 +31,34 @@ from aiwatcher_cli.local_state import (
 from aiwatcher_cli.scanner import LocalEvent, LocalSession, SurfaceCoverage
 
 
-# Enough of a browser to run the real overlay script and read back what it drew.
-# The alternative is asserting on the source, which is how the page came to
-# render "No Fresh Start needed right now" for a loop without anyone noticing.
+# Enough of a browser to run the real overlay script and read back what it drew,
+# and what it then called. The alternative is asserting on the source, which is
+# how the page came to render "No Fresh Start needed right now" for a loop
+# without anyone noticing.
 #
 # Parameterised by the intervention because the bug class this catches is
 # per-signal: the page renders one kind correctly and another kind wrongly, and
 # a harness pinned to a single kind cannot see the difference.
+#
+# One node per id, not one shared node. The page sets `.onclick` on
+# `primaryAction` and then on `inspect`; with a single shared object the second
+# assignment silently replaces the first, so every click test would exercise
+# the wrong handler.
 STUBS_TEMPLATE = """
-let drawn = '';
-const node = {
-  set innerHTML(value) { drawn = value; },
-  get innerHTML() { return drawn; },
-  onclick: null,
-};
-globalThis.document = { getElementById: () => node };
+const calls = [];
+const nodes = {};
+function nodeFor(id) {
+  if (!nodes[id]) {
+    nodes[id] = {
+      _html: '',
+      onclick: null,
+      set innerHTML(value) { this._html = value; },
+      get innerHTML() { return this._html; },
+    };
+  }
+  return nodes[id];
+}
+globalThis.document = { getElementById: (id) => nodeFor(id) };
 globalThis.window = {
   location: { search: '?session=sess-1&intervention=fp-1', href: '' },
   setTimeout: () => {},
@@ -58,20 +71,39 @@ Object.defineProperty(globalThis, 'navigator', {
   value: { clipboard: { writeText: async () => {} } },
   configurable: true,
 });
-globalThis.fetch = async (url) => {
+globalThis.fetch = async (url, options) => {
+  calls.push(`${(options && options.method) || 'GET'} ${String(url).split('?')[0]}`);
   if (String(url).startsWith('/api/ambient-intervention?')) {
     return { ok: true, json: async () => (__INTERVENTION__) };
   }
   if (String(url).startsWith('/api/summary')) {
     return { json: async () => (__SUMMARY__) };
   }
+  if (String(url).startsWith('/api/runtime-return')) {
+    return { ok: true, json: async () => (__RUNTIME_RETURN__) };
+  }
   return { ok: true, json: async () => ({}) };
 };
 """
 
-TAIL = """
-await new Promise(resolve => globalThis.queueMicrotask(() => setTimeout(resolve, 60)));
-console.log(drawn);
+SETTLE = "await new Promise(resolve => globalThis.queueMicrotask(() => setTimeout(resolve, 60)));"
+
+TAIL = f"""
+{SETTLE}
+console.log(nodeFor('bubble').innerHTML);
+"""
+
+# Presses the primary button and reports what the page called and then drew.
+# Asserting on the rendered label alone cannot tell "Return to session" that
+# returns you from one that copies a brief -- which is the whole defect.
+CLICK_TAIL = f"""
+{SETTLE}
+const handler = nodes['primaryAction'] && nodes['primaryAction'].onclick;
+if (!handler) throw new Error('no primary button was rendered');
+await handler();
+{SETTLE}
+console.log(JSON.stringify(calls));
+console.log(nodeFor('bubble').innerHTML);
 """
 
 
@@ -2083,9 +2115,18 @@ class DashboardWindowTests(unittest.TestCase):
             os.unlink(script_path)
         self.assertEqual(completed.returncode, 0, f"Overlay inline JS has a syntax error:\n{completed.stderr}")
 
-    def _render_overlay_for(self, intervention: dict, summary: dict | None = None) -> str:
-        """Run the real overlay script against one intervention and return the
-        HTML it drew."""
+    def _render_overlay_for(
+        self,
+        intervention: dict,
+        summary: dict | None = None,
+        runtime_return: dict | None = None,
+        click_primary: bool = False,
+    ) -> str:
+        """Run the real overlay script against one intervention.
+
+        Returns the HTML it drew, or -- with click_primary -- the calls it made
+        after the primary button was pressed, followed by what it drew next.
+        """
         node = shutil.which("node")
         if not node:
             self.skipTest("node not available to run the overlay script")
@@ -2097,9 +2138,13 @@ class DashboardWindowTests(unittest.TestCase):
                 "__SUMMARY__",
                 json.dumps(summary if summary is not None else {"handoff_bubble": None, "context_health": []}),
             )
+            .replace(
+                "__RUNTIME_RETURN__",
+                json.dumps(runtime_return if runtime_return is not None else {"ok": True, "message": "Opened exact chat link."}),
+            )
         )
         with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False, encoding="utf-8") as handle:
-            handle.write(stubs + script + TAIL)
+            handle.write(stubs + script + (CLICK_TAIL if click_primary else TAIL))
             script_path = handle.name
         try:
             completed = subprocess.run([node, script_path], capture_output=True, text=True)
@@ -2128,6 +2173,93 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Possible loop detected", drawn)
         self.assertIn("Inspect and stop", drawn)
         self.assertNotIn("No Fresh Start needed right now", drawn)
+
+    def test_return_to_session_focuses_the_tool_rather_than_copying_a_brief(self) -> None:
+        """A blocked session is alive and stopped on a permission prompt. It
+        needs an answer in the tool, so the button asks the server to focus it.
+        It used to copy a target=generic Fresh Start brief and tell you to
+        paste it -- which abandons work that only needed a yes."""
+        out = self._render_overlay_for(
+            {
+                "fingerprint": "fp-1",
+                "session_id": "sess-1",
+                "signal_kind": "session_blocked",
+                "action": "return_session",
+                "severity": "warning",
+                "reason": "Waiting for permission. This session cannot continue until you answer it.",
+                "title": "A session is waiting for you",
+                "primary_label": "Return to session",
+            },
+            runtime_return={"ok": True, "message": "Opened exact chat link."},
+            click_primary=True,
+        )
+
+        self.assertIn("POST /api/runtime-return", out)
+        self.assertNotIn("/api/handoff-basic", out)
+        self.assertIn("Opened exact chat link.", out)
+
+    def test_return_to_session_says_why_when_there_is_nothing_to_attach_to(self) -> None:
+        """A browser session has no deep link, so the return can fail for an
+        ordinary reason. Reporting a return that did not happen is the failure
+        this mode exists to stop, so it names the reason and leaves the
+        evidence one click away."""
+        out = self._render_overlay_for(
+            {
+                "fingerprint": "fp-1",
+                "session_id": "sess-1",
+                "signal_kind": "session_blocked",
+                "action": "return_session",
+                "severity": "warning",
+                "reason": "Waiting for permission. This session cannot continue until you answer it.",
+                "title": "A session is waiting for you",
+                "primary_label": "Return to session",
+            },
+            runtime_return={"ok": False, "message": "No runtime process is attached to this session."},
+            click_primary=True,
+        )
+
+        self.assertIn("Could not return you to the session", out)
+        self.assertIn("No runtime process is attached to this session.", out)
+        self.assertIn("/?session=sess-1", out)
+
+    def test_return_failure_prefers_the_servers_own_reason(self) -> None:
+        """perform_runtime_return answers with `message`; the not-found path
+        answers with `error`. Falling back to our own generic sentence when the
+        server said something specific throws away the useful half."""
+        out = self._render_overlay_for(
+            {
+                "fingerprint": "fp-1",
+                "session_id": "sess-1",
+                "signal_kind": "session_blocked",
+                "action": "return_session",
+                "severity": "warning",
+                "reason": "Waiting for permission.",
+                "title": "A session is waiting for you",
+                "primary_label": "Return to session",
+            },
+            runtime_return={"ok": False, "error": "session not found"},
+            click_primary=True,
+        )
+
+        self.assertIn("session not found", out)
+        self.assertNotIn("AIWatcher could not reach the tool from here.", out)
+
+    def test_return_mode_keeps_the_secondary_inspect_button(self) -> None:
+        """Inspect is a different act from returning, so unlike inspect mode --
+        where a second button would repeat the primary -- it stays offered."""
+        drawn = self._render_overlay_for(            {
+                "fingerprint": "fp-1",
+                "session_id": "sess-1",
+                "signal_kind": "session_blocked",
+                "action": "return_session",
+                "severity": "warning",
+                "reason": "Waiting for permission. This session cannot continue until you answer it.",
+                "title": "A session is waiting for you",
+                "primary_label": "Return to session",
+            })
+
+        self.assertIn("Return to session", drawn)
+        self.assertIn('id="inspect"', drawn)
 
     def test_overlay_does_not_borrow_another_sessions_bubble(self) -> None:
         """handoff_bubble is whichever session the dashboard is worried about,

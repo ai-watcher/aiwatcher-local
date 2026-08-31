@@ -119,24 +119,42 @@ COMPANION_BAR_SIGNAL_KINDS = frozenset({
 })
 
 
-# Actions whose primary button reviews evidence instead of putting a brief on
-# the clipboard.
+# What the primary button does, per action.
 #
-# A loop is here because you cannot write a useful next step for a run that is
-# repeating -- you have to look at what it is repeating. `switch_tool` is here
-# because "Review switch options" was copying a `target=generic` Fresh Start
-# brief and closing: not a switch, and not a review either. Opening the session
-# reaches the Fresh Start drawer, which already offers a per-tool target for
-# the brief, so the choice is presented rather than made for you.
+# The table above says what the button is *called*; this says what it must then
+# *do*. They are one decision, kept in one place on purpose: a label and a
+# handler chosen independently is exactly how "Review switch options" came to
+# copy a `target=generic` Fresh Start brief, and how "Return to session" came to
+# copy one too.
 #
-# The overlay page keeps its own mapping in PRIMARY_MODES in web/overlay.js,
-# because that one names functions on the page and cannot import this. The two
-# agree on every kind except `return_session`, which inspects on the page and
-# still copies here. The bar owns that kind (COMPANION_BAR_SIGNAL_KINDS), so
-# the desktop window only sees it with the bar off -- reachable, but rarer, and
-# not fixed here. It is the same label-versus-behaviour split: a button reading
-# "Return to session" that puts a brief on the clipboard.
-INSPECT_ACTIONS = frozenset({"recover_loop", "switch_tool"})
+#   copy    -- put a brief on the clipboard
+#   inspect -- open the session in the dashboard, to look at the evidence
+#   return  -- focus the tool the session is already running in
+#
+# `return` exists because a blocked session is not a session you should hand
+# off. It is alive and waiting on a permission prompt, and it needs an answer
+# in the tool, not a brief pasted into a fresh chat that abandons it. A loop
+# and runway pressure inspect instead: you cannot write a useful next step for
+# a run that is repeating without looking at what it repeats, and the switch
+# targets live in the session drawer.
+#
+# overlay.js keeps the same mapping in its own PRIMARY_MODES, because that one
+# names functions on the page and cannot import this. Keep them in step.
+PRIMARY_MODE_FOR_ACTION: dict[str, str] = {
+    "return_session": "return",
+    "recover_loop": "inspect",
+    "switch_tool": "inspect",
+    "fresh_chat": "copy",
+    "continue_focused": "copy",
+}
+
+# Copy is the fallback because it is the only mode that needs no attachment and
+# no live session: worse than the right action, never wrong enough to mislead.
+DEFAULT_PRIMARY_MODE = "copy"
+
+
+def primary_mode_for_action(action: str) -> str:
+    return PRIMARY_MODE_FOR_ACTION.get(action, DEFAULT_PRIMARY_MODE)
 
 
 def presentation_for_signal(signal_kind: str, reason: str) -> dict[str, str]:

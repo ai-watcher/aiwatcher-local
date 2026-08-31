@@ -43,6 +43,13 @@ jobs:
       - name: Compile
         run: python -m compileall aiwatcher_cli
       - name: Unit tests
+        env:
+          # One macOS job owns the swiftc typecheck of the overlay source. It
+          # needs the macOS SDK, it is the slowest single test in the suite,
+          # and the source it checks does not vary by Python version -- running
+          # it on all four macOS jobs buys nothing. Outside CI it runs on any
+          # Mac, so a developer still gets it without matching a version.
+          AIWATCHER_SWIFT_TYPECHECK: ${{ (matrix.os == 'macos-latest' && matrix.python-version == '3.13') && '1' || '0' }}
         run: python -m unittest discover -s tests -v
       - name: CLI help
         run: aiwatcher --help
