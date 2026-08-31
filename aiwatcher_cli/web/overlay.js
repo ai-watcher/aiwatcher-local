@@ -88,6 +88,33 @@ Continue only the smallest checkpoint, run the narrowest useful verification, an
   await recordAmbientAction('acted');
   await copyText(brief, 'Focused next step copied');
 }
+async function returnToSession(bubble) {
+  await recordAmbientAction('acted');
+  let returned = null;
+  try {
+    const res = await fetch('/api/runtime-return', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: bubble.session_id || '' }),
+    });
+    returned = await res.json();
+  } catch (error) {}
+  if (returned && returned.ok) {
+    renderSaved(returned.message || 'Opened your AI tool. Answer it there to continue.');
+    return;
+  }
+  // There is not always something to attach to -- a browser session has no
+  // deep link. Say why and leave the evidence one click away, rather than
+  // reporting a return that did not happen.
+  // perform_runtime_return answers with `message`; the not-found path answers
+  // with `error`. Prefer whichever the server actually said over our own
+  // generic sentence -- "no runtime process is attached" is the useful half.
+  const reason = (returned && (returned.message || returned.error))
+    || 'AIWatcher could not reach the tool from here.';
+  const target = `/?session=${encodeURIComponent(bubble.session_id || '')}`;
+  document.getElementById('bubble').innerHTML = `<div class="top"><div><h1>Could not return you to the session</h1><p>${esc(reason)}</p></div><span class="badge">warning</span></div>
+    <div class="body"><div class="actions"><a class="primary" href="${target}">Open the session in AIWatcher</a><button onclick="window.close()">Close</button></div></div>`;
+}
 async function inspectIntervention(bubble) {
   await recordAmbientAction('acted');
   window.location.href = `/?session=${encodeURIComponent(bubble.session_id || '')}`;
@@ -103,7 +130,10 @@ async function dismissIntervention() {
 // Which button handler an action wants. This stays here because it names
 // functions on this page; the wording does not, and no longer lives here.
 const PRIMARY_MODES = {
-  return_session: 'inspect',
+  // Not 'inspect'. A blocked session is alive and stopped on a permission
+  // prompt: it needs an answer in the tool, and opening AIWatcher is not that
+  // any more than copying a Fresh Start brief was.
+  return_session: 'return',
   recover_loop: 'inspect',
   continue_focused: 'focused',
   fresh_chat: 'fresh_chat',
@@ -180,6 +210,7 @@ function renderBubble(bubble, intervention) {
   </div>
   <div class="foot">Local-only. Prompt/source content is not stored in this decision.</div>`;
   document.getElementById('primaryAction').onclick = () => {
+    if (presentation.primaryMode === 'return') return returnToSession(bubble);
     if (presentation.primaryMode === 'inspect') return inspectIntervention(bubble);
     if (presentation.primaryMode === 'focused') return copyFocusedBrief(bubble, intervention || {});
     return copyHandoff(bubble, 'copy_handoff');

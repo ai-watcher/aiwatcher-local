@@ -1725,13 +1725,64 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertEqual(kwargs["primary_mode"], "inspect")
         self.assertEqual(kwargs["primary_label"], "Review switch options")
 
-    def test_inspect_actions_are_real_actions(self) -> None:
-        """A name here that no presentation emits routes nothing, and reads as
-        coverage the button does not have."""
+    def test_blocked_session_overlay_returns_rather_than_copying(self) -> None:
+        """The strongest signal in the product had the weakest action: the
+        desktop window took `copy`, so a button reading "Return to session"
+        put a Fresh Start brief on the clipboard and said "Paste it to
+        continue" -- for a session that had only stopped to ask a question."""
+        row = session(1, project="/repo/orcha")
+        row.surface = "cli"
+        args = SimpleNamespace(
+            days=1,
+            interval=15,
+            once=True,
+            cost_threshold=5.0,
+            calls_threshold=250,
+            tokens_threshold=500_000,
+            target="generic",
+            notify=False,
+            overlay=True,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(cli, "get_baselines", return_value={}),
+                patch.object(cli, "safe_runtime_processes", return_value=[]),
+                patch.object(cli, "_watch_status", return_value={
+                    "action": "return to session",
+                    "signal_kind": "session_blocked",
+                    "reason": "Waiting for permission. This session stopped and cannot continue.",
+                    "health": None,
+                    "loop": None,
+                    "velocity": None,
+                    "runway": None,
+                }),
+                patch.object(cli, "_open_handoff_overlay", return_value=(True, "native")) as overlay,
+                patch("sys.stdout", io.StringIO()),
+            ):
+                cli._print_watch_status_card(row, [row], args, [], {}, {})
+
+        overlay.assert_called_once()
+        kwargs = overlay.call_args.kwargs
+        self.assertEqual(kwargs["primary_mode"], "return")
+        self.assertEqual(kwargs["primary_label"], "Return to session")
+
+    def test_every_action_has_a_declared_primary_mode(self) -> None:
+        """An action missing from the map silently falls back to copying a
+        brief, which is how this class of defect keeps arriving: the label
+        changes, nobody names the behaviour, and copy is what happens."""
         from aiwatcher_cli import runtime_nudge
 
         emitted = {action for _, _, action in runtime_nudge._PRESENTATIONS.values()}
-        self.assertTrue(runtime_nudge.INSPECT_ACTIONS.issubset(emitted))
+        self.assertEqual(emitted - set(runtime_nudge.PRIMARY_MODE_FOR_ACTION), set())
+        # And nothing in the map that no presentation emits: a mode for an
+        # action that never ships reads as coverage the button does not have.
+        self.assertEqual(set(runtime_nudge.PRIMARY_MODE_FOR_ACTION) - emitted, set())
+        self.assertEqual(
+            set(runtime_nudge.PRIMARY_MODE_FOR_ACTION.values()) | {runtime_nudge.DEFAULT_PRIMARY_MODE},
+            {"copy", "inspect", "return"},
+        )
 
     def test_open_handoff_overlay_defers_signals_the_companion_bar_presents(self) -> None:
         with (

@@ -106,11 +106,11 @@ from .receipt import (
 from .runtime_attachment import runtime_attachment_for_session, safe_runtime_processes
 from .runtime_nudge import (
     COMPANION_BAR_SIGNAL_KINDS,
-    INSPECT_ACTIONS,
     MAX_ACTIVE_IDLE_SECONDS,
     build_runtime_nudge,
     foreground_tool,
     presentation_for_signal,
+    primary_mode_for_action,
 )
 from .outcome_evidence import (
     VALID_EVIDENCE_OUTCOMES,
@@ -5835,7 +5835,7 @@ def _print_watch_status_card(
                     intervention_fingerprint=fingerprint,
                     signal_kind=str(presentation["signal_kind"]),
                     primary_label=primary_label,
-                    primary_mode="inspect" if presentation["action_mode"] in INSPECT_ACTIONS else "copy",
+                    primary_mode=primary_mode_for_action(str(presentation["action_mode"])),
                     runtime_action_available=attachment.available and getattr(attachment, "level", "") != "app",
                 )
                 print(f"  Overlay: {'opened' if overlay_ok else 'not opened'} ({overlay_detail})")

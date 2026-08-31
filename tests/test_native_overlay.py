@@ -22,6 +22,20 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertEqual(config.primary_mode, "copy")
         self.assertEqual(config.primary_label, "Copy fresh-session brief")
 
+    def test_blocked_session_returns_rather_than_handing_off(self) -> None:
+        config = overlay_config("session_blocked")
+
+        self.assertEqual(config.primary_mode, "return")
+        self.assertEqual(config.primary_label, "Return to session")
+        # Not a handoff: the session is waiting, not heavy.
+        self.assertNotIn("fresh", config.title.lower())
+        self.assertNotIn("brief", config.primary_label.lower())
+
+    def test_waiting_aliases_reach_the_blocked_session_config(self) -> None:
+        for alias in ("waiting", "session_waiting", "blocked"):
+            with self.subTest(alias=alias):
+                self.assertEqual(native_overlay._normalize_signal_kind(alias), "session_blocked")
+
     def test_loop_prioritizes_inspection(self) -> None:
         config = overlay_config("loop", action_endpoint_available=True)
 
@@ -65,6 +79,33 @@ class NativeOverlayConfigTests(unittest.TestCase):
 
         self.assertIn('_normalize_signal_kind(signal_kind) == "critical_context"', source)
         self.assertIn('_record_decision(base, session_id, "copy_handoff"', source)
+
+    def test_tk_overlay_returns_without_touching_the_clipboard(self) -> None:
+        source = inspect.getsource(native_overlay.run_native_overlay)
+
+        self.assertIn('if primary_mode == "return":', source)
+        self.assertIn("_runtime_return_result(base, session_id)", source)
+        # The handler itself never touches the clipboard, and the dispatch
+        # reaches it before the copy path. A brief on the clipboard is the
+        # thing this mode exists to stop.
+        handler = source.split("def return_to_session()")[1].split("def primary_action()")[0]
+        self.assertNotIn("clipboard_append", handler)
+        self.assertNotIn("clipboard_clear", handler)
+        dispatch = source.split("def primary_action()")[1]
+        self.assertLess(
+            dispatch.index('if primary_mode == "return":'),
+            dispatch.index("clipboard_append"),
+        )
+
+    def test_swift_overlay_returns_and_reports_why_it_could_not(self) -> None:
+        source = native_overlay.MACOS_SWIFT_OVERLAY
+
+        self.assertIn('if primaryMode == "return" {', source)
+        self.assertIn("func requestRuntimeReturnResult()", source)
+        self.assertIn("Could not reach the tool from here", source)
+        # Unlike the fire-and-forget call, this one waits: a button that
+        # reports a return has to know whether one happened.
+        self.assertIn("sem.wait(timeout: .now() + 4)", source)
 
     def test_macos_presence_is_collapsed_nonactivating_companion(self) -> None:
         source = native_overlay.MACOS_SWIFT_PRESENCE
@@ -211,6 +252,34 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("--tray", source)
         self.assertIn("run_native_tray", source)
         self.assertIn("run_native_presence", source)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class MacosSwiftOverlaySourceTests(unittest.TestCase):
+    def test_swift_overlay_source_typechecks(self) -> None:
+        """The Swift companion is the macOS delivery path and is stored as a
+        Python string, so nothing parses it until a developer on a Mac triggers
+        an overlay. A typo here is a window that never opens, reported as
+        "Overlay: opened". swiftc is present on the macOS CI runners."""
+        import os
+        import shutil as _shutil
+        import subprocess
+        import tempfile
+
+        swiftc = _shutil.which("swiftc")
+        if not swiftc:
+            self.skipTest("swiftc not available to typecheck the overlay source")
+        with tempfile.NamedTemporaryFile("w", suffix=".swift", delete=False, encoding="utf-8") as handle:
+            handle.write(native_overlay.MACOS_SWIFT_OVERLAY)
+            path = handle.name
+        try:
+            completed = subprocess.run([swiftc, "-typecheck", path], capture_output=True, text=True)
+        finally:
+            os.unlink(path)
+        self.assertEqual(completed.returncode, 0, f"Swift overlay source does not typecheck:\n{completed.stderr}")
 
 
 if __name__ == "__main__":
