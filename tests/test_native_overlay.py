@@ -269,6 +269,13 @@ class MacosSwiftOverlaySourceTests(unittest.TestCase):
         toolchain too, and it typechecks this file right up to `import Cocoa`,
         which is macOS-only. Checking for the compiler alone turned a
         platform-specific source file into a failure on every Linux job.
+
+        In CI one macOS job owns it (see AIWATCHER_SWIFT_TYPECHECK in
+        ci.yml): this source does not vary by Python version, so four macOS
+        jobs would pay for the same answer. The gate is on the flag rather
+        than on a version number so that a developer on a Mac still gets the
+        check whatever Python they run -- the system one here is 3.9, which
+        the macOS matrix does not even cover.
         """
         import os
         import shutil as _shutil
@@ -279,6 +286,8 @@ class MacosSwiftOverlaySourceTests(unittest.TestCase):
         swiftc = _shutil.which("swiftc")
         if _sys.platform != "darwin" or not swiftc:
             self.skipTest("the macOS SDK is needed to typecheck a Cocoa source file")
+        if os.environ.get("CI") and os.environ.get("AIWATCHER_SWIFT_TYPECHECK") != "1":
+            self.skipTest("another macOS job owns the swiftc typecheck in CI")
         with tempfile.NamedTemporaryFile("w", suffix=".swift", delete=False, encoding="utf-8") as handle:
             handle.write(native_overlay.MACOS_SWIFT_OVERLAY)
             path = handle.name
