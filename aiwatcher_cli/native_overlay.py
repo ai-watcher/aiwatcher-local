@@ -508,6 +508,27 @@ final class DragView: NSView {
     override var mouseDownCanMoveWindow: Bool { true }
 }
 
+// The collapsed bubble is one full-size button, so a plain NSButton would
+// swallow every mouse-down and the bubble could not be moved. A press that
+// travels more than a few points becomes a window drag; a press released in
+// place stays a click.
+final class DraggableButton: NSButton {
+    override func mouseDown(with event: NSEvent) {
+        let start = event.locationInWindow
+        while true {
+            guard let next = window?.nextEvent(matching: [.leftMouseUp, .leftMouseDragged]) else { return }
+            if next.type == .leftMouseUp {
+                performClick(nil)
+                return
+            }
+            if abs(next.locationInWindow.x - start.x) + abs(next.locationInWindow.y - start.y) > 3 {
+                window?.performDrag(with: next)
+                return
+            }
+        }
+    }
+}
+
 final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var window: NSPanel!
     var rootView: NSView!
@@ -523,7 +544,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var collapseButton: NSButton!
     var expandButton: NSButton!
     var dragHandle: NSTextField!
-    var dotLabel: NSTextField!
+    var brandMarkView: NSView!
+    var collapsedMarkView: NSView!
+    var collapsedBlueRing: CALayer!
+    var collapsedBadge: NSTextField!
     var primaryURL = dashboardURL
     var primaryAction = "open_url"
     var primarySessionID = ""
@@ -554,8 +578,35 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     let headerHeight: CGFloat = 58
     let rowHeight: CGFloat = 34
     let maxWaitingRows = 3
-    let collapsedWidth: CGFloat = 48
-    let collapsedHeight: CGFloat = 42
+    let collapsedWidth: CGFloat = 44
+    let collapsedHeight: CGFloat = 44
+    let brandBlue = NSColor(calibratedRed: 0.00, green: 0.32, blue: 0.96, alpha: 1)      // #0052F5
+    let brandInkOnDark = NSColor(calibratedRed: 0.86, green: 0.90, blue: 0.96, alpha: 1) // #DCE6F6
+    let brandInkOnLight = NSColor(calibratedRed: 0.08, green: 0.07, blue: 0.08, alpha: 1) // #141314
+
+    // The mark from logo/aiwatcher-mark.svg as layers: a CALayer with a border
+    // and corner radius is a rounded-rect ring. Both rings are 300 wide with a
+    // 40 stroke and an 85 outer corner radius in a 429x349 box; the ink ring
+    // (300x232 at offset 129,117) draws in front. The rings' heights differ on
+    // purpose -- equalising them breaks the fit to the original artwork.
+    func makeBrandMark(height: CGFloat, ink: NSColor) -> (mark: CALayer, blueRing: CALayer, inkRing: CALayer) {
+        let s = height / 349.0
+        let mark = CALayer()
+        mark.frame = CGRect(x: 0, y: 0, width: 429.0 * s, height: height)
+        let blueRing = CALayer()
+        blueRing.frame = CGRect(x: 0, y: height - 260.0 * s, width: 300.0 * s, height: 260.0 * s)
+        blueRing.borderWidth = 40.0 * s
+        blueRing.cornerRadius = 85.0 * s
+        blueRing.borderColor = brandBlue.cgColor
+        mark.addSublayer(blueRing)
+        let inkRing = CALayer()
+        inkRing.frame = CGRect(x: 129.0 * s, y: 0, width: 300.0 * s, height: 232.0 * s)
+        inkRing.borderWidth = 40.0 * s
+        inkRing.cornerRadius = 85.0 * s
+        inkRing.borderColor = ink.cgColor
+        mark.addSublayer(inkRing)
+        return (mark, blueRing, inkRing)
+    }
 
     // One row per waiting session, but only once there is a queue to draw:
     // a single waiting session keeps the original one-line layout.
@@ -590,6 +641,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         window.becomesKeyOnlyIfNeeded = true
         window.isMovableByWindowBackground = true
         window.hasShadow = true
+        // Without this the window's opaque backing shows as dark corners
+        // behind the rounded root view -- a square drawn behind the bubble.
+        window.isOpaque = false
+        window.backgroundColor = .clear
 
         rootView = DragView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         rootView.wantsLayer = true
@@ -606,11 +661,12 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         dragHandle.toolTip = "Drag AIWatcher"
         rootView.addSubview(dragHandle)
 
-        dotLabel = NSTextField(labelWithString: "AI")
-        dotLabel.frame = NSRect(x: 30, y: 31, width: 28, height: 16)
-        dotLabel.font = NSFont.systemFont(ofSize: 10, weight: .bold)
-        dotLabel.textColor = NSColor(calibratedRed: 0.43, green: 0.96, blue: 0.78, alpha: 1)
-        rootView.addSubview(dotLabel)
+        // The dashboard's brand mark, on the bar's dark ground so the ink ring
+        // takes the dark-theme ink (see logo/README.md on the brand branch).
+        brandMarkView = NSView(frame: NSRect(x: 30, y: 16, width: 32, height: 26))
+        brandMarkView.wantsLayer = true
+        brandMarkView.layer?.addSublayer(makeBrandMark(height: 26, ink: brandInkOnDark).mark)
+        rootView.addSubview(brandMarkView)
 
         titleLabel = NSTextField(labelWithString: "AIWatcher")
         titleLabel.frame = NSRect(x: 66, y: 31, width: 220, height: 17)
@@ -683,16 +739,33 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         collapseButton.toolTip = "Minimize AIWatcher"
         rootView.addSubview(collapseButton)
 
-        expandButton = NSButton(title: "AI", target: self, action: #selector(toggleCollapsed))
-        expandButton.frame = NSRect(x: 4, y: 5, width: 40, height: 32)
-        expandButton.bezelStyle = .rounded
-        expandButton.controlSize = .small
+        // Collapsed, the companion is a Loom-style bubble: the mark alone on a
+        // white circle, no ring border and no other chrome. The mark is hosted
+        // in a plain NSView rather than the button's layer -- NSButton uses
+        // flipped layer geometry, which drew the mark upside down.
+        collapsedMarkView = NSView(frame: NSRect(x: 9.7, y: 12, width: 24.6, height: 20))
+        collapsedMarkView.wantsLayer = true
+        let collapsedMark = makeBrandMark(height: 20, ink: brandInkOnLight)
+        collapsedMarkView.layer?.addSublayer(collapsedMark.mark)
+        collapsedBlueRing = collapsedMark.blueRing
+        collapsedMarkView.isHidden = true
+        rootView.addSubview(collapsedMarkView)
+
+        // Waiting-count badge riding the bubble's top-right edge. The white
+        // ground never floods; the count is the only added chrome.
+        collapsedBadge = NSTextField(labelWithString: "")
+        collapsedBadge.frame = NSRect(x: 27, y: 27, width: 16, height: 16)
+        collapsedBadge.font = NSFont.systemFont(ofSize: 9, weight: .bold)
+        collapsedBadge.textColor = NSColor.white
+        collapsedBadge.alignment = .center
+        collapsedBadge.wantsLayer = true
+        collapsedBadge.layer?.cornerRadius = 8
+        collapsedBadge.isHidden = true
+        rootView.addSubview(collapsedBadge)
+
+        expandButton = DraggableButton(title: "", target: self, action: #selector(toggleCollapsed))
+        expandButton.frame = NSRect(x: 0, y: 0, width: 44, height: 44)
         expandButton.isBordered = false
-        expandButton.font = NSFont.systemFont(ofSize: 12, weight: .heavy)
-        expandButton.wantsLayer = true
-        expandButton.layer?.cornerRadius = 16
-        expandButton.layer?.borderWidth = 1
-        expandButton.layer?.borderColor = NSColor(calibratedRed: 0.43, green: 0.96, blue: 0.78, alpha: 0.44).cgColor
         expandButton.toolTip = "Open AIWatcher Companion"
         expandButton.isHidden = true
         rootView.addSubview(expandButton)
@@ -1090,26 +1163,30 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
     func applyVisibility() {
         if collapsed {
-            for view in [dragHandle, dotLabel, titleLabel, subtitleLabel, primaryButton, continueButton, skipButton, planButton, askButton, scanButton, consoleButton, collapseButton] {
+            for view in [dragHandle, brandMarkView, titleLabel, subtitleLabel, primaryButton, continueButton, skipButton, planButton, askButton, scanButton, consoleButton, collapseButton] {
                 view?.isHidden = true
             }
             for view in rowDots { view.isHidden = true }
             for label in rowLabels { label.isHidden = true }
             for button in rowButtons { button.isHidden = true }
+            collapsedMarkView.isHidden = false
+            collapsedBadge.isHidden = waitingCount <= 0
             expandButton.isHidden = false
             return
         }
+        collapsedMarkView.isHidden = true
+        collapsedBadge.isHidden = true
         // The header band keeps its one-line layout; with queue rows drawn
         // below it, every header frame shifts up by the rows area (AppKit's
         // origin is the bottom-left corner).
         let rowsShown = visibleWaitingRows
         let yOff = CGFloat(rowsShown) * rowHeight
         dragHandle.isHidden = false
-        dotLabel.isHidden = false
+        brandMarkView.isHidden = false
         titleLabel.isHidden = false
         subtitleLabel.isHidden = false
         dragHandle.frame = NSRect(x: 10, y: 21 + yOff, width: 18, height: 16)
-        dotLabel.frame = NSRect(x: 30, y: 31 + yOff, width: 28, height: 16)
+        brandMarkView.frame = NSRect(x: 30, y: 16 + yOff, width: 32, height: 26)
         collapseButton.frame = NSRect(x: 538, y: 37 + yOff, width: 18, height: 18)
         let attention = needsAttentionState()
         // With a queue on screen each row carries its own Open button, so the
@@ -1194,30 +1271,32 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         applyVisibility()
         let needsAttention = needsAttentionState()
         let dark = NSColor(calibratedRed: 0.035, green: 0.052, blue: 0.078, alpha: 0.94).cgColor
-        let quietCollapsed = NSColor(calibratedRed: 0.91, green: 0.96, blue: 1.00, alpha: 0.88).cgColor
         let orangeColor = pulseOn
             ? NSColor(calibratedRed: 0.93, green: 0.42, blue: 0.14, alpha: 0.96)
             : NSColor(calibratedRed: 0.72, green: 0.27, blue: 0.09, alpha: 0.94)
-        rootView.layer?.backgroundColor = (collapsed && needsAttention) ? orangeColor.cgColor : (collapsed ? quietCollapsed : dark)
+        // Collapsed, the bubble stays white in every state. Attention is
+        // carried by the mark itself -- the blue ring is the one that turns
+        // orange and pulses, the same job it does in the dashboard favicon --
+        // rather than by flooding the ground.
+        rootView.layer?.backgroundColor = collapsed
+            ? NSColor(calibratedRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.97).cgColor
+            : dark
+        rootView.layer?.borderWidth = collapsed ? 0 : 1
         rootView.layer?.borderColor = needsAttention
             ? NSColor(calibratedRed: 1.00, green: 0.63, blue: 0.24, alpha: 0.95).cgColor
-            : (collapsed
-                ? NSColor(calibratedRed: 0.26, green: 0.66, blue: 0.82, alpha: 0.92).cgColor
-                : NSColor(calibratedRed: 0.34, green: 0.52, blue: 0.74, alpha: 0.72).cgColor)
+            : NSColor(calibratedRed: 0.34, green: 0.52, blue: 0.74, alpha: 0.72).cgColor
         primaryButton.layer?.backgroundColor = needsAttention ? orangeColor.cgColor : NSColor.clear.cgColor
-        expandButton.layer?.backgroundColor = needsAttention
-            ? orangeColor.cgColor
-            : NSColor(calibratedRed: 0.95, green: 0.99, blue: 1.00, alpha: 0.96).cgColor
-        expandButton.layer?.borderColor = needsAttention
-            ? NSColor(calibratedRed: 1.0, green: 0.72, blue: 0.36, alpha: 0.96).cgColor
-            : NSColor(calibratedRed: 0.23, green: 0.64, blue: 0.80, alpha: 0.88).cgColor
         primaryButton.contentTintColor = needsAttention ? NSColor.white : NSColor.controlTextColor
-        // The pill is what is on screen all day; a waiting count is the one
-        // number worth carrying there. Any other state keeps the "AI" mark.
-        expandButton.title = waitingCount > 0 ? String(waitingCount) : "AI"
-        expandButton.contentTintColor = needsAttention
-            ? NSColor.white
-            : NSColor(calibratedRed: 0.05, green: 0.15, blue: 0.20, alpha: 1.0)
+        collapsedBlueRing.borderColor = (needsAttention ? orangeColor : brandBlue).cgColor
+        // The bubble is what is on screen all day; a waiting count is the one
+        // number worth carrying there. It rides as a small badge on the white
+        // ground -- the ground itself never floods, per the brand rule that
+        // attention is carried by the mark's blue ring turning orange.
+        collapsedBadge.stringValue = waitingCount > 0 ? String(waitingCount) : ""
+        collapsedBadge.layer?.backgroundColor = orangeColor.cgColor
+        if collapsed {
+            collapsedBadge.isHidden = waitingCount <= 0
+        }
         applyWindowVisibility()
     }
 
@@ -1785,6 +1864,44 @@ def _foreground_looks_like_ai_work() -> bool:
     return True
 
 
+def _draw_brand_mark(canvas: object, height: float, blue: str, ink: str) -> None:
+    """Draw the two-ring mark from logo/aiwatcher-mark.svg on a Tk canvas.
+
+    Tk has no rounded-rectangle primitive, so each ring is four lines and four
+    arcs on the stroke centerline. The geometry is the mark's own: both rings
+    300 wide with a 40 stroke and an 85 outer corner radius in a 429x349 box,
+    the ink ring (300x232 at offset 129,117) drawn in front. The rings' heights
+    differ on purpose -- equalising them breaks the fit to the original artwork.
+    """
+    s = height / 349.0
+    stroke = max(2.0, 40.0 * s)
+
+    def ring(x: float, y: float, w: float, h: float, colour: str) -> None:
+        r = 85.0 * s - stroke / 2.0
+        x0, y0 = x + stroke / 2.0, y + stroke / 2.0
+        x1, y1 = x + w - stroke / 2.0, y + h - stroke / 2.0
+        for ax, ay, bx, by in (
+            (x0 + r, y0, x1 - r, y0),
+            (x0 + r, y1, x1 - r, y1),
+            (x0, y0 + r, x0, y1 - r),
+            (x1, y0 + r, x1, y1 - r),
+        ):
+            canvas.create_line(ax, ay, bx, by, fill=colour, width=stroke)
+        for cx, cy, start in (
+            (x0, y0, 90.0),
+            (x1 - 2.0 * r, y0, 0.0),
+            (x0, y1 - 2.0 * r, 180.0),
+            (x1 - 2.0 * r, y1 - 2.0 * r, 270.0),
+        ):
+            canvas.create_arc(
+                cx, cy, cx + 2.0 * r, cy + 2.0 * r,
+                start=start, extent=90.0, style="arc", outline=colour, width=stroke,
+            )
+
+    ring(0.0, 0.0, 300.0 * s, 260.0 * s, blue)
+    ring(129.0 * s, 117.0 * s, 300.0 * s, 232.0 * s, ink)
+
+
 def run_native_presence(
     url: str,
     *,
@@ -1817,8 +1934,8 @@ def run_native_presence(
 
     expanded_width = 560
     expanded_height = 58
-    collapsed_width = 48
-    collapsed_height = 42
+    collapsed_width = 44
+    collapsed_height = 44
     row_height = 30
     max_waiting_rows = 3
     screen_width = int(root.winfo_screenwidth())
@@ -1835,7 +1952,6 @@ def run_native_presence(
     style.configure("Presence.TFrame", background="#090d14")
     style.configure("PresenceTitle.TLabel", background="#090d14", foreground="#f7fbff", font=("Helvetica", 11, "bold"))
     style.configure("PresenceMuted.TLabel", background="#090d14", foreground="#a8b6ca", font=("Helvetica", 9))
-    style.configure("PresenceDot.TLabel", background="#090d14", foreground="#6df5c3", font=("Helvetica", 10, "bold"))
     style.configure("PresenceDrag.TLabel", background="#090d14", foreground="#8ea3bd", font=("Helvetica", 10, "bold"))
     style.configure("Presence.TButton", font=("Helvetica", 9, "bold"), padding=(6, 3))
     style.configure("PresenceAttention.TButton", font=("Helvetica", 9, "bold"), padding=(6, 3))
@@ -1872,9 +1988,14 @@ def run_native_presence(
     waiting_count_var = tk.IntVar(value=0)
     drag = ttk.Label(frame, text="::", style="PresenceDrag.TLabel", cursor="fleur")
     drag.pack(side="left", padx=(0, 6))
+    # The brand mark sits beside both lines of copy, as on the dashboard. The
+    # expanded bar is always the dark ground, so the ink ring takes the
+    # dark-theme ink.
+    mark_canvas = tk.Canvas(frame, width=32, height=26, bg="#090d14", highlightthickness=0, bd=0)
+    _draw_brand_mark(mark_canvas, height=26.0, blue="#0052F5", ink="#DCE6F6")
+    mark_canvas.pack(side="left", padx=(0, 8), before=left)
     title_stack = ttk.Frame(left, style="Presence.TFrame")
     title_stack.pack(anchor="w")
-    ttk.Label(title_stack, text="AI", style="PresenceDot.TLabel").pack(side="left", padx=(0, 6))
     ttk.Label(title_stack, textvariable=title_var, style="PresenceTitle.TLabel").pack(side="left")
     ttk.Label(left, textvariable=subtitle_var, style="PresenceMuted.TLabel", wraplength=250).pack(anchor="w")
 
@@ -2315,39 +2436,39 @@ def run_native_presence(
             "clipboard_confirm", "session_waiting",
         }
         attention_bg = "#ed6a24" if pulse_var.get() else "#b84816"
-        quiet_collapsed_bg = "#eef8fb"
-        shell_bg = attention_bg if collapsed.get() and needs_attention else (quiet_collapsed_bg if collapsed.get() else "#090d14")
+        # Collapsed, the bubble stays white in every state; attention is
+        # carried by the mark's blue ring turning orange, the same job it does
+        # in the dashboard favicon -- not by flooding the ground.
+        shell_bg = "#ffffff" if collapsed.get() else "#090d14"
         root.configure(bg=shell_bg)
         style.configure("Presence.TFrame", background=shell_bg)
         style.configure("PresenceTitle.TLabel", background=shell_bg)
         style.configure("PresenceMuted.TLabel", background=shell_bg)
-        style.configure(
-            "PresenceDot.TLabel",
-            background=shell_bg,
-            foreground="#0e3342" if collapsed.get() and not needs_attention else "#6df5c3",
-        )
         style.configure("PresenceDrag.TLabel", background=shell_bg)
-        style.configure(
-            "PresenceCollapsed.TButton",
-            background=quiet_collapsed_bg,
-            foreground="#0e3342",
-            bordercolor="#3fa6c7",
-            lightcolor="#dff7ff",
-            darkcolor="#7eb8c8",
-            font=("Helvetica", 9, "bold"),
-            padding=(6, 3),
-        )
         style.configure(
             "PresenceAttention.TButton",
             background=attention_bg if needs_attention else "#f2f6fb",
             foreground="#ffffff" if needs_attention else "#111827",
         )
         primary_button.configure(style="PresenceAttention.TButton" if needs_attention else "Presence.TButton")
-        collapsed_button.configure(style="PresenceAttention.TButton" if needs_attention else "PresenceCollapsed.TButton")
-        # The pill is what is on screen all day; a waiting count is the one
-        # number worth carrying there. Any other state keeps the "AI" mark.
+        collapsed_canvas.configure(bg="#ffffff")
+        collapsed_canvas.delete("all")
+        _draw_brand_mark(
+            collapsed_canvas, height=18.0,
+            blue=attention_bg if needs_attention else "#0052F5",
+            ink="#141314",
+        )
+        collapsed_canvas.move("all", 3.0, 7.0)
+        # The bubble is what is on screen all day; a waiting count is the one
+        # number worth carrying there. It rides as a small badge on the white
+        # ground -- the ground itself never floods, per the brand rule that
+        # attention is carried by the mark's blue ring turning orange.
         waiting_count = int(waiting_count_var.get() or 0)
-        collapsed_button.configure(text=str(waiting_count) if waiting_count > 0 else "AI")
+        if waiting_count > 0:
+            collapsed_canvas.create_oval(26, 2, 42, 18, fill=attention_bg, outline="")
+            collapsed_canvas.create_text(
+                34, 10, text=str(waiting_count), fill="#ffffff", font=("Helvetica", 8, "bold"),
+            )
         attention_layout = has_primary_action() and not collapsed.get()
         # With a queue on screen each row carries its own Open button, so the
         # single primary would only duplicate the first row's.
@@ -2456,8 +2577,6 @@ def run_native_presence(
     console_button = ttk.Button(frame, text="UI", width=4, style="Presence.TButton", command=open_dashboard)
     console_button.pack(side="left")
     ttk.Button(frame, text="-", width=2, style="PresenceMini.TButton", command=toggle_collapsed).pack(side="left", padx=(4, 0))
-    collapsed_button = ttk.Button(collapsed_frame, text="AI", width=4, style="Presence.TButton", command=toggle_collapsed)
-    collapsed_button.pack(fill="both", expand=True)
     rows_frame = ttk.Frame(root, style="Presence.TFrame")
     row_widgets: list[tuple[ttk.Frame, ttk.Label]] = []
     for row_index in range(max_waiting_rows):
@@ -2470,6 +2589,37 @@ def run_native_presence(
             command=lambda index=row_index: open_waiting_row(index),
         ).pack(side="right")
         row_widgets.append((row_frame, row_label))
+    # The collapsed state is a Loom-style bubble: the mark alone on a plain
+    # white ground, no lettering and no border chrome. update_attention_style
+    # repaints it, turning the mark's blue ring orange when attention is due.
+    collapsed_canvas = tk.Canvas(collapsed_frame, width=28, height=32, bg="#ffffff", highlightthickness=0, bd=0)
+    collapsed_canvas.pack(fill="both", expand=True)
+
+    # The canvas covers the whole bubble, so it has to carry the move as well
+    # as the click: a press that travels more than a few pixels drags the
+    # window, and a press released in place expands the bar.
+    collapsed_press = {"x": 0, "y": 0, "moved": False}
+
+    def collapsed_button_press(event: tk.Event) -> None:
+        collapsed_press["x"] = int(event.x_root)
+        collapsed_press["y"] = int(event.y_root)
+        collapsed_press["moved"] = False
+        drag_start["x"] = int(event.x_root) - int(root.winfo_rootx())
+        drag_start["y"] = int(event.y_root) - int(root.winfo_rooty())
+
+    def collapsed_button_motion(event: tk.Event) -> None:
+        if abs(int(event.x_root) - collapsed_press["x"]) + abs(int(event.y_root) - collapsed_press["y"]) > 3:
+            collapsed_press["moved"] = True
+        if collapsed_press["moved"]:
+            move_window(event)
+
+    def collapsed_button_release(_event: tk.Event) -> None:
+        if not collapsed_press["moved"]:
+            toggle_collapsed()
+
+    collapsed_canvas.bind("<ButtonPress-1>", collapsed_button_press)
+    collapsed_canvas.bind("<B1-Motion>", collapsed_button_motion)
+    collapsed_canvas.bind("<ButtonRelease-1>", collapsed_button_release)
     set_collapsed(True)
     refresh_state()
     pulse_attention()
