@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import re
+import pathlib
 from types import SimpleNamespace
 
 BS = chr(92)
@@ -933,18 +934,29 @@ class WatchRanksByWhoNeedsYouTest(unittest.TestCase):
 
     def test_every_row_says_why_it_sits_where_it_does(self):
         """Three keys deep and none of them were visible: a reader saw an order
-        and had to trust it."""
+        and had to trust it.
+
+        The middle rung used to spell out the past-the-limit sentence here.
+        That made healthReason a second place the deadline was worked out --
+        the defect test_the_runway_deadline_is_computed_in_one_place exists to
+        stop -- so it now defers to runwayVerdict, which owns that wording. The
+        rung is still there; it is quoted from the one source instead."""
         self.assertIn("Waiting on you", self.reason)
-        self.assertIn("Past the", self.reason)
+        self.assertIn("runwayVerdict(row.chart)", self.reason)
         self.assertIn("Highest per-turn here", self.reason)
+        verdict = js_function_source(self.js, "runwayVerdict")
+        self.assertIn("past the action threshold", verdict)
 
     def test_the_reason_follows_the_same_precedence_as_the_sort(self):
         # Or the explanation drifts from the ordering it explains.
         waiting = self.reason.index("Waiting on you")
-        past = self.reason.index("Past the")
+        past = self.reason.index("runwayVerdict(row.chart)")
         highest = self.reason.index("Highest per-turn here")
         self.assertLess(waiting, past)
         self.assertLess(past, highest)
+        # And each of the three rungs returns, so a lower one cannot outrank a
+        # higher one by falling through to it.
+        self.assertEqual(self.reason.count("return"), 3)
 
     def test_the_rank_and_the_reason_read_one_source(self):
         # A second list of waiting sessions would be a second thing to keep in
@@ -1492,15 +1504,28 @@ class WatchTest(unittest.TestCase):
         self.assertIn("Math.min(...series)", trend)
 
     def test_the_worst_project_leads(self):
+        """The lead card and the quiet rows underneath it were two shapes for
+        one list, and the split forced a decision -- which single session is
+        worth a card -- that the ranking already answers. One row shape now,
+        numbered, worst first. The rule the split existed to serve is unchanged
+        and still tested: the worst thing is the first thing you read."""
         rank = js_function_source(self.js, "healthRank")
         self.assertIn("latest >= critical", rank)
-        self.assertIn("healthLeadCard", self.js)
-        self.assertIn("healthQuietRow", self.js)
+        self.assertNotIn("healthLeadCard", self.js)
+        self.assertNotIn("healthQuietRow", self.js)
+        render = js_function_source(self.js, "renderContextHealth")
+        self.assertIn("healthRank(a, keys)", render)
+        self.assertIn("healthRow(row, waitingById, i)", render)
+        # Numbered from the sorted list, so the position a reader sees is the
+        # position the ranking assigned.
+        row = js_function_source(self.js, "healthRow")
+        self.assertIn("${index + 1}", row)
 
     def test_the_verdict_comes_before_the_marks(self):
-        # Same rule as the session drawer: reach the conclusion, then show the
-        # evidence for it.
-        card = js_function_source(self.js, "healthLeadCard")
+        # Same rule as the session drawer -- and now literally in it. The meter
+        # and the trend moved to the drawer with the rest of the diagnosis, so
+        # this is where "conclusion, then the evidence for it" is enforced.
+        card = js_function_source(self.js, "renderSessionContextHealth")
         self.assertLess(card.index("health-verdict"), card.index("meter-host"))
         self.assertLess(card.index("meter-host"), card.index("trend-host"))
 
@@ -1511,13 +1536,250 @@ class WatchTest(unittest.TestCase):
                      "function runwayCaption(", "drawRunwayMini"):
             with self.subTest(symbol=name):
                 self.assertNotIn(name, self.js)
-        # runwayVerdict survives: the lead card still states the deadline.
+        # runwayVerdict survives: the ranked row's reason and the drawer's
+        # health section both state the deadline through it.
         self.assertIn("function runwayVerdict(", self.js)
 
     def test_projects_are_named_not_pathed(self):
         self.assertIn("function healthProjectName(", self.js)
-        card = js_function_source(self.js, "healthLeadCard")
-        self.assertIn("healthProjectName(row)", card)
+        row = js_function_source(self.js, "healthRow")
+        self.assertIn("healthProjectName(row)", row)
+
+
+class BrandMarkTest(unittest.TestCase):
+    """The mark lives in three places at once and none of them can reference a
+    file: the dashboard is spliced into one self-contained page, and the wheel
+    ships only web/*.{html,css,js}. So the geometry is duplicated by necessity,
+    and these assert the copies still say the same thing.
+
+    logo/aiwatcher-mark.svg is the source of truth. The supplied artwork was a
+    raster in an SVG wrapper, so the mark was refitted as real vector -- see
+    logo/README.md for the numbers and how they were arrived at.
+    """
+
+    # Both rings: 300 outer width, 40 stroke, 85 outer corner radius. The height
+    # difference between them is the part most likely to be "tidied" by someone
+    # who assumes it is a mistake, so it is pinned explicitly.
+    BLUE_RING = 'x="20" y="20" width="260" height="220" rx="65"'
+    INK_RING = 'x="149" y="137" width="260" height="192" rx="65"'
+
+    @classmethod
+    def setUpClass(cls):
+        cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.source = (pathlib.Path(ui.__file__).resolve().parent.parent
+                      / "logo" / "aiwatcher-mark.svg").read_text(encoding="utf-8")
+
+    def test_the_source_of_truth_exists_and_is_vector(self):
+        """The artwork it replaced was a base64 PNG inside an SVG shell, which
+        is not a vector file however it is named."""
+        self.assertIn(self.BLUE_RING, self.source)
+        self.assertIn(self.INK_RING, self.source)
+        self.assertNotIn("<image", self.source)
+        self.assertNotIn("base64", self.source)
+
+    def test_the_brand_mark_is_the_logo(self):
+        # Not a monogram in a tinted tile. The tile put a second blue behind the
+        # ring's own blue and was a container the mark does not need.
+        self.assertIn(self.BLUE_RING, self.html)
+        self.assertIn(self.INK_RING, self.html)
+        self.assertNotIn('class="brand-mark" aria-hidden="true">AW<', self.html)
+        # currentColor is what lets the ink ring invert; a fixed ink would
+        # disappear against the dark page.
+        mark = self.html[self.html.index('class="brand-mark"'):]
+        mark = mark[:mark.index("</svg>")]
+        self.assertIn('stroke="currentColor"', mark)
+        self.assertIn('stroke="var(--brand-blue)"', mark)
+
+    def test_the_ink_inverts_and_the_blue_does_not(self):
+        # The blue is the brand and holds in both themes -- 3.15:1 against the
+        # dark ground, past the 3:1 floor for a graphic. The ink cannot hold.
+        self.assertEqual(self.css.count("--brand-blue: #0052F5;"), 2)
+        self.assertIn("--brand-ink:  #141314;", self.css)
+        self.assertIn("--brand-ink:  #DCE6F6;", self.css)
+
+    def test_the_wordmark_reads_as_the_product_name(self):
+        """It was briefly built from parts -- "AI", a drawn tie, "Watcher" --
+        which read as three words rather than the name and needed an aria-label
+        to say so. The tie is gone, so the heading is simply the name again and
+        needs nothing to translate it."""
+        head = self.html[self.html.index('class="wordmark"'):]
+        head = head[:head.index("</h1>")]
+        self.assertIn("AIWatcher", head)
+        self.assertIn(">Local<", head)
+        self.assertNotIn("aria-label", head)
+        self.assertNotIn("aria-hidden", head)
+        self.assertNotIn("wordmark-tie", self.html)
+        self.assertNotIn("\u221e", self.html)
+
+    def test_local_sits_outside_the_name(self):
+        # "Local" is the qualifier that separates this from the Enterprise link
+        # two controls away, so it is set to read as a qualifier rather than as
+        # part of the name.
+        rule = self.css[self.css.index(".wordmark-local {"):]
+        rule = rule[:rule.index("}")]
+        self.assertIn("--fw-med", rule)
+        self.assertIn("var(--muted)", rule)
+        # And the weight it steps down from is the wordmark's own.
+        wordmark = self.css[self.css.index(".wordmark {"):]
+        self.assertIn("--fw-bold", wordmark[:wordmark.index("}")])
+
+    def test_the_favicon_is_the_mark_carrying_the_state(self):
+        """The favicon is the only part of the tab that reads once the title is
+        truncated, so becoming the logo must not cost the state signal. The ring
+        that is brand blue at rest is the ring that turns amber or red."""
+        favicon = js_function_source(self.js, "faviconFor")
+        self.assertIn("stroke='\" + colour + \"'", favicon)
+        self.assertIn("x='20' y='20' width='260' height='220' rx='65'", favicon)
+        # ...and it is the blue ring that takes it. The ink ring carries no
+        # stroke of its own here -- it is coloured by the style block, which is
+        # what lets it invert.
+        ink = favicon[favicon.index("class='ink'"):]
+        self.assertNotIn("stroke='", ink[:ink.index("/>")])
+        self.assertIn("x='149' y='137' width='260' height='192' rx='65'", favicon)
+        # No status dot competing with the mark at 16px, and no dark tile.
+        self.assertNotIn("<circle", favicon)
+        self.assertNotIn("#070b11", favicon)
+
+    def test_the_favicon_ink_survives_a_dark_tab_strip(self):
+        """Drawn in the brand's near-black it vanished on a dark strip, leaving
+        half a mark. The favicon cannot read the page's theme -- it is not on the
+        page -- so it asks the browser directly, and falls back to the near-black
+        the default light strips want."""
+        self.assertIn("@media(prefers-color-scheme:dark){.ink{stroke:#DCE6F6}}", self.js)
+        self.assertIn(".ink{stroke:#141314}", self.js)
+        # The markup default carries it too, or the first paint is half a mark
+        # for every dark-themed browser until the first refresh.
+        self.assertIn("prefers-color-scheme", self.html)
+
+    def test_the_resting_favicon_is_the_brand_blue(self):
+        # idle used to be a grey dot. At rest the mark is simply the mark.
+        self.assertIn("const FAVICON_REST_BLUE = '#0052F5';", self.js)
+        self.assertNotIn("idle: '#78869a'", self.js)
+        # The default in the markup matches the resting state, or the tab
+        # flickers from one mark to another on every load.
+        self.assertIn("%23" + "0052F5", self.html)
+
+
+class WatchRanksAndTheDrawerDiagnosesTest(unittest.TestCase):
+    """Watch answered two questions in one surface: which session to deal with
+    first, and what is wrong inside the leading one. The second is a diagnosis,
+    and it was only ever available for whichever session happened to rank first
+    -- open any other one and the meter, the trend and the facts strip were not
+    on offer at all.
+
+    Splitting them gives every session the same diagnosis, at the cost of a
+    click. These tests pin the split so a later change cannot quietly put half
+    the diagnosis back on the list and leave the other half in the drawer.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.row = js_function_source(cls.js, "healthRow")
+        cls.drawer = js_function_source(cls.js, "renderSessionContextHealth")
+
+    def test_one_quantity_gets_one_number(self):
+        """The row put "110 turns" in its headroom column beside a reason that
+        read "40+ turns of headroom". Both were true -- the verdict caps at the
+        end of the drawn projection and the column did not -- and side by side
+        they read as a contradiction over a number the chart never reaches."""
+        room = js_function_source(self.js, "headroomLabel")
+        self.assertIn("turns > RUNWAY_MAX_PROJECTED_TURNS", room)
+        self.assertIn("${RUNWAY_MAX_PROJECTED_TURNS}+ turns", room)
+        # And the drawer states it once, in the verdict, rather than repeating
+        # the same two facts as a stat block underneath it.
+        self.assertNotIn("health-hero", self.drawer)
+        self.assertNotIn("headroomLabel", self.drawer)
+        # The session review's own Room left line projected past the end of the
+        # drawn chart too, and now sits in the same drawer as it.
+        verdict = js_function_source(self.js, "verdictLines")
+        self.assertIn("p.turns_to_critical > RUNWAY_MAX_PROJECTED_TURNS", verdict)
+
+    def test_growth_per_turn_is_not_dressed_as_turn_size(self):
+        """runwayVerdict's healthy branch read "At 827/turn" -- the growth rate
+        -- directly above a Room left line reading "115.6k per turn", the turn
+        size. Two quantities differing by two orders of magnitude, phrased the
+        same way, one under the other."""
+        verdict = js_function_source(self.js, "runwayVerdict")
+        # Every branch that quotes the rate says it is a rate.
+        self.assertEqual(
+            verdict.count("Growing ${compactTokens(chart.growth_per_turn_n)}/turn"),
+            verdict.count("growth_per_turn_n"))
+
+    def test_the_diagnosis_lives_in_the_drawer(self):
+        # Matched on the whole attribute, so renaming a class cannot leave the
+        # assertion passing on a prefix of the old name.
+        for mark in ('class="health-verdict"', 'class="meter-host"',
+                     'class="trend-host"', 'class="health-facts"',
+                     "Inferred intent", "Context AIWatcher will carry"):
+            with self.subTest(mark=mark):
+                self.assertIn(mark, self.drawer)
+                self.assertNotIn(mark, self.row)
+
+    def test_the_row_carries_the_ranking_and_nothing_else(self):
+        # Rank, severity, who it is, why it sits there, and the one action.
+        for mark in ('class="rank-n"', "rank-dot", "rank-title",
+                     'class="rank-why"', 'class="rank-act"'):
+            with self.subTest(mark=mark):
+                self.assertIn(mark, self.row)
+
+    def test_the_drawer_reads_the_payload_watch_already_fetched(self):
+        """A second fetch would be a second answer to the same question, and
+        the two could disagree about a session's headroom."""
+        self.assertIn("contextHealthCache = data.context_health || []", self.js)
+        self.assertIn("contextHealthCache", self.drawer)
+        self.assertNotIn("fetch(", self.drawer)
+
+    def test_the_drawer_paints_what_it_wrote(self):
+        # The load loop paints the page. A drawer opened between loads has to
+        # paint its own placeholders or the meter and trend stay empty.
+        self.assertIn("function paintDrawerHealth(", self.js)
+        paint = js_function_source(self.js, "paintDrawerHealth")
+        self.assertIn("drawMeter(", paint)
+        self.assertIn("drawTrend(", paint)
+        # Scoped to the drawer, so it cannot repaint the ranked row's sparkline
+        # with a stale chart.
+        self.assertIn("getElementById('detailContent')", paint)
+
+    def test_one_session_may_own_more_than_one_placeholder(self):
+        """With the drawer open across a refresh, a session id has two hosts --
+        its ranked-row sparkline and the drawer's. Keyed one node per id, the
+        second overwrote the first and one of them was left blank."""
+        self.assertIn("(meterNodes[node.getAttribute('data-meter')] ||= []).push(node)", self.js)
+        self.assertIn("(trendNodes[node.getAttribute('data-trend')] ||= []).push(node)", self.js)
+        self.assertIn("(meterNodes[row.session_id] || []).forEach(node => drawMeter(node, row.chart))", self.js)
+        self.assertIn("(trendNodes[row.session_id] || []).forEach(node => drawTrend(node, row.chart))", self.js)
+
+    def test_the_whole_row_opens_the_session(self):
+        """The title was the only target, and it is the shortest thing on a row
+        the width of the card. The reason and the numbers describe the same
+        session, so the whole row carries the click."""
+        self.assertIn('onclick="selectSession(this.dataset.session)"', self.row)
+        # The controls inside it do something else, so they must not fall
+        # through to it.
+        for control in ("startFreshFromBubble", "Review"):
+            with self.subTest(control=control):
+                head = self.row[:self.row.index(control)]
+                self.assertIn("event.stopPropagation()", head[head.rindex("<button"):])
+        # A div, because it contains buttons -- and no role on it, or it
+        # announces a button containing buttons. Matched against the code with
+        # the comments stripped: the comment says the same words.
+        code = "\n".join(line for line in self.row.split("\n")
+                         if not line.lstrip().startswith("//"))
+        self.assertNotIn("role=", code)
+        # The title stays a real button: a div with an onclick is not reachable
+        # or announced by keyboard. It carries no handler of its own, so
+        # activating it bubbles to the one on the row.
+        self.assertIn('class="link-inline rank-title" type="button"', code)
+        title = code[code.index("rank-title"):]
+        self.assertNotIn("onclick", title[:title.index("</button>")])
+
+    def test_the_row_names_the_session_it_opens(self):
+        # A project can hold several sessions and the row is about exactly one
+        # of them; the title alone says only the project and the tool.
+        self.assertIn("row.session_short", self.row)
 
 
 class WindowSummaryTest(unittest.TestCase):
@@ -1709,11 +1971,17 @@ class HealthCardActionTest(unittest.TestCase):
                 self.assertTrue(action["reason"])
 
     def test_the_button_dispatches_on_the_kind_it_was_given(self):
-        self.assertIn("function runHealthAction", self.js)
+        """runHealthAction and healthActionButton were the indirection between
+        a row and its control. The ranked row writes the control inline, so the
+        kind and the handler are one expression and cannot disagree -- which is
+        what the indirection was there to guarantee."""
+        self.assertNotIn("function runHealthAction", self.js)
+        self.assertNotIn("function healthActionButton", self.js)
         self.assertNotIn('onclick="selectSession(this.dataset.session)">${esc(row.action.label)}', self.js)
-        button = js_function_source(self.js, "healthActionButton")
+        row = js_function_source(self.js, "healthRow")
         # Offering "Start fresh" where no handoff exists would be the same bug again.
-        self.assertIn("row.can_handoff", button)
+        self.assertIn("row.can_handoff", row)
+        self.assertLess(row.index("row.can_handoff"), row.index("startFreshFromBubble"))
 
 
 class FalseAffordanceTest(unittest.TestCase):
@@ -1851,6 +2119,25 @@ class DesignScaleTest(unittest.TestCase):
         cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
         cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
 
+    def test_the_sticky_header_paints_the_page_it_covers(self):
+        """The header was a flat --bg over a body that is a gradient. At the top
+        of the page the body is nearer --ground-deep, so the header sat on it as
+        a visible lighter strip in both themes.
+
+        It has to stay opaque, because content scrolls under it -- so it repeats
+        the body's own ground, fixed to the viewport like the body's, which puts
+        the slice it paints exactly over the slice it covers."""
+        self.assertIn("--page-ground:", self.css)
+        header = self.css[self.css.index("\n    header {"):]
+        header = header[:header.index("\n    }")]
+        self.assertIn("background: var(--page-ground)", header)
+        self.assertIn("background-attachment: fixed", header)
+        # And the body reads the same declaration, so the two cannot drift.
+        body = self.css[self.css.index("\n    body {"):]
+        body = body[:body.index("\n    }")]
+        self.assertIn("background: var(--page-ground)", body)
+        self.assertIn("background-attachment: fixed", body)
+
     def test_the_scales_are_defined(self):
         for token in ("--fs-1", "--fs-2", "--fs-3", "--fs-4", "--fs-5", "--fs-6", "--fs-hero",
                       "--fw-normal", "--fw-med", "--fw-bold",
@@ -1892,7 +2179,7 @@ class DesignScaleTest(unittest.TestCase):
         counts. Both are checked against the rule they actually declare.
         """
         rows = re.findall(r'class="grid kpis"[^>]*>(.*?)</section>', self.html, re.S)
-        self.assertEqual(len(rows), 2, "expected a stat row on Home and on Prove")
+        self.assertGreaterEqual(len(rows), 3, "expected stat rows on Home, Control and Prove")
 
         fixed = re.findall(r"\.kpis \{[^}]*grid-template-columns:\s*([^;]+);", self.css)
         self.assertTrue(fixed, "the stat row declares no columns")
@@ -1911,11 +2198,17 @@ class DesignScaleTest(unittest.TestCase):
         # Home's tiles withhold themselves rather than showing a zero, so the
         # count is 0 to 3 at runtime. A fixed rule would leave a hole exactly
         # when a tile had nothing honest to say.
-        home = next(r for r in rows if "presenceTile" in r)
-        self.assertGreater(home.count('class="card metric-card'), 0)
-        home_rule = re.search(r"#homeStrip \{[^}]*grid-template-columns:\s*([^;]+);", self.css)
-        self.assertIsNotNone(home_rule, "Home's strip declares no columns of its own")
-        self.assertIn("auto-fit", home_rule.group(1))
+        # Home and Control both hold tiles that withhold themselves rather than
+        # showing a zero, so their counts are 0 to 3 at runtime. A fixed rule
+        # would leave a hole exactly when a tile had nothing honest to say.
+        for name, marker in (("homeStrip", "presenceTile"), ("controlStrip", "gateTile")):
+            with self.subTest(strip=name):
+                row = next(r for r in rows if marker in r)
+                self.assertGreater(row.count('class="card metric-card'), 0)
+                rule = re.search(
+                    r"#%s[^{]*\{[^}]*grid-template-columns:\s*([^;]+);" % name, self.css)
+                self.assertIsNotNone(rule, "%s declares no columns of its own" % name)
+                self.assertIn("auto-fit", rule.group(1))
 
     def test_root_declares_a_font_family(self):
         # Without it :root computed to Times New Roman and only body caught Inter.

@@ -666,6 +666,44 @@ function drawerArrivalBlocks(node) {
   if (children.length === 1 && children[0].children.length > 1) return Array.from(children[0].children);
   return children;
 }
+/* Context health for the session the drawer opened.
+ *
+ * This is the diagnosis the Watch lead card used to carry: the verdict, the
+ * meter against the limit, the shape of the climb, and the two scopes of the
+ * facts strip. Watch answers "which one first" and this answers "what is going
+ * on in it", which is the drawer's job -- the same split the rest of the
+ * restructure runs on.
+ *
+ * Emitted with the same data-meter / data-trend hooks the load loop paints, so
+ * the drawing code did not have to learn a second place to look.
+ */
+function renderSessionContextHealth(sessionId) {
+  const row = (contextHealthCache || []).find(item => item.session_id === sessionId);
+  if (!row || !row.chart) return '';
+  const verdict = runwayVerdict(row.chart);
+  return `<section class="detail-section session-health">
+    <h2>Context health</h2>
+    ${verdict ? `<p class="health-verdict"><strong>${esc(verdict.headline)}</strong> &mdash; ${esc(verdict.detail)}</p>` : ''}
+    <div class="meter-host" data-meter="${esc(row.session_id)}"></div>
+    <div class="trend-host" data-trend="${esc(row.session_id)}"></div>
+    <p class="health-facts">${healthFacts(row).map(group => `<span>${esc(group)}</span>`).join('')}</p>
+    ${row.intent_summary || row.context_summary ? `<div class="health-evidence">
+      ${row.intent_summary ? `<div class="label">Inferred intent</div><p>${esc(row.intent_summary)}</p>` : ''}
+      ${row.context_summary ? `<div class="label">Context AIWatcher will carry</div><p>${esc(row.context_summary)}</p>` : ''}
+    </div>` : ''}
+  </section>`;
+}
+/* Paint whatever health placeholders the drawer just wrote. The load loop does
+ * this for the page; a drawer opened between loads has to do it for itself or
+ * the meter and the trend stay empty until the next refresh. */
+function paintDrawerHealth(sessionId) {
+  const row = (contextHealthCache || []).find(item => item.session_id === sessionId);
+  if (!row) return;
+  const scope = document.getElementById('detailContent');
+  if (!scope) return;
+  drawMeter(scope.querySelector('[data-meter]'), row.chart);
+  drawTrend(scope.querySelector('[data-trend]'), row.chart);
+}
 function setDrawerContent(html) {
   const node = document.getElementById('detailContent');
   if (!node) return null;
@@ -1010,7 +1048,9 @@ function verdictLines(s) {
         ? `${p.latest_turn_label} per turn, past the ${critical} mark. No headroom left to project.`
         : `${p.latest_turn_label} per turn. Not enough turns yet to project a trend.`;
     } else {
-      body = `${p.latest_turn_label} per turn. About ${p.turns_to_critical} turn${p.turns_to_critical === 1 ? '' : 's'} of headroom at this rate.`;
+      body = p.turns_to_critical > RUNWAY_MAX_PROJECTED_TURNS
+        ? `${p.latest_turn_label} per turn. More than ${RUNWAY_MAX_PROJECTED_TURNS} turns of headroom at this rate.`
+        : `${p.latest_turn_label} per turn. About ${p.turns_to_critical} turn${p.turns_to_critical === 1 ? '' : 's'} of headroom at this rate.`;
     }
     lines.push({ key: 'room', label: 'Room left', tone: p.severity, body });
   }
@@ -1976,13 +2016,13 @@ function runwayVerdict(chart) {
     return {
       severity: 'healthy',
       headline: `${RUNWAY_MAX_PROJECTED_TURNS}+ turns of headroom`,
-      detail: `At ${compactTokens(chart.growth_per_turn_n)}/turn. Far enough out that the exact number is noise.`,
+      detail: `Growing ${compactTokens(chart.growth_per_turn_n)}/turn. Far enough out that the exact number is noise.`,
     };
   }
   return {
     severity: chart.turns_to_critical <= 10 ? 'critical' : 'warning',
     headline: `≈${chart.turns_to_critical} turn${chart.turns_to_critical === 1 ? '' : 's'} of headroom`,
-    detail: `At ${compactTokens(chart.growth_per_turn_n)}/turn, the growth since this session last shed context.`,
+    detail: `Growing ${compactTokens(chart.growth_per_turn_n)}/turn, since this session last shed context.`,
   };
 }
 /* Names every line on the runway chart. The caption used to carry "Amber is
@@ -2523,35 +2563,31 @@ function healthReason(row, waitingById) {
   const entry = waitingById && waitingById.get(row.session_id);
   if (entry) {
     const mins = Math.round((entry.idle_seconds || 0) / 60);
-    return mins >= 1
-      ? `Waiting on you for ${mins}m.`
-      : 'Waiting on you.';
+    return mins >= 1 ? `Waiting on you for ${mins}m.` : 'Waiting on you.';
   }
-  const chart = row.chart || {};
-  const critical = chart.critical_tokens_n || 0;
-  const latest = chart.latest_turn_tokens_n || 0;
-  if (critical && latest >= critical) {
-    return `Past the ${compactTokens(critical)} limit at ${esc(row.latest_turn_tokens)} per turn.`;
-  }
-  if (latest) return `Highest per-turn here at ${esc(row.latest_turn_tokens)}.`;
-  return '';
+  // Everything below waiting is a pressure verdict, and runwayVerdict is where
+  // that is computed. Restating it here would be a second place the deadline
+  // is worked out, which is the defect test_the_runway_deadline_is_computed_in
+  // _one_place exists to stop -- and the two would drift.
+  const verdict = runwayVerdict(row.chart);
+  if (verdict) return `<b>${esc(verdict.headline)}</b> &mdash; ${esc(verdict.detail)}`;
+  const latest = (row.chart || {}).latest_turn_tokens_n || 0;
+  return latest ? `Highest per-turn here at ${esc(row.latest_turn_tokens)}.` : '';
 }
-
-function headroomLabel(chart) {
-  const turns = chart && chart.turns_to_critical;
-  if (turns === null || turns === undefined) {
-    return { big: 'No headroom', sub: 'already past the limit' };
-  }
-  return { big: `${turns} turn${turns === 1 ? '' : 's'}`, sub: 'of headroom at this rate' };
-}
-
+/* Kept through the lead card's removal because they still have callers, not by
+ * accident: headroomLabel is read by the ranked row, and healthFacts moved to
+ * the drawer with the rest of the diagnosis.
+ * healthActionButton and runHealthAction did not survive -- the ranked row
+ * branches on can_handoff where the button is written, so the indirection was
+ * carrying nothing. */
 function healthFacts(row) {
   const chart = row.chart || {};
   const peakIsHistoric = chart.peak_turn_tokens_n > chart.latest_turn_tokens_n * 1.05;
+  // Read by the session drawer: Watch ranks, the drawer diagnoses.
   // Two scopes used to run together in one dot-separated list, so "68% replay"
   // (the charted session) and "10 sessions" (the whole project) read as one
-  // measurement. The card already warns in prose that its buttons act on a
-  // single session rather than all of them; the numbers now say so too.
+  // measurement. The drawer is opened for one session, so the
+  // numbers have to say which of them is about the project it sits in.
   const session = [
     peakIsHistoric ? `peak ${row.peak_turn_tokens}` : '',
     row.bloat_measurable ? `${row.bloat_label} replay` : '',
@@ -2572,130 +2608,134 @@ function healthFacts(row) {
   ].filter(Boolean);
 }
 
-// A health-card button goes where its label says. The kind comes from
-// _context_action alongside the label, so the two cannot be changed apart.
-// Falls back to the review when a handoff is not available for this row,
-// rather than offering "Start fresh" and doing nothing.
-function healthActionButton(row, className, label, kind) {
-  const effective = (kind === 'handoff' && !row.can_handoff) ? 'review' : kind;
-  const text = effective === kind ? label : 'Review session';
-  return `<button class="${className}" data-session="${esc(row.session_id)}" data-kind="${esc(effective)}" onclick="runHealthAction(this.dataset.kind, this.dataset.session)">${esc(text)}</button>`;
+function headroomLabel(chart) {
+  const turns = chart && chart.turns_to_critical;
+  if (turns === null || turns === undefined) {
+    return { big: 'No headroom', sub: 'already past the limit' };
+  }
+  // Capped where runwayVerdict caps. Uncapped this printed "110 turns" beside a
+  // reason reading "40+ turns of headroom" -- two numbers for one quantity,
+  // disagreeing, on the same row. 110 is also past the end of the drawn
+  // projection, so it was a number the chart underneath it never reaches.
+  if (turns > RUNWAY_MAX_PROJECTED_TURNS) {
+    return { big: `${RUNWAY_MAX_PROJECTED_TURNS}+ turns`, sub: 'of headroom at this rate' };
+  }
+  return { big: `${turns} turn${turns === 1 ? '' : 's'}`, sub: 'of headroom at this rate' };
 }
-
-function runHealthAction(kind, sessionId) {
-  return kind === 'handoff' ? openHandoff(sessionId) : selectSession(sessionId);
-}
-
-function healthLeadCard(row, waitingById) {
-  const verdict = runwayVerdict(row.chart);
+function healthRow(row, waitingById, index) {
+  const reason = healthReason(row, waitingById);
   const room = headroomLabel(row.chart);
-  return `<div class="health-card lead" data-project-full="${esc(row.project_full || '')}">
-    <div class="health-head">
-      <div><h3 title="${esc(row.project_full || row.project)}">${esc(healthProjectName(row))}</h3><p>${row.session_count > 1
-        ? `${esc(row.session_count)} sessions here \u00b7 charted below: <button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${row.charted_because_live
-            ? 'the worst recently active one' : 'the one under most pressure'}</button> (${esc(row.tool)} \u00b7 last active ${esc(row.age_label)} ago)${row.bigger_idle_label
-            ? ` \u2014 a larger one, ${esc(row.bigger_idle_label)}, has been quiet for ${esc(row.bigger_idle_age_label)}` : ''}`
-        : `<button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.tool)} session</button> \u00b7 last active ${esc(row.age_label)} ago`}</p></div>
-      <span class="health-severity ${esc(row.severity)}">${esc(row.severity)}</span>
-    </div>
-    ${(() => { const why = healthReason(row, waitingById);
-      return why ? `<p class="health-why"><b>First:</b> ${why}</p>` : ''; })()}
-    ${verdict ? `<p class="health-verdict"><strong>${esc(verdict.headline)}</strong> \u2014 ${esc(verdict.detail)}</p>` : ''}
-    <div class="identity-strip">
-      <strong>${esc(row.identity_label || 'Historical log only')}</strong>
-      <span>${esc(row.tool || 'unknown tool')} · ${esc(row.session_short || row.session_id || 'unknown session')}</span>
-      <span>${esc(row.return_label || 'Exact chat unavailable')}</span>
-    </div>
-    <div class="health-evidence">
-      <div class="label">Inferred intent</div>
-      <p>${esc(row.intent_summary || row.action.reason || 'Review this source before carrying context forward.')}</p>
-      <div class="label">Context AIWatcher will carry</div>
-      <p>${esc(row.context_summary || row.recommendation || 'Fresh Start will use local session identity and workspace evidence.')}</p>
-    </div>
-    <div class="health-hero"><b>${esc(room.big)}</b><u>${esc(room.sub)}</u>
-      <span class="health-now">${esc(row.latest_turn_tokens)} per turn</span></div>
-    <div class="meter-host" data-meter="${esc(row.session_id)}"></div>
-    <div class="trend-host" data-trend="${esc(row.session_id)}"></div>
-    <p class="health-facts">${healthFacts(row).map(group => `<span>${esc(group)}</span>`).join('')}</p>
-    <div class="health-actions">
-      ${healthActionButton(row, 'btn-primary', row.action.label, row.action.kind)}
-      ${row.can_handoff ? healthActionButton(row, 'btn-quiet', row.action.secondary_label, row.action.secondary_kind) : ''}
-      ${row.can_handoff ? `<button class="btn-quiet" data-session="${esc(row.session_id)}" data-project="${esc(row.project_full || '')}" onclick="continueFreshStartProject(this.dataset.session, this.dataset.project)">Continue 48h</button>` : ''}
-      ${row.can_handoff ? `<button class="btn-quiet" data-project="${esc(row.project_full || '')}" onclick="snoozeFreshStartProject(this.dataset.project, this)">Snooze 48h</button>` : ''}
-      <button class="btn-quiet" data-compact="${esc(row.compact_prompt || '/compact')}" onclick="copyText(this.dataset.compact, 'Compact prompt copied')">Copy compact prompt</button>
-    </div>
-    <p class="receipt-note">${esc(row.action.reason)}${row.session_count > 1
-      ? ' These act on that one session, not on all ' + esc(row.session_count) + ' in the project.'
-      : ''}</p>
+  // Fresh Start is a different action from opening the session, so it stops the
+  // click reaching the row underneath it.
+  const action = row.can_handoff
+    ? `<button class="btn-primary" onclick="event.stopPropagation(); startFreshFromBubble('${esc(row.session_id)}')">Fresh Start</button>`
+    : `<button class="btn-quiet" onclick="event.stopPropagation(); selectSession('${esc(row.session_id)}')">Review</button>`;
+  // The whole row opens the session: the reason and the numbers are as much a
+  // description of it as the title is, and a target the width of the card is
+  // easier to hit than a phrase inside it.
+  //
+  // A div rather than a button, because it contains buttons and that nesting is
+  // invalid -- the old lead card was a div for the same reason. The div carries
+  // the click for the mouse; the title stays a real button so the row is still
+  // reachable and announced by keyboard, which a div with an onclick is not.
+  // The title carries no handler of its own -- activating it, by mouse or by
+  // Enter, bubbles to the row, so there is one handler rather than two that
+  // could come to differ. No role on the row: it would announce a button
+  // containing buttons.
+  //
+  // The row carries rank, severity and one reason, and nothing else. Inferred
+  // intent, the context a Fresh Start would carry, the meter and the facts
+  // strip all still render -- in the drawer this row opens. Watch answers
+  // "which one first"; the drawer answers "what is going on in it".
+  return `<div class="health-rank-row" data-project-full="${esc(row.project_full || '')}"
+    data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">
+    <span class="rank-n">${index + 1}</span>
+    <span class="rank-dot ${esc(row.severity)}"></span>
+    <span class="rank-main">
+      <span class="rank-who">
+        <button class="link-inline rank-title" type="button">${esc(healthProjectName(row))} &middot; ${esc(row.tool || 'unknown tool')}</button>
+        <span class="rank-id">${esc(row.session_short || row.session_id || 'unknown session')}</span>
+      </span>
+      ${reason ? `<span class="rank-why">${reason}</span>` : ''}
+      ${row.session_count > 1
+        ? `<span class="rank-why">${esc(row.session_count)} sessions here; this is the one under most pressure.</span>`
+        : ''}
+    </span>
+    <span class="rank-trend" data-trend="${esc(row.session_id)}"></span>
+    <span class="rank-room">${esc(room.big)}</span>
+    <span class="rank-act">${action}</span>
   </div>`;
 }
-
-function healthQuietRow(row, waitingById) {
-  const room = headroomLabel(row.chart);
-  return `<button class="health-row" data-session="${esc(row.session_id)}" data-project-full="${esc(row.project_full || '')}" onclick="selectSession(this.dataset.session)">
-    <span class="health-row-name" title="${esc(row.project_full || row.project)}">${esc(healthProjectName(row))}
-      ${(() => { const why = healthReason(row, waitingById);
-        return why ? `<i class="health-row-why">${why}</i>` : ''; })()}</span>
-    <span class="health-row-trend" data-trend="${esc(row.session_id)}"></span>
-    <span class="health-row-now">${esc(row.latest_turn_tokens)}</span>
-    <span class="health-row-room">${esc(room.big)}</span>
-    <span class="health-severity ${esc(row.severity)}">${esc(row.severity)}</span>
-  </button>`;
-}
-
 function renderContextHealth(rows, statusArg, presence) {
   const status = arguments.length > 1 ? arguments[1] : 'ready';
-  // Keyed by session so the rank and the reason read the same source; a second
-  // list here would be a second thing to keep in step with presence.
   const waitingById = new Map(
     (((presence || {}).sessions) || [])
       .filter(entry => entry.state === 'waiting')
       .map(entry => [entry.session_id, entry]));
   if (status === 'pending') return '<div class="loading">Checking context health and handoff opportunities...</div>';
   if (!rows.length) return '<div class="empty">No active context-health warnings. AIWatcher will surface bloat, stale sessions, and handoff opportunities here.</div>';
-  // One project is worth acting on; the rest are worth knowing about. Four cards
-  // of equal weight gave the eye nowhere to start.
   const ranked = rows.slice().sort((a, b) => {
-    const ar = healthRank(a, new Set(waitingById.keys()));
-    const br = healthRank(b, new Set(waitingById.keys()));
+    const keys = new Set(waitingById.keys());
+    const ar = healthRank(a, keys), br = healthRank(b, keys);
     return br[0] - ar[0] || br[1] - ar[1] || br[2] - ar[2];
   });
-  const [lead, ...rest] = ranked;
   const snoozable = ranked.filter(row => row.can_handoff && (row.severity === 'critical' || row.severity === 'warning'));
-  // Only when there is more than one to act on. The pre-redesign header also
-  // carried a heading counting the projects and a "Review list" button; this
-  // layout already shows the count and is itself the review list, so only the
-  // control with no other home survives. Label kept verbatim from #83 -- it is
-  // their copy, and its test is what proves the capability came across.
   const batch = snoozable.length > 1
     ? `<div class="health-batch"><button class="btn-quiet" onclick="snoozeVisibleFreshStartProjects(this)">Snooze all 48h</button></div>`
     : '';
-  return `<div class="health-stack">${batch}${healthLeadCard(lead, waitingById)}${rest.map(row => healthQuietRow(row, waitingById)).join('')}</div>`;
+  // healthFacts carried these per project, under a card that no longer exists.
+  // The severity counts are the part that was not already on Home's facts row,
+  // and they belong at the top of the list they describe.
+  const critical = ranked.filter(r => r.severity === 'critical').length;
+  const warning = ranked.filter(r => r.severity === 'warning').length;
+  const tally = [critical ? `${critical} critical` : '', warning ? `${warning} warning` : '']
+    .filter(Boolean).join(' \u00b7 ');
+  const head = tally
+    ? `<div class="health-tally"><span class="health-severity ${critical ? 'critical' : 'warning'}">${esc(tally)}</span></div>`
+    : '';
+  return `<div class="health-stack">${head}${batch}${ranked.map((row, i) => healthRow(row, waitingById, i)).join('')}</div>`;
+}
+function coverageGate(row) {
+  // The gate column answers "is anything intercepted before it runs", which is
+  // a different question from how much history exists. Derived from the status
+  // rather than the prose, so it cannot disagree with the pill beside it.
+  const map = {
+    automatic: ['Automatic', 'automatic'],
+    limited: ['Unverified', 'unverified'],
+    unverified: ['Unverified', 'unverified'],
+    companion: ['Companion only', 'companion'],
+    not_detected: ['Not detected', 'not_detected'],
+    unsupported: ['Not supported', 'unsupported'],
+  };
+  const [label, cls] = map[row.status] || ['Unknown', 'unverified'];
+  return `<span class="coverage-status ${esc(cls)}">${esc(label)}</span>`;
 }
 function renderCoverage(rows) {
   if (!rows.length) return '<div class="empty">Coverage could not be determined on this machine.</div>';
-  const modeCopy = {
-    automatic: 'Protected automatically when the tool invokes its hook.',
-    companion: 'Companion/manual protection. AIWatcher can help, but it is not intercepting this surface directly.',
-    limited: 'Partial coverage. Treat findings as local evidence, not full control.',
-    unverified: 'Not verified on this machine yet. Run the suggested check before trusting protection claims.',
-    not_detected: 'Tool not detected. Install or open the tool, then refresh coverage.',
-    unsupported: 'No direct hook known. Use Prompt Companion or history-only review.',
-  };
-  return rows.map(row => `<div class="coverage-card">
-    <div class="coverage-head">
-      <h3>${esc(row.label)}</h3>
-      <span class="coverage-status ${esc(row.status)}">${esc(row.status_label)}</span>
-    </div>
-    <div class="coverage-detail">
-      <div><strong>Protection:</strong> ${esc(modeCopy[row.status] || 'Local evidence only until verified.')}</div>
-      <div><strong>Gate:</strong> ${esc(row.automatic_gate)}</div>
-      <div><strong>History:</strong> ${esc(row.history)}</div>
-      <div><strong>Sessions:</strong> ${esc(row.session_count)}</div>
-      <div><strong>Next:</strong> ${esc(row.action)}</div>
-      <div>${esc(row.detail)}</div>
-    </div>
-  </div>`).join('');
+  return `<div class="table-wrap"><table class="coverage-table">
+    <thead><tr>
+      <th>Tool</th><th>Coverage</th><th>Gate</th><th class="num">Sessions</th><th>Next</th>
+    </tr></thead>
+    <tbody>${rows.map(row => `<tr>
+      <td>
+        <strong>${esc(row.label)}</strong>
+        ${row.detail ? `<span class="cell-note">${esc(row.detail)}</span>` : ''}
+      </td>
+      <td>
+        <span class="coverage-status ${esc(row.status)}">${esc(row.status_label)}</span>
+        ${row.history ? `<span class="cell-note">${esc(row.history)}</span>` : ''}
+      </td>
+      <td>${coverageGate(row)}</td>
+      <td class="num">${esc(row.session_count)}</td>
+      <td><span class="cell-note">${esc(row.action || '')}</span></td>
+    </tr>`).join('')}</tbody>
+  </table></div>
+  <p class="receipt-note coverage-legend">
+    <strong>Protection:</strong> <b>Automatic</b> is intercepted when the tool invokes its hook.
+    <b>Unverified</b> means history is visible but interception has not been proven on this exact
+    surface. <b>Companion only</b> means AIWatcher can help, but is not intercepting directly.
+    <b>Not detected</b> and <b>Not supported</b> claim nothing.
+  </p>`;
 }
 function renderSetup(rows) {
   if (!rows.length) return '<div class="empty">Setup checklist unavailable.</div>';
@@ -2823,7 +2863,7 @@ function renderSessionSummary(s, label = 'Loading detailed evidence...') {
         ? `<button class="btn-primary" disabled>${esc(action.label || 'Review outcome')}</button>`
         : `<button class="btn-primary" disabled>${esc(action.label || 'Review session')}</button>`
     : '';
-  return `<div class="session-review-shell">${renderSessionHero(s)}
+  return `<div class="session-review-shell">${renderSessionHero(s)}${renderSessionContextHealth(s.session_id)}
   <section class="detail-section recommended-action loading-action">
     <div class="section-title">
       <div><h3>${esc(action ? action.label : 'Review session')}</h3><p>${esc(action ? action.reason : 'AIWatcher is loading full local evidence for this session.')}</p></div>
@@ -2933,6 +2973,7 @@ async function selectSession(sessionId, attempt = 0, token = null) {
   if (!isCurrent()) return;
   if (fastSummary && !fastSummary.error) {
     setDrawerContent(renderSessionSummary(fastSummary));
+    paintDrawerHealth(sessionId);
   } else {
     setDrawerContent(`<div class="loading">Loading session details for ${esc(sessionId)}...</div>`);
   }
@@ -2954,6 +2995,7 @@ async function selectSession(sessionId, attempt = 0, token = null) {
   }
   if (s.detail_pending) {
     if (!fastSummary || fastSummary.error) setDrawerContent(renderSessionSummary(s));
+    paintDrawerHealth(sessionId);
     const pending = document.createElement('div');
     pending.className = 'loading';
     pending.textContent = s.detail_message || 'Timeline and evidence are still indexing in the background.';
@@ -3072,7 +3114,7 @@ async function selectSession(sessionId, attempt = 0, token = null) {
     // change. The asks table is the evidence for that conclusion, so it follows.
     promptReview = `${coaching}${expensiveAsks}<section class="detail-section"><h3>Prompt context</h3>${opener}</section>`;
   }
-  setDrawerContent(`<div class="session-review-shell">${renderSessionHero(s)}
+  setDrawerContent(`<div class="session-review-shell">${renderSessionHero(s)}${renderSessionContextHealth(s.session_id)}
     ${renderSessionActions(s)}
     ${renderVerdict(s)}
     ${outcomeActions}
@@ -3091,6 +3133,7 @@ async function selectSession(sessionId, attempt = 0, token = null) {
       </tbody></table>
     </div></details></section>
     ${timeline}</div>`);
+  paintDrawerHealth(s.session_id);
 }
 async function markOutcome(sessionId, outcome) {
   const buttons = document.querySelectorAll('.outcome-button');
@@ -3251,6 +3294,42 @@ function renderReport(report) {
  * look impressive would contradict the one thing this product sells, on the
  * very first thing anyone sees.
  */
+/* Theme.
+ *
+ * Follows the operating system until the reader chooses, and then keeps that
+ * choice -- a dashboard left open on a second monitor should not flip when the
+ * OS crosses its own sunset. The stored value is the only state; the attribute
+ * on <html> is derived from it on every load, so a second window opened later
+ * agrees with the first.
+ *
+ * Set before first paint in the inline bootstrap below, not here, or the page
+ * renders dark and then snaps to light in front of the reader.
+ */
+function currentTheme() {
+  try {
+    const stored = localStorage.getItem('aiw-theme');
+    if (stored === 'light' || stored === 'dark') return stored;
+  } catch (error) {
+    // Private windows and blocked site data throw on access rather than
+    // returning null. Following the OS is the right answer there anyway.
+  }
+  return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches
+    ? 'light' : 'dark';
+}
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  const button = document.getElementById('themeToggle');
+  if (!button) return;
+  // The label is the action, not the state: a button reading "Light" while the
+  // page is light gives the reader nothing to press for.
+  button.textContent = theme === 'light' ? 'Dark' : 'Light';
+  button.setAttribute('aria-pressed', theme === 'light' ? 'true' : 'false');
+}
+function toggleTheme() {
+  const next = currentTheme() === 'light' ? 'dark' : 'light';
+  try { localStorage.setItem('aiw-theme', next); } catch (error) { /* choice lasts this page */ }
+  applyTheme(next);
+}
 function renderFirstRun(card) {
   const host = document.getElementById('firstRunBody');
   if (!host) return;
@@ -3304,6 +3383,55 @@ async function dismissFirstRun(goHome) {
     // again, which is better than being stuck on it.
   }
   if (goHome) showView('today');
+}
+/* Control's strip: three facts that each end in something you can do.
+ *
+ * Every value here is already in the payload -- the handoff bubble knows what a
+ * Fresh Start would save, coverage knows whether anything is gated, totals
+ * knows how many decisions this window produced. What was missing was a place
+ * to read them together, which is what the stage is for.
+ */
+function renderControlStrip(data) {
+  const bubble = data.handoff_bubble || null;
+  const fresh = document.getElementById('freshStartTile');
+  if (fresh) {
+    if (bubble && bubble.saved_context_label) {
+      fresh.className = 'card metric-card '
+        + (bubble.severity === 'critical' ? 'metric-red' : 'metric-amber');
+      fresh.hidden = false;
+      fresh.innerHTML = `<div class="label">Fresh Start ready</div>
+        <div class="value">${esc(bubble.saved_context_label)}</div>
+        <div class="sub">context saved if you start fresh &middot;
+          <button class="link-inline" onclick="startFreshFromBubble('${esc(bubble.session_id)}')">copy brief</button></div>`;
+    } else { fresh.hidden = true; }
+  }
+
+  const gate = document.getElementById('gateTile');
+  if (gate) {
+    const coverage = data.coverage || [];
+    const gated = coverage.filter(row => row.status === 'automatic').length;
+    // Off is the state worth colouring: nothing is being reviewed before it
+    // runs, which is the one thing this stage exists to change.
+    gate.className = 'card metric-card ' + (gated ? 'metric-green' : 'metric-amber');
+    gate.hidden = !coverage.length;
+    gate.innerHTML = `<div class="label">Gate</div>
+      <div class="value">${gated ? 'On' : 'Off'}</div>
+      <div class="sub">${gated
+        ? `${esc(gated)} of ${esc(coverage.length)} tools gated automatically`
+        : 'Nothing is reviewed before it runs &middot; <button class="link-inline" onclick="showView(\'setup\')">see coverage</button>'}</div>`;
+  }
+
+  const decisions = document.getElementById('decisionsTile');
+  if (decisions) {
+    const n = Number((data.totals || {}).preflight_decisions) || 0;
+    decisions.hidden = !n;
+    // No colour. A count of decisions is neither good news nor bad.
+    decisions.className = 'card metric-card metric-neutral';
+    decisions.innerHTML = `<div class="label">Decisions made</div>
+      <div class="value">${esc(n)}</div>
+      <div class="sub">${esc((data.totals || {}).window_label || 'this window')} &middot;
+        <button class="link-inline" onclick="showView('receipts')">receipts on Prove</button></div>`;
+  }
 }
 function renderCheckpoint(card) {
   const host = document.getElementById('checkpoint');
@@ -3835,6 +3963,10 @@ let sessionsLoadedForDays = null;
 let reportLoadedForDays = null;
 let reportLoading = false;
 let freshStartReceiptsMarkedViewed = false;
+// context_health rows, kept so the session drawer can show the health of the
+// session it opened. Watch ranks; the drawer diagnoses -- and the diagnosis
+// lives in this payload, not in /api/session.
+let contextHealthCache = [];
 let sessionRowsCache = [];
 let changeRowsCache = [];
 let sessionSort = { key: 'updated_at', dir: 'desc' };
@@ -3895,17 +4027,10 @@ async function snoozeFreshStartProjects(projects, message) {
     return false;
   }
 }
-async function snoozeFreshStartProject(project, button) {
-  const ok = await snoozeFreshStartProjects([project], 'Fresh Start snoozed for this project for 48h.');
-  if (ok && button) {
-    const card = button.closest('.health-card');
-    if (card) card.classList.add('muted-card');
-  }
-}
 async function snoozeVisibleFreshStartProjects(button) {
-  // Any element carrying a project, not only .health-card. This screen shows
-  // one lead card and the rest as compact rows, so matching on the card class
-  // would have snoozed a single project while the button said it snoozed all.
+  // Any element carrying a project. Matching on a card class would have
+  // snoozed a single project while the button said it snoozed all -- and there
+  // are no cards on this screen any more, only ranked rows.
   const cards = Array.from(document.querySelectorAll('#sessionContextHealth [data-project-full]'));
   const projects = [...new Set(cards.map(card => card.dataset.projectFull || '').filter(Boolean))];
   const ok = await snoozeFreshStartProjects(projects, `Fresh Start snoozed for ${projects.length} project${projects.length === 1 ? '' : 's'} for 48h.`);
@@ -4328,7 +4453,9 @@ const REFRESH_HIDDEN_MS = 60000;
 const REFRESH_CATCHUP_MS = 1800;   // first poll after the watcher starts rebuilding
 const REFRESH_CATCHUP_FACTOR = 1.5;
 
-const TAB_COLOURS = { critical: '#f2778f', warning: '#f2bf6b', healthy: '#43d9a3', idle: '#78869a' };
+const FAVICON_REST_BLUE = '#0052F5';
+// idle drops out: the resting mark is the brand's own blue, not a grey dot.
+const TAB_COLOURS = { critical: '#f2778f', warning: '#f2bf6b', healthy: '#43d9a3' };
 
 let refreshTimer = null;
 let freshnessTimer = null;
@@ -4362,11 +4489,29 @@ function nextRefreshDelay(data, forceRefresh) {
   return idle;
 }
 
+/* The mark, with the blue ring carrying the state colour.
+ *
+ * The favicon is not decoration here: it is the only part of the tab that reads
+ * at a glance when the title is truncated to twenty characters. So the shape
+ * became the logo without giving that up -- the ring that is brand blue at rest
+ * is the ring that turns amber or red, rather than a status dot competing with
+ * the mark at 16px.
+ *
+ * The ink ring inverts on its own. A favicon sits on the browser's tab strip
+ * rather than on the page, so it cannot follow the page's theme -- and drawn in
+ * the brand's near-black it disappeared entirely on a dark strip, leaving half
+ * a mark. Browsers that do not resolve the query fall back to the near-black,
+ * which is what the light strips they ship by default want.
+ */
+const FAVICON_INK = '<style>.ink{stroke:#141314}'
+  + '@media(prefers-color-scheme:dark){.ink{stroke:#DCE6F6}}</style>';
+
 function faviconFor(state) {
-  const colour = TAB_COLOURS[state] || TAB_COLOURS.idle;
-  const svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>"
-    + "<rect width='32' height='32' rx='7' fill='#070b11'/>"
-    + "<circle cx='16' cy='16' r='7' fill='" + colour + "'/></svg>";
+  const colour = TAB_COLOURS[state] || FAVICON_REST_BLUE;
+  const svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='-10 -10 449 369' fill='none'>"
+    + FAVICON_INK
+    + "<rect x='20' y='20' width='260' height='220' rx='65' stroke='" + colour + "' stroke-width='40'/>"
+    + "<rect class='ink' x='149' y='137' width='260' height='192' rx='65' stroke-width='40'/></svg>";
   return 'data:image/svg+xml,' + encodeURIComponent(svg);
 }
 
@@ -4489,6 +4634,7 @@ async function loadOnce(resetDetail, forceRefresh) {
   renderCheckpoint(data.checkpoint);
   renderPresenceTile(data.presence);
   renderWasteTile(data.optimize);
+  renderControlStrip(data);
   // Routed from the payload rather than a stored client flag: the server
   // already knows whether anything is gated and whether the screen was
   // dismissed, and a second source of truth here would drift from it. Only on
@@ -4558,15 +4704,16 @@ async function loadOnce(resetDetail, forceRefresh) {
   // it finds the placeholders wherever they were emitted.
   const meterNodes = {};
   document.querySelectorAll('[data-meter]').forEach(node => {
-    meterNodes[node.getAttribute('data-meter')] = node;
+    (meterNodes[node.getAttribute('data-meter')] ||= []).push(node);
   });
   const trendNodes = {};
   document.querySelectorAll('[data-trend]').forEach(node => {
-    trendNodes[node.getAttribute('data-trend')] = node;
+    (trendNodes[node.getAttribute('data-trend')] ||= []).push(node);
   });
+  contextHealthCache = data.context_health || [];
   (data.context_health || []).forEach(row => {
-    drawMeter(meterNodes[row.session_id], row.chart);
-    drawTrend(trendNodes[row.session_id], row.chart);
+    (meterNodes[row.session_id] || []).forEach(node => drawMeter(node, row.chart));
+    (trendNodes[row.session_id] || []).forEach(node => drawTrend(node, row.chart));
   });
   changeRowsCache = data.changes || [];
   document.getElementById('changeRows').innerHTML = renderChangeRows(changeRowsCache);
@@ -4680,6 +4827,10 @@ async function load(resetDetail = true, forceRefresh = false) {
 document.addEventListener('keydown', event => { if (event.key === 'Escape') closeDrawer(); });
 (async () => {
   startLiveRefresh();
+  // The attribute is already set by the inline bootstrap; this syncs the
+  // button's label to it, which the bootstrap cannot do because the button
+  // does not exist yet.
+  applyTheme(currentTheme());
   await load();
   const requestedView = new URLSearchParams(location.search).get('view');
   // Every view id, or a ?view= deep link at one of them silently does nothing.

@@ -4,20 +4,46 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>AIWatcher Local</title>
-  <!-- Replaced at runtime with a state-coloured data: URI (see renderTabState).
-       A link element has to exist for that swap to have somewhere to land, and
-       the inline default keeps the page self-contained with no second request. -->
-  <link id="favicon" rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23070b11'/%3E%3Ccircle cx='16' cy='16' r='7' fill='%2378869a'/%3E%3C/svg%3E" />
+  <!-- Replaced at runtime with a state-coloured data: URI (see faviconFor):
+       the blue ring is the one that turns amber or red. A link element has to
+       exist for that swap to have somewhere to land, and the inline default
+       keeps the page self-contained with no second request. -->
+  <link id="favicon" rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%27-10%20-10%20449%20369%27%20fill%3D%27none%27%3E%3Cstyle%3E.ink%7Bstroke%3A%23141314%7D%40media%28prefers-color-scheme%3Adark%29%7B.ink%7Bstroke%3A%23DCE6F6%7D%7D%3C%2Fstyle%3E%3Crect%20x%3D%2720%27%20y%3D%2720%27%20width%3D%27260%27%20height%3D%27220%27%20rx%3D%2765%27%20stroke%3D%27%230052F5%27%20stroke-width%3D%2740%27%2F%3E%3Crect%20class%3D%27ink%27%20x%3D%27149%27%20y%3D%27137%27%20width%3D%27260%27%20height%3D%27192%27%20rx%3D%2765%27%20stroke-width%3D%2740%27%2F%3E%3C%2Fsvg%3E" />
+  <!-- Before the stylesheet, and inline on purpose: the attribute has to be on
+       <html> for the first paint, or the page renders in one theme and snaps to
+       the other in front of the reader. Small enough to duplicate the read that
+       currentTheme() does properly later. -->
+  <script>
+    (function () {
+      var t;
+      try { t = localStorage.getItem('aiw-theme'); } catch (e) { t = null; }
+      if (t !== 'light' && t !== 'dark') {
+        t = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches
+          ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
   <style>@@INCLUDE:index.css@@</style>
 </head>
 <body>
 <main>
   <header>
     <div class="brand">
-      <div class="brand-mark" aria-hidden="true">AW</div>
+      <!-- The mark, inline. The page is spliced into one self-contained file and
+           serves no external assets, so this cannot be a <img src>. Source of
+           truth is logo/aiwatcher-mark.svg; the only change here is that the ink
+           ring reads currentColor so it can invert for the dark theme. -->
+      <svg class="brand-mark" viewBox="0 0 429 349" fill="none" aria-hidden="true">
+        <rect x="20" y="20" width="260" height="220" rx="65" stroke="var(--brand-blue)" stroke-width="40"/>
+        <rect x="149" y="137" width="260" height="192" rx="65" stroke="currentColor" stroke-width="40"/>
+      </svg>
       <div class="brand-copy">
         <div class="actions">
-          <h1>AIWatcher Local</h1>
+          <!-- The wordmark. "Local" is the product qualifier that separates
+               this from the Enterprise link two controls away, so it follows the
+               name rather than joining it. -->
+          <h1 class="wordmark">AIWatcher <span class="wordmark-local">Local</span></h1>
           <span class="status-badge"><span class="status-dot"></span>Private and local</span>
         </div>
         <p>Your AI coding work, outcomes, and improvement signals.</p>
@@ -29,6 +55,10 @@
         <option value="7" selected>Last 7 days</option>
         <option value="30">Last 30 days</option>
       </select>
+      <!-- Follows the OS until you say otherwise; the label states what a click
+           does, not what is currently on. aria-pressed carries the state for a
+           reader that cannot see which way the page went. -->
+      <button id="themeToggle" class="btn-quiet" aria-pressed="false" onclick="toggleTheme()">Light</button>
       <button id="refreshButton" class="btn-quiet" onclick="load(false, true)">Refresh data</button>
       <a class="link-button" href="https://www.getaiwatcher.com" target="_blank" rel="noreferrer">Enterprise</a>
     </div>
@@ -298,15 +328,16 @@
        actions into it is another. What it says now is what it will do, not a
        placeholder pretending to be finished. -->
   <section id="view-control" class="view" hidden>
-    <div class="card">
-      <div class="section-title">
-        <div><h2>Control</h2><p>What you can do about what the other surfaces just told you.</p></div>
-        <span class="note-chip local">Local only</span>
-      </div>
-      <div class="empty">Fresh Start is still on Home and per-session actions are still in the
-        session drawer. They move here next, so acting on a warning does not mean remembering
-        which page the action lives on.</div>
-    </div>
+    <!-- What you can act on, read across. Three facts that each end in a verb:
+         how much context a Fresh Start would save, whether anything is being
+         reviewed before it runs, and how many decisions this window produced.
+         The placeholder that stood here said the actions were still elsewhere,
+         which was true and is not a surface. -->
+    <section class="grid kpis" id="controlStrip">
+      <div class="card metric-card metric-neutral" id="freshStartTile" hidden></div>
+      <div class="card metric-card metric-neutral" id="gateTile" hidden></div>
+      <div class="card metric-card metric-neutral" id="decisionsTile" hidden></div>
+    </section>
 
     <!-- Moved from Plan. It had been demoted there already -- collapsed behind
          a summary, because it was 64% of a tab named for planning -- which
@@ -452,7 +483,12 @@
         <div><h2 id="coverageSummary">Surface coverage</h2><p>Detected tools, hook confidence, and what AIWatcher can honestly measure.</p></div>
         <span class="note-chip local">Local only</span>
       </div>
-      <div id="coverageRowsSettings" class="coverage-grid"></div>
+      <!-- Not .coverage-grid any more. That is a two-column card grid, and
+           coverage is a table now -- it made the table one grid item and the
+           legend beneath it another, so they sat side by side and the table
+           rendered at half width. Setup steps below still use the grid,
+           because those are cards. -->
+      <div id="coverageRowsSettings"></div>
     </section>
 
     <div class="card">
