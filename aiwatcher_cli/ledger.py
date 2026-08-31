@@ -798,3 +798,100 @@ def _first_commit_at_or_after(changes: Sequence[Change], stamp: datetime) -> Cha
         if change.landed_at >= stamp:
             return change
     return None
+
+
+# A median needs enough points to be a median. Below this it is one commit
+# divided by another, which is the failure MIN_SESSIONS_PER_MODEL exists to
+# prevent one module over.
+MIN_CHECKPOINT_BASELINE = 4
+
+
+def checkpoint_distance(
+    ledger: Ledger,
+    events: Sequence[LocalEvent],
+    repo: str,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """How far this repo is from its last commit, in time and in money.
+
+    The honest present-tense question. "Is this spend wasted" cannot be answered
+    while it is happening -- build_ledger banks an event against the *first
+    commit at or after it*, so everything from the last max_lookback_hours is
+    provisionally unbanked and may become banked the moment you commit. A live
+    "unbanked" figure would therefore fire on every developer every afternoon
+    for the ordinary state of having written code you have not landed yet, and
+    a signal that fires for everyone sorts nothing.
+
+    "How far am I from a checkpoint" is answerable right now and carries no
+    verdict: it is a distance, not an accusation. The action is obvious and the
+    reader supplies their own judgment about whether the distance is fine.
+
+    The threshold is the developer's own median spend between commits, because
+    provider quota is not visible locally and a fixed dollar figure would be a
+    number someone picked. Each change banks the spend since the one before it,
+    so the per-change costs already *are* the between-commit distribution --
+    no separate history to keep. Median rather than mean: one 300-dollar
+    afternoon should not move the bar the other days are judged against.
+    """
+    stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    wanted = repo_identity(repo)
+
+    mine = [c for c in ledger.changes if repo_identity(c.repo) == wanted]
+    if not mine:
+        return {
+            "available": False,
+            "reason": "No commits from you in this repo in the window, so there is no checkpoint to measure from.",
+        }
+
+    last = max(mine, key=lambda c: c.landed_at)
+    # _event_repo, not the event's raw path: it resolves to the repo root and
+    # caches, which is what makes a clone of the same repository count as the
+    # same repository here and in build_ledger.
+    cache: dict[str, str | None] = {}
+    since = []
+    for event in events:
+        if event.cost_usd <= 0 or not event.timestamp:
+            continue
+        if event.timestamp.astimezone(timezone.utc) <= last.landed_at:
+            continue
+        root = _event_repo(event, cache)
+        if root and repo_identity(root) == wanted:
+            since.append(event)
+    spend = round(sum(event.cost_usd for event in since), 6)
+    elapsed = stamp - last.landed_at
+
+    card: dict[str, Any] = {
+        "available": True,
+        "reason": None,
+        "repo": repo,
+        "last_commit_sha": last.sha[:12],
+        "last_commit_subject": last.subject,
+        "hours_since": round(elapsed.total_seconds() / 3600.0, 2),
+        "spend_usd": spend,
+        "events_since": len(since),
+    }
+
+    # Compare to the owner, not to a round number.
+    costs = sorted(c.cost_usd for c in ledger.changes if c.cost_usd > 0)
+    if len(costs) < MIN_CHECKPOINT_BASELINE:
+        card["baseline"] = {
+            "available": False,
+            "reason": (
+                f"Need {MIN_CHECKPOINT_BASELINE}+ costed commits to know what your usual "
+                f"distance between checkpoints is; there are {len(costs)}."
+            ),
+            "changes": len(costs),
+        }
+        return card
+
+    middle = len(costs) // 2
+    median = costs[middle] if len(costs) % 2 else (costs[middle - 1] + costs[middle]) / 2.0
+    card["baseline"] = {
+        "available": median > 0,
+        "reason": None if median > 0 else "Median spend between commits is zero.",
+        "median_usd": round(median, 6),
+        "changes": len(costs),
+        "ratio": round(spend / median, 2) if median > 0 else None,
+    }
+    return card

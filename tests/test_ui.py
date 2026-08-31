@@ -1367,7 +1367,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["state"], "control_review")
         self.assertEqual(state["label"], "Review context")
         self.assertEqual(state["primary_label"], "Review")
-        self.assertEqual(state["primary_url"], "/?view=sessions#contextHealth")
+        self.assertEqual(state["primary_url"], "/?view=watch#contextHealth")
         self.assertEqual(state["skip_state"], "control_recommended_group")
         self.assertEqual(state["fresh_start_project_count"], 2)
         self.assertIn("/repo/app", state["skip_project"])
@@ -1749,7 +1749,7 @@ class DashboardWindowTests(unittest.TestCase):
 
         self.assertEqual(state["state"], "optimize_available")
         self.assertEqual(state["label"], "Optimize")
-        self.assertEqual(state["primary_url"], "/?view=prompt#optimizeWorkspace")
+        self.assertEqual(state["primary_url"], "/?view=control#optimizeWorkspace")
         self.assertEqual(state["skip_state"], "optimize_available")
 
     def test_companion_state_exposes_ask_deep_link(self) -> None:
@@ -1785,7 +1785,7 @@ class DashboardWindowTests(unittest.TestCase):
 
         self.assertIn("archive candidate", answer["answer"])
         self.assertTrue(any("Do not" in bullet or "cannot archive" in bullet for bullet in answer["bullets"]))
-        self.assertEqual(answer["actions"][0]["url"], "/?view=prompt#optimizeWorkspace")
+        self.assertEqual(answer["actions"][0]["url"], "/?view=control#optimizeWorkspace")
 
     def test_ask_aiwatcher_answers_context_health_from_local_evidence(self) -> None:
         with patch.object(ui, "build_summary_cached", return_value={

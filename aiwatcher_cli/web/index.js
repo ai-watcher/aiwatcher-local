@@ -2498,13 +2498,43 @@ function healthProjectName(row) {
   return projectName(row);
 }
 
-function healthRank(row) {
-  // Worst first: anything past the limit outranks anything below it, and within
+function healthRank(row, waiting) {
+  // "Which one needs you first" -- so a session that is literally waiting on
+  // your input outranks a bigger one that is still making progress. Size was
+  // the only key here, which answered "which is worst" instead: a session
+  // blocked on a question you have not seen is the one that cannot continue
+  // without you, whatever its per-turn number.
+  //
+  // Then the old order, unchanged: past the limit outranks below it, and within
   // each group the bigger per-turn number leads.
   const chart = row.chart || {};
   const critical = chart.critical_tokens_n || Infinity;
   const latest = chart.latest_turn_tokens_n || 0;
-  return [latest >= critical ? 1 : 0, latest];
+  return [waiting && waiting.has(row.session_id) ? 1 : 0, latest >= critical ? 1 : 0, latest];
+}
+/* Why this row sits where it does.
+ *
+ * The ranking is three keys deep and none of them were visible: a reader saw
+ * an order and had to trust it. Each reason states the key that actually put
+ * the row here, in the same precedence the sort uses, so the explanation
+ * cannot drift from the ordering it explains.
+ */
+function healthReason(row, waitingById) {
+  const entry = waitingById && waitingById.get(row.session_id);
+  if (entry) {
+    const mins = Math.round((entry.idle_seconds || 0) / 60);
+    return mins >= 1
+      ? `Waiting on you for ${mins}m.`
+      : 'Waiting on you.';
+  }
+  const chart = row.chart || {};
+  const critical = chart.critical_tokens_n || 0;
+  const latest = chart.latest_turn_tokens_n || 0;
+  if (critical && latest >= critical) {
+    return `Past the ${compactTokens(critical)} limit at ${esc(row.latest_turn_tokens)} per turn.`;
+  }
+  if (latest) return `Highest per-turn here at ${esc(row.latest_turn_tokens)}.`;
+  return '';
 }
 
 function headroomLabel(chart) {
@@ -2556,7 +2586,7 @@ function runHealthAction(kind, sessionId) {
   return kind === 'handoff' ? openHandoff(sessionId) : selectSession(sessionId);
 }
 
-function healthLeadCard(row) {
+function healthLeadCard(row, waitingById) {
   const verdict = runwayVerdict(row.chart);
   const room = headroomLabel(row.chart);
   return `<div class="health-card lead" data-project-full="${esc(row.project_full || '')}">
@@ -2568,6 +2598,8 @@ function healthLeadCard(row) {
         : `<button class="link-inline" data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">${esc(row.tool)} session</button> \u00b7 last active ${esc(row.age_label)} ago`}</p></div>
       <span class="health-severity ${esc(row.severity)}">${esc(row.severity)}</span>
     </div>
+    ${(() => { const why = healthReason(row, waitingById);
+      return why ? `<p class="health-why"><b>First:</b> ${why}</p>` : ''; })()}
     ${verdict ? `<p class="health-verdict"><strong>${esc(verdict.headline)}</strong> \u2014 ${esc(verdict.detail)}</p>` : ''}
     <div class="identity-strip">
       <strong>${esc(row.identity_label || 'Historical log only')}</strong>
@@ -2598,10 +2630,12 @@ function healthLeadCard(row) {
   </div>`;
 }
 
-function healthQuietRow(row) {
+function healthQuietRow(row, waitingById) {
   const room = headroomLabel(row.chart);
   return `<button class="health-row" data-session="${esc(row.session_id)}" data-project-full="${esc(row.project_full || '')}" onclick="selectSession(this.dataset.session)">
-    <span class="health-row-name" title="${esc(row.project_full || row.project)}">${esc(healthProjectName(row))}</span>
+    <span class="health-row-name" title="${esc(row.project_full || row.project)}">${esc(healthProjectName(row))}
+      ${(() => { const why = healthReason(row, waitingById);
+        return why ? `<i class="health-row-why">${why}</i>` : ''; })()}</span>
     <span class="health-row-trend" data-trend="${esc(row.session_id)}"></span>
     <span class="health-row-now">${esc(row.latest_turn_tokens)}</span>
     <span class="health-row-room">${esc(room.big)}</span>
@@ -2609,15 +2643,22 @@ function healthQuietRow(row) {
   </button>`;
 }
 
-function renderContextHealth(rows) {
+function renderContextHealth(rows, statusArg, presence) {
   const status = arguments.length > 1 ? arguments[1] : 'ready';
+  // Keyed by session so the rank and the reason read the same source; a second
+  // list here would be a second thing to keep in step with presence.
+  const waitingById = new Map(
+    (((presence || {}).sessions) || [])
+      .filter(entry => entry.state === 'waiting')
+      .map(entry => [entry.session_id, entry]));
   if (status === 'pending') return '<div class="loading">Checking context health and handoff opportunities...</div>';
   if (!rows.length) return '<div class="empty">No active context-health warnings. AIWatcher will surface bloat, stale sessions, and handoff opportunities here.</div>';
   // One project is worth acting on; the rest are worth knowing about. Four cards
   // of equal weight gave the eye nowhere to start.
   const ranked = rows.slice().sort((a, b) => {
-    const [ac, av] = healthRank(a), [bc, bv] = healthRank(b);
-    return bc - ac || bv - av;
+    const ar = healthRank(a, new Set(waitingById.keys()));
+    const br = healthRank(b, new Set(waitingById.keys()));
+    return br[0] - ar[0] || br[1] - ar[1] || br[2] - ar[2];
   });
   const [lead, ...rest] = ranked;
   const snoozable = ranked.filter(row => row.can_handoff && (row.severity === 'critical' || row.severity === 'warning'));
@@ -2629,7 +2670,7 @@ function renderContextHealth(rows) {
   const batch = snoozable.length > 1
     ? `<div class="health-batch"><button class="btn-quiet" onclick="snoozeVisibleFreshStartProjects(this)">Snooze all 48h</button></div>`
     : '';
-  return `<div class="health-stack">${batch}${healthLeadCard(lead)}${rest.map(healthQuietRow).join('')}</div>`;
+  return `<div class="health-stack">${batch}${healthLeadCard(lead, waitingById)}${rest.map(row => healthQuietRow(row, waitingById)).join('')}</div>`;
 }
 function renderCoverage(rows) {
   if (!rows.length) return '<div class="empty">Coverage could not be determined on this machine.</div>';
@@ -3182,6 +3223,237 @@ function renderReport(report) {
     ${sections.join('')}
     <p class="receipt-note">API-equivalent value, not invoice spend. Outcomes are inferred from local signals, not guaranteed truth. Based on local logs only, not live provider quota.</p>`;
 }
+/* How far this repo is from its last commit.
+ *
+ * Present tense, which is what Home asks for, and deliberately not a verdict.
+ * The tempting figure here is "how much of today's spend is unbanked", and it
+ * cannot honestly exist: the ledger banks an event against the first commit at
+ * or after it, so everything inside the 12-hour lookback is provisionally
+ * unbanked and flips the moment you commit. A tile built on that would fire on
+ * every developer every afternoon for the ordinary state of having uncommitted
+ * work, and a signal that fires for everyone sorts nothing.
+ *
+ * Distance is answerable now. It states a fact and leaves the judgment to the
+ * reader -- except where there is a real baseline to compare against, and that
+ * baseline is the developer's own median spend between commits, never a round
+ * number someone picked. No status rail either way: being far from a commit is
+ * a normal part of a working afternoon.
+ */
+/* The screen a machine sees once, before anything is gated.
+ *
+ * Two cases, and designing for only one fails the other. AIWatcher reads
+ * history that already exists, so an established user meets everything at once
+ * at the moment they understand least; a genuinely new one meets nine empty
+ * states, none of which say when anything will appear. The first gets a finding
+ * about themselves, the second a status report about their machine.
+ *
+ * No sample data in either. Inventing figures to make an empty first screen
+ * look impressive would contradict the one thing this product sells, on the
+ * very first thing anyone sees.
+ */
+function renderFirstRun(card) {
+  const host = document.getElementById('firstRunBody');
+  if (!host) return;
+  const readable = (card.readable || []).map(esc).join(', ');
+  const unmeasured = (card.unmeasured || [])
+    .map(row => `<li><b>${esc(row.tool)}</b> — ${esc(row.why)}</li>`).join('');
+
+  const finding = card.kind === 'has_history'
+    ? `<p class="first-run-find">You have spent <b>${esc(card.spend_label)}</b> in the
+         ${esc(String(card.window_label || '').toLowerCase())}, across
+         <b>${esc(card.sessions)}</b> sessions.${card.replayed_spend_share_pct
+           ? ` <b>${esc(Math.round(card.replayed_spend_share_pct))}%</b> of it went on re-sending
+               context you had already sent.` : ''}${card.unbanked_label
+           ? ` <b>${esc(card.unbanked_label)}</b> never reached a commit.` : ''}</p>
+       <p class="first-run-note">Read from history already on this machine. Nothing was uploaded
+         and nothing was configured to produce it.</p>`
+    : `<p class="first-run-find">AIWatcher is reading this machine.</p>
+       <ul class="first-run-list">
+         ${readable ? `<li><b>${readable}</b> — readable here.</li>` : ''}
+         ${unmeasured}
+         ${card.repos ? `<li><b>${esc(card.repos)}</b> git repos found.</li>` : ''}
+         <li>No AI sessions recorded yet.</li>
+       </ul>
+       <p class="first-run-note">Cost and survival figures appear after a few sessions. Survival
+         needs commits about a week old before it means anything.</p>`;
+
+  host.innerHTML = `<span class="eyebrow">First run</span>
+    ${finding}
+    <div class="first-run-gate">
+      <b>Nothing is reviewed before it runs yet.</b>
+      Turning on the gate is what lets AIWatcher stop the next expensive prompt instead of
+      reporting on it afterwards.
+    </div>
+    <div class="actions">
+      <button class="btn-primary" onclick="showView('setup'); dismissFirstRun()">Show me how</button>
+      <button class="btn-quiet" onclick="dismissFirstRun(true)">Skip to the dashboard</button>
+    </div>`;
+}
+/* Dismissal is recorded on the server, not in this tab.
+ *
+ * A timestamp in local state, so a second window does not re-show what the
+ * first one just dismissed and a restart does not either. It is also why the
+ * decision survives: the screen is meant to be seen once, and "once" cannot be
+ * kept in a variable that dies with the page.
+ */
+async function dismissFirstRun(goHome) {
+  try {
+    await fetch('/api/first-run-dismissed', { method: 'POST' });
+  } catch (error) {
+    // Never block leaving the screen on a write. The worst case is seeing it
+    // again, which is better than being stuck on it.
+  }
+  if (goHome) showView('today');
+}
+function renderCheckpoint(card) {
+  const host = document.getElementById('checkpoint');
+  if (!host) return;
+  if (!card || (!card.available && !card.reason)) { host.hidden = true; return; }
+  if (!card.available) {
+    // No live session is not worth a permanent tile; an unmeasurable one is,
+    // because then the reader is looking at a session and the gap needs a
+    // reason rather than a blank.
+    if (/no live session/i.test(card.reason || '')) { host.hidden = true; return; }
+    host.hidden = false;
+    host.innerHTML = `<div class="label">Since last commit</div>
+      <div class="value">--</div>
+      <div class="sub">${esc(card.reason)}</div>`;
+    return;
+  }
+  const baseline = card.baseline || {};
+  const sub = baseline.available && baseline.ratio
+    ? `${esc(card.spend_label)} spent &middot; <b>${esc(baseline.ratio)}×</b> your usual ${esc(baseline.median_label)}`
+    // The full reason is a sentence and belongs where there is room for one.
+    // In a tile it just makes this one taller than its neighbours, and the row
+    // is meant to be read across.
+    : `${esc(card.spend_label)} spent &middot; no usual distance yet`
+      + (baseline.changes !== undefined
+          ? ` (${esc(baseline.changes)} costed commits, needs 4)` : '');
+  // Amber only once past the usual distance. Below it this is an ordinary
+  // working afternoon, and a rail would assert a judgment nothing supports.
+  host.className = 'card metric-card '
+    + (baseline.available && baseline.ratio >= 2 ? 'metric-amber' : 'metric-neutral');
+  host.hidden = false;
+  host.innerHTML = `<div class="label">Since last commit</div>
+    <div class="value">${esc(card.elapsed_label)}</div>
+    <div class="sub">${sub}</div>`;
+}
+/* What is running, right now.
+ *
+ * presence has carried this since the session-badges work; Home never showed
+ * it. "Waiting on you" leads when there is one, because a blocked session is
+ * the only state here that cannot continue without the reader.
+ */
+function renderPresenceTile(presence) {
+  const host = document.getElementById('presenceTile');
+  if (!host) return;
+  const live = Number(presence && presence.live) || 0;
+  if (!live) { host.hidden = true; return; }
+  const waiting = Number(presence.waiting) || 0;
+  const working = Number(presence.working) || 0;
+  const quiet = Number(presence.quiet) || 0;
+  const parts = [];
+  if (waiting) parts.push(`<b>${esc(waiting)} waiting on you</b>`);
+  if (working) parts.push(`${esc(working)} working`);
+  if (quiet) parts.push(`${esc(quiet)} quiet`);
+  host.className = 'card metric-card ' + (waiting ? 'metric-amber' : 'metric-blue');
+  host.hidden = false;
+  host.innerHTML = `<div class="label">Running now</div>
+    <div class="value">${esc(live)}</div>
+    <div class="sub">${parts.join(' &middot; ')}</div>`;
+}
+/* Waste sitting around: stale chats, pending Fresh Starts, abandoned worktrees,
+ * runtime clutter. A signal here and the queue on Control -- a review queue is
+ * a sit-down task and does not belong on a surface read from four feet away,
+ * but the fact that it has items in it is present tense.
+ */
+function renderWasteTile(optimize) {
+  const host = document.getElementById('wasteTile');
+  if (!host) return;
+  const items = ((optimize && optimize.candidates) || []).length;
+  if (!optimize || !items) { host.hidden = true; return; }
+  const impact = optimize.impact_label ? esc(optimize.impact_label) : 'no measured impact';
+  host.className = 'card metric-card '
+    + (optimize.status === 'needs_action' ? 'metric-amber' : 'metric-neutral');
+  host.hidden = false;
+  host.innerHTML = `<div class="label">Worth cleaning up</div>
+    <div class="value">${esc(items)}</div>
+    <div class="sub">${impact} &middot; <button class="link-inline" onclick="showView('control')">review on Control</button></div>`;
+}
+/* Prove's claim, and the coverage behind it.
+ *
+ * The surface was two tables of receipts: a log, which answers "what happened",
+ * and not an argument, which is what "was any of this worth it" needs. The
+ * argument was already written and rendering nowhere near here -- the server
+ * builds `unbanked.headline` and its caption in _unbanked_card, and the caption
+ * is careful about the thing that matters: uncommitted work in progress looks
+ * exactly like exploration that went nowhere, and this cannot tell them apart.
+ *
+ * Coverage leads rather than trails. On a surface whose job is to be believed,
+ * "80% of spend is measured and the rest is too recent to judge" is not a
+ * hedge to bury under the tables -- it is the reason to trust the figures above
+ * it. A proving surface that only reports its wins is the one nobody believes.
+ */
+function renderProveClaim(unbanked, survival) {
+  const parts = [];
+
+  if (unbanked && unbanked.available && unbanked.headline) {
+    // The sentence carries the figure, so it is not also set beside it as a
+    // headline number: the server's headline already opens with the amount,
+    // and a figure next to it printed "$64.52 -- $64.52 of the last 7 days
+    // has no commit behind it". One labelled statement of a number.
+    //
+    // No status rail. There is no baseline for how much unbanked spend is too
+    // much -- exploration that goes nowhere is how the work gets done -- and
+    // colouring it would assert a judgment nothing here can support.
+    // The claim, and the split it is a claim about, side by side. Stating a
+    // share without showing it makes the reader take the number on trust on the
+    // one surface whose whole job is to be believed.
+    const pct = Number(unbanked.unbanked_pct) || 0;
+    parts.push(`<div class="claim-pair">
+      <div class="verdict-card">
+        <h3>${esc(unbanked.headline)}</h3>
+        <p>${esc(unbanked.caption || '')}</p>
+      </div>
+      <div class="claim-evidence">
+        <span class="claim-figure">${esc(unbanked.unbanked_label)}</span>
+        <div class="split-bar" role="img" aria-label="${esc(unbanked.banked_label)} reached a commit, ${esc(unbanked.unbanked_label)} did not">
+          <i style="width:${(100 - pct).toFixed(1)}%;background:var(--blue)"></i>
+          <i style="width:${pct.toFixed(1)}%;background:var(--amber)"></i>
+        </div>
+        <div class="split-legend">
+          <span><i style="background:var(--blue)"></i>Reached a commit &middot; ${esc(unbanked.banked_label)}</span>
+          <span><i style="background:var(--amber)"></i>No commit behind it &middot; ${esc(unbanked.unbanked_label)}</span>
+        </div>
+        <p class="receipt-note">A commit banks the spend that preceded it, within
+          ${esc(unbanked.max_lookback_hours || 12)} hours. Anything with no commit after it, or whose
+          next commit came too late, stays unbanked.</p>
+      </div>
+    </div>`);
+  } else {
+    // Unmeasurable is its own state, with the reason, never a zero.
+    parts.push(`<div class="empty">${esc((unbanked && unbanked.reason)
+      || 'Spend cannot be attributed to commits in this window yet.')}</div>`);
+  }
+
+  if (survival && survival.available) {
+    const tooRecent = survival.changes_too_recent
+      ? ` ${esc(survival.changes_too_recent)} newer `
+        + (survival.changes_too_recent === 1 ? 'change is' : 'changes are')
+        + ` not old enough to judge yet, worth ${esc(survival.too_recent_label)}.`
+      : '';
+    parts.push(`<p class="receipt-note"><strong>What this is based on.</strong>
+      ${esc(survival.cost_coverage_pct)}% of spend in the last ${esc(survival.window_days)} days is
+      measured, across ${esc(survival.changes_measured)} changes old enough to judge.${tooRecent}
+      Survival is a floor, not a verdict: reformatting and refactoring move attribution away from
+      the original change, so the true figure is at least this good and never worse.</p>`);
+  } else if (survival && survival.reason) {
+    parts.push(`<p class="receipt-note"><strong>What this is based on.</strong>
+      ${esc(survival.reason)}</p>`);
+  }
+
+  return parts.join('');
+}
 function renderInsightHeadline(totals) {
   const split = totals.replayed_tokens_label && totals.replayed_share_pct
     ? `<span class="pill">${esc(totals.new_tokens_label)} new &middot; ${esc(totals.replayed_tokens_label)} replayed (${esc(totals.replayed_share_pct)}%)</span>`
@@ -3518,10 +3790,32 @@ function annotateClipping(node) {
     : '';
 }
 
+/* One recommendation, and the rest on request.
+ *
+ * The screen is called Improve and its job is "what is the one behaviour I
+ * should change next". Seven findings ranked by money is a ranking, not an
+ * answer: a list of everything is advice about nothing, and the reader has to
+ * do the choosing the ranking was supposed to do for them.
+ *
+ * _insight_feed already orders by impact_usd, so the first card is the one the
+ * money says matters. Nothing is dropped -- the remainder folds, with its count
+ * in the summary, because a fold with a bare title hides whether there is
+ * anything behind it. The threshold for reading further should be a click, not
+ * a scroll past six things you did not ask about.
+ */
 function renderInsightFeed(insights) {
   if (!insights || !insights.length) {
     return '<div class="empty">No notable local signals yet. Keep using AI tools and check back after a few sessions.</div>';
   }
+  const [first, ...rest] = insights;
+  const lead = renderInsightRows([first]);
+  if (!rest.length) return lead;
+  return lead + `<details class="aiw-details">
+    <summary><span>${rest.length} more signal${rest.length === 1 ? '' : 's'}, ranked below this one</span></summary>
+    <div class="details-body">${renderInsightRows(rest)}</div>
+  </details>`;
+}
+function renderInsightRows(insights) {
   return insights.map(card => `<div class="feed-row ${esc(card.severity || 'info')}${card.session_id ? ' clickable' : ''}"
       ${card.session_id ? `onclick="selectSession('${esc(card.session_id)}')"` : ''}>
       <div class="feed-main${card.chart ? ' has-evidence' : ''}">
@@ -3535,6 +3829,8 @@ function renderInsightFeed(insights) {
       ${card.impact_label ? `<span class="feed-impact mono">${esc(card.impact_label)}</span>` : ''}
     </div>`).join('');
 }
+// One decision per page load; see the call site.
+let firstRunRouted = false;
 let sessionsLoadedForDays = null;
 let reportLoadedForDays = null;
 let reportLoading = false;
@@ -3630,6 +3926,12 @@ function showView(view) {
   document.querySelectorAll('.view').forEach(node => {
     node.hidden = node.id !== `view-${view}`;
   });
+  // The first-run screen hides the rail rather than merely going unhighlighted
+  // in it. It is shown once and left once; a sidebar behind it would invite
+  // wandering off before the one action it exists for, and every destination
+  // in that rail is still empty on the machine it is shown to.
+  const rail = document.querySelector('.product-nav');
+  if (rail) rail.hidden = view === 'first-run';
   // Views swap in place while the window keeps its scroll offset, so arriving
   // from a card partway down one page dropped you the same distance into the
   // next one -- "Open Watch" sits well down Home and landed 774px past the
@@ -4184,6 +4486,24 @@ async function loadOnce(resetDetail, forceRefresh) {
   document.getElementById('costPerUseful').textContent =
     `${totals.cost_per_useful_change} value each${totals.inferred_useful_outcomes ? ` · ${totals.inferred_useful_outcomes} to confirm` : ''}`;
   renderSurvivalTile(data.survival || {});
+  renderCheckpoint(data.checkpoint);
+  renderPresenceTile(data.presence);
+  renderWasteTile(data.optimize);
+  // Routed from the payload rather than a stored client flag: the server
+  // already knows whether anything is gated and whether the screen was
+  // dismissed, and a second source of truth here would drift from it. Only on
+  // the first paint of a page load -- re-showing it under someone mid-session
+  // because a refresh arrived would be the opposite of "shown once".
+  if (!firstRunRouted) {
+    firstRunRouted = true;
+    const firstRun = data.first_run || {};
+    if (firstRun.show) { renderFirstRun(firstRun); showView('first-run'); }
+  }
+  // Prove's claim reads the same two objects the Changes ledger and the
+  // survival tile already read: no new payload, just the argument they were
+  // always evidence for, stated where it is asked.
+  document.getElementById('proveClaim').innerHTML =
+    renderProveClaim(data.unbanked, data.survival);
   document.getElementById('preflightDecisions').textContent = totals.preflight_decisions;
   // Same two-step contract as the runway charts: the tiles' numbers are set
   // first, then SVG is appended into nodes collected by attribute. Absent on
@@ -4218,7 +4538,8 @@ async function loadOnce(resetDetail, forceRefresh) {
   const handoffDecisions = data.handoff_decisions || [];
   document.getElementById('receiptRows').innerHTML = renderReceiptRows(receiptCache);
   document.getElementById('handoffDecisionRows').innerHTML = renderHandoffDecisionRows(handoffDecisions);
-  document.getElementById('sessionContextHealth').innerHTML = renderContextHealth(data.context_health || [], data.context_health_status || 'ready');
+  document.getElementById('sessionContextHealth').innerHTML =
+    renderContextHealth(data.context_health || [], data.context_health_status || 'ready', data.presence);
   document.getElementById('optimizeWorkspaceBody').innerHTML = renderOptimizeWorkspace(data.optimize || null);
   // The summary has to carry the count, or a collapsed card hides the fact that
   // there is anything in it at all.
@@ -4253,8 +4574,12 @@ async function loadOnce(resetDetail, forceRefresh) {
   updateSortIndicators('change', changeSort, ['committed_at', 'project', 'cost_usd', 'lines_changed', 'usd_per_line', 'survival_pct', 'usd_per_surviving_line']);
   const coverage = data.coverage || [];
   document.getElementById('coverageRowsSettings').innerHTML = renderCoverage(coverage);
-  // Counts on the summaries: a folded section with a bare title hides whether
-  // there is anything inside, and these two are the whole of Settings.
+  // Counts on both headings. Setup steps is still folded, and a folded section
+  // with a bare title hides whether there is anything inside. Coverage is not
+  // folded any more -- it sits under the privacy card, whose promise it
+  // qualifies -- but the count earns its place there for a different reason:
+  // "2 of 4 gated automatically" is the honest headline, and a bare "Surface
+  // coverage" would let a reader assume the four are covered.
   const gated = coverage.filter(row => row.status === 'automatic').length;
   const coverageSummary = document.getElementById('coverageSummary');
   if (coverageSummary) {
@@ -4357,15 +4682,35 @@ document.addEventListener('keydown', event => { if (event.key === 'Escape') clos
   startLiveRefresh();
   await load();
   const requestedView = new URLSearchParams(location.search).get('view');
-  if (requestedView && ['today','prompt','sessions','projects','changes','receipts','insights','setup'].includes(requestedView)) {
+  // Every view id, or a ?view= deep link at one of them silently does nothing.
+  // test_deep_link_allowlist_covers_every_view pins this against the markup so
+  // adding a section cannot quietly leave it unreachable by link.
+  if (requestedView && ['today','prompt','watch','sessions','control','projects','changes','receipts','insights','setup','first-run'].includes(requestedView)) {
     showView(requestedView);
     if (requestedView === 'prompt') {
       document.getElementById('promptInput').focus();
     }
   }
-  if (location.hash === '#optimizeWorkspace') {
-    showView('prompt');
-    window.setTimeout(() => document.getElementById('optimizeWorkspace').scrollIntoView({ block: 'start' }), 50);
+  // Deep links carry a #target as well as ?view=: the Companion's nudges point
+  // at the card that explains the nudge, not merely the page holding it.
+  //
+  // Native anchor scrolling cannot do this. Every view is hidden at load and
+  // only revealed once showView runs, so the browser looks for the target,
+  // finds nothing, and has stopped caring by the time it exists. #contextHealth
+  // was emitted by seven links and never worked for exactly that reason -- and
+  // for a second one, since no element carried that id at all.
+  //
+  // The owning view is derived from the element rather than kept in a mapping
+  // beside it: a second list is a second thing to forget when a card moves, and
+  // cards have moved. This also replaces the hand-written #optimizeWorkspace
+  // branch, which was the only target that ever worked because it was the only
+  // one someone had written a special case for.
+  const hashTarget = location.hash ? document.getElementById(location.hash.slice(1)) : null;
+  if (hashTarget) {
+    const owner = hashTarget.closest('.view');
+    if (owner) showView(owner.id.replace(/^view-/, ''));
+    // After the view is visible, or there is nothing laid out to scroll to.
+    window.setTimeout(() => hashTarget.scrollIntoView({ block: 'start' }), 50);
   }
   if (new URLSearchParams(location.search).get('ask') === '1') {
     openAskPanel();

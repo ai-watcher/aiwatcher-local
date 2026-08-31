@@ -156,7 +156,8 @@ indexed metadata. `/api/handoff-basic`, `/api/handoff`, and
 `/api/handoff-demo` accept the same dashboard-only Fresh Start options as their
 `GET` forms. `/api/handoff-decision` records which action you took on a Fresh
 Start companion, `/api/handoff-receipts-viewed` marks proof-pending receipts as
-seen, `/api/optimize-decision` records an Improve action, `/api/companion-skip`
+seen, `/api/first-run-dismissed` records that the once-only first-run screen has
+been seen so it does not return (no body; the timestamp is the server's), `/api/optimize-decision` records an Improve action, `/api/companion-skip`
 snoozes a non-blocking companion reminder, and
 `/api/ambient-intervention-action` records the native companion lifecycle
 (`displayed`, `acted`, `snoozed`, `dismissed`, or `failed`).
