@@ -98,7 +98,7 @@ from .runtime_attachment import (
     runtime_attachment_for_session,
     safe_runtime_processes,
 )
-from .runtime_nudge import foreground_tool
+from .runtime_nudge import foreground_tool, presentation_for_signal
 from .session_presence import (
     LIVE_WINDOW_MINUTES,
     live_presence,
@@ -5954,6 +5954,19 @@ class UIHandler(BaseHTTPRequestHandler):
                     "expected_savings",
                 )
             }
+            # Serve the wording rather than letting the overlay keep its own
+            # copy of it. overlay.js had a second table keyed on action with no
+            # entry for `return_session`, so a blocked session -- the strongest
+            # signal the product has -- rendered there as the generic fallback
+            # "AIWatcher found something to review", and its runway label had
+            # drifted to "Copy Fresh Start brief". One table cannot drift from
+            # itself.
+            presentation = presentation_for_signal(
+                str(record.get("signal_kind") or "usage_pressure"),
+                str(record.get("reason") or ""),
+            )
+            payload["title"] = presentation["title"]
+            payload["primary_label"] = presentation["primary_label"]
             self._send(200, json.dumps(payload), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/companion-state":

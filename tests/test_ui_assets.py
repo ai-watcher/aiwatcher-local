@@ -40,6 +40,19 @@ class WebAssetsTest(unittest.TestCase):
     the package, and an include that never got substituted -- both of which serve
     a page that looks fine in the diff and is broken in the browser."""
 
+    def test_overlay_keeps_no_second_copy_of_the_nudge_titles(self):
+        """overlay.js used to carry its own title table keyed on action. It
+        drifted: no entry for a waiting session, so the strongest signal in the
+        product rendered as "AIWatcher found something to review". The titles
+        now arrive from /api/ambient-intervention, and a copy reappearing here
+        is the drift starting again."""
+        from aiwatcher_cli.runtime_nudge import _PRESENTATIONS
+
+        source = js_function_source(ui._load_asset("overlay.js"), "interventionPresentation")
+        for signal_kind, (title, _primary_label, _action) in _PRESENTATIONS.items():
+            with self.subTest(signal_kind=signal_kind):
+                self.assertNotIn(title, source)
+
     def test_every_asset_ships(self):
         for name in WEB_FILES:
             with self.subTest(asset=name):

@@ -106,6 +106,8 @@ from .receipt import (
 )
 from .runtime_attachment import perform_runtime_return, runtime_attachment_for_session, safe_runtime_processes
 from .runtime_nudge import (
+    COMPANION_BAR_SIGNAL_KINDS,
+    INSPECT_ACTIONS,
     MAX_ACTIVE_IDLE_SECONDS,
     build_runtime_nudge,
     foreground_tool,
@@ -5253,8 +5255,12 @@ def _open_handoff_overlay(
     """Best-effort local companion overlay outside the AI tool UI."""
     if os.environ.get("AIWATCHER_DISABLE_OVERLAY", "").strip().lower() in {"1", "true", "yes", "on"}:
         return False, "disabled by AIWATCHER_DISABLE_OVERLAY"
-    if _existing_companion_presence_pid() is not None:
-        return True, "companion presence already owns interventions"
+    if _existing_companion_presence_pid() is not None and signal_kind in COMPANION_BAR_SIGNAL_KINDS:
+        # The bar does present these three, so reporting delivery is honest.
+        # It was reported for every kind, which is why a loop or a velocity
+        # spike produced a "Overlay: opened" log line and no window: this
+        # returned True without opening anything.
+        return True, f"companion presence bar presents {signal_kind}"
     brief_file = None
     if brief_text:
         try:
@@ -5960,7 +5966,7 @@ def _print_watch_status_card(
                     intervention_fingerprint=fingerprint,
                     signal_kind=str(presentation["signal_kind"]),
                     primary_label=primary_label,
-                    primary_mode="inspect" if presentation["action_mode"] == "recover_loop" else "copy",
+                    primary_mode="inspect" if presentation["action_mode"] in INSPECT_ACTIONS else "copy",
                     runtime_action_available=attachment.available and getattr(attachment, "level", "") != "app",
                 )
                 print(f"  Overlay: {'opened' if overlay_ok else 'not opened'} ({overlay_detail})")
