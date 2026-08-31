@@ -1681,6 +1681,58 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertIn("held for dashboard", stdout.getvalue())
         self.assertFalse(notifications[0]["sent"])
 
+    def test_runway_overlay_reviews_instead_of_copying_a_generic_brief(self) -> None:
+        """The runway button is labelled "Review switch options" and used to
+        copy a target=generic Fresh Start brief -- neither a switch nor a
+        review. The desktop window took `copy` even though overlay_config's own
+        default for runway is `inspect`, because the caller forced the mode for
+        everything that was not a loop."""
+        row = session(1, project="/repo/orcha")
+        row.surface = "cli"
+        args = SimpleNamespace(
+            days=1,
+            interval=15,
+            once=True,
+            cost_threshold=5.0,
+            calls_threshold=250,
+            tokens_threshold=500_000,
+            target="generic",
+            notify=False,
+            overlay=True,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(cli, "get_baselines", return_value={}),
+                patch.object(cli, "safe_runtime_processes", return_value=[]),
+                patch.object(cli, "_watch_status", return_value={
+                    "action": "switch tool or lane",
+                    "signal_kind": "runway",
+                    "reason": "Estimated usage in the last 24h is 2.4x your typical claude-code session.",
+                    "health": None,
+                    "loop": None,
+                    "velocity": None,
+                    "runway": None,
+                }),
+                patch.object(cli, "_open_handoff_overlay", return_value=(True, "native")) as overlay,
+                patch("sys.stdout", io.StringIO()),
+            ):
+                cli._print_watch_status_card(row, [row], args, [], {}, {})
+
+        overlay.assert_called_once()
+        kwargs = overlay.call_args.kwargs
+        self.assertEqual(kwargs["primary_mode"], "inspect")
+        self.assertEqual(kwargs["primary_label"], "Review switch options")
+
+    def test_inspect_actions_are_real_actions(self) -> None:
+        """A name here that no presentation emits routes nothing, and reads as
+        coverage the button does not have."""
+        from aiwatcher_cli import runtime_nudge
+
+        emitted = {action for _, _, action in runtime_nudge._PRESENTATIONS.values()}
+        self.assertTrue(runtime_nudge.INSPECT_ACTIONS.issubset(emitted))
+
     def test_open_handoff_overlay_defers_signals_the_companion_bar_presents(self) -> None:
         with (
             patch.object(cli, "_existing_companion_presence_pid", return_value=4242),

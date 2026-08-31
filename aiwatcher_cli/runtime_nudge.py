@@ -119,6 +119,26 @@ COMPANION_BAR_SIGNAL_KINDS = frozenset({
 })
 
 
+# Actions whose primary button reviews evidence instead of putting a brief on
+# the clipboard.
+#
+# A loop is here because you cannot write a useful next step for a run that is
+# repeating -- you have to look at what it is repeating. `switch_tool` is here
+# because "Review switch options" was copying a `target=generic` Fresh Start
+# brief and closing: not a switch, and not a review either. Opening the session
+# reaches the Fresh Start drawer, which already offers a per-tool target for
+# the brief, so the choice is presented rather than made for you.
+#
+# The overlay page keeps its own mapping in PRIMARY_MODES in web/overlay.js,
+# because that one names functions on the page and cannot import this. The two
+# agree on every kind except `return_session`, which inspects on the page and
+# still copies here. The bar owns that kind (COMPANION_BAR_SIGNAL_KINDS), so
+# the desktop window only sees it with the bar off -- reachable, but rarer, and
+# not fixed here. It is the same label-versus-behaviour split: a button reading
+# "Return to session" that puts a brief on the clipboard.
+INSPECT_ACTIONS = frozenset({"recover_loop", "switch_tool"})
+
+
 def presentation_for_signal(signal_kind: str, reason: str) -> dict[str, str]:
     title, primary_label, action = _PRESENTATIONS.get(signal_kind, _PRESENTATIONS["usage_pressure"])
     return {

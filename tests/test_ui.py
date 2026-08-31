@@ -34,7 +34,11 @@ from aiwatcher_cli.scanner import LocalEvent, LocalSession, SurfaceCoverage
 # Enough of a browser to run the real overlay script and read back what it drew.
 # The alternative is asserting on the source, which is how the page came to
 # render "No Fresh Start needed right now" for a loop without anyone noticing.
-STUBS = """
+#
+# Parameterised by the intervention because the bug class this catches is
+# per-signal: the page renders one kind correctly and another kind wrongly, and
+# a harness pinned to a single kind cannot see the difference.
+STUBS_TEMPLATE = """
 let drawn = '';
 const node = {
   set innerHTML(value) { drawn = value; },
@@ -47,22 +51,19 @@ globalThis.window = {
   setTimeout: () => {},
   close: () => {},
 };
-globalThis.navigator = { clipboard: { writeText: async () => {} } };
+// Node 21+ defines `navigator` as a getter with no setter, and this harness
+// runs as a module, so a plain assignment throws rather than being ignored.
+// The property is configurable, so redefining it works on every version.
+Object.defineProperty(globalThis, 'navigator', {
+  value: { clipboard: { writeText: async () => {} } },
+  configurable: true,
+});
 globalThis.fetch = async (url) => {
   if (String(url).startsWith('/api/ambient-intervention?')) {
-    return { ok: true, json: async () => ({
-      fingerprint: 'fp-1',
-      session_id: 'sess-1',
-      signal_kind: 'loop',
-      action: 'recover_loop',
-      severity: 'critical',
-      reason: 'The same tool call repeated 9 times.',
-      title: 'Possible loop detected',
-      primary_label: 'Inspect and stop',
-    }) };
+    return { ok: true, json: async () => (__INTERVENTION__) };
   }
   if (String(url).startsWith('/api/summary')) {
-    return { json: async () => ({ handoff_bubble: null, context_health: [] }) };
+    return { json: async () => (__SUMMARY__) };
   }
   return { ok: true, json: async () => ({}) };
 };
@@ -2077,29 +2078,114 @@ class DashboardWindowTests(unittest.TestCase):
             os.unlink(script_path)
         self.assertEqual(completed.returncode, 0, f"Overlay inline JS has a syntax error:\n{completed.stderr}")
 
+    def _render_overlay_for(self, intervention: dict, summary: dict | None = None) -> str:
+        """Run the real overlay script against one intervention and return the
+        HTML it drew."""
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not available to run the overlay script")
+        script = re.search(r"<script>(.*?)</script>", ui.OVERLAY_HTML, re.S).group(1)
+        stubs = (
+            STUBS_TEMPLATE
+            .replace("__INTERVENTION__", json.dumps(intervention))
+            .replace(
+                "__SUMMARY__",
+                json.dumps(summary if summary is not None else {"handoff_bubble": None, "context_health": []}),
+            )
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False, encoding="utf-8") as handle:
+            handle.write(stubs + script + TAIL)
+            script_path = handle.name
+        try:
+            completed = subprocess.run([node, script_path], capture_output=True, text=True)
+        finally:
+            os.unlink(script_path)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return completed.stdout
+
     def test_overlay_renders_a_signal_that_has_no_fresh_start_bubble(self) -> None:
         """handoff_bubble is built from context health alone, so a loop, a
         velocity spike, or a waiting session has none behind it. The page used
         to fall through to "No Fresh Start needed right now" -- the opposite of
         the signal that opened the window -- and nothing caught it because the
         overlay was unreachable whenever the Companion bar was running."""
-        node = shutil.which("node")
-        if not node:
-            self.skipTest("node not available to run the overlay script")
-        script = re.search(r"<script>(.*?)</script>", ui.OVERLAY_HTML, re.S).group(1)
-        harness = STUBS + script + TAIL
-        with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False, encoding="utf-8") as handle:
-            handle.write(harness)
-            script_path = handle.name
-        try:
-            completed = subprocess.run([node, script_path], capture_output=True, text=True)
-        finally:
-            os.unlink(script_path)
+        drawn = self._render_overlay_for({
+            "fingerprint": "fp-1",
+            "session_id": "sess-1",
+            "signal_kind": "loop",
+            "action": "recover_loop",
+            "severity": "critical",
+            "reason": "The same tool call repeated 9 times.",
+            "title": "Possible loop detected",
+            "primary_label": "Inspect and stop",
+        })
 
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertIn("Possible loop detected", completed.stdout)
-        self.assertIn("Inspect and stop", completed.stdout)
-        self.assertNotIn("No Fresh Start needed right now", completed.stdout)
+        self.assertIn("Possible loop detected", drawn)
+        self.assertIn("Inspect and stop", drawn)
+        self.assertNotIn("No Fresh Start needed right now", drawn)
+
+    def test_overlay_does_not_borrow_another_sessions_bubble(self) -> None:
+        """handoff_bubble is whichever session the dashboard is worried about,
+        not necessarily the one the window was opened for. A blocked session is
+        the case that collides: it is waiting, not heavy, so it has no
+        context-health row of its own, and the page used to draw the
+        intervention's title over the other session's identity, tokens and
+        spend -- then point the button at that other session."""
+        drawn = self._render_overlay_for(
+            {
+                "fingerprint": "fp-1",
+                "session_id": "sess-1",
+                "signal_kind": "session_blocked",
+                "action": "return_session",
+                "severity": "warning",
+                "reason": "Waiting for permission. This session cannot continue until you answer it.",
+                "title": "A session is waiting for you",
+                "primary_label": "Return to session",
+            },
+            summary={
+                "handoff_bubble": {
+                    "session_id": "sess-other",
+                    "project": "/repo/unrelated",
+                    "tool": "claude-code",
+                    "severity": "critical",
+                    "body": "Context is 860,652 tokens/turn.",
+                    "reason": "Context is 860,652 tokens/turn.",
+                    "tags": ["860.7k tokens/turn", "$477.61 on replayed context"],
+                },
+                "context_health": [],
+            },
+        )
+
+        self.assertIn("A session is waiting for you", drawn)
+        self.assertIn("Waiting for permission", drawn)
+        self.assertNotIn("sess-other", drawn)
+        self.assertNotIn("unrelated", drawn)
+        self.assertNotIn("477.61", drawn)
+
+    def test_overlay_runway_button_reviews_rather_than_copying_a_brief(self) -> None:
+        """"Review switch options" has to review something. It used to run the
+        Fresh Start path -- copy a `target=generic` brief and close -- so the
+        one button in the product that offers a switch was the one that could
+        not make one. It now opens the session, one click from the Fresh Start
+        drawer's per-tool targets.
+
+        Asserted through the absence of the secondary Inspect button, which
+        renderBubble drops exactly when the primary is already the inspect
+        action. That is the page's own observable signature for this mode."""
+        drawn = self._render_overlay_for({
+            "fingerprint": "fp-1",
+            "session_id": "sess-1",
+            "signal_kind": "runway",
+            "action": "switch_tool",
+            "severity": "warning",
+            "reason": "Estimated usage in the last 24h is 2.4x your typical claude-code session.",
+            "title": "Usage runway is getting low",
+            "primary_label": "Review switch options",
+        })
+
+        self.assertIn("Usage runway is getting low", drawn)
+        self.assertIn("Review switch options", drawn)
+        self.assertNotIn('id="inspect"', drawn)
 
     def test_prompt_plan_routes_broad_codex_work_to_fork(self) -> None:
         with (

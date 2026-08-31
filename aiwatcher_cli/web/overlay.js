@@ -107,7 +107,12 @@ const PRIMARY_MODES = {
   recover_loop: 'inspect',
   continue_focused: 'focused',
   fresh_chat: 'fresh_chat',
-  switch_tool: 'fresh_chat',
+  // "Review switch options" has to review something. Copying a target=generic
+  // Fresh Start brief is not a switch, and it left the one button in the
+  // product that offers one unable to make it. Inspect opens the session, one
+  // click from the Fresh Start drawer's per-tool targets, so the choice is
+  // presented rather than made on the developer's behalf.
+  switch_tool: 'inspect',
 };
 function interventionPresentation(bubble, intervention) {
   if (!intervention) {
@@ -206,6 +211,14 @@ async function load() {
         tags: [`${health.latest_turn_tokens} tokens/turn`, `${saved} replayed`].concat(
           health.bloat_measurable ? [`${health.bloat_label} of spend replayed`] : []),
       };
+    } else {
+      // handoff_bubble is whichever session the dashboard is worried about,
+      // which need not be the one this window was opened for. Keeping it drew
+      // the intervention's title over another session's identity, tokens and
+      // spend, and pointed the button at that other session. A deep link to a
+      // session with no context-health row is exactly the blocked-session
+      // case: alive, waiting, and under no context pressure at all.
+      bubble = null;
     }
   }
   // A loop, a velocity spike, runway pressure, or a waiting session has no
