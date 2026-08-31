@@ -263,15 +263,22 @@ class MacosSwiftOverlaySourceTests(unittest.TestCase):
         """The Swift companion is the macOS delivery path and is stored as a
         Python string, so nothing parses it until a developer on a Mac triggers
         an overlay. A typo here is a window that never opens, reported as
-        "Overlay: opened". swiftc is present on the macOS CI runners."""
+        "Overlay: opened".
+
+        Gated on macOS, not merely on swiftc: the Linux runners ship a Swift
+        toolchain too, and it typechecks this file right up to `import Cocoa`,
+        which is macOS-only. Checking for the compiler alone turned a
+        platform-specific source file into a failure on every Linux job.
+        """
         import os
         import shutil as _shutil
         import subprocess
+        import sys as _sys
         import tempfile
 
         swiftc = _shutil.which("swiftc")
-        if not swiftc:
-            self.skipTest("swiftc not available to typecheck the overlay source")
+        if _sys.platform != "darwin" or not swiftc:
+            self.skipTest("the macOS SDK is needed to typecheck a Cocoa source file")
         with tempfile.NamedTemporaryFile("w", suffix=".swift", delete=False, encoding="utf-8") as handle:
             handle.write(native_overlay.MACOS_SWIFT_OVERLAY)
             path = handle.name
