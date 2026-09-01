@@ -201,6 +201,11 @@ Where it is available, running both is the normal setup: the prompt hook catches
 risky *intent*, the command gate catches a risky *command* that a perfectly
 reasonable prompt happened to produce.
 
+When the Companion is running, the command gate follows the same interaction
+model as Prompt Gate: the Companion lights up as **Review command**, and opens
+the local decision page only when you click it. If the Companion is not running,
+AIWatcher falls back to opening the one-shot local page directly.
+
 #### Verify and undo
 
 Every installer prints the change and writes nothing unless you pass `--write`,

@@ -173,6 +173,7 @@ def _empty_state() -> dict[str, Any]:
         "ambient_interventions": [],
         "sent_notification_keys": [],
         "active_prompt_gate": None,
+        "active_command_gate": None,
         # Second Opinion spends the user's own money on their own key, so
         # consent is per project and the spend ledger is what the monthly cap
         # is enforced against.
@@ -260,6 +261,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("ambient_interventions", [])
     data.setdefault("sent_notification_keys", [])
     data.setdefault("active_prompt_gate", None)
+    data.setdefault("active_command_gate", None)
     data.setdefault("ui_server", None)
     data.setdefault("watcher_heartbeat", None)
     data.setdefault("session_waiting", {})
@@ -577,6 +579,81 @@ def mark_active_prompt_gate_seen(gate_id: str) -> None:
 
 def active_prompt_gate_seen(gate_id: str) -> bool:
     gate = active_prompt_gate()
+    return bool(isinstance(gate, dict) and gate.get("id") == gate_id and gate.get("companion_seen_at"))
+
+
+def record_active_command_gate(
+    *,
+    gate_id: str,
+    tool: str,
+    command_preview: str,
+    pattern_id: str,
+    reason: str,
+    url: str,
+    expires_at: datetime,
+) -> None:
+    with _locked_state():
+        data = _load()
+        data["active_command_gate"] = {
+            "id": gate_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "expires_at": expires_at.astimezone(timezone.utc).isoformat(),
+            "tool": tool,
+            "command_preview": command_preview.strip()[:500],
+            "pattern_id": pattern_id.strip()[:120],
+            "reason": reason.strip()[:500],
+            "url": url,
+            "companion_seen_at": None,
+        }
+        _save(data)
+
+
+def clear_active_command_gate(gate_id: str | None = None) -> None:
+    with _locked_state():
+        data = _load()
+        gate = data.get("active_command_gate")
+        if not isinstance(gate, dict):
+            data["active_command_gate"] = None
+            _save(data)
+            return
+        if gate_id is not None and gate.get("id") != gate_id:
+            return
+        data["active_command_gate"] = None
+        _save(data)
+
+
+def active_command_gate() -> dict[str, Any] | None:
+    with _locked_state():
+        data = _load()
+        gate = data.get("active_command_gate")
+        if not isinstance(gate, dict):
+            return None
+        try:
+            expires_at = datetime.fromisoformat(str(gate.get("expires_at")))
+        except ValueError:
+            expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at.astimezone(timezone.utc) < datetime.now(timezone.utc):
+            data["active_command_gate"] = None
+            _save(data)
+            return None
+        return dict(gate)
+
+
+def mark_active_command_gate_seen(gate_id: str) -> None:
+    with _locked_state():
+        data = _load()
+        gate = data.get("active_command_gate")
+        if not isinstance(gate, dict) or gate.get("id") != gate_id:
+            return
+        gate["companion_seen_at"] = datetime.now(timezone.utc).isoformat()
+        data["active_command_gate"] = gate
+        _save(data)
+
+
+def active_command_gate_seen(gate_id: str) -> bool:
+    gate = active_command_gate()
     return bool(isinstance(gate, dict) and gate.get("id") == gate_id and gate.get("companion_seen_at"))
 
 

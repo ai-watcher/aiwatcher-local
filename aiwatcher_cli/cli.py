@@ -47,8 +47,10 @@ from . import prompt_signals
 from .local_state import (
     COMMAND_GATE_BLOCKED_DECISIONS,
     VALID_OUTCOMES,
+    active_command_gate_seen,
     ambient_intervention_delivery_allowed,
     active_prompt_gate_seen,
+    clear_active_command_gate,
     clear_watcher_heartbeat,
     companion_skip_active,
     command_hash,
@@ -71,6 +73,7 @@ from .local_state import (
     record_active_prompt_gate,
     record_always_allow_command_pattern,
     record_ambient_intervention_action,
+    record_active_command_gate,
     record_command_decision,
     record_decision,
     record_evidence_snapshot,
@@ -3144,7 +3147,14 @@ def analyze_tool_call(tool_name: str, tool_input: dict[str, object]) -> dict[str
     return None
 
 
-def _command_gate_html(*, command: str, reason: str, pattern_id: str, tool_label: str) -> str:
+def _command_gate_html(
+    *,
+    command: str,
+    reason: str,
+    pattern_id: str,
+    tool_label: str,
+    timeout_seconds: int = PROMPT_GATE_TIMEOUT_SECONDS,
+) -> str:
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>AIWatcher command gate</title>
 <style>
@@ -3156,6 +3166,7 @@ pre {{ background:#0b1118; border:1px solid #2a3646; border-radius:6px; padding:
 .reason {{ border-left:3px solid #d9534f; padding:8px 12px; background:#181310; margin:14px 0; }}
 .row {{ display:flex; gap:10px; margin-top:20px; flex-wrap:wrap; }}
 button {{ padding:10px 16px; border-radius:6px; border:1px solid #2a3646; font-size:14px; cursor:pointer; }}
+button:disabled {{ opacity:.56; cursor:not-allowed; }}
 .allow {{ background:#1b2b1f; color:#8fd19e; border-color:#2f6f3f; }}
 .block {{ background:#2b1b1b; color:#e08787; border-color:#6f2f2f; }}
 .always {{ background:#141d29; color:#9fb0c3; }}
@@ -3171,23 +3182,56 @@ button {{ padding:10px 16px; border-radius:6px; border:1px solid #2a3646; font-s
 <button class="block" onclick="decide('block')">Block</button>
 <button class="always" onclick="decide('always_allow')">Always allow this pattern</button>
 </div>
-<div class="status" id="status"></div>
+<div class="status" id="status">Waiting for your choice. This gate expires in {max(1, int(timeout_seconds))}s.</div>
 </div>
 <script>
+let resolved = false;
+let remainingSeconds = {max(1, int(timeout_seconds))};
+const statusEl = document.getElementById('status');
+const buttons = Array.from(document.querySelectorAll('button'));
+
+function setButtonsDisabled(disabled) {{
+  buttons.forEach((button) => {{ button.disabled = disabled; }});
+}}
+
+const expiryTimer = setInterval(() => {{
+  if (resolved) {{
+    clearInterval(expiryTimer);
+    return;
+  }}
+  remainingSeconds -= 1;
+  if (remainingSeconds <= 0) {{
+    clearInterval(expiryTimer);
+    setButtonsDisabled(true);
+    statusEl.textContent = 'This gate expired. Return to Claude Code and retry if you still want to run the command.';
+  }} else {{
+    statusEl.textContent = 'Waiting for your choice. This gate expires in ' + remainingSeconds + 's.';
+  }}
+}}, 1000);
+
 async function decide(decision) {{
-  document.getElementById('status').textContent = 'Recording decision...';
+  if (resolved) return;
+  resolved = true;
+  clearInterval(expiryTimer);
+  setButtonsDisabled(true);
+  statusEl.textContent = 'Recording decision...';
   try {{
     const res = await fetch('/decision', {{
       method: 'POST', headers: {{'Content-Type': 'application/json'}},
       body: JSON.stringify({{decision}})
     }});
     if (res.ok) {{
-      document.getElementById('status').textContent = 'Decision recorded (' + decision + '). You can close this tab.';
+      statusEl.textContent = 'Decision recorded (' + decision + '). Return to Claude Code. This tab can be closed.';
+      setTimeout(() => {{ window.close(); }}, 700);
     }} else {{
-      document.getElementById('status').textContent = 'Could not record decision. Try again.';
+      resolved = false;
+      setButtonsDisabled(false);
+      statusEl.textContent = 'Could not record decision. Try again before this gate expires.';
     }}
   }} catch (e) {{
-    document.getElementById('status').textContent = 'Could not reach AIWatcher. Try again.';
+    resolved = false;
+    setButtonsDisabled(false);
+    statusEl.textContent = 'This gate window can no longer reach AIWatcher. The hook may have timed out; return to Claude Code and retry if needed.';
   }}
 }}
 </script>
@@ -3246,6 +3290,7 @@ def run_command_gate(
     if open_browser and not _display_available():
         return _fallback_command_gate(command=command, reason=reason, pattern_id=pattern_id)
 
+    gate_id = uuid.uuid4().hex
     decision_event = threading.Event()
     state: dict[str, str] = {}
 
@@ -3267,7 +3312,16 @@ def run_command_gate(
             if self.path != "/":
                 self._send(404, "Not found", "text/plain; charset=utf-8")
                 return
-            self._send(200, _command_gate_html(command=command, reason=reason, pattern_id=pattern_id, tool_label=tool_label))
+            self._send(
+                200,
+                _command_gate_html(
+                    command=command,
+                    reason=reason,
+                    pattern_id=pattern_id,
+                    tool_label=tool_label,
+                    timeout_seconds=timeout_seconds,
+                ),
+            )
 
         def do_POST(self) -> None:
             if self.path != "/decision":
@@ -3291,19 +3345,64 @@ def run_command_gate(
     thread.start()
     url = f"http://127.0.0.1:{server.server_port}/"
     try:
+        try:
+            command_preview, _ = redact_command_for_storage(command)
+            record_active_command_gate(
+                gate_id=gate_id,
+                tool=tool_label,
+                command_preview=command_preview,
+                pattern_id=pattern_id,
+                reason=reason,
+                url=url,
+                expires_at=datetime.now(timezone.utc) + timedelta(seconds=max(1, timeout_seconds)),
+            )
+        except OSError:
+            pass
         if ready_callback:
             ready_callback(url)
-        if open_browser:
+        companion_owns_gate = _companion_can_own_blocking_gate() if open_browser else False
+        if open_browser and not companion_owns_gate:
             try:
                 opened = webbrowser.open(url)
             except Exception:
                 opened = False
             if not opened:
+                try:
+                    clear_active_command_gate(gate_id)
+                except OSError:
+                    pass
                 return _fallback_command_gate(command=command, reason=reason, pattern_id=pattern_id)
+        elif open_browser and companion_owns_gate:
+            seen_by_companion = False
+            companion_wait_seconds = min(10.0, max(0.5, min(timeout_seconds / 2, timeout_seconds / 6)))
+            deadline = time_module.monotonic() + companion_wait_seconds
+            while not decision_event.is_set() and time_module.monotonic() < deadline:
+                try:
+                    if active_command_gate_seen(gate_id):
+                        seen_by_companion = True
+                        break
+                except OSError:
+                    break
+                time_module.sleep(0.1)
+            if not seen_by_companion and not decision_event.is_set():
+                try:
+                    opened = webbrowser.open(url)
+                except Exception:
+                    opened = False
+                if not opened:
+                    try:
+                        clear_active_command_gate(gate_id)
+                    except OSError:
+                        pass
+                    return _fallback_command_gate(command=command, reason=reason, pattern_id=pattern_id)
         if not decision_event.wait(max(1, timeout_seconds)):
             return None
         return state.get("decision")
     finally:
+        try:
+            clear_active_command_gate(gate_id)
+        except OSError:
+            pass
         server.shutdown()
         server.server_close()
 
@@ -5108,12 +5207,12 @@ def _existing_companion_presence_pid() -> int | None:
     return None
 
 
-def _companion_can_own_prompt_gate() -> bool:
-    """Return true when Companion can be the first prompt-gate surface.
+def _companion_can_own_blocking_gate() -> bool:
+    """Return true when Companion can be the first blocking-gate surface.
 
     The native presence PID file is the strongest signal, but users can also
     have the background Companion heartbeat without a readable presence PID
-    after restarts or dev-process churn. In that case the prompt hook should
+    after restarts or dev-process churn. In that case the hook should
     still publish an active gate for Companion before falling back to a browser.
     """
     if _existing_companion_presence_pid() is not None:
@@ -5146,6 +5245,10 @@ def _companion_can_own_prompt_gate() -> bool:
     except (TypeError, ValueError):
         return False
     return (datetime.now(timezone.utc) - updated).total_seconds() <= 90
+
+
+def _companion_can_own_prompt_gate() -> bool:
+    return _companion_can_own_blocking_gate()
 
 
 def _existing_companion_tray_pid() -> int | None:
@@ -8350,15 +8453,25 @@ def _configured_aiwatcher_source_warnings() -> list[str]:
     if os.name == "nt":
         package_root = package_root.replace("\\", "/")
     checks = [
-        ("Claude project hook", _claude_settings_path("project"), "claude-hook"),
-        ("Claude user hook", _claude_settings_path("user"), "claude-hook"),
-        ("Codex project hook", _codex_hooks_path("project"), "codex-hook"),
-        ("Codex user hook", _codex_hooks_path("user"), "codex-hook"),
-        ("Cursor project hook", _cursor_hooks_path("project"), "cursor-hook"),
-        ("Cursor user hook", _cursor_hooks_path("user"), "cursor-hook"),
+        ("Claude project hook", _claude_settings_path("project"), "claude-hook",
+         "python -m aiwatcher_cli install-claude-hook --write --scope project --gate"),
+        ("Claude user hook", _claude_settings_path("user"), "claude-hook",
+         "python -m aiwatcher_cli install-claude-hook --write --scope user --gate"),
+        ("Claude project command gate", _claude_settings_path("project"), "claude-pretooluse-hook",
+         "python -m aiwatcher_cli install-claude-command-gate --write --scope project"),
+        ("Claude user command gate", _claude_settings_path("user"), "claude-pretooluse-hook",
+         "python -m aiwatcher_cli install-claude-command-gate --write --scope user"),
+        ("Codex project hook", _codex_hooks_path("project"), "codex-hook",
+         "python -m aiwatcher_cli install-codex-hook --write --scope project --gate"),
+        ("Codex user hook", _codex_hooks_path("user"), "codex-hook",
+         "python -m aiwatcher_cli install-codex-hook --write --scope user --gate"),
+        ("Cursor project hook", _cursor_hooks_path("project"), "cursor-hook",
+         "python -m aiwatcher_cli install-cursor-hook --write --scope project --gate"),
+        ("Cursor user hook", _cursor_hooks_path("user"), "cursor-hook",
+         "python -m aiwatcher_cli install-cursor-hook --write --scope user --gate"),
     ]
     warnings: list[str] = []
-    for label, path, marker in checks:
+    for label, path, marker, repair in checks:
         text = _file_text(path)
         if marker not in text:
             continue
@@ -8366,7 +8479,7 @@ def _configured_aiwatcher_source_warnings() -> list[str]:
         if package_root not in normalized:
             warnings.append(
                 f"{label} is installed from a different AIWatcher checkout. Reinstall it from this repo so hooks, "
-                f"Companion, and Prompt Gate use the same code. Path: {path}"
+                f"Companion, and gates use the same code. Path: {path}. Repair: {repair}"
             )
     return warnings
 

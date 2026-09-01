@@ -1768,6 +1768,40 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["continue_url"], "http://127.0.0.1:9999/")
         mark_seen.assert_called_once_with("gate-1")
 
+    def test_companion_state_surfaces_active_command_gate(self) -> None:
+        with (
+            patch.object(ui, "active_prompt_gate", return_value=None),
+            patch.object(ui, "active_command_gate", return_value={
+                "id": "cmd-gate-1",
+                "tool": "Claude Code",
+                "command_preview": "cat .env",
+                "pattern_id": "credential-read",
+                "reason": "Reading a credential/secret file can expose its contents.",
+                "url": "http://127.0.0.1:9998/",
+            }),
+            patch.object(ui, "mark_active_command_gate_seen") as mark_seen,
+            patch.object(ui, "build_summary_cached", return_value={
+                "handoff_bubble": {
+                    "session_id": "sess-1",
+                    "severity": "critical",
+                    "body": "Context is getting expensive.",
+                },
+                "intervention_receipts": [],
+                "handoff_decisions": [],
+                "insights": [],
+                "watcher": {"running": True},
+            }),
+        ):
+            state = ui.build_companion_state()
+
+        self.assertEqual(state["state"], "command_gate")
+        self.assertEqual(state["label"], "Command Gate")
+        self.assertEqual(state["primary_label"], "Review command")
+        self.assertEqual(state["primary_action"], "open_prompt_gate")
+        self.assertEqual(state["primary_url"], "http://127.0.0.1:9998/")
+        self.assertIn("cat .env", state["subtitle"])
+        mark_seen.assert_called_once_with("cmd-gate-1")
+
     def test_companion_state_surfaces_fresh_start_proof_as_passive_status(self) -> None:
         with (
             patch.object(ui, "build_summary_cached", return_value={

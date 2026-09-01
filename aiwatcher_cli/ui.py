@@ -50,6 +50,7 @@ from .local_state import (
     MAX_COMMAND_DECISIONS_STORED,
     PROMPT_MODIFIED_DECISIONS,
     VALID_OUTCOMES,
+    active_command_gate,
     active_prompt_gate,
     analyst_consent,
     analyst_contents_allowed,
@@ -66,6 +67,7 @@ from .local_state import (
     recent_interventions,
     recent_optimize_decisions,
     get_ambient_intervention,
+    mark_active_command_gate_seen,
     mark_active_prompt_gate_seen,
     mark_recent_handoff_receipts_viewed,
     record_companion_skip,
@@ -6001,6 +6003,35 @@ def build_companion_state() -> dict[str, object]:
             "continue_url": str(gate.get("url") or ""),
             "control_url": str(gate.get("url") or "/?view=prompt"),
             "detail": "A hook paused this prompt locally. Review it before the AI tool continues.",
+        }
+    try:
+        command_gate = active_command_gate()
+    except OSError:
+        command_gate = None
+    if isinstance(command_gate, dict):
+        gate_id = command_gate.get("id")
+        if isinstance(gate_id, str) and gate_id:
+            try:
+                mark_active_command_gate_seen(gate_id)
+            except OSError:
+                pass
+        tool = str(command_gate.get("tool") or "Claude Code")
+        reason = str(command_gate.get("reason") or "A local command needs review before it runs.")
+        preview = str(command_gate.get("command_preview") or "").strip()
+        subtitle = reason
+        if preview:
+            subtitle = f"{reason} Command: {preview}"
+        return {
+            **base,
+            "state": "command_gate",
+            "label": "Command Gate",
+            "title": "Review command",
+            "subtitle": subtitle,
+            "primary_label": "Review command",
+            "primary_action": "open_prompt_gate",
+            "primary_url": str(command_gate.get("url") or "/?view=control"),
+            "control_url": str(command_gate.get("url") or "/?view=control"),
+            "detail": f"{tool} paused a shell command locally. Choose Allow once, Block, or Always allow before it continues.",
         }
     # Second only to the prompt gate, and ahead of every advisory state below.
     # The gate outranks it because there AIWatcher is itself holding a prompt

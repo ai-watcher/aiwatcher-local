@@ -1323,11 +1323,11 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     // not the second: they earn the primary and the compact layout, but
     // "review when ready" must not wear the orange "blocked on you" treatment.
     func hasPrimaryAction() -> Bool {
-        return ["prompt_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm", "session_waiting", "session_finished", "away_digest"].contains(stateName)
+        return ["prompt_gate", "command_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm", "session_waiting", "session_finished", "away_digest"].contains(stateName)
     }
 
     func needsAttentionState() -> Bool {
-        return ["prompt_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm", "session_waiting"].contains(stateName)
+        return ["prompt_gate", "command_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm", "session_waiting"].contains(stateName)
     }
 
     func shouldShowWindow() -> Bool {
@@ -2743,7 +2743,7 @@ def run_native_presence(
         # update_attention_style's needs_attention set deliberately excludes
         # it, so "review when ready" never wears the orange treatment.
         return state_var.get() in {
-            "prompt_gate", "control_recommended", "optimize_available", "clipboard_confirm",
+            "prompt_gate", "command_gate", "control_recommended", "optimize_available", "clipboard_confirm",
             "session_waiting", "session_finished", "away_digest",
         }
 
@@ -2876,7 +2876,7 @@ def run_native_presence(
 
     def update_attention_style() -> None:
         needs_attention = state_var.get() in {
-            "prompt_gate", "control_recommended", "control_review", "optimize_available",
+            "prompt_gate", "command_gate", "control_recommended", "control_review", "optimize_available",
             "clipboard_confirm", "session_waiting",
         }
         attention_bg = "#ed6a24" if pulse_var.get() else "#b84816"
