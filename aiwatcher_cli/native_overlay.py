@@ -299,31 +299,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.becomesKeyOnlyIfNeeded = true
         window.hasShadow = true
 
+        // The notification wears the brand the same way the collapsed bubble
+        // does: the mark on a plain white ground, ink type, and severity
+        // carried by the mark itself -- the blue ring turns orange when the
+        // signal is critical, the job that ring does everywhere else. The
+        // ground never floods.
+        window.isOpaque = false
+        window.backgroundColor = .clear
         let view = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         view.wantsLayer = true
-        view.layer?.backgroundColor = NSColor(calibratedRed: 0.93, green: 0.96, blue: 1.0, alpha: 1).cgColor
-        view.layer?.cornerRadius = 12
+        view.layer?.backgroundColor = NSColor(calibratedRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.98).cgColor
+        view.layer?.cornerRadius = 14
         view.layer?.borderWidth = 1
-        view.layer?.borderColor = NSColor(calibratedRed: 0.65, green: 0.76, blue: 0.91, alpha: 1).cgColor
+        view.layer?.borderColor = NSColor(calibratedRed: 0.08, green: 0.07, blue: 0.08, alpha: 0.14).cgColor
         window.contentView = view
 
+        // The mark from logo/aiwatcher-mark.svg as layers, ink-on-light. Both
+        // rings 300 wide, 40 stroke, 85 outer corner radius in a 429x349 box;
+        // the ink ring (300x232 at offset 129,117) in front. The height
+        // difference between the rings is the artwork's own.
+        let markHeight: CGFloat = 30
+        let markScale = markHeight / 349.0
+        let markView = NSView(frame: NSRect(x: 22, y: 118, width: 429.0 * markScale, height: markHeight))
+        markView.wantsLayer = true
+        let blueRing = CALayer()
+        blueRing.frame = CGRect(x: 0, y: markHeight - 260.0 * markScale, width: 300.0 * markScale, height: 260.0 * markScale)
+        blueRing.borderWidth = 40.0 * markScale
+        blueRing.cornerRadius = 85.0 * markScale
+        blueRing.borderColor = (severityText == "critical"
+            ? NSColor(calibratedRed: 0.93, green: 0.42, blue: 0.14, alpha: 1)
+            : NSColor(calibratedRed: 0.00, green: 0.32, blue: 0.96, alpha: 1)).cgColor
+        markView.layer?.addSublayer(blueRing)
+        let inkRing = CALayer()
+        inkRing.frame = CGRect(x: 129.0 * markScale, y: 0, width: 300.0 * markScale, height: 232.0 * markScale)
+        inkRing.borderWidth = 40.0 * markScale
+        inkRing.cornerRadius = 85.0 * markScale
+        inkRing.borderColor = NSColor(calibratedRed: 0.08, green: 0.07, blue: 0.08, alpha: 1).cgColor
+        markView.layer?.addSublayer(inkRing)
+        view.addSubview(markView)
+
         let title = NSTextField(labelWithString: titleText)
-        title.frame = NSRect(x: 22, y: 122, width: 500, height: 26)
+        title.frame = NSRect(x: 70, y: 122, width: 452, height: 26)
         title.font = NSFont.boldSystemFont(ofSize: 18)
-        title.textColor = NSColor(calibratedRed: 0.08, green: 0.32, blue: 0.65, alpha: 1)
+        title.textColor = NSColor(calibratedRed: 0.08, green: 0.07, blue: 0.08, alpha: 1)
         view.addSubview(title)
 
         let badge = NSTextField(labelWithString: severityText)
         badge.frame = NSRect(x: 550, y: 124, width: 92, height: 22)
         badge.alignment = .center
         badge.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        badge.textColor = NSColor(calibratedRed: 0.30, green: 0.36, blue: 0.48, alpha: 1)
+        badge.textColor = severityText == "critical"
+            ? NSColor(calibratedRed: 0.80, green: 0.33, blue: 0.09, alpha: 1)
+            : NSColor(calibratedRed: 0.62, green: 0.42, blue: 0.07, alpha: 1)
         view.addSubview(badge)
 
         let body = NSTextField(wrappingLabelWithString: bodyText)
         body.frame = NSRect(x: 22, y: 78, width: 626, height: 38)
         body.font = NSFont.systemFont(ofSize: 14)
-        body.textColor = NSColor(calibratedRed: 0.22, green: 0.28, blue: 0.40, alpha: 1)
+        body.textColor = NSColor(calibratedRed: 0.26, green: 0.25, blue: 0.26, alpha: 1)
         view.addSubview(body)
 
         let primary = NSButton(title: primaryLabel, target: self, action: #selector(primaryAction))
@@ -346,7 +379,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusLabel.frame = NSRect(x: 452, y: 44, width: 196, height: 18)
         statusLabel.alignment = .right
         statusLabel.font = NSFont.systemFont(ofSize: 11)
-        statusLabel.textColor = NSColor(calibratedRed: 0.36, green: 0.43, blue: 0.55, alpha: 1)
+        statusLabel.textColor = NSColor(calibratedRed: 0.08, green: 0.07, blue: 0.08, alpha: 0.55)
         view.addSubview(statusLabel)
 
         window.orderFrontRegardless()
@@ -545,8 +578,11 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var expandButton: NSButton!
     var dragHandle: NSTextField!
     var brandMarkView: NSView!
+    var brandBlueRing: CALayer!
     var collapsedMarkView: NSView!
     var collapsedBlueRing: CALayer!
+    var collapsedBadge: NSTextField!
+    var orbitLayer: CAShapeLayer!
     var primaryURL = dashboardURL
     var primaryAction = "open_url"
     var primarySessionID = ""
@@ -566,10 +602,42 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var autoCollapseDeadline: Date? = nil
     var suppressPassiveRefreshUntil: Date? = nil
     var pendingClipboardOverrideSessionID = ""
+    var waitingRowTexts: [String] = []
+    var waitingURLs: [String] = []
+    var waitingSessionIDs: [String] = []
+    var waitingReturnAvailable: [Bool] = []
+    var waitingWants: [String] = []
+    var waitingRowKinds: [String] = []
+    var waitingCount = 0
+    var workingCount = 0
+    var finishedCount = 0
+    var detailText = ""
+    var pressureAvailable = false
+    var pressurePct = 0
+    var pressureSeverity = "ok"
+    var pressureLabel = ""
+    var pressureStats = ""
+    var pressureStatsDetail = ""
+    var signalChipText = ""
+    var signalURL = ""
+    var rowDots: [NSView] = []
+    var rowLabels: [NSTextField] = []
+    var rowTags: [NSTextField] = []
+    var rowButtons: [NSButton] = []
+    var meterTrack: NSView!
+    var meterFill: NSView!
+    var meterLabel: NSTextField!
+    var statsLabel: NSTextField!
+    var signalButton: NSButton!
     let expandedWidth: CGFloat = 560
-    let expandedHeight: CGFloat = 58
-    let collapsedWidth: CGFloat = 44
-    let collapsedHeight: CGFloat = 44
+    let headerHeight: CGFloat = 58
+    let rowHeight: CGFloat = 34
+    let maxWaitingRows = 3
+    // 52, not 44: the count badge sits at the circle's 45-degree corner, and
+    // on a 44px bubble that corner has already curved away -- the badge was
+    // half over transparent window and rendered cropped.
+    let collapsedWidth: CGFloat = 52
+    let collapsedHeight: CGFloat = 52
     let brandBlue = NSColor(calibratedRed: 0.00, green: 0.32, blue: 0.96, alpha: 1)      // #0052F5
     let brandInkOnDark = NSColor(calibratedRed: 0.86, green: 0.90, blue: 0.96, alpha: 1) // #DCE6F6
     let brandInkOnLight = NSColor(calibratedRed: 0.08, green: 0.07, blue: 0.08, alpha: 1) // #141314
@@ -596,6 +664,21 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         inkRing.borderColor = ink.cgColor
         mark.addSublayer(inkRing)
         return (mark, blueRing, inkRing)
+    }
+
+    // One row per waiting session, a single one included: the row is where
+    // the wants tag and the per-row Return live, and a lone blocked session
+    // deserves both as much as a queue does. The away digest reuses the same
+    // rows for its history entries.
+    var visibleWaitingRows: Int {
+        if !["session_waiting", "away_digest"].contains(stateName) || waitingRowTexts.isEmpty {
+            return 0
+        }
+        return min(waitingRowTexts.count, maxWaitingRows)
+    }
+
+    var expandedHeight: CGFloat {
+        return headerHeight + CGFloat(visibleWaitingRows) * rowHeight
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -642,7 +725,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         // takes the dark-theme ink (see logo/README.md on the brand branch).
         brandMarkView = NSView(frame: NSRect(x: 30, y: 16, width: 32, height: 26))
         brandMarkView.wantsLayer = true
-        brandMarkView.layer?.addSublayer(makeBrandMark(height: 26, ink: brandInkOnDark).mark)
+        let expandedMark = makeBrandMark(height: 26, ink: brandInkOnDark)
+        brandBlueRing = expandedMark.blueRing
+        brandMarkView.layer?.addSublayer(expandedMark.mark)
         rootView.addSubview(brandMarkView)
 
         titleLabel = NSTextField(labelWithString: "AIWatcher")
@@ -720,20 +805,138 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         // white circle, no ring border and no other chrome. The mark is hosted
         // in a plain NSView rather than the button's layer -- NSButton uses
         // flipped layer geometry, which drew the mark upside down.
-        collapsedMarkView = NSView(frame: NSRect(x: 9.7, y: 12, width: 24.6, height: 20))
+        collapsedMarkView = NSView(frame: NSRect(x: 12.5, y: 15, width: 27.1, height: 22))
         collapsedMarkView.wantsLayer = true
-        let collapsedMark = makeBrandMark(height: 20, ink: brandInkOnLight)
+        let collapsedMark = makeBrandMark(height: 22, ink: brandInkOnLight)
         collapsedMarkView.layer?.addSublayer(collapsedMark.mark)
         collapsedBlueRing = collapsedMark.blueRing
         collapsedMarkView.isHidden = true
         rootView.addSubview(collapsedMarkView)
 
+        // The running indicator: a short mint arc orbiting the bubble's rim
+        // while any session is working -- the owner's pick over the quieter
+        // candidates, and the one place the bar uses continuous motion.
+        // Attention still outranks it, and Reduce Motion suppresses it
+        // entirely (the mint ring alone says running then).
+        orbitLayer = CAShapeLayer()
+        orbitLayer.bounds = CGRect(x: 0, y: 0, width: 52, height: 52)
+        orbitLayer.position = CGPoint(x: 26, y: 26)
+        orbitLayer.path = CGPath(ellipseIn: CGRect(x: 2, y: 2, width: 48, height: 48), transform: nil)
+        orbitLayer.fillColor = NSColor.clear.cgColor
+        orbitLayer.strokeColor = NSColor(calibratedRed: 0.26, green: 0.85, blue: 0.64, alpha: 1).cgColor
+        orbitLayer.lineWidth = 2.5
+        orbitLayer.lineCap = .round
+        orbitLayer.strokeEnd = 0.17
+        orbitLayer.isHidden = true
+        let spin = CABasicAnimation(keyPath: "transform.rotation.z")
+        spin.fromValue = 0
+        spin.toValue = -2 * Double.pi
+        spin.duration = 2.8
+        spin.repeatCount = .infinity
+        orbitLayer.add(spin, forKey: "orbit")
+        rootView.layer?.addSublayer(orbitLayer)
+
+        // Count badge at the bubble's top-right, kept fully inside the white
+        // circle: at 45 degrees a 16px badge fits a radius-26 circle only if
+        // its centre is within 18 of the bubble's -- hence (31, 31), not the
+        // window corner. The white ground never floods; the count is the only
+        // added chrome.
+        collapsedBadge = NSTextField(labelWithString: "")
+        collapsedBadge.frame = NSRect(x: 31, y: 31, width: 16, height: 16)
+        collapsedBadge.font = NSFont.systemFont(ofSize: 9, weight: .bold)
+        collapsedBadge.textColor = NSColor.white
+        collapsedBadge.alignment = .center
+        collapsedBadge.wantsLayer = true
+        collapsedBadge.layer?.cornerRadius = 8
+        collapsedBadge.isHidden = true
+        rootView.addSubview(collapsedBadge)
+
         expandButton = DraggableButton(title: "", target: self, action: #selector(toggleCollapsed))
-        expandButton.frame = NSRect(x: 0, y: 0, width: 44, height: 44)
+        expandButton.frame = NSRect(x: 0, y: 0, width: 52, height: 52)
         expandButton.isBordered = false
         expandButton.toolTip = "Open AIWatcher Companion"
         expandButton.isHidden = true
         rootView.addSubview(expandButton)
+
+        // Pre-allocated queue rows for the multi-session waiting state. Built
+        // once and toggled by isHidden, matching how every other control here
+        // is managed, rather than creating views per poll.
+        for index in 0..<maxWaitingRows {
+            let dot = NSView(frame: .zero)
+            dot.wantsLayer = true
+            dot.layer?.cornerRadius = 3.5
+            dot.isHidden = true
+            rootView.addSubview(dot)
+            rowDots.append(dot)
+
+            let label = NSTextField(labelWithString: "")
+            label.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+            label.textColor = NSColor(calibratedRed: 0.90, green: 0.94, blue: 0.98, alpha: 1)
+            label.lineBreakMode = .byTruncatingTail
+            label.isHidden = true
+            rootView.addSubview(label)
+            rowLabels.append(label)
+
+            // What the session is asking for, from the hook's closed
+            // vocabulary -- "wants: run Bash" -- so the row says how big an
+            // interruption answering is.
+            let tag = NSTextField(labelWithString: "")
+            tag.font = NSFont.systemFont(ofSize: 9)
+            tag.textColor = NSColor(calibratedRed: 0.67, green: 0.74, blue: 0.84, alpha: 1)
+            tag.alignment = .right
+            tag.lineBreakMode = .byTruncatingTail
+            tag.isHidden = true
+            rootView.addSubview(tag)
+            rowTags.append(tag)
+
+            let button = NSButton(title: "Open", target: self, action: #selector(openWaitingRow(_:)))
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            button.tag = index
+            button.toolTip = "Open this waiting session"
+            button.isHidden = true
+            rootView.addSubview(button)
+            rowButtons.append(button)
+        }
+
+        // Context-pressure meter for the resting state: the one graphic the
+        // bar carries. A meter, not a chart -- position against the per-turn
+        // limit is readable at a glance where a trend line is not.
+        meterTrack = NSView(frame: .zero)
+        meterTrack.wantsLayer = true
+        meterTrack.layer?.cornerRadius = 2.5
+        meterTrack.layer?.backgroundColor = NSColor(calibratedRed: 0.16, green: 0.20, blue: 0.27, alpha: 1).cgColor
+        meterTrack.isHidden = true
+        rootView.addSubview(meterTrack)
+        meterFill = NSView(frame: .zero)
+        meterFill.wantsLayer = true
+        meterFill.layer?.cornerRadius = 2.5
+        meterTrack.addSubview(meterFill)
+        meterLabel = NSTextField(labelWithString: "")
+        meterLabel.font = NSFont.systemFont(ofSize: 8, weight: .semibold)
+        meterLabel.isHidden = true
+        rootView.addSubview(meterLabel)
+
+        // Running totals for the working session -- the absolute anchor for
+        // the meter's percent. Plain muted text, no status colour: a total
+        // is not a verdict.
+        statsLabel = NSTextField(labelWithString: "")
+        statsLabel.font = NSFont.systemFont(ofSize: 9)
+        statsLabel.textColor = NSColor(calibratedRed: 0.67, green: 0.74, blue: 0.84, alpha: 1)
+        statsLabel.alignment = .right
+        statsLabel.isHidden = true
+        rootView.addSubview(statsLabel)
+
+        // Missed-nudge chip: the overlay-only signals (loop, velocity, runway,
+        // usage pressure) vanish with the 20-second panel; the chip is where a
+        // missed one lands. It borrows Plan/Ask's slot -- both remain a click
+        // away in the Console, a recent signal is not.
+        signalButton = NSButton(title: "", target: self, action: #selector(openSignal))
+        signalButton.bezelStyle = .rounded
+        signalButton.controlSize = .small
+        signalButton.contentTintColor = NSColor(calibratedRed: 0.94, green: 0.62, blue: 0.15, alpha: 1)
+        signalButton.isHidden = true
+        rootView.addSubview(signalButton)
 
         setCollapsed(true)
         window.orderFrontRegardless()
@@ -744,6 +947,59 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
     @objc func openDashboard() {
         openURL(dashboardURL)
+    }
+
+    @objc func openWaitingRow(_ sender: NSButton) {
+        let index = sender.tag
+        guard index >= 0, index < waitingURLs.count else { return }
+        if index < waitingReturnAvailable.count, waitingReturnAvailable[index],
+           index < waitingSessionIDs.count, !waitingSessionIDs[index].isEmpty {
+            requestRuntimeReturn(sessionID: waitingSessionIDs[index], fallbackURL: waitingURLs[index])
+            return
+        }
+        openURL(waitingURLs[index])
+        scheduleAutoCollapse(after: 1.5)
+    }
+
+    // Asks the dashboard to focus the blocked tool. The honesty rule from the
+    // transient overlay applies here too: wait for the result, and on failure
+    // say why and open the session in AIWatcher -- never report a return that
+    // did not happen.
+    func requestRuntimeReturn(sessionID: String, fallbackURL: String) {
+        guard let url = URL(string: dashboardBaseURL + "/api/runtime-return") else {
+            openURL(fallbackURL)
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 4
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["session_id": sessionID])
+        subtitleLabel.stringValue = "Returning..."
+        URLSession.shared.dataTask(with: request) { data, _, _ in
+            var ok = false
+            var message = ""
+            if let data = data,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                ok = json["ok"] as? Bool ?? false
+                message = json["message"] as? String ?? ""
+            }
+            DispatchQueue.main.async {
+                if ok {
+                    self.subtitleLabel.stringValue = String((message.isEmpty ? "Opened your AI tool. Answer it there." : message).prefix(46))
+                } else {
+                    openURL(fallbackURL)
+                    self.subtitleLabel.stringValue = "No live return. Opened in AIWatcher."
+                }
+                self.scheduleAutoCollapse(after: 2.5)
+            }
+        }.resume()
+    }
+
+    @objc func openSignal() {
+        guard !signalURL.isEmpty else { return }
+        openURL(signalURL)
+        scheduleAutoCollapse(after: 1.5)
     }
 
     @objc func openPrompt() {
@@ -785,6 +1041,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         }
         if primaryAction == "copy_fresh_start" && !primarySessionID.isEmpty {
             copyFreshStartFromCompanion()
+            return
+        }
+        if primaryAction == "runtime_return" && !primarySessionID.isEmpty {
+            requestRuntimeReturn(sessionID: primarySessionID, fallbackURL: primaryURL)
             return
         }
         if primaryAction == "open_prompt_gate" {
@@ -1059,8 +1319,11 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     // session_waiting belongs in both lists. Left out, the widget renders the
     // words "Waiting on you" in its calm style with no button -- saying
     // something urgent while looking like nothing is happening.
+    // session_finished and away_digest are deliberately in the first list and
+    // not the second: they earn the primary and the compact layout, but
+    // "review when ready" must not wear the orange "blocked on you" treatment.
     func hasPrimaryAction() -> Bool {
-        return ["prompt_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm", "session_waiting"].contains(stateName)
+        return ["prompt_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm", "session_waiting", "session_finished", "away_digest"].contains(stateName)
     }
 
     func needsAttentionState() -> Bool {
@@ -1069,6 +1332,11 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
     func shouldShowWindow() -> Bool {
         if needsAttentionState() {
+            return true
+        }
+        // Soft attention: finished work and the away digest force the window
+        // visible even in nudges-only mode, without the orange treatment.
+        if ["session_finished", "away_digest"].contains(stateName) {
             return true
         }
         if visibilityMode == "nudges-only" {
@@ -1095,19 +1363,41 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             for view in [dragHandle, brandMarkView, titleLabel, subtitleLabel, primaryButton, continueButton, skipButton, planButton, askButton, scanButton, consoleButton, collapseButton] {
                 view?.isHidden = true
             }
+            for view in rowDots { view.isHidden = true }
+            for label in rowLabels { label.isHidden = true }
+            for tag in rowTags { tag.isHidden = true }
+            for button in rowButtons { button.isHidden = true }
+            meterTrack.isHidden = true
+            meterLabel.isHidden = true
+            statsLabel.isHidden = true
+            signalButton.isHidden = true
             collapsedMarkView.isHidden = false
+            collapsedBadge.isHidden = waitingCount <= 0 && finishedCount <= 0
             expandButton.isHidden = false
             return
         }
         collapsedMarkView.isHidden = true
+        collapsedBadge.isHidden = true
+        // The header band keeps its one-line layout; with queue rows drawn
+        // below it, every header frame shifts up by the rows area (AppKit's
+        // origin is the bottom-left corner).
+        let rowsShown = visibleWaitingRows
+        let yOff = CGFloat(rowsShown) * rowHeight
         dragHandle.isHidden = false
         brandMarkView.isHidden = false
         titleLabel.isHidden = false
         subtitleLabel.isHidden = false
-        let showPrimary = hasPrimaryAction()
-        planButton.isHidden = showPrimary
-        askButton.isHidden = showPrimary
-        scanButton.isHidden = showPrimary
+        dragHandle.frame = NSRect(x: 10, y: 21 + yOff, width: 18, height: 16)
+        brandMarkView.frame = NSRect(x: 30, y: 16 + yOff, width: 32, height: 26)
+        collapseButton.frame = NSRect(x: 538, y: 37 + yOff, width: 18, height: 18)
+        let attention = needsAttentionState()
+        // With a queue on screen each row carries its own Open button, so the
+        // single primary would only duplicate the first row's.
+        let showPrimary = hasPrimaryAction() && rowsShown == 0
+        let showChip = !signalChipText.isEmpty && !attention && !showPrimary
+        planButton.isHidden = attention || showChip || showPrimary
+        askButton.isHidden = attention || showChip || showPrimary
+        scanButton.isHidden = attention || showPrimary
         consoleButton.isHidden = false
         collapseButton.isHidden = false
         expandButton.isHidden = true
@@ -1119,37 +1409,129 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         primaryButton.isHidden = !showPrimary
         continueButton.isHidden = !showContinue
         skipButton.isHidden = !showSkip
-        if showPrimary {
-            titleLabel.frame = NSRect(x: 66, y: 31, width: 170, height: 17)
-            subtitleLabel.frame = NSRect(x: 66, y: 12, width: 170, height: 16)
-            primaryButton.frame = NSRect(x: 250, y: 15, width: 112, height: 28)
+        if attention || showPrimary {
+            meterTrack.isHidden = true
+            meterLabel.isHidden = true
+            statsLabel.isHidden = true
+            signalButton.isHidden = true
+            titleLabel.frame = NSRect(x: 66, y: 31 + yOff, width: 170, height: 17)
+            subtitleLabel.frame = NSRect(x: 66, y: 12 + yOff, width: 170, height: 16)
+            primaryButton.frame = NSRect(x: 250, y: 15 + yOff, width: 112, height: 28)
             if showContinue {
-                continueButton.frame = NSRect(x: 368, y: 15, width: 70, height: 28)
+                continueButton.frame = NSRect(x: 368, y: 15 + yOff, width: 70, height: 28)
                 if showSkip {
-                    skipButton.frame = NSRect(x: 444, y: 15, width: 48, height: 28)
-                    consoleButton.frame = NSRect(x: 498, y: 15, width: 38, height: 28)
+                    skipButton.frame = NSRect(x: 444, y: 15 + yOff, width: 48, height: 28)
+                    consoleButton.frame = NSRect(x: 498, y: 15 + yOff, width: 38, height: 28)
                 } else {
-                    consoleButton.frame = NSRect(x: 444, y: 15, width: 38, height: 28)
+                    consoleButton.frame = NSRect(x: 444, y: 15 + yOff, width: 38, height: 28)
                 }
             } else {
                 if showSkip {
-                    skipButton.frame = NSRect(x: 368, y: 15, width: 48, height: 28)
-                    consoleButton.frame = NSRect(x: 422, y: 15, width: 38, height: 28)
+                    skipButton.frame = NSRect(x: 368, y: 15 + yOff, width: 48, height: 28)
+                    consoleButton.frame = NSRect(x: 422, y: 15 + yOff, width: 38, height: 28)
                 } else {
-                    consoleButton.frame = NSRect(x: 368, y: 15, width: 38, height: 28)
+                    consoleButton.frame = NSRect(x: 368, y: 15 + yOff, width: 38, height: 28)
                 }
             }
         } else {
-            titleLabel.frame = NSRect(x: 66, y: 31, width: 220, height: 17)
-            subtitleLabel.frame = NSRect(x: 66, y: 12, width: 238, height: 16)
-            planButton.frame = NSRect(x: 318, y: 15, width: 48, height: 28)
-            askButton.frame = NSRect(x: 370, y: 15, width: 46, height: 28)
-            scanButton.frame = NSRect(x: 420, y: 15, width: 52, height: 28)
-            consoleButton.frame = NSRect(x: 476, y: 15, width: 38, height: 28)
+            let showMeter = pressureAvailable
+            let showStats = showMeter && !pressureStats.isEmpty
+            statsLabel.isHidden = !showStats
+            if showStats {
+                // Right-aligned on the title line's tail; the title is capped
+                // at 18 characters, so the two never meet.
+                statsLabel.frame = NSRect(x: 204, y: 33 + yOff, width: 112, height: 13)
+                statsLabel.stringValue = pressureStats
+                statsLabel.toolTip = pressureStatsDetail.isEmpty ? nil : pressureStatsDetail
+            }
+            titleLabel.frame = NSRect(x: 66, y: 31 + yOff, width: 220, height: 17)
+            subtitleLabel.frame = NSRect(x: 66, y: 12 + yOff, width: showMeter ? 150 : 238, height: 16)
+            meterTrack.isHidden = !showMeter
+            meterLabel.isHidden = !showMeter
+            if showMeter {
+                // Fill clamps at 100%; the percent label does not. A 250K turn
+                // is past the limit, and the number should say so.
+                meterTrack.frame = NSRect(x: 222, y: 17 + yOff, width: 62, height: 5)
+                let clamped = min(max(pressurePct, 0), 100)
+                meterFill.frame = NSRect(x: 0, y: 0, width: 62.0 * CGFloat(clamped) / 100.0, height: 5)
+                let meterColor = pressureSeverity == "critical"
+                    ? NSColor(calibratedRed: 0.93, green: 0.42, blue: 0.14, alpha: 1)
+                    : (pressureSeverity == "warning"
+                        ? NSColor(calibratedRed: 0.94, green: 0.62, blue: 0.15, alpha: 1)
+                        : NSColor(calibratedRed: 0.35, green: 0.55, blue: 0.98, alpha: 1))
+                meterFill.layer?.backgroundColor = meterColor.cgColor
+                meterLabel.frame = NSRect(x: 288, y: 12 + yOff, width: 28, height: 14)
+                meterLabel.stringValue = "\(pressurePct)%"
+                meterLabel.textColor = meterColor
+                meterTrack.toolTip = pressureLabel
+                meterLabel.toolTip = pressureLabel
+            }
+            signalButton.isHidden = !showChip
+            if showChip {
+                signalButton.title = signalChipText
+                signalButton.frame = NSRect(x: 318, y: 15 + yOff, width: 100, height: 28)
+            }
+            planButton.frame = NSRect(x: 318, y: 15 + yOff, width: 48, height: 28)
+            askButton.frame = NSRect(x: 370, y: 15 + yOff, width: 46, height: 28)
+            scanButton.frame = NSRect(x: 420, y: 15 + yOff, width: 52, height: 28)
+            consoleButton.frame = NSRect(x: 476, y: 15 + yOff, width: 38, height: 28)
+        }
+        for index in 0..<maxWaitingRows {
+            let visible = index < rowsShown
+            rowDots[index].isHidden = !visible
+            rowLabels[index].isHidden = !visible
+            rowButtons[index].isHidden = !visible
+            let wants = index < waitingWants.count ? waitingWants[index] : ""
+            rowTags[index].isHidden = !visible || wants.isEmpty
+            if !visible { continue }
+            let rowY = yOff - rowHeight * CGFloat(index + 1)
+            rowDots[index].frame = NSRect(x: 30, y: rowY + 14, width: 7, height: 7)
+            // Digest rows color by kind -- mint for finished work, amber for
+            // signals; waiting rows keep hottest-first by position.
+            let kind = index < waitingRowKinds.count ? waitingRowKinds[index] : ""
+            let dotColor: NSColor
+            if kind == "finished" {
+                dotColor = NSColor(calibratedRed: 0.36, green: 0.79, blue: 0.65, alpha: 1)
+            } else if !kind.isEmpty {
+                dotColor = NSColor(calibratedRed: 0.94, green: 0.62, blue: 0.15, alpha: 1)
+            } else {
+                dotColor = index == 0
+                    ? NSColor(calibratedRed: 0.89, green: 0.29, blue: 0.29, alpha: 1)
+                    : NSColor(calibratedRed: 0.94, green: 0.62, blue: 0.15, alpha: 1)
+            }
+            rowDots[index].layer?.backgroundColor = dotColor.cgColor
+            rowLabels[index].frame = NSRect(x: 46, y: rowY + 9, width: wants.isEmpty ? 396 : 284, height: 17)
+            rowLabels[index].stringValue = index < waitingRowTexts.count ? waitingRowTexts[index] : ""
+            rowTags[index].frame = NSRect(x: 334, y: rowY + 10, width: 112, height: 14)
+            rowTags[index].stringValue = wants.isEmpty ? "" : "wants: \(wants)"
+            let canReturn = index < waitingReturnAvailable.count && waitingReturnAvailable[index]
+            rowButtons[index].title = canReturn ? "Return" : (kind.isEmpty ? "Open" : "Review")
+            rowButtons[index].toolTip = canReturn
+                ? "Focus the blocked tool directly"
+                : (kind.isEmpty
+                    ? "Tool window not reachable from here -- opens the session in AIWatcher"
+                    : "Open this in AIWatcher")
+            rowButtons[index].frame = NSRect(x: 452, y: rowY + 4, width: 64, height: 26)
         }
     }
 
+    // The queue can change the bar's height between polls. Anchored the same
+    // way setCollapsed anchors: a bottom-positioned bar grows upward, a
+    // top-positioned one downward, so the corner the user parked it in stays
+    // put.
+    func applyWindowSize() {
+        if collapsed { return }
+        let target = expandedHeight
+        let current = window.frame
+        if abs(current.height - target) < 0.5 { return }
+        let targetY = position.contains("top") ? current.maxY - target : current.minY
+        let frame = NSRect(x: current.minX, y: targetY, width: expandedWidth, height: target)
+        window.setFrame(frame, display: true, animate: true)
+        rootView.frame = NSRect(x: 0, y: 0, width: expandedWidth, height: target)
+    }
+
     func updateAppearance() {
+        applyWindowSize()
         applyVisibility()
         let needsAttention = needsAttentionState()
         let dark = NSColor(calibratedRed: 0.035, green: 0.052, blue: 0.078, alpha: 0.94).cgColor
@@ -1169,7 +1551,30 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             : NSColor(calibratedRed: 0.34, green: 0.52, blue: 0.74, alpha: 0.72).cgColor
         primaryButton.layer?.backgroundColor = needsAttention ? orangeColor.cgColor : NSColor.clear.cgColor
         primaryButton.contentTintColor = needsAttention ? NSColor.white : NSColor.controlTextColor
-        collapsedBlueRing.borderColor = (needsAttention ? orangeColor : brandBlue).cgColor
+        // The blue ring is the mark's state channel, speaking the dashboard
+        // favicon's vocabulary: orange when something needs you, mint while a
+        // session is actively working (#43d9a3, the favicon's healthy-live
+        // colour), brand blue at rest. Mint does not pulse -- running is a
+        // status, not an alarm.
+        let runningMint = NSColor(calibratedRed: 0.26, green: 0.85, blue: 0.64, alpha: 1)
+        let ringColor = needsAttention ? orangeColor : (workingCount > 0 ? runningMint : brandBlue)
+        collapsedBlueRing.borderColor = ringColor.cgColor
+        brandBlueRing.borderColor = ringColor.cgColor
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        orbitLayer.isHidden = !collapsed || workingCount <= 0 || needsAttention || reduceMotion
+        // The bubble is what is on screen all day; a count is the one number
+        // worth carrying there. It rides as a small badge on the white ground
+        // -- the ground itself never floods, per the brand rule that attention
+        // is carried by the mark's blue ring turning orange. Orange badge for
+        // sessions blocked on you; brand blue for finished work awaiting
+        // review, which is a calmer claim.
+        collapsedBadge.stringValue = waitingCount > 0
+            ? String(waitingCount)
+            : (finishedCount > 0 ? String(finishedCount) : "")
+        collapsedBadge.layer?.backgroundColor = (waitingCount > 0 ? orangeColor : brandBlue).cgColor
+        if collapsed {
+            collapsedBadge.isHidden = waitingCount <= 0 && finishedCount <= 0
+        }
         applyWindowVisibility()
     }
 
@@ -1213,8 +1618,65 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             suppressPassiveRefreshUntil = nil
         }
         self.stateName = incomingState
+        self.detailText = json["detail"] as? String ?? ""
+        // The away digest's history entries ride the same row machinery as
+        // the waiting queue; a payload carries one list or the other.
+        var waiting = json["waiting_sessions"] as? [[String: Any]] ?? []
+        if waiting.isEmpty {
+            waiting = json["digest_rows"] as? [[String: Any]] ?? []
+        }
+        self.waitingRowTexts = waiting.prefix(maxWaitingRows).map { row in
+            let tool = row["tool"] as? String ?? "AI tool"
+            let project = row["project"] as? String ?? ""
+            let waited = row["waited_label"] as? String ?? ""
+            return [tool, project, waited].filter { !$0.isEmpty }.joined(separator: " · ")
+        }
+        self.waitingURLs = waiting.prefix(maxWaitingRows).map { row in
+            absoluteURL((row["url"] as? String) ?? "/")
+        }
+        self.waitingSessionIDs = waiting.prefix(maxWaitingRows).map { row in
+            (row["session_id"] as? String) ?? ""
+        }
+        self.waitingReturnAvailable = waiting.prefix(maxWaitingRows).map { row in
+            (row["return_available"] as? Bool) ?? false
+        }
+        self.waitingWants = waiting.prefix(maxWaitingRows).map { row in
+            String(((row["wants"] as? String) ?? "").prefix(16))
+        }
+        self.waitingRowKinds = waiting.prefix(maxWaitingRows).map { row in
+            (row["kind"] as? String) ?? ""
+        }
+        let presence = json["presence"] as? [String: Any]
+        self.waitingCount = presence?["waiting"] as? Int ?? self.waitingRowTexts.count
+        self.workingCount = presence?["working"] as? Int ?? 0
+        let finishedList = json["finished_sessions"] as? [[String: Any]] ?? []
+        let digestList = json["digest_rows"] as? [[String: Any]] ?? []
+        self.finishedCount = finishedList.isEmpty ? digestList.count : finishedList.count
+        let pressure = json["pressure"] as? [String: Any]
+        self.pressureAvailable = pressure?["available"] as? Bool ?? false
+        self.pressurePct = pressure?["pct_of_turn_limit"] as? Int ?? 0
+        self.pressureSeverity = pressure?["severity"] as? String ?? "ok"
+        self.pressureLabel = pressure?["label"] as? String ?? ""
+        self.pressureStats = String((pressure?["stats_label"] as? String ?? "").prefix(20))
+        self.pressureStatsDetail = pressure?["stats_detail"] as? String ?? ""
+        if let signal = json["recent_signal"] as? [String: Any] {
+            self.signalChipText = String((signal["chip"] as? String ?? "").prefix(14))
+            self.signalURL = absoluteURL((signal["url"] as? String) ?? "/")
+        } else {
+            self.signalChipText = ""
+            self.signalURL = ""
+        }
         self.titleLabel.stringValue = String((json["label"] as? String ?? "AIWatcher").prefix(18))
-        self.subtitleLabel.stringValue = String((json["subtitle"] as? String ?? "Watching quietly").prefix(46))
+        var subtitleText = String((json["subtitle"] as? String ?? "Watching quietly").prefix(46))
+        if incomingState == "prompt_gate", let remaining = json["expires_in_seconds"] as? Int, remaining >= 0 {
+            subtitleText += " · \(remaining)s"
+        }
+        self.subtitleLabel.stringValue = subtitleText
+        // The payload has always shipped a second explanatory sentence; the
+        // bar never drew it. A tooltip costs no pixels.
+        let tip = self.detailText.isEmpty ? nil : self.detailText
+        self.titleLabel.toolTip = tip
+        self.subtitleLabel.toolTip = tip
         self.primaryButton.title = String((json["primary_label"] as? String ?? "Watch").prefix(12))
         self.primaryAction = json["primary_action"] as? String ?? "open_url"
         self.primarySessionID = json["primary_session_id"] as? String ?? ""
@@ -1785,8 +2247,12 @@ def run_native_presence(
 
     expanded_width = 560
     expanded_height = 58
-    collapsed_width = 44
-    collapsed_height = 44
+    # 52, not 44: the count badge needs room inside the bubble -- see the
+    # matching constant in the Swift bar.
+    collapsed_width = 52
+    collapsed_height = 52
+    row_height = 30
+    max_waiting_rows = 3
     screen_width = int(root.winfo_screenwidth())
     screen_height = int(root.winfo_screenheight())
     x = 24 if "left" in position else max(16, screen_width - expanded_width - 24)
@@ -1832,6 +2298,22 @@ def run_native_presence(
     pulse_var = tk.BooleanVar(value=False)
     suppress_passive_refresh_until = tk.DoubleVar(value=0.0)
     pending_clipboard_override_session_var = tk.StringVar(value="")
+    waiting_row_texts: list[str] = []
+    waiting_row_urls: list[str] = []
+    waiting_row_session_ids: list[str] = []
+    waiting_row_return: list[bool] = []
+    waiting_row_wants: list[str] = []
+    waiting_row_kinds: list[str] = []
+    waiting_count_var = tk.IntVar(value=0)
+    working_count_var = tk.IntVar(value=0)
+    finished_count_var = tk.IntVar(value=0)
+    orbit_angle_var = tk.IntVar(value=0)
+    pressure_available_var = tk.BooleanVar(value=False)
+    pressure_pct_var = tk.IntVar(value=0)
+    pressure_severity_var = tk.StringVar(value="ok")
+    pressure_stats_var = tk.StringVar(value="")
+    signal_chip_var = tk.StringVar(value="")
+    signal_url_var = tk.StringVar(value="")
     drag = ttk.Label(frame, text="::", style="PresenceDrag.TLabel", cursor="fleur")
     drag.pack(side="left", padx=(0, 6))
     # The brand mark sits beside both lines of copy, as on the dashboard. The
@@ -1843,7 +2325,16 @@ def run_native_presence(
     title_stack = ttk.Frame(left, style="Presence.TFrame")
     title_stack.pack(anchor="w")
     ttk.Label(title_stack, textvariable=title_var, style="PresenceTitle.TLabel").pack(side="left")
-    ttk.Label(left, textvariable=subtitle_var, style="PresenceMuted.TLabel", wraplength=250).pack(anchor="w")
+    # Running totals for the working session -- the absolute anchor for the
+    # meter's percent. Plain muted text, no status colour: a total is not a
+    # verdict. Empty when unmeasurable, which packs to nothing.
+    ttk.Label(title_stack, textvariable=pressure_stats_var, style="PresenceMuted.TLabel").pack(side="left", padx=(10, 0))
+    subtitle_row = ttk.Frame(left, style="Presence.TFrame")
+    subtitle_row.pack(anchor="w", fill="x")
+    ttk.Label(subtitle_row, textvariable=subtitle_var, style="PresenceMuted.TLabel", wraplength=250).pack(side="left")
+    # Context-pressure meter for the resting state: the one graphic the bar
+    # carries. Packed only while the payload says the number is measurable.
+    meter_canvas = tk.Canvas(subtitle_row, width=70, height=9, bg="#090d14", highlightthickness=0, bd=0)
 
     drag_start: dict[str, int] = {"x": 0, "y": 0}
 
@@ -1879,8 +2370,80 @@ def run_native_presence(
         if suppress_passive_refresh_until.get() <= time.time():
             suppress_passive_refresh_until.set(0.0)
         state_var.set(incoming_state)
+        waiting_row_texts.clear()
+        waiting_row_urls.clear()
+        waiting_row_session_ids.clear()
+        waiting_row_return.clear()
+        waiting_row_wants.clear()
+        waiting_row_kinds.clear()
+        # The away digest's history entries ride the same row machinery as
+        # the waiting queue; a payload carries one list or the other.
+        waiting_sessions = payload.get("waiting_sessions")
+        if not isinstance(waiting_sessions, list) or not waiting_sessions:
+            waiting_sessions = payload.get("digest_rows")
+        if isinstance(waiting_sessions, list):
+            for row in waiting_sessions[:max_waiting_rows]:
+                if not isinstance(row, dict):
+                    continue
+                parts = [
+                    str(row.get("tool") or "AI tool"),
+                    str(row.get("project") or ""),
+                    str(row.get("waited_label") or ""),
+                ]
+                waiting_row_texts.append(" · ".join(part for part in parts if part))
+                path = str(row.get("url") or "/")
+                waiting_row_urls.append(path if path.startswith("http") else f"{url.rstrip('/')}{path}")
+                waiting_row_session_ids.append(str(row.get("session_id") or ""))
+                waiting_row_return.append(bool(row.get("return_available")))
+                waiting_row_wants.append(str(row.get("wants") or "")[:16])
+                waiting_row_kinds.append(str(row.get("kind") or ""))
+        presence = payload.get("presence")
+        try:
+            waiting_count = int(presence.get("waiting") or 0) if isinstance(presence, dict) else 0
+        except (TypeError, ValueError):
+            waiting_count = 0
+        waiting_count_var.set(waiting_count or len(waiting_row_texts))
+        try:
+            working_count_var.set(int(presence.get("working") or 0) if isinstance(presence, dict) else 0)
+        except (TypeError, ValueError, tk.TclError):
+            working_count_var.set(0)
+        finished_sessions = payload.get("finished_sessions")
+        digest_rows = payload.get("digest_rows")
+        if isinstance(finished_sessions, list) and finished_sessions:
+            finished_count_var.set(len(finished_sessions))
+        elif isinstance(digest_rows, list):
+            finished_count_var.set(len(digest_rows))
+        else:
+            finished_count_var.set(0)
+        pressure = payload.get("pressure")
+        if isinstance(pressure, dict) and pressure.get("available"):
+            pressure_available_var.set(True)
+            try:
+                pressure_pct_var.set(int(pressure.get("pct_of_turn_limit") or 0))
+            except (TypeError, ValueError, tk.TclError):
+                pressure_pct_var.set(0)
+            pressure_severity_var.set(str(pressure.get("severity") or "ok"))
+            if incoming_state == "watching":
+                pressure_stats_var.set(str(pressure.get("stats_label") or "")[:20])
+            else:
+                pressure_stats_var.set("")
+        else:
+            pressure_available_var.set(False)
+            pressure_stats_var.set("")
+        signal = payload.get("recent_signal")
+        if isinstance(signal, dict) and signal.get("chip"):
+            signal_chip_var.set(str(signal.get("chip"))[:14])
+            signal_path = str(signal.get("url") or "/")
+            signal_url_var.set(signal_path if signal_path.startswith("http") else f"{url.rstrip('/')}{signal_path}")
+        else:
+            signal_chip_var.set("")
+            signal_url_var.set("")
         title_var.set(str(payload.get("label") or "AIWatcher")[:18])
-        subtitle_var.set(str(payload.get("subtitle") or "Watching quietly")[:46])
+        subtitle_text = str(payload.get("subtitle") or "Watching quietly")[:46]
+        remaining = payload.get("expires_in_seconds")
+        if incoming_state == "prompt_gate" and isinstance(remaining, int) and remaining >= 0:
+            subtitle_text += f" · {remaining}s"
+        subtitle_var.set(subtitle_text)
         primary_label_var.set(str(payload.get("primary_label") or "Watch")[:12])
         primary_action_var.set(str(payload.get("primary_action") or "open_url"))
         primary_session_id_var.set(str(payload.get("primary_session_id") or ""))
@@ -1947,6 +2510,9 @@ def run_native_presence(
             return
         if primary_action_var.get() == "copy_fresh_start" and primary_session_id_var.get().strip():
             copy_fresh_start_from_companion()
+            return
+        if primary_action_var.get() == "runtime_return" and primary_session_id_var.get().strip():
+            request_runtime_return(primary_session_id_var.get().strip(), primary_url_var.get() or url)
             return
         if primary_action_var.get() == "open_prompt_gate":
             schedule_auto_collapse(1500)
@@ -2143,6 +2709,10 @@ def run_native_presence(
     skip_packed = tk.BooleanVar(value=False)
     scan_packed = tk.BooleanVar(value=True)
     primary_packed = tk.BooleanVar(value=True)
+    rows_packed = tk.BooleanVar(value=False)
+    rows_shown = tk.IntVar(value=0)
+    meter_packed = tk.BooleanVar(value=False)
+    signal_packed = tk.BooleanVar(value=False)
     auto_collapse_token = tk.IntVar(value=0)
     auto_collapse_deadline = tk.DoubleVar(value=0.0)
 
@@ -2160,7 +2730,7 @@ def run_native_presence(
         else:
             collapsed_frame.pack_forget()
             frame.pack(fill="both", expand=True)
-            root.geometry(f"{expanded_width}x{expanded_height}")
+            root.geometry(f"{expanded_width}x{expanded_height + row_height * visible_waiting_rows()}")
         update_attention_style()
 
     def toggle_collapsed() -> None:
@@ -2169,10 +2739,97 @@ def run_native_presence(
             schedule_auto_collapse(10000)
 
     def has_primary_action() -> bool:
+        # session_finished earns the primary (Review) and the compact layout;
+        # update_attention_style's needs_attention set deliberately excludes
+        # it, so "review when ready" never wears the orange treatment.
         return state_var.get() in {
             "prompt_gate", "control_recommended", "optimize_available", "clipboard_confirm",
-            "session_waiting",
+            "session_waiting", "session_finished", "away_digest",
         }
+
+    def visible_waiting_rows() -> int:
+        # One row per waiting session, a single one included: the row is where
+        # the wants tag and the per-row Return live, and a lone blocked
+        # session deserves both as much as a queue does. The away digest
+        # reuses the same rows for its history entries.
+        if state_var.get() not in {"session_waiting", "away_digest"} or not waiting_row_texts:
+            return 0
+        return min(len(waiting_row_texts), max_waiting_rows)
+
+    def request_runtime_return(session_id: str, fallback_url: str) -> None:
+        # The honesty rule from the transient overlay applies here too: wait
+        # for the result, and on failure say why and open the session in
+        # AIWatcher -- never report a return that did not happen.
+        subtitle_var.set("Returning...")
+        request = urllib.request.Request(
+            f"{url.rstrip('/')}/api/runtime-return",
+            data=json.dumps({"session_id": session_id}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        ok = False
+        message = ""
+        try:
+            with urllib.request.urlopen(request, timeout=4.0) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            if isinstance(result, dict):
+                ok = bool(result.get("ok"))
+                message = str(result.get("message") or "")
+        except (OSError, urllib.error.URLError, json.JSONDecodeError):
+            pass
+        if ok:
+            subtitle_var.set((message or "Opened your AI tool. Answer it there.")[:46])
+        else:
+            webbrowser.open(fallback_url)
+            subtitle_var.set("No live return. Opened in AIWatcher.")
+        schedule_auto_collapse(2500)
+
+    def open_waiting_row(index: int) -> None:
+        if not 0 <= index < len(waiting_row_urls):
+            return
+        if (
+            index < len(waiting_row_return)
+            and waiting_row_return[index]
+            and index < len(waiting_row_session_ids)
+            and waiting_row_session_ids[index]
+        ):
+            request_runtime_return(waiting_row_session_ids[index], waiting_row_urls[index])
+            return
+        webbrowser.open(waiting_row_urls[index])
+        schedule_auto_collapse(1500)
+
+    def open_signal() -> None:
+        target = signal_url_var.get().strip()
+        if target:
+            webbrowser.open(target)
+            schedule_auto_collapse(1500)
+
+    def apply_waiting_rows() -> None:
+        rows = 0 if collapsed.get() else visible_waiting_rows()
+        for index in range(min(rows, len(waiting_row_texts))):
+            row_widgets[index][1].configure(text=waiting_row_texts[index])
+            can_return = index < len(waiting_row_return) and waiting_row_return[index]
+            kind = waiting_row_kinds[index] if index < len(waiting_row_kinds) else ""
+            row_widgets[index][2].configure(
+                text="Return" if can_return else ("Review" if kind else "Open"),
+            )
+            wants = waiting_row_wants[index] if index < len(waiting_row_wants) else ""
+            row_widgets[index][3].configure(text=f"wants: {wants}" if wants else "")
+        if rows == rows_shown.get():
+            return
+        for row_frame, _row_label, _row_button, _row_wants in row_widgets:
+            row_frame.pack_forget()
+        if rows_packed.get():
+            rows_frame.pack_forget()
+            rows_packed.set(False)
+        if rows:
+            rows_frame.pack(fill="both", expand=True)
+            rows_packed.set(True)
+            for index in range(rows):
+                row_widgets[index][0].pack(fill="x")
+        rows_shown.set(rows)
+        if not collapsed.get():
+            root.geometry(f"{expanded_width}x{expanded_height + row_height * rows}")
 
     def should_show_window() -> bool:
         if has_primary_action():
@@ -2238,30 +2895,99 @@ def run_native_presence(
             foreground="#ffffff" if needs_attention else "#111827",
         )
         primary_button.configure(style="PresenceAttention.TButton" if needs_attention else "Presence.TButton")
+        # The blue ring is the mark's state channel, speaking the dashboard
+        # favicon's vocabulary: orange when something needs you, mint while a
+        # session is actively working (#43d9a3, the favicon's healthy-live
+        # colour), brand blue at rest.
+        ring_colour = (
+            attention_bg if needs_attention
+            else ("#43d9a3" if int(working_count_var.get() or 0) > 0 else "#0052F5")
+        )
+        mark_canvas.delete("all")
+        _draw_brand_mark(mark_canvas, height=26.0, blue=ring_colour, ink="#DCE6F6")
         collapsed_canvas.configure(bg="#ffffff")
         collapsed_canvas.delete("all")
         _draw_brand_mark(
             collapsed_canvas, height=18.0,
-            blue=attention_bg if needs_attention else "#0052F5",
+            blue=ring_colour,
             ink="#141314",
         )
-        collapsed_canvas.move("all", 3.0, 7.0)
-        should_show_primary = has_primary_action() and not collapsed.get()
-        if should_show_primary:
+        collapsed_canvas.move("all", 7.0, 13.0)
+        # The running indicator: a mint arc stepping around the bubble's rim
+        # while any session is working, advanced on the existing pulse tick.
+        # Coarser than the Swift bar's continuous orbit, which is the Tk
+        # fallback's usual fidelity. Attention outranks it.
+        if int(working_count_var.get() or 0) > 0 and not needs_attention:
+            orbit_angle_var.set((int(orbit_angle_var.get()) - 103) % 360)
+            collapsed_canvas.create_arc(
+                2, 4, 34, 36, start=orbit_angle_var.get(), extent=62,
+                style="arc", outline="#43d9a3", width=2,
+            )
+        # The bubble is what is on screen all day; a count is the one number
+        # worth carrying there. It rides as a small badge on the white ground
+        # -- the ground itself never floods. Orange for sessions blocked on
+        # you; brand blue for finished work awaiting review, a calmer claim.
+        waiting_count = int(waiting_count_var.get() or 0)
+        finished_count = int(finished_count_var.get() or 0)
+        badge_count = waiting_count or finished_count
+        if badge_count > 0:
+            # Fully inside the 36-wide canvas -- the old (26..42) oval ran
+            # past the canvas edge and rendered cropped.
+            collapsed_canvas.create_oval(
+                19, 2, 35, 18,
+                fill=attention_bg if waiting_count > 0 else "#0052F5", outline="",
+            )
+            collapsed_canvas.create_text(
+                27, 10, text=str(badge_count), fill="#ffffff", font=("Helvetica", 8, "bold"),
+            )
+        attention_layout = has_primary_action() and not collapsed.get()
+        # With a queue on screen each row carries its own Open button, so the
+        # single primary would only duplicate the first row's.
+        should_show_primary = attention_layout and visible_waiting_rows() == 0
+        # The missed-nudge chip borrows Plan/Ask's slot -- both remain a click
+        # away in the Console, a recent signal is not.
+        show_chip = bool(signal_chip_var.get()) and not attention_layout and not collapsed.get()
+        hide_plan_ask = attention_layout or show_chip
+        if show_chip and not signal_packed.get():
+            signal_button.pack(side="left", padx=(8, 4), before=scan_button)
+            signal_packed.set(True)
+        elif not show_chip and signal_packed.get():
+            signal_button.pack_forget()
+            signal_packed.set(False)
+        if pressure_available_var.get() and not collapsed.get() and not attention_layout:
+            if not meter_packed.get():
+                meter_canvas.pack(side="left", padx=(8, 0))
+                meter_packed.set(True)
+            meter_canvas.configure(bg="#090d14")
+            meter_canvas.delete("all")
+            pct = max(0, min(100, int(pressure_pct_var.get() or 0)))
+            meter_colour = {"critical": "#ed6a24", "warning": "#ef9f27"}.get(
+                pressure_severity_var.get(), "#4f83f0",
+            )
+            meter_canvas.create_rectangle(0, 2, 62, 7, fill="#2a3342", outline="")
+            if pct:
+                meter_canvas.create_rectangle(0, 2, int(62 * pct / 100), 7, fill=meter_colour, outline="")
+        elif meter_packed.get():
+            meter_canvas.pack_forget()
+            meter_packed.set(False)
+        # Repacked right-to-left, each anchored to the nearest button that is
+        # actually packed: `before=` a forgotten widget is a TclError, and both
+        # the chip and the attention layout can leave ask or scan unpacked.
+        if hide_plan_ask:
+            if ask_packed.get():
+                ask_button.pack_forget()
+                ask_packed.set(False)
+        elif not collapsed.get() and not ask_packed.get():
+            ask_button.pack(side="left", padx=(0, 4), before=scan_button if scan_packed.get() else console_button)
+            ask_packed.set(True)
+        if hide_plan_ask:
             if plan_packed.get():
                 plan_button.pack_forget()
                 plan_packed.set(False)
         elif not collapsed.get() and not plan_packed.get():
             plan_button.pack(side="left", padx=(8, 4), before=ask_button)
             plan_packed.set(True)
-        if should_show_primary:
-            if ask_packed.get():
-                ask_button.pack_forget()
-                ask_packed.set(False)
-        elif not collapsed.get() and not ask_packed.get():
-            ask_button.pack(side="left", padx=(0, 4), before=scan_button)
-            ask_packed.set(True)
-        if should_show_primary:
+        if attention_layout:
             if scan_packed.get():
                 scan_button.pack_forget()
                 scan_packed.set(False)
@@ -2298,6 +3024,7 @@ def run_native_presence(
         elif not should_show_skip and skip_packed.get():
             skip_button.pack_forget()
             skip_packed.set(False)
+        apply_waiting_rows()
         apply_window_visibility()
 
     def pulse_attention() -> None:
@@ -2326,6 +3053,19 @@ def run_native_presence(
             continue_session_id_var.set("")
             skip_state_var.set("")
             skip_project_var.set("")
+            waiting_row_texts.clear()
+            waiting_row_urls.clear()
+            waiting_row_session_ids.clear()
+            waiting_row_return.clear()
+            waiting_row_wants.clear()
+            waiting_row_kinds.clear()
+            waiting_count_var.set(0)
+            working_count_var.set(0)
+            finished_count_var.set(0)
+            pressure_available_var.set(False)
+            pressure_stats_var.set("")
+            signal_chip_var.set("")
+            signal_url_var.set("")
         finally:
             update_attention_style()
             schedule_auto_collapse(10000 if has_primary_action() else 4000)
@@ -2347,10 +3087,26 @@ def run_native_presence(
     console_button = ttk.Button(frame, text="UI", width=4, style="Presence.TButton", command=open_dashboard)
     console_button.pack(side="left")
     ttk.Button(frame, text="-", width=2, style="PresenceMini.TButton", command=toggle_collapsed).pack(side="left", padx=(4, 0))
+    signal_button = ttk.Button(frame, textvariable=signal_chip_var, width=10, style="Presence.TButton", command=open_signal)
+    rows_frame = ttk.Frame(root, style="Presence.TFrame")
+    row_widgets: list[tuple[ttk.Frame, ttk.Label, ttk.Button, ttk.Label]] = []
+    for row_index in range(max_waiting_rows):
+        row_frame = ttk.Frame(rows_frame, padding=(14, 2), style="Presence.TFrame")
+        ttk.Label(row_frame, text="●", style="PresenceDot.TLabel").pack(side="left", padx=(0, 6))
+        row_label = ttk.Label(row_frame, text="", style="PresenceMuted.TLabel")
+        row_label.pack(side="left", fill="x", expand=True)
+        row_button = ttk.Button(
+            row_frame, text="Open", width=7, style="Presence.TButton",
+            command=lambda index=row_index: open_waiting_row(index),
+        )
+        row_button.pack(side="right")
+        row_wants = ttk.Label(row_frame, text="", style="PresenceMuted.TLabel")
+        row_wants.pack(side="right", padx=(0, 8))
+        row_widgets.append((row_frame, row_label, row_button, row_wants))
     # The collapsed state is a Loom-style bubble: the mark alone on a plain
     # white ground, no lettering and no border chrome. update_attention_style
     # repaints it, turning the mark's blue ring orange when attention is due.
-    collapsed_canvas = tk.Canvas(collapsed_frame, width=28, height=32, bg="#ffffff", highlightthickness=0, bd=0)
+    collapsed_canvas = tk.Canvas(collapsed_frame, width=36, height=40, bg="#ffffff", highlightthickness=0, bd=0)
     collapsed_canvas.pack(fill="both", expand=True)
 
     # The canvas covers the whole bubble, so it has to carry the move as well
@@ -2440,9 +3196,15 @@ def run_native_overlay(
     reason = body
     local_brief = _read_brief_file(brief_file)
 
+    # The notification wears the brand the same way the collapsed bubble does:
+    # the mark on a plain white ground, ink type, and severity carried by the
+    # mark itself -- the blue ring turns orange when the signal is critical.
+    # The ground never floods.
+    shell = "#ffffff"
+    ink = "#141314"
     root = tk.Tk()
     root.title("AIWatcher")
-    root.configure(bg="#edf4ff")
+    root.configure(bg=shell)
     root.attributes("-topmost", True)
     if sys.platform == "win32":
         root.overrideredirect(True)
@@ -2460,10 +3222,16 @@ def run_native_overlay(
         style.theme_use("clam")
     except tk.TclError:
         pass
-    style.configure("AIW.TFrame", background="#edf4ff")
-    style.configure("AIW.TLabel", background="#edf4ff", foreground="#1f2a44", font=("Helvetica", 13))
-    style.configure("AIWTitle.TLabel", background="#edf4ff", foreground="#1d5dab", font=("Helvetica", 20, "bold"))
-    style.configure("AIWMuted.TLabel", background="#edf4ff", foreground="#4f5f78", font=("Helvetica", 12))
+    style.configure("AIW.TFrame", background=shell)
+    style.configure("AIW.TLabel", background=shell, foreground="#413f42", font=("Helvetica", 13))
+    style.configure("AIWTitle.TLabel", background=shell, foreground=ink, font=("Helvetica", 20, "bold"))
+    style.configure("AIWMuted.TLabel", background=shell, foreground="#6d6a6e", font=("Helvetica", 12))
+    style.configure(
+        "AIWSeverity.TLabel",
+        background=shell,
+        foreground="#cc5417" if (severity or "").lower() == "critical" else "#9d6b12",
+        font=("Helvetica", 12, "bold"),
+    )
     style.configure("AIW.TButton", font=("Helvetica", 13, "bold"), padding=(14, 8))
 
     frame = ttk.Frame(root, padding=22, style="AIW.TFrame")
@@ -2471,10 +3239,17 @@ def run_native_overlay(
 
     header = ttk.Frame(frame, style="AIW.TFrame")
     header.pack(fill="x")
-    ttk.Label(header, text=title or "Start a fresh AI session", style="AIWTitle.TLabel", wraplength=600).pack(
+    mark_canvas = tk.Canvas(header, width=38, height=30, bg=shell, highlightthickness=0, bd=0)
+    _draw_brand_mark(
+        mark_canvas, height=30.0,
+        blue="#ed6a24" if (severity or "").lower() == "critical" else "#0052F5",
+        ink=ink,
+    )
+    mark_canvas.pack(side="left", padx=(0, 10))
+    ttk.Label(header, text=title or "Start a fresh AI session", style="AIWTitle.TLabel", wraplength=560).pack(
         side="left", fill="x", expand=True, anchor="w"
     )
-    ttk.Label(header, text=severity or "warning", style="AIWMuted.TLabel").pack(side="right", padx=(16, 0))
+    ttk.Label(header, text=severity or "warning", style="AIWSeverity.TLabel").pack(side="right", padx=(16, 0))
 
     ttk.Label(frame, text=body or "AIWatcher found context pressure that may waste your next turns.", style="AIW.TLabel", wraplength=700).pack(
         fill="x", pady=(12, 18), anchor="w"

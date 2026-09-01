@@ -151,7 +151,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         # attention carried by the blue ring, not an orange ground.
         self.assertIn('window.isOpaque = false', source)
         self.assertIn('collapsedMarkView', source)
-        self.assertIn('collapsedBlueRing.borderColor = (needsAttention ? orangeColor : brandBlue).cgColor', source)
+        self.assertIn("collapsedBlueRing.borderColor = ringColor.cgColor", source)
         self.assertIn('"/api/companion-state"', source)
         self.assertIn('"Plan"', source)
         self.assertIn('"Scan"', source)
@@ -169,6 +169,168 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("current.maxX - targetWidth", source)
         self.assertIn("hasPrimaryAction", source)
         self.assertIn("scheduleAutoCollapse", source)
+
+    def test_presence_bars_draw_the_waiting_queue_and_countdown(self) -> None:
+        # Both bars render the additive companion-state fields: waiting_sessions
+        # queue rows, the presence waiting count on the collapsed pill, the
+        # prompt-gate countdown, and `detail` as a tooltip where the toolkit
+        # has one.
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn('json["waiting_sessions"]', mac)
+        self.assertIn('json["expires_in_seconds"]', mac)
+        self.assertIn('json["presence"]', mac)
+        self.assertIn("@objc func openWaitingRow", mac)
+        self.assertIn("visibleWaitingRows", mac)
+        # Height follows the queue, and the resize keeps the parked corner
+        # fixed the same way setCollapsed does.
+        self.assertIn("func applyWindowSize()", mac)
+        self.assertIn("CGFloat(visibleWaitingRows) * rowHeight", mac)
+        # The waiting count rides the white bubble as a badge; the ground
+        # itself never floods, per the brand rule that attention is carried by
+        # the mark's blue ring turning orange.
+        self.assertIn("collapsedBadge", mac)
+        self.assertIn("collapsedBadge.stringValue = waitingCount > 0", mac)
+        self.assertIn("titleLabel.toolTip", mac)
+        # A queue means per-row Open buttons, not a duplicated primary.
+        self.assertIn("hasPrimaryAction() && rowsShown == 0", mac)
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn("waiting_sessions", tk_source)
+        self.assertIn("expires_in_seconds", tk_source)
+        self.assertIn("def visible_waiting_rows", tk_source)
+        self.assertIn("def open_waiting_row", tk_source)
+        self.assertIn("def apply_waiting_rows", tk_source)
+        self.assertIn("create_text(\n                27, 10, text=str(badge_count)", tk_source)
+        self.assertIn("visible_waiting_rows() == 0", tk_source)
+
+    def test_presence_bars_draw_the_meter_and_missed_signal_chip(self) -> None:
+        # The meter draws only when the payload says the number is measurable
+        # -- unmeasurable must not render as an empty bar -- and the chip
+        # borrows Plan/Ask's slot only outside attention states.
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn('json["pressure"]', mac)
+        self.assertIn('json["recent_signal"]', mac)
+        self.assertIn("let showMeter = pressureAvailable", mac)
+        self.assertIn("@objc func openSignal", mac)
+        self.assertIn("!signalChipText.isEmpty && !attention", mac)
+        # The fill clamps at 100%; the percent label does not: a 250K turn is
+        # past the limit and the number should say so.
+        self.assertIn("min(max(pressurePct, 0), 100)", mac)
+
+        # The running-totals label rides the pressure block as plain muted
+        # text -- a total is not a verdict, so no status colour touches it.
+        self.assertIn('pressure?["stats_label"]', mac)
+        self.assertIn("statsLabel", mac)
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn("pressure_stats_var", tk_source)
+        self.assertIn('payload.get("pressure")', tk_source)
+        self.assertIn('payload.get("recent_signal")', tk_source)
+        self.assertIn("def open_signal", tk_source)
+        self.assertIn("pressure_available_var.get() and not collapsed.get()", tk_source)
+
+    def test_presence_bars_return_to_the_blocked_tool_honestly(self) -> None:
+        # A queue row (or a lone session's primary) whose runtime attachment is
+        # reachable posts /api/runtime-return and reports the result; failure
+        # says so and opens the session in AIWatcher instead. Never a claimed
+        # jump that did not happen.
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn('"return_available"', mac)
+        self.assertIn("func requestRuntimeReturn(sessionID:", mac)
+        self.assertIn('primaryAction == "runtime_return"', mac)
+        self.assertIn('canReturn ? "Return" : (kind.isEmpty ? "Open" : "Review")', mac)
+        self.assertIn('"No live return. Opened in AIWatcher."', mac)
+        # The result is awaited, with a bounded timeout, off the main thread.
+        self.assertIn("request.timeoutInterval = 4", mac)
+        self.assertIn("DispatchQueue.main.async", mac)
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn("def request_runtime_return", tk_source)
+        self.assertIn('"runtime_return"', tk_source)
+        self.assertIn("return_available", tk_source)
+        self.assertIn('"Return" if can_return else ("Review" if kind else "Open")', tk_source)
+        self.assertIn("No live return. Opened in AIWatcher.", tk_source)
+
+    def test_presence_rows_say_what_the_session_wants(self) -> None:
+        # The "wants" tag is the hook's closed-vocabulary phrase; the row only
+        # ever renders "wants: <phrase>" or nothing at all.
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn('row["wants"]', mac)
+        self.assertIn("rowTags", mac)
+        self.assertIn('wants.isEmpty ? "" : "wants: \\(wants)"', mac)
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn("waiting_row_wants", tk_source)
+        self.assertIn('f"wants: {wants}" if wants else ""', tk_source)
+
+    def test_finished_earns_the_primary_but_never_the_orange(self) -> None:
+        # session_finished sits in hasPrimaryAction (Review, compact layout)
+        # and deliberately not in needsAttentionState: "review when ready"
+        # must not wear the "blocked on you" treatment. The bubble badge goes
+        # brand blue for the same reason, and the window still shows in
+        # nudges-only mode via the soft-attention check.
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn("session_finished", mac.split("func hasPrimaryAction")[1][:400])
+        self.assertNotIn("session_finished", mac.split("func needsAttentionState")[1][:400])
+        self.assertIn('["session_finished", "away_digest"].contains(stateName)', mac)
+        self.assertIn('json["finished_sessions"]', mac)
+        self.assertIn("finishedCount > 0 ? String(finishedCount)", mac)
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn("session_finished", tk_source.split("def has_primary_action()")[1][:600])
+        self.assertNotIn(
+            "session_finished",
+            tk_source.split("needs_attention = state_var.get() in")[1][:200],
+        )
+        self.assertIn('fill=attention_bg if waiting_count > 0 else "#0052F5"', tk_source)
+
+    def test_the_away_digest_rides_the_queue_rows(self) -> None:
+        # History entries reuse the waiting-row machinery: mint/amber dots by
+        # kind, Review buttons, and the calm treatment -- away_digest earns
+        # the compact layout without joining the attention lists.
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn('json["digest_rows"]', mac)
+        self.assertIn('"away_digest"', mac)
+        self.assertNotIn("away_digest", mac.split("func needsAttentionState")[1][:400])
+        self.assertIn('kind.isEmpty ? "Open" : "Review"', mac)
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn('payload.get("digest_rows")', tk_source)
+        self.assertIn('"away_digest"', tk_source)
+        self.assertNotIn(
+            "away_digest",
+            tk_source.split("needs_attention = state_var.get() in")[1][:200],
+        )
+        self.assertIn('"Review" if kind else "Open"', tk_source)
+
+    def test_the_running_arc_orbits_the_bubble(self) -> None:
+        # The owner's pick from the mockup candidates: a short mint arc
+        # circling the bubble rim while a session works. Attention outranks
+        # it, and macOS Reduce Motion suppresses it entirely -- the mint ring
+        # alone says running then.
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn("orbitLayer", mac)
+        self.assertIn('CABasicAnimation(keyPath: "transform.rotation.z")', mac)
+        self.assertIn("accessibilityDisplayShouldReduceMotion", mac)
+        self.assertIn(
+            "orbitLayer.isHidden = !collapsed || workingCount <= 0 || needsAttention || reduceMotion",
+            mac,
+        )
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn("orbit_angle_var", tk_source)
+        self.assertIn('style="arc", outline="#43d9a3"', tk_source)
+
+    def test_the_marks_ring_says_running(self) -> None:
+        # The ring speaks the dashboard favicon's vocabulary: orange for
+        # attention, mint #43d9a3 (the favicon's healthy-live colour) while a
+        # session is working, brand blue at rest. Attention keeps priority.
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn("workingCount > 0 ? runningMint : brandBlue", mac)
+        self.assertIn("0.26, green: 0.85, blue: 0.64", mac)
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn('"#43d9a3" if int(working_count_var.get() or 0) > 0 else "#0052F5"', tk_source)
 
     def test_tk_presence_opens_dashboard_and_prompt_without_session_claim(self) -> None:
         source = inspect.getsource(native_overlay.run_native_presence)
@@ -216,7 +378,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         # Asserted per state rather than as one literal set: the previous form
         # pinned the exact spelling of the line, so adding a state broke it for
         # formatting reasons rather than behavioural ones.
-        primary_states = source[source.index("def has_primary_action()"):][:400]
+        primary_states = source[source.index("def has_primary_action()"):][:600]
         for state in ("prompt_gate", "control_recommended", "optimize_available",
                       "clipboard_confirm", "session_waiting"):
             with self.subTest(state=state):
@@ -303,14 +465,23 @@ class MacosSwiftOverlaySourceTests(unittest.TestCase):
             self.skipTest("the macOS SDK is needed to typecheck a Cocoa source file")
         if os.environ.get("CI") and os.environ.get("AIWATCHER_SWIFT_TYPECHECK") != "1":
             self.skipTest("another macOS job owns the swiftc typecheck in CI")
-        with tempfile.NamedTemporaryFile("w", suffix=".swift", delete=False, encoding="utf-8") as handle:
-            handle.write(native_overlay.MACOS_SWIFT_OVERLAY)
-            path = handle.name
-        try:
-            completed = subprocess.run([swiftc, "-typecheck", path], capture_output=True, text=True)
-        finally:
-            os.unlink(path)
-        self.assertEqual(completed.returncode, 0, f"Swift overlay source does not typecheck:\n{completed.stderr}")
+        # Both embedded Cocoa sources, not just the nudge overlay: the presence
+        # bar is the one that changes most and a typo there is a Companion that
+        # silently never draws.
+        sources = {
+            "overlay": native_overlay.MACOS_SWIFT_OVERLAY,
+            "presence": native_overlay.MACOS_SWIFT_PRESENCE,
+        }
+        for name, source in sources.items():
+            with self.subTest(source=name):
+                with tempfile.NamedTemporaryFile("w", suffix=".swift", delete=False, encoding="utf-8") as handle:
+                    handle.write(source)
+                    path = handle.name
+                try:
+                    completed = subprocess.run([swiftc, "-typecheck", path], capture_output=True, text=True)
+                finally:
+                    os.unlink(path)
+                self.assertEqual(completed.returncode, 0, f"Swift {name} source does not typecheck:\n{completed.stderr}")
 
 
 if __name__ == "__main__":

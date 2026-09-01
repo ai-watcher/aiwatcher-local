@@ -43,13 +43,17 @@ from .scanner import LocalSession, _git_root
 #
 # STOPGAP. The defensible way to pick this is the histogram of gaps between
 # writes inside real sessions -- scripts/probe_concurrency.py prints it -- and
-# that data lives on a machine we have not been able to read yet. 120s is
-# chosen to fail in the safe direction: too short and a session flickers
-# working/quiet/working through every long test run, and flicker in the corner
-# of the eye is the one thing an always-open ambient surface must not do. Too
-# long only means a stopped session lingers a couple of minutes, which nobody
-# notices. Revisit against the histogram before this is treated as tuned.
-WORKING_SECONDS = 120
+# that data lives on a machine we have not been able to read yet. The trade:
+# too short and a session flickers working/quiet/working through every long
+# tool call (nothing writes to the transcript while a build or test suite
+# runs), and flicker in the corner of the eye is the one thing an always-open
+# ambient surface must not do; too long and a finished session lingers as
+# "working". Started at 120s; halved to 60s at the owner's request after
+# living with the Companion's finished notice -- two minutes of lingering was
+# the annoyance in practice, and 60s still covers the ~40s test-suite gaps
+# observed while building this. A tool call over a minute will still flicker.
+# Revisit against the histogram before this is treated as tuned.
+WORKING_SECONDS = 60
 
 # The outer boundary: past this, a session is not live at all. Not a new
 # threshold -- it is the one `ui.session_state` has always used to call a

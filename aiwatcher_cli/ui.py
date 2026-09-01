@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
@@ -19,7 +20,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
-from . import analyst, prompt_signals
+from . import analyst, prompt_signals, statusline
 from .cli import (
     SEARCH_RANK_FIELDS,
     SEARCH_RANK_TOPIC,
@@ -58,6 +59,7 @@ from .local_state import (
     get_watcher_status,
     outcome_counts,
     outcomes_for_sessions,
+    recent_ambient_interventions,
     recent_command_decisions,
     recent_handoff_decisions,
     recent_interventions,
@@ -101,6 +103,7 @@ from .runtime_attachment import (
 from .runtime_nudge import foreground_tool, presentation_for_signal
 from .session_presence import (
     LIVE_WINDOW_MINUTES,
+    SessionPresence,
     live_presence,
     presence_for_sessions,
     tool_label,
@@ -5444,9 +5447,470 @@ def answer_local_question(question: str, days: int = 7) -> dict[str, object]:
     )
 
 
+def _project_basename(path: object) -> str:
+    raw = str(path or "").rstrip("/")
+    return raw.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+
+
+def _waited_fragment(label: object) -> str:
+    # "waiting 12m" -> "12m". Under a minute the presence label is "waiting on
+    # you", and that fragment pastes into nonsense ("Claude · repo · on you"),
+    # so it becomes "" and callers drop the duration instead.
+    frag = str(label or "").replace("waiting ", "", 1).strip()
+    return "" if frag in {"", "on you"} else frag
+
+
+def _presence_block(rows: list[SessionPresence]) -> dict[str, object]:
+    """Live now-counts for the Companion's resting state.
+
+    The label these counts answer is "what is happening right now": sessions on
+    this machine classified this second, never the cached 7-day summary. Two
+    honesty rules shape the block. An AIWatcher Second Opinion spawn is left out
+    of the counts -- "1 working" must not be AIWatcher's own feature passing as
+    the user's work. And zero is two different answers: no snapshot yet means
+    "cannot see" (measurable false, with the reason), while a snapshot whose
+    sessions have all ended is a true, measured "no live sessions".
+    """
+    own = [row for row in rows if not row.analyst_run]
+    measured = [row for row in own if row.measurable]
+    counts = {"working": 0, "waiting": 0, "quiet": 0}
+    if not own:
+        return {
+            **counts,
+            "measurable": False,
+            "reason": "no local session snapshot yet",
+            "line": "Waiting for the first session scan",
+        }
+    if not measured:
+        reason = next((row.reason for row in own if row.reason), None)
+        return {
+            **counts,
+            "measurable": False,
+            "reason": reason or "sessions not measurable here",
+            "line": "Live sessions not measurable here",
+        }
+    for row in measured:
+        if row.state in counts:
+            counts[row.state] += 1
+    working, waiting, quiet = counts["working"], counts["waiting"], counts["quiet"]
+    if working or waiting:
+        line = f"{working} working · {waiting} waiting"
+        if waiting:
+            longest = max(
+                (row for row in measured if row.state == "waiting"),
+                key=lambda row: row.idle_seconds or 0.0,
+            )
+            frag = _waited_fragment(longest.label)
+            if frag:
+                line += f" {frag}"
+    elif quiet:
+        line = f"{quiet} quiet session{'s' if quiet != 1 else ''}"
+    else:
+        line = "No live sessions"
+    return {**counts, "measurable": True, "reason": None, "line": line}
+
+
+# Latest-turn transcript reads keyed by source_path; the value is the
+# session's updated_at stamp plus the tokens read then (0 = read but not
+# measurable). A session only changes its transcript when it writes, and
+# writing moves updated_at, so a hit means the 13ms parse can be skipped.
+_PRESSURE_TRANSCRIPT_CACHE: dict[str, tuple[str, int]] = {}
+
+_TRANSIENT_SIGNAL_KINDS = {"loop", "velocity", "runway", "usage_pressure"}
+_TRANSIENT_SIGNAL_LABELS = {
+    "loop": "Possible loop",
+    "velocity": "Velocity spike",
+    "runway": "Runway low",
+    "usage_pressure": "Usage pressure",
+}
+# A signal older than the live window belongs to a session presumed gone;
+# a chip for it would be an alarm about nothing the user can still act on.
+RECENT_SIGNAL_WINDOW_MINUTES = LIVE_WINDOW_MINUTES
+
+
+def _pressure_block(rows: list[SessionPresence], sessions: list[LocalSession]) -> dict[str, object]:
+    """Context pressure of the session being worked in, for the resting bar.
+
+    The label asks: "how close is this session's latest turn to the per-turn
+    limit where a Fresh Start gets recommended?" Unit and scope: billed input
+    tokens on the latest single turn of the most recently active *working*
+    session -- per-turn, never a cumulative session total under a per-turn
+    label. Compared against CRITICAL_TOKENS_PER_TURN, the same constant the
+    runway chart and statusline read, so the surfaces cannot disagree.
+    Freshness comes from statusline.read_transcript (one file, ~13ms), cached
+    on the session's updated_at rather than served from the 6-hour summary
+    cache. When the input is missing -- no working session, a cumulative-total
+    source, an unreadable transcript -- the block says so and the widgets draw
+    no meter, never a zero.
+    """
+    working = [
+        row for row in rows
+        if row.state == "working" and row.measurable and not row.analyst_run
+    ]
+    if not working:
+        return {"available": False, "reason": "no working session right now"}
+    target = working[0]
+    # Looked up in the rows this poll already holds, not via _find_session_row:
+    # that helper falls back to a full rescan, which has no place on a 3-second
+    # poll path.
+    session = next((row for row in sessions if row.session_id == target.session_id), None)
+    if session is None or not session.source_path:
+        return {"available": False, "reason": "session transcript not tracked"}
+    if has_cumulative_totals(session):
+        return {
+            "available": False,
+            "reason": "this tool reports cumulative totals, not per-turn context",
+        }
+    stamp = session.updated_at.isoformat() if session.updated_at else ""
+    cached = _PRESSURE_TRANSCRIPT_CACHE.get(session.source_path)
+    if cached is not None and cached[0] == stamp:
+        latest = cached[1]
+    else:
+        stats = statusline.read_transcript(session.source_path)
+        latest = int(stats.get("latest_context") or 0) if stats.get("available") else 0
+        if len(_PRESSURE_TRANSCRIPT_CACHE) > 32:
+            _PRESSURE_TRANSCRIPT_CACHE.clear()
+        _PRESSURE_TRANSCRIPT_CACHE[session.source_path] = (stamp, latest)
+    if latest <= 0:
+        return {"available": False, "reason": "no per-turn usage recorded in this session yet"}
+    severity = (
+        "critical" if latest >= CRITICAL_TOKENS_PER_TURN
+        else "warning" if latest >= PRESSURE_TOKENS_PER_TURN
+        else "ok"
+    )
+    pct = round(100 * latest / CRITICAL_TOKENS_PER_TURN)
+    # Absolute anchors for the percent: what this session has spent so far,
+    # straight off the session row -- no new reads. Raw totals, so the
+    # widgets draw them as plain muted text with no status colour (a total is
+    # not a verdict), and the tooltip names the dollar figure API-equivalent:
+    # for a subscription user no money moved.
+    cost = float(session.cost_usd or 0.0)
+    tokens_total = int(session.tokens_in or 0) + int(session.tokens_out or 0)
+    stats_parts = []
+    if cost > 0:
+        stats_parts.append(f"${cost:,.2f}" if cost < 100 else f"${cost:,.0f}")
+    if tokens_total > 0:
+        stats_parts.append(compact_int(tokens_total))
+    return {
+        "available": True,
+        "reason": None,
+        "session_id": target.session_id,
+        "latest_turn_tokens": latest,
+        "pct_of_turn_limit": pct,
+        "severity": severity,
+        "label": f"{compact_int(latest)} · {pct}% of turn limit",
+        "stats_label": " · ".join(stats_parts),
+        "stats_detail": "This session so far, API-equivalent cost and total tokens.",
+    }
+
+
+# Finished-notice tracking, in this process's memory. "Finished" is a
+# transition -- working on the last poll, quiet on this one -- which cannot be
+# read from a single snapshot: statelessly, a session that just completed a
+# turn and one abandoned twenty minutes ago look identical until the idle
+# clock separates them, which is exactly too late. The cost of memory is that
+# a dashboard restart loses at most one pending notice; the away digest
+# (which is stateless over the gap window) covers the larger version.
+_PRESENCE_LAST_STATES: dict[str, str] = {}
+_FINISHED_NOTICES: dict[str, float] = {}
+# Stopgap constant, not a measured threshold: after this long the notice is
+# stale news rather than a nudge, and the session is plain "quiet" again.
+FINISHED_NOTICE_TTL_SECONDS = 15 * 60
+
+
+def _update_finished_notices(rows: list[SessionPresence]) -> None:
+    now = time.time()
+    current: dict[str, str] = {}
+    for row in rows:
+        if row.analyst_run or not row.measurable:
+            continue
+        current[row.session_id] = row.state
+        previous = _PRESENCE_LAST_STATES.get(row.session_id)
+        if row.state == "quiet" and previous == "working":
+            _FINISHED_NOTICES[row.session_id] = now
+        elif row.state in {"working", "waiting"}:
+            # The session is active again; a "finished" claim about it would
+            # be false the moment it rendered.
+            _FINISHED_NOTICES.pop(row.session_id, None)
+    _PRESENCE_LAST_STATES.clear()
+    _PRESENCE_LAST_STATES.update(current)
+    for session_id, finished_at in list(_FINISHED_NOTICES.items()):
+        if now - finished_at > FINISHED_NOTICE_TTL_SECONDS or session_id not in current:
+            _FINISHED_NOTICES.pop(session_id, None)
+
+
+def _finished_rows(rows: list[SessionPresence]) -> list[tuple[float, SessionPresence]]:
+    """Active finished notices, newest first, skips honored."""
+    notices = []
+    for row in rows:
+        finished_at = _FINISHED_NOTICES.get(row.session_id)
+        if finished_at is None or row.state != "quiet":
+            continue
+        if companion_skip_active(f"session_finished:{row.session_id}"):
+            continue
+        notices.append((finished_at, row))
+    notices.sort(key=lambda item: item[0], reverse=True)
+    return notices
+
+
+def _freshened_for_presence(rows: list[LocalSession]) -> list[LocalSession]:
+    """Presence-grade write stamps for the Companion poll.
+
+    The session index refreshes on scan cadence, which is right for totals
+    and minutes late for "is it writing this second" -- the bar kept saying
+    Finished after the session had visibly resumed, and kept saying Waiting
+    after a prompt was answered. A single-file transcript's mtime is the same
+    fact, one stat() away, so presence reads max(indexed stamp, mtime) for
+    .jsonl sources. Cumulative DB sources are excluded on purpose: their file
+    is shared across sessions, and any one session writing would mark all of
+    them working.
+    """
+    fresh: list[LocalSession] = []
+    for row in rows:
+        path = row.source_path or ""
+        if not path.endswith(".jsonl"):
+            fresh.append(row)
+            continue
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            fresh.append(row)
+            continue
+        stamp = datetime.fromtimestamp(mtime, tz=timezone.utc)
+        current = row.updated_at
+        if current is not None and current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        if current is None or stamp > current:
+            fresh.append(dataclasses.replace(row, updated_at=stamp))
+        else:
+            fresh.append(row)
+    return fresh
+
+
+# Away-digest tracking. The bar polls every 2-3 seconds all day, so a hole in
+# the poll stream longer than AWAY_GAP_SECONDS means the machine slept, was
+# locked, or the developer was genuinely gone -- not just reading. The digest
+# itself is reconstructed after the fact from records that already exist
+# (session write stamps and ambient-intervention records inside the gap), so
+# nothing needed to be watching during a gap the server slept through too.
+# Everything in it is phrased as history -- "finished 31m ago" -- because
+# nobody has re-measured whether any condition still holds.
+_LAST_COMPANION_POLL: float | None = None
+_AWAY_DIGEST: dict[str, object] | None = None
+AWAY_GAP_SECONDS = 20 * 60
+# Stopgap constant: a digest nobody expanded within this window is stale news;
+# the evidence it pointed at stays in the dashboard.
+AWAY_DIGEST_TTL_SECONDS = 15 * 60
+
+
+def _away_minutes_label(seconds: float) -> str:
+    minutes = max(1, int(seconds // 60))
+    return f"{minutes}m" if minutes < 120 else f"{minutes // 60}h"
+
+
+def _update_away_digest(
+    session_rows: list[LocalSession],
+    presence_rows: list[SessionPresence],
+) -> None:
+    global _LAST_COMPANION_POLL, _AWAY_DIGEST
+    now = time.time()
+    previous = _LAST_COMPANION_POLL
+    _LAST_COMPANION_POLL = now
+    if previous is None or now - previous < AWAY_GAP_SECONDS:
+        return
+    gap_start = datetime.fromtimestamp(previous, tz=timezone.utc)
+    gap_end = datetime.fromtimestamp(now, tz=timezone.utc)
+    states = {row.session_id: row.state for row in presence_rows}
+    rows: list[dict[str, object]] = []
+    finished_count = 0
+    for session in session_rows:
+        if session.analyst_run:
+            continue
+        stamp = session.updated_at
+        if stamp is None:
+            continue
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        # Last write inside the gap, and silent now: it finished while the
+        # developer was away. A session writing again already (working or
+        # waiting) is live and needs no history entry.
+        if not (gap_start < stamp <= gap_end):
+            continue
+        if states.get(session.session_id) not in {"quiet", "gone"}:
+            continue
+        finished_count += 1
+        rows.append({
+            "kind": "finished",
+            "session_id": session.session_id,
+            "tool": tool_label(session.tool),
+            "project": _project_basename(session.project_path) or "this machine",
+            "waited_label": _away_minutes_label(now - stamp.timestamp()),
+            "url": f"/?session={quote(session.session_id, safe='')}",
+        })
+        # The finished-notice path would re-announce the same sessions the
+        # moment the digest is dismissed; the digest is their announcement.
+        _FINISHED_NOTICES.pop(session.session_id, None)
+    signal_count = 0
+    for record in recent_ambient_interventions(limit=20):
+        kind = str(record.get("signal_kind") or "")
+        if kind not in _TRANSIENT_SIGNAL_KINDS:
+            continue
+        stamp = _parse_iso_datetime(record.get("updated_at") or record.get("created_at"))
+        if stamp is None or not (gap_start < stamp <= gap_end):
+            continue
+        signal_count += 1
+        session_id = str(record.get("session_id") or "")
+        urls = record.get("urls") if isinstance(record.get("urls"), dict) else {}
+        rows.append({
+            "kind": kind,
+            "session_id": session_id,
+            "tool": _TRANSIENT_SIGNAL_LABELS.get(kind, kind),
+            "project": "",
+            "waited_label": _away_minutes_label(now - stamp.timestamp()),
+            "url": str(urls.get("dashboard") or "")
+            or (f"/?session={quote(session_id, safe='')}" if session_id else "/"),
+        })
+    if not rows:
+        return
+    _AWAY_DIGEST = {
+        "created": now,
+        "gap_label": _away_minutes_label(now - previous),
+        "finished_count": finished_count,
+        "signal_count": signal_count,
+        "rows": rows[:3],
+    }
+
+
+def _active_away_digest() -> dict[str, object] | None:
+    global _AWAY_DIGEST
+    if _AWAY_DIGEST is None:
+        return None
+    created = float(_AWAY_DIGEST.get("created") or 0.0)
+    if time.time() - created > AWAY_DIGEST_TTL_SECONDS:
+        _AWAY_DIGEST = None
+        return None
+    return _AWAY_DIGEST
+
+
+def _dismiss_away_digest() -> None:
+    global _AWAY_DIGEST
+    _AWAY_DIGEST = None
+
+
+# One `ps` sweep per ~10s, not per 2-second poll: runtime attachment for the
+# queue rows needs the live process list, and which windows exist does not
+# change faster than this. Races between poller threads just refresh twice.
+_RUNTIME_PROCESS_CACHE: tuple[float, list[object]] | None = None
+_RUNTIME_PROCESS_TTL_SECONDS = 10.0
+
+
+def _cached_runtime_processes() -> list[object]:
+    global _RUNTIME_PROCESS_CACHE
+    now = time.monotonic()
+    cached = _RUNTIME_PROCESS_CACHE
+    if cached is not None and now - cached[0] < _RUNTIME_PROCESS_TTL_SECONDS:
+        return cached[1]
+    processes = list(safe_runtime_processes())
+    _RUNTIME_PROCESS_CACHE = (now, processes)
+    return processes
+
+
+def _waiting_row_return_available(session_id: str, sessions: list[LocalSession]) -> bool:
+    """Whether a queue row can offer a real Return instead of Open.
+
+    True means /api/runtime-return has something to perform for this session
+    -- the same attachment.available gate build_runtime_return applies -- so
+    the button never promises a jump the endpoint would refuse. That includes
+    the app tier: for a desktop-app session the owner's call was that Return
+    should bring the app forward even when it is already frontmost, rather
+    than detour through the dashboard -- the "Find your chat there" result
+    message owns the not-the-exact-chat limitation.
+    """
+    session = next((row for row in sessions if row.session_id == session_id), None)
+    if session is None:
+        return False
+    try:
+        attachment = runtime_attachment_for_session(
+            session,
+            state=session_state(session),
+            processes=_cached_runtime_processes(),
+        )
+    except OSError:
+        return False
+    return bool(attachment.available)
+
+
+def _recent_signal_block() -> dict[str, object] | None:
+    """The most recent overlay-only signal, so the bar can catch a missed one.
+
+    Loop, velocity, runway and usage-pressure nudges live in a 20-second
+    transient overlay; step away and the signal is gone. Every such nudge
+    already persists an ambient-intervention record, so the bar carries the
+    newest one inside the live window as a passive chip. Recency, not truth:
+    the chip says "this fired Nm ago", which stays true after the fact, rather
+    than re-asserting a condition nobody has re-measured.
+    """
+    now = datetime.now(timezone.utc)
+    for record in recent_ambient_interventions(limit=20):
+        kind = str(record.get("signal_kind") or "")
+        if kind not in _TRANSIENT_SIGNAL_KINDS:
+            continue
+        stamp = _parse_iso_datetime(record.get("updated_at") or record.get("created_at"))
+        if stamp is None:
+            continue
+        age = (now - stamp).total_seconds()
+        if age < 0 or age > RECENT_SIGNAL_WINDOW_MINUTES * 60:
+            continue
+        session_id = str(record.get("session_id") or "")
+        minutes = int(age // 60)
+        urls = record.get("urls") if isinstance(record.get("urls"), dict) else {}
+        return {
+            "kind": kind,
+            "label": _TRANSIENT_SIGNAL_LABELS.get(kind, kind),
+            "chip": f"{kind} {minutes}m" if minutes else f"{kind} now",
+            "minutes_ago": minutes,
+            "severity": str(record.get("severity") or "warning"),
+            "session_id": session_id,
+            "url": str(urls.get("dashboard") or "")
+            or (f"/?session={quote(session_id, safe='')}" if session_id else "/"),
+        }
+    return None
+
+
 def build_companion_state() -> dict[str, object]:
     """Small, fast state contract for the always-available Companion surface."""
     summary = build_summary_cached(7)
+    # Presence is computed here, not read from `summary`. The summary is an
+    # aggregate about a seven-day window and is cached accordingly -- 45s in
+    # memory, six hours on disk -- which is correct for spend totals and wrong
+    # for a fact about this second. Served from that cache, "waiting on you"
+    # could be hours old, and the Companion would sit quiet through the wait it
+    # exists to report.
+    #
+    # presence_for_sessions rather than live_presence: this needs per-session
+    # states only, and live_presence also resolves working trees for the
+    # collision check, which shells out to git per directory.
+    try:
+        waiting_signals = session_waiting_signals()
+    except OSError:
+        waiting_signals = {}
+    session_rows = _freshened_for_presence(_cached_session_rows())
+    presence_rows = presence_for_sessions(session_rows, waiting=waiting_signals)
+    _update_finished_notices(presence_rows)
+    finished_notices = _finished_rows(presence_rows)
+    finished_payload = [
+        {
+            "session_id": row.session_id,
+            "tool": tool_label(row.tool),
+            "project": _project_basename(row.project_path) or "this machine",
+            "finished_label": (
+                f"{int((time.time() - at) // 60)}m" if at <= time.time() - 60 else "now"
+            ),
+            "url": f"/?session={quote(row.session_id, safe='')}",
+        }
+        for at, row in finished_notices[:3]
+    ]
+    _update_away_digest(session_rows, presence_rows)
     base = {
         "state": "watching",
         "label": "Watching quietly",
@@ -5463,6 +5927,14 @@ def build_companion_state() -> dict[str, object]:
         "watch_url": "/",
         "console_url": "/",
         "detail": "Local-only. No prompt or source text is shown in the Companion.",
+        "presence": _presence_block(presence_rows),
+        # In the base payload, not only the finished state: the bubble's blue
+        # badge must survive whatever state owns the bar, or a finished
+        # session vanishes from the glanceable surface the moment anything
+        # else has the headline.
+        "finished_sessions": finished_payload,
+        "pressure": _pressure_block(presence_rows, session_rows),
+        "recent_signal": _recent_signal_block(),
     }
     try:
         gate = active_prompt_gate()
@@ -5479,12 +5951,22 @@ def build_companion_state() -> dict[str, object]:
                 mark_active_prompt_gate_seen(gate_id)
             except OSError:
                 pass
+        # Seconds until the gate auto-releases: unit is seconds-from-now for
+        # this one gate, recomputed on each poll so the widgets never tick a
+        # clock themselves. A missing or unparsable expires_at yields None, and
+        # the widgets show no countdown rather than an invented number.
+        gate_expires = _parse_iso_datetime(gate.get("expires_at"))
         return {
             **base,
             "state": "prompt_gate",
             "label": str(gate.get("workflow_label") or "Prompt Gate"),
             "title": "Prompt Gate",
             "subtitle": str(gate.get("workflow_reward") or f"{tool} {risk}-risk prompt waiting{score_label}."),
+            "expires_in_seconds": (
+                max(0, int((gate_expires - datetime.now(timezone.utc)).total_seconds()))
+                if gate_expires is not None
+                else None
+            ),
             "primary_label": "Review Gate",
             "primary_action": "open_prompt_gate",
             "primary_url": str(gate.get("url") or "/?view=prompt"),
@@ -5505,24 +5987,7 @@ def build_companion_state() -> dict[str, object]:
     # matching active session has a justified action". A blocked session is the
     # most justified action the product has, and until this branch existed it
     # was the one case the Companion sat quiet through.
-    # Computed here, not read from `summary`. The summary is an aggregate about
-    # a seven-day window and is cached accordingly -- 45s in memory, six hours
-    # on disk -- which is correct for spend totals and wrong for a fact about
-    # this second. Served from that cache, "waiting on you" could be hours old,
-    # and the Companion would sit quiet through the wait it exists to report.
-    #
-    # presence_for_sessions rather than live_presence: this only needs the
-    # waiting rows, and live_presence also resolves working trees for the
-    # collision check, which shells out to git per directory.
-    try:
-        waiting_signals = session_waiting_signals()
-    except OSError:
-        waiting_signals = {}
-    waiting_rows = [
-        row.to_json()
-        for row in presence_for_sessions(_cached_session_rows(), waiting=waiting_signals)
-        if row.state == "waiting"
-    ] if waiting_signals else []
+    waiting_rows = [row.to_json() for row in presence_rows if row.state == "waiting"]
     if waiting_rows:
         # Longest wait first: how long you have been the bottleneck is the part
         # worth reading, and with several waiting the count goes in the sentence
@@ -5530,36 +5995,129 @@ def build_companion_state() -> dict[str, object]:
         waiting_rows.sort(key=lambda row: float(row.get("idle_seconds") or 0.0), reverse=True)
         first = waiting_rows[0]
         session_id = str(first.get("session_id") or "")
-        waited = str(first.get("label") or "").replace("waiting ", "", 1).strip()
+        waited = _waited_fragment(first.get("label"))
         # Basename, not the path. The widget truncates its subtitle at 46
         # characters, and "/Users/dannylo/aiwatcher-local" spends thirty of them
         # on a prefix that is the same for every project the developer has --
         # measured on the real surface, where the project name was the part
         # being cut. The label above already says what is happening; this line
         # only has to say which session and for how long.
-        raw_project = str(first.get("project_path") or "").rstrip("/")
-        project = raw_project.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] or "this machine"
+        project = _project_basename(first.get("project_path")) or "this machine"
         tool = tool_label(str(first.get("tool") or ""))
         if len(waiting_rows) == 1:
-            subtitle = f"{tool} · {project}" + (f" · {waited}" if waited and waited != "on you" else "")
+            subtitle = f"{tool} · {project}" + (f" · {waited}" if waited else "")
         else:
             subtitle = f"{len(waiting_rows)} sessions · longest {waited or project}"
+        # One pre-worded row per blocked session so the widgets can draw a
+        # queue instead of a headline. Worded here, once, because three
+        # clients (Swift, Tk, browser overlay) would otherwise each respell
+        # the same duration and path. Capped at three: the bar caps its
+        # rows there, and the count above already says the full total.
+        queue = [
+            {
+                "session_id": str(row.get("session_id") or ""),
+                "tool": tool_label(str(row.get("tool") or "")),
+                "project": _project_basename(row.get("project_path")) or "this machine",
+                "waited_label": _waited_fragment(row.get("label")),
+                "idle_seconds": row.get("idle_seconds"),
+                "url": f"/?session={quote(str(row.get('session_id') or ''), safe='')}",
+                "return_available": _waiting_row_return_available(
+                    str(row.get("session_id") or ""), session_rows,
+                ),
+                # From the hook's closed vocabulary ("run Bash", "edit
+                # files", ...): what kind of interruption answering is,
+                # never what the session actually said.
+                "wants": str(
+                    (waiting_signals.get(str(row.get("session_id") or "")) or {}).get("wants") or ""
+                ),
+            }
+            for row in waiting_rows[:3]
+        ]
+        # A reachable single session gets Return as the primary: the whole
+        # point of noticing a blocked session is answering it, and the tool
+        # window is one jump away. The dashboard stays the fallback -- the
+        # widgets open primary_url whenever the return reports failure, so
+        # the button never claims a jump that did not happen.
+        first_returnable = bool(queue and queue[0]["return_available"])
         return {
             **base,
             "state": "session_waiting",
             "label": "Waiting on you",
             "title": "Waiting on you",
             "subtitle": subtitle,
-            # Opens the session in the dashboard, which carries the Return
-            # control already. The widgets bind runtime-return to the Fresh
-            # Start path only, and adding an action to two UI toolkits -- one of
-            # them Swift that cannot be built or run here -- to save a click is
-            # a trade in the wrong direction.
-            "primary_label": "Open session",
-            "primary_action": "open_url",
+            "primary_label": "Return" if first_returnable else "Open session",
+            "primary_action": "runtime_return" if first_returnable else "open_url",
             "primary_session_id": session_id,
             "primary_url": f"/?session={quote(session_id, safe='')}" if session_id else "/",
-            "detail": "This session asked for permission and has done nothing since.",
+            "waiting_sessions": queue,
+            "detail": "This session asked for permission and has done nothing since."
+            if len(waiting_rows) == 1
+            else "These sessions asked for permission and have done nothing since.",
+        }
+
+    # The away digest sits between a blocked session (which still outranks
+    # everything but the gate) and the single-finish notice: it is the same
+    # kind of news, in bulk, and its rows include what the finish notices
+    # would have said.
+    digest = _active_away_digest()
+    if digest is not None:
+        digest_rows = list(digest.get("rows") or [])
+        finished_count = int(digest.get("finished_count") or 0)
+        signal_count = int(digest.get("signal_count") or 0)
+        parts = []
+        if finished_count:
+            parts.append(f"{finished_count} finished")
+        if signal_count:
+            parts.append(f"{signal_count} signal{'s' if signal_count != 1 else ''}")
+        parts.append(f"gap {digest.get('gap_label')}")
+        first_url = str(digest_rows[0].get("url") or "/") if digest_rows else "/"
+        return {
+            **base,
+            "state": "away_digest",
+            "label": "While you were away",
+            "title": "While you were away",
+            "subtitle": " · ".join(parts),
+            "primary_label": "Review",
+            "primary_action": "open_url",
+            "primary_url": first_url,
+            "skip_label": "Dismiss",
+            "skip_state": "away_digest",
+            "digest_rows": digest_rows,
+            "detail": "Reconstructed from local records inside the gap. Dismiss clears this summary; the evidence stays in the dashboard.",
+        }
+
+    # Below a blocked session -- blocked outranks done -- and below live work:
+    # the takeover only happens while nothing is working. Field report: with
+    # one session running and another freshly finished, the finished headline
+    # owned the bar for its whole 15 minutes and hid the running session's
+    # meter and totals -- old news masking live information. While anything
+    # works, the resting layout wins and the finished count rides its
+    # subtitle and the bubble's blue badge instead. Still above every
+    # fresh-start advisory, and calm on purpose: the widgets render this
+    # without the orange treatment, because "review when ready" is a
+    # different claim than "blocked on you".
+    presence_block = base["presence"] if isinstance(base["presence"], dict) else {}
+    if finished_notices and int(presence_block.get("working") or 0) == 0:
+        finished_at, finished_row = finished_notices[0]
+        minutes = int((time.time() - finished_at) // 60)
+        ago = f"{minutes}m ago" if minutes else "just now"
+        finished_project = _project_basename(finished_row.project_path) or "this machine"
+        finished_tool = tool_label(finished_row.tool)
+        finished_id = finished_row.session_id
+        return {
+            **base,
+            "state": "session_finished",
+            "label": "Finished working",
+            "title": "Finished working",
+            "subtitle": f"{finished_tool} · {finished_project} · {ago}",
+            "primary_label": "Review",
+            "primary_action": "open_url",
+            "primary_session_id": finished_id,
+            "primary_url": f"/?session={quote(finished_id, safe='')}",
+            "skip_label": "Skip",
+            "skip_state": "session_finished",
+            "skip_session_id": finished_id,
+            "detail": "This session was working a moment ago and has gone quiet -- likely a completed turn awaiting review.",
         }
 
     fresh_start_candidates = _fresh_start_context_candidates(summary)
@@ -5777,7 +6335,11 @@ def build_companion_state() -> dict[str, object]:
             }
     watcher = summary.get("watcher")
     running = isinstance(watcher, dict) and bool(watcher.get("running"))
-    quiet_subtitle = "Local Companion is running"
+    # The resting subtitle answers "what is happening now" (the presence line),
+    # not "what happened this week". The 7-day rollup is retrospective -- it
+    # does not change what the developer does in the next minute -- so it moves
+    # to `detail`, which the widgets surface as a tooltip.
+    rollup = None
     totals = summary.get("totals")
     if isinstance(totals, dict):
         window = str(totals.get("window_label") or "Last 7 days").replace("Last ", "", 1)
@@ -5790,14 +6352,25 @@ def build_companion_state() -> dict[str, object]:
         if tokens:
             parts.append(f"{tokens} tokens")
         if parts:
-            quiet_subtitle = f"{window}: " + " · ".join(parts)
+            rollup = f"{window}: " + " · ".join(parts)
+    quiet_detail = "AIWatcher will interrupt only when a matching active session has a justified action."
+    if rollup:
+        quiet_detail = f"{rollup}. {quiet_detail}"
+    presence = base["presence"]
+    quiet_subtitle = str(presence["line"]) if isinstance(presence, dict) else "Local Companion is running"
+    # Finished work that live work outranked still gets its line fragment,
+    # subject to the widgets' 46-character subtitle.
+    if finished_notices:
+        appended = f"{quiet_subtitle} · {len(finished_notices)} finished"
+        if len(appended) <= 46:
+            quiet_subtitle = appended
     return {
         **base,
         "state": "watching" if running else "offline",
         "label": "Watching quietly" if running else "Open AIWatcher",
         "subtitle": quiet_subtitle if running else "Companion state is available from the Dashboard",
         "primary_label": "Console" if running else "Open",
-        "detail": "AIWatcher will interrupt only when a matching active session has a justified action." if running else base["detail"],
+        "detail": quiet_detail if running else base["detail"],
     }
 
 
@@ -6506,6 +7079,21 @@ class UIHandler(BaseHTTPRequestHandler):
                     record = record_companion_skip(
                         key="needs_review",
                         reason="User skipped the needs-review Companion nudge.",
+                    )
+                    self._send(200, json.dumps({"ok": True, "record": record}), "application/json; charset=utf-8")
+                    return
+                if state == "away_digest":
+                    # Memory-only, like the digest itself: dismissing clears
+                    # the pending summary; the evidence it pointed at stays.
+                    _dismiss_away_digest()
+                    self._send(200, json.dumps({"ok": True}), "application/json; charset=utf-8")
+                    return
+                if state == "session_finished" and session_id:
+                    # The default hour outlives the notice's own 15-minute TTL,
+                    # so a skip is final for that finish rather than a snooze.
+                    record = record_companion_skip(
+                        key=f"session_finished:{session_id}",
+                        reason="User skipped the finished-session Companion notice.",
                     )
                     self._send(200, json.dumps({"ok": True, "record": record}), "application/json; charset=utf-8")
                     return

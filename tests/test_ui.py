@@ -1584,8 +1584,13 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["primary_label"], "Console")
 
     def test_companion_state_stays_quiet_when_watching(self) -> None:
+        # The resting subtitle is the live presence line -- what is happening
+        # now -- and the retrospective 7-day rollup moves to `detail`, which
+        # the widgets surface as a tooltip rather than headline text.
         with (
             patch.object(ui, "active_prompt_gate", return_value=None),
+            patch.object(ui, "_cached_session_rows", return_value=[]),
+            patch.object(ui, "session_waiting_signals", return_value={}),
             patch.object(ui, "build_summary_cached", return_value={
                 "totals": {
                     "window_label": "Last 7 days",
@@ -1605,7 +1610,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["state"], "watching")
         self.assertEqual(state["label"], "Watching quietly")
         self.assertEqual(state["primary_label"], "Console")
-        self.assertEqual(state["subtitle"], "7 days: 3 sessions · $1.25 · 42.0k tokens")
+        self.assertEqual(state["subtitle"], state["presence"]["line"])
+        self.assertIn("7 days: 3 sessions · $1.25 · 42.0k tokens", state["detail"])
 
     def test_companion_state_surfaces_active_prompt_gate(self) -> None:
         with (

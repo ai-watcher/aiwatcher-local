@@ -7237,6 +7237,36 @@ def _waiting_kind(message: str) -> str:
     return "permission" if any(hint in lowered for hint in _WAITING_PERMISSION_HINTS) else "input"
 
 
+# The Companion's "wants" tag vocabulary. The values below are the ONLY
+# strings this classifier can emit (plus the coarse kinds "permission" and
+# "input" as fallbacks): a known tool name in the notification maps to its
+# phrase, everything else stays coarse. Matched on whole word tokens, not
+# substrings -- "credit" must not read as "edit", "thread" as "read".
+_WAITING_WANTS_BUCKETS: tuple[tuple[frozenset[str], str], ...] = (
+    (frozenset({"bash", "shell"}), "run Bash"),
+    (frozenset({"edit", "write", "multiedit", "notebookedit"}), "edit files"),
+    (frozenset({"read", "grep", "glob"}), "read files"),
+    (frozenset({"webfetch", "websearch"}), "fetch web"),
+    (frozenset({"mcp"}), "use a connector"),
+)
+
+
+def _waiting_wants(message: str, kind: str) -> str:
+    """A closed-vocabulary phrase for what the blocked session is asking.
+
+    Same privacy contract as _waiting_kind: the message can quote commands or
+    paths, so nothing from it survives -- the return value is always drawn
+    from the fixed vocabulary above or the coarse kind.
+    """
+    if kind != "permission":
+        return "input"
+    tokens = set(re.findall(r"[a-z]+", (message or "").lower()))
+    for names, phrase in _WAITING_WANTS_BUCKETS:
+        if tokens & names:
+            return phrase
+    return "permission"
+
+
 def command_claude_activity_hook(args: argparse.Namespace) -> int:
     """Record that a Claude Code session is waiting on its developer.
 
@@ -7249,12 +7279,15 @@ def command_claude_activity_hook(args: argparse.Namespace) -> int:
     session_id = str(payload.get("session_id") or payload.get("sessionId") or "").strip()
     if not session_id:
         return 0
+    message = str(payload.get("message") or "")
+    kind = _waiting_kind(message)
     try:
         record_session_waiting(
             session_id=session_id,
             tool="claude-code",
-            kind=_waiting_kind(str(payload.get("message") or "")),
+            kind=kind,
             cwd=str(payload.get("cwd") or "") or None,
+            wants=_waiting_wants(message, kind),
         )
     except Exception:
         return 0
