@@ -627,8 +627,11 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     let headerHeight: CGFloat = 58
     let rowHeight: CGFloat = 34
     let maxWaitingRows = 3
-    let collapsedWidth: CGFloat = 44
-    let collapsedHeight: CGFloat = 44
+    // 52, not 44: the count badge sits at the circle's 45-degree corner, and
+    // on a 44px bubble that corner has already curved away -- the badge was
+    // half over transparent window and rendered cropped.
+    let collapsedWidth: CGFloat = 52
+    let collapsedHeight: CGFloat = 52
     let brandBlue = NSColor(calibratedRed: 0.00, green: 0.32, blue: 0.96, alpha: 1)      // #0052F5
     let brandInkOnDark = NSColor(calibratedRed: 0.86, green: 0.90, blue: 0.96, alpha: 1) // #DCE6F6
     let brandInkOnLight = NSColor(calibratedRed: 0.08, green: 0.07, blue: 0.08, alpha: 1) // #141314
@@ -794,18 +797,21 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         // white circle, no ring border and no other chrome. The mark is hosted
         // in a plain NSView rather than the button's layer -- NSButton uses
         // flipped layer geometry, which drew the mark upside down.
-        collapsedMarkView = NSView(frame: NSRect(x: 9.7, y: 12, width: 24.6, height: 20))
+        collapsedMarkView = NSView(frame: NSRect(x: 12.5, y: 15, width: 27.1, height: 22))
         collapsedMarkView.wantsLayer = true
-        let collapsedMark = makeBrandMark(height: 20, ink: brandInkOnLight)
+        let collapsedMark = makeBrandMark(height: 22, ink: brandInkOnLight)
         collapsedMarkView.layer?.addSublayer(collapsedMark.mark)
         collapsedBlueRing = collapsedMark.blueRing
         collapsedMarkView.isHidden = true
         rootView.addSubview(collapsedMarkView)
 
-        // Waiting-count badge riding the bubble's top-right edge. The white
-        // ground never floods; the count is the only added chrome.
+        // Count badge at the bubble's top-right, kept fully inside the white
+        // circle: at 45 degrees a 16px badge fits a radius-26 circle only if
+        // its centre is within 18 of the bubble's -- hence (31, 31), not the
+        // window corner. The white ground never floods; the count is the only
+        // added chrome.
         collapsedBadge = NSTextField(labelWithString: "")
-        collapsedBadge.frame = NSRect(x: 27, y: 27, width: 16, height: 16)
+        collapsedBadge.frame = NSRect(x: 31, y: 31, width: 16, height: 16)
         collapsedBadge.font = NSFont.systemFont(ofSize: 9, weight: .bold)
         collapsedBadge.textColor = NSColor.white
         collapsedBadge.alignment = .center
@@ -815,7 +821,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         rootView.addSubview(collapsedBadge)
 
         expandButton = DraggableButton(title: "", target: self, action: #selector(toggleCollapsed))
-        expandButton.frame = NSRect(x: 0, y: 0, width: 44, height: 44)
+        expandButton.frame = NSRect(x: 0, y: 0, width: 52, height: 52)
         expandButton.isBordered = false
         expandButton.toolTip = "Open AIWatcher Companion"
         expandButton.isHidden = true
@@ -2176,8 +2182,10 @@ def run_native_presence(
 
     expanded_width = 560
     expanded_height = 58
-    collapsed_width = 44
-    collapsed_height = 44
+    # 52, not 44: the count badge needs room inside the bubble -- see the
+    # matching constant in the Swift bar.
+    collapsed_width = 52
+    collapsed_height = 52
     row_height = 30
     max_waiting_rows = 3
     screen_width = int(root.winfo_screenwidth())
@@ -2813,7 +2821,7 @@ def run_native_presence(
             blue=attention_bg if needs_attention else "#0052F5",
             ink="#141314",
         )
-        collapsed_canvas.move("all", 3.0, 7.0)
+        collapsed_canvas.move("all", 7.0, 13.0)
         # The bubble is what is on screen all day; a count is the one number
         # worth carrying there. It rides as a small badge on the white ground
         # -- the ground itself never floods. Orange for sessions blocked on
@@ -2822,12 +2830,14 @@ def run_native_presence(
         finished_count = int(finished_count_var.get() or 0)
         badge_count = waiting_count or finished_count
         if badge_count > 0:
+            # Fully inside the 36-wide canvas -- the old (26..42) oval ran
+            # past the canvas edge and rendered cropped.
             collapsed_canvas.create_oval(
-                26, 2, 42, 18,
+                19, 2, 35, 18,
                 fill=attention_bg if waiting_count > 0 else "#0052F5", outline="",
             )
             collapsed_canvas.create_text(
-                34, 10, text=str(badge_count), fill="#ffffff", font=("Helvetica", 8, "bold"),
+                27, 10, text=str(badge_count), fill="#ffffff", font=("Helvetica", 8, "bold"),
             )
         attention_layout = has_primary_action() and not collapsed.get()
         # With a queue on screen each row carries its own Open button, so the
@@ -2993,7 +3003,7 @@ def run_native_presence(
     # The collapsed state is a Loom-style bubble: the mark alone on a plain
     # white ground, no lettering and no border chrome. update_attention_style
     # repaints it, turning the mark's blue ring orange when attention is due.
-    collapsed_canvas = tk.Canvas(collapsed_frame, width=28, height=32, bg="#ffffff", highlightthickness=0, bd=0)
+    collapsed_canvas = tk.Canvas(collapsed_frame, width=36, height=40, bg="#ffffff", highlightthickness=0, bd=0)
     collapsed_canvas.pack(fill="both", expand=True)
 
     # The canvas covers the whole bubble, so it has to carry the move as well
