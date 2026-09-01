@@ -151,7 +151,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         # attention carried by the blue ring, not an orange ground.
         self.assertIn('window.isOpaque = false', source)
         self.assertIn('collapsedMarkView', source)
-        self.assertIn('collapsedBlueRing.borderColor = (needsAttention ? orangeColor : brandBlue).cgColor', source)
+        self.assertIn("collapsedBlueRing.borderColor = ringColor.cgColor", source)
         self.assertIn('"/api/companion-state"', source)
         self.assertIn('"Plan"', source)
         self.assertIn('"Scan"', source)
