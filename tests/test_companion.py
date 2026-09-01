@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -545,6 +546,65 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
         self.assertIsNone(state["expires_in_seconds"])
 
 
+class CompanionFinishedTests(WaitingSessionCompanionTests):
+    """A working session that goes quiet is finished work awaiting review."""
+
+    def setUp(self):
+        ui._PRESENCE_LAST_STATES.clear()
+        ui._FINISHED_NOTICES.clear()
+
+    def test_a_working_to_quiet_transition_becomes_finished(self):
+        state = self._state(self._summary(), sessions=[self._session("done-1", idle_minutes=0.5)])
+        self.assertEqual(state["state"], "watching")
+        state = self._state(self._summary(), sessions=[self._session("done-1", idle_minutes=3.0)])
+        self.assertEqual(state["state"], "session_finished")
+        self.assertEqual(state["label"], "Finished working")
+        self.assertEqual(state["primary_label"], "Review")
+        self.assertIn("done-1", state["primary_url"])
+        self.assertIn("just now", state["subtitle"])
+        self.assertEqual(len(state["finished_sessions"]), 1)
+        self.assertEqual(state["skip_state"], "session_finished")
+
+    def test_a_snapshot_alone_is_not_finished(self):
+        # Statelessly, just-finished and long-abandoned look identical; only
+        # the observed working -> quiet transition separates them.
+        state = self._state(self._summary(), sessions=[self._session("q", idle_minutes=3.0)])
+        self.assertEqual(state["state"], "watching")
+
+    def test_blocked_outranks_finished(self):
+        self._state(self._summary(), sessions=[self._session("done-1", idle_minutes=0.5)])
+        sessions = [
+            self._session("done-1", idle_minutes=3.0),
+            self._session("blocked", idle_minutes=5.0),
+        ]
+        state = self._state(
+            self._summary(), sessions=sessions, signals=self._signal("blocked", minutes_ago=4.0),
+        )
+        self.assertEqual(state["state"], "session_waiting")
+
+    def test_the_notice_retires_when_the_session_works_again(self):
+        self._state(self._summary(), sessions=[self._session("done-1", idle_minutes=0.5)])
+        self._state(self._summary(), sessions=[self._session("done-1", idle_minutes=3.0)])
+        state = self._state(self._summary(), sessions=[self._session("done-1", idle_minutes=0.2)])
+        self.assertEqual(state["state"], "watching")
+
+    def test_the_notice_expires_as_stale_news(self):
+        self._state(self._summary(), sessions=[self._session("done-1", idle_minutes=0.5)])
+        self._state(self._summary(), sessions=[self._session("done-1", idle_minutes=3.0)])
+        ui._FINISHED_NOTICES["done-1"] = time.time() - (ui.FINISHED_NOTICE_TTL_SECONDS + 60)
+        state = self._state(self._summary(), sessions=[self._session("done-1", idle_minutes=6.0)])
+        self.assertEqual(state["state"], "watching")
+
+    def test_a_skipped_finish_stays_quiet(self):
+        self._state(self._summary(), sessions=[self._session("done-1", idle_minutes=0.5)])
+        with patch.object(
+            ui, "companion_skip_active",
+            side_effect=lambda key: key == "session_finished:done-1",
+        ):
+            state = self._state(self._summary(), sessions=[self._session("done-1", idle_minutes=3.0)])
+        self.assertEqual(state["state"], "watching")
+
+
 class CompanionPressureAndSignalTests(WaitingSessionCompanionTests):
     """The meter and the missed-nudge chip: fresh numbers or honest absence."""
 
@@ -686,4 +746,4 @@ class WaitingWidgetAttentionTests(unittest.TestCase):
                        "def has_primary_action()", "needs_attention = state_var.get()"):
             with self.subTest(marker=marker):
                 block = self.source[self.source.index(marker):]
-                self.assertIn("session_waiting", block[:400])
+                self.assertIn("session_waiting", block[:600])

@@ -606,6 +606,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var waitingReturnAvailable: [Bool] = []
     var waitingWants: [String] = []
     var waitingCount = 0
+    var finishedCount = 0
     var detailText = ""
     var pressureAvailable = false
     var pressurePct = 0
@@ -1269,8 +1270,11 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     // session_waiting belongs in both lists. Left out, the widget renders the
     // words "Waiting on you" in its calm style with no button -- saying
     // something urgent while looking like nothing is happening.
+    // session_finished is deliberately in the first list and not the second:
+    // it earns the Review primary and the compact layout, but "review when
+    // ready" must not wear the orange "blocked on you" treatment.
     func hasPrimaryAction() -> Bool {
-        return ["prompt_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm", "session_waiting"].contains(stateName)
+        return ["prompt_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm", "session_waiting", "session_finished"].contains(stateName)
     }
 
     func needsAttentionState() -> Bool {
@@ -1279,6 +1283,11 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
     func shouldShowWindow() -> Bool {
         if needsAttentionState() {
+            return true
+        }
+        // Soft attention: a finished session forces the window visible even in
+        // nudges-only mode, without the orange treatment.
+        if stateName == "session_finished" {
             return true
         }
         if visibilityMode == "nudges-only" {
@@ -1313,7 +1322,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             meterLabel.isHidden = true
             signalButton.isHidden = true
             collapsedMarkView.isHidden = false
-            collapsedBadge.isHidden = waitingCount <= 0
+            collapsedBadge.isHidden = waitingCount <= 0 && finishedCount <= 0
             expandButton.isHidden = false
             return
         }
@@ -1335,10 +1344,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         // With a queue on screen each row carries its own Open button, so the
         // single primary would only duplicate the first row's.
         let showPrimary = hasPrimaryAction() && rowsShown == 0
-        let showChip = !signalChipText.isEmpty && !attention
-        planButton.isHidden = attention || showChip
-        askButton.isHidden = attention || showChip
-        scanButton.isHidden = attention
+        let showChip = !signalChipText.isEmpty && !attention && !showPrimary
+        planButton.isHidden = attention || showChip || showPrimary
+        askButton.isHidden = attention || showChip || showPrimary
+        scanButton.isHidden = attention || showPrimary
         consoleButton.isHidden = false
         collapseButton.isHidden = false
         expandButton.isHidden = true
@@ -1350,7 +1359,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         primaryButton.isHidden = !showPrimary
         continueButton.isHidden = !showContinue
         skipButton.isHidden = !showSkip
-        if attention {
+        if attention || showPrimary {
             meterTrack.isHidden = true
             meterLabel.isHidden = true
             signalButton.isHidden = true
@@ -1470,14 +1479,18 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         primaryButton.layer?.backgroundColor = needsAttention ? orangeColor.cgColor : NSColor.clear.cgColor
         primaryButton.contentTintColor = needsAttention ? NSColor.white : NSColor.controlTextColor
         collapsedBlueRing.borderColor = (needsAttention ? orangeColor : brandBlue).cgColor
-        // The bubble is what is on screen all day; a waiting count is the one
-        // number worth carrying there. It rides as a small badge on the white
-        // ground -- the ground itself never floods, per the brand rule that
-        // attention is carried by the mark's blue ring turning orange.
-        collapsedBadge.stringValue = waitingCount > 0 ? String(waitingCount) : ""
-        collapsedBadge.layer?.backgroundColor = orangeColor.cgColor
+        // The bubble is what is on screen all day; a count is the one number
+        // worth carrying there. It rides as a small badge on the white ground
+        // -- the ground itself never floods, per the brand rule that attention
+        // is carried by the mark's blue ring turning orange. Orange badge for
+        // sessions blocked on you; brand blue for finished work awaiting
+        // review, which is a calmer claim.
+        collapsedBadge.stringValue = waitingCount > 0
+            ? String(waitingCount)
+            : (finishedCount > 0 ? String(finishedCount) : "")
+        collapsedBadge.layer?.backgroundColor = (waitingCount > 0 ? orangeColor : brandBlue).cgColor
         if collapsed {
-            collapsedBadge.isHidden = waitingCount <= 0
+            collapsedBadge.isHidden = waitingCount <= 0 && finishedCount <= 0
         }
         applyWindowVisibility()
     }
@@ -1544,6 +1557,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         }
         let presence = json["presence"] as? [String: Any]
         self.waitingCount = presence?["waiting"] as? Int ?? self.waitingRowTexts.count
+        self.finishedCount = (json["finished_sessions"] as? [[String: Any]])?.count ?? 0
         let pressure = json["pressure"] as? [String: Any]
         self.pressureAvailable = pressure?["available"] as? Bool ?? false
         self.pressurePct = pressure?["pct_of_turn_limit"] as? Int ?? 0
@@ -2192,6 +2206,7 @@ def run_native_presence(
     waiting_row_return: list[bool] = []
     waiting_row_wants: list[str] = []
     waiting_count_var = tk.IntVar(value=0)
+    finished_count_var = tk.IntVar(value=0)
     pressure_available_var = tk.BooleanVar(value=False)
     pressure_pct_var = tk.IntVar(value=0)
     pressure_severity_var = tk.StringVar(value="ok")
@@ -2275,6 +2290,8 @@ def run_native_presence(
         except (TypeError, ValueError):
             waiting_count = 0
         waiting_count_var.set(waiting_count or len(waiting_row_texts))
+        finished_sessions = payload.get("finished_sessions")
+        finished_count_var.set(len(finished_sessions) if isinstance(finished_sessions, list) else 0)
         pressure = payload.get("pressure")
         if isinstance(pressure, dict) and pressure.get("available"):
             pressure_available_var.set(True)
@@ -2594,9 +2611,12 @@ def run_native_presence(
             schedule_auto_collapse(10000)
 
     def has_primary_action() -> bool:
+        # session_finished earns the primary (Review) and the compact layout;
+        # update_attention_style's needs_attention set deliberately excludes
+        # it, so "review when ready" never wears the orange treatment.
         return state_var.get() in {
             "prompt_gate", "control_recommended", "optimize_available", "clipboard_confirm",
-            "session_waiting",
+            "session_waiting", "session_finished",
         }
 
     def visible_waiting_rows() -> int:
@@ -2751,15 +2771,20 @@ def run_native_presence(
             ink="#141314",
         )
         collapsed_canvas.move("all", 3.0, 7.0)
-        # The bubble is what is on screen all day; a waiting count is the one
-        # number worth carrying there. It rides as a small badge on the white
-        # ground -- the ground itself never floods, per the brand rule that
-        # attention is carried by the mark's blue ring turning orange.
+        # The bubble is what is on screen all day; a count is the one number
+        # worth carrying there. It rides as a small badge on the white ground
+        # -- the ground itself never floods. Orange for sessions blocked on
+        # you; brand blue for finished work awaiting review, a calmer claim.
         waiting_count = int(waiting_count_var.get() or 0)
-        if waiting_count > 0:
-            collapsed_canvas.create_oval(26, 2, 42, 18, fill=attention_bg, outline="")
+        finished_count = int(finished_count_var.get() or 0)
+        badge_count = waiting_count or finished_count
+        if badge_count > 0:
+            collapsed_canvas.create_oval(
+                26, 2, 42, 18,
+                fill=attention_bg if waiting_count > 0 else "#0052F5", outline="",
+            )
             collapsed_canvas.create_text(
-                34, 10, text=str(waiting_count), fill="#ffffff", font=("Helvetica", 8, "bold"),
+                34, 10, text=str(badge_count), fill="#ffffff", font=("Helvetica", 8, "bold"),
             )
         attention_layout = has_primary_action() and not collapsed.get()
         # With a queue on screen each row carries its own Open button, so the
@@ -2775,7 +2800,7 @@ def run_native_presence(
         elif not show_chip and signal_packed.get():
             signal_button.pack_forget()
             signal_packed.set(False)
-        if pressure_available_var.get() and not collapsed.get():
+        if pressure_available_var.get() and not collapsed.get() and not attention_layout:
             if not meter_packed.get():
                 meter_canvas.pack(side="left", padx=(8, 0))
                 meter_packed.set(True)
@@ -2880,6 +2905,7 @@ def run_native_presence(
             waiting_row_return.clear()
             waiting_row_wants.clear()
             waiting_count_var.set(0)
+            finished_count_var.set(0)
             pressure_available_var.set(False)
             signal_chip_var.set("")
             signal_url_var.set("")

@@ -5589,6 +5589,55 @@ def _pressure_block(rows: list[SessionPresence], sessions: list[LocalSession]) -
     }
 
 
+# Finished-notice tracking, in this process's memory. "Finished" is a
+# transition -- working on the last poll, quiet on this one -- which cannot be
+# read from a single snapshot: statelessly, a session that just completed a
+# turn and one abandoned twenty minutes ago look identical until the idle
+# clock separates them, which is exactly too late. The cost of memory is that
+# a dashboard restart loses at most one pending notice; the away digest
+# (which is stateless over the gap window) covers the larger version.
+_PRESENCE_LAST_STATES: dict[str, str] = {}
+_FINISHED_NOTICES: dict[str, float] = {}
+# Stopgap constant, not a measured threshold: after this long the notice is
+# stale news rather than a nudge, and the session is plain "quiet" again.
+FINISHED_NOTICE_TTL_SECONDS = 15 * 60
+
+
+def _update_finished_notices(rows: list[SessionPresence]) -> None:
+    now = time.time()
+    current: dict[str, str] = {}
+    for row in rows:
+        if row.analyst_run or not row.measurable:
+            continue
+        current[row.session_id] = row.state
+        previous = _PRESENCE_LAST_STATES.get(row.session_id)
+        if row.state == "quiet" and previous == "working":
+            _FINISHED_NOTICES[row.session_id] = now
+        elif row.state in {"working", "waiting"}:
+            # The session is active again; a "finished" claim about it would
+            # be false the moment it rendered.
+            _FINISHED_NOTICES.pop(row.session_id, None)
+    _PRESENCE_LAST_STATES.clear()
+    _PRESENCE_LAST_STATES.update(current)
+    for session_id, finished_at in list(_FINISHED_NOTICES.items()):
+        if now - finished_at > FINISHED_NOTICE_TTL_SECONDS or session_id not in current:
+            _FINISHED_NOTICES.pop(session_id, None)
+
+
+def _finished_rows(rows: list[SessionPresence]) -> list[tuple[float, SessionPresence]]:
+    """Active finished notices, newest first, skips honored."""
+    notices = []
+    for row in rows:
+        finished_at = _FINISHED_NOTICES.get(row.session_id)
+        if finished_at is None or row.state != "quiet":
+            continue
+        if companion_skip_active(f"session_finished:{row.session_id}"):
+            continue
+        notices.append((finished_at, row))
+    notices.sort(key=lambda item: item[0], reverse=True)
+    return notices
+
+
 # One `ps` sweep per ~10s, not per 2-second poll: runtime attachment for the
 # queue rows needs the live process list, and which windows exist does not
 # change faster than this. Races between poller threads just refresh twice.
@@ -5688,6 +5737,7 @@ def build_companion_state() -> dict[str, object]:
         waiting_signals = {}
     session_rows = _cached_session_rows()
     presence_rows = presence_for_sessions(session_rows, waiting=waiting_signals)
+    _update_finished_notices(presence_rows)
     base = {
         "state": "watching",
         "label": "Watching quietly",
@@ -5825,6 +5875,48 @@ def build_companion_state() -> dict[str, object]:
             "detail": "This session asked for permission and has done nothing since."
             if len(waiting_rows) == 1
             else "These sessions asked for permission and have done nothing since.",
+        }
+
+    # Below a blocked session -- blocked outranks done -- but above every
+    # fresh-start advisory: "it just finished, review it while your own
+    # context is fresh" is more timely than advice about context health.
+    # Calm on purpose: the widgets render this without the orange attention
+    # treatment, because "review when ready" is a different claim than
+    # "blocked on you".
+    finished_notices = _finished_rows(presence_rows)
+    if finished_notices:
+        finished_at, finished_row = finished_notices[0]
+        minutes = int((time.time() - finished_at) // 60)
+        ago = f"{minutes}m ago" if minutes else "just now"
+        finished_project = _project_basename(finished_row.project_path) or "this machine"
+        finished_tool = tool_label(finished_row.tool)
+        finished_id = finished_row.session_id
+        return {
+            **base,
+            "state": "session_finished",
+            "label": "Finished working",
+            "title": "Finished working",
+            "subtitle": f"{finished_tool} · {finished_project} · {ago}",
+            "primary_label": "Review",
+            "primary_action": "open_url",
+            "primary_session_id": finished_id,
+            "primary_url": f"/?session={quote(finished_id, safe='')}",
+            "skip_label": "Skip",
+            "skip_state": "session_finished",
+            "skip_session_id": finished_id,
+            "finished_sessions": [
+                {
+                    "session_id": row.session_id,
+                    "tool": tool_label(row.tool),
+                    "project": _project_basename(row.project_path) or "this machine",
+                    "finished_label": (
+                        f"{int((time.time() - at) // 60)}m" if at <= time.time() - 60 else "now"
+                    ),
+                    "url": f"/?session={quote(row.session_id, safe='')}",
+                }
+                for at, row in finished_notices[:3]
+            ],
+            "detail": "This session was working a moment ago and has gone quiet -- likely a completed turn awaiting review.",
         }
 
     fresh_start_candidates = _fresh_start_context_candidates(summary)
@@ -6780,6 +6872,15 @@ class UIHandler(BaseHTTPRequestHandler):
                     record = record_companion_skip(
                         key="needs_review",
                         reason="User skipped the needs-review Companion nudge.",
+                    )
+                    self._send(200, json.dumps({"ok": True, "record": record}), "application/json; charset=utf-8")
+                    return
+                if state == "session_finished" and session_id:
+                    # The default hour outlives the notice's own 15-minute TTL,
+                    # so a skip is final for that finish rather than a snooze.
+                    record = record_companion_skip(
+                        key=f"session_finished:{session_id}",
+                        reason="User skipped the finished-session Companion notice.",
                     )
                     self._send(200, json.dumps({"ok": True, "record": record}), "application/json; charset=utf-8")
                     return

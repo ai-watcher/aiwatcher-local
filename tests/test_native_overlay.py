@@ -189,7 +189,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         # itself never floods, per the brand rule that attention is carried by
         # the mark's blue ring turning orange.
         self.assertIn("collapsedBadge", mac)
-        self.assertIn('collapsedBadge.stringValue = waitingCount > 0 ? String(waitingCount) : ""', mac)
+        self.assertIn("collapsedBadge.stringValue = waitingCount > 0", mac)
         self.assertIn("titleLabel.toolTip", mac)
         # A queue means per-row Open buttons, not a duplicated primary.
         self.assertIn("hasPrimaryAction() && rowsShown == 0", mac)
@@ -200,7 +200,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("def visible_waiting_rows", tk_source)
         self.assertIn("def open_waiting_row", tk_source)
         self.assertIn("def apply_waiting_rows", tk_source)
-        self.assertIn("create_text(\n                34, 10, text=str(waiting_count)", tk_source)
+        self.assertIn("create_text(\n                34, 10, text=str(badge_count)", tk_source)
         self.assertIn("visible_waiting_rows() == 0", tk_source)
 
     def test_presence_bars_draw_the_meter_and_missed_signal_chip(self) -> None:
@@ -257,6 +257,27 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("waiting_row_wants", tk_source)
         self.assertIn('f"wants: {wants}" if wants else ""', tk_source)
 
+    def test_finished_earns_the_primary_but_never_the_orange(self) -> None:
+        # session_finished sits in hasPrimaryAction (Review, compact layout)
+        # and deliberately not in needsAttentionState: "review when ready"
+        # must not wear the "blocked on you" treatment. The bubble badge goes
+        # brand blue for the same reason, and the window still shows in
+        # nudges-only mode via the soft-attention check.
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn("session_finished", mac.split("func hasPrimaryAction")[1][:400])
+        self.assertNotIn("session_finished", mac.split("func needsAttentionState")[1][:400])
+        self.assertIn('if stateName == "session_finished" {', mac)
+        self.assertIn('json["finished_sessions"]', mac)
+        self.assertIn("finishedCount > 0 ? String(finishedCount)", mac)
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn("session_finished", tk_source.split("def has_primary_action()")[1][:600])
+        self.assertNotIn(
+            "session_finished",
+            tk_source.split("needs_attention = state_var.get() in")[1][:200],
+        )
+        self.assertIn('fill=attention_bg if waiting_count > 0 else "#0052F5"', tk_source)
+
     def test_tk_presence_opens_dashboard_and_prompt_without_session_claim(self) -> None:
         source = inspect.getsource(native_overlay.run_native_presence)
 
@@ -303,7 +324,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         # Asserted per state rather than as one literal set: the previous form
         # pinned the exact spelling of the line, so adding a state broke it for
         # formatting reasons rather than behavioural ones.
-        primary_states = source[source.index("def has_primary_action()"):][:400]
+        primary_states = source[source.index("def has_primary_action()"):][:600]
         for state in ("prompt_gate", "control_recommended", "optimize_available",
                       "clipboard_confirm", "session_waiting"):
             with self.subTest(state=state):
