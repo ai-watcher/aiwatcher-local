@@ -303,6 +303,24 @@ class NativeOverlayConfigTests(unittest.TestCase):
         )
         self.assertIn('"Review" if kind else "Open"', tk_source)
 
+    def test_the_running_arc_orbits_the_bubble(self) -> None:
+        # The owner's pick from the mockup candidates: a short mint arc
+        # circling the bubble rim while a session works. Attention outranks
+        # it, and macOS Reduce Motion suppresses it entirely -- the mint ring
+        # alone says running then.
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn("orbitLayer", mac)
+        self.assertIn('CABasicAnimation(keyPath: "transform.rotation.z")', mac)
+        self.assertIn("accessibilityDisplayShouldReduceMotion", mac)
+        self.assertIn(
+            "orbitLayer.isHidden = !collapsed || workingCount <= 0 || needsAttention || reduceMotion",
+            mac,
+        )
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn("orbit_angle_var", tk_source)
+        self.assertIn('style="arc", outline="#43d9a3"', tk_source)
+
     def test_the_marks_ring_says_running(self) -> None:
         # The ring speaks the dashboard favicon's vocabulary: orange for
         # attention, mint #43d9a3 (the favicon's healthy-live colour) while a

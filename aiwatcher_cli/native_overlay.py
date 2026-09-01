@@ -582,6 +582,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var collapsedMarkView: NSView!
     var collapsedBlueRing: CALayer!
     var collapsedBadge: NSTextField!
+    var orbitLayer: CAShapeLayer!
     var primaryURL = dashboardURL
     var primaryAction = "open_url"
     var primarySessionID = ""
@@ -811,6 +812,29 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         collapsedBlueRing = collapsedMark.blueRing
         collapsedMarkView.isHidden = true
         rootView.addSubview(collapsedMarkView)
+
+        // The running indicator: a short mint arc orbiting the bubble's rim
+        // while any session is working -- the owner's pick over the quieter
+        // candidates, and the one place the bar uses continuous motion.
+        // Attention still outranks it, and Reduce Motion suppresses it
+        // entirely (the mint ring alone says running then).
+        orbitLayer = CAShapeLayer()
+        orbitLayer.bounds = CGRect(x: 0, y: 0, width: 52, height: 52)
+        orbitLayer.position = CGPoint(x: 26, y: 26)
+        orbitLayer.path = CGPath(ellipseIn: CGRect(x: 2, y: 2, width: 48, height: 48), transform: nil)
+        orbitLayer.fillColor = NSColor.clear.cgColor
+        orbitLayer.strokeColor = NSColor(calibratedRed: 0.26, green: 0.85, blue: 0.64, alpha: 1).cgColor
+        orbitLayer.lineWidth = 2.5
+        orbitLayer.lineCap = .round
+        orbitLayer.strokeEnd = 0.17
+        orbitLayer.isHidden = true
+        let spin = CABasicAnimation(keyPath: "transform.rotation.z")
+        spin.fromValue = 0
+        spin.toValue = -2 * Double.pi
+        spin.duration = 2.8
+        spin.repeatCount = .infinity
+        orbitLayer.add(spin, forKey: "orbit")
+        rootView.layer?.addSublayer(orbitLayer)
 
         // Count badge at the bubble's top-right, kept fully inside the white
         // circle: at 45 degrees a 16px badge fits a radius-26 circle only if
@@ -1536,6 +1560,8 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         let ringColor = needsAttention ? orangeColor : (workingCount > 0 ? runningMint : brandBlue)
         collapsedBlueRing.borderColor = ringColor.cgColor
         brandBlueRing.borderColor = ringColor.cgColor
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        orbitLayer.isHidden = !collapsed || workingCount <= 0 || needsAttention || reduceMotion
         // The bubble is what is on screen all day; a count is the one number
         // worth carrying there. It rides as a small badge on the white ground
         // -- the ground itself never floods, per the brand rule that attention
@@ -2281,6 +2307,7 @@ def run_native_presence(
     waiting_count_var = tk.IntVar(value=0)
     working_count_var = tk.IntVar(value=0)
     finished_count_var = tk.IntVar(value=0)
+    orbit_angle_var = tk.IntVar(value=0)
     pressure_available_var = tk.BooleanVar(value=False)
     pressure_pct_var = tk.IntVar(value=0)
     pressure_severity_var = tk.StringVar(value="ok")
@@ -2886,6 +2913,16 @@ def run_native_presence(
             ink="#141314",
         )
         collapsed_canvas.move("all", 7.0, 13.0)
+        # The running indicator: a mint arc stepping around the bubble's rim
+        # while any session is working, advanced on the existing pulse tick.
+        # Coarser than the Swift bar's continuous orbit, which is the Tk
+        # fallback's usual fidelity. Attention outranks it.
+        if int(working_count_var.get() or 0) > 0 and not needs_attention:
+            orbit_angle_var.set((int(orbit_angle_var.get()) - 103) % 360)
+            collapsed_canvas.create_arc(
+                2, 4, 34, 36, start=orbit_angle_var.get(), extent=62,
+                style="arc", outline="#43d9a3", width=2,
+            )
         # The bubble is what is on screen all day; a count is the one number
         # worth carrying there. It rides as a small badge on the white ground
         # -- the ground itself never floods. Orange for sessions blocked on
