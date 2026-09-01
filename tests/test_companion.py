@@ -480,6 +480,17 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
         self.assertEqual(first["waited_label"], "15m")
         self.assertEqual(first["url"], "/?session=s-long")
 
+    def test_queue_rows_carry_the_wants_bucket(self):
+        # Joined from the hook's waiting signal: the closed-vocabulary phrase,
+        # or "" when the signal predates the field.
+        signals = self._signal("sess-1")
+        signals["sess-1"]["wants"] = "run Bash"
+        state = self._state(self._summary(), sessions=[self._session("sess-1")], signals=signals)
+        self.assertEqual(state["waiting_sessions"][0]["wants"], "run Bash")
+
+        state = self._state(self._summary(), sessions=[self._session("sess-1")], signals=self._signal("sess-1"))
+        self.assertEqual(state["waiting_sessions"][0]["wants"], "")
+
     def test_a_sub_minute_row_has_no_waited_label(self):
         # Under a minute the presence label is "waiting on you"; a row must
         # carry "" rather than the fragment "on you".

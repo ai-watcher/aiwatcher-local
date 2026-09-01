@@ -5889,6 +5889,27 @@ class ClaudeActivityHookTests(unittest.TestCase):
         self._run(json.dumps({"session_id": "abc", "message": "Claude is waiting for your input"}))
         self.assertEqual(local_state.session_waiting_signals()["abc"]["kind"], "input")
 
+    def test_the_wants_bucket_names_the_tool_from_a_fixed_vocabulary(self):
+        cases = {
+            "Claude needs your permission to use Bash": "run Bash",
+            "Claude needs your permission to use Edit": "edit files",
+            "Claude needs your permission to use WebFetch": "fetch web",
+            "Claude needs your permission to use mcp__github__create_issue": "use a connector",
+            "Claude needs your permission to do something novel": "permission",
+            "Claude is waiting for your input": "input",
+        }
+        for message, expected in cases.items():
+            with self.subTest(message=message):
+                self._run(json.dumps({"session_id": "abc", "message": message}))
+                self.assertEqual(local_state.session_waiting_signals()["abc"]["wants"], expected)
+
+    def test_the_wants_bucket_never_leaks_message_words(self):
+        # Matched on word tokens, not substrings: "credit" is not "edit",
+        # "thread" is not "read". An unrecognized permission stays the coarse
+        # bucket rather than carrying anything the message said.
+        self._run(json.dumps({"session_id": "abc", "message": "Please allow the credit thread to spread"}))
+        self.assertEqual(local_state.session_waiting_signals()["abc"]["wants"], "permission")
+
     def test_a_second_signal_replaces_the_first(self):
         self._run(json.dumps({"session_id": "abc", "message": "waiting for your input"}))
         self._run(json.dumps({"session_id": "abc", "message": "needs your permission"}))

@@ -5796,6 +5796,12 @@ def build_companion_state() -> dict[str, object]:
                 "return_available": _waiting_row_return_available(
                     str(row.get("session_id") or ""), session_rows,
                 ),
+                # From the hook's closed vocabulary ("run Bash", "edit
+                # files", ...): what kind of interruption answering is,
+                # never what the session actually said.
+                "wants": str(
+                    (waiting_signals.get(str(row.get("session_id") or "")) or {}).get("wants") or ""
+                ),
             }
             for row in waiting_rows[:3]
         ]

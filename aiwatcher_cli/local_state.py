@@ -421,6 +421,7 @@ def record_session_waiting(
     tool: str,
     kind: str,
     cwd: str | None = None,
+    wants: str | None = None,
 ) -> None:
     """Note that a session asked for the developer's attention.
 
@@ -448,6 +449,10 @@ def record_session_waiting(
             "tool": tool,
             "kind": kind,
             "cwd": cwd,
+            # A closed-vocabulary phrase from the hook's classifier ("run
+            # Bash", "edit files", ...), never message text -- the same
+            # privacy contract as `kind`.
+            "wants": wants or "",
         }
         if len(fresh) > MAX_WAITING_SIGNALS:
             fresh = dict(

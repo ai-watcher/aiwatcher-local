@@ -604,6 +604,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var waitingURLs: [String] = []
     var waitingSessionIDs: [String] = []
     var waitingReturnAvailable: [Bool] = []
+    var waitingWants: [String] = []
     var waitingCount = 0
     var detailText = ""
     var pressureAvailable = false
@@ -614,6 +615,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var signalURL = ""
     var rowDots: [NSView] = []
     var rowLabels: [NSTextField] = []
+    var rowTags: [NSTextField] = []
     var rowButtons: [NSButton] = []
     var meterTrack: NSView!
     var meterFill: NSView!
@@ -833,6 +835,18 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             label.isHidden = true
             rootView.addSubview(label)
             rowLabels.append(label)
+
+            // What the session is asking for, from the hook's closed
+            // vocabulary -- "wants: run Bash" -- so the row says how big an
+            // interruption answering is.
+            let tag = NSTextField(labelWithString: "")
+            tag.font = NSFont.systemFont(ofSize: 9)
+            tag.textColor = NSColor(calibratedRed: 0.67, green: 0.74, blue: 0.84, alpha: 1)
+            tag.alignment = .right
+            tag.lineBreakMode = .byTruncatingTail
+            tag.isHidden = true
+            rootView.addSubview(tag)
+            rowTags.append(tag)
 
             let button = NSButton(title: "Open", target: self, action: #selector(openWaitingRow(_:)))
             button.bezelStyle = .rounded
@@ -1292,6 +1306,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             }
             for view in rowDots { view.isHidden = true }
             for label in rowLabels { label.isHidden = true }
+            for tag in rowTags { tag.isHidden = true }
             for button in rowButtons { button.isHidden = true }
             meterTrack.isHidden = true
             meterLabel.isHidden = true
@@ -1396,14 +1411,18 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             rowDots[index].isHidden = !visible
             rowLabels[index].isHidden = !visible
             rowButtons[index].isHidden = !visible
+            let wants = index < waitingWants.count ? waitingWants[index] : ""
+            rowTags[index].isHidden = !visible || wants.isEmpty
             if !visible { continue }
             let rowY = yOff - rowHeight * CGFloat(index + 1)
             rowDots[index].frame = NSRect(x: 30, y: rowY + 14, width: 7, height: 7)
             rowDots[index].layer?.backgroundColor = (index == 0
                 ? NSColor(calibratedRed: 0.89, green: 0.29, blue: 0.29, alpha: 1)
                 : NSColor(calibratedRed: 0.94, green: 0.62, blue: 0.15, alpha: 1)).cgColor
-            rowLabels[index].frame = NSRect(x: 46, y: rowY + 9, width: 396, height: 17)
+            rowLabels[index].frame = NSRect(x: 46, y: rowY + 9, width: wants.isEmpty ? 396 : 284, height: 17)
             rowLabels[index].stringValue = index < waitingRowTexts.count ? waitingRowTexts[index] : ""
+            rowTags[index].frame = NSRect(x: 334, y: rowY + 10, width: 112, height: 14)
+            rowTags[index].stringValue = wants.isEmpty ? "" : "wants: \(wants)"
             let canReturn = index < waitingReturnAvailable.count && waitingReturnAvailable[index]
             rowButtons[index].title = canReturn ? "Return" : "Open"
             rowButtons[index].toolTip = canReturn
@@ -1518,6 +1537,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         }
         self.waitingReturnAvailable = waiting.prefix(maxWaitingRows).map { row in
             (row["return_available"] as? Bool) ?? false
+        }
+        self.waitingWants = waiting.prefix(maxWaitingRows).map { row in
+            String(((row["wants"] as? String) ?? "").prefix(16))
         }
         let presence = json["presence"] as? [String: Any]
         self.waitingCount = presence?["waiting"] as? Int ?? self.waitingRowTexts.count
@@ -2167,6 +2189,7 @@ def run_native_presence(
     waiting_row_urls: list[str] = []
     waiting_row_session_ids: list[str] = []
     waiting_row_return: list[bool] = []
+    waiting_row_wants: list[str] = []
     waiting_count_var = tk.IntVar(value=0)
     pressure_available_var = tk.BooleanVar(value=False)
     pressure_pct_var = tk.IntVar(value=0)
@@ -2244,6 +2267,7 @@ def run_native_presence(
                 waiting_row_urls.append(path if path.startswith("http") else f"{url.rstrip('/')}{path}")
                 waiting_row_session_ids.append(str(row.get("session_id") or ""))
                 waiting_row_return.append(bool(row.get("return_available")))
+                waiting_row_wants.append(str(row.get("wants") or "")[:16])
         presence = payload.get("presence")
         try:
             waiting_count = int(presence.get("waiting") or 0) if isinstance(presence, dict) else 0
@@ -2635,9 +2659,11 @@ def run_native_presence(
             row_widgets[index][1].configure(text=waiting_row_texts[index])
             can_return = index < len(waiting_row_return) and waiting_row_return[index]
             row_widgets[index][2].configure(text="Return" if can_return else "Open")
+            wants = waiting_row_wants[index] if index < len(waiting_row_wants) else ""
+            row_widgets[index][3].configure(text=f"wants: {wants}" if wants else "")
         if rows == rows_shown.get():
             return
-        for row_frame, _row_label, _row_button in row_widgets:
+        for row_frame, _row_label, _row_button, _row_wants in row_widgets:
             row_frame.pack_forget()
         if rows_packed.get():
             rows_frame.pack_forget()
@@ -2850,6 +2876,7 @@ def run_native_presence(
             waiting_row_urls.clear()
             waiting_row_session_ids.clear()
             waiting_row_return.clear()
+            waiting_row_wants.clear()
             waiting_count_var.set(0)
             pressure_available_var.set(False)
             signal_chip_var.set("")
@@ -2877,7 +2904,7 @@ def run_native_presence(
     ttk.Button(frame, text="-", width=2, style="PresenceMini.TButton", command=toggle_collapsed).pack(side="left", padx=(4, 0))
     signal_button = ttk.Button(frame, textvariable=signal_chip_var, width=10, style="Presence.TButton", command=open_signal)
     rows_frame = ttk.Frame(root, style="Presence.TFrame")
-    row_widgets: list[tuple[ttk.Frame, ttk.Label, ttk.Button]] = []
+    row_widgets: list[tuple[ttk.Frame, ttk.Label, ttk.Button, ttk.Label]] = []
     for row_index in range(max_waiting_rows):
         row_frame = ttk.Frame(rows_frame, padding=(14, 2), style="Presence.TFrame")
         ttk.Label(row_frame, text="●", style="PresenceDot.TLabel").pack(side="left", padx=(0, 6))
@@ -2888,7 +2915,9 @@ def run_native_presence(
             command=lambda index=row_index: open_waiting_row(index),
         )
         row_button.pack(side="right")
-        row_widgets.append((row_frame, row_label, row_button))
+        row_wants = ttk.Label(row_frame, text="", style="PresenceMuted.TLabel")
+        row_wants.pack(side="right", padx=(0, 8))
+        row_widgets.append((row_frame, row_label, row_button, row_wants))
     # The collapsed state is a Loom-style bubble: the mark alone on a plain
     # white ground, no lettering and no border chrome. update_attention_style
     # repaints it, turning the mark's blue ring orange when attention is due.

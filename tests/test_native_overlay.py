@@ -245,6 +245,18 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('"Return" if can_return else "Open"', tk_source)
         self.assertIn("No live return. Opened in AIWatcher.", tk_source)
 
+    def test_presence_rows_say_what_the_session_wants(self) -> None:
+        # The "wants" tag is the hook's closed-vocabulary phrase; the row only
+        # ever renders "wants: <phrase>" or nothing at all.
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn('row["wants"]', mac)
+        self.assertIn("rowTags", mac)
+        self.assertIn('wants.isEmpty ? "" : "wants: \\(wants)"', mac)
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn("waiting_row_wants", tk_source)
+        self.assertIn('f"wants: {wants}" if wants else ""', tk_source)
+
     def test_tk_presence_opens_dashboard_and_prompt_without_session_claim(self) -> None:
         source = inspect.getsource(native_overlay.run_native_presence)
 
