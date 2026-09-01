@@ -303,6 +303,17 @@ class NativeOverlayConfigTests(unittest.TestCase):
         )
         self.assertIn('"Review" if kind else "Open"', tk_source)
 
+    def test_the_marks_ring_says_running(self) -> None:
+        # The ring speaks the dashboard favicon's vocabulary: orange for
+        # attention, mint #43d9a3 (the favicon's healthy-live colour) while a
+        # session is working, brand blue at rest. Attention keeps priority.
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn("workingCount > 0 ? runningMint : brandBlue", mac)
+        self.assertIn("0.26, green: 0.85, blue: 0.64", mac)
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn('"#43d9a3" if int(working_count_var.get() or 0) > 0 else "#0052F5"', tk_source)
+
     def test_tk_presence_opens_dashboard_and_prompt_without_session_claim(self) -> None:
         source = inspect.getsource(native_overlay.run_native_presence)
 

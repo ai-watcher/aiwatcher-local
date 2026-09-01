@@ -578,6 +578,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var expandButton: NSButton!
     var dragHandle: NSTextField!
     var brandMarkView: NSView!
+    var brandBlueRing: CALayer!
     var collapsedMarkView: NSView!
     var collapsedBlueRing: CALayer!
     var collapsedBadge: NSTextField!
@@ -607,6 +608,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var waitingWants: [String] = []
     var waitingRowKinds: [String] = []
     var waitingCount = 0
+    var workingCount = 0
     var finishedCount = 0
     var detailText = ""
     var pressureAvailable = false
@@ -722,7 +724,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         // takes the dark-theme ink (see logo/README.md on the brand branch).
         brandMarkView = NSView(frame: NSRect(x: 30, y: 16, width: 32, height: 26))
         brandMarkView.wantsLayer = true
-        brandMarkView.layer?.addSublayer(makeBrandMark(height: 26, ink: brandInkOnDark).mark)
+        let expandedMark = makeBrandMark(height: 26, ink: brandInkOnDark)
+        brandBlueRing = expandedMark.blueRing
+        brandMarkView.layer?.addSublayer(expandedMark.mark)
         rootView.addSubview(brandMarkView)
 
         titleLabel = NSTextField(labelWithString: "AIWatcher")
@@ -1523,7 +1527,15 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             : NSColor(calibratedRed: 0.34, green: 0.52, blue: 0.74, alpha: 0.72).cgColor
         primaryButton.layer?.backgroundColor = needsAttention ? orangeColor.cgColor : NSColor.clear.cgColor
         primaryButton.contentTintColor = needsAttention ? NSColor.white : NSColor.controlTextColor
-        collapsedBlueRing.borderColor = (needsAttention ? orangeColor : brandBlue).cgColor
+        // The blue ring is the mark's state channel, speaking the dashboard
+        // favicon's vocabulary: orange when something needs you, mint while a
+        // session is actively working (#43d9a3, the favicon's healthy-live
+        // colour), brand blue at rest. Mint does not pulse -- running is a
+        // status, not an alarm.
+        let runningMint = NSColor(calibratedRed: 0.26, green: 0.85, blue: 0.64, alpha: 1)
+        let ringColor = needsAttention ? orangeColor : (workingCount > 0 ? runningMint : brandBlue)
+        collapsedBlueRing.borderColor = ringColor.cgColor
+        brandBlueRing.borderColor = ringColor.cgColor
         // The bubble is what is on screen all day; a count is the one number
         // worth carrying there. It rides as a small badge on the white ground
         // -- the ground itself never floods, per the brand rule that attention
@@ -1610,6 +1622,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         }
         let presence = json["presence"] as? [String: Any]
         self.waitingCount = presence?["waiting"] as? Int ?? self.waitingRowTexts.count
+        self.workingCount = presence?["working"] as? Int ?? 0
         let finishedList = json["finished_sessions"] as? [[String: Any]] ?? []
         let digestList = json["digest_rows"] as? [[String: Any]] ?? []
         self.finishedCount = finishedList.isEmpty ? digestList.count : finishedList.count
@@ -2266,6 +2279,7 @@ def run_native_presence(
     waiting_row_wants: list[str] = []
     waiting_row_kinds: list[str] = []
     waiting_count_var = tk.IntVar(value=0)
+    working_count_var = tk.IntVar(value=0)
     finished_count_var = tk.IntVar(value=0)
     pressure_available_var = tk.BooleanVar(value=False)
     pressure_pct_var = tk.IntVar(value=0)
@@ -2362,6 +2376,10 @@ def run_native_presence(
         except (TypeError, ValueError):
             waiting_count = 0
         waiting_count_var.set(waiting_count or len(waiting_row_texts))
+        try:
+            working_count_var.set(int(presence.get("working") or 0) if isinstance(presence, dict) else 0)
+        except (TypeError, ValueError, tk.TclError):
+            working_count_var.set(0)
         finished_sessions = payload.get("finished_sessions")
         digest_rows = payload.get("digest_rows")
         if isinstance(finished_sessions, list) and finished_sessions:
@@ -2850,11 +2868,21 @@ def run_native_presence(
             foreground="#ffffff" if needs_attention else "#111827",
         )
         primary_button.configure(style="PresenceAttention.TButton" if needs_attention else "Presence.TButton")
+        # The blue ring is the mark's state channel, speaking the dashboard
+        # favicon's vocabulary: orange when something needs you, mint while a
+        # session is actively working (#43d9a3, the favicon's healthy-live
+        # colour), brand blue at rest.
+        ring_colour = (
+            attention_bg if needs_attention
+            else ("#43d9a3" if int(working_count_var.get() or 0) > 0 else "#0052F5")
+        )
+        mark_canvas.delete("all")
+        _draw_brand_mark(mark_canvas, height=26.0, blue=ring_colour, ink="#DCE6F6")
         collapsed_canvas.configure(bg="#ffffff")
         collapsed_canvas.delete("all")
         _draw_brand_mark(
             collapsed_canvas, height=18.0,
-            blue=attention_bg if needs_attention else "#0052F5",
+            blue=ring_colour,
             ink="#141314",
         )
         collapsed_canvas.move("all", 7.0, 13.0)
@@ -2995,6 +3023,7 @@ def run_native_presence(
             waiting_row_wants.clear()
             waiting_row_kinds.clear()
             waiting_count_var.set(0)
+            working_count_var.set(0)
             finished_count_var.set(0)
             pressure_available_var.set(False)
             pressure_stats_var.set("")
