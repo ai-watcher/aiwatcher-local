@@ -99,7 +99,7 @@ from .runtime_attachment import (
     runtime_attachment_for_session,
     safe_runtime_processes,
 )
-from .runtime_nudge import foreground_tool, presentation_for_signal
+from .runtime_nudge import _tool_family, foreground_tool, presentation_for_signal
 from .session_presence import (
     LIVE_WINDOW_MINUTES,
     SessionPresence,
@@ -5607,12 +5607,23 @@ def _cached_runtime_processes() -> list[object]:
     return processes
 
 
-def _waiting_row_return_available(session_id: str, sessions: list[LocalSession]) -> bool:
+def _waiting_row_return_available(
+    session_id: str,
+    sessions: list[LocalSession],
+    *,
+    foreground: str | None = None,
+) -> bool:
     """Whether a queue row can offer a real Return instead of Open.
 
     True means /api/runtime-return has something to perform for this session
     -- the same attachment.available gate build_runtime_return applies -- so
     the button never promises a jump the endpoint would refuse.
+
+    One tier gets an extra gate. An app-level attachment can only bring the
+    app forward; when that app is already frontmost -- the common case when
+    the blocked chat and the developer live in the same desktop app -- the
+    jump is a visible no-op, and the row offers Open instead of a button
+    that appears to do nothing.
     """
     session = next((row for row in sessions if row.session_id == session_id), None)
     if session is None:
@@ -5625,7 +5636,11 @@ def _waiting_row_return_available(session_id: str, sessions: list[LocalSession])
         )
     except OSError:
         return False
-    return bool(attachment.available)
+    if not attachment.available:
+        return False
+    if attachment.level == "app" and foreground and foreground == _tool_family(attachment.app_name):
+        return False
+    return True
 
 
 def _recent_signal_block() -> dict[str, object] | None:
@@ -5781,6 +5796,9 @@ def build_companion_state() -> dict[str, object]:
         # clients (Swift, Tk, browser overlay) would otherwise each respell
         # the same duration and path. Capped at three: the bar caps its
         # rows there, and the count above already says the full total.
+        # The frontmost app is read once per poll, not once per row: it is a
+        # subprocess on macOS, and it cannot differ between rows anyway.
+        foreground = foreground_tool()
         queue = [
             {
                 "session_id": str(row.get("session_id") or ""),
@@ -5790,7 +5808,7 @@ def build_companion_state() -> dict[str, object]:
                 "idle_seconds": row.get("idle_seconds"),
                 "url": f"/?session={quote(str(row.get('session_id') or ''), safe='')}",
                 "return_available": _waiting_row_return_available(
-                    str(row.get("session_id") or ""), session_rows,
+                    str(row.get("session_id") or ""), session_rows, foreground=foreground,
                 ),
             }
             for row in waiting_rows[:3]

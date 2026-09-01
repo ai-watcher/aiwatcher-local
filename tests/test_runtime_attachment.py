@@ -170,7 +170,10 @@ class RuntimeAttachmentTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         popen.assert_called_once()
-        self.assertIn("Exact chat return is not available", result["message"])
+        # Honest about the reach, and short enough to survive the Companion
+        # bar's 46-character subtitle.
+        self.assertIn("Find your chat there", result["message"])
+        self.assertLessEqual(len(str(result["message"])), 46)
 
     def test_perform_runtime_return_opens_exact_deep_link(self) -> None:
         session = LocalSession(

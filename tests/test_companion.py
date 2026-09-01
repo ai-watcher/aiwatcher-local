@@ -636,12 +636,36 @@ class CompanionPressureAndSignalTests(WaitingSessionCompanionTests):
                 patch.object(ui, "safe_runtime_processes", return_value=[])
             ), patch.object(
                 ui, "runtime_attachment_for_session",
-                return_value=SimpleNamespace(available=available),
+                return_value=SimpleNamespace(available=available, level="workspace", app_name=None),
             ):
                 self.assertEqual(
                     ui._waiting_row_return_available("sess-1", [session]), available,
                 )
         self.assertFalse(ui._waiting_row_return_available("missing", [session]))
+
+    def test_app_tier_return_is_not_offered_when_the_app_is_already_frontmost(self):
+        # An app-level attachment can only bring the app forward. With that app
+        # already frontmost -- blocked chat and developer in the same desktop
+        # app -- the jump is a visible no-op and the row must offer Open.
+        ui._RUNTIME_PROCESS_CACHE = None
+        session = self._session("sess-1")
+        cases = [
+            ("app", "Claude", "claude", False),   # no-op jump: withhold Return
+            ("app", "Claude", "terminal", True),  # user is elsewhere: app-front helps
+            ("app", "Claude", None, True),        # unknown foreground: keep the offer
+            ("exact_deep_link", "Claude", "claude", True),  # deeper tiers always reach
+        ]
+        for level, app_name, foreground, expected in cases:
+            with self.subTest(level=level, foreground=foreground), (
+                patch.object(ui, "safe_runtime_processes", return_value=[])
+            ), patch.object(
+                ui, "runtime_attachment_for_session",
+                return_value=SimpleNamespace(available=True, level=level, app_name=app_name),
+            ):
+                self.assertEqual(
+                    ui._waiting_row_return_available("sess-1", [session], foreground=foreground),
+                    expected,
+                )
 
     def test_stale_and_bar_native_signals_produce_no_chip(self):
         # Older than the live window: the session is presumed gone, and a chip

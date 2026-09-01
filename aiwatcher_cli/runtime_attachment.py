@@ -467,7 +467,10 @@ def perform_runtime_return(attachment: RuntimeAttachment) -> dict[str, object]:
             return {"ok": True, "message": "Opened exact chat link.", "attachment": attachment.to_json()}
         if attachment.mode == "app" and attachment.app_name and sys.platform == "darwin":
             subprocess.Popen(["open", "-a", attachment.app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return {"ok": True, "message": f"Opened {attachment.app_name}. Exact chat return is not available yet.", "attachment": attachment.to_json()}
+            # Short enough to survive the Companion bar's 46-character
+            # subtitle, and honest about the reach: the app comes forward,
+            # the exact chat inside it does not.
+            return {"ok": True, "message": f"Opened {attachment.app_name}. Find your chat there.", "attachment": attachment.to_json()}
         if attachment.mode == "cursor" and attachment.project_path:
             subprocess.Popen(["cursor", attachment.project_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return {"ok": True, "message": "Opened workspace in Cursor.", "attachment": attachment.to_json()}
