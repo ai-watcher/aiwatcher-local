@@ -708,6 +708,30 @@ class CompanionPressureAndSignalTests(WaitingSessionCompanionTests):
         self.assertEqual(pressure["pct_of_turn_limit"], 79)
         read.assert_called_once()
 
+    def test_the_meter_carries_the_sessions_running_totals(self):
+        # Absolute anchors for the percent: API-equivalent cost and total
+        # tokens, straight off the session row. A raw total, so it ships as a
+        # plain label with no severity attached.
+        ui._PRESSURE_TRANSCRIPT_CACHE.clear()
+        session = LocalSession(
+            session_id="w1",
+            tool="claude-code",
+            project_path="/repo/aiwatcher-local",
+            raw_cwd="/repo/aiwatcher-local",
+            updated_at=datetime.now(timezone.utc) - timedelta(seconds=20),
+            source_path="/tmp/w-stats.jsonl",
+            cost_usd=12.34,
+            tokens_in=4_000_000,
+            tokens_out=1_000_000,
+        )
+        with patch.object(ui.statusline, "read_transcript", return_value={
+            "available": True, "latest_context": 42_000,
+        }):
+            state = self._state(self._summary(), sessions=[session])
+        pressure = state["pressure"]
+        self.assertEqual(pressure["stats_label"], f"$12.34 · {ui.compact_int(5_000_000)}")
+        self.assertIn("API-equivalent", pressure["stats_detail"])
+
     def test_pressure_is_cached_on_the_sessions_write_stamp(self):
         # A transcript only changes when the session writes, and writing moves
         # updated_at -- so two polls between writes must not parse it twice.

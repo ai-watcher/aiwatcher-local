@@ -5578,6 +5578,18 @@ def _pressure_block(rows: list[SessionPresence], sessions: list[LocalSession]) -
         else "ok"
     )
     pct = round(100 * latest / CRITICAL_TOKENS_PER_TURN)
+    # Absolute anchors for the percent: what this session has spent so far,
+    # straight off the session row -- no new reads. Raw totals, so the
+    # widgets draw them as plain muted text with no status colour (a total is
+    # not a verdict), and the tooltip names the dollar figure API-equivalent:
+    # for a subscription user no money moved.
+    cost = float(session.cost_usd or 0.0)
+    tokens_total = int(session.tokens_in or 0) + int(session.tokens_out or 0)
+    stats_parts = []
+    if cost > 0:
+        stats_parts.append(f"${cost:,.2f}" if cost < 100 else f"${cost:,.0f}")
+    if tokens_total > 0:
+        stats_parts.append(compact_int(tokens_total))
     return {
         "available": True,
         "reason": None,
@@ -5586,6 +5598,8 @@ def _pressure_block(rows: list[SessionPresence], sessions: list[LocalSession]) -
         "pct_of_turn_limit": pct,
         "severity": severity,
         "label": f"{compact_int(latest)} · {pct}% of turn limit",
+        "stats_label": " · ".join(stats_parts),
+        "stats_detail": "This session so far, API-equivalent cost and total tokens.",
     }
 
 

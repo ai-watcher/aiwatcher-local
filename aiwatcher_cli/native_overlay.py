@@ -613,6 +613,8 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var pressurePct = 0
     var pressureSeverity = "ok"
     var pressureLabel = ""
+    var pressureStats = ""
+    var pressureStatsDetail = ""
     var signalChipText = ""
     var signalURL = ""
     var rowDots: [NSView] = []
@@ -622,6 +624,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var meterTrack: NSView!
     var meterFill: NSView!
     var meterLabel: NSTextField!
+    var statsLabel: NSTextField!
     var signalButton: NSButton!
     let expandedWidth: CGFloat = 560
     let headerHeight: CGFloat = 58
@@ -885,6 +888,16 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         meterLabel.font = NSFont.systemFont(ofSize: 8, weight: .semibold)
         meterLabel.isHidden = true
         rootView.addSubview(meterLabel)
+
+        // Running totals for the working session -- the absolute anchor for
+        // the meter's percent. Plain muted text, no status colour: a total
+        // is not a verdict.
+        statsLabel = NSTextField(labelWithString: "")
+        statsLabel.font = NSFont.systemFont(ofSize: 9)
+        statsLabel.textColor = NSColor(calibratedRed: 0.67, green: 0.74, blue: 0.84, alpha: 1)
+        statsLabel.alignment = .right
+        statsLabel.isHidden = true
+        rootView.addSubview(statsLabel)
 
         // Missed-nudge chip: the overlay-only signals (loop, velocity, runway,
         // usage pressure) vanish with the 20-second panel; the chip is where a
@@ -1328,6 +1341,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             for button in rowButtons { button.isHidden = true }
             meterTrack.isHidden = true
             meterLabel.isHidden = true
+            statsLabel.isHidden = true
             signalButton.isHidden = true
             collapsedMarkView.isHidden = false
             collapsedBadge.isHidden = waitingCount <= 0 && finishedCount <= 0
@@ -1370,6 +1384,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         if attention || showPrimary {
             meterTrack.isHidden = true
             meterLabel.isHidden = true
+            statsLabel.isHidden = true
             signalButton.isHidden = true
             titleLabel.frame = NSRect(x: 66, y: 31 + yOff, width: 170, height: 17)
             subtitleLabel.frame = NSRect(x: 66, y: 12 + yOff, width: 170, height: 16)
@@ -1392,6 +1407,15 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             }
         } else {
             let showMeter = pressureAvailable
+            let showStats = showMeter && !pressureStats.isEmpty
+            statsLabel.isHidden = !showStats
+            if showStats {
+                // Right-aligned on the title line's tail; the title is capped
+                // at 18 characters, so the two never meet.
+                statsLabel.frame = NSRect(x: 204, y: 33 + yOff, width: 112, height: 13)
+                statsLabel.stringValue = pressureStats
+                statsLabel.toolTip = pressureStatsDetail.isEmpty ? nil : pressureStatsDetail
+            }
             titleLabel.frame = NSRect(x: 66, y: 31 + yOff, width: 220, height: 17)
             subtitleLabel.frame = NSRect(x: 66, y: 12 + yOff, width: showMeter ? 150 : 238, height: 16)
             meterTrack.isHidden = !showMeter
@@ -1594,6 +1618,8 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         self.pressurePct = pressure?["pct_of_turn_limit"] as? Int ?? 0
         self.pressureSeverity = pressure?["severity"] as? String ?? "ok"
         self.pressureLabel = pressure?["label"] as? String ?? ""
+        self.pressureStats = String((pressure?["stats_label"] as? String ?? "").prefix(20))
+        self.pressureStatsDetail = pressure?["stats_detail"] as? String ?? ""
         if let signal = json["recent_signal"] as? [String: Any] {
             self.signalChipText = String((signal["chip"] as? String ?? "").prefix(14))
             self.signalURL = absoluteURL((signal["url"] as? String) ?? "/")
@@ -2244,6 +2270,7 @@ def run_native_presence(
     pressure_available_var = tk.BooleanVar(value=False)
     pressure_pct_var = tk.IntVar(value=0)
     pressure_severity_var = tk.StringVar(value="ok")
+    pressure_stats_var = tk.StringVar(value="")
     signal_chip_var = tk.StringVar(value="")
     signal_url_var = tk.StringVar(value="")
     drag = ttk.Label(frame, text="::", style="PresenceDrag.TLabel", cursor="fleur")
@@ -2257,6 +2284,10 @@ def run_native_presence(
     title_stack = ttk.Frame(left, style="Presence.TFrame")
     title_stack.pack(anchor="w")
     ttk.Label(title_stack, textvariable=title_var, style="PresenceTitle.TLabel").pack(side="left")
+    # Running totals for the working session -- the absolute anchor for the
+    # meter's percent. Plain muted text, no status colour: a total is not a
+    # verdict. Empty when unmeasurable, which packs to nothing.
+    ttk.Label(title_stack, textvariable=pressure_stats_var, style="PresenceMuted.TLabel").pack(side="left", padx=(10, 0))
     subtitle_row = ttk.Frame(left, style="Presence.TFrame")
     subtitle_row.pack(anchor="w", fill="x")
     ttk.Label(subtitle_row, textvariable=subtitle_var, style="PresenceMuted.TLabel", wraplength=250).pack(side="left")
@@ -2347,8 +2378,13 @@ def run_native_presence(
             except (TypeError, ValueError, tk.TclError):
                 pressure_pct_var.set(0)
             pressure_severity_var.set(str(pressure.get("severity") or "ok"))
+            if incoming_state == "watching":
+                pressure_stats_var.set(str(pressure.get("stats_label") or "")[:20])
+            else:
+                pressure_stats_var.set("")
         else:
             pressure_available_var.set(False)
+            pressure_stats_var.set("")
         signal = payload.get("recent_signal")
         if isinstance(signal, dict) and signal.get("chip"):
             signal_chip_var.set(str(signal.get("chip"))[:14])
@@ -2961,6 +2997,7 @@ def run_native_presence(
             waiting_count_var.set(0)
             finished_count_var.set(0)
             pressure_available_var.set(False)
+            pressure_stats_var.set("")
             signal_chip_var.set("")
             signal_url_var.set("")
         finally:

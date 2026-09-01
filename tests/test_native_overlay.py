@@ -217,7 +217,13 @@ class NativeOverlayConfigTests(unittest.TestCase):
         # past the limit and the number should say so.
         self.assertIn("min(max(pressurePct, 0), 100)", mac)
 
+        # The running-totals label rides the pressure block as plain muted
+        # text -- a total is not a verdict, so no status colour touches it.
+        self.assertIn('pressure?["stats_label"]', mac)
+        self.assertIn("statsLabel", mac)
+
         tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn("pressure_stats_var", tk_source)
         self.assertIn('payload.get("pressure")', tk_source)
         self.assertIn('payload.get("recent_signal")', tk_source)
         self.assertIn("def open_signal", tk_source)
