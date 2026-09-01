@@ -543,10 +543,32 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var autoCollapseDeadline: Date? = nil
     var suppressPassiveRefreshUntil: Date? = nil
     var pendingClipboardOverrideSessionID = ""
+    var waitingRowTexts: [String] = []
+    var waitingURLs: [String] = []
+    var waitingCount = 0
+    var detailText = ""
+    var rowDots: [NSView] = []
+    var rowLabels: [NSTextField] = []
+    var rowButtons: [NSButton] = []
     let expandedWidth: CGFloat = 560
-    let expandedHeight: CGFloat = 58
+    let headerHeight: CGFloat = 58
+    let rowHeight: CGFloat = 34
+    let maxWaitingRows = 3
     let collapsedWidth: CGFloat = 48
     let collapsedHeight: CGFloat = 42
+
+    // One row per waiting session, but only once there is a queue to draw:
+    // a single waiting session keeps the original one-line layout.
+    var visibleWaitingRows: Int {
+        if stateName != "session_waiting" || waitingRowTexts.count < 2 {
+            return 0
+        }
+        return min(waitingRowTexts.count, maxWaitingRows)
+    }
+
+    var expandedHeight: CGFloat {
+        return headerHeight + CGFloat(visibleWaitingRows) * rowHeight
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -675,6 +697,35 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         expandButton.isHidden = true
         rootView.addSubview(expandButton)
 
+        // Pre-allocated queue rows for the multi-session waiting state. Built
+        // once and toggled by isHidden, matching how every other control here
+        // is managed, rather than creating views per poll.
+        for index in 0..<maxWaitingRows {
+            let dot = NSView(frame: .zero)
+            dot.wantsLayer = true
+            dot.layer?.cornerRadius = 3.5
+            dot.isHidden = true
+            rootView.addSubview(dot)
+            rowDots.append(dot)
+
+            let label = NSTextField(labelWithString: "")
+            label.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+            label.textColor = NSColor(calibratedRed: 0.90, green: 0.94, blue: 0.98, alpha: 1)
+            label.lineBreakMode = .byTruncatingTail
+            label.isHidden = true
+            rootView.addSubview(label)
+            rowLabels.append(label)
+
+            let button = NSButton(title: "Open", target: self, action: #selector(openWaitingRow(_:)))
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            button.tag = index
+            button.toolTip = "Open this waiting session"
+            button.isHidden = true
+            rootView.addSubview(button)
+            rowButtons.append(button)
+        }
+
         setCollapsed(true)
         window.orderFrontRegardless()
         updateAppearance()
@@ -684,6 +735,13 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
     @objc func openDashboard() {
         openURL(dashboardURL)
+    }
+
+    @objc func openWaitingRow(_ sender: NSButton) {
+        let index = sender.tag
+        guard index >= 0, index < waitingURLs.count else { return }
+        openURL(waitingURLs[index])
+        scheduleAutoCollapse(after: 1.5)
     }
 
     @objc func openPrompt() {
@@ -1035,17 +1093,31 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             for view in [dragHandle, dotLabel, titleLabel, subtitleLabel, primaryButton, continueButton, skipButton, planButton, askButton, scanButton, consoleButton, collapseButton] {
                 view?.isHidden = true
             }
+            for view in rowDots { view.isHidden = true }
+            for label in rowLabels { label.isHidden = true }
+            for button in rowButtons { button.isHidden = true }
             expandButton.isHidden = false
             return
         }
+        // The header band keeps its one-line layout; with queue rows drawn
+        // below it, every header frame shifts up by the rows area (AppKit's
+        // origin is the bottom-left corner).
+        let rowsShown = visibleWaitingRows
+        let yOff = CGFloat(rowsShown) * rowHeight
         dragHandle.isHidden = false
         dotLabel.isHidden = false
         titleLabel.isHidden = false
         subtitleLabel.isHidden = false
-        let showPrimary = hasPrimaryAction()
-        planButton.isHidden = showPrimary
-        askButton.isHidden = showPrimary
-        scanButton.isHidden = showPrimary
+        dragHandle.frame = NSRect(x: 10, y: 21 + yOff, width: 18, height: 16)
+        dotLabel.frame = NSRect(x: 30, y: 31 + yOff, width: 28, height: 16)
+        collapseButton.frame = NSRect(x: 538, y: 37 + yOff, width: 18, height: 18)
+        let attention = needsAttentionState()
+        // With a queue on screen each row carries its own Open button, so the
+        // single primary would only duplicate the first row's.
+        let showPrimary = hasPrimaryAction() && rowsShown == 0
+        planButton.isHidden = attention
+        askButton.isHidden = attention
+        scanButton.isHidden = attention
         consoleButton.isHidden = false
         collapseButton.isHidden = false
         expandButton.isHidden = true
@@ -1057,37 +1129,68 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         primaryButton.isHidden = !showPrimary
         continueButton.isHidden = !showContinue
         skipButton.isHidden = !showSkip
-        if showPrimary {
-            titleLabel.frame = NSRect(x: 66, y: 31, width: 170, height: 17)
-            subtitleLabel.frame = NSRect(x: 66, y: 12, width: 170, height: 16)
-            primaryButton.frame = NSRect(x: 250, y: 15, width: 112, height: 28)
+        if attention {
+            titleLabel.frame = NSRect(x: 66, y: 31 + yOff, width: 170, height: 17)
+            subtitleLabel.frame = NSRect(x: 66, y: 12 + yOff, width: 170, height: 16)
+            primaryButton.frame = NSRect(x: 250, y: 15 + yOff, width: 112, height: 28)
             if showContinue {
-                continueButton.frame = NSRect(x: 368, y: 15, width: 70, height: 28)
+                continueButton.frame = NSRect(x: 368, y: 15 + yOff, width: 70, height: 28)
                 if showSkip {
-                    skipButton.frame = NSRect(x: 444, y: 15, width: 48, height: 28)
-                    consoleButton.frame = NSRect(x: 498, y: 15, width: 38, height: 28)
+                    skipButton.frame = NSRect(x: 444, y: 15 + yOff, width: 48, height: 28)
+                    consoleButton.frame = NSRect(x: 498, y: 15 + yOff, width: 38, height: 28)
                 } else {
-                    consoleButton.frame = NSRect(x: 444, y: 15, width: 38, height: 28)
+                    consoleButton.frame = NSRect(x: 444, y: 15 + yOff, width: 38, height: 28)
                 }
             } else {
                 if showSkip {
-                    skipButton.frame = NSRect(x: 368, y: 15, width: 48, height: 28)
-                    consoleButton.frame = NSRect(x: 422, y: 15, width: 38, height: 28)
+                    skipButton.frame = NSRect(x: 368, y: 15 + yOff, width: 48, height: 28)
+                    consoleButton.frame = NSRect(x: 422, y: 15 + yOff, width: 38, height: 28)
                 } else {
-                    consoleButton.frame = NSRect(x: 368, y: 15, width: 38, height: 28)
+                    consoleButton.frame = NSRect(x: 368, y: 15 + yOff, width: 38, height: 28)
                 }
             }
         } else {
-            titleLabel.frame = NSRect(x: 66, y: 31, width: 220, height: 17)
-            subtitleLabel.frame = NSRect(x: 66, y: 12, width: 238, height: 16)
-            planButton.frame = NSRect(x: 318, y: 15, width: 48, height: 28)
-            askButton.frame = NSRect(x: 370, y: 15, width: 46, height: 28)
-            scanButton.frame = NSRect(x: 420, y: 15, width: 52, height: 28)
-            consoleButton.frame = NSRect(x: 476, y: 15, width: 38, height: 28)
+            titleLabel.frame = NSRect(x: 66, y: 31 + yOff, width: 220, height: 17)
+            subtitleLabel.frame = NSRect(x: 66, y: 12 + yOff, width: 238, height: 16)
+            planButton.frame = NSRect(x: 318, y: 15 + yOff, width: 48, height: 28)
+            askButton.frame = NSRect(x: 370, y: 15 + yOff, width: 46, height: 28)
+            scanButton.frame = NSRect(x: 420, y: 15 + yOff, width: 52, height: 28)
+            consoleButton.frame = NSRect(x: 476, y: 15 + yOff, width: 38, height: 28)
+        }
+        for index in 0..<maxWaitingRows {
+            let visible = index < rowsShown
+            rowDots[index].isHidden = !visible
+            rowLabels[index].isHidden = !visible
+            rowButtons[index].isHidden = !visible
+            if !visible { continue }
+            let rowY = yOff - rowHeight * CGFloat(index + 1)
+            rowDots[index].frame = NSRect(x: 30, y: rowY + 14, width: 7, height: 7)
+            rowDots[index].layer?.backgroundColor = (index == 0
+                ? NSColor(calibratedRed: 0.89, green: 0.29, blue: 0.29, alpha: 1)
+                : NSColor(calibratedRed: 0.94, green: 0.62, blue: 0.15, alpha: 1)).cgColor
+            rowLabels[index].frame = NSRect(x: 46, y: rowY + 9, width: 400, height: 17)
+            rowLabels[index].stringValue = index < waitingRowTexts.count ? waitingRowTexts[index] : ""
+            rowButtons[index].frame = NSRect(x: 458, y: rowY + 4, width: 58, height: 26)
         }
     }
 
+    // The queue can change the bar's height between polls. Anchored the same
+    // way setCollapsed anchors: a bottom-positioned bar grows upward, a
+    // top-positioned one downward, so the corner the user parked it in stays
+    // put.
+    func applyWindowSize() {
+        if collapsed { return }
+        let target = expandedHeight
+        let current = window.frame
+        if abs(current.height - target) < 0.5 { return }
+        let targetY = position.contains("top") ? current.maxY - target : current.minY
+        let frame = NSRect(x: current.minX, y: targetY, width: expandedWidth, height: target)
+        window.setFrame(frame, display: true, animate: true)
+        rootView.frame = NSRect(x: 0, y: 0, width: expandedWidth, height: target)
+    }
+
     func updateAppearance() {
+        applyWindowSize()
         applyVisibility()
         let needsAttention = needsAttentionState()
         let dark = NSColor(calibratedRed: 0.035, green: 0.052, blue: 0.078, alpha: 0.94).cgColor
@@ -1109,6 +1212,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             ? NSColor(calibratedRed: 1.0, green: 0.72, blue: 0.36, alpha: 0.96).cgColor
             : NSColor(calibratedRed: 0.23, green: 0.64, blue: 0.80, alpha: 0.88).cgColor
         primaryButton.contentTintColor = needsAttention ? NSColor.white : NSColor.controlTextColor
+        // The pill is what is on screen all day; a waiting count is the one
+        // number worth carrying there. Any other state keeps the "AI" mark.
+        expandButton.title = waitingCount > 0 ? String(waitingCount) : "AI"
         expandButton.contentTintColor = needsAttention
             ? NSColor.white
             : NSColor(calibratedRed: 0.05, green: 0.15, blue: 0.20, alpha: 1.0)
@@ -1155,8 +1261,30 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             suppressPassiveRefreshUntil = nil
         }
         self.stateName = incomingState
+        self.detailText = json["detail"] as? String ?? ""
+        let waiting = json["waiting_sessions"] as? [[String: Any]] ?? []
+        self.waitingRowTexts = waiting.prefix(maxWaitingRows).map { row in
+            let tool = row["tool"] as? String ?? "AI tool"
+            let project = row["project"] as? String ?? ""
+            let waited = row["waited_label"] as? String ?? ""
+            return [tool, project, waited].filter { !$0.isEmpty }.joined(separator: " · ")
+        }
+        self.waitingURLs = waiting.prefix(maxWaitingRows).map { row in
+            absoluteURL((row["url"] as? String) ?? "/")
+        }
+        let presence = json["presence"] as? [String: Any]
+        self.waitingCount = presence?["waiting"] as? Int ?? self.waitingRowTexts.count
         self.titleLabel.stringValue = String((json["label"] as? String ?? "AIWatcher").prefix(18))
-        self.subtitleLabel.stringValue = String((json["subtitle"] as? String ?? "Watching quietly").prefix(46))
+        var subtitleText = String((json["subtitle"] as? String ?? "Watching quietly").prefix(46))
+        if incomingState == "prompt_gate", let remaining = json["expires_in_seconds"] as? Int, remaining >= 0 {
+            subtitleText += " · \(remaining)s"
+        }
+        self.subtitleLabel.stringValue = subtitleText
+        // The payload has always shipped a second explanatory sentence; the
+        // bar never drew it. A tooltip costs no pixels.
+        let tip = self.detailText.isEmpty ? nil : self.detailText
+        self.titleLabel.toolTip = tip
+        self.subtitleLabel.toolTip = tip
         self.primaryButton.title = String((json["primary_label"] as? String ?? "Watch").prefix(12))
         self.primaryAction = json["primary_action"] as? String ?? "open_url"
         self.primarySessionID = json["primary_session_id"] as? String ?? ""
@@ -1691,6 +1819,8 @@ def run_native_presence(
     expanded_height = 58
     collapsed_width = 48
     collapsed_height = 42
+    row_height = 30
+    max_waiting_rows = 3
     screen_width = int(root.winfo_screenwidth())
     screen_height = int(root.winfo_screenheight())
     x = 24 if "left" in position else max(16, screen_width - expanded_width - 24)
@@ -1737,6 +1867,9 @@ def run_native_presence(
     pulse_var = tk.BooleanVar(value=False)
     suppress_passive_refresh_until = tk.DoubleVar(value=0.0)
     pending_clipboard_override_session_var = tk.StringVar(value="")
+    waiting_row_texts: list[str] = []
+    waiting_row_urls: list[str] = []
+    waiting_count_var = tk.IntVar(value=0)
     drag = ttk.Label(frame, text="::", style="PresenceDrag.TLabel", cursor="fleur")
     drag.pack(side="left", padx=(0, 6))
     title_stack = ttk.Frame(left, style="Presence.TFrame")
@@ -1779,8 +1912,33 @@ def run_native_presence(
         if suppress_passive_refresh_until.get() <= time.time():
             suppress_passive_refresh_until.set(0.0)
         state_var.set(incoming_state)
+        waiting_row_texts.clear()
+        waiting_row_urls.clear()
+        waiting_sessions = payload.get("waiting_sessions")
+        if isinstance(waiting_sessions, list):
+            for row in waiting_sessions[:max_waiting_rows]:
+                if not isinstance(row, dict):
+                    continue
+                parts = [
+                    str(row.get("tool") or "AI tool"),
+                    str(row.get("project") or ""),
+                    str(row.get("waited_label") or ""),
+                ]
+                waiting_row_texts.append(" · ".join(part for part in parts if part))
+                path = str(row.get("url") or "/")
+                waiting_row_urls.append(path if path.startswith("http") else f"{url.rstrip('/')}{path}")
+        presence = payload.get("presence")
+        try:
+            waiting_count = int(presence.get("waiting") or 0) if isinstance(presence, dict) else 0
+        except (TypeError, ValueError):
+            waiting_count = 0
+        waiting_count_var.set(waiting_count or len(waiting_row_texts))
         title_var.set(str(payload.get("label") or "AIWatcher")[:18])
-        subtitle_var.set(str(payload.get("subtitle") or "Watching quietly")[:46])
+        subtitle_text = str(payload.get("subtitle") or "Watching quietly")[:46]
+        remaining = payload.get("expires_in_seconds")
+        if incoming_state == "prompt_gate" and isinstance(remaining, int) and remaining >= 0:
+            subtitle_text += f" · {remaining}s"
+        subtitle_var.set(subtitle_text)
         primary_label_var.set(str(payload.get("primary_label") or "Watch")[:12])
         primary_action_var.set(str(payload.get("primary_action") or "open_url"))
         primary_session_id_var.set(str(payload.get("primary_session_id") or ""))
@@ -2043,6 +2201,8 @@ def run_native_presence(
     skip_packed = tk.BooleanVar(value=False)
     scan_packed = tk.BooleanVar(value=True)
     primary_packed = tk.BooleanVar(value=True)
+    rows_packed = tk.BooleanVar(value=False)
+    rows_shown = tk.IntVar(value=0)
     auto_collapse_token = tk.IntVar(value=0)
     auto_collapse_deadline = tk.DoubleVar(value=0.0)
 
@@ -2060,7 +2220,7 @@ def run_native_presence(
         else:
             collapsed_frame.pack_forget()
             frame.pack(fill="both", expand=True)
-            root.geometry(f"{expanded_width}x{expanded_height}")
+            root.geometry(f"{expanded_width}x{expanded_height + row_height * visible_waiting_rows()}")
         update_attention_style()
 
     def toggle_collapsed() -> None:
@@ -2073,6 +2233,38 @@ def run_native_presence(
             "prompt_gate", "control_recommended", "optimize_available", "clipboard_confirm",
             "session_waiting",
         }
+
+    def visible_waiting_rows() -> int:
+        # One row per waiting session, but only once there is a queue to draw:
+        # a single waiting session keeps the original one-line layout.
+        if state_var.get() != "session_waiting" or len(waiting_row_texts) < 2:
+            return 0
+        return min(len(waiting_row_texts), max_waiting_rows)
+
+    def open_waiting_row(index: int) -> None:
+        if 0 <= index < len(waiting_row_urls):
+            webbrowser.open(waiting_row_urls[index])
+            schedule_auto_collapse(1500)
+
+    def apply_waiting_rows() -> None:
+        rows = 0 if collapsed.get() else visible_waiting_rows()
+        for index in range(min(rows, len(waiting_row_texts))):
+            row_widgets[index][1].configure(text=waiting_row_texts[index])
+        if rows == rows_shown.get():
+            return
+        for row_frame, _row_label in row_widgets:
+            row_frame.pack_forget()
+        if rows_packed.get():
+            rows_frame.pack_forget()
+            rows_packed.set(False)
+        if rows:
+            rows_frame.pack(fill="both", expand=True)
+            rows_packed.set(True)
+            for index in range(rows):
+                row_widgets[index][0].pack(fill="x")
+        rows_shown.set(rows)
+        if not collapsed.get():
+            root.geometry(f"{expanded_width}x{expanded_height + row_height * rows}")
 
     def should_show_window() -> bool:
         if has_primary_action():
@@ -2152,22 +2344,29 @@ def run_native_presence(
         )
         primary_button.configure(style="PresenceAttention.TButton" if needs_attention else "Presence.TButton")
         collapsed_button.configure(style="PresenceAttention.TButton" if needs_attention else "PresenceCollapsed.TButton")
-        should_show_primary = has_primary_action() and not collapsed.get()
-        if should_show_primary:
+        # The pill is what is on screen all day; a waiting count is the one
+        # number worth carrying there. Any other state keeps the "AI" mark.
+        waiting_count = int(waiting_count_var.get() or 0)
+        collapsed_button.configure(text=str(waiting_count) if waiting_count > 0 else "AI")
+        attention_layout = has_primary_action() and not collapsed.get()
+        # With a queue on screen each row carries its own Open button, so the
+        # single primary would only duplicate the first row's.
+        should_show_primary = attention_layout and visible_waiting_rows() == 0
+        if attention_layout:
             if plan_packed.get():
                 plan_button.pack_forget()
                 plan_packed.set(False)
         elif not collapsed.get() and not plan_packed.get():
             plan_button.pack(side="left", padx=(8, 4), before=ask_button)
             plan_packed.set(True)
-        if should_show_primary:
+        if attention_layout:
             if ask_packed.get():
                 ask_button.pack_forget()
                 ask_packed.set(False)
         elif not collapsed.get() and not ask_packed.get():
             ask_button.pack(side="left", padx=(0, 4), before=scan_button)
             ask_packed.set(True)
-        if should_show_primary:
+        if attention_layout:
             if scan_packed.get():
                 scan_button.pack_forget()
                 scan_packed.set(False)
@@ -2204,6 +2403,7 @@ def run_native_presence(
         elif not should_show_skip and skip_packed.get():
             skip_button.pack_forget()
             skip_packed.set(False)
+        apply_waiting_rows()
         apply_window_visibility()
 
     def pulse_attention() -> None:
@@ -2232,6 +2432,9 @@ def run_native_presence(
             continue_session_id_var.set("")
             skip_state_var.set("")
             skip_project_var.set("")
+            waiting_row_texts.clear()
+            waiting_row_urls.clear()
+            waiting_count_var.set(0)
         finally:
             update_attention_style()
             schedule_auto_collapse(10000 if has_primary_action() else 4000)
@@ -2255,6 +2458,18 @@ def run_native_presence(
     ttk.Button(frame, text="-", width=2, style="PresenceMini.TButton", command=toggle_collapsed).pack(side="left", padx=(4, 0))
     collapsed_button = ttk.Button(collapsed_frame, text="AI", width=4, style="Presence.TButton", command=toggle_collapsed)
     collapsed_button.pack(fill="both", expand=True)
+    rows_frame = ttk.Frame(root, style="Presence.TFrame")
+    row_widgets: list[tuple[ttk.Frame, ttk.Label]] = []
+    for row_index in range(max_waiting_rows):
+        row_frame = ttk.Frame(rows_frame, padding=(14, 2), style="Presence.TFrame")
+        ttk.Label(row_frame, text="●", style="PresenceDot.TLabel").pack(side="left", padx=(0, 6))
+        row_label = ttk.Label(row_frame, text="", style="PresenceMuted.TLabel")
+        row_label.pack(side="left", fill="x", expand=True)
+        ttk.Button(
+            row_frame, text="Open", width=6, style="Presence.TButton",
+            command=lambda index=row_index: open_waiting_row(index),
+        ).pack(side="right")
+        row_widgets.append((row_frame, row_label))
     set_collapsed(True)
     refresh_state()
     pulse_attention()

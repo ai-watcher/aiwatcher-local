@@ -157,6 +157,35 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("hasPrimaryAction", source)
         self.assertIn("scheduleAutoCollapse", source)
 
+    def test_presence_bars_draw_the_waiting_queue_and_countdown(self) -> None:
+        # Both bars render the additive companion-state fields: waiting_sessions
+        # queue rows, the presence waiting count on the collapsed pill, the
+        # prompt-gate countdown, and `detail` as a tooltip where the toolkit
+        # has one.
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn('json["waiting_sessions"]', mac)
+        self.assertIn('json["expires_in_seconds"]', mac)
+        self.assertIn('json["presence"]', mac)
+        self.assertIn("@objc func openWaitingRow", mac)
+        self.assertIn("visibleWaitingRows", mac)
+        # Height follows the queue, and the resize keeps the parked corner
+        # fixed the same way setCollapsed does.
+        self.assertIn("func applyWindowSize()", mac)
+        self.assertIn("CGFloat(visibleWaitingRows) * rowHeight", mac)
+        self.assertIn('waitingCount > 0 ? String(waitingCount) : "AI"', mac)
+        self.assertIn("titleLabel.toolTip", mac)
+        # A queue means per-row Open buttons, not a duplicated primary.
+        self.assertIn("hasPrimaryAction() && rowsShown == 0", mac)
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn("waiting_sessions", tk_source)
+        self.assertIn("expires_in_seconds", tk_source)
+        self.assertIn("def visible_waiting_rows", tk_source)
+        self.assertIn("def open_waiting_row", tk_source)
+        self.assertIn("def apply_waiting_rows", tk_source)
+        self.assertIn('str(waiting_count) if waiting_count > 0 else "AI"', tk_source)
+        self.assertIn("visible_waiting_rows() == 0", tk_source)
+
     def test_tk_presence_opens_dashboard_and_prompt_without_session_claim(self) -> None:
         source = inspect.getsource(native_overlay.run_native_presence)
 
@@ -288,14 +317,23 @@ class MacosSwiftOverlaySourceTests(unittest.TestCase):
             self.skipTest("the macOS SDK is needed to typecheck a Cocoa source file")
         if os.environ.get("CI") and os.environ.get("AIWATCHER_SWIFT_TYPECHECK") != "1":
             self.skipTest("another macOS job owns the swiftc typecheck in CI")
-        with tempfile.NamedTemporaryFile("w", suffix=".swift", delete=False, encoding="utf-8") as handle:
-            handle.write(native_overlay.MACOS_SWIFT_OVERLAY)
-            path = handle.name
-        try:
-            completed = subprocess.run([swiftc, "-typecheck", path], capture_output=True, text=True)
-        finally:
-            os.unlink(path)
-        self.assertEqual(completed.returncode, 0, f"Swift overlay source does not typecheck:\n{completed.stderr}")
+        # Both embedded Cocoa sources, not just the nudge overlay: the presence
+        # bar is the one that changes most and a typo there is a Companion that
+        # silently never draws.
+        sources = {
+            "overlay": native_overlay.MACOS_SWIFT_OVERLAY,
+            "presence": native_overlay.MACOS_SWIFT_PRESENCE,
+        }
+        for name, source in sources.items():
+            with self.subTest(source=name):
+                with tempfile.NamedTemporaryFile("w", suffix=".swift", delete=False, encoding="utf-8") as handle:
+                    handle.write(source)
+                    path = handle.name
+                try:
+                    completed = subprocess.run([swiftc, "-typecheck", path], capture_output=True, text=True)
+                finally:
+                    os.unlink(path)
+                self.assertEqual(completed.returncode, 0, f"Swift {name} source does not typecheck:\n{completed.stderr}")
 
 
 if __name__ == "__main__":
