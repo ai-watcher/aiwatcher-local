@@ -605,6 +605,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var waitingSessionIDs: [String] = []
     var waitingReturnAvailable: [Bool] = []
     var waitingWants: [String] = []
+    var waitingRowKinds: [String] = []
     var waitingCount = 0
     var finishedCount = 0
     var detailText = ""
@@ -658,9 +659,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
     // One row per waiting session, a single one included: the row is where
     // the wants tag and the per-row Return live, and a lone blocked session
-    // deserves both as much as a queue does.
+    // deserves both as much as a queue does. The away digest reuses the same
+    // rows for its history entries.
     var visibleWaitingRows: Int {
-        if stateName != "session_waiting" || waitingRowTexts.isEmpty {
+        if !["session_waiting", "away_digest"].contains(stateName) || waitingRowTexts.isEmpty {
             return 0
         }
         return min(waitingRowTexts.count, maxWaitingRows)
@@ -1270,11 +1272,11 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     // session_waiting belongs in both lists. Left out, the widget renders the
     // words "Waiting on you" in its calm style with no button -- saying
     // something urgent while looking like nothing is happening.
-    // session_finished is deliberately in the first list and not the second:
-    // it earns the Review primary and the compact layout, but "review when
-    // ready" must not wear the orange "blocked on you" treatment.
+    // session_finished and away_digest are deliberately in the first list and
+    // not the second: they earn the primary and the compact layout, but
+    // "review when ready" must not wear the orange "blocked on you" treatment.
     func hasPrimaryAction() -> Bool {
-        return ["prompt_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm", "session_waiting", "session_finished"].contains(stateName)
+        return ["prompt_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm", "session_waiting", "session_finished", "away_digest"].contains(stateName)
     }
 
     func needsAttentionState() -> Bool {
@@ -1285,9 +1287,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         if needsAttentionState() {
             return true
         }
-        // Soft attention: a finished session forces the window visible even in
-        // nudges-only mode, without the orange treatment.
-        if stateName == "session_finished" {
+        // Soft attention: finished work and the away digest force the window
+        // visible even in nudges-only mode, without the orange treatment.
+        if ["session_finished", "away_digest"].contains(stateName) {
             return true
         }
         if visibilityMode == "nudges-only" {
@@ -1426,18 +1428,31 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             if !visible { continue }
             let rowY = yOff - rowHeight * CGFloat(index + 1)
             rowDots[index].frame = NSRect(x: 30, y: rowY + 14, width: 7, height: 7)
-            rowDots[index].layer?.backgroundColor = (index == 0
-                ? NSColor(calibratedRed: 0.89, green: 0.29, blue: 0.29, alpha: 1)
-                : NSColor(calibratedRed: 0.94, green: 0.62, blue: 0.15, alpha: 1)).cgColor
+            // Digest rows color by kind -- mint for finished work, amber for
+            // signals; waiting rows keep hottest-first by position.
+            let kind = index < waitingRowKinds.count ? waitingRowKinds[index] : ""
+            let dotColor: NSColor
+            if kind == "finished" {
+                dotColor = NSColor(calibratedRed: 0.36, green: 0.79, blue: 0.65, alpha: 1)
+            } else if !kind.isEmpty {
+                dotColor = NSColor(calibratedRed: 0.94, green: 0.62, blue: 0.15, alpha: 1)
+            } else {
+                dotColor = index == 0
+                    ? NSColor(calibratedRed: 0.89, green: 0.29, blue: 0.29, alpha: 1)
+                    : NSColor(calibratedRed: 0.94, green: 0.62, blue: 0.15, alpha: 1)
+            }
+            rowDots[index].layer?.backgroundColor = dotColor.cgColor
             rowLabels[index].frame = NSRect(x: 46, y: rowY + 9, width: wants.isEmpty ? 396 : 284, height: 17)
             rowLabels[index].stringValue = index < waitingRowTexts.count ? waitingRowTexts[index] : ""
             rowTags[index].frame = NSRect(x: 334, y: rowY + 10, width: 112, height: 14)
             rowTags[index].stringValue = wants.isEmpty ? "" : "wants: \(wants)"
             let canReturn = index < waitingReturnAvailable.count && waitingReturnAvailable[index]
-            rowButtons[index].title = canReturn ? "Return" : "Open"
+            rowButtons[index].title = canReturn ? "Return" : (kind.isEmpty ? "Open" : "Review")
             rowButtons[index].toolTip = canReturn
                 ? "Focus the blocked tool directly"
-                : "Tool window not reachable from here -- opens the session in AIWatcher"
+                : (kind.isEmpty
+                    ? "Tool window not reachable from here -- opens the session in AIWatcher"
+                    : "Open this in AIWatcher")
             rowButtons[index].frame = NSRect(x: 452, y: rowY + 4, width: 64, height: 26)
         }
     }
@@ -1536,7 +1551,12 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         }
         self.stateName = incomingState
         self.detailText = json["detail"] as? String ?? ""
-        let waiting = json["waiting_sessions"] as? [[String: Any]] ?? []
+        // The away digest's history entries ride the same row machinery as
+        // the waiting queue; a payload carries one list or the other.
+        var waiting = json["waiting_sessions"] as? [[String: Any]] ?? []
+        if waiting.isEmpty {
+            waiting = json["digest_rows"] as? [[String: Any]] ?? []
+        }
         self.waitingRowTexts = waiting.prefix(maxWaitingRows).map { row in
             let tool = row["tool"] as? String ?? "AI tool"
             let project = row["project"] as? String ?? ""
@@ -1555,9 +1575,14 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         self.waitingWants = waiting.prefix(maxWaitingRows).map { row in
             String(((row["wants"] as? String) ?? "").prefix(16))
         }
+        self.waitingRowKinds = waiting.prefix(maxWaitingRows).map { row in
+            (row["kind"] as? String) ?? ""
+        }
         let presence = json["presence"] as? [String: Any]
         self.waitingCount = presence?["waiting"] as? Int ?? self.waitingRowTexts.count
-        self.finishedCount = (json["finished_sessions"] as? [[String: Any]])?.count ?? 0
+        let finishedList = json["finished_sessions"] as? [[String: Any]] ?? []
+        let digestList = json["digest_rows"] as? [[String: Any]] ?? []
+        self.finishedCount = finishedList.isEmpty ? digestList.count : finishedList.count
         let pressure = json["pressure"] as? [String: Any]
         self.pressureAvailable = pressure?["available"] as? Bool ?? false
         self.pressurePct = pressure?["pct_of_turn_limit"] as? Int ?? 0
@@ -2205,6 +2230,7 @@ def run_native_presence(
     waiting_row_session_ids: list[str] = []
     waiting_row_return: list[bool] = []
     waiting_row_wants: list[str] = []
+    waiting_row_kinds: list[str] = []
     waiting_count_var = tk.IntVar(value=0)
     finished_count_var = tk.IntVar(value=0)
     pressure_available_var = tk.BooleanVar(value=False)
@@ -2268,7 +2294,13 @@ def run_native_presence(
         waiting_row_urls.clear()
         waiting_row_session_ids.clear()
         waiting_row_return.clear()
+        waiting_row_wants.clear()
+        waiting_row_kinds.clear()
+        # The away digest's history entries ride the same row machinery as
+        # the waiting queue; a payload carries one list or the other.
         waiting_sessions = payload.get("waiting_sessions")
+        if not isinstance(waiting_sessions, list) or not waiting_sessions:
+            waiting_sessions = payload.get("digest_rows")
         if isinstance(waiting_sessions, list):
             for row in waiting_sessions[:max_waiting_rows]:
                 if not isinstance(row, dict):
@@ -2284,6 +2316,7 @@ def run_native_presence(
                 waiting_row_session_ids.append(str(row.get("session_id") or ""))
                 waiting_row_return.append(bool(row.get("return_available")))
                 waiting_row_wants.append(str(row.get("wants") or "")[:16])
+                waiting_row_kinds.append(str(row.get("kind") or ""))
         presence = payload.get("presence")
         try:
             waiting_count = int(presence.get("waiting") or 0) if isinstance(presence, dict) else 0
@@ -2291,7 +2324,13 @@ def run_native_presence(
             waiting_count = 0
         waiting_count_var.set(waiting_count or len(waiting_row_texts))
         finished_sessions = payload.get("finished_sessions")
-        finished_count_var.set(len(finished_sessions) if isinstance(finished_sessions, list) else 0)
+        digest_rows = payload.get("digest_rows")
+        if isinstance(finished_sessions, list) and finished_sessions:
+            finished_count_var.set(len(finished_sessions))
+        elif isinstance(digest_rows, list):
+            finished_count_var.set(len(digest_rows))
+        else:
+            finished_count_var.set(0)
         pressure = payload.get("pressure")
         if isinstance(pressure, dict) and pressure.get("available"):
             pressure_available_var.set(True)
@@ -2616,14 +2655,15 @@ def run_native_presence(
         # it, so "review when ready" never wears the orange treatment.
         return state_var.get() in {
             "prompt_gate", "control_recommended", "optimize_available", "clipboard_confirm",
-            "session_waiting", "session_finished",
+            "session_waiting", "session_finished", "away_digest",
         }
 
     def visible_waiting_rows() -> int:
         # One row per waiting session, a single one included: the row is where
         # the wants tag and the per-row Return live, and a lone blocked
-        # session deserves both as much as a queue does.
-        if state_var.get() != "session_waiting" or not waiting_row_texts:
+        # session deserves both as much as a queue does. The away digest
+        # reuses the same rows for its history entries.
+        if state_var.get() not in {"session_waiting", "away_digest"} or not waiting_row_texts:
             return 0
         return min(len(waiting_row_texts), max_waiting_rows)
 
@@ -2680,7 +2720,10 @@ def run_native_presence(
         for index in range(min(rows, len(waiting_row_texts))):
             row_widgets[index][1].configure(text=waiting_row_texts[index])
             can_return = index < len(waiting_row_return) and waiting_row_return[index]
-            row_widgets[index][2].configure(text="Return" if can_return else "Open")
+            kind = waiting_row_kinds[index] if index < len(waiting_row_kinds) else ""
+            row_widgets[index][2].configure(
+                text="Return" if can_return else ("Review" if kind else "Open"),
+            )
             wants = waiting_row_wants[index] if index < len(waiting_row_wants) else ""
             row_widgets[index][3].configure(text=f"wants: {wants}" if wants else "")
         if rows == rows_shown.get():
@@ -2904,6 +2947,7 @@ def run_native_presence(
             waiting_row_session_ids.clear()
             waiting_row_return.clear()
             waiting_row_wants.clear()
+            waiting_row_kinds.clear()
             waiting_count_var.set(0)
             finished_count_var.set(0)
             pressure_available_var.set(False)

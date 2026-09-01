@@ -232,7 +232,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('"return_available"', mac)
         self.assertIn("func requestRuntimeReturn(sessionID:", mac)
         self.assertIn('primaryAction == "runtime_return"', mac)
-        self.assertIn('canReturn ? "Return" : "Open"', mac)
+        self.assertIn('canReturn ? "Return" : (kind.isEmpty ? "Open" : "Review")', mac)
         self.assertIn('"No live return. Opened in AIWatcher."', mac)
         # The result is awaited, with a bounded timeout, off the main thread.
         self.assertIn("request.timeoutInterval = 4", mac)
@@ -242,7 +242,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("def request_runtime_return", tk_source)
         self.assertIn('"runtime_return"', tk_source)
         self.assertIn("return_available", tk_source)
-        self.assertIn('"Return" if can_return else "Open"', tk_source)
+        self.assertIn('"Return" if can_return else ("Review" if kind else "Open")', tk_source)
         self.assertIn("No live return. Opened in AIWatcher.", tk_source)
 
     def test_presence_rows_say_what_the_session_wants(self) -> None:
@@ -266,7 +266,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         mac = native_overlay.MACOS_SWIFT_PRESENCE
         self.assertIn("session_finished", mac.split("func hasPrimaryAction")[1][:400])
         self.assertNotIn("session_finished", mac.split("func needsAttentionState")[1][:400])
-        self.assertIn('if stateName == "session_finished" {', mac)
+        self.assertIn('["session_finished", "away_digest"].contains(stateName)', mac)
         self.assertIn('json["finished_sessions"]', mac)
         self.assertIn("finishedCount > 0 ? String(finishedCount)", mac)
 
@@ -277,6 +277,25 @@ class NativeOverlayConfigTests(unittest.TestCase):
             tk_source.split("needs_attention = state_var.get() in")[1][:200],
         )
         self.assertIn('fill=attention_bg if waiting_count > 0 else "#0052F5"', tk_source)
+
+    def test_the_away_digest_rides_the_queue_rows(self) -> None:
+        # History entries reuse the waiting-row machinery: mint/amber dots by
+        # kind, Review buttons, and the calm treatment -- away_digest earns
+        # the compact layout without joining the attention lists.
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn('json["digest_rows"]', mac)
+        self.assertIn('"away_digest"', mac)
+        self.assertNotIn("away_digest", mac.split("func needsAttentionState")[1][:400])
+        self.assertIn('kind.isEmpty ? "Open" : "Review"', mac)
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn('payload.get("digest_rows")', tk_source)
+        self.assertIn('"away_digest"', tk_source)
+        self.assertNotIn(
+            "away_digest",
+            tk_source.split("needs_attention = state_var.get() in")[1][:200],
+        )
+        self.assertIn('"Review" if kind else "Open"', tk_source)
 
     def test_tk_presence_opens_dashboard_and_prompt_without_session_claim(self) -> None:
         source = inspect.getsource(native_overlay.run_native_presence)

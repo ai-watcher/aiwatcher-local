@@ -5638,6 +5638,116 @@ def _finished_rows(rows: list[SessionPresence]) -> list[tuple[float, SessionPres
     return notices
 
 
+# Away-digest tracking. The bar polls every 2-3 seconds all day, so a hole in
+# the poll stream longer than AWAY_GAP_SECONDS means the machine slept, was
+# locked, or the developer was genuinely gone -- not just reading. The digest
+# itself is reconstructed after the fact from records that already exist
+# (session write stamps and ambient-intervention records inside the gap), so
+# nothing needed to be watching during a gap the server slept through too.
+# Everything in it is phrased as history -- "finished 31m ago" -- because
+# nobody has re-measured whether any condition still holds.
+_LAST_COMPANION_POLL: float | None = None
+_AWAY_DIGEST: dict[str, object] | None = None
+AWAY_GAP_SECONDS = 20 * 60
+# Stopgap constant: a digest nobody expanded within this window is stale news;
+# the evidence it pointed at stays in the dashboard.
+AWAY_DIGEST_TTL_SECONDS = 15 * 60
+
+
+def _away_minutes_label(seconds: float) -> str:
+    minutes = max(1, int(seconds // 60))
+    return f"{minutes}m" if minutes < 120 else f"{minutes // 60}h"
+
+
+def _update_away_digest(
+    session_rows: list[LocalSession],
+    presence_rows: list[SessionPresence],
+) -> None:
+    global _LAST_COMPANION_POLL, _AWAY_DIGEST
+    now = time.time()
+    previous = _LAST_COMPANION_POLL
+    _LAST_COMPANION_POLL = now
+    if previous is None or now - previous < AWAY_GAP_SECONDS:
+        return
+    gap_start = datetime.fromtimestamp(previous, tz=timezone.utc)
+    gap_end = datetime.fromtimestamp(now, tz=timezone.utc)
+    states = {row.session_id: row.state for row in presence_rows}
+    rows: list[dict[str, object]] = []
+    finished_count = 0
+    for session in session_rows:
+        if session.analyst_run:
+            continue
+        stamp = session.updated_at
+        if stamp is None:
+            continue
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        # Last write inside the gap, and silent now: it finished while the
+        # developer was away. A session writing again already (working or
+        # waiting) is live and needs no history entry.
+        if not (gap_start < stamp <= gap_end):
+            continue
+        if states.get(session.session_id) not in {"quiet", "gone"}:
+            continue
+        finished_count += 1
+        rows.append({
+            "kind": "finished",
+            "session_id": session.session_id,
+            "tool": tool_label(session.tool),
+            "project": _project_basename(session.project_path) or "this machine",
+            "waited_label": _away_minutes_label(now - stamp.timestamp()),
+            "url": f"/?session={quote(session.session_id, safe='')}",
+        })
+        # The finished-notice path would re-announce the same sessions the
+        # moment the digest is dismissed; the digest is their announcement.
+        _FINISHED_NOTICES.pop(session.session_id, None)
+    signal_count = 0
+    for record in recent_ambient_interventions(limit=20):
+        kind = str(record.get("signal_kind") or "")
+        if kind not in _TRANSIENT_SIGNAL_KINDS:
+            continue
+        stamp = _parse_iso_datetime(record.get("updated_at") or record.get("created_at"))
+        if stamp is None or not (gap_start < stamp <= gap_end):
+            continue
+        signal_count += 1
+        session_id = str(record.get("session_id") or "")
+        urls = record.get("urls") if isinstance(record.get("urls"), dict) else {}
+        rows.append({
+            "kind": kind,
+            "session_id": session_id,
+            "tool": _TRANSIENT_SIGNAL_LABELS.get(kind, kind),
+            "project": "",
+            "waited_label": _away_minutes_label(now - stamp.timestamp()),
+            "url": str(urls.get("dashboard") or "")
+            or (f"/?session={quote(session_id, safe='')}" if session_id else "/"),
+        })
+    if not rows:
+        return
+    _AWAY_DIGEST = {
+        "created": now,
+        "gap_label": _away_minutes_label(now - previous),
+        "finished_count": finished_count,
+        "signal_count": signal_count,
+        "rows": rows[:3],
+    }
+
+
+def _active_away_digest() -> dict[str, object] | None:
+    global _AWAY_DIGEST
+    if _AWAY_DIGEST is None:
+        return None
+    created = float(_AWAY_DIGEST.get("created") or 0.0)
+    if time.time() - created > AWAY_DIGEST_TTL_SECONDS:
+        _AWAY_DIGEST = None
+        return None
+    return _AWAY_DIGEST
+
+
+def _dismiss_away_digest() -> None:
+    global _AWAY_DIGEST
+    _AWAY_DIGEST = None
+
+
 # One `ps` sweep per ~10s, not per 2-second poll: runtime attachment for the
 # queue rows needs the live process list, and which windows exist does not
 # change faster than this. Races between poller threads just refresh twice.
@@ -5738,6 +5848,7 @@ def build_companion_state() -> dict[str, object]:
     session_rows = _cached_session_rows()
     presence_rows = presence_for_sessions(session_rows, waiting=waiting_signals)
     _update_finished_notices(presence_rows)
+    _update_away_digest(session_rows, presence_rows)
     base = {
         "state": "watching",
         "label": "Watching quietly",
@@ -5875,6 +5986,37 @@ def build_companion_state() -> dict[str, object]:
             "detail": "This session asked for permission and has done nothing since."
             if len(waiting_rows) == 1
             else "These sessions asked for permission and have done nothing since.",
+        }
+
+    # The away digest sits between a blocked session (which still outranks
+    # everything but the gate) and the single-finish notice: it is the same
+    # kind of news, in bulk, and its rows include what the finish notices
+    # would have said.
+    digest = _active_away_digest()
+    if digest is not None:
+        digest_rows = list(digest.get("rows") or [])
+        finished_count = int(digest.get("finished_count") or 0)
+        signal_count = int(digest.get("signal_count") or 0)
+        parts = []
+        if finished_count:
+            parts.append(f"{finished_count} finished")
+        if signal_count:
+            parts.append(f"{signal_count} signal{'s' if signal_count != 1 else ''}")
+        parts.append(f"gap {digest.get('gap_label')}")
+        first_url = str(digest_rows[0].get("url") or "/") if digest_rows else "/"
+        return {
+            **base,
+            "state": "away_digest",
+            "label": "While you were away",
+            "title": "While you were away",
+            "subtitle": " · ".join(parts),
+            "primary_label": "Review",
+            "primary_action": "open_url",
+            "primary_url": first_url,
+            "skip_label": "Dismiss",
+            "skip_state": "away_digest",
+            "digest_rows": digest_rows,
+            "detail": "Reconstructed from local records inside the gap. Dismiss clears this summary; the evidence stays in the dashboard.",
         }
 
     # Below a blocked session -- blocked outranks done -- but above every
@@ -6874,6 +7016,12 @@ class UIHandler(BaseHTTPRequestHandler):
                         reason="User skipped the needs-review Companion nudge.",
                     )
                     self._send(200, json.dumps({"ok": True, "record": record}), "application/json; charset=utf-8")
+                    return
+                if state == "away_digest":
+                    # Memory-only, like the digest itself: dismissing clears
+                    # the pending summary; the evidence it pointed at stays.
+                    _dismiss_away_digest()
+                    self._send(200, json.dumps({"ok": True}), "application/json; charset=utf-8")
                     return
                 if state == "session_finished" and session_id:
                     # The default hour outlives the notice's own 15-minute TTL,

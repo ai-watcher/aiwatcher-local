@@ -605,6 +605,82 @@ class CompanionFinishedTests(WaitingSessionCompanionTests):
         self.assertEqual(state["state"], "watching")
 
 
+class CompanionAwayDigestTests(WaitingSessionCompanionTests):
+    """The bar's first appearance after a real gap is a briefing, not a siren."""
+
+    def setUp(self):
+        ui._PRESENCE_LAST_STATES.clear()
+        ui._FINISHED_NOTICES.clear()
+        ui._LAST_COMPANION_POLL = None
+        ui._AWAY_DIGEST = None
+
+    def tearDown(self):
+        ui._LAST_COMPANION_POLL = None
+        ui._AWAY_DIGEST = None
+
+    def _loop_record(self, minutes_ago=30.0):
+        stamp = (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).isoformat()
+        return {
+            "signal_kind": "loop", "updated_at": stamp, "severity": "warning",
+            "session_id": "sig-1", "urls": {"dashboard": "/?session=sig-1"},
+        }
+
+    def test_a_gap_reconstructs_finished_work_and_missed_signals(self):
+        ui._LAST_COMPANION_POLL = time.time() - 48 * 60
+        finished = self._session("done-away", idle_minutes=25.0)
+        before_gap = self._session("old", idle_minutes=120.0)
+        with patch.object(ui, "recent_ambient_interventions", return_value=[self._loop_record()]):
+            state = self._state(self._summary(), sessions=[finished, before_gap])
+        self.assertEqual(state["state"], "away_digest")
+        self.assertIn("1 finished", state["subtitle"])
+        self.assertIn("1 signal", state["subtitle"])
+        self.assertIn("gap 48m", state["subtitle"])
+        self.assertEqual([row["kind"] for row in state["digest_rows"]], ["finished", "loop"])
+        self.assertEqual(state["skip_state"], "away_digest")
+        # The digest is those sessions' announcement; the finish notice must
+        # not re-announce them after dismissal.
+        self.assertNotIn("done-away", ui._FINISHED_NOTICES)
+
+    def test_the_digest_persists_until_dismissed(self):
+        ui._LAST_COMPANION_POLL = time.time() - 48 * 60
+        finished = self._session("done-away", idle_minutes=25.0)
+        self._state(self._summary(), sessions=[finished])
+        state = self._state(self._summary(), sessions=[finished])
+        self.assertEqual(state["state"], "away_digest")
+        ui._dismiss_away_digest()
+        state = self._state(self._summary(), sessions=[finished])
+        self.assertEqual(state["state"], "watching")
+
+    def test_a_short_gap_is_not_an_absence(self):
+        ui._LAST_COMPANION_POLL = time.time() - 5 * 60
+        state = self._state(self._summary(), sessions=[self._session("done-away", idle_minutes=3.0)])
+        self.assertNotEqual(state["state"], "away_digest")
+
+    def test_an_uneventful_gap_produces_no_digest(self):
+        ui._LAST_COMPANION_POLL = time.time() - 48 * 60
+        state = self._state(self._summary(), sessions=[])
+        self.assertEqual(state["state"], "watching")
+
+    def test_blocked_outranks_the_digest(self):
+        ui._LAST_COMPANION_POLL = time.time() - 48 * 60
+        sessions = [
+            self._session("done-away", idle_minutes=25.0),
+            self._session("blocked", idle_minutes=5.0),
+        ]
+        state = self._state(
+            self._summary(), sessions=sessions, signals=self._signal("blocked", minutes_ago=4.0),
+        )
+        self.assertEqual(state["state"], "session_waiting")
+
+    def test_the_digest_expires_as_stale_news(self):
+        ui._LAST_COMPANION_POLL = time.time() - 48 * 60
+        finished = self._session("done-away", idle_minutes=25.0)
+        self._state(self._summary(), sessions=[finished])
+        ui._AWAY_DIGEST["created"] = time.time() - (ui.AWAY_DIGEST_TTL_SECONDS + 60)
+        state = self._state(self._summary(), sessions=[finished])
+        self.assertEqual(state["state"], "watching")
+
+
 class CompanionPressureAndSignalTests(WaitingSessionCompanionTests):
     """The meter and the missed-nudge chip: fresh numbers or honest absence."""
 
