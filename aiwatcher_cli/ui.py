@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
@@ -5652,6 +5653,40 @@ def _finished_rows(rows: list[SessionPresence]) -> list[tuple[float, SessionPres
     return notices
 
 
+def _freshened_for_presence(rows: list[LocalSession]) -> list[LocalSession]:
+    """Presence-grade write stamps for the Companion poll.
+
+    The session index refreshes on scan cadence, which is right for totals
+    and minutes late for "is it writing this second" -- the bar kept saying
+    Finished after the session had visibly resumed, and kept saying Waiting
+    after a prompt was answered. A single-file transcript's mtime is the same
+    fact, one stat() away, so presence reads max(indexed stamp, mtime) for
+    .jsonl sources. Cumulative DB sources are excluded on purpose: their file
+    is shared across sessions, and any one session writing would mark all of
+    them working.
+    """
+    fresh: list[LocalSession] = []
+    for row in rows:
+        path = row.source_path or ""
+        if not path.endswith(".jsonl"):
+            fresh.append(row)
+            continue
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            fresh.append(row)
+            continue
+        stamp = datetime.fromtimestamp(mtime, tz=timezone.utc)
+        current = row.updated_at
+        if current is not None and current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        if current is None or stamp > current:
+            fresh.append(dataclasses.replace(row, updated_at=stamp))
+        else:
+            fresh.append(row)
+    return fresh
+
+
 # Away-digest tracking. The bar polls every 2-3 seconds all day, so a hole in
 # the poll stream longer than AWAY_GAP_SECONDS means the machine slept, was
 # locked, or the developer was genuinely gone -- not just reading. The digest
@@ -5859,7 +5894,7 @@ def build_companion_state() -> dict[str, object]:
         waiting_signals = session_waiting_signals()
     except OSError:
         waiting_signals = {}
-    session_rows = _cached_session_rows()
+    session_rows = _freshened_for_presence(_cached_session_rows())
     presence_rows = presence_for_sessions(session_rows, waiting=waiting_signals)
     _update_finished_notices(presence_rows)
     _update_away_digest(session_rows, presence_rows)

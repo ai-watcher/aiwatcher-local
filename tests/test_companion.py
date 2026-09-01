@@ -553,6 +553,27 @@ class CompanionFinishedTests(WaitingSessionCompanionTests):
         ui._PRESENCE_LAST_STATES.clear()
         ui._FINISHED_NOTICES.clear()
 
+    def test_presence_reads_the_transcripts_own_clock(self):
+        # The session index refreshes on scan cadence -- minutes late for "is
+        # it writing this second". A .jsonl transcript's mtime is the same
+        # fact, fresh every poll; shared-file DB sources are excluded because
+        # one session writing would mark all of them working.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "s.jsonl"
+            path.write_text("x", encoding="utf-8")
+            stale = datetime.now(timezone.utc) - timedelta(minutes=10)
+            row = LocalSession(
+                session_id="s", tool="claude-code", project_path="/r",
+                updated_at=stale, source_path=str(path),
+            )
+            fresh = ui._freshened_for_presence([row])[0]
+            self.assertGreater(fresh.updated_at, stale)
+            db_row = LocalSession(
+                session_id="d", tool="codex", project_path="/r",
+                updated_at=stale, source_path=str(Path(tmp) / "sessions.db"),
+            )
+            self.assertIs(ui._freshened_for_presence([db_row])[0], db_row)
+
     def test_a_working_to_quiet_transition_becomes_finished(self):
         state = self._state(self._summary(), sessions=[self._session("done-1", idle_minutes=0.5)])
         self.assertEqual(state["state"], "watching")
