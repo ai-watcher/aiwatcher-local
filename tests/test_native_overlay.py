@@ -185,7 +185,11 @@ class NativeOverlayConfigTests(unittest.TestCase):
         # fixed the same way setCollapsed does.
         self.assertIn("func applyWindowSize()", mac)
         self.assertIn("CGFloat(visibleWaitingRows) * rowHeight", mac)
-        self.assertIn('waitingCount > 0 ? String(waitingCount) : "AI"', mac)
+        # The waiting count rides the white bubble as a badge; the ground
+        # itself never floods, per the brand rule that attention is carried by
+        # the mark's blue ring turning orange.
+        self.assertIn("collapsedBadge", mac)
+        self.assertIn('collapsedBadge.stringValue = waitingCount > 0 ? String(waitingCount) : ""', mac)
         self.assertIn("titleLabel.toolTip", mac)
         # A queue means per-row Open buttons, not a duplicated primary.
         self.assertIn("hasPrimaryAction() && rowsShown == 0", mac)
@@ -196,7 +200,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("def visible_waiting_rows", tk_source)
         self.assertIn("def open_waiting_row", tk_source)
         self.assertIn("def apply_waiting_rows", tk_source)
-        self.assertIn('str(waiting_count) if waiting_count > 0 else "AI"', tk_source)
+        self.assertIn("create_text(\n                34, 10, text=str(waiting_count)", tk_source)
         self.assertIn("visible_waiting_rows() == 0", tk_source)
 
     def test_tk_presence_opens_dashboard_and_prompt_without_session_claim(self) -> None:

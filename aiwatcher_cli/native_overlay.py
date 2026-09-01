@@ -299,31 +299,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.becomesKeyOnlyIfNeeded = true
         window.hasShadow = true
 
+        // The notification wears the brand the same way the collapsed bubble
+        // does: the mark on a plain white ground, ink type, and severity
+        // carried by the mark itself -- the blue ring turns orange when the
+        // signal is critical, the job that ring does everywhere else. The
+        // ground never floods.
+        window.isOpaque = false
+        window.backgroundColor = .clear
         let view = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         view.wantsLayer = true
-        view.layer?.backgroundColor = NSColor(calibratedRed: 0.93, green: 0.96, blue: 1.0, alpha: 1).cgColor
-        view.layer?.cornerRadius = 12
+        view.layer?.backgroundColor = NSColor(calibratedRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.98).cgColor
+        view.layer?.cornerRadius = 14
         view.layer?.borderWidth = 1
-        view.layer?.borderColor = NSColor(calibratedRed: 0.65, green: 0.76, blue: 0.91, alpha: 1).cgColor
+        view.layer?.borderColor = NSColor(calibratedRed: 0.08, green: 0.07, blue: 0.08, alpha: 0.14).cgColor
         window.contentView = view
 
+        // The mark from logo/aiwatcher-mark.svg as layers, ink-on-light. Both
+        // rings 300 wide, 40 stroke, 85 outer corner radius in a 429x349 box;
+        // the ink ring (300x232 at offset 129,117) in front. The height
+        // difference between the rings is the artwork's own.
+        let markHeight: CGFloat = 30
+        let markScale = markHeight / 349.0
+        let markView = NSView(frame: NSRect(x: 22, y: 118, width: 429.0 * markScale, height: markHeight))
+        markView.wantsLayer = true
+        let blueRing = CALayer()
+        blueRing.frame = CGRect(x: 0, y: markHeight - 260.0 * markScale, width: 300.0 * markScale, height: 260.0 * markScale)
+        blueRing.borderWidth = 40.0 * markScale
+        blueRing.cornerRadius = 85.0 * markScale
+        blueRing.borderColor = (severityText == "critical"
+            ? NSColor(calibratedRed: 0.93, green: 0.42, blue: 0.14, alpha: 1)
+            : NSColor(calibratedRed: 0.00, green: 0.32, blue: 0.96, alpha: 1)).cgColor
+        markView.layer?.addSublayer(blueRing)
+        let inkRing = CALayer()
+        inkRing.frame = CGRect(x: 129.0 * markScale, y: 0, width: 300.0 * markScale, height: 232.0 * markScale)
+        inkRing.borderWidth = 40.0 * markScale
+        inkRing.cornerRadius = 85.0 * markScale
+        inkRing.borderColor = NSColor(calibratedRed: 0.08, green: 0.07, blue: 0.08, alpha: 1).cgColor
+        markView.layer?.addSublayer(inkRing)
+        view.addSubview(markView)
+
         let title = NSTextField(labelWithString: titleText)
-        title.frame = NSRect(x: 22, y: 122, width: 500, height: 26)
+        title.frame = NSRect(x: 70, y: 122, width: 452, height: 26)
         title.font = NSFont.boldSystemFont(ofSize: 18)
-        title.textColor = NSColor(calibratedRed: 0.08, green: 0.32, blue: 0.65, alpha: 1)
+        title.textColor = NSColor(calibratedRed: 0.08, green: 0.07, blue: 0.08, alpha: 1)
         view.addSubview(title)
 
         let badge = NSTextField(labelWithString: severityText)
         badge.frame = NSRect(x: 550, y: 124, width: 92, height: 22)
         badge.alignment = .center
         badge.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        badge.textColor = NSColor(calibratedRed: 0.30, green: 0.36, blue: 0.48, alpha: 1)
+        badge.textColor = severityText == "critical"
+            ? NSColor(calibratedRed: 0.80, green: 0.33, blue: 0.09, alpha: 1)
+            : NSColor(calibratedRed: 0.62, green: 0.42, blue: 0.07, alpha: 1)
         view.addSubview(badge)
 
         let body = NSTextField(wrappingLabelWithString: bodyText)
         body.frame = NSRect(x: 22, y: 78, width: 626, height: 38)
         body.font = NSFont.systemFont(ofSize: 14)
-        body.textColor = NSColor(calibratedRed: 0.22, green: 0.28, blue: 0.40, alpha: 1)
+        body.textColor = NSColor(calibratedRed: 0.26, green: 0.25, blue: 0.26, alpha: 1)
         view.addSubview(body)
 
         let primary = NSButton(title: primaryLabel, target: self, action: #selector(primaryAction))
@@ -346,7 +379,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusLabel.frame = NSRect(x: 452, y: 44, width: 196, height: 18)
         statusLabel.alignment = .right
         statusLabel.font = NSFont.systemFont(ofSize: 11)
-        statusLabel.textColor = NSColor(calibratedRed: 0.36, green: 0.43, blue: 0.55, alpha: 1)
+        statusLabel.textColor = NSColor(calibratedRed: 0.08, green: 0.07, blue: 0.08, alpha: 0.55)
         view.addSubview(statusLabel)
 
         window.orderFrontRegardless()
@@ -2682,9 +2715,15 @@ def run_native_overlay(
     reason = body
     local_brief = _read_brief_file(brief_file)
 
+    # The notification wears the brand the same way the collapsed bubble does:
+    # the mark on a plain white ground, ink type, and severity carried by the
+    # mark itself -- the blue ring turns orange when the signal is critical.
+    # The ground never floods.
+    shell = "#ffffff"
+    ink = "#141314"
     root = tk.Tk()
     root.title("AIWatcher")
-    root.configure(bg="#edf4ff")
+    root.configure(bg=shell)
     root.attributes("-topmost", True)
     if sys.platform == "win32":
         root.overrideredirect(True)
@@ -2702,10 +2741,16 @@ def run_native_overlay(
         style.theme_use("clam")
     except tk.TclError:
         pass
-    style.configure("AIW.TFrame", background="#edf4ff")
-    style.configure("AIW.TLabel", background="#edf4ff", foreground="#1f2a44", font=("Helvetica", 13))
-    style.configure("AIWTitle.TLabel", background="#edf4ff", foreground="#1d5dab", font=("Helvetica", 20, "bold"))
-    style.configure("AIWMuted.TLabel", background="#edf4ff", foreground="#4f5f78", font=("Helvetica", 12))
+    style.configure("AIW.TFrame", background=shell)
+    style.configure("AIW.TLabel", background=shell, foreground="#413f42", font=("Helvetica", 13))
+    style.configure("AIWTitle.TLabel", background=shell, foreground=ink, font=("Helvetica", 20, "bold"))
+    style.configure("AIWMuted.TLabel", background=shell, foreground="#6d6a6e", font=("Helvetica", 12))
+    style.configure(
+        "AIWSeverity.TLabel",
+        background=shell,
+        foreground="#cc5417" if (severity or "").lower() == "critical" else "#9d6b12",
+        font=("Helvetica", 12, "bold"),
+    )
     style.configure("AIW.TButton", font=("Helvetica", 13, "bold"), padding=(14, 8))
 
     frame = ttk.Frame(root, padding=22, style="AIW.TFrame")
@@ -2713,10 +2758,17 @@ def run_native_overlay(
 
     header = ttk.Frame(frame, style="AIW.TFrame")
     header.pack(fill="x")
-    ttk.Label(header, text=title or "Start a fresh AI session", style="AIWTitle.TLabel", wraplength=600).pack(
+    mark_canvas = tk.Canvas(header, width=38, height=30, bg=shell, highlightthickness=0, bd=0)
+    _draw_brand_mark(
+        mark_canvas, height=30.0,
+        blue="#ed6a24" if (severity or "").lower() == "critical" else "#0052F5",
+        ink=ink,
+    )
+    mark_canvas.pack(side="left", padx=(0, 10))
+    ttk.Label(header, text=title or "Start a fresh AI session", style="AIWTitle.TLabel", wraplength=560).pack(
         side="left", fill="x", expand=True, anchor="w"
     )
-    ttk.Label(header, text=severity or "warning", style="AIWMuted.TLabel").pack(side="right", padx=(16, 0))
+    ttk.Label(header, text=severity or "warning", style="AIWSeverity.TLabel").pack(side="right", padx=(16, 0))
 
     ttk.Label(frame, text=body or "AIWatcher found context pressure that may waste your next turns.", style="AIW.TLabel", wraplength=700).pack(
         fill="x", pady=(12, 18), anchor="w"

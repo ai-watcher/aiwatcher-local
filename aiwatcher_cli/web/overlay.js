@@ -193,9 +193,19 @@ function renderBubble(bubble, intervention) {
     || (intervention ? '' : 'Use a Fresh Start brief to preserve the outcome without carrying the full chat history.');
   const detailLine = detail && detail !== presentation.body ? `<p>${esc(detail)}</p>` : '';
   const tags = (bubble.tags || []).map(tag => `<span class="tag">${esc(tag)}</span>`).join('');
+  // The brand mark from logo/aiwatcher-mark.svg, inline because this page is
+  // spliced into one self-contained document. Severity is carried by the mark
+  // itself: the blue ring turns orange when the signal is critical, the same
+  // job that ring does in the companion bubble and the dashboard favicon.
+  const critical = String(presentation.severity || '').toLowerCase() === 'critical';
+  const markSvg = `<svg class="mark" viewBox="0 0 429 349" fill="none" aria-hidden="true">
+    <rect x="20" y="20" width="260" height="220" rx="65" stroke="${critical ? '#ED6A24' : '#0052F5'}" stroke-width="40"/>
+    <rect x="149" y="137" width="260" height="192" rx="65" stroke="#141314" stroke-width="40"/>
+  </svg>`;
   document.getElementById('bubble').innerHTML = `<div class="top">
-    <div><h1>${esc(presentation.title || 'AIWatcher found something to review')}</h1><p>${esc(presentation.body || 'Review the local evidence before continuing.')}</p></div>
-    <span class="badge">${esc(presentation.severity || 'warning')}</span>
+    ${markSvg}
+    <div class="copy"><h1>${esc(presentation.title || 'AIWatcher found something to review')}</h1><p>${esc(presentation.body || 'Review the local evidence before continuing.')}</p></div>
+    <span class="badge${critical ? ' critical' : ''}">${esc(presentation.severity || 'warning')}</span>
   </div>
   <div class="body">
     <div class="identity"><strong>${esc(identityLabel)}</strong><br>${identityParts.map(esc).join(' · ')}${lastLine}</div>
