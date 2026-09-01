@@ -438,8 +438,8 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
         state = self._state(
             self._summary(),
             sessions=[
-                self._session("w1", idle_minutes=0.5),
-                self._session("w2", idle_minutes=1.0),
+                self._session("w1", idle_minutes=0.25),
+                self._session("w2", idle_minutes=0.75),
                 self._session("q1", idle_minutes=10.0),
             ],
         )
