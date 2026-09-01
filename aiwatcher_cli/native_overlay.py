@@ -655,10 +655,11 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         return (mark, blueRing, inkRing)
     }
 
-    // One row per waiting session, but only once there is a queue to draw:
-    // a single waiting session keeps the original one-line layout.
+    // One row per waiting session, a single one included: the row is where
+    // the wants tag and the per-row Return live, and a lone blocked session
+    // deserves both as much as a queue does.
     var visibleWaitingRows: Int {
-        if stateName != "session_waiting" || waitingRowTexts.count < 2 {
+        if stateName != "session_waiting" || waitingRowTexts.isEmpty {
             return 0
         }
         return min(waitingRowTexts.count, maxWaitingRows)
@@ -2599,9 +2600,10 @@ def run_native_presence(
         }
 
     def visible_waiting_rows() -> int:
-        # One row per waiting session, but only once there is a queue to draw:
-        # a single waiting session keeps the original one-line layout.
-        if state_var.get() != "session_waiting" or len(waiting_row_texts) < 2:
+        # One row per waiting session, a single one included: the row is where
+        # the wants tag and the per-row Return live, and a lone blocked
+        # session deserves both as much as a queue does.
+        if state_var.get() != "session_waiting" or not waiting_row_texts:
             return 0
         return min(len(waiting_row_texts), max_waiting_rows)
 
