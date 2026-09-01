@@ -19,7 +19,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
-from . import analyst, prompt_signals
+from . import analyst, prompt_signals, statusline
 from .cli import (
     SEARCH_RANK_FIELDS,
     SEARCH_RANK_TOPIC,
@@ -58,6 +58,7 @@ from .local_state import (
     get_watcher_status,
     outcome_counts,
     outcomes_for_sessions,
+    recent_ambient_interventions,
     recent_command_decisions,
     recent_handoff_decisions,
     recent_interventions,
@@ -5508,6 +5509,123 @@ def _presence_block(rows: list[SessionPresence]) -> dict[str, object]:
     return {**counts, "measurable": True, "reason": None, "line": line}
 
 
+# Latest-turn transcript reads keyed by source_path; the value is the
+# session's updated_at stamp plus the tokens read then (0 = read but not
+# measurable). A session only changes its transcript when it writes, and
+# writing moves updated_at, so a hit means the 13ms parse can be skipped.
+_PRESSURE_TRANSCRIPT_CACHE: dict[str, tuple[str, int]] = {}
+
+_TRANSIENT_SIGNAL_KINDS = {"loop", "velocity", "runway", "usage_pressure"}
+_TRANSIENT_SIGNAL_LABELS = {
+    "loop": "Possible loop",
+    "velocity": "Velocity spike",
+    "runway": "Runway low",
+    "usage_pressure": "Usage pressure",
+}
+# A signal older than the live window belongs to a session presumed gone;
+# a chip for it would be an alarm about nothing the user can still act on.
+RECENT_SIGNAL_WINDOW_MINUTES = LIVE_WINDOW_MINUTES
+
+
+def _pressure_block(rows: list[SessionPresence], sessions: list[LocalSession]) -> dict[str, object]:
+    """Context pressure of the session being worked in, for the resting bar.
+
+    The label asks: "how close is this session's latest turn to the per-turn
+    limit where a Fresh Start gets recommended?" Unit and scope: billed input
+    tokens on the latest single turn of the most recently active *working*
+    session -- per-turn, never a cumulative session total under a per-turn
+    label. Compared against CRITICAL_TOKENS_PER_TURN, the same constant the
+    runway chart and statusline read, so the surfaces cannot disagree.
+    Freshness comes from statusline.read_transcript (one file, ~13ms), cached
+    on the session's updated_at rather than served from the 6-hour summary
+    cache. When the input is missing -- no working session, a cumulative-total
+    source, an unreadable transcript -- the block says so and the widgets draw
+    no meter, never a zero.
+    """
+    working = [
+        row for row in rows
+        if row.state == "working" and row.measurable and not row.analyst_run
+    ]
+    if not working:
+        return {"available": False, "reason": "no working session right now"}
+    target = working[0]
+    # Looked up in the rows this poll already holds, not via _find_session_row:
+    # that helper falls back to a full rescan, which has no place on a 3-second
+    # poll path.
+    session = next((row for row in sessions if row.session_id == target.session_id), None)
+    if session is None or not session.source_path:
+        return {"available": False, "reason": "session transcript not tracked"}
+    if has_cumulative_totals(session):
+        return {
+            "available": False,
+            "reason": "this tool reports cumulative totals, not per-turn context",
+        }
+    stamp = session.updated_at.isoformat() if session.updated_at else ""
+    cached = _PRESSURE_TRANSCRIPT_CACHE.get(session.source_path)
+    if cached is not None and cached[0] == stamp:
+        latest = cached[1]
+    else:
+        stats = statusline.read_transcript(session.source_path)
+        latest = int(stats.get("latest_context") or 0) if stats.get("available") else 0
+        if len(_PRESSURE_TRANSCRIPT_CACHE) > 32:
+            _PRESSURE_TRANSCRIPT_CACHE.clear()
+        _PRESSURE_TRANSCRIPT_CACHE[session.source_path] = (stamp, latest)
+    if latest <= 0:
+        return {"available": False, "reason": "no per-turn usage recorded in this session yet"}
+    severity = (
+        "critical" if latest >= CRITICAL_TOKENS_PER_TURN
+        else "warning" if latest >= PRESSURE_TOKENS_PER_TURN
+        else "ok"
+    )
+    pct = round(100 * latest / CRITICAL_TOKENS_PER_TURN)
+    return {
+        "available": True,
+        "reason": None,
+        "session_id": target.session_id,
+        "latest_turn_tokens": latest,
+        "pct_of_turn_limit": pct,
+        "severity": severity,
+        "label": f"{compact_int(latest)} · {pct}% of turn limit",
+    }
+
+
+def _recent_signal_block() -> dict[str, object] | None:
+    """The most recent overlay-only signal, so the bar can catch a missed one.
+
+    Loop, velocity, runway and usage-pressure nudges live in a 20-second
+    transient overlay; step away and the signal is gone. Every such nudge
+    already persists an ambient-intervention record, so the bar carries the
+    newest one inside the live window as a passive chip. Recency, not truth:
+    the chip says "this fired Nm ago", which stays true after the fact, rather
+    than re-asserting a condition nobody has re-measured.
+    """
+    now = datetime.now(timezone.utc)
+    for record in recent_ambient_interventions(limit=20):
+        kind = str(record.get("signal_kind") or "")
+        if kind not in _TRANSIENT_SIGNAL_KINDS:
+            continue
+        stamp = _parse_iso_datetime(record.get("updated_at") or record.get("created_at"))
+        if stamp is None:
+            continue
+        age = (now - stamp).total_seconds()
+        if age < 0 or age > RECENT_SIGNAL_WINDOW_MINUTES * 60:
+            continue
+        session_id = str(record.get("session_id") or "")
+        minutes = int(age // 60)
+        urls = record.get("urls") if isinstance(record.get("urls"), dict) else {}
+        return {
+            "kind": kind,
+            "label": _TRANSIENT_SIGNAL_LABELS.get(kind, kind),
+            "chip": f"{kind} {minutes}m" if minutes else f"{kind} now",
+            "minutes_ago": minutes,
+            "severity": str(record.get("severity") or "warning"),
+            "session_id": session_id,
+            "url": str(urls.get("dashboard") or "")
+            or (f"/?session={quote(session_id, safe='')}" if session_id else "/"),
+        }
+    return None
+
+
 def build_companion_state() -> dict[str, object]:
     """Small, fast state contract for the always-available Companion surface."""
     summary = build_summary_cached(7)
@@ -5525,7 +5643,8 @@ def build_companion_state() -> dict[str, object]:
         waiting_signals = session_waiting_signals()
     except OSError:
         waiting_signals = {}
-    presence_rows = presence_for_sessions(_cached_session_rows(), waiting=waiting_signals)
+    session_rows = _cached_session_rows()
+    presence_rows = presence_for_sessions(session_rows, waiting=waiting_signals)
     base = {
         "state": "watching",
         "label": "Watching quietly",
@@ -5543,6 +5662,8 @@ def build_companion_state() -> dict[str, object]:
         "console_url": "/",
         "detail": "Local-only. No prompt or source text is shown in the Companion.",
         "presence": _presence_block(presence_rows),
+        "pressure": _pressure_block(presence_rows, session_rows),
+        "recent_signal": _recent_signal_block(),
     }
     try:
         gate = active_prompt_gate()

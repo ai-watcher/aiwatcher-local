@@ -203,6 +203,26 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("create_text(\n                34, 10, text=str(waiting_count)", tk_source)
         self.assertIn("visible_waiting_rows() == 0", tk_source)
 
+    def test_presence_bars_draw_the_meter_and_missed_signal_chip(self) -> None:
+        # The meter draws only when the payload says the number is measurable
+        # -- unmeasurable must not render as an empty bar -- and the chip
+        # borrows Plan/Ask's slot only outside attention states.
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn('json["pressure"]', mac)
+        self.assertIn('json["recent_signal"]', mac)
+        self.assertIn("let showMeter = pressureAvailable", mac)
+        self.assertIn("@objc func openSignal", mac)
+        self.assertIn("!signalChipText.isEmpty && !attention", mac)
+        # The fill clamps at 100%; the percent label does not: a 250K turn is
+        # past the limit and the number should say so.
+        self.assertIn("min(max(pressurePct, 0), 100)", mac)
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn('payload.get("pressure")', tk_source)
+        self.assertIn('payload.get("recent_signal")', tk_source)
+        self.assertIn("def open_signal", tk_source)
+        self.assertIn("pressure_available_var.get() and not collapsed.get()", tk_source)
+
     def test_tk_presence_opens_dashboard_and_prompt_without_session_claim(self) -> None:
         source = inspect.getsource(native_overlay.run_native_presence)
 

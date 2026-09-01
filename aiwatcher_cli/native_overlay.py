@@ -604,9 +604,19 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var waitingURLs: [String] = []
     var waitingCount = 0
     var detailText = ""
+    var pressureAvailable = false
+    var pressurePct = 0
+    var pressureSeverity = "ok"
+    var pressureLabel = ""
+    var signalChipText = ""
+    var signalURL = ""
     var rowDots: [NSView] = []
     var rowLabels: [NSTextField] = []
     var rowButtons: [NSButton] = []
+    var meterTrack: NSView!
+    var meterFill: NSView!
+    var meterLabel: NSTextField!
+    var signalButton: NSButton!
     let expandedWidth: CGFloat = 560
     let headerHeight: CGFloat = 58
     let rowHeight: CGFloat = 34
@@ -832,6 +842,35 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             rowButtons.append(button)
         }
 
+        // Context-pressure meter for the resting state: the one graphic the
+        // bar carries. A meter, not a chart -- position against the per-turn
+        // limit is readable at a glance where a trend line is not.
+        meterTrack = NSView(frame: .zero)
+        meterTrack.wantsLayer = true
+        meterTrack.layer?.cornerRadius = 2.5
+        meterTrack.layer?.backgroundColor = NSColor(calibratedRed: 0.16, green: 0.20, blue: 0.27, alpha: 1).cgColor
+        meterTrack.isHidden = true
+        rootView.addSubview(meterTrack)
+        meterFill = NSView(frame: .zero)
+        meterFill.wantsLayer = true
+        meterFill.layer?.cornerRadius = 2.5
+        meterTrack.addSubview(meterFill)
+        meterLabel = NSTextField(labelWithString: "")
+        meterLabel.font = NSFont.systemFont(ofSize: 8, weight: .semibold)
+        meterLabel.isHidden = true
+        rootView.addSubview(meterLabel)
+
+        // Missed-nudge chip: the overlay-only signals (loop, velocity, runway,
+        // usage pressure) vanish with the 20-second panel; the chip is where a
+        // missed one lands. It borrows Plan/Ask's slot -- both remain a click
+        // away in the Console, a recent signal is not.
+        signalButton = NSButton(title: "", target: self, action: #selector(openSignal))
+        signalButton.bezelStyle = .rounded
+        signalButton.controlSize = .small
+        signalButton.contentTintColor = NSColor(calibratedRed: 0.94, green: 0.62, blue: 0.15, alpha: 1)
+        signalButton.isHidden = true
+        rootView.addSubview(signalButton)
+
         setCollapsed(true)
         window.orderFrontRegardless()
         updateAppearance()
@@ -847,6 +886,12 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         let index = sender.tag
         guard index >= 0, index < waitingURLs.count else { return }
         openURL(waitingURLs[index])
+        scheduleAutoCollapse(after: 1.5)
+    }
+
+    @objc func openSignal() {
+        guard !signalURL.isEmpty else { return }
+        openURL(signalURL)
         scheduleAutoCollapse(after: 1.5)
     }
 
@@ -1202,6 +1247,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             for view in rowDots { view.isHidden = true }
             for label in rowLabels { label.isHidden = true }
             for button in rowButtons { button.isHidden = true }
+            meterTrack.isHidden = true
+            meterLabel.isHidden = true
+            signalButton.isHidden = true
             collapsedMarkView.isHidden = false
             collapsedBadge.isHidden = waitingCount <= 0
             expandButton.isHidden = false
@@ -1225,8 +1273,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         // With a queue on screen each row carries its own Open button, so the
         // single primary would only duplicate the first row's.
         let showPrimary = hasPrimaryAction() && rowsShown == 0
-        planButton.isHidden = attention
-        askButton.isHidden = attention
+        let showChip = !signalChipText.isEmpty && !attention
+        planButton.isHidden = attention || showChip
+        askButton.isHidden = attention || showChip
         scanButton.isHidden = attention
         consoleButton.isHidden = false
         collapseButton.isHidden = false
@@ -1240,6 +1289,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         continueButton.isHidden = !showContinue
         skipButton.isHidden = !showSkip
         if attention {
+            meterTrack.isHidden = true
+            meterLabel.isHidden = true
+            signalButton.isHidden = true
             titleLabel.frame = NSRect(x: 66, y: 31 + yOff, width: 170, height: 17)
             subtitleLabel.frame = NSRect(x: 66, y: 12 + yOff, width: 170, height: 16)
             primaryButton.frame = NSRect(x: 250, y: 15 + yOff, width: 112, height: 28)
@@ -1260,8 +1312,34 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         } else {
+            let showMeter = pressureAvailable
             titleLabel.frame = NSRect(x: 66, y: 31 + yOff, width: 220, height: 17)
-            subtitleLabel.frame = NSRect(x: 66, y: 12 + yOff, width: 238, height: 16)
+            subtitleLabel.frame = NSRect(x: 66, y: 12 + yOff, width: showMeter ? 150 : 238, height: 16)
+            meterTrack.isHidden = !showMeter
+            meterLabel.isHidden = !showMeter
+            if showMeter {
+                // Fill clamps at 100%; the percent label does not. A 250K turn
+                // is past the limit, and the number should say so.
+                meterTrack.frame = NSRect(x: 222, y: 17 + yOff, width: 62, height: 5)
+                let clamped = min(max(pressurePct, 0), 100)
+                meterFill.frame = NSRect(x: 0, y: 0, width: 62.0 * CGFloat(clamped) / 100.0, height: 5)
+                let meterColor = pressureSeverity == "critical"
+                    ? NSColor(calibratedRed: 0.93, green: 0.42, blue: 0.14, alpha: 1)
+                    : (pressureSeverity == "warning"
+                        ? NSColor(calibratedRed: 0.94, green: 0.62, blue: 0.15, alpha: 1)
+                        : NSColor(calibratedRed: 0.35, green: 0.55, blue: 0.98, alpha: 1))
+                meterFill.layer?.backgroundColor = meterColor.cgColor
+                meterLabel.frame = NSRect(x: 288, y: 12 + yOff, width: 28, height: 14)
+                meterLabel.stringValue = "\(pressurePct)%"
+                meterLabel.textColor = meterColor
+                meterTrack.toolTip = pressureLabel
+                meterLabel.toolTip = pressureLabel
+            }
+            signalButton.isHidden = !showChip
+            if showChip {
+                signalButton.title = signalChipText
+                signalButton.frame = NSRect(x: 318, y: 15 + yOff, width: 100, height: 28)
+            }
             planButton.frame = NSRect(x: 318, y: 15 + yOff, width: 48, height: 28)
             askButton.frame = NSRect(x: 370, y: 15 + yOff, width: 46, height: 28)
             scanButton.frame = NSRect(x: 420, y: 15 + yOff, width: 52, height: 28)
@@ -1386,6 +1464,18 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         }
         let presence = json["presence"] as? [String: Any]
         self.waitingCount = presence?["waiting"] as? Int ?? self.waitingRowTexts.count
+        let pressure = json["pressure"] as? [String: Any]
+        self.pressureAvailable = pressure?["available"] as? Bool ?? false
+        self.pressurePct = pressure?["pct_of_turn_limit"] as? Int ?? 0
+        self.pressureSeverity = pressure?["severity"] as? String ?? "ok"
+        self.pressureLabel = pressure?["label"] as? String ?? ""
+        if let signal = json["recent_signal"] as? [String: Any] {
+            self.signalChipText = String((signal["chip"] as? String ?? "").prefix(14))
+            self.signalURL = absoluteURL((signal["url"] as? String) ?? "/")
+        } else {
+            self.signalChipText = ""
+            self.signalURL = ""
+        }
         self.titleLabel.stringValue = String((json["label"] as? String ?? "AIWatcher").prefix(18))
         var subtitleText = String((json["subtitle"] as? String ?? "Watching quietly").prefix(46))
         if incomingState == "prompt_gate", let remaining = json["expires_in_seconds"] as? Int, remaining >= 0 {
@@ -2019,6 +2109,11 @@ def run_native_presence(
     waiting_row_texts: list[str] = []
     waiting_row_urls: list[str] = []
     waiting_count_var = tk.IntVar(value=0)
+    pressure_available_var = tk.BooleanVar(value=False)
+    pressure_pct_var = tk.IntVar(value=0)
+    pressure_severity_var = tk.StringVar(value="ok")
+    signal_chip_var = tk.StringVar(value="")
+    signal_url_var = tk.StringVar(value="")
     drag = ttk.Label(frame, text="::", style="PresenceDrag.TLabel", cursor="fleur")
     drag.pack(side="left", padx=(0, 6))
     # The brand mark sits beside both lines of copy, as on the dashboard. The
@@ -2030,7 +2125,12 @@ def run_native_presence(
     title_stack = ttk.Frame(left, style="Presence.TFrame")
     title_stack.pack(anchor="w")
     ttk.Label(title_stack, textvariable=title_var, style="PresenceTitle.TLabel").pack(side="left")
-    ttk.Label(left, textvariable=subtitle_var, style="PresenceMuted.TLabel", wraplength=250).pack(anchor="w")
+    subtitle_row = ttk.Frame(left, style="Presence.TFrame")
+    subtitle_row.pack(anchor="w", fill="x")
+    ttk.Label(subtitle_row, textvariable=subtitle_var, style="PresenceMuted.TLabel", wraplength=250).pack(side="left")
+    # Context-pressure meter for the resting state: the one graphic the bar
+    # carries. Packed only while the payload says the number is measurable.
+    meter_canvas = tk.Canvas(subtitle_row, width=70, height=9, bg="#090d14", highlightthickness=0, bd=0)
 
     drag_start: dict[str, int] = {"x": 0, "y": 0}
 
@@ -2087,6 +2187,24 @@ def run_native_presence(
         except (TypeError, ValueError):
             waiting_count = 0
         waiting_count_var.set(waiting_count or len(waiting_row_texts))
+        pressure = payload.get("pressure")
+        if isinstance(pressure, dict) and pressure.get("available"):
+            pressure_available_var.set(True)
+            try:
+                pressure_pct_var.set(int(pressure.get("pct_of_turn_limit") or 0))
+            except (TypeError, ValueError, tk.TclError):
+                pressure_pct_var.set(0)
+            pressure_severity_var.set(str(pressure.get("severity") or "ok"))
+        else:
+            pressure_available_var.set(False)
+        signal = payload.get("recent_signal")
+        if isinstance(signal, dict) and signal.get("chip"):
+            signal_chip_var.set(str(signal.get("chip"))[:14])
+            signal_path = str(signal.get("url") or "/")
+            signal_url_var.set(signal_path if signal_path.startswith("http") else f"{url.rstrip('/')}{signal_path}")
+        else:
+            signal_chip_var.set("")
+            signal_url_var.set("")
         title_var.set(str(payload.get("label") or "AIWatcher")[:18])
         subtitle_text = str(payload.get("subtitle") or "Watching quietly")[:46]
         remaining = payload.get("expires_in_seconds")
@@ -2357,6 +2475,8 @@ def run_native_presence(
     primary_packed = tk.BooleanVar(value=True)
     rows_packed = tk.BooleanVar(value=False)
     rows_shown = tk.IntVar(value=0)
+    meter_packed = tk.BooleanVar(value=False)
+    signal_packed = tk.BooleanVar(value=False)
     auto_collapse_token = tk.IntVar(value=0)
     auto_collapse_deadline = tk.DoubleVar(value=0.0)
 
@@ -2398,6 +2518,12 @@ def run_native_presence(
     def open_waiting_row(index: int) -> None:
         if 0 <= index < len(waiting_row_urls):
             webbrowser.open(waiting_row_urls[index])
+            schedule_auto_collapse(1500)
+
+    def open_signal() -> None:
+        target = signal_url_var.get().strip()
+        if target:
+            webbrowser.open(target)
             schedule_auto_collapse(1500)
 
     def apply_waiting_rows() -> None:
@@ -2506,20 +2632,49 @@ def run_native_presence(
         # With a queue on screen each row carries its own Open button, so the
         # single primary would only duplicate the first row's.
         should_show_primary = attention_layout and visible_waiting_rows() == 0
-        if attention_layout:
+        # The missed-nudge chip borrows Plan/Ask's slot -- both remain a click
+        # away in the Console, a recent signal is not.
+        show_chip = bool(signal_chip_var.get()) and not attention_layout and not collapsed.get()
+        hide_plan_ask = attention_layout or show_chip
+        if show_chip and not signal_packed.get():
+            signal_button.pack(side="left", padx=(8, 4), before=scan_button)
+            signal_packed.set(True)
+        elif not show_chip and signal_packed.get():
+            signal_button.pack_forget()
+            signal_packed.set(False)
+        if pressure_available_var.get() and not collapsed.get():
+            if not meter_packed.get():
+                meter_canvas.pack(side="left", padx=(8, 0))
+                meter_packed.set(True)
+            meter_canvas.configure(bg="#090d14")
+            meter_canvas.delete("all")
+            pct = max(0, min(100, int(pressure_pct_var.get() or 0)))
+            meter_colour = {"critical": "#ed6a24", "warning": "#ef9f27"}.get(
+                pressure_severity_var.get(), "#4f83f0",
+            )
+            meter_canvas.create_rectangle(0, 2, 62, 7, fill="#2a3342", outline="")
+            if pct:
+                meter_canvas.create_rectangle(0, 2, int(62 * pct / 100), 7, fill=meter_colour, outline="")
+        elif meter_packed.get():
+            meter_canvas.pack_forget()
+            meter_packed.set(False)
+        # Repacked right-to-left, each anchored to the nearest button that is
+        # actually packed: `before=` a forgotten widget is a TclError, and both
+        # the chip and the attention layout can leave ask or scan unpacked.
+        if hide_plan_ask:
+            if ask_packed.get():
+                ask_button.pack_forget()
+                ask_packed.set(False)
+        elif not collapsed.get() and not ask_packed.get():
+            ask_button.pack(side="left", padx=(0, 4), before=scan_button if scan_packed.get() else console_button)
+            ask_packed.set(True)
+        if hide_plan_ask:
             if plan_packed.get():
                 plan_button.pack_forget()
                 plan_packed.set(False)
         elif not collapsed.get() and not plan_packed.get():
             plan_button.pack(side="left", padx=(8, 4), before=ask_button)
             plan_packed.set(True)
-        if attention_layout:
-            if ask_packed.get():
-                ask_button.pack_forget()
-                ask_packed.set(False)
-        elif not collapsed.get() and not ask_packed.get():
-            ask_button.pack(side="left", padx=(0, 4), before=scan_button)
-            ask_packed.set(True)
         if attention_layout:
             if scan_packed.get():
                 scan_button.pack_forget()
@@ -2589,6 +2744,9 @@ def run_native_presence(
             waiting_row_texts.clear()
             waiting_row_urls.clear()
             waiting_count_var.set(0)
+            pressure_available_var.set(False)
+            signal_chip_var.set("")
+            signal_url_var.set("")
         finally:
             update_attention_style()
             schedule_auto_collapse(10000 if has_primary_action() else 4000)
@@ -2610,6 +2768,7 @@ def run_native_presence(
     console_button = ttk.Button(frame, text="UI", width=4, style="Presence.TButton", command=open_dashboard)
     console_button.pack(side="left")
     ttk.Button(frame, text="-", width=2, style="PresenceMini.TButton", command=toggle_collapsed).pack(side="left", padx=(4, 0))
+    signal_button = ttk.Button(frame, textvariable=signal_chip_var, width=10, style="Presence.TButton", command=open_signal)
     rows_frame = ttk.Frame(root, style="Presence.TFrame")
     row_widgets: list[tuple[ttk.Frame, ttk.Label]] = []
     for row_index in range(max_waiting_rows):

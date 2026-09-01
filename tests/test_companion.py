@@ -529,6 +529,90 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
         self.assertIsNone(state["expires_in_seconds"])
 
 
+class CompanionPressureAndSignalTests(WaitingSessionCompanionTests):
+    """The meter and the missed-nudge chip: fresh numbers or honest absence."""
+
+    def _working_session(self, session_id="w1", *, source_path="/tmp/w1.jsonl", notes=()):
+        return LocalSession(
+            session_id=session_id,
+            tool="claude-code",
+            project_path="/repo/aiwatcher-local",
+            raw_cwd="/repo/aiwatcher-local",
+            updated_at=datetime.now(timezone.utc) - timedelta(seconds=20),
+            source_path=source_path,
+            notes=list(notes),
+        )
+
+    def test_pressure_reads_the_working_sessions_latest_turn(self):
+        ui._PRESSURE_TRANSCRIPT_CACHE.clear()
+        with patch.object(ui.statusline, "read_transcript", return_value={
+            "available": True, "latest_context": 158_000,
+        }) as read:
+            state = self._state(self._summary(), sessions=[self._working_session()])
+        pressure = state["pressure"]
+        self.assertTrue(pressure["available"])
+        self.assertEqual(pressure["latest_turn_tokens"], 158_000)
+        self.assertEqual(pressure["severity"], "warning")
+        self.assertEqual(pressure["pct_of_turn_limit"], 79)
+        read.assert_called_once()
+
+    def test_pressure_is_cached_on_the_sessions_write_stamp(self):
+        # A transcript only changes when the session writes, and writing moves
+        # updated_at -- so two polls between writes must not parse it twice.
+        ui._PRESSURE_TRANSCRIPT_CACHE.clear()
+        session = self._working_session(source_path="/tmp/w-cache.jsonl")
+        with patch.object(ui.statusline, "read_transcript", return_value={
+            "available": True, "latest_context": 42_000,
+        }) as read:
+            self._state(self._summary(), sessions=[session])
+            self._state(self._summary(), sessions=[session])
+        read.assert_called_once()
+
+    def test_no_working_session_means_no_meter_not_a_zero(self):
+        state = self._state(self._summary(), sessions=[self._session("q", idle_minutes=12.0)])
+        self.assertFalse(state["pressure"]["available"])
+        self.assertTrue(state["pressure"]["reason"])
+
+    def test_cumulative_total_sources_refuse_the_per_turn_label(self):
+        # Instance 1 and 2 of the recurring defect: a cumulative number under a
+        # per-turn label. The Codex-DB path reports running totals, so the
+        # meter must decline rather than divide the wrong number.
+        ui._PRESSURE_TRANSCRIPT_CACHE.clear()
+        session = self._working_session(notes=["cumulative totals from thread"])
+        with patch.object(ui.statusline, "read_transcript") as read:
+            state = self._state(self._summary(), sessions=[session])
+        self.assertFalse(state["pressure"]["available"])
+        self.assertIn("cumulative", state["pressure"]["reason"])
+        read.assert_not_called()
+
+    def _signal_record(self, kind="loop", *, minutes_ago=8.0, severity="warning"):
+        stamp = (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).isoformat()
+        return {
+            "signal_kind": kind, "updated_at": stamp, "severity": severity,
+            "session_id": "sess-loop", "urls": {"dashboard": "/?session=sess-loop"},
+        }
+
+    def test_a_recent_overlay_only_signal_reaches_the_bar_as_a_chip(self):
+        with patch.object(ui, "recent_ambient_interventions", return_value=[self._signal_record()]):
+            state = self._state(self._summary(), sessions=[])
+        chip = state["recent_signal"]
+        self.assertEqual(chip["kind"], "loop")
+        self.assertEqual(chip["chip"], "loop 8m")
+        self.assertEqual(chip["url"], "/?session=sess-loop")
+
+    def test_stale_and_bar_native_signals_produce_no_chip(self):
+        # Older than the live window: the session is presumed gone, and a chip
+        # would be an alarm about nothing actionable. Bar-native kinds already
+        # have their own states and must not double-report.
+        records = [
+            self._signal_record("session_blocked", minutes_ago=1.0),
+            self._signal_record("loop", minutes_ago=45.0),
+        ]
+        with patch.object(ui, "recent_ambient_interventions", return_value=records):
+            state = self._state(self._summary(), sessions=[])
+        self.assertIsNone(state["recent_signal"])
+
+
 class WaitingWidgetAttentionTests(unittest.TestCase):
     """A state the widget does not know about renders calmly."""
 
