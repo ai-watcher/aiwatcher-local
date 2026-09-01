@@ -5897,6 +5897,19 @@ def build_companion_state() -> dict[str, object]:
     session_rows = _freshened_for_presence(_cached_session_rows())
     presence_rows = presence_for_sessions(session_rows, waiting=waiting_signals)
     _update_finished_notices(presence_rows)
+    finished_notices = _finished_rows(presence_rows)
+    finished_payload = [
+        {
+            "session_id": row.session_id,
+            "tool": tool_label(row.tool),
+            "project": _project_basename(row.project_path) or "this machine",
+            "finished_label": (
+                f"{int((time.time() - at) // 60)}m" if at <= time.time() - 60 else "now"
+            ),
+            "url": f"/?session={quote(row.session_id, safe='')}",
+        }
+        for at, row in finished_notices[:3]
+    ]
     _update_away_digest(session_rows, presence_rows)
     base = {
         "state": "watching",
@@ -5915,6 +5928,11 @@ def build_companion_state() -> dict[str, object]:
         "console_url": "/",
         "detail": "Local-only. No prompt or source text is shown in the Companion.",
         "presence": _presence_block(presence_rows),
+        # In the base payload, not only the finished state: the bubble's blue
+        # badge must survive whatever state owns the bar, or a finished
+        # session vanishes from the glanceable surface the moment anything
+        # else has the headline.
+        "finished_sessions": finished_payload,
         "pressure": _pressure_block(presence_rows, session_rows),
         "recent_signal": _recent_signal_block(),
     }
@@ -6068,14 +6086,18 @@ def build_companion_state() -> dict[str, object]:
             "detail": "Reconstructed from local records inside the gap. Dismiss clears this summary; the evidence stays in the dashboard.",
         }
 
-    # Below a blocked session -- blocked outranks done -- but above every
-    # fresh-start advisory: "it just finished, review it while your own
-    # context is fresh" is more timely than advice about context health.
-    # Calm on purpose: the widgets render this without the orange attention
-    # treatment, because "review when ready" is a different claim than
-    # "blocked on you".
-    finished_notices = _finished_rows(presence_rows)
-    if finished_notices:
+    # Below a blocked session -- blocked outranks done -- and below live work:
+    # the takeover only happens while nothing is working. Field report: with
+    # one session running and another freshly finished, the finished headline
+    # owned the bar for its whole 15 minutes and hid the running session's
+    # meter and totals -- old news masking live information. While anything
+    # works, the resting layout wins and the finished count rides its
+    # subtitle and the bubble's blue badge instead. Still above every
+    # fresh-start advisory, and calm on purpose: the widgets render this
+    # without the orange treatment, because "review when ready" is a
+    # different claim than "blocked on you".
+    presence_block = base["presence"] if isinstance(base["presence"], dict) else {}
+    if finished_notices and int(presence_block.get("working") or 0) == 0:
         finished_at, finished_row = finished_notices[0]
         minutes = int((time.time() - finished_at) // 60)
         ago = f"{minutes}m ago" if minutes else "just now"
@@ -6095,18 +6117,6 @@ def build_companion_state() -> dict[str, object]:
             "skip_label": "Skip",
             "skip_state": "session_finished",
             "skip_session_id": finished_id,
-            "finished_sessions": [
-                {
-                    "session_id": row.session_id,
-                    "tool": tool_label(row.tool),
-                    "project": _project_basename(row.project_path) or "this machine",
-                    "finished_label": (
-                        f"{int((time.time() - at) // 60)}m" if at <= time.time() - 60 else "now"
-                    ),
-                    "url": f"/?session={quote(row.session_id, safe='')}",
-                }
-                for at, row in finished_notices[:3]
-            ],
             "detail": "This session was working a moment ago and has gone quiet -- likely a completed turn awaiting review.",
         }
 
@@ -6348,6 +6358,12 @@ def build_companion_state() -> dict[str, object]:
         quiet_detail = f"{rollup}. {quiet_detail}"
     presence = base["presence"]
     quiet_subtitle = str(presence["line"]) if isinstance(presence, dict) else "Local Companion is running"
+    # Finished work that live work outranked still gets its line fragment,
+    # subject to the widgets' 46-character subtitle.
+    if finished_notices:
+        appended = f"{quiet_subtitle} · {len(finished_notices)} finished"
+        if len(appended) <= 46:
+            quiet_subtitle = appended
     return {
         **base,
         "state": "watching" if running else "offline",

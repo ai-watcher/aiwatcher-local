@@ -592,6 +592,21 @@ class CompanionFinishedTests(WaitingSessionCompanionTests):
         state = self._state(self._summary(), sessions=[self._session("q", idle_minutes=3.0)])
         self.assertEqual(state["state"], "watching")
 
+    def test_live_work_outranks_the_finished_notice(self):
+        # Field report: a finished headline owned the bar for its whole 15
+        # minutes and hid the running session's meter and totals. While
+        # anything is working, the resting layout wins and the finish rides
+        # the subtitle fragment and the bubble's badge instead.
+        self._state(self._summary(), sessions=[self._session("done-1", idle_minutes=0.25)])
+        sessions = [
+            self._session("done-1", idle_minutes=3.0),
+            self._session("busy", idle_minutes=0.25),
+        ]
+        state = self._state(self._summary(), sessions=sessions)
+        self.assertEqual(state["state"], "watching")
+        self.assertIn("1 finished", state["subtitle"])
+        self.assertEqual(len(state["finished_sessions"]), 1)
+
     def test_blocked_outranks_finished(self):
         self._state(self._summary(), sessions=[self._session("done-1", idle_minutes=0.5)])
         sessions = [
