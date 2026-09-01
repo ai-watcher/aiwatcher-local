@@ -89,6 +89,7 @@ from .runtime_attachment import (
 from .runtime_nudge import foreground_tool, presentation_for_signal
 from .session_presence import (
     LIVE_WINDOW_MINUTES,
+    SessionPresence,
     live_presence,
     presence_for_sessions,
     tool_label,
@@ -5267,9 +5268,87 @@ def answer_local_question(question: str, days: int = 7) -> dict[str, object]:
     )
 
 
+def _project_basename(path: object) -> str:
+    raw = str(path or "").rstrip("/")
+    return raw.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+
+
+def _waited_fragment(label: object) -> str:
+    # "waiting 12m" -> "12m". Under a minute the presence label is "waiting on
+    # you", and that fragment pastes into nonsense ("Claude · repo · on you"),
+    # so it becomes "" and callers drop the duration instead.
+    frag = str(label or "").replace("waiting ", "", 1).strip()
+    return "" if frag in {"", "on you"} else frag
+
+
+def _presence_block(rows: list[SessionPresence]) -> dict[str, object]:
+    """Live now-counts for the Companion's resting state.
+
+    The label these counts answer is "what is happening right now": sessions on
+    this machine classified this second, never the cached 7-day summary. Two
+    honesty rules shape the block. An AIWatcher Second Opinion spawn is left out
+    of the counts -- "1 working" must not be AIWatcher's own feature passing as
+    the user's work. And zero is two different answers: no snapshot yet means
+    "cannot see" (measurable false, with the reason), while a snapshot whose
+    sessions have all ended is a true, measured "no live sessions".
+    """
+    own = [row for row in rows if not row.analyst_run]
+    measured = [row for row in own if row.measurable]
+    counts = {"working": 0, "waiting": 0, "quiet": 0}
+    if not own:
+        return {
+            **counts,
+            "measurable": False,
+            "reason": "no local session snapshot yet",
+            "line": "Waiting for the first session scan",
+        }
+    if not measured:
+        reason = next((row.reason for row in own if row.reason), None)
+        return {
+            **counts,
+            "measurable": False,
+            "reason": reason or "sessions not measurable here",
+            "line": "Live sessions not measurable here",
+        }
+    for row in measured:
+        if row.state in counts:
+            counts[row.state] += 1
+    working, waiting, quiet = counts["working"], counts["waiting"], counts["quiet"]
+    if working or waiting:
+        line = f"{working} working · {waiting} waiting"
+        if waiting:
+            longest = max(
+                (row for row in measured if row.state == "waiting"),
+                key=lambda row: row.idle_seconds or 0.0,
+            )
+            frag = _waited_fragment(longest.label)
+            if frag:
+                line += f" {frag}"
+    elif quiet:
+        line = f"{quiet} quiet session{'s' if quiet != 1 else ''}"
+    else:
+        line = "No live sessions"
+    return {**counts, "measurable": True, "reason": None, "line": line}
+
+
 def build_companion_state() -> dict[str, object]:
     """Small, fast state contract for the always-available Companion surface."""
     summary = build_summary_cached(7)
+    # Presence is computed here, not read from `summary`. The summary is an
+    # aggregate about a seven-day window and is cached accordingly -- 45s in
+    # memory, six hours on disk -- which is correct for spend totals and wrong
+    # for a fact about this second. Served from that cache, "waiting on you"
+    # could be hours old, and the Companion would sit quiet through the wait it
+    # exists to report.
+    #
+    # presence_for_sessions rather than live_presence: this needs per-session
+    # states only, and live_presence also resolves working trees for the
+    # collision check, which shells out to git per directory.
+    try:
+        waiting_signals = session_waiting_signals()
+    except OSError:
+        waiting_signals = {}
+    presence_rows = presence_for_sessions(_cached_session_rows(), waiting=waiting_signals)
     base = {
         "state": "watching",
         "label": "Watching quietly",
@@ -5286,6 +5365,7 @@ def build_companion_state() -> dict[str, object]:
         "watch_url": "/",
         "console_url": "/",
         "detail": "Local-only. No prompt or source text is shown in the Companion.",
+        "presence": _presence_block(presence_rows),
     }
     try:
         gate = active_prompt_gate()
@@ -5302,12 +5382,22 @@ def build_companion_state() -> dict[str, object]:
                 mark_active_prompt_gate_seen(gate_id)
             except OSError:
                 pass
+        # Seconds until the gate auto-releases: unit is seconds-from-now for
+        # this one gate, recomputed on each poll so the widgets never tick a
+        # clock themselves. A missing or unparsable expires_at yields None, and
+        # the widgets show no countdown rather than an invented number.
+        gate_expires = _parse_iso_datetime(gate.get("expires_at"))
         return {
             **base,
             "state": "prompt_gate",
             "label": str(gate.get("workflow_label") or "Prompt Gate"),
             "title": "Prompt Gate",
             "subtitle": str(gate.get("workflow_reward") or f"{tool} {risk}-risk prompt waiting{score_label}."),
+            "expires_in_seconds": (
+                max(0, int((gate_expires - datetime.now(timezone.utc)).total_seconds()))
+                if gate_expires is not None
+                else None
+            ),
             "primary_label": "Review Gate",
             "primary_action": "open_prompt_gate",
             "primary_url": str(gate.get("url") or "/?view=prompt"),
@@ -5328,24 +5418,7 @@ def build_companion_state() -> dict[str, object]:
     # matching active session has a justified action". A blocked session is the
     # most justified action the product has, and until this branch existed it
     # was the one case the Companion sat quiet through.
-    # Computed here, not read from `summary`. The summary is an aggregate about
-    # a seven-day window and is cached accordingly -- 45s in memory, six hours
-    # on disk -- which is correct for spend totals and wrong for a fact about
-    # this second. Served from that cache, "waiting on you" could be hours old,
-    # and the Companion would sit quiet through the wait it exists to report.
-    #
-    # presence_for_sessions rather than live_presence: this only needs the
-    # waiting rows, and live_presence also resolves working trees for the
-    # collision check, which shells out to git per directory.
-    try:
-        waiting_signals = session_waiting_signals()
-    except OSError:
-        waiting_signals = {}
-    waiting_rows = [
-        row.to_json()
-        for row in presence_for_sessions(_cached_session_rows(), waiting=waiting_signals)
-        if row.state == "waiting"
-    ] if waiting_signals else []
+    waiting_rows = [row.to_json() for row in presence_rows if row.state == "waiting"]
     if waiting_rows:
         # Longest wait first: how long you have been the bottleneck is the part
         # worth reading, and with several waiting the count goes in the sentence
@@ -5353,18 +5426,17 @@ def build_companion_state() -> dict[str, object]:
         waiting_rows.sort(key=lambda row: float(row.get("idle_seconds") or 0.0), reverse=True)
         first = waiting_rows[0]
         session_id = str(first.get("session_id") or "")
-        waited = str(first.get("label") or "").replace("waiting ", "", 1).strip()
+        waited = _waited_fragment(first.get("label"))
         # Basename, not the path. The widget truncates its subtitle at 46
         # characters, and "/Users/dannylo/aiwatcher-local" spends thirty of them
         # on a prefix that is the same for every project the developer has --
         # measured on the real surface, where the project name was the part
         # being cut. The label above already says what is happening; this line
         # only has to say which session and for how long.
-        raw_project = str(first.get("project_path") or "").rstrip("/")
-        project = raw_project.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] or "this machine"
+        project = _project_basename(first.get("project_path")) or "this machine"
         tool = tool_label(str(first.get("tool") or ""))
         if len(waiting_rows) == 1:
-            subtitle = f"{tool} · {project}" + (f" · {waited}" if waited and waited != "on you" else "")
+            subtitle = f"{tool} · {project}" + (f" · {waited}" if waited else "")
         else:
             subtitle = f"{len(waiting_rows)} sessions · longest {waited or project}"
         return {
@@ -5382,7 +5454,25 @@ def build_companion_state() -> dict[str, object]:
             "primary_action": "open_url",
             "primary_session_id": session_id,
             "primary_url": f"/?session={quote(session_id, safe='')}" if session_id else "/",
-            "detail": "This session asked for permission and has done nothing since.",
+            # One pre-worded row per blocked session so the widgets can draw a
+            # queue instead of a headline. Worded here, once, because three
+            # clients (Swift, Tk, browser overlay) would otherwise each respell
+            # the same duration and path. Capped at three: the bar caps its
+            # rows there, and the count above already says the full total.
+            "waiting_sessions": [
+                {
+                    "session_id": str(row.get("session_id") or ""),
+                    "tool": tool_label(str(row.get("tool") or "")),
+                    "project": _project_basename(row.get("project_path")) or "this machine",
+                    "waited_label": _waited_fragment(row.get("label")),
+                    "idle_seconds": row.get("idle_seconds"),
+                    "url": f"/?session={quote(str(row.get('session_id') or ''), safe='')}",
+                }
+                for row in waiting_rows[:3]
+            ],
+            "detail": "This session asked for permission and has done nothing since."
+            if len(waiting_rows) == 1
+            else "These sessions asked for permission and have done nothing since.",
         }
 
     fresh_start_candidates = _fresh_start_context_candidates(summary)
@@ -5600,7 +5690,11 @@ def build_companion_state() -> dict[str, object]:
             }
     watcher = summary.get("watcher")
     running = isinstance(watcher, dict) and bool(watcher.get("running"))
-    quiet_subtitle = "Local Companion is running"
+    # The resting subtitle answers "what is happening now" (the presence line),
+    # not "what happened this week". The 7-day rollup is retrospective -- it
+    # does not change what the developer does in the next minute -- so it moves
+    # to `detail`, which the widgets surface as a tooltip.
+    rollup = None
     totals = summary.get("totals")
     if isinstance(totals, dict):
         window = str(totals.get("window_label") or "Last 7 days").replace("Last ", "", 1)
@@ -5613,14 +5707,19 @@ def build_companion_state() -> dict[str, object]:
         if tokens:
             parts.append(f"{tokens} tokens")
         if parts:
-            quiet_subtitle = f"{window}: " + " · ".join(parts)
+            rollup = f"{window}: " + " · ".join(parts)
+    quiet_detail = "AIWatcher will interrupt only when a matching active session has a justified action."
+    if rollup:
+        quiet_detail = f"{rollup}. {quiet_detail}"
+    presence = base["presence"]
+    quiet_subtitle = str(presence["line"]) if isinstance(presence, dict) else "Local Companion is running"
     return {
         **base,
         "state": "watching" if running else "offline",
         "label": "Watching quietly" if running else "Open AIWatcher",
         "subtitle": quiet_subtitle if running else "Companion state is available from the Dashboard",
         "primary_label": "Console" if running else "Open",
-        "detail": "AIWatcher will interrupt only when a matching active session has a justified action." if running else base["detail"],
+        "detail": quiet_detail if running else base["detail"],
     }
 
 

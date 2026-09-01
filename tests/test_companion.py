@@ -419,6 +419,116 @@ class WaitingSessionCompanionTests(unittest.TestCase):
         self.assertNotEqual(state["state"], "session_waiting")
 
 
+class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
+    """The additive phase-1 payload: live presence, a waiting queue, a countdown.
+
+    Subclassing borrows the _state/_session/_signal harness; the inherited
+    tests re-run here, which is harmless and keeps the fixtures in one place.
+    """
+
+    def test_the_resting_subtitle_is_the_presence_line(self):
+        # "What is happening now" replaces "what happened this week" on the
+        # resting surface; the rollup is retrospective and moves to the tooltip.
+        state = self._state(
+            self._summary(),
+            sessions=[
+                self._session("w1", idle_minutes=0.5),
+                self._session("w2", idle_minutes=1.0),
+                self._session("q1", idle_minutes=10.0),
+            ],
+        )
+        self.assertEqual(state["state"], "watching")
+        self.assertEqual(state["subtitle"], "2 working · 0 waiting")
+        presence = state["presence"]
+        self.assertTrue(presence["measurable"])
+        self.assertEqual(
+            (presence["working"], presence["waiting"], presence["quiet"]),
+            (2, 0, 1),
+        )
+
+    def test_every_state_carries_the_presence_block(self):
+        # The collapsed pill draws the waiting count in any state, so the block
+        # lives in the base payload, not one branch.
+        state = self._state(self._summary(), sessions=[self._session()], signals=self._signal())
+        self.assertEqual(state["state"], "session_waiting")
+        self.assertEqual(state["presence"]["waiting"], 1)
+
+    def test_the_waiting_queue_is_preworded_capped_and_longest_first(self):
+        sessions = [
+            self._session("s-short", project="/repo/billing-service", idle_minutes=4.0),
+            self._session("s-long", project="/repo/myapp", idle_minutes=17.0),
+            self._session("s-mid", project="/repo/infra", idle_minutes=9.0),
+            self._session("s-least", project="/repo/docs", idle_minutes=2.5),
+        ]
+        signals = {}
+        for session_id, minutes in (("s-short", 3.0), ("s-long", 15.0), ("s-mid", 7.0), ("s-least", 1.0)):
+            signals.update(self._signal(session_id, minutes_ago=minutes))
+        state = self._state(self._summary(), sessions=sessions, signals=signals)
+        queue = state["waiting_sessions"]
+        # Capped at three rows -- the count lives in the subtitle instead.
+        self.assertEqual(len(queue), 3)
+        self.assertIn("4 sessions", state["subtitle"])
+        self.assertEqual([row["session_id"] for row in queue], ["s-long", "s-mid", "s-short"])
+        first = queue[0]
+        self.assertEqual(first["tool"], ui.tool_label("claude-code"))
+        self.assertEqual(first["project"], "myapp")
+        self.assertEqual(first["waited_label"], "15m")
+        self.assertEqual(first["url"], "/?session=s-long")
+
+    def test_a_sub_minute_row_has_no_waited_label(self):
+        # Under a minute the presence label is "waiting on you"; a row must
+        # carry "" rather than the fragment "on you".
+        state = self._state(
+            self._summary(),
+            sessions=[self._session(idle_minutes=0.5)],
+            signals=self._signal(minutes_ago=0.3),
+        )
+        self.assertEqual(state["waiting_sessions"][0]["waited_label"], "")
+
+    def test_no_snapshot_is_cannot_see_not_nothing_running(self):
+        state = self._state(self._summary(), sessions=[])
+        presence = state["presence"]
+        self.assertFalse(presence["measurable"])
+        self.assertTrue(presence["reason"])
+        self.assertEqual(state["subtitle"], presence["line"])
+
+    def test_analyst_spawns_do_not_count_as_the_users_work(self):
+        rows = [
+            ui.SessionPresence(
+                session_id="own", tool="claude-code", state="working",
+                label="working", measurable=True, idle_seconds=10.0,
+            ),
+            ui.SessionPresence(
+                session_id="spawn", tool="claude-code", state="working",
+                label="working", measurable=True, idle_seconds=5.0, analyst_run=True,
+            ),
+        ]
+        self.assertEqual(ui._presence_block(rows)["working"], 1)
+
+    def test_all_quiet_reads_as_quiet_not_as_nothing(self):
+        state = self._state(self._summary(), sessions=[self._session("q", idle_minutes=12.0)])
+        self.assertEqual(state["subtitle"], "1 quiet session")
+
+    def test_the_prompt_gate_carries_its_countdown(self):
+        expires = datetime.now(timezone.utc) + timedelta(seconds=90)
+        state = self._state(
+            self._summary(), gate={
+                "id": "g1", "tool": "claude-code", "risk": "high",
+                "url": "/?view=prompt", "expires_at": expires.isoformat(),
+            },
+        )
+        self.assertEqual(state["state"], "prompt_gate")
+        self.assertTrue(85 <= state["expires_in_seconds"] <= 90)
+
+    def test_a_gate_without_expiry_shows_no_countdown(self):
+        # None, not zero: "no deadline recorded" must not render as "expired".
+        state = self._state(
+            self._summary(),
+            gate={"id": "g1", "tool": "claude-code", "risk": "high", "url": "/?view=prompt"},
+        )
+        self.assertIsNone(state["expires_in_seconds"])
+
+
 class WaitingWidgetAttentionTests(unittest.TestCase):
     """A state the widget does not know about renders calmly."""
 
