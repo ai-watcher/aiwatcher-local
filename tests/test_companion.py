@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from datetime import datetime, timedelta, timezone
@@ -311,12 +312,16 @@ class WaitingSessionCompanionTests(unittest.TestCase):
             "kind": "permission",
         }}
 
-    def _state(self, summary, *, sessions=(), signals=None, gate=None):
+    def _state(self, summary, *, sessions=(), signals=None, gate=None, return_available=False):
         with (
             patch.object(ui, "build_summary_cached", return_value=summary),
             patch.object(ui, "active_prompt_gate", return_value=gate),
             patch.object(ui, "_cached_session_rows", return_value=list(sessions)),
             patch.object(ui, "session_waiting_signals", return_value=signals or {}),
+            # Pinned rather than classified: the real helper reads the live
+            # process table, and whether a test machine happens to have a
+            # matching window must not decide what these tests assert.
+            patch.object(ui, "_waiting_row_return_available", return_value=return_available),
         ):
             return ui.build_companion_state()
 
@@ -599,6 +604,44 @@ class CompanionPressureAndSignalTests(WaitingSessionCompanionTests):
         self.assertEqual(chip["kind"], "loop")
         self.assertEqual(chip["chip"], "loop 8m")
         self.assertEqual(chip["url"], "/?session=sess-loop")
+
+    def test_a_reachable_single_session_gets_return_as_primary(self):
+        state = self._state(
+            self._summary(), sessions=[self._session("sess-1")],
+            signals=self._signal("sess-1"), return_available=True,
+        )
+        self.assertEqual(state["primary_label"], "Return")
+        self.assertEqual(state["primary_action"], "runtime_return")
+        # The dashboard stays one failure away: primary_url is the fallback
+        # the widgets open when the return reports it did not happen.
+        self.assertIn("sess-1", state["primary_url"])
+        self.assertTrue(state["waiting_sessions"][0]["return_available"])
+
+    def test_an_unreachable_session_keeps_open_session(self):
+        state = self._state(
+            self._summary(), sessions=[self._session("sess-1")],
+            signals=self._signal("sess-1"), return_available=False,
+        )
+        self.assertEqual(state["primary_label"], "Open session")
+        self.assertEqual(state["primary_action"], "open_url")
+        self.assertFalse(state["waiting_sessions"][0]["return_available"])
+
+    def test_return_availability_is_the_endpoints_own_gate(self):
+        # The row must never promise a jump /api/runtime-return would refuse,
+        # so the helper reads the same attachment.available the endpoint does.
+        ui._RUNTIME_PROCESS_CACHE = None
+        session = self._session("sess-1")
+        for available in (True, False):
+            with self.subTest(available=available), (
+                patch.object(ui, "safe_runtime_processes", return_value=[])
+            ), patch.object(
+                ui, "runtime_attachment_for_session",
+                return_value=SimpleNamespace(available=available),
+            ):
+                self.assertEqual(
+                    ui._waiting_row_return_available("sess-1", [session]), available,
+                )
+        self.assertFalse(ui._waiting_row_return_available("missing", [session]))
 
     def test_stale_and_bar_native_signals_produce_no_chip(self):
         # Older than the live window: the session is presumed gone, and a chip

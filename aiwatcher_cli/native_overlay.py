@@ -602,6 +602,8 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var pendingClipboardOverrideSessionID = ""
     var waitingRowTexts: [String] = []
     var waitingURLs: [String] = []
+    var waitingSessionIDs: [String] = []
+    var waitingReturnAvailable: [Bool] = []
     var waitingCount = 0
     var detailText = ""
     var pressureAvailable = false
@@ -885,8 +887,48 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     @objc func openWaitingRow(_ sender: NSButton) {
         let index = sender.tag
         guard index >= 0, index < waitingURLs.count else { return }
+        if index < waitingReturnAvailable.count, waitingReturnAvailable[index],
+           index < waitingSessionIDs.count, !waitingSessionIDs[index].isEmpty {
+            requestRuntimeReturn(sessionID: waitingSessionIDs[index], fallbackURL: waitingURLs[index])
+            return
+        }
         openURL(waitingURLs[index])
         scheduleAutoCollapse(after: 1.5)
+    }
+
+    // Asks the dashboard to focus the blocked tool. The honesty rule from the
+    // transient overlay applies here too: wait for the result, and on failure
+    // say why and open the session in AIWatcher -- never report a return that
+    // did not happen.
+    func requestRuntimeReturn(sessionID: String, fallbackURL: String) {
+        guard let url = URL(string: dashboardBaseURL + "/api/runtime-return") else {
+            openURL(fallbackURL)
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 4
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["session_id": sessionID])
+        subtitleLabel.stringValue = "Returning..."
+        URLSession.shared.dataTask(with: request) { data, _, _ in
+            var ok = false
+            var message = ""
+            if let data = data,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                ok = json["ok"] as? Bool ?? false
+                message = json["message"] as? String ?? ""
+            }
+            DispatchQueue.main.async {
+                if ok {
+                    self.subtitleLabel.stringValue = String((message.isEmpty ? "Opened your AI tool. Answer it there." : message).prefix(46))
+                } else {
+                    openURL(fallbackURL)
+                    self.subtitleLabel.stringValue = "No live return. Opened in AIWatcher."
+                }
+                self.scheduleAutoCollapse(after: 2.5)
+            }
+        }.resume()
     }
 
     @objc func openSignal() {
@@ -934,6 +976,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         }
         if primaryAction == "copy_fresh_start" && !primarySessionID.isEmpty {
             copyFreshStartFromCompanion()
+            return
+        }
+        if primaryAction == "runtime_return" && !primarySessionID.isEmpty {
+            requestRuntimeReturn(sessionID: primarySessionID, fallbackURL: primaryURL)
             return
         }
         if primaryAction == "open_prompt_gate" {
@@ -1356,9 +1402,14 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             rowDots[index].layer?.backgroundColor = (index == 0
                 ? NSColor(calibratedRed: 0.89, green: 0.29, blue: 0.29, alpha: 1)
                 : NSColor(calibratedRed: 0.94, green: 0.62, blue: 0.15, alpha: 1)).cgColor
-            rowLabels[index].frame = NSRect(x: 46, y: rowY + 9, width: 400, height: 17)
+            rowLabels[index].frame = NSRect(x: 46, y: rowY + 9, width: 396, height: 17)
             rowLabels[index].stringValue = index < waitingRowTexts.count ? waitingRowTexts[index] : ""
-            rowButtons[index].frame = NSRect(x: 458, y: rowY + 4, width: 58, height: 26)
+            let canReturn = index < waitingReturnAvailable.count && waitingReturnAvailable[index]
+            rowButtons[index].title = canReturn ? "Return" : "Open"
+            rowButtons[index].toolTip = canReturn
+                ? "Focus the blocked tool directly"
+                : "Tool window not reachable from here -- opens the session in AIWatcher"
+            rowButtons[index].frame = NSRect(x: 452, y: rowY + 4, width: 64, height: 26)
         }
     }
 
@@ -1461,6 +1512,12 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         }
         self.waitingURLs = waiting.prefix(maxWaitingRows).map { row in
             absoluteURL((row["url"] as? String) ?? "/")
+        }
+        self.waitingSessionIDs = waiting.prefix(maxWaitingRows).map { row in
+            (row["session_id"] as? String) ?? ""
+        }
+        self.waitingReturnAvailable = waiting.prefix(maxWaitingRows).map { row in
+            (row["return_available"] as? Bool) ?? false
         }
         let presence = json["presence"] as? [String: Any]
         self.waitingCount = presence?["waiting"] as? Int ?? self.waitingRowTexts.count
@@ -2108,6 +2165,8 @@ def run_native_presence(
     pending_clipboard_override_session_var = tk.StringVar(value="")
     waiting_row_texts: list[str] = []
     waiting_row_urls: list[str] = []
+    waiting_row_session_ids: list[str] = []
+    waiting_row_return: list[bool] = []
     waiting_count_var = tk.IntVar(value=0)
     pressure_available_var = tk.BooleanVar(value=False)
     pressure_pct_var = tk.IntVar(value=0)
@@ -2168,6 +2227,8 @@ def run_native_presence(
         state_var.set(incoming_state)
         waiting_row_texts.clear()
         waiting_row_urls.clear()
+        waiting_row_session_ids.clear()
+        waiting_row_return.clear()
         waiting_sessions = payload.get("waiting_sessions")
         if isinstance(waiting_sessions, list):
             for row in waiting_sessions[:max_waiting_rows]:
@@ -2181,6 +2242,8 @@ def run_native_presence(
                 waiting_row_texts.append(" · ".join(part for part in parts if part))
                 path = str(row.get("url") or "/")
                 waiting_row_urls.append(path if path.startswith("http") else f"{url.rstrip('/')}{path}")
+                waiting_row_session_ids.append(str(row.get("session_id") or ""))
+                waiting_row_return.append(bool(row.get("return_available")))
         presence = payload.get("presence")
         try:
             waiting_count = int(presence.get("waiting") or 0) if isinstance(presence, dict) else 0
@@ -2277,6 +2340,9 @@ def run_native_presence(
             return
         if primary_action_var.get() == "copy_fresh_start" and primary_session_id_var.get().strip():
             copy_fresh_start_from_companion()
+            return
+        if primary_action_var.get() == "runtime_return" and primary_session_id_var.get().strip():
+            request_runtime_return(primary_session_id_var.get().strip(), primary_url_var.get() or url)
             return
         if primary_action_var.get() == "open_prompt_gate":
             schedule_auto_collapse(1500)
@@ -2515,10 +2581,47 @@ def run_native_presence(
             return 0
         return min(len(waiting_row_texts), max_waiting_rows)
 
+    def request_runtime_return(session_id: str, fallback_url: str) -> None:
+        # The honesty rule from the transient overlay applies here too: wait
+        # for the result, and on failure say why and open the session in
+        # AIWatcher -- never report a return that did not happen.
+        subtitle_var.set("Returning...")
+        request = urllib.request.Request(
+            f"{url.rstrip('/')}/api/runtime-return",
+            data=json.dumps({"session_id": session_id}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        ok = False
+        message = ""
+        try:
+            with urllib.request.urlopen(request, timeout=4.0) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            if isinstance(result, dict):
+                ok = bool(result.get("ok"))
+                message = str(result.get("message") or "")
+        except (OSError, urllib.error.URLError, json.JSONDecodeError):
+            pass
+        if ok:
+            subtitle_var.set((message or "Opened your AI tool. Answer it there.")[:46])
+        else:
+            webbrowser.open(fallback_url)
+            subtitle_var.set("No live return. Opened in AIWatcher.")
+        schedule_auto_collapse(2500)
+
     def open_waiting_row(index: int) -> None:
-        if 0 <= index < len(waiting_row_urls):
-            webbrowser.open(waiting_row_urls[index])
-            schedule_auto_collapse(1500)
+        if not 0 <= index < len(waiting_row_urls):
+            return
+        if (
+            index < len(waiting_row_return)
+            and waiting_row_return[index]
+            and index < len(waiting_row_session_ids)
+            and waiting_row_session_ids[index]
+        ):
+            request_runtime_return(waiting_row_session_ids[index], waiting_row_urls[index])
+            return
+        webbrowser.open(waiting_row_urls[index])
+        schedule_auto_collapse(1500)
 
     def open_signal() -> None:
         target = signal_url_var.get().strip()
@@ -2530,9 +2633,11 @@ def run_native_presence(
         rows = 0 if collapsed.get() else visible_waiting_rows()
         for index in range(min(rows, len(waiting_row_texts))):
             row_widgets[index][1].configure(text=waiting_row_texts[index])
+            can_return = index < len(waiting_row_return) and waiting_row_return[index]
+            row_widgets[index][2].configure(text="Return" if can_return else "Open")
         if rows == rows_shown.get():
             return
-        for row_frame, _row_label in row_widgets:
+        for row_frame, _row_label, _row_button in row_widgets:
             row_frame.pack_forget()
         if rows_packed.get():
             rows_frame.pack_forget()
@@ -2743,6 +2848,8 @@ def run_native_presence(
             skip_project_var.set("")
             waiting_row_texts.clear()
             waiting_row_urls.clear()
+            waiting_row_session_ids.clear()
+            waiting_row_return.clear()
             waiting_count_var.set(0)
             pressure_available_var.set(False)
             signal_chip_var.set("")
@@ -2770,17 +2877,18 @@ def run_native_presence(
     ttk.Button(frame, text="-", width=2, style="PresenceMini.TButton", command=toggle_collapsed).pack(side="left", padx=(4, 0))
     signal_button = ttk.Button(frame, textvariable=signal_chip_var, width=10, style="Presence.TButton", command=open_signal)
     rows_frame = ttk.Frame(root, style="Presence.TFrame")
-    row_widgets: list[tuple[ttk.Frame, ttk.Label]] = []
+    row_widgets: list[tuple[ttk.Frame, ttk.Label, ttk.Button]] = []
     for row_index in range(max_waiting_rows):
         row_frame = ttk.Frame(rows_frame, padding=(14, 2), style="Presence.TFrame")
         ttk.Label(row_frame, text="●", style="PresenceDot.TLabel").pack(side="left", padx=(0, 6))
         row_label = ttk.Label(row_frame, text="", style="PresenceMuted.TLabel")
         row_label.pack(side="left", fill="x", expand=True)
-        ttk.Button(
-            row_frame, text="Open", width=6, style="Presence.TButton",
+        row_button = ttk.Button(
+            row_frame, text="Open", width=7, style="Presence.TButton",
             command=lambda index=row_index: open_waiting_row(index),
-        ).pack(side="right")
-        row_widgets.append((row_frame, row_label))
+        )
+        row_button.pack(side="right")
+        row_widgets.append((row_frame, row_label, row_button))
     # The collapsed state is a Loom-style bubble: the mark alone on a plain
     # white ground, no lettering and no border chrome. update_attention_style
     # repaints it, turning the mark's blue ring orange when attention is due.

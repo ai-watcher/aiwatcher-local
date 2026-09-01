@@ -5589,6 +5589,45 @@ def _pressure_block(rows: list[SessionPresence], sessions: list[LocalSession]) -
     }
 
 
+# One `ps` sweep per ~10s, not per 2-second poll: runtime attachment for the
+# queue rows needs the live process list, and which windows exist does not
+# change faster than this. Races between poller threads just refresh twice.
+_RUNTIME_PROCESS_CACHE: tuple[float, list[object]] | None = None
+_RUNTIME_PROCESS_TTL_SECONDS = 10.0
+
+
+def _cached_runtime_processes() -> list[object]:
+    global _RUNTIME_PROCESS_CACHE
+    now = time.monotonic()
+    cached = _RUNTIME_PROCESS_CACHE
+    if cached is not None and now - cached[0] < _RUNTIME_PROCESS_TTL_SECONDS:
+        return cached[1]
+    processes = list(safe_runtime_processes())
+    _RUNTIME_PROCESS_CACHE = (now, processes)
+    return processes
+
+
+def _waiting_row_return_available(session_id: str, sessions: list[LocalSession]) -> bool:
+    """Whether a queue row can offer a real Return instead of Open.
+
+    True means /api/runtime-return has something to perform for this session
+    -- the same attachment.available gate build_runtime_return applies -- so
+    the button never promises a jump the endpoint would refuse.
+    """
+    session = next((row for row in sessions if row.session_id == session_id), None)
+    if session is None:
+        return False
+    try:
+        attachment = runtime_attachment_for_session(
+            session,
+            state=session_state(session),
+            processes=_cached_runtime_processes(),
+        )
+    except OSError:
+        return False
+    return bool(attachment.available)
+
+
 def _recent_signal_block() -> dict[str, object] | None:
     """The most recent overlay-only signal, so the bar can catch a missed one.
 
@@ -5737,37 +5776,42 @@ def build_companion_state() -> dict[str, object]:
             subtitle = f"{tool} · {project}" + (f" · {waited}" if waited else "")
         else:
             subtitle = f"{len(waiting_rows)} sessions · longest {waited or project}"
+        # One pre-worded row per blocked session so the widgets can draw a
+        # queue instead of a headline. Worded here, once, because three
+        # clients (Swift, Tk, browser overlay) would otherwise each respell
+        # the same duration and path. Capped at three: the bar caps its
+        # rows there, and the count above already says the full total.
+        queue = [
+            {
+                "session_id": str(row.get("session_id") or ""),
+                "tool": tool_label(str(row.get("tool") or "")),
+                "project": _project_basename(row.get("project_path")) or "this machine",
+                "waited_label": _waited_fragment(row.get("label")),
+                "idle_seconds": row.get("idle_seconds"),
+                "url": f"/?session={quote(str(row.get('session_id') or ''), safe='')}",
+                "return_available": _waiting_row_return_available(
+                    str(row.get("session_id") or ""), session_rows,
+                ),
+            }
+            for row in waiting_rows[:3]
+        ]
+        # A reachable single session gets Return as the primary: the whole
+        # point of noticing a blocked session is answering it, and the tool
+        # window is one jump away. The dashboard stays the fallback -- the
+        # widgets open primary_url whenever the return reports failure, so
+        # the button never claims a jump that did not happen.
+        first_returnable = bool(queue and queue[0]["return_available"])
         return {
             **base,
             "state": "session_waiting",
             "label": "Waiting on you",
             "title": "Waiting on you",
             "subtitle": subtitle,
-            # Opens the session in the dashboard, which carries the Return
-            # control already. The widgets bind runtime-return to the Fresh
-            # Start path only, and adding an action to two UI toolkits -- one of
-            # them Swift that cannot be built or run here -- to save a click is
-            # a trade in the wrong direction.
-            "primary_label": "Open session",
-            "primary_action": "open_url",
+            "primary_label": "Return" if first_returnable else "Open session",
+            "primary_action": "runtime_return" if first_returnable else "open_url",
             "primary_session_id": session_id,
             "primary_url": f"/?session={quote(session_id, safe='')}" if session_id else "/",
-            # One pre-worded row per blocked session so the widgets can draw a
-            # queue instead of a headline. Worded here, once, because three
-            # clients (Swift, Tk, browser overlay) would otherwise each respell
-            # the same duration and path. Capped at three: the bar caps its
-            # rows there, and the count above already says the full total.
-            "waiting_sessions": [
-                {
-                    "session_id": str(row.get("session_id") or ""),
-                    "tool": tool_label(str(row.get("tool") or "")),
-                    "project": _project_basename(row.get("project_path")) or "this machine",
-                    "waited_label": _waited_fragment(row.get("label")),
-                    "idle_seconds": row.get("idle_seconds"),
-                    "url": f"/?session={quote(str(row.get('session_id') or ''), safe='')}",
-                }
-                for row in waiting_rows[:3]
-            ],
+            "waiting_sessions": queue,
             "detail": "This session asked for permission and has done nothing since."
             if len(waiting_rows) == 1
             else "These sessions asked for permission and have done nothing since.",

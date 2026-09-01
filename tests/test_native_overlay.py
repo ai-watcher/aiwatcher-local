@@ -223,6 +223,28 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("def open_signal", tk_source)
         self.assertIn("pressure_available_var.get() and not collapsed.get()", tk_source)
 
+    def test_presence_bars_return_to_the_blocked_tool_honestly(self) -> None:
+        # A queue row (or a lone session's primary) whose runtime attachment is
+        # reachable posts /api/runtime-return and reports the result; failure
+        # says so and opens the session in AIWatcher instead. Never a claimed
+        # jump that did not happen.
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn('"return_available"', mac)
+        self.assertIn("func requestRuntimeReturn(sessionID:", mac)
+        self.assertIn('primaryAction == "runtime_return"', mac)
+        self.assertIn('canReturn ? "Return" : "Open"', mac)
+        self.assertIn('"No live return. Opened in AIWatcher."', mac)
+        # The result is awaited, with a bounded timeout, off the main thread.
+        self.assertIn("request.timeoutInterval = 4", mac)
+        self.assertIn("DispatchQueue.main.async", mac)
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn("def request_runtime_return", tk_source)
+        self.assertIn('"runtime_return"', tk_source)
+        self.assertIn("return_available", tk_source)
+        self.assertIn('"Return" if can_return else "Open"', tk_source)
+        self.assertIn("No live return. Opened in AIWatcher.", tk_source)
+
     def test_tk_presence_opens_dashboard_and_prompt_without_session_claim(self) -> None:
         source = inspect.getsource(native_overlay.run_native_presence)
 
