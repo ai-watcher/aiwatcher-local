@@ -182,6 +182,10 @@ def _empty_state() -> dict[str, Any]:
         # is not agreeing to let it read your source.
         "analyst_contents": {},
         "analyst_runs": [],
+        # When the first-run screen was dismissed. One timestamp, not a flag:
+        # "never seen" and "seen on install day" are different facts, and a
+        # bare boolean cannot tell a fresh machine from a long-dismissed one.
+        "first_run_dismissed_at": None,
         "ui_server": None,
         "watcher_heartbeat": None,
         # One record per session, latest wins: {session_id: {at, tool, kind}}.
@@ -259,6 +263,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("ui_server", None)
     data.setdefault("watcher_heartbeat", None)
     data.setdefault("session_waiting", {})
+    data.setdefault("first_run_dismissed_at", None)
     return data
 
 
@@ -1959,3 +1964,26 @@ def record_always_allow_command_pattern(pattern_id: str) -> None:
         if pattern_id not in allowlist:
             allowlist.append(pattern_id)
         _save(data)
+
+
+def first_run_dismissed_at() -> str | None:
+    """When the first-run screen was dismissed, if it has been."""
+    try:
+        return _load().get("first_run_dismissed_at")
+    except StateReadError:
+        # Unreadable state is not "never dismissed". Re-showing onboarding
+        # because a file could not be parsed is worse than not showing it.
+        return datetime.now(timezone.utc).isoformat()
+
+
+def dismiss_first_run() -> str:
+    """Record that the first-run screen has been seen, so it does not return."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _locked_state():
+        data = _load()
+        if not data.get("first_run_dismissed_at"):
+            data["first_run_dismissed_at"] = now
+            _save(data)
+        else:
+            now = str(data["first_run_dismissed_at"])
+    return now

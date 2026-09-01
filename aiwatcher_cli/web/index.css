@@ -31,42 +31,271 @@
          was catching every node. */
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 
-      color-scheme: dark;
-      --bg: #070b11;
-      --surface: #101720;
-      --surface-raised: #151e2a;
-      --surface-hover: #1a2533;
-      --text: #f7f9fc;
-      --muted: #aab7c8;
-      --faint: #78869a;
-      --line: #263346;
-      --line-strong: #354963;
-      --green: #43d9a3;
-      --green-soft: rgba(67, 217, 163, .12);
-      --blue: #65a7ff;
-      --blue-soft: rgba(101, 167, 255, .14);
-      --cyan: #58d7e8;
-      --cyan-soft: rgba(88, 215, 232, .11);
-      --amber: #f2bf6b;
-      --amber-soft: rgba(242, 191, 107, .13);
-      --red: #f2778f;
-      --red-soft: rgba(242, 119, 143, .13);
-      --drawer-bg: #080d14;
-      --drawer-surface: #0e151f;
-      --drawer-ink: #111a26;
-      --drawer-line: rgba(148, 163, 184, .14);
-      --drawer-line-strong: rgba(133, 169, 220, .30);
-      --drawer-glow: rgba(101, 167, 255, .18);
       --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    /* ---- Palette: dark ---------------------------------------------------
+       Adminator v4, which is the palette the port study measured, with one
+       value deliberately not taken. Adminator ships --t-light #64748B; it is
+       slate-500, chosen to sit on white, and on its own --bg-card it measures
+       3.6:1. This dashboard's existing #78869a measures 4.63:1 on the same
+       ground, so the quiet tier keeps the value the app already validated.
+
+       Everything a theme can change lives here. Nothing below this block
+       names a colour.                                                       */
+    :root, :root[data-theme="dark"] {
+      color-scheme: dark;
+
+      --bg-body: #0B1120;
+      --bg-card: #141B2D;
+      --bg-muted: #1A2237;
+      --bg-hover: #1C2438;
+
+      --t-base: #F1F5F9;
+      --t-muted: #94A3B8;
+      --t-light: #78869a;
+
+      --border: #222C42;
+      /* Adminator has no strong tier -- its soft one runs the other way -- so
+         this keeps the value this dashboard validated. */
+      --border-strong: #354963;
+
+      --success: #34D399;  --success-soft: rgba(52,211,153,.12);
+      --primary: #60A5FA;  --primary-soft: rgba(96,165,250,.14);
+      --info:    #38BDF8;  --info-soft:    rgba(56,189,248,.11);
+      --warning: #FBBF24;  --warning-soft: rgba(251,191,36,.13);
+      --danger:  #F87171;  --danger-soft:  rgba(248,113,113,.13);
+
+      --sheet-bg: #080D18;
+      --sheet-surface: #101728;
+      --sheet-ink: #161E32;
+      --sheet-line: rgba(148,163,184,.14);
+      --sheet-line-strong: rgba(133,169,220,.30);
+      --sheet-glow: rgba(96,165,250,.18);
+
+      --blue-rgb: 96,165,250;
+      --green-rgb: 52,211,153;
+      --amber-rgb: 251,191,36;
+      --red-rgb: 248,113,113;
+      --cyan-rgb: 56,189,248;
+
+      /* The wash that lifts a card off the page. It inverts under light: a
+         white wash on a white card is absent, and 30 uses of it carry hover
+         and active feedback. */
+      --sheen-rgb: 255,255,255;
+      --shadow-rgb: 0,0,0;
+      --hairline-rgb: 148,163,184;
+      --hairline-lift-rgb: 133,169,220;
+      --well-rgb: 5,9,20;
+      --scrim-rgb: 11,17,32;
+
+      --tint-green-rgb: 15,42,32;
+      --tint-red-rgb: 43,20,20;
+      --blue-deep-rgb: 15,40,71;
+      --blue-mid-rgb: 47,111,189;
+      --blue-mid2-rgb: 49,108,180;
+      --blue-soft-rgb: 86,157,231;
+      --blue-pale-rgb: 147,197,253;
+      --blue-lift-rgb: 147,197,253;
+
+      --brand-blue: #0052F5;
+      --brand-ink:  #DCE6F6;
+
+      --text-bright: #DCE6F6;
+      --text-quiet: #BDC9D9;
+      --text-dim: #94A3B8;
+      --ground-deep: #080D18;
+      --ground-mid: #141B2D;
+      --ground-lift: #222C42;
+      --ink-deep-rgb: 8,13,24;
+      --ink-mid-rgb: 20,27,45;
+      --ink-lift-rgb: 42,55,75;
+      --surface-warning: #2B1F08;
+      --surface-danger: #2B1414;
+
+      --on-success: #A7F3D0;  --on-success-lift: #A7F3D0;
+      --on-success-quiet: #6EE7B7; --on-success-bright: #D1FAE5;
+      --on-warning: #FDE68A;  --on-warning-lift: #FDE68A;  --on-warning-bright: #FEF3C7;
+      --on-danger: #FECACA;   --on-danger-lift: #FECACA;   --on-danger-bright: #FEE2E2;
+      --on-brand: #BFDBFE;    --on-brand-lift: #BFDBFE;    --on-brand-bright: #DBEAFE;
+      --on-brand-quiet: #BFDBFE; --on-brand-action: #DBEAFE;
+
+      /* The handoff receipt is a light card inside a dark UI, so it reads as a
+         printed slip. Under light it has to invert the other way or the effect
+         is silently deleted. */
+      --invert-bg: #FFFFFF;   --invert-hover: #F8FAFC;
+      --invert-text: #0F172A; --invert-muted: #475569;
+      --invert-line: #CBD5E1; --invert-line-soft: #E2E8F0;
+      --invert-ink: #334155;  --invert-line-hover: #94A3B8;
+      --invert-tint: #EFF6FF; --invert-head: #1D4ED8;
+
+      --on-accent: #FFFFFF;
+      --btn-bg: #2563EB;      --btn-line: #60A5FA;
+      --btn-bg-hover: #1D4ED8; --btn-line-hover: #93C5FD;
+      --btn-line-quiet: #3B82F6; --btn-line-row: #3d6594;
+      --pulse-line: #93C5FD;  --accent-fallback: #60A5FA;
+      --metric-green-fallback: #059669;
+      --btn-line-hover-quiet: #475569;
+      --alert-red: #F87171;   --alert-amber: #FBBF24;
+    }
+
+    /* ---- Palette: light --------------------------------------------------
+       Not a mechanical inversion. Three groups had to be measured rather than
+       flipped, and the port study is where those numbers come from.
+
+       The quiet text tiers are darkened from what Adminator ships. Its
+       #64748B / #94A3B8 pair is measured against plain white, where the second
+       does not pass at all (2.56:1) -- and this dashboard puts quiet text on
+       wells and tinted rows far more than on white, which costs another half
+       stop.
+
+       The semantic hues drop a step because several are used as *text*, not
+       as fills: #10B981 on white is 2.54:1.
+
+       And the sheen inverts, or every hover state disappears.               */
+    :root[data-theme="light"] {
+      color-scheme: light;
+
+      --bg-body: #F0F4F8;
+      --bg-card: #FFFFFF;
+      --bg-muted: #F1F5F9;
+      --bg-hover: #F8FAFC;
+
+      --t-base: #1E293B;
+      --t-muted: #556174;
+      --t-light: #64707F;
+
+      --border: #E4E8EF;
+      --border-strong: #CBD5E1;
+
+      --success: #047857;  --success-soft: rgba(4,120,87,.10);
+      --primary: #2563EB;  --primary-soft: rgba(37,99,235,.10);
+      --info:    #0284C7;  --info-soft:    rgba(2,132,199,.10);
+      --warning: #B45309;  --warning-soft: rgba(180,83,9,.10);
+      /* red-700 rather than red-600: as *text* on the card ground the
+         lighter step measured 4.37:1, just under AA. */
+      --danger:  #B91C1C;  --danger-soft:  rgba(185,28,28,.10);
+
+      --sheet-bg: #E9EEF5;
+      --sheet-surface: #FFFFFF;
+      --sheet-ink: #F1F5F9;
+      --sheet-line: rgba(71,85,105,.16);
+      --sheet-line-strong: rgba(71,85,105,.30);
+      --sheet-glow: rgba(37,99,235,.16);
+
+      --blue-rgb: 37,99,235;
+      --green-rgb: 4,120,87;
+      --amber-rgb: 180,83,9;
+      --red-rgb: 185,28,28;
+      --cyan-rgb: 2,132,199;
+
+      /* Inverted: a dark wash, so a hover still reads as a change. */
+      --sheen-rgb: 15,23,42;
+      --shadow-rgb: 15,23,42;
+      --hairline-rgb: 71,85,105;
+      --hairline-lift-rgb: 71,85,105;
+      /* Adminator's --bg-muted rather than #E2E8F0. A recess only has to read
+         as a recess, and the darker value was the single biggest source of
+         contrast failures for quiet text sitting on it. */
+      --well-rgb: 241,245,249;
+      --scrim-rgb: 240,244,248;
+
+      --tint-green-rgb: 236,253,245;
+      --tint-red-rgb: 254,242,242;
+      --blue-deep-rgb: 239,246,255;
+      --blue-mid-rgb: 59,130,246;
+      --blue-mid2-rgb: 37,99,235;
+      --blue-soft-rgb: 37,99,235;
+      --blue-pale-rgb: 29,78,216;
+      --blue-lift-rgb: 37,99,235;
+
+      --brand-blue: #0052F5;
+      --brand-ink:  #141314;
+
+      --text-bright: #334155;
+      --text-quiet: #475569;
+      --text-dim: #64707F;
+      --ground-deep: #E9EEF5;
+      --ground-mid: #F1F5F9;
+      --ground-lift: #E2E8F0;
+      --ink-deep-rgb: 233,238,245;
+      --ink-mid-rgb: 241,245,249;
+      --ink-lift-rgb: 226,232,240;
+      --surface-warning: #FFFBEB;
+      --surface-danger: #FEF2F2;
+
+      /* Text on a semantic fill has to go dark here. A pale mint on a pale
+         mint tint is not low contrast, it is invisible. */
+      --on-success: #065F46;  --on-success-lift: #065F46;
+      --on-success-quiet: #047857; --on-success-bright: #064E3B;
+      --on-warning: #92400E;  --on-warning-lift: #92400E;  --on-warning-bright: #78350F;
+      --on-danger: #991B1B;   --on-danger-lift: #991B1B;   --on-danger-bright: #7F1D1D;
+      --on-brand: #1E40AF;    --on-brand-lift: #1E40AF;    --on-brand-bright: #1E3A8A;
+      --on-brand-quiet: #1D4ED8; --on-brand-action: #1E40AF;
+
+      /* The receipt inverts the other way: a dark slip on a light page. */
+      --invert-bg: #0F172A;   --invert-hover: #1E293B;
+      --invert-text: #F8FAFC; --invert-muted: #94A3B8;
+      --invert-line: #334155; --invert-line-soft: #1E293B;
+      --invert-ink: #CBD5E1;  --invert-line-hover: #475569;
+      --invert-tint: #1E293B; --invert-head: #93C5FD;
+
+      --on-accent: #FFFFFF;
+      --btn-bg: #2563EB;      --btn-line: #1D4ED8;
+      --btn-bg-hover: #1D4ED8; --btn-line-hover: #1E40AF;
+      --btn-line-quiet: #93C5FD; --btn-line-row: #BFDBFE;
+      --pulse-line: #2563EB;  --accent-fallback: #2563EB;
+      --metric-green-fallback: #047857;
+      --btn-line-hover-quiet: #94A3B8;
+      --alert-red: #B91C1C;   --alert-amber: #B45309;
+    }
+
+    /* ---- Aliases -------------------------------------------------------
+       The names the rest of this stylesheet and index.js already use, pointed
+       at the palette above. Names only, never values, so one alias block
+       serves every palette -- which is what lets a theme change touch one
+       block instead of two hundred rules.                                   */
+    :root {
+      --bg:             var(--bg-body);
+      --surface:        var(--bg-card);
+      --surface-raised: var(--bg-muted);
+      --surface-hover:  var(--bg-hover);
+
+      --text:  var(--t-base);
+      --muted: var(--t-muted);
+      --faint: var(--t-light);
+
+      --line:        var(--border);
+      --line-strong: var(--border-strong);
+
+      --green: var(--success);  --green-soft: var(--success-soft);
+      --blue:  var(--primary);  --blue-soft:  var(--primary-soft);
+      --cyan:  var(--info);     --cyan-soft:  var(--info-soft);
+      --amber: var(--warning);  --amber-soft: var(--warning-soft);
+      --red:   var(--danger);   --red-soft:   var(--danger-soft);
+
+      --drawer-bg:          var(--sheet-bg);
+      --drawer-surface:     var(--sheet-surface);
+      --drawer-ink:         var(--sheet-ink);
+      --drawer-line:        var(--sheet-line);
+      --drawer-line-strong: var(--sheet-line-strong);
+      --drawer-glow:        var(--sheet-glow);
+
+      /* The page ground, named once. The sticky header has to paint an opaque
+         copy of whatever is behind it, and a flat --bg was not that: the body
+         is a gradient, so at the top of the page it is nearer --ground-deep and
+         the header sat on it as a visible lighter strip. Substitution happens
+         where it is used, so this one declaration is correct in both themes. */
+      --page-ground:
+        radial-gradient(circle at 10% -10%, rgba(var(--cyan-rgb), .12), transparent 34%),
+        radial-gradient(circle at 82% 0%, rgba(var(--green-rgb), .08), transparent 30%),
+        linear-gradient(180deg, var(--ground-deep) 0%, var(--bg) 44%, var(--ground-deep) 100%);
     }
     * { box-sizing: border-box; }
     html { min-width: 320px; }
     body {
       margin: 0;
-      background:
-        radial-gradient(circle at 10% -10%, rgba(88,215,232,.12), transparent 34%),
-        radial-gradient(circle at 82% 0%, rgba(67,217,163,.08), transparent 30%),
-        linear-gradient(180deg, #0b1119 0%, var(--bg) 44%, #05080d 100%);
+      background: var(--page-ground);
       background-attachment: fixed;
       color: var(--text);
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -74,7 +303,14 @@
     }
     body.drawer-open { overflow: hidden; }
     main {
-      width: min(100%, 1780px);
+      /* The cap is set by the widest thing that has to fit, not by the widest
+         monitor. Content is this minus 192px of rail, 40px of gap and 72px of
+         padding, so 1520 leaves a 1216px column -- enough for the two-column
+         compositions and for a table to breathe, and not so much that a card
+         holding one paragraph stretches three times past it. At the old 1780
+         the column reached 1492px while --w-prose held text at 514, so most of
+         every prose card was empty. */
+      width: min(100%, 1520px);
       margin: 0 auto;
       padding: 28px 36px 32px;
       display: grid;
@@ -91,7 +327,11 @@
       position: sticky; top: 0; z-index: 20;
       display: flex; align-items: center; justify-content: space-between;
       gap: var(--sp-5); margin-bottom: var(--sp-3); padding: var(--sp-2) 0;
-      background: var(--bg); border-bottom: 1px solid var(--line);
+      /* The same ground as the body, and fixed to the viewport like it, so the
+         slice the header paints lines up with the slice it covers. Opaque,
+         because content scrolls underneath. */
+      background: var(--page-ground); background-attachment: fixed;
+      border-bottom: 1px solid var(--line);
     }
     h1 { font-size: var(--fs-5); margin: 0; letter-spacing: 0; line-height: 1.12; }
     /* A card title has to sit a step up the scale from the text under it, not
@@ -102,20 +342,29 @@
     h3 { margin: 0; font-size: var(--fs-4); line-height: 1.3; }
     p { color: var(--muted); line-height: 1.5; margin: 0; }
     .brand { display: flex; align-items: center; gap: var(--sp-3); min-width: 0; }
+    /* The mark stands on its own ground. It used to be an "AW" monogram in a
+       tinted, bordered tile -- a container the real mark does not need, and one
+       that put a second blue behind the ring's blue. Sized by height so the
+       rings keep their proportions; currentColor is what inverts the ink ring
+       between themes. */
     .brand-mark {
-      display: grid; place-items: center; width: 38px; height: 38px;
-      border: 1px solid rgba(112,167,255,.58); border-radius: var(--r-2);
-      background:
-        linear-gradient(135deg, rgba(88,215,232,.20), rgba(67,217,163,.16), rgba(101,167,255,.18)),
-        rgba(10,16,24,.88);
-      color: #e7f0ff; font-weight: var(--fw-bold);
-      box-shadow: inset 0 1px 0 rgba(255,255,255,.10), 0 14px 34px rgba(18,70,140,.18);
+      height: 34px; width: auto; flex: none;
+      color: var(--brand-ink);
     }
+    /* The wordmark. The artwork's typeface cannot be matched -- the dashboard
+       makes no external requests, so there is no webfont to reach for, and the
+       face is not one any system ships. What carries across is the weight and
+       the tracking, measured off the artwork at a 900px render: the stem of the
+       "I" is 0.26 of the cap height, which is a black weight. */
+    .wordmark { font-weight: var(--fw-bold); letter-spacing: -.015em; }
+    /* "Local" is a qualifier on the product, not part of the name, and is set to
+       read as one: same size, stepped down in weight and colour. */
+    .wordmark-local { font-weight: var(--fw-med); color: var(--muted); }
     .brand-copy { min-width: 0; }
     .brand-copy p { margin-top: 2px; font-size: var(--fs-2); }
     .status-badge {
-      display: inline-flex; align-items: center; gap: var(--sp-2); color: #c9f8e5;
-      border: 1px solid rgba(53,211,153,.32); background: var(--green-soft);
+      display: inline-flex; align-items: center; gap: var(--sp-2); color: var(--on-success-lift);
+      border: 1px solid rgba(var(--green-rgb), .32); background: var(--green-soft);
       border-radius: var(--r-pill); padding: 5px 9px; font-size: var(--fs-1); font-weight: var(--fw-med);
     }
     .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
@@ -158,9 +407,9 @@
       min-height: clamp(300px, calc(71vh - 250px), 760px);
       justify-content: space-between;
     }
-    .ambient[data-state="critical"] { border-color: rgba(242, 119, 143, .38); }
-    .ambient[data-state="warning"] { border-color: rgba(242, 191, 107, .34); }
-    .ambient[data-state="healthy"] { border-color: rgba(67, 217, 163, .28); }
+    .ambient[data-state="critical"] { border-color: rgba(var(--red-rgb), .38); }
+    .ambient[data-state="warning"] { border-color: rgba(var(--amber-rgb), .34); }
+    .ambient[data-state="healthy"] { border-color: rgba(var(--green-rgb), .28); }
     .ambient-top {
       display: flex;
       justify-content: space-between;
@@ -169,6 +418,26 @@
       font-family: var(--mono);
       font-size: var(--fs-2);
       color: var(--faint);
+      /* Two lines, reserved, for the same reason .ambient-say reserves three
+         ems below: the running and quiet states put different amounts of text
+         in this row, so without a reservation the surface moves by a line the
+         moment a session starts or stops under a reader who is not looking.
+
+         Measured against real local data. Laid out on one line, including the
+         freshness stamp and the space between the two columns, the row needs —
+
+             quiet ("no session running - last was claude-code")   429px
+             running, short path (". 1 of 3 live")                 458px
+             running, long path (". 1 of 13 live")                 667px
+
+         The container is 946px inside a 1280px window, so it narrows with the
+         window. Between roughly 1001px and 763px of window the running state
+         has wrapped to two lines and the quiet state has not -- that band is
+         ordinary working width, not an edge case, and this surface competes
+         with an editor for the screen. Two lines covers every case measured;
+         at 560px the longest running row still came to 28px against the quiet
+         state's 14px. */
+      min-height: 2.4em;
     }
     .ambient-top b { color: var(--muted); font-weight: var(--fw-normal); }
     .ambient-hero {
@@ -230,6 +499,11 @@
     @media (max-width: 560px) {
       .ambient { padding: 16px; }
       .ambient-hero { font-size: var(--fs-6); }
+      /* No deeper reservation here. An earlier draft of this change also named
+         the charted session in that row, which needed a third line at this
+         width; without it the longest running row measures 28px against the
+         quiet state's 14px, so the two lines reserved above already cover it
+         and a third would be reserved for text that cannot appear. */
     }
 
     .freshness {
@@ -289,10 +563,10 @@
       border: 1px solid var(--line); padding: 4px 8px; font-size: var(--fs-1); font-weight: var(--fw-bold);
       white-space: nowrap;
     }
-    .cache-pill.refreshing, .health-pill.review, .health-pill.warning, .session-state.recent { color: #ffe2a4; border-color: rgba(246,189,96,.45); background: var(--amber-soft); }
-    .cache-pill.fresh, .health-pill.healthy, .session-state.active { color: #bff5df; border-color: rgba(53,211,153,.45); background: var(--green-soft); }
-    .cache-pill.building, .cache-pill.stale, .health-pill.limited, .session-state.ended, .session-state.stale, .session-state.unknown { color: #dceaff; border-color: rgba(112,167,255,.45); background: var(--blue-soft); }
-    .health-pill.critical { color: #ffc4ce; border-color: rgba(242,125,143,.45); background: var(--red-soft); }
+    .cache-pill.refreshing, .health-pill.review, .health-pill.warning, .session-state.recent { color: var(--on-warning); border-color: rgba(var(--amber-rgb), .45); background: var(--amber-soft); }
+    .cache-pill.fresh, .health-pill.healthy, .session-state.active { color: var(--on-success); border-color: rgba(var(--green-rgb), .45); background: var(--green-soft); }
+    .cache-pill.building, .cache-pill.stale, .health-pill.limited, .session-state.ended, .session-state.stale, .session-state.unknown { color: var(--on-brand); border-color: rgba(var(--blue-rgb), .45); background: var(--blue-soft); }
+    .health-pill.critical { color: var(--on-danger); border-color: rgba(var(--red-rgb), .45); background: var(--red-soft); }
     button, select {
       border: 1px solid var(--line-strong);
       background: var(--surface-raised);
@@ -306,22 +580,22 @@
     select {
       padding-right: 34px;
       background:
-        linear-gradient(180deg, rgba(255,255,255,.025), transparent),
+        linear-gradient(180deg, rgba(var(--sheen-rgb), .025), transparent),
         var(--surface-raised);
     }
     button { cursor: pointer; transition: background .15s ease, border-color .15s ease, color .15s ease; }
-    button:hover { background: var(--surface-hover); border-color: #53647a; }
+    button:hover { background: var(--surface-hover); border-color: var(--btn-line-hover-quiet); }
     button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
     button:disabled { cursor: not-allowed; opacity: .62; }
     .actions { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; }
-    .btn-primary { background: #2f6fbd; border-color: #5594df; color: white; }
-    .btn-primary:hover { background: #397dce; border-color: #86bdff; }
-    .btn-quiet { background: transparent; border-color: var(--line); color: #d5deea; }
+    .btn-primary { background: var(--btn-bg); border-color: var(--btn-line); color: var(--on-accent); }
+    .btn-primary:hover { background: var(--btn-bg-hover); border-color: var(--btn-line-hover); }
+    .btn-quiet { background: transparent; border-color: var(--line); color: var(--text-bright); }
     .link-button {
       text-decoration: none;
-      border: 1px solid #4377b5;
+      border: 1px solid var(--btn-line-quiet);
       background: var(--blue-soft);
-      color: #dcebff;
+      color: var(--on-brand-lift);
       border-radius: var(--r-2);
       min-height: 38px;
       padding: 9px 12px;
@@ -330,18 +604,18 @@
     .grid { display: grid; gap: var(--sp-3); }
     .product-nav {
       position: sticky; top: calc(var(--header-h) + var(--sp-2)); z-index: 10; display: grid; gap: var(--sp-1); width: 100%;
-      margin: 0; padding: 8px; border: 1px solid rgba(148,163,184,.18);
+      margin: 0; padding: 8px; border: 1px solid rgba(var(--hairline-rgb), .18);
       border-radius: var(--r-2);
       background:
-        linear-gradient(180deg, rgba(255,255,255,.035), transparent),
-        rgba(13,19,28,.88);
-      box-shadow: inset 0 1px 0 rgba(255,255,255,.035), 0 18px 40px rgba(0,0,0,.13);
+        linear-gradient(180deg, rgba(var(--sheen-rgb), .035), transparent),
+        rgba(var(--ink-mid-rgb), .88);
+      box-shadow: inset 0 1px 0 rgba(var(--sheen-rgb), .035), 0 18px 40px rgba(var(--shadow-rgb), .13);
     }
     .nav-tab {
       display: flex; align-items: center; justify-content: flex-start;
       width: 100%; text-align: left; min-height: 42px; border: 1px solid transparent;
       background: transparent; border-radius: var(--r-2); padding: 10px 12px;
-      color: #b6c2d2; font-size: var(--fs-3); font-weight: var(--fw-med);
+      color: var(--text-quiet); font-size: var(--fs-3); font-weight: var(--fw-med);
       white-space: nowrap;
     }
     /* Nested under Watch: these are views within a section, not peers of it, so
@@ -371,15 +645,15 @@
     /* The rail starts and stops with the group rather than running past it. */
     .nav-sub:first-of-type::before { top: var(--sp-1); }
     .nav-sub:last-of-type::before { bottom: var(--sp-1); }
-    .nav-sub.active { color: white; }
-    .nav-tab:hover { background: rgba(255,255,255,.035); border-color: rgba(148,163,184,.10); }
+    .nav-sub.active { color: var(--t-base); }
+    .nav-tab:hover { background: rgba(var(--sheen-rgb), .035); border-color: rgba(var(--hairline-rgb), .10); }
     .nav-tab.active {
       background:
-        linear-gradient(135deg, rgba(101,167,255,.24), rgba(88,215,232,.10)),
-        rgba(42,55,75,.82);
-      color: white;
-      border-color: rgba(126,176,241,.30);
-      box-shadow: inset 3px 0 0 var(--blue), inset 0 1px 0 rgba(255,255,255,.06), 0 8px 18px rgba(0,0,0,.10);
+        linear-gradient(135deg, rgba(var(--blue-rgb), .24), rgba(var(--cyan-rgb), .10)),
+        rgba(var(--ink-lift-rgb), .82);
+      color: var(--t-base);
+      border-color: rgba(var(--blue-pale-rgb), .30);
+      box-shadow: inset 3px 0 0 var(--blue), inset 0 1px 0 rgba(var(--sheen-rgb), .06), 0 8px 18px rgba(var(--shadow-rgb), .10);
     }
     .view { grid-column: 2; min-width: 0; }
     .view[hidden] { display: none; }
@@ -397,27 +671,20 @@
        every column is wide, rather than four columns that wrap one card's copy
        and pull the whole row taller. */
     .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: var(--sp-3) 0; }
-    /* Watch composes rather than stacks. Context health and the work list were
-       583px and 995px of a single column, so at 1492x945 the screen was 1592px
-       tall and you could never see both -- and the answer to "is this session
-       in trouble" is only useful next to the work you would act on.
-       align-items: start because the two are different lengths and should be,
-       rather than one stretching to pad out the other. */
-    .watch-shell { display: grid; gap: var(--sp-3); }
-    .watch-shell > .card { margin: 0; }
-    /* Split evenly, and the breakpoint is set by the one hard constraint: the
-       work table must never scroll sideways. Its min-content is 393px, so with
-       68px of card padding a column below ~461px would clip it. At 1300 the
-       content area is ~997px and an even split gives each card ~493px.
-       The facts strip above wants ~584px to hold one line, which no split of a
-       1300px window can give it -- and tuning the breakpoint to that number
-       would be tuning to today's dollar figures, since the strip's width grows
-       with the values in it. It wraps between its two scopes instead, never
-       inside one (see .health-facts). At 1492 it fits on one line again. */
-    @media (min-width: 1300px) {
-      .watch-shell { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
-    }
+    /* .watch-shell was here: a two-column grid above 1300px that put Context
+       health beside the work table, because at 1492x945 the two stacked to
+       1592px and you could never see both at once. That was the right fix for a
+       view holding both. The table is its own view under Projects now, so Watch
+       is one card, and a grid whose breakpoint exists to fit a second column
+       would be reserving space for something that cannot arrive. */
     @media (min-width: 1280px) { .kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+    /* Home's strip sizes itself instead of counting. Its tiles hide rather than
+       show a zero -- nothing running, no checkpoint to measure from, nothing
+       worth cleaning up -- so the count is 0 to 3 at runtime and a fixed column
+       rule would leave a gap where a tile withheld itself. auto-fit collapses
+       the empty tracks and the survivors fill the row. */
+    #homeStrip, #controlStrip { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    #homeStrip:not(:has(> :not([hidden]))), #controlStrip:not(:has(> :not([hidden]))) { display: none; }
     /* Headings and <strong> were never given a weight, so they took the UA
        default of 700 -- a fourth weight the stylesheet did not know it had.
        600 matches where the explicit 650/700/720 rules already landed. */
@@ -425,44 +692,44 @@
     .two { grid-template-columns: minmax(0, 1.15fr) minmax(340px, .85fr); }
     .card {
       background:
-        linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.006)),
-        rgba(16,23,32,.92);
-      border: 1px solid rgba(148,163,184,.18);
+        linear-gradient(180deg, rgba(var(--sheen-rgb), .035), rgba(var(--sheen-rgb), .006)),
+        rgba(var(--ink-mid-rgb), .92);
+      border: 1px solid rgba(var(--hairline-rgb), .18);
       border-radius: var(--r-2);
       padding: 18px;
       min-width: 0;
-      box-shadow: inset 0 1px 0 rgba(255,255,255,.035), 0 18px 44px rgba(0,0,0,.14);
+      box-shadow: inset 0 1px 0 rgba(var(--sheen-rgb), .035), 0 18px 44px rgba(var(--shadow-rgb), .14);
     }
     .home-command-card {
       position: relative;
       overflow: hidden;
-      border-color: rgba(133,169,220,.30);
+      border-color: rgba(var(--hairline-lift-rgb), .30);
       background:
-        radial-gradient(circle at 10% -12%, rgba(112,167,255,.12), transparent 30%),
-        linear-gradient(180deg, rgba(17,25,36,.98), rgba(11,16,23,.98));
-      box-shadow: inset 0 1px 0 rgba(255,255,255,.035), 0 18px 44px rgba(0,0,0,.18);
+        radial-gradient(circle at 10% -12%, rgba(var(--blue-rgb), .12), transparent 30%),
+        linear-gradient(180deg, rgba(var(--ink-mid-rgb), .98), rgba(var(--ink-deep-rgb), .98));
+      box-shadow: inset 0 1px 0 rgba(var(--sheen-rgb), .035), 0 18px 44px rgba(var(--shadow-rgb), .18);
     }
     .home-command-card::before {
       content: "";
       position: absolute;
       inset: 0 0 auto;
       height: 2px;
-      background: linear-gradient(90deg, rgba(53,211,153,.70), rgba(112,167,255,.60), rgba(246,189,96,.46));
+      background: linear-gradient(90deg, rgba(var(--green-rgb), .70), rgba(var(--blue-rgb), .60), rgba(var(--amber-rgb), .46));
       opacity: .74;
       pointer-events: none;
     }
     .home-command-card .section-title { position: relative; z-index: 1; }
     .hero-card {
-      border-color: rgba(112,167,255,.32);
+      border-color: rgba(var(--blue-rgb), .32);
       background:
-        linear-gradient(135deg, rgba(101,167,255,.12), rgba(88,215,232,.04) 44%, transparent 64%),
-        #111b28;
+        linear-gradient(135deg, rgba(var(--blue-rgb), .12), rgba(var(--cyan-rgb), .04) 44%, transparent 64%),
+        var(--ground-mid);
     }
     .attention-card {
-      border-color: rgba(246,189,96,.34);
+      border-color: rgba(var(--amber-rgb), .34);
       background:
-        linear-gradient(135deg, rgba(246,189,96,.10), transparent 56%),
-        #181710;
+        linear-gradient(135deg, rgba(var(--amber-rgb), .10), transparent 56%),
+        var(--surface-warning);
     }
     .metric-card { min-height: 116px; position: relative; overflow: hidden; }
     .metric-card::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--metric, var(--blue)); }
@@ -471,7 +738,7 @@
       position: absolute;
       inset: auto 12px 10px;
       height: 1px;
-      background: linear-gradient(90deg, transparent, rgba(255,255,255,.08), transparent);
+      background: linear-gradient(90deg, transparent, rgba(var(--sheen-rgb), .08), transparent);
       pointer-events: none;
     }
     .metric-green { --metric: var(--green); }
@@ -586,23 +853,23 @@
     .value { font-size: var(--fs-6); font-weight: var(--fw-bold); margin-top: 10px; font-variant-numeric: tabular-nums; }
     .sub { color: var(--muted); font-size: var(--fs-2); margin-top: 4px; }
     .session-summary { margin-top: 16px; }
-    .session-title { font-size: var(--fs-4); color: white; font-weight: var(--fw-med); overflow-wrap: anywhere; }
+    .session-title { font-size: var(--fs-4); color: var(--t-base); font-weight: var(--fw-med); overflow-wrap: anywhere; }
     .session-meta { margin-top: 5px; color: var(--muted); }
     .session-actions { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-top: 18px; }
     .recommended-action {
-      border: 1px solid rgba(86,157,231,.30);
+      border: 1px solid rgba(var(--blue-soft-rgb), .30);
       border-left: 3px solid var(--blue);
-      background: rgba(49,108,180,.08);
+      background: rgba(var(--blue-mid2-rgb), .08);
       animation: recommendationPulse 1.3s ease-out 1;
     }
     .recommended-action h3 { font-size: var(--fs-3); margin-bottom: 5px; }
-    .recommended-action p { color: #b9c6d8; }
+    .recommended-action p { color: var(--text-quiet); }
     .recommended-action.loading-action {
       animation: none;
-      border-left-color: rgba(112,167,255,.54);
+      border-left-color: rgba(var(--blue-rgb), .54);
       background:
-        linear-gradient(135deg, rgba(112,167,255,.08), transparent 54%),
-        rgba(7,12,18,.24);
+        linear-gradient(135deg, rgba(var(--blue-rgb), .08), transparent 54%),
+        rgba(var(--ink-deep-rgb), .24);
     }
     .action-kicker { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-bottom: 10px; }
     .action-composer {
@@ -610,16 +877,16 @@
       gap: var(--sp-3);
       border-left-color: var(--amber);
       background:
-        linear-gradient(135deg, rgba(246,189,96,.09), transparent 48%),
-        rgba(7,12,18,.22);
+        linear-gradient(135deg, rgba(var(--amber-rgb), .09), transparent 48%),
+        rgba(var(--ink-deep-rgb), .22);
     }
     .action-composer-head { display: grid; gap: var(--sp-1); }
-    .action-composer-head h3 { display: flex; align-items: center; gap: var(--sp-2); margin: 0; font-size: var(--fs-2); color: #f7dd9c; text-transform: uppercase; letter-spacing: .06em; }
-    .action-composer-head strong { display: block; color: white; font-size: var(--fs-5); line-height: 1.15; letter-spacing: 0; text-transform: none; }
+    .action-composer-head h3 { display: flex; align-items: center; gap: var(--sp-2); margin: 0; font-size: var(--fs-2); color: var(--on-warning-lift); text-transform: uppercase; letter-spacing: .06em; }
+    .action-composer-head strong { display: block; color: var(--t-base); font-size: var(--fs-5); line-height: 1.15; letter-spacing: 0; text-transform: none; }
     .action-evidence { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
-    .action-evidence .pill { background: rgba(5,9,14,.38); }
+    .action-evidence .pill { background: rgba(var(--well-rgb), .38); }
     .action-buttons { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
-    .action-buttons .btn-primary { box-shadow: 0 0 0 1px rgba(255,255,255,.06), 0 10px 26px rgba(47,111,189,.24); }
+    .action-buttons .btn-primary { box-shadow: 0 0 0 1px rgba(var(--sheen-rgb), .06), 0 10px 26px rgba(var(--blue-mid-rgb), .24); }
     /* A status, not a control. Deliberately carries no border, background or
        button padding, so it cannot be mistaken for the real buttons it sits
        beside -- which is what the disabled button here used to do. */
@@ -646,9 +913,9 @@
     .blast-list li { display: flex; gap: var(--sp-2); align-items: baseline; }
     .blast-points { font-variant-numeric: tabular-nums; font-weight: var(--fw-med); color: var(--amber); min-width: 2.2em; }
     .blast-points.down { color: var(--green); }
-    .signal-chip.destructive { color: #ffd8df; border-color: rgba(242,119,143,.45); background: var(--red-soft); }
-    .signal-chip.sensitive { color: #ffe2a4; border-color: rgba(246,189,96,.45); background: var(--amber-soft); }
-    .signal-chip.breadth { color: #dceaff; border-color: rgba(112,167,255,.45); background: var(--blue-soft); }
+    .signal-chip.destructive { color: var(--on-danger-lift); border-color: rgba(var(--red-rgb), .45); background: var(--red-soft); }
+    .signal-chip.sensitive { color: var(--on-warning); border-color: rgba(var(--amber-rgb), .45); background: var(--amber-soft); }
+    .signal-chip.breadth { color: var(--on-brand); border-color: rgba(var(--blue-rgb), .45); background: var(--blue-soft); }
     /* Why this row is in the results. A search for one project used to return
        every sibling under the same parent with nothing saying so. */
     .match-note { margin-left: var(--sp-2); font-size: var(--fs-1); color: var(--faint); white-space: nowrap; }
@@ -679,10 +946,10 @@
     .watcher-start-hint { font-size: var(--fs-2); color: var(--muted); }
     .watcher-start code {
       font-size: var(--fs-2); padding: 3px 8px; border-radius: var(--r-1);
-      background: rgba(255,255,255,.06); border: 1px solid var(--line);
+      background: rgba(var(--sheen-rgb), .06); border: 1px solid var(--line);
       color: var(--text); user-select: all; overflow-wrap: anywhere;
     }
-    .tool-link-note { margin-top: 10px; font-size: var(--fs-2); color: #94a3b8; }
+    .tool-link-note { margin-top: 10px; font-size: var(--fs-2); color: var(--text-dim); }
     .ai-loading-panel {
       display: grid;
       grid-template-columns: 34px minmax(0, 1fr);
@@ -690,11 +957,11 @@
       align-items: start;
       margin-top: 14px;
       padding: 13px 14px;
-      border: 1px solid rgba(112,167,255,.22);
+      border: 1px solid rgba(var(--blue-rgb), .22);
       border-radius: var(--r-2);
       background:
-        linear-gradient(180deg, rgba(255,255,255,.025), transparent),
-        rgba(5,9,14,.34);
+        linear-gradient(180deg, rgba(var(--sheen-rgb), .025), transparent),
+        rgba(var(--well-rgb), .34);
     }
     .ai-loading-mark {
       display: grid;
@@ -702,16 +969,16 @@
       width: 28px;
       height: 28px;
       border-radius: var(--r-2);
-      color: #dceaff;
+      color: var(--on-brand);
       background:
-        linear-gradient(135deg, rgba(53,211,153,.20), rgba(112,167,255,.18)),
-        rgba(9,14,22,.9);
-      border: 1px solid rgba(112,167,255,.32);
+        linear-gradient(135deg, rgba(var(--green-rgb), .20), rgba(var(--blue-rgb), .18)),
+        rgba(var(--ink-deep-rgb), .9);
+      border: 1px solid rgba(var(--blue-rgb), .32);
       font-size: var(--fs-2);
       font-weight: var(--fw-bold);
-      box-shadow: inset 0 1px 0 rgba(255,255,255,.05);
+      box-shadow: inset 0 1px 0 rgba(var(--sheen-rgb), .05);
     }
-    .ai-loading-panel strong { display: block; color: white; margin-bottom: 2px; }
+    .ai-loading-panel strong { display: block; color: var(--t-base); margin-bottom: 2px; }
     .ai-loading-panel p { font-size: var(--fs-2); }
     .ai-loading-bar {
       position: relative;
@@ -719,8 +986,8 @@
       height: 6px;
       margin-top: 10px;
       border-radius: var(--r-pill);
-      background: rgba(3,7,12,.72);
-      border: 1px solid rgba(148,163,184,.16);
+      background: rgba(var(--ink-deep-rgb), .72);
+      border: 1px solid rgba(var(--hairline-rgb), .16);
     }
     .ai-loading-bar::before {
       content: "";
@@ -728,15 +995,15 @@
       inset: 0 auto 0 0;
       width: 38%;
       border-radius: inherit;
-      background: linear-gradient(90deg, rgba(53,211,153,.42), rgba(112,167,255,.72), rgba(246,189,96,.42));
+      background: linear-gradient(90deg, rgba(var(--green-rgb), .42), rgba(var(--blue-rgb), .72), rgba(var(--amber-rgb), .42));
       animation: loadingSweep 1.6s ease-in-out infinite;
     }
     .receipt-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--sp-4); align-items: center; }
     .risk-flow { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-top: 12px; }
     .risk-chip { border: 1px solid var(--line); border-radius: var(--r-1); padding: 6px 9px; font-size: var(--fs-2); font-weight: var(--fw-bold); text-transform: capitalize; }
-    .risk-chip.high { color: #ffc4ce; border-color: rgba(242,125,143,.45); background: var(--red-soft); }
-    .risk-chip.medium { color: #ffe2a4; border-color: rgba(246,189,96,.45); background: var(--amber-soft); }
-    .risk-chip.low { color: #bff5df; border-color: rgba(53,211,153,.45); background: var(--green-soft); }
+    .risk-chip.high { color: var(--on-danger); border-color: rgba(var(--red-rgb), .45); background: var(--red-soft); }
+    .risk-chip.medium { color: var(--on-warning); border-color: rgba(var(--amber-rgb), .45); background: var(--amber-soft); }
+    .risk-chip.low { color: var(--on-success); border-color: rgba(var(--green-rgb), .45); background: var(--green-soft); }
     .risk-arrow { color: var(--muted); font-weight: var(--fw-bold); }
     /* Prose caps. Measured at a 2100px viewport, .receipt-note ran to 252
        characters per line on five views -- Home was fine only because it had
@@ -758,7 +1025,7 @@
        of 168 of them, which is the same as being on none: a column only reads
        as a column when the digits share a grid. */
     td.num, th.num { text-align: right; white-space: nowrap; }
-    td.num, td.mono, .num, .value, .mini strong, .health-hero b, .ambient-hero,
+    td.num, td.mono, .num, .value, .mini strong, .ambient-hero,
     .ambient-facts b, .blast-points, .trend-tick, .trend-value {
       font-variant-numeric: tabular-nums;
     }
@@ -766,12 +1033,12 @@
     .bar-row { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(120px, 1.5fr) 88px; gap: var(--sp-3); align-items: center; margin: 11px 0; padding: 5px 0; }
     .bar-row.clickable, tr.clickable { cursor: pointer; }
     .bar-row.clickable { border-radius: var(--r-1); }
-    .bar-row.clickable:hover { background: rgba(255,255,255,.03); }
-    .bar-row.clickable:hover .bar-label, tr.clickable:hover td { color: white; }
-    .bar-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dce6f6; }
-    .bar-shell { height: 8px; background: #080d13; border-radius: var(--r-2); overflow: hidden; border: 1px solid #222d3b; }
+    .bar-row.clickable:hover { background: rgba(var(--sheen-rgb), .03); }
+    .bar-row.clickable:hover .bar-label, tr.clickable:hover td { color: var(--t-base); }
+    .bar-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-bright); }
+    .bar-shell { height: 8px; background: var(--ground-deep); border-radius: var(--r-2); overflow: hidden; border: 1px solid var(--ground-lift); }
     .bar { height: 100%; background: var(--blue); border-radius: var(--r-2); min-width: 2px; }
-    .amount { text-align: right; color: #dce6f6; font-variant-numeric: tabular-nums; }
+    .amount { text-align: right; color: var(--text-bright); font-variant-numeric: tabular-nums; }
     .insight { border-left: 3px solid var(--amber); padding: 8px 0 8px 13px; margin: 12px 0; }
     .headline { display: flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap; margin: 4px 0 16px; }
     .headline-figure { font-size: var(--fs-6); font-weight: var(--fw-med); letter-spacing: 0; }
@@ -784,7 +1051,7 @@
     .feed-row.high .feed-main { border-left-color: var(--red); }
     .feed-row.medium .feed-main { border-left-color: var(--amber); }
     .feed-row.info .feed-main { border-left-color: var(--line-strong); }
-    .feed-main strong { display: block; color: white; margin-bottom: 4px; }
+    .feed-main strong { display: block; color: var(--t-base); margin-bottom: 4px; }
     .feed-main p { margin: 0; color: var(--muted); line-height: 1.5; }
     .feed-impact { font-size: var(--fs-4); white-space: nowrap; padding-top: 1px; }
     /* A finding's claim and the chart that evidences it, side by side.
@@ -812,9 +1079,25 @@
         align-items: start;
       }
     }
-    .insight strong { display: block; margin-bottom: 3px; color: white; }
+    /* A claim beside the evidence for it. The feed's version of this waits for
+       1480px because its chart has a 640px canvas; this one carries a bar and a
+       legend, which stay readable much narrower, so it splits at 980 -- the
+       width where the claim itself still has 280px to sit in. Stacked below
+       that rather than squeezed. */
+    .claim-pair { display: grid; gap: var(--sp-4); align-items: start; }
+    @media (min-width: 980px) {
+      .claim-pair { grid-template-columns: minmax(280px, 1fr) minmax(320px, 1.15fr); }
+    }
+    .claim-evidence { display: flex; flex-direction: column; gap: var(--sp-2); }
+    .claim-figure { font-family: var(--mono); font-size: var(--fs-5); text-align: right; }
+    .split-bar { display: flex; height: 14px; border-radius: var(--r-1); overflow: hidden; background: var(--surface-raised); }
+    .split-bar i { display: block; height: 100%; }
+    .split-legend { display: flex; gap: var(--sp-3); flex-wrap: wrap; font-size: var(--fs-2); color: var(--muted); }
+    .split-legend span { display: flex; align-items: center; gap: var(--sp-1); }
+    .split-legend i { width: 9px; height: 9px; border-radius: var(--r-pill); display: block; }
+    .insight strong { display: block; margin-bottom: 3px; color: var(--t-base); }
     .pill-row { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: 12px; }
-    .pill { border: 1px solid var(--line); background: #0b1118; border-radius: var(--r-pill); padding: 5px 9px; color: #bdc9d9; font-size: var(--fs-1); }
+    .pill { border: 1px solid var(--line); background: var(--ground-deep); border-radius: var(--r-pill); padding: 5px 9px; color: var(--text-quiet); font-size: var(--fs-1); }
     .action-queue { display: grid; gap: var(--sp-2); position: relative; z-index: 1; }
     .action-row {
       position: relative;
@@ -822,42 +1105,81 @@
       grid-template-columns: minmax(0, 1fr) auto;
       gap: var(--sp-3);
       align-items: center;
-      border: 1px solid rgba(148,163,184,.16);
+      border: 1px solid rgba(var(--hairline-rgb), .16);
       border-left: 4px solid var(--line-strong);
       border-radius: var(--r-2);
       background:
-        linear-gradient(180deg, rgba(255,255,255,.025), transparent),
-        rgba(5,9,14,.46);
+        linear-gradient(180deg, rgba(var(--sheen-rgb), .025), transparent),
+        rgba(var(--well-rgb), .46);
       padding: 14px;
-      box-shadow: inset 0 1px 0 rgba(255,255,255,.025);
+      box-shadow: inset 0 1px 0 rgba(var(--sheen-rgb), .025);
       animation: sessionSurfaceIn .22s ease-out both;
     }
     .action-queue > .action-row:first-child {
       padding: 18px;
-      border-color: rgba(112,167,255,.28);
+      border-color: rgba(var(--blue-rgb), .28);
       background:
-        linear-gradient(135deg, rgba(112,167,255,.13), transparent 52%),
-        rgba(5,9,14,.54);
+        linear-gradient(135deg, rgba(var(--blue-rgb), .13), transparent 52%),
+        rgba(var(--well-rgb), .54);
     }
     .action-queue > .action-row:first-child .action-title { font-size: var(--fs-4); }
     .action-row.critical { border-left-color: var(--red); }
     .action-row.high { border-left-color: var(--amber); }
     .action-row.medium { border-left-color: var(--blue); }
     .action-row.low { border-left-color: var(--green); }
-    .action-title { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; font-weight: var(--fw-bold); color: white; }
+    .action-title { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; font-weight: var(--fw-bold); color: var(--t-base); }
     .action-row p { margin: 6px 0 0; color: var(--muted); line-height: 1.45; }
     .action-meta { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: 10px; }
     .action-row .actions { justify-content: flex-end; }
     .coverage-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-3); }
+    /* The coverage table. Rows align on one axis so ten tools can be compared
+       rather than read one card at a time; the quiet second line in a cell is
+       the prose that used to be a labelled row of its own. */
+    .coverage-table td { vertical-align: top; }
+    .coverage-table td strong { display: block; }
+    .cell-note {
+      display: block; margin-top: 3px; font-size: var(--fs-1);
+      color: var(--muted); line-height: 1.45; font-weight: var(--fw-normal);
+      max-width: 42ch; white-space: normal;
+    }
+    /* The status pill sizes to its text in a cell rather than stretching. */
+    .coverage-table .coverage-status { display: inline-block; }
     /* ---- Watch: one project expanded, the rest as rows -------------------
        Four cards of equal weight gave the eye nowhere to start. */
     .health-stack { display: flex; flex-direction: column; gap: var(--sp-2); }
-    .health-card.lead { border-color: rgba(242, 119, 143, .30); }
+    .health-tally { display: flex; justify-content: flex-end; }
+    /* One shape per row, ranked. The number is what makes the eye start at the
+       top -- the lead card did that by being six times taller, which cost the
+       comparison the list exists for. */
+    .health-rank-row {
+      display: grid;
+      grid-template-columns: 20px 8px minmax(0, 1fr) 120px 84px auto;
+      align-items: center; gap: var(--sp-3);
+      width: 100%; text-align: left;
+      padding: 12px 14px; border: 1px solid var(--line);
+      border-radius: var(--r-2); background: var(--surface); color: var(--text);
+    }
+    .health-rank-row { cursor: pointer; }
+    .health-rank-row:hover { background: var(--surface-hover); }
+    .rank-n { font-family: var(--mono); font-size: var(--fs-2); color: var(--faint); font-variant-numeric: tabular-nums; }
+    .rank-dot { width: 8px; height: 8px; border-radius: var(--r-pill); background: var(--faint); }
+    .rank-dot.critical { background: var(--red); }
+    .rank-dot.warning { background: var(--amber); }
+    .rank-dot.healthy { background: var(--green); }
+    .rank-main { min-width: 0; display: flex; flex-direction: column; gap: var(--sp-1); }
+    .rank-title { font-weight: var(--fw-med); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .rank-who { display: flex; align-items: baseline; gap: var(--sp-2); min-width: 0; }
+    .rank-id { font-size: var(--fs-1); color: var(--faint); font-family: var(--mono); white-space: nowrap; }
+    .rank-why { font-size: var(--fs-2); color: var(--muted); line-height: 1.45; }
+    .rank-room { font-family: var(--mono); font-size: var(--fs-2); color: var(--muted); text-align: right; }
+    .rank-trend { display: block; }
+    @media (max-width: 1100px) {
+      /* The trend and the headroom are the first to go: the rank, the reason
+         and the action are what the row is for. */
+      .health-rank-row { grid-template-columns: 20px 8px minmax(0, 1fr) auto; }
+      .rank-trend, .rank-room { display: none; }
+    }
     .health-verdict { margin: 0; font-size: var(--fs-3); line-height: 1.5; color: var(--text); max-width: 62ch; }
-    .health-hero { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--sp-1) var(--sp-2); margin: 2px 0; }
-    .health-hero b { font-size: var(--fs-5); font-weight: var(--fw-med); letter-spacing: -.02em; color: var(--text); }
-    .health-hero u { text-decoration: none; font-size: var(--fs-2); color: var(--muted); }
-    .health-now { margin-left: auto; font-family: var(--mono); font-size: var(--fs-2); color: var(--muted); font-variant-numeric: tabular-nums; }
 
     /* the meter is comparable across projects; the trend deliberately is not */
     .meter-host { position: relative; }
@@ -897,7 +1219,34 @@
       background: var(--surface); color: var(--text);
     }
     .health-row:hover { background: var(--surface-hover); }
-    .health-row-name { font-size: var(--fs-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* Two lines now: the project, and why this row is ranked where it is. The
+       name keeps its ellipsis; the reason wraps rather than truncating, because
+       a half-shown reason is worse than none. */
+    .health-row-name { font-size: var(--fs-2); overflow: hidden; min-width: 0; }
+    .health-row-name > i {
+      display: block; font-style: normal; font-size: var(--fs-1);
+      color: var(--muted); margin-top: 2px;
+    }
+    /* [hidden] is only display:none by user-agent default, which any explicit
+       display beats -- and .product-nav sets one. The rail set its hidden
+       attribute on the first-run screen and stayed on screen anyway. */
+    .product-nav[hidden] { display: none; }
+
+    /* First run. One column, capped at reading width: this is the only screen
+       in the product that is read rather than scanned. */
+    .first-run { max-width: 640px; margin: 0 auto; }
+    .first-run-find { font-size: var(--fs-5); line-height: 1.35; margin: 10px 0 0; }
+    .first-run-find b { font-weight: var(--fw-med); }
+    .first-run-note { color: var(--muted); font-size: var(--fs-2); margin: 12px 0 0; }
+    .first-run-list { margin: 12px 0 0; padding-left: 18px; color: var(--muted); line-height: 1.6; }
+    .first-run-list b { color: var(--text); font-weight: var(--fw-normal); }
+    .first-run-gate {
+      background: var(--surface-raised); border-radius: var(--r-2);
+      padding: 12px 14px; margin-top: 16px; font-size: var(--fs-2); color: var(--muted);
+    }
+    .first-run-gate b { display: block; color: var(--text); margin-bottom: 2px; }
+    .health-why { font-size: var(--fs-2); color: var(--muted); margin: 10px 0 0; }
+    .health-why b { color: var(--text); font-weight: var(--fw-med); }
     .health-row-trend { display: block; }
     .health-row-trend .trend-svg { height: 26px; }
     .health-row-now, .health-row-room { font-family: var(--mono); font-size: var(--fs-2); color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -907,12 +1256,12 @@
       .health-row-trend, .health-row-room { display: none; }
     }
 
-    .coverage-card, .health-card {
+    .coverage-card {
       border: 1px solid var(--line);
       border-radius: var(--r-2);
       background:
-        linear-gradient(180deg, rgba(255,255,255,.025), transparent),
-        rgba(11,17,24,.82);
+        linear-gradient(180deg, rgba(var(--sheen-rgb), .025), transparent),
+        rgba(var(--ink-deep-rgb), .82);
       padding: 14px;
     }
     /* A link inside a sentence, not a control beside one. The card already
@@ -921,42 +1270,43 @@
     .link-inline { background: none; border: 0; padding: 0; font: inherit; color: var(--blue);
       text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
     .link-inline:hover { color: var(--text); }
-    .muted-card { opacity: .58; }
     .health-batch { display: flex; justify-content: flex-end; margin-bottom: 10px; }
     .coverage-head, .health-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); margin-bottom: 8px; }
     .coverage-status, .health-severity { border-radius: var(--r-pill); border: 1px solid var(--line); padding: 4px 8px; font-size: var(--fs-1); font-weight: var(--fw-bold); white-space: nowrap; }
-    .coverage-status.automatic, .health-severity.healthy { color: #bff5df; border-color: rgba(53,211,153,.45); background: var(--green-soft); }
-    .coverage-status.limited { color: #b8f0e0; border-color: rgba(53,211,153,.3); background: rgba(53,211,153,.1); }
-    .coverage-status.unverified, .health-severity.warning { color: #ffe2a4; border-color: rgba(246,189,96,.45); background: var(--amber-soft); }
-    .coverage-status.companion { color: #dceaff; border-color: rgba(112,167,255,.45); background: var(--blue-soft); }
-    .coverage-status.unsupported, .coverage-status.not_detected, .health-severity.critical { color: #ffc4ce; border-color: rgba(242,125,143,.45); background: var(--red-soft); }
+    .coverage-status.automatic, .health-severity.healthy { color: var(--on-success); border-color: rgba(var(--green-rgb), .45); background: var(--green-soft); }
+    .coverage-status.limited { color: var(--on-success-quiet); border-color: rgba(var(--green-rgb), .3); background: rgba(var(--green-rgb), .1); }
+    .coverage-status.unverified, .health-severity.warning { color: var(--on-warning); border-color: rgba(var(--amber-rgb), .45); background: var(--amber-soft); }
+    .coverage-status.companion { color: var(--on-brand); border-color: rgba(var(--blue-rgb), .45); background: var(--blue-soft); }
+    .coverage-status.unsupported, .coverage-status.not_detected, .health-severity.critical { color: var(--on-danger); border-color: rgba(var(--red-rgb), .45); background: var(--red-soft); }
     .coverage-detail, .health-detail { display: grid; gap: var(--sp-1); color: var(--muted); font-size: var(--fs-2); line-height: 1.45; }
     /* Arrived with main. Put on the scale rather than beside it: raw 12px/999px/8px
        would reopen the drift the token pass closed, and a test pins it. */
     .identity-strip { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; color: var(--muted); font-size: var(--fs-2); }
-    .identity-strip strong, .identity-strip span { border: 1px solid var(--line); border-radius: var(--r-pill); padding: 4px 8px; background: rgba(7,12,19,.56); }
-    .identity-strip strong { color: #dceaff; border-color: rgba(112,167,255,.36); }
-    .health-evidence { border: 1px solid rgba(148,163,184,.16); border-radius: var(--r-2); background: rgba(6,11,18,.48); padding: 10px; margin-top: 10px; }
+    .identity-strip strong, .identity-strip span { border: 1px solid var(--line); border-radius: var(--r-pill); padding: 4px 8px; background: rgba(var(--ink-deep-rgb), .56); }
+    .identity-strip strong { color: var(--on-brand); border-color: rgba(var(--blue-rgb), .36); }
+    .session-health .health-facts { margin: var(--sp-2) 0 0; }
+    .session-health .meter-host, .session-health .trend-host { margin-top: var(--sp-2); }
+    .health-evidence { border: 1px solid rgba(var(--hairline-rgb), .16); border-radius: var(--r-2); background: rgba(var(--ink-deep-rgb), .48); padding: 10px; margin-top: 10px; }
     .health-evidence .label { font-size: var(--fs-1); }
     .health-evidence p { margin: 3px 0 0; color: var(--muted); }
     .health-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: 12px; }
     .handoff-bubble {
-      border-color: rgba(112,167,255,.5);
-      background: #eaf2ff;
-      color: #172237;
-      box-shadow: 0 10px 26px rgba(7,18,32,.18);
+      border-color: rgba(var(--blue-rgb), .5);
+      background: var(--invert-tint);
+      color: var(--invert-text);
+      box-shadow: 0 10px 26px rgba(var(--ink-mid-rgb), .18);
     }
-    .handoff-bubble h2 { color: #1f5fa8; }
-    .handoff-bubble p, .handoff-bubble .sub { color: #4b5870; }
-    .handoff-bubble .pill { background: rgba(255,255,255,.72); border-color: #bfd2ec; color: #37445a; }
-    .handoff-bubble .btn-primary { background: #ffffff; border-color: #c5d7ee; color: #172237; }
-    .handoff-bubble .btn-primary:hover { background: #f8fbff; border-color: #8fb6e8; }
-    .handoff-bubble .btn-quiet { background: transparent; border-color: transparent; color: #4b5870; }
-    .handoff-bubble .btn-quiet:hover { background: rgba(255,255,255,.6); border-color: #c5d7ee; color: #172237; }
-    .outcome-pill.useful { color: #bff5df; border-color: rgba(53,211,153,.38); background: var(--green-soft); }
-    .outcome-pill.rework { color: #ffe2a4; border-color: rgba(246,189,96,.38); background: var(--amber-soft); }
-    .outcome-pill.abandoned { color: #ffc4ce; border-color: rgba(242,125,143,.38); background: var(--red-soft); }
-    .outcome-pill.evidence { color: #d4e7ff; border-color: rgba(135,168,255,.36); background: rgba(135,168,255,.12); }
+    .handoff-bubble h2 { color: var(--invert-head); }
+    .handoff-bubble p, .handoff-bubble .sub { color: var(--invert-muted); }
+    .handoff-bubble .pill { background: rgba(var(--sheen-rgb), .72); border-color: var(--invert-line-soft); color: var(--invert-ink); }
+    .handoff-bubble .btn-primary { background: var(--invert-bg); border-color: var(--invert-line); color: var(--invert-text); }
+    .handoff-bubble .btn-primary:hover { background: var(--invert-hover); border-color: var(--invert-line-hover); }
+    .handoff-bubble .btn-quiet { background: transparent; border-color: transparent; color: var(--invert-muted); }
+    .handoff-bubble .btn-quiet:hover { background: rgba(var(--sheen-rgb), .6); border-color: var(--invert-line); color: var(--invert-text); }
+    .outcome-pill.useful { color: var(--on-success); border-color: rgba(var(--green-rgb), .38); background: var(--green-soft); }
+    .outcome-pill.rework { color: var(--on-warning); border-color: rgba(var(--amber-rgb), .38); background: var(--amber-soft); }
+    .outcome-pill.abandoned { color: var(--on-danger); border-color: rgba(var(--red-rgb), .38); background: var(--red-soft); }
+    .outcome-pill.evidence { color: var(--on-brand-quiet); border-color: rgba(var(--blue-lift-rgb), .36); background: rgba(var(--blue-lift-rgb), .12); }
     table { width: 100%; border-collapse: collapse; font-size: var(--fs-2); }
     th, td { border-bottom: 1px solid var(--line); padding: 11px 8px; text-align: left; }
     th { color: var(--muted); font-weight: var(--fw-med); }
@@ -977,7 +1327,7 @@
       font-weight: inherit;
       text-align: inherit;
     }
-    .sort-head:hover { background: transparent; color: white; }
+    .sort-head:hover { background: transparent; color: var(--t-base); }
     /* A project row opens a drawer, so the thing that opens it is a button and
        reachable by keyboard. The Watch health rows were already done this way;
        Projects was left as a <tr onclick> with no role and no tab stop. */
@@ -988,14 +1338,14 @@
     }
     .row-open:hover { color: var(--text); }
     .sort-head span { display: inline-block; min-width: 10px; color: var(--blue); }
-    tr.clickable:hover { background: rgba(112,167,255,.05); }
+    tr.clickable:hover { background: rgba(var(--blue-rgb), .05); }
     .session-filters { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; margin: 14px 0 4px; }
     .session-filters input[type="text"] {
       flex: 1; min-width: 220px; border: 1px solid var(--line-strong); background: var(--surface-raised);
       color: var(--text); border-radius: var(--r-2); min-height: 38px; padding: 8px 12px; font: inherit;
     }
     .session-filters input[type="text"]:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
-    .row-action { min-height: 30px; padding: 5px 9px; color: #ddecff; background: var(--blue-soft); border-color: #3d6594; font-size: var(--fs-2); }
+    .row-action { min-height: 30px; padding: 5px 9px; color: var(--on-brand-action); background: var(--blue-soft); border-color: var(--btn-line-row); font-size: var(--fs-2); }
     .action-stack { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; justify-content: flex-end; }
     .empty { color: var(--muted); padding: var(--sp-4); border: 1px dashed var(--line); border-radius: var(--r-2); }
     /* A no-results message belongs where the rows would have been, not flush
@@ -1004,8 +1354,8 @@
     .digest-row { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); padding: 8px 0; border-bottom: 1px solid var(--line); }
     .digest-row:last-child { border-bottom: 0; }
     .digest-row.clickable { cursor: pointer; }
-    .digest-row.clickable:hover { background: rgba(255,255,255,.03); }
-    .digest-row .digest-row-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dce6f6; }
+    .digest-row.clickable:hover { background: rgba(var(--sheen-rgb), .03); }
+    .digest-row .digest-row-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-bright); }
     .detail-section { padding: 20px 0; border-bottom: 1px solid var(--line); }
     .detail-section:last-child { border-bottom: 0; }
     .session-review-shell {
@@ -1013,10 +1363,10 @@
       border: 1px solid var(--drawer-line-strong);
       border-radius: var(--r-2);
       background:
-        radial-gradient(circle at 16% -8%, rgba(112,167,255,.11), transparent 28%),
-        linear-gradient(180deg, rgba(18,27,39,.96), rgba(11,16,23,.98));
+        radial-gradient(circle at 16% -8%, rgba(var(--blue-rgb), .11), transparent 28%),
+        linear-gradient(180deg, rgba(var(--ink-mid-rgb), .96), rgba(var(--ink-deep-rgb), .98));
       overflow: hidden;
-      box-shadow: inset 0 1px 0 rgba(255,255,255,.035), 0 18px 44px rgba(0,0,0,.28);
+      box-shadow: inset 0 1px 0 rgba(var(--sheen-rgb), .035), 0 18px 44px rgba(var(--shadow-rgb), .28);
       animation: sessionSurfaceIn .22s ease-out both;
     }
     .session-review-shell::before {
@@ -1024,7 +1374,7 @@
       position: absolute;
       inset: 0 0 auto;
       height: 2px;
-      background: linear-gradient(90deg, rgba(53,211,153,.70), rgba(112,167,255,.62), rgba(246,189,96,.48));
+      background: linear-gradient(90deg, rgba(var(--green-rgb), .70), rgba(var(--blue-rgb), .62), rgba(var(--amber-rgb), .48));
       opacity: .74;
       pointer-events: none;
     }
@@ -1037,8 +1387,8 @@
     .session-hero {
       border-bottom: 1px solid var(--drawer-line);
       background:
-        linear-gradient(135deg, rgba(112,167,255,.10), transparent 54%),
-        linear-gradient(180deg, rgba(255,255,255,.025), transparent);
+        linear-gradient(135deg, rgba(var(--blue-rgb), .10), transparent 54%),
+        linear-gradient(180deg, rgba(var(--sheen-rgb), .025), transparent);
       padding: 22px;
       margin: 0;
     }
@@ -1047,15 +1397,15 @@
     .session-identity-card {
       display: grid;
       gap: var(--sp-2);
-      border: 1px solid rgba(133,169,220,.24);
+      border: 1px solid rgba(var(--hairline-lift-rgb), .24);
       border-radius: var(--r-2);
-      background: rgba(6,11,17,.42);
+      background: rgba(var(--ink-deep-rgb), .42);
       padding: 12px;
       margin: 12px 0;
     }
     .session-identity-row { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
-    .session-identity-main { min-width: 0; flex: 1; color: #d8e4f4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .session-id-chip { font: 700 12px/1.1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #f7dd9c; border: 1px solid rgba(246,189,96,.42); background: rgba(246,189,96,.12); border-radius: var(--r-pill); padding: 6px 9px; white-space: nowrap; }
+    .session-identity-main { min-width: 0; flex: 1; color: var(--text-bright); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .session-id-chip { font: 700 12px/1.1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--on-warning-lift); border: 1px solid rgba(var(--amber-rgb), .42); background: rgba(var(--amber-rgb), .12); border-radius: var(--r-pill); padding: 6px 9px; white-space: nowrap; }
     /* Replaces the four-fact hero grid: only context pressure varies enough to
        earn the space, and the rest each had their own section directly below. */
     .session-hero-pressure {
@@ -1088,20 +1438,20 @@
       border: 1px solid var(--drawer-line);
       border-radius: var(--r-2);
       background:
-        linear-gradient(180deg, rgba(255,255,255,.035), transparent),
-        rgba(5,9,14,.30);
+        linear-gradient(180deg, rgba(var(--sheen-rgb), .035), transparent),
+        rgba(var(--well-rgb), .30);
       padding: 11px 12px;
       min-height: 86px;
-      box-shadow: inset 0 1px 0 rgba(255,255,255,.025);
+      box-shadow: inset 0 1px 0 rgba(var(--sheen-rgb), .025);
     }
     .session-hero-fact span { display: block; color: var(--muted); font-size: var(--fs-1); text-transform: uppercase; letter-spacing: .06em; font-weight: var(--fw-bold); }
-    .session-hero-fact strong { display: block; margin-top: 7px; font-size: var(--fs-4); line-height: 1.18; color: white; overflow-wrap: anywhere; }
+    .session-hero-fact strong { display: block; margin-top: 7px; font-size: var(--fs-4); line-height: 1.18; color: var(--t-base); overflow-wrap: anywhere; }
     .session-hero-status { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: 11px; }
     .session-meter { margin-top: 10px; }
-    .session-meter-track { height: 7px; border-radius: var(--r-pill); overflow: hidden; border: 1px solid rgba(148,163,184,.18); background: rgba(3,7,12,.62); }
+    .session-meter-track { height: 7px; border-radius: var(--r-pill); overflow: hidden; border: 1px solid rgba(var(--hairline-rgb), .18); background: rgba(var(--ink-deep-rgb), .62); }
     .session-meter-fill { height: 100%; width: var(--meter-width, 0%); border-radius: inherit; background: linear-gradient(90deg, var(--green), var(--amber), var(--red)); }
     .session-meter-label { display: flex; justify-content: space-between; gap: var(--sp-2); color: var(--muted); font-size: var(--fs-1); margin-top: 6px; }
-    .confidence-chip { display: inline-flex; align-items: center; gap: var(--sp-1); border: 1px solid var(--drawer-line); border-radius: var(--r-pill); padding: 5px 8px; font-size: var(--fs-1); font-weight: var(--fw-bold); color: #cbd7e8; background: rgba(5,9,14,.28); }
+    .confidence-chip { display: inline-flex; align-items: center; gap: var(--sp-1); border: 1px solid var(--drawer-line); border-radius: var(--r-pill); padding: 5px 8px; font-size: var(--fs-1); font-weight: var(--fw-bold); color: var(--text-quiet); background: rgba(var(--well-rgb), .28); }
     .confidence-chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--blue); }
     .confidence-chip.verified::before, .confidence-chip.observed::before { background: var(--green); }
     .confidence-chip.inferred::before { background: var(--amber); }
@@ -1138,11 +1488,11 @@
     .verdict-line.tone-healthy { border-left-color: var(--green); }
     .verdict-line.tone-unknown p { color: var(--muted); }
 
-    .verdict-card { border: 1px solid var(--drawer-line); border-left: 3px solid var(--blue); border-radius: var(--r-2); padding: 14px; background: rgba(112,167,255,.055); margin-top: 12px; }
-    .verdict-card.high { border-left-color: var(--amber); background: rgba(246,189,96,.06); }
-    .verdict-card.useful { border-left-color: var(--green); background: rgba(53,211,153,.06); }
+    .verdict-card { border: 1px solid var(--drawer-line); border-left: 3px solid var(--blue); border-radius: var(--r-2); padding: 14px; background: rgba(var(--blue-rgb), .055); margin-top: 12px; }
+    .verdict-card.high { border-left-color: var(--amber); background: rgba(var(--amber-rgb), .06); }
+    .verdict-card.useful { border-left-color: var(--green); background: rgba(var(--green-rgb), .06); }
     .verdict-card h3 { font-size: var(--fs-3); margin: 0 0 8px; }
-    .verdict-card ul { margin: 10px 0 0; padding-left: 18px; color: #d9e4f2; line-height: 1.45; }
+    .verdict-card ul { margin: 10px 0 0; padding-left: 18px; color: var(--text-bright); line-height: 1.45; }
     /* A section whose only content is a collapsed summary is a one-line control,
        so it should not also carry a full section's padding -- nine of them at
        full height was most of a screen of nothing but summaries. */
@@ -1151,22 +1501,22 @@
     .optimize-lede { margin: 0 0 12px; color: var(--muted); font-size: var(--fs-2); line-height: 1.5; }
     #optimizeWorkspace { padding: 8px 0; }
     #optimizeWorkspace > details.aiw-details { margin-top: 0; }
-    details.aiw-details { border: 1px solid var(--drawer-line); border-radius: var(--r-2); background: rgba(5,9,14,.22); margin-top: 12px; }
-    details.aiw-details summary { cursor: pointer; padding: 12px 14px; color: #dce6f6; font-weight: var(--fw-bold); }
+    details.aiw-details { border: 1px solid var(--drawer-line); border-radius: var(--r-2); background: rgba(var(--well-rgb), .22); margin-top: 12px; }
+    details.aiw-details summary { cursor: pointer; padding: 12px 14px; color: var(--text-bright); font-weight: var(--fw-bold); }
     details.aiw-details[open] summary { border-bottom: 1px solid var(--drawer-line); }
     .details-body { padding: 14px; }
     .insight-list { margin: 8px 0 0; padding-left: 18px; }
     .insight-list li { margin: 6px 0; line-height: 1.45; }
-    .costliest-step { margin: 12px 0; padding: 12px 14px; border: 1px solid var(--line-strong); border-left: 3px solid var(--metric-red, #d9534f); border-radius: var(--r-2); background: var(--surface-raised); }
+    .costliest-step { margin: 12px 0; padding: 12px 14px; border: 1px solid var(--line-strong); border-left: 3px solid var(--metric-red, var(--alert-red)); border-radius: var(--r-2); background: var(--surface-raised); }
     .costliest-head { display: flex; justify-content: space-between; align-items: baseline; gap: var(--sp-2); font-size: var(--fs-2); text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
     .costliest-share { text-transform: none; letter-spacing: 0; font-weight: var(--fw-med); color: var(--text, inherit); }
     .costliest-body { margin-top: 6px; font-size: var(--fs-3); overflow-wrap: anywhere; }
-    .waste-note { margin: 12px 0; padding: 10px 14px; border: 1px solid var(--line-strong); border-left: 3px solid #e0a800; border-radius: var(--r-2); background: var(--surface-raised); font-size: var(--fs-2); line-height: 1.45; }
+    .waste-note { margin: 12px 0; padding: 10px 14px; border: 1px solid var(--line-strong); border-left: 3px solid var(--alert-amber); border-radius: var(--r-2); background: var(--surface-raised); font-size: var(--fs-2); line-height: 1.45; }
     .prompt-text, .prompt-suggested, .prompt-opener { margin: 8px 0 4px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--r-2); background: var(--surface-raised); font-size: var(--fs-2); line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow-y: auto; }
-    .prompt-suggested { border-left: 3px solid var(--metric-green, #2e9e5b); }
+    .prompt-suggested { border-left: 3px solid var(--metric-green, var(--metric-green-fallback)); }
     .risk-tag { font-size: var(--fs-1); text-transform: uppercase; letter-spacing: .04em; padding: 2px 8px; border-radius: var(--r-pill); vertical-align: middle; margin-left: 8px; border: 1px solid var(--line-strong); }
-    .risk-high { color: #d9534f; border-color: #d9534f; }
-    .risk-medium { color: #e0a800; border-color: #e0a800; }
+    .risk-high { color: var(--alert-red); border-color: var(--alert-red); }
+    .risk-medium { color: var(--alert-amber); border-color: var(--alert-amber); }
     .risk-low { color: var(--muted); }
     .prompt-opener { font-family: var(--mono); font-size: var(--fs-2); }
     .prompt-opener-label { display: inline-block; font-size: var(--fs-1); text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-right: 6px; }
@@ -1193,7 +1543,7 @@
     .section-title p { font-size: var(--fs-2); }
     .mono { font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .privacy-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-2); }
-    .privacy-item { display: flex; align-items: center; gap: var(--sp-2); color: #c8d3e1; padding: 10px 0; }
+    .privacy-item { display: flex; align-items: center; gap: var(--sp-2); color: var(--text-quiet); padding: 10px 0; }
     .privacy-check { color: var(--green); font-weight: var(--fw-bold); }
     .prompt-shell { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, .86fr); gap: var(--sp-4); align-items: start; }
     .prompt-box, .brief-box {
@@ -1203,46 +1553,46 @@
       border: 1px solid var(--line-strong);
       border-radius: var(--r-2);
       background:
-        linear-gradient(180deg, rgba(255,255,255,.018), transparent),
-        #080e15;
+        linear-gradient(180deg, rgba(var(--sheen-rgb), .018), transparent),
+        var(--ground-deep);
       color: var(--text);
       padding: 14px;
       font: var(--fs-2)/1.55 var(--mono);
-      box-shadow: inset 0 1px 0 rgba(255,255,255,.025);
+      box-shadow: inset 0 1px 0 rgba(var(--sheen-rgb), .025);
     }
     .prompt-box:focus, .brief-box:focus { outline: 2px solid var(--blue); outline-offset: 2px; }
     .prompt-form-row { display: grid; grid-template-columns: minmax(160px, .24fr) minmax(0, 1fr); gap: var(--sp-2); margin: 12px 0; }
     .prompt-result { margin-top: 14px; }
-    .risk-card { border-left: 3px solid var(--amber); padding: 14px; border-radius: var(--r-2); background: rgba(17,25,35,.86); }
-    .risk-card.high { border-left-color: var(--red); background: rgba(34,17,24,.86); }
-    .risk-card.low { border-left-color: var(--green); background: rgba(16,27,23,.86); }
+    .risk-card { border-left: 3px solid var(--amber); padding: 14px; border-radius: var(--r-2); background: rgba(var(--ink-mid-rgb), .86); }
+    .risk-card.high { border-left-color: var(--red); background: rgba(var(--tint-red-rgb), .86); }
+    .risk-card.low { border-left-color: var(--green); background: rgba(var(--tint-green-rgb), .86); }
     .risk-card h3 { font-size: var(--fs-4); margin-bottom: 8px; }
     .plan-route-card {
-      border: 1px solid rgba(112,167,255,.34);
+      border: 1px solid rgba(var(--blue-rgb), .34);
       border-left: 4px solid var(--blue);
       border-radius: var(--r-2);
       padding: 16px;
       background:
-        linear-gradient(135deg, rgba(112,167,255,.12), transparent 54%),
-        rgba(10,16,24,.78);
+        linear-gradient(135deg, rgba(var(--blue-rgb), .12), transparent 54%),
+        rgba(var(--scrim-rgb), .78);
       display: grid;
       gap: var(--sp-2);
     }
-    .plan-route-card.fresh_start { border-left-color: var(--green); background: linear-gradient(135deg, rgba(53,211,153,.12), transparent 54%), rgba(10,16,24,.78); }
-    .plan-route-card.prompt_change { border-left-color: var(--amber); background: linear-gradient(135deg, rgba(246,189,96,.12), transparent 54%), rgba(10,16,24,.78); }
+    .plan-route-card.fresh_start { border-left-color: var(--green); background: linear-gradient(135deg, rgba(var(--green-rgb), .12), transparent 54%), rgba(var(--scrim-rgb), .78); }
+    .plan-route-card.prompt_change { border-left-color: var(--amber); background: linear-gradient(135deg, rgba(var(--amber-rgb), .12), transparent 54%), rgba(var(--scrim-rgb), .78); }
     .plan-route-card.archive { border-left-color: var(--faint); }
     .plan-route-card.fork { border-left-color: var(--blue); }
     .plan-route-card h3 { font-size: var(--fs-4); margin: 0; }
     .plan-route-card .plan-label { width: fit-content; }
-    .plan-next-step { color: #dce8f8; }
-    .prompt-list { margin: 10px 0 0; padding-left: 18px; color: #d9e4f2; line-height: 1.55; }
+    .plan-next-step { color: var(--text-bright); }
+    .prompt-list { margin: 10px 0 0; padding-left: 18px; color: var(--text-bright); line-height: 1.55; }
     .copy-row { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: 12px; }
     .handoff-cta {
       margin-top: 16px;
       padding: 14px;
-      border: 1px solid rgba(86,157,231,.36);
+      border: 1px solid rgba(var(--blue-soft-rgb), .36);
       border-radius: var(--r-2);
-      background: linear-gradient(135deg, rgba(47,111,189,.18), rgba(53,211,153,.1));
+      background: linear-gradient(135deg, rgba(var(--blue-mid-rgb), .18), rgba(var(--green-rgb), .1));
       display: grid;
       gap: var(--sp-2);
     }
@@ -1254,7 +1604,7 @@
       padding: 14px;
       border: 1px solid var(--line);
       border-radius: var(--r-2);
-      background: #0b1118;
+      background: var(--ground-deep);
       display: grid;
       gap: var(--sp-3);
     }
@@ -1267,18 +1617,18 @@
       width: 100%;
       border: 1px solid var(--line-strong);
       border-radius: var(--r-2);
-      background: #080e15;
+      background: var(--ground-deep);
       color: var(--text);
       padding: 9px 10px;
       font: inherit;
     }
     .handoff-form textarea { min-height: 74px; resize: vertical; font-size: var(--fs-2); line-height: 1.45; }
     .fresh-preview, .receipt-widget {
-      border: 1px solid rgba(133,169,220,.24);
+      border: 1px solid rgba(var(--hairline-lift-rgb), .24);
       border-radius: var(--r-2);
       background:
-        linear-gradient(180deg, rgba(255,255,255,.025), transparent),
-        rgba(5,9,14,.30);
+        linear-gradient(180deg, rgba(var(--sheen-rgb), .025), transparent),
+        rgba(var(--well-rgb), .30);
       padding: 14px;
       margin-top: 14px;
     }
@@ -1293,36 +1643,36 @@
       padding-top: 10px;
     }
     .fresh-preview-row:first-child { border-top: 0; padding-top: 0; }
-    .fresh-preview-row strong { color: #d9e5f5; font-size: var(--fs-2); text-transform: uppercase; letter-spacing: .06em; }
-    .fresh-preview-row p { color: #eef4fc; overflow-wrap: anywhere; }
-    .receipt-widget { border-color: rgba(53,211,153,.34); background: linear-gradient(135deg, rgba(53,211,153,.10), rgba(5,9,14,.30)); }
+    .fresh-preview-row strong { color: var(--text-bright); font-size: var(--fs-2); text-transform: uppercase; letter-spacing: .06em; }
+    .fresh-preview-row p { color: var(--text-bright); overflow-wrap: anywhere; }
+    .receipt-widget { border-color: rgba(var(--green-rgb), .34); background: linear-gradient(135deg, rgba(var(--green-rgb), .10), rgba(var(--well-rgb), .30)); }
     .receipt-steps { display: grid; gap: var(--sp-2); margin-top: 10px; }
-    .receipt-step { display: flex; gap: var(--sp-2); align-items: flex-start; color: #d8e4f4; }
-    .receipt-step span { display: grid; place-items: center; width: 20px; height: 20px; border-radius: var(--r-pill); background: rgba(53,211,153,.16); border: 1px solid rgba(53,211,153,.38); color: #bff5df; font-size: var(--fs-1); font-weight: var(--fw-bold); flex: none; }
+    .receipt-step { display: flex; gap: var(--sp-2); align-items: flex-start; color: var(--text-bright); }
+    .receipt-step span { display: grid; place-items: center; width: 20px; height: 20px; border-radius: var(--r-pill); background: rgba(var(--green-rgb), .16); border: 1px solid rgba(var(--green-rgb), .38); color: var(--on-success); font-size: var(--fs-1); font-weight: var(--fw-bold); flex: none; }
     .evidence-rail { display: grid; gap: 0; margin-top: 12px; }
     .evidence-node { position: relative; display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: var(--sp-2); padding: 0 0 14px; animation: evidenceNodeIn .22s ease-out both; }
     .evidence-node::before { content: ""; position: absolute; left: 9px; top: 22px; bottom: 0; width: 1px; background: var(--drawer-line-strong); }
     .evidence-node:last-child { padding-bottom: 0; }
     .evidence-node:last-child::before { display: none; }
-    .evidence-dot { width: 19px; height: 19px; border-radius: var(--r-pill); border: 1px solid rgba(112,167,255,.54); background: rgba(112,167,255,.16); box-shadow: 0 0 0 4px rgba(112,167,255,.05); margin-top: 1px; }
-    .evidence-node.verified .evidence-dot, .evidence-node.observed .evidence-dot { border-color: rgba(53,211,153,.56); background: rgba(53,211,153,.18); }
-    .evidence-node.inferred .evidence-dot { border-color: rgba(246,189,96,.56); background: rgba(246,189,96,.18); }
-    .evidence-copy strong { display: flex; gap: var(--sp-2); align-items: center; color: white; font-size: var(--fs-3); }
+    .evidence-dot { width: 19px; height: 19px; border-radius: var(--r-pill); border: 1px solid rgba(var(--blue-rgb), .54); background: rgba(var(--blue-rgb), .16); box-shadow: 0 0 0 4px rgba(var(--blue-rgb), .05); margin-top: 1px; }
+    .evidence-node.verified .evidence-dot, .evidence-node.observed .evidence-dot { border-color: rgba(var(--green-rgb), .56); background: rgba(var(--green-rgb), .18); }
+    .evidence-node.inferred .evidence-dot { border-color: rgba(var(--amber-rgb), .56); background: rgba(var(--amber-rgb), .18); }
+    .evidence-copy strong { display: flex; gap: var(--sp-2); align-items: center; color: var(--t-base); font-size: var(--fs-3); }
     .evidence-copy p { margin-top: 3px; font-size: var(--fs-2); color: var(--muted); }
-    .prompt-opt-in { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-2); background: var(--surface-raised); font-size: var(--fs-2); color: #d5deea; cursor: pointer; }
-    .prompt-opt-in input { width: 15px; height: 15px; accent-color: var(--blue, #4f8cff); }
-    .prompt-opt-in .hint { flex-basis: 100%; color: #93a2b8; font-size: var(--fs-2); }
-    .ask-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.48); opacity: 0; pointer-events: none; transition: opacity .18s ease; z-index: 24; }
+    .prompt-opt-in { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-2); background: var(--surface-raised); font-size: var(--fs-2); color: var(--text-bright); cursor: pointer; }
+    .prompt-opt-in input { width: 15px; height: 15px; accent-color: var(--blue, var(--accent-fallback)); }
+    .prompt-opt-in .hint { flex-basis: 100%; color: var(--text-dim); font-size: var(--fs-2); }
+    .ask-backdrop { position: fixed; inset: 0; background: rgba(var(--shadow-rgb), .48); opacity: 0; pointer-events: none; transition: opacity .18s ease; z-index: 24; }
     .ask-backdrop.open { opacity: 1; pointer-events: auto; }
     .ask-panel {
       position: fixed; z-index: 25; right: 18px; bottom: 18px; width: min(520px, calc(100vw - 28px));
       max-height: min(720px, calc(100vh - 34px));
       display: grid; grid-template-rows: auto auto minmax(120px, 1fr) auto; gap: var(--sp-3);
-      padding: 16px; border: 1px solid rgba(112,167,255,.38); border-radius: var(--r-2);
+      padding: 16px; border: 1px solid rgba(var(--blue-rgb), .38); border-radius: var(--r-2);
       background:
-        linear-gradient(135deg, rgba(53,211,153,.10), rgba(112,167,255,.10) 42%, transparent),
-        #0b1118;
-      box-shadow: 0 22px 60px rgba(0,0,0,.52), inset 0 1px 0 rgba(255,255,255,.04);
+        linear-gradient(135deg, rgba(var(--green-rgb), .10), rgba(var(--blue-rgb), .10) 42%, transparent),
+        var(--ground-deep);
+      box-shadow: 0 22px 60px rgba(var(--shadow-rgb), .52), inset 0 1px 0 rgba(var(--sheen-rgb), .04);
       transform: translateY(18px); opacity: 0; visibility: hidden; transition: transform .18s ease, opacity .18s ease, visibility .18s ease;
     }
     .ask-panel.open { transform: translateY(0); opacity: 1; visibility: visible; }
@@ -1330,52 +1680,52 @@
     .ask-head h2 { font-size: var(--fs-4); }
     .ask-head p { margin-top: 3px; font-size: var(--fs-2); }
     .ask-templates { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
-    .ask-template { min-height: 30px; padding: 6px 9px; border-radius: var(--r-pill); font-size: var(--fs-2); color: #dceaff; background: rgba(112,167,255,.10); }
+    .ask-template { min-height: 30px; padding: 6px 9px; border-radius: var(--r-pill); font-size: var(--fs-2); color: var(--on-brand); background: rgba(var(--blue-rgb), .10); }
     .ask-messages { display: grid; gap: var(--sp-2); overflow-y: auto; padding-right: 2px; }
-    .ask-message { border: 1px solid var(--line); border-radius: var(--r-2); padding: 11px 12px; background: rgba(5,9,14,.46); }
-    .ask-message.user { justify-self: end; max-width: 88%; background: rgba(112,167,255,.13); border-color: rgba(112,167,255,.28); }
+    .ask-message { border: 1px solid var(--line); border-radius: var(--r-2); padding: 11px 12px; background: rgba(var(--well-rgb), .46); }
+    .ask-message.user { justify-self: end; max-width: 88%; background: rgba(var(--blue-rgb), .13); border-color: rgba(var(--blue-rgb), .28); }
     .ask-message.aiw { border-left: 3px solid var(--green); }
-    .ask-message strong { display: block; margin-bottom: 5px; color: white; }
-    .ask-message ul { margin: 8px 0 0; padding-left: 18px; color: #d9e4f2; line-height: 1.45; }
+    .ask-message strong { display: block; margin-bottom: 5px; color: var(--t-base); }
+    .ask-message ul { margin: 8px 0 0; padding-left: 18px; color: var(--text-bright); line-height: 1.45; }
     .ask-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: 10px; }
-    .ask-actions a { text-decoration: none; border: 1px solid rgba(112,167,255,.38); border-radius: var(--r-2); padding: 7px 9px; color: #dceaff; background: rgba(112,167,255,.10); font-size: var(--fs-2); font-weight: var(--fw-bold); }
+    .ask-actions a { text-decoration: none; border: 1px solid rgba(var(--blue-rgb), .38); border-radius: var(--r-2); padding: 7px 9px; color: var(--on-brand); background: rgba(var(--blue-rgb), .10); font-size: var(--fs-2); font-weight: var(--fw-bold); }
     .ask-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--sp-2); align-items: end; }
     .ask-form textarea {
       width: 100%; min-height: 46px; max-height: 110px; resize: vertical;
-      border: 1px solid var(--line-strong); border-radius: var(--r-2); background: #080e15;
+      border: 1px solid var(--line-strong); border-radius: var(--r-2); background: var(--ground-deep);
       color: var(--text); padding: 10px; font: inherit;
     }
-    .drawer-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.62); opacity: 0; pointer-events: none; transition: opacity .18s ease; z-index: 20; }
+    .drawer-backdrop { position: fixed; inset: 0; background: rgba(var(--shadow-rgb), .62); opacity: 0; pointer-events: none; transition: opacity .18s ease; z-index: 20; }
     .drawer-backdrop.open { opacity: 1; pointer-events: auto; }
     .drawer {
       position: fixed; z-index: 21; top: 0; right: 0; bottom: 0; width: min(620px, 94vw);
-      background: var(--drawer-bg); border-left: 1px solid var(--drawer-line-strong); box-shadow: -18px 0 46px rgba(0,0,0,.42);
+      background: var(--drawer-bg); border-left: 1px solid var(--drawer-line-strong); box-shadow: -18px 0 46px rgba(var(--shadow-rgb), .42);
       transform: translateX(102%); visibility: hidden; transition: transform .2s ease, visibility .2s ease; display: flex; flex-direction: column;
     }
     .drawer.open { transform: translateX(0); visibility: visible; }
-    .drawer-header { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); padding: 18px 22px; border-bottom: 1px solid var(--drawer-line); background: rgba(5,9,14,.34); }
+    .drawer-header { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); padding: 18px 22px; border-bottom: 1px solid var(--drawer-line); background: rgba(var(--well-rgb), .34); }
     .drawer-header p { font-size: var(--fs-2); margin-top: 2px; }
     .drawer-content { padding: 16px 22px 30px; overflow-y: auto; }
-    .drawer .runtime-strip { border-color: var(--drawer-line); background: rgba(5,9,14,.24); margin: 10px 0 0; }
+    .drawer .runtime-strip { border-color: var(--drawer-line); background: rgba(var(--well-rgb), .24); margin: 10px 0 0; }
     .drawer .copy-row { gap: var(--sp-2); }
     .drawer .btn-primary, .drawer .btn-quiet { min-height: 34px; padding: 7px 10px; }
     .outcome-control { padding: 18px 20px; border: 0; border-bottom: 1px solid var(--drawer-line); border-radius: 0; background: transparent; }
     .outcome-control h3 { font-size: var(--fs-3); }
     .outcome-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-2); margin-top: 12px; }
-    .outcome-button { min-height: 38px; background: #0d131b; }
-    .outcome-button.useful { color: #bff5df; border-color: rgba(53,211,153,.45); }
-    .outcome-button.rework { color: #ffe2a4; border-color: rgba(246,189,96,.45); }
-    .outcome-button.abandoned { color: #ffc4ce; border-color: rgba(242,125,143,.45); }
+    .outcome-button { min-height: 38px; background: var(--ground-deep); }
+    .outcome-button.useful { color: var(--on-success); border-color: rgba(var(--green-rgb), .45); }
+    .outcome-button.rework { color: var(--on-warning); border-color: rgba(var(--amber-rgb), .45); }
+    .outcome-button.abandoned { color: var(--on-danger); border-color: rgba(var(--red-rgb), .45); }
     .outcome-button.selected { font-weight: var(--fw-med); }
-    .outcome-button.selected.useful { background: rgba(53,211,153,.28); box-shadow: inset 0 0 0 2px var(--green); color: #eafff5; }
-    .outcome-button.selected.rework { background: rgba(246,189,96,.28); box-shadow: inset 0 0 0 2px var(--amber); color: #fff3dc; }
-    .outcome-button.selected.abandoned { background: rgba(242,125,143,.28); box-shadow: inset 0 0 0 2px var(--red); color: #ffe3e8; }
-    .toast { position: fixed; right: 20px; top: calc(var(--header-h) + var(--sp-3)); z-index: 30; max-width: 420px; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: var(--r-2); background: #18212c; color: var(--text); box-shadow: 0 12px 32px rgba(0,0,0,.35); opacity: 0; transform: translateY(12px); pointer-events: none; transition: opacity .18s ease, transform .18s ease; }
+    .outcome-button.selected.useful { background: rgba(var(--green-rgb), .28); box-shadow: inset 0 0 0 2px var(--green); color: var(--on-success-bright); }
+    .outcome-button.selected.rework { background: rgba(var(--amber-rgb), .28); box-shadow: inset 0 0 0 2px var(--amber); color: var(--on-warning-bright); }
+    .outcome-button.selected.abandoned { background: rgba(var(--red-rgb), .28); box-shadow: inset 0 0 0 2px var(--red); color: var(--on-danger-bright); }
+    .toast { position: fixed; right: 20px; top: calc(var(--header-h) + var(--sp-3)); z-index: 30; max-width: 420px; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: var(--r-2); background: var(--ground-mid); color: var(--text); box-shadow: 0 12px 32px rgba(var(--shadow-rgb), .35); opacity: 0; transform: translateY(12px); pointer-events: none; transition: opacity .18s ease, transform .18s ease; }
     /* Moved under the header from the bottom-right corner, where it was
        partly clipped by the window edge and far from every button. */
-    button.copied { border-color: rgba(67,217,163,.55); color: var(--green); }
+    button.copied { border-color: rgba(var(--green-rgb), .55); color: var(--green); }
     .toast.show { opacity: 1; transform: translateY(0); }
-    .toast.error { border-color: rgba(242,125,143,.55); background: #2a171d; }
+    .toast.error { border-color: rgba(var(--red-rgb), .55); background: var(--surface-danger); }
     /* Drawer content lands 0.2s-4.5s after the panel opens, so a bare swap
        reads as a jump rather than a resolve. Only the blocks that actually
        changed carry this (see setDrawerContent in index.js); the global
@@ -1388,8 +1738,8 @@
     .loading { color: var(--muted); padding: 18px 0; }
     .drawer .loading { padding: 18px 2px; }
     @keyframes recommendationPulse {
-      0% { box-shadow: inset 0 0 0 0 rgba(112,167,255,.26); border-left-color: #9fc8ff; }
-      100% { box-shadow: inset 0 0 0 8px rgba(112,167,255,0); border-left-color: var(--blue); }
+      0% { box-shadow: inset 0 0 0 0 rgba(var(--blue-rgb), .26); border-left-color: var(--pulse-line); }
+      100% { box-shadow: inset 0 0 0 8px rgba(var(--blue-rgb), 0); border-left-color: var(--blue); }
     }
     @keyframes sessionSurfaceIn {
       from { opacity: .82; transform: translateY(5px); }

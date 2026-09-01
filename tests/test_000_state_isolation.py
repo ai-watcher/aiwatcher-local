@@ -60,16 +60,26 @@ class StateIsolationTests(unittest.TestCase):
     """Guards the guard. Without these, losing isolation is silent."""
 
     def test_state_is_redirected_away_from_the_real_home(self):
-        from aiwatcher_cli import local_state
+        from aiwatcher_cli import analyst, local_state, prompt_signals
 
-        state = str(local_state.state_path())
-        self.assertIn(
-            PREFIX, state,
-            "AIWatcher state is not isolated, so this run is writing to the real "
-            "ledger. If you changed how the tests are invoked, make sure this "
-            "module is still imported before the others.",
-        )
-        self.assertNotIn(str(Path.home() / ".aiwatcher"), state)
+        real_home = (Path.home() / ".aiwatcher").resolve()
+        for label, path in (
+            ("local state", local_state.state_path()),
+            ("analyst detection cache", analyst._cache_path()),
+            ("prompt signal overrides", prompt_signals.config_path()),
+        ):
+            with self.subTest(label):
+                resolved = path.resolve()
+                self.assertIn(
+                    PREFIX, str(resolved),
+                    "AIWatcher state is not isolated, so this run is writing to "
+                    "the real ledger. If you changed how the tests are invoked, "
+                    "make sure this module is still imported before the others.",
+                )
+                self.assertFalse(
+                    resolved == real_home or real_home in resolved.parents,
+                    f"{label} resolves into the real home at {resolved}",
+                )
 
     def test_writing_state_does_not_touch_the_real_ledger(self):
         from aiwatcher_cli import local_state

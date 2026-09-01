@@ -43,3 +43,14 @@ events.json
 # stable and reviewable. It holds a throwaway agent's scratch space, never
 # anything worth committing.
 .aiwatcher/
+
+# Per-developer dev-server config for the Claude Code browser preview.
+# Generated locally and full of machine-specific ports and absolute paths.
+.claude/launch.json
+
+# Throwaway UI spikes and the notes around them: mockups of proposed surfaces,
+# captured API fixtures, and handoff prompts. Kept in the repo so they are where
+# you would look for them and so their paths stay relative, but never shipped --
+# a mockup that gets reviewed as product code is worse than no mockup, and the
+# fixtures carry real local paths, session ids and dollar figures.
+spike/

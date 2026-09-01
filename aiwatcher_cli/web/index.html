@@ -4,20 +4,46 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>AIWatcher Local</title>
-  <!-- Replaced at runtime with a state-coloured data: URI (see renderTabState).
-       A link element has to exist for that swap to have somewhere to land, and
-       the inline default keeps the page self-contained with no second request. -->
-  <link id="favicon" rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23070b11'/%3E%3Ccircle cx='16' cy='16' r='7' fill='%2378869a'/%3E%3C/svg%3E" />
+  <!-- Replaced at runtime with a state-coloured data: URI (see faviconFor):
+       the blue ring is the one that turns amber or red. A link element has to
+       exist for that swap to have somewhere to land, and the inline default
+       keeps the page self-contained with no second request. -->
+  <link id="favicon" rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%27-10%20-10%20449%20369%27%20fill%3D%27none%27%3E%3Cstyle%3E.ink%7Bstroke%3A%23141314%7D%40media%28prefers-color-scheme%3Adark%29%7B.ink%7Bstroke%3A%23DCE6F6%7D%7D%3C%2Fstyle%3E%3Crect%20x%3D%2720%27%20y%3D%2720%27%20width%3D%27260%27%20height%3D%27220%27%20rx%3D%2765%27%20stroke%3D%27%230052F5%27%20stroke-width%3D%2740%27%2F%3E%3Crect%20class%3D%27ink%27%20x%3D%27149%27%20y%3D%27137%27%20width%3D%27260%27%20height%3D%27192%27%20rx%3D%2765%27%20stroke-width%3D%2740%27%2F%3E%3C%2Fsvg%3E" />
+  <!-- Before the stylesheet, and inline on purpose: the attribute has to be on
+       <html> for the first paint, or the page renders in one theme and snaps to
+       the other in front of the reader. Small enough to duplicate the read that
+       currentTheme() does properly later. -->
+  <script>
+    (function () {
+      var t;
+      try { t = localStorage.getItem('aiw-theme'); } catch (e) { t = null; }
+      if (t !== 'light' && t !== 'dark') {
+        t = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches
+          ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
   <style>@@INCLUDE:index.css@@</style>
 </head>
 <body>
 <main>
   <header>
     <div class="brand">
-      <div class="brand-mark" aria-hidden="true">AW</div>
+      <!-- The mark, inline. The page is spliced into one self-contained file and
+           serves no external assets, so this cannot be a <img src>. Source of
+           truth is logo/aiwatcher-mark.svg; the only change here is that the ink
+           ring reads currentColor so it can invert for the dark theme. -->
+      <svg class="brand-mark" viewBox="0 0 429 349" fill="none" aria-hidden="true">
+        <rect x="20" y="20" width="260" height="220" rx="65" stroke="var(--brand-blue)" stroke-width="40"/>
+        <rect x="149" y="137" width="260" height="192" rx="65" stroke="currentColor" stroke-width="40"/>
+      </svg>
       <div class="brand-copy">
         <div class="actions">
-          <h1>AIWatcher Local</h1>
+          <!-- The wordmark. "Local" is the product qualifier that separates
+               this from the Enterprise link two controls away, so it follows the
+               name rather than joining it. -->
+          <h1 class="wordmark">AIWatcher <span class="wordmark-local">Local</span></h1>
           <span class="status-badge"><span class="status-dot"></span>Private and local</span>
         </div>
         <p>Your AI coding work, outcomes, and improvement signals.</p>
@@ -29,6 +55,10 @@
         <option value="7" selected>Last 7 days</option>
         <option value="30">Last 30 days</option>
       </select>
+      <!-- Follows the OS until you say otherwise; the label states what a click
+           does, not what is currently on. aria-pressed carries the state for a
+           reader that cannot see which way the page went. -->
+      <button id="themeToggle" class="btn-quiet" aria-pressed="false" onclick="toggleTheme()">Light</button>
       <button id="refreshButton" class="btn-quiet" onclick="load(false, true)">Refresh data</button>
       <a class="link-button" href="https://www.getaiwatcher.com" target="_blank" rel="noreferrer">Enterprise</a>
     </div>
@@ -57,13 +87,27 @@
   <nav class="product-nav" aria-label="AIWatcher Local sections">
     <button class="nav-tab active" data-view="today" onclick="showView('today')">Home</button>
     <button class="nav-tab" data-view="prompt" onclick="showView('prompt')">Plan</button>
-    <button class="nav-tab" data-view="sessions" onclick="showView('sessions')">Watch</button>
-    <button class="nav-tab nav-sub" data-view="projects" onclick="showView('projects')">Projects</button>
-    <button class="nav-tab nav-sub" data-view="changes" onclick="showView('changes')">Changes ledger</button>
+    <button class="nav-tab" data-view="watch" onclick="showView('watch')">Watch</button>
+    <button class="nav-tab" data-view="control" onclick="showView('control')">Control</button>
     <button class="nav-tab" data-view="receipts" onclick="showView('receipts')">Prove</button>
+    <button class="nav-tab nav-sub" data-view="changes" onclick="showView('changes')">Changes ledger</button>
     <button class="nav-tab" data-view="insights" onclick="showView('insights')">Improve</button>
+    <button class="nav-tab" data-view="projects" onclick="showView('projects')">Projects</button>
+    <button class="nav-tab nav-sub" data-view="sessions" onclick="showView('sessions')">Sessions</button>
     <button class="nav-tab" data-view="setup" onclick="showView('setup')">Settings</button>
   </nav>
+
+  <!-- Shown once, on a machine where nothing is gated yet, and deliberately
+       absent from the nav: this is a moment in a journey, not a destination,
+       and you should not be able to navigate back to your own onboarding a
+       month later. NavigationTest exempts it by name and says why -- see
+       BORROWS_HIGHLIGHT there -- so the every-view-needs-a-nav-entry rule keeps
+       applying to everything else. -->
+  <section id="view-first-run" class="view" hidden>
+    <div class="card first-run">
+      <div id="firstRunBody"></div>
+    </div>
+  </section>
 
   <section id="view-today" class="view">
     <!-- The ambient surface. Five slots, in a fixed order, filled by renderAmbient:
@@ -72,23 +116,33 @@
          starts or ends -- peripheral vision notices movement, not content. -->
     <section id="ambient" class="ambient" aria-live="polite" hidden></section>
 
-    <!-- A standing summary of the window, under the panel about right now. Cut
-         with the rest of Home on the grounds that each number appears elsewhere,
-         which was true and missed the point: four numbers in four places is not
-         the same as four numbers in one glance. Three, not four -- preflight
-         decisions moved to Prove and duplicating it back would undo that. -->
-    <section class="grid kpis" style="margin-top:14px">
-      <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub" id="costPerUseful">-</div><div class="metric-spark" data-tile-spark="usefulOutcomes" hidden></div></div>
-      <!-- Promoted out of the Useful outcomes card, where it was a second metric
-           reading as a footnote to the first: a whole sentence carrying a rate, a
-           base and a window, which made that one card 53px taller than its
-           neighbours and set the height of the row. It is the other ratio this
-           dashboard is willing to judge, so it gets a slot, not a sentence. The
-           green rail is the shared identity of the two outcome-quality ratios,
-           not a claim about the value -- it is green at every value. -->
-      <div class="card metric-card metric-green"><div class="label">Cost per surviving line</div><div class="value" id="costPerSurviving">-</div><div class="sub" id="costPerSurvivingSub">-</div><div class="metric-spark" id="survivalMeter" hidden></div></div>
-      <div class="card metric-card metric-blue"><div class="label">Sessions observed</div><div class="value" id="sessions">-</div><div class="sub">This machine only</div><div class="metric-spark" data-tile-spark="sessions" hidden></div></div>
-      <div class="card metric-card metric-neutral"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div><div class="metric-spark" data-tile-spark="apiValue" hidden></div></div>
+    <!-- The window summary that used to sit here is on Prove now. It was moved
+         once before on the grounds that each number appears elsewhere, and
+         restored with the right objection: four numbers in four places is not
+         the same as four numbers in one glance. That objection still stands and
+         this move does not reopen it -- the four travel together and are still
+         read across, they are simply read across on the surface that asks the
+         question they answer.
+
+         Home asks "is something happening right now that I should deal with".
+         Cost per useful change and cost per surviving line answer "was the
+         spend worth it", which is a question you ask at the end of a period,
+         not mid-task with an editor open. On Prove they stop being a standing
+         summary and become the evidence under a claim. -->
+
+    <!-- Three present-tense facts, read across. Each answers this surface's
+         question -- is something happening right now that I should deal with --
+         from a different angle: what is running, how far from a checkpoint, and
+         what is sitting around costing nothing useful.
+
+         A row rather than three stacked cards, for the same reason the window
+         summary is a row on Prove: three numbers in three places is not three
+         numbers in one glance. Each hides itself rather than showing a zero, so
+         an idle machine does not carry a permanent row about nothing. -->
+    <section class="grid kpis" id="homeStrip" style="margin-top:14px">
+      <div class="card metric-card metric-blue" id="presenceTile" hidden></div>
+      <div class="card metric-card metric-neutral" id="checkpoint" hidden></div>
+      <div class="card metric-card metric-neutral" id="wasteTile" hidden></div>
     </section>
 
     <!-- Receipt only, and hidden until you act. The alert this element used to
@@ -124,19 +178,10 @@
         <div id="promptResult" class="prompt-result"><div class="empty">Run Plan to choose the safest next route before sending the prompt.</div></div>
       </div>
     </div>
-    <!-- Housekeeping, not planning. It was 64% of this tab, above the tool the
-         tab is named for, so it now opens on demand with its count in the
-         summary. The link to planning is real -- you clear clutter before
-         carrying context forward -- but it is the preamble, not the point. -->
-    <section id="optimizeWorkspace" class="card" style="margin-top:14px">
-      <details class="aiw-details">
-        <summary><span id="optimizeWorkspaceSummary">Optimize workspace</span></summary>
-        <div class="details-body">
-          <p class="optimize-lede">Review stale chats, pending Fresh Starts, AI worktrees, and runtime clutter before carrying context forward. <span class="note-chip local">Local only</span></p>
-          <div id="optimizeWorkspaceBody"><div class="empty">Loading workspace cleanup evidence...</div></div>
-        </div>
-      </details>
-    </section>
+    <!-- The Optimize workspace queue was here, collapsed, having already been
+         demoted once for being 64% of a tab named for something else. It is on
+         Control now: it is not planning, it is the acting the loop's third
+         stage exists for. -->
   </section>
 
   <section id="view-projects" class="view" hidden>
@@ -150,24 +195,68 @@
         <tbody id="projectRows"></tbody>
       </table></div>
     </div>
+
+    <!-- Both moved from Improve, where they were analysis filed under advice.
+         They answer "where did the spend go" -- the same question the table
+         above answers, on a different axis -- and neither tells you what to
+         change, which is what Improve is for. The scatter says so itself: it
+         is explicitly not a verdict on which model is better value. -->
+    <section class="card" style="margin-bottom:14px" id="modelScatter" hidden>
+      <div class="section-title">
+        <div><h2>Cost against size, one dot per session</h2><p>Both axes are logarithmic, so a dearer model sits higher rather than climbing more steeply. Look for a hollow dot high up: an expensive session that produced nothing. A faded dot is one nobody has judged yet, which is not the same as one that failed. Click any dot to open that session.</p></div>
+      </div>
+      <div class="bar-legend" id="modelScatterLegend"></div>
+      <div data-scatter></div>
+      <p class="receipt-note" id="modelScatterWithheld" hidden></p>
+      <p class="receipt-note">Not a verdict on which model is better value. If the dear model gets the hard problems it will land less often for reasons that have nothing to do with the model, and nothing local separates those.</p>
+    </section>
+    <section class="card" style="margin-top:14px">
+      <div class="section-title"><div><h2>Models and Tools</h2><p>Where the spend went, by model and by tool.</p></div></div>
+        <h3 style="font-size:var(--fs-2);font-weight:var(--fw-med);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 4px">By model</h3>
+        <div id="models"></div>
+        <h3 style="font-size:var(--fs-2);font-weight:var(--fw-med);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:14px 0 4px">By tool</h3>
+        <div class="composition" id="toolsComposition" hidden>
+          <div class="pie-host" data-pie="tools"></div>
+          <div class="composition-legend" id="toolsCompositionLegend"></div>
+          <div id="tools"></div>
+        </div>
+        <h3 style="font-size:var(--fs-2);font-weight:var(--fw-med);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:16px 0 2px">Model mix within each tool</h3>
+        <p style="font-size:var(--fs-1);color:var(--faint);margin:0 0 8px">Each bar is that tool's own 100%, so size means proportion, not volume &mdash; the token total is on the right.</p>
+        <div id="toolModels" hidden></div>
+    </section>
   </section>
 
-  <section id="view-sessions" class="view" hidden>
-    <!-- Two zones once the window is wide enough for both to be real: what is
-         happening right now, beside the work it is happening to. Stacked below
-         1280px, because a 1024px window leaves 721px of content once the nav
-         rail is taken out and the Work table needs 393px of that on its own. -->
-    <div class="watch-shell">
-    <div class="card">
+  <!-- Triage, and only triage: which session needs you, and which one first.
+       The Work table used to sit beside this in a two-zone grid, on the
+       reasoning that "what is happening right now" belongs next to "the work it
+       is happening to". They are two jobs, though, and only one of them is
+       urgent -- searching sessions is a sit-down task whose search can fall
+       back to a per-session git lookup taking seconds, which is not something
+       to put on the screen you reach because something is wrong. It is its own
+       view under Projects now, and the two-zone grid is gone with it. -->
+  <section id="view-watch" class="view" hidden>
+    <!-- The card carries the deep-link target seven Companion nudges have
+         always pointed at. It sits here rather than on the div the rows render
+         into, so arriving puts the heading at the top of the window instead of
+         the first row with its explanation scrolled off. -->
+    <div class="card" id="contextHealth">
       <div class="section-title">
         <div><h2>Context health</h2><p>Context bloat, runway pressure, and Fresh Start actions for local work.</p></div>
         <span class="note-chip">Actionable sessions</span>
       </div>
       <div id="sessionContextHealth"></div>
     </div>
+  </section>
+
+  <!-- The Work table, lifted out of Watch. It keeps the id `sessions` because
+       every link that says ?view=sessions without a #contextHealth hash meant
+       this table -- "Open Work", "Review Sessions", and the drawer's "Find real
+       sessions" -- and because showView keys its lazy load off that id. Watch
+       took the id `watch`, which is what its nav entry has always said. -->
+  <section id="view-sessions" class="view" hidden>
     <div class="card">
       <div class="section-title">
-        <div><h2>Work</h2><p>Search sessions, inspect projects, review changes, and continue prior local AI work. Prompt text is shown for your own review only, never uploaded.</p></div>
+        <div><h2>Sessions</h2><p>Search sessions, inspect projects, and continue prior local AI work. Prompt text is shown for your own review only, never uploaded.</p></div>
         <span class="note-chip local">Local only</span>
       </div>
       <div class="session-filters">
@@ -199,7 +288,6 @@
         <tbody id="sessionRows"></tbody>
       </table></div>
     </div>
-    </div>
   </section>
 
   <section id="view-changes" class="view" hidden>
@@ -229,7 +317,105 @@
     </div>
   </section>
 
+  <!-- Stage three of the loop the README defines: Plan, Watch, Control, Prove,
+       Improve. It is the only stage with no nav entry, so the one moment the
+       product exists for -- doing something about what it just told you -- is
+       reachable only if you already know that Fresh Start lives on Home, the
+       cleanup queue lives on Plan, and the session actions live in the drawer.
+
+       The shell lands first, deliberately empty of moved content: reparenting
+       the nav is one reviewable change, and relocating the queue and the
+       actions into it is another. What it says now is what it will do, not a
+       placeholder pretending to be finished. -->
+  <section id="view-control" class="view" hidden>
+    <!-- What you can act on, read across. Three facts that each end in a verb:
+         how much context a Fresh Start would save, whether anything is being
+         reviewed before it runs, and how many decisions this window produced.
+         The placeholder that stood here said the actions were still elsewhere,
+         which was true and is not a surface. -->
+    <section class="grid kpis" id="controlStrip">
+      <div class="card metric-card metric-neutral" id="freshStartTile" hidden></div>
+      <div class="card metric-card metric-neutral" id="gateTile" hidden></div>
+      <div class="card metric-card metric-neutral" id="decisionsTile" hidden></div>
+    </section>
+
+    <!-- Moved from Plan. It had been demoted there already -- collapsed behind
+         a summary, because it was 64% of a tab named for planning -- which
+         treated the symptom. Reviewing stale chats, pending Fresh Starts, AI
+         worktrees and runtime clutter is not preparation for a prompt, it is
+         the acting this stage is named for, and the only reason it lived on
+         Plan is that Plan was the nearest surface that existed.
+
+         Left expanded rather than collapsed: it was folded away for competing
+         with the prompt tool, and here there is nothing to compete with. The
+         ids are load()'s -- it writes optimizeWorkspaceSummary and
+         optimizeWorkspaceBody by getElementById -- so the card fills exactly as
+         it did on Plan, and #optimizeWorkspace still resolves as a deep link
+         target, now under ?view=control. -->
+    <section id="optimizeWorkspace" class="card" style="margin-top:14px">
+      <div class="section-title">
+        <div><h2 id="optimizeWorkspaceSummary">Optimize workspace</h2>
+          <p class="optimize-lede">Stale chats, pending Fresh Starts, AI worktrees, and runtime clutter worth clearing.</p></div>
+        <span class="note-chip local">Local only</span>
+      </div>
+      <div id="optimizeWorkspaceBody"><div class="empty">Loading workspace cleanup evidence...</div></div>
+    </section>
+  </section>
+
   <section id="view-receipts" class="view" hidden>
+    <!-- The claim, above the numbers that back it and the receipts that
+         evidence those. This surface answers "was any of this worth it", and a
+         reader arriving at two tables of decisions has to assemble the answer
+         themselves. Conclusion first, then support, then detail. -->
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title">
+        <div><h2>Was any of this worth it?</h2><p>What the spend bought, what it did not, and how much of it can be judged yet.</p></div>
+        <span class="note-chip local">Local only</span>
+      </div>
+      <div id="proveClaim"></div>
+    </section>
+
+    <!-- Moved from Home, together and unchanged. These four answer "was the
+         spend worth it", which is this surface's question and not Home's, and
+         they are the claim the receipt tables below are evidence for -- the
+         two had been on separate screens, so Home carried figures with no
+         backing and Prove carried backing with no figures.
+
+         The ids are load()'s, not this section's: it writes them by
+         getElementById and data-tile-spark, so the row keeps filling from
+         where it always did. They stay in one row for the reason they were
+         restored to Home in the first place -- four numbers in four places is
+         not four numbers in one glance.
+
+         They sit above the receipts and below nothing yet. The sentence that
+         should lead this surface -- the unbanked headline, already written in
+         the payload -- is a separate change. -->
+    <section class="grid kpis" style="margin-bottom:14px">
+      <div class="card metric-card metric-green"><div class="label">Useful outcomes</div><div class="value" id="usefulOutcomes">-</div><div class="sub" id="costPerUseful">-</div><div class="metric-spark" data-tile-spark="usefulOutcomes" hidden></div></div>
+      <!-- Promoted out of the Useful outcomes card, where it was a second metric
+           reading as a footnote to the first: a whole sentence carrying a rate, a
+           base and a window, which made that one card 53px taller than its
+           neighbours and set the height of the row. It is the other ratio this
+           dashboard is willing to judge, so it gets a slot, not a sentence. The
+           green rail is the shared identity of the two outcome-quality ratios,
+           not a claim about the value -- it is green at every value. -->
+      <div class="card metric-card metric-green"><div class="label">Cost per surviving line</div><div class="value" id="costPerSurviving">-</div><div class="sub" id="costPerSurvivingSub">-</div><div class="metric-spark" id="survivalMeter" hidden></div></div>
+      <div class="card metric-card metric-blue"><div class="label">Sessions observed</div><div class="value" id="sessions">-</div><div class="sub">This machine only</div><div class="metric-spark" data-tile-spark="sessions" hidden></div></div>
+      <div class="card metric-card metric-neutral"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div><div class="metric-spark" data-tile-spark="apiValue" hidden></div></div>
+    </section>
+
+    <!-- Moved from Improve. "What stuck, and what was caught before it ran" is
+         evidence about what happened, which is this surface's question; on
+         Improve it sat beside advice about what to do next and answered a
+         different one. It reads between the summary above and the receipts
+         below because that is its altitude: coarser than a receipt row, finer
+         than a ratio. -->
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title">
+        <div><h2>Outcomes and guardrails</h2><p>What stuck, and what was caught before it ran.</p></div>
+      </div>
+      <div id="report"></div>
+    </section>
     <!-- The preflight count used to be a standalone card floating above this
          one with nothing connecting them (P3-4). It is an inline stat on the
          card it describes. Both ids are kept: load() writes to them. -->
@@ -268,44 +454,41 @@
       <p id="analystOverhead" class="receipt-note"></p>
       <div id="insightFeed"></div>
     </section>
-    <section class="card" style="margin-bottom:14px" id="modelScatter" hidden>
-      <div class="section-title">
-        <div><h2>Cost against size, one dot per session</h2><p>Both axes are logarithmic, so a dearer model sits higher rather than climbing more steeply. Look for a hollow dot high up: an expensive session that produced nothing. A faded dot is one nobody has judged yet, which is not the same as one that failed. Click any dot to open that session.</p></div>
-      </div>
-      <div class="bar-legend" id="modelScatterLegend"></div>
-      <div data-scatter></div>
-      <p class="receipt-note" id="modelScatterWithheld" hidden></p>
-      <p class="receipt-note">Not a verdict on which model is better value. If the dear model gets the hard problems it will land less often for reasons that have nothing to do with the model, and nothing local separates those.</p>
-    </section>
-    <section class="card" style="margin-bottom:14px">
-      <div class="section-title">
-        <div><h2>Outcomes and guardrails</h2><p>What stuck, and what was caught before it ran.</p></div>
-      </div>
-      <div id="report"></div>
-    </section>
     <p class="receipt-note" style="margin-top:4px">
       Read-only local scan &middot; no LLM calls &middot; no source or prompt content in summaries &middot;
       nothing leaves this machine unless you connect Cloud.
     </p>
-    <section class="card" style="margin-top:14px">
-      <div class="section-title"><div><h2>Models and Tools</h2><p>Where the spend went, by model and by tool.</p></div></div>
-        <h3 style="font-size:var(--fs-2);font-weight:var(--fw-med);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 4px">By model</h3>
-        <div id="models"></div>
-        <h3 style="font-size:var(--fs-2);font-weight:var(--fw-med);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:14px 0 4px">By tool</h3>
-        <div class="composition" id="toolsComposition" hidden>
-          <div class="pie-host" data-pie="tools"></div>
-          <div class="composition-legend" id="toolsCompositionLegend"></div>
-          <div id="tools"></div>
-        <h3 style="font-size:var(--fs-2);font-weight:var(--fw-med);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:16px 0 2px">Model mix within each tool</h3>
-        <p style="font-size:var(--fs-1);color:var(--faint);margin:0 0 8px">Each bar is that tool's own 100%, so size means proportion, not volume &mdash; the token total is on the right.</p>
-        <div id="toolModels" hidden></div>
-    </section>
   </section>
-
   <section id="view-setup" class="view" hidden>
     <section class="card" style="margin-bottom:14px">
       <div class="section-title"><div><h2>Privacy at a glance</h2><p>Your local trust boundary stays visible.</p></div></div>
       <div class="privacy-grid" id="privacy"></div>
+    </section>
+
+    <!-- Out of the fold, and directly under the promise it qualifies. Privacy
+         at a glance says what AIWatcher will not do; this says what it can
+         actually see, which is the other half of the same answer and the half
+         that admits limits -- Cursor is installed but keeps no local cost
+         history, so it is listed as detected and not measured rather than
+         quietly dropped.
+
+         Someone deciding whether to keep this running wants both halves at
+         once. One click away is not far, but it is far enough that the
+         reassuring half was visible by default and the qualifying half was
+         not. The heading is the count element, so it reads "Surface coverage
+         (2 of 4 gated automatically)" rather than needing a summary line to
+         say whether there is anything inside. -->
+    <section class="card" style="margin-bottom:14px">
+      <div class="section-title">
+        <div><h2 id="coverageSummary">Surface coverage</h2><p>Detected tools, hook confidence, and what AIWatcher can honestly measure.</p></div>
+        <span class="note-chip local">Local only</span>
+      </div>
+      <!-- Not .coverage-grid any more. That is a two-column card grid, and
+           coverage is a table now -- it made the table one grid item and the
+           legend beneath it another, so they sat side by side and the table
+           rendered at half width. Setup steps below still use the grid,
+           because those are cards. -->
+      <div id="coverageRowsSettings"></div>
     </section>
 
     <div class="card">
@@ -314,13 +497,9 @@
         <span class="note-chip local">Local only</span>
       </div>
       <p class="receipt-note">Ambient Watch starts with the dashboard by default. For standalone mode, run <code>aiwatcher watch --notify --overlay --interval 60</code>.</p>
-      <details class="aiw-details">
-        <summary><span id="coverageSummary">Surface coverage</span></summary>
-        <div class="details-body">
-          <p class="optimize-lede">Detected tools, hook confidence, and what AIWatcher can honestly measure.</p>
-          <div id="coverageRowsSettings" class="coverage-grid"></div>
-        </div>
-      </details>
+      <!-- Setup steps stay folded. They are recommendations about what to
+           install next, not a statement about what the tool can see, so they
+           do not carry the weight coverage does. -->
       <details class="aiw-details">
         <summary><span id="setupSummary">Setup steps</span></summary>
         <div class="details-body">

@@ -78,11 +78,23 @@ from .local_state import (
     state_path,
 )
 from .outcome_evidence import VALID_EVIDENCE_OUTCOMES, build_outcome_evidence, evidence_for_sessions
-from .ledger import UNBANKED_OUTSIDE_REPO, Ledger, build_ledger, unbanked_summary
+from .local_state import dismiss_first_run, first_run_dismissed_at
+from .ledger import (
+    UNBANKED_OUTSIDE_REPO,
+    Ledger,
+    build_ledger,
+    checkpoint_distance,
+    unbanked_summary,
+)
 from .pricing import cache_read_cost, estimate_cost, is_subscription_model
 from .runtime_attachment import (
     RuntimeAttachment,
+    format_resume_command,
+    launch_resume_command,
     perform_runtime_return,
+    resolve_resume_cwd,
+    resume_command_for_session,
+    resume_unavailable_reason,
     runtime_attachment_for_session,
     safe_runtime_processes,
 )
@@ -140,7 +152,17 @@ SUMMARY_MEMORY_TTL_SECONDS = 45
 SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
 # Bump whenever build_summary's payload shape changes, so a cache written by an
 # older build is discarded instead of rendering blank sections in a newer UI.
-SUMMARY_CACHE_SCHEMA_VERSION = 7
+SUMMARY_CACHE_SCHEMA_VERSION = 8
+
+# POST endpoints whose only fact is that they happened, so they carry no JSON
+# body and are exempt from the content-type check. Named rather than written
+# inline: a second `not in {...}` inside do_POST is also what the route parser
+# in test_cli reads to find the supported endpoints, and an inline set here
+# shadowed the real list.
+_POST_WITHOUT_BODY = frozenset({
+    "/api/handoff-receipts-viewed",
+    "/api/first-run-dismissed",
+})
 SESSION_SNAPSHOT_SCHEMA_VERSION = 1
 SUMMARY_BACKGROUND_COOLDOWN_SECONDS = 8
 SUMMARY_WINDOWS = (1, 7, 30)
@@ -1628,6 +1650,41 @@ def build_runtime_return(session_id: str, days: int = 30) -> dict[str, object]:
     state = session_state(row)
     attachment = runtime_attachment_for_session(row, state=state, processes=safe_runtime_processes())
     return perform_runtime_return(attachment)
+
+
+def build_session_resume(session_id: str, days: int = 30, *, launch: bool = False) -> dict[str, object]:
+    """Resolve the tool's own resume command for one session.
+
+    Deliberately does not consult session_state or runtime processes: resume
+    works on a session that ended days ago in a terminal since closed, which
+    is the case the live-attachment tiers cannot serve at all.
+
+    `command` is always returned when one exists, whether or not `launch`
+    succeeded, so the front end can fall back to copying it.
+    """
+    row = _find_session_row(session_id, days=days)
+    if not row:
+        return {"ok": False, "available": False, "error": "session not found"}
+    command = resume_command_for_session(row.tool, row.session_id)
+    if not command:
+        return {"ok": False, "available": False, "message": resume_unavailable_reason(row.tool, row.session_id)}
+    cwd = resolve_resume_cwd(row.project_path)
+    display = format_resume_command(command, cwd=cwd) or ""
+    result: dict[str, object] = {
+        "ok": True,
+        "available": True,
+        "tool": row.tool,
+        "cwd": cwd,
+        "command": display,
+        "message": f"Copy this into a terminal: `{display}`",
+    }
+    if launch:
+        # launch_resume_command owns ok/message from here: a failed spawn must
+        # report itself so the reader copies instead of assuming a window opened.
+        result.update(launch_resume_command(command, cwd=row.project_path))
+        result["available"] = True
+        result["command"] = display
+    return result
 
 
 def _related_active_workspaces(row: LocalSession, *, limit: int = 3) -> list[str]:
@@ -3377,6 +3434,104 @@ def _unbanked_chart(ledger: Ledger) -> dict[str, object] | None:
     return {"segments": segments, "total_usd": round(total, 6), "total_label": money(total)}
 
 
+def _checkpoint_card(
+    ledger: Ledger | None,
+    events: list[LocalEvent],
+    cards: list[dict[str, object]],
+) -> dict[str, object]:
+    """Checkpoint distance for the session Home is charting.
+
+    Scoped to the charted session's repo rather than the whole machine: the
+    figure sits under a hero that is one session, and a distance summed across
+    every repo would be the scope defect this dashboard keeps producing.
+    """
+    if ledger is None:
+        return {"available": False, "reason": "Could not read git history for the active repos."}
+    live = next((card for card in cards if card.get("charted_because_live")), None)
+    if live is None:
+        return {"available": False, "reason": "No live session to measure from."}
+    repo = str(live.get("project_full") or "")
+    if not repo:
+        return {"available": False, "reason": "The charted session has no resolved project path."}
+    card = dict(checkpoint_distance(ledger, events, repo))
+    if card.get("available"):
+        hours = float(card.get("hours_since") or 0)
+        card["elapsed_label"] = (
+            f"{hours / 24:.1f}d" if hours >= 24
+            else (f"{hours:.0f}h" if hours >= 1 else f"{hours * 60:.0f}m")
+        )
+        card["spend_label"] = money(float(card.get("spend_usd") or 0))
+        baseline = card.get("baseline") or {}
+        if isinstance(baseline, dict) and baseline.get("available"):
+            baseline["median_label"] = money(float(baseline.get("median_usd") or 0))
+    return card
+
+
+def _first_run_card(
+    *,
+    sessions: int,
+    spend_label: str,
+    window_label: str,
+    replayed_spend_share_pct: object,
+    coverage: list[dict[str, object]],
+    unbanked: dict[str, object],
+    ledger: Ledger | None,
+) -> dict[str, object]:
+    """The screen a machine sees once, before anything is gated.
+
+    Deliberately outside the nav: it is a moment in a journey, not a
+    destination, and you should not be able to navigate back to your own
+    onboarding a month later.
+
+    Two cases, and they fail in opposite directions if you only design for one.
+    AIWatcher reads history that already exists, so somebody who has been using
+    Claude Code for months is met with everything at once at the moment they
+    understand least. Somebody genuinely new is met with nine empty states, none
+    of which say when anything will appear. The first gets a finding about
+    themselves; the second gets a status report about their machine.
+
+    Neither gets invented numbers. "Not measurable" is a first-class state in
+    this product and there is a written rule against a figure that answers the
+    wrong question -- breaking both on the very first screen anyone sees would
+    cost more than the polish gains.
+    """
+    gated = [row for row in coverage if row.get("status") == "automatic"]
+    dismissed = first_run_dismissed_at()
+    if dismissed:
+        return {"show": False, "reason": "Already dismissed.", "dismissed_at": dismissed}
+    if gated:
+        # The one action this screen exists to prompt is already done.
+        return {"show": False, "reason": "A tool is already gated automatically."}
+
+    card: dict[str, object] = {
+        "show": True,
+        "reason": None,
+        "gate_installed": False,
+        # Named so the copy can say what it can and cannot see, rather than
+        # implying the listed tools are the covered ones.
+        "readable": [str(row.get("tool")) for row in coverage
+                     if row.get("status") in {"automatic", "limited"}],
+        "unmeasured": [
+            {"tool": str(row.get("tool")), "why": str(row.get("status_label") or "")}
+            for row in coverage if row.get("status") not in {"automatic", "limited"}
+        ],
+        "repos": len(ledger.repos) if ledger else 0,
+        "sessions": sessions,
+    }
+    if sessions <= 0:
+        card["kind"] = "new"
+        return card
+
+    # History already on the machine, so the finding needs no configuration to
+    # produce and is about them rather than about the product.
+    card["kind"] = "has_history"
+    card["spend_label"] = spend_label
+    card["window_label"] = window_label
+    card["replayed_spend_share_pct"] = replayed_spend_share_pct
+    card["unbanked_label"] = unbanked.get("unbanked_label") if unbanked.get("available") else None
+    return card
+
+
 def _unbanked_card(ledger: Ledger | None) -> dict[str, object]:
     """Spend in this window with no commit behind it."""
     if ledger is None:
@@ -4686,6 +4841,21 @@ def build_summary(
         "watcher": get_watcher_status(),
         "context_health": context_health,
         "context_health_status": "ready",
+        # Distance from the last checkpoint in the repo the charted session is
+        # working in. Home's question is "is something happening right now that
+        # I should deal with", and this is the only spend figure that can be
+        # answered honestly in the present tense -- see checkpoint_distance for
+        # why the obvious one, live unbanked spend, cannot be.
+        "checkpoint": _checkpoint_card(window_ledger, all_events, context_health),
+        "first_run": _first_run_card(
+            sessions=int(stats["sessions"]),
+            spend_label=money(float(stats["api_value_usd"])),
+            window_label="Last 24 hours" if days == 1 else f"Last {days} days",
+            replayed_spend_share_pct=replayed_spend_share,
+            coverage=[row.to_json() for row in surface_coverage(all_rows)],
+            unbanked=unbanked,
+            ledger=window_ledger,
+        ),
         "optimize": optimize,
         "handoff_bubble": handoff_bubble,
         "handoff_decisions": handoff_decisions,
@@ -4961,6 +5131,13 @@ def _build_summary_shell(
             "cost_per_useful_change": money(cost_per_useful) if cost_per_useful is not None else "—",
         },
         "survival": {"available": False, "reason": "Background evidence refresh pending."},
+        # Same shape as the real payload's, so the front end reads one contract
+        # rather than distinguishing "not computed yet" from "not present".
+        "checkpoint": {"available": False, "reason": "Background evidence refresh pending."},
+        # Never on the first paint: deciding to show onboarding needs coverage
+        # and history, and guessing wrong here means flashing an install screen
+        # at someone who installed months ago.
+        "first_run": {"show": False, "reason": "Background evidence refresh pending."},
         "projects": projects[:10],
         "projects_composition": _composition_chart(projects),
         "tools": tools,
@@ -5148,8 +5325,8 @@ def answer_local_question(question: str, days: int = 7) -> dict[str, object]:
                 confidence="Observed/inferred from local session history",
                 bullets=bullets,
                 actions=[
-                    _ask_action("Review Optimize", "/?view=prompt#optimizeWorkspace"),
-                    _ask_action("Open Work", "/?view=sessions"),
+                    _ask_action("Review Optimize", "/?view=control#optimizeWorkspace"),
+                    _ask_action("Open Sessions", "/?view=sessions"),
                 ],
             )
         return _ask_answer(
@@ -5167,7 +5344,7 @@ def answer_local_question(question: str, days: int = 7) -> dict[str, object]:
             latest = str(row.get("latest_turn_tokens") or row.get("latest_turn_tokens_label") or "unknown")
             recommendation = str(row.get("recommendation") or "Use a narrower prompt or Fresh Start before continuing.")
             session_id = str(row.get("session_id") or "")
-            actions = [_ask_action("Open Watch", "/?view=sessions")]
+            actions = [_ask_action("Open Watch", "/?view=watch")]
             if session_id:
                 actions.insert(0, _ask_action("Inspect Session", f"/?session={session_id}"))
             if row.get("can_handoff") and session_id:
@@ -5497,7 +5674,7 @@ def build_companion_state() -> dict[str, object]:
                 "label": "Watching quietly",
                 "subtitle": f"{project_count} projects ready for context review in Console",
                 "primary_label": "Console",
-                "primary_url": "/?view=sessions#contextHealth",
+                "primary_url": "/?view=watch#contextHealth",
                 "detail": "Fresh Start review is batched in Watch and only blinks while an affected AI surface is foreground.",
             }
         return {
@@ -5510,14 +5687,14 @@ def build_companion_state() -> dict[str, object]:
             ),
             "primary_label": "Review",
             "primary_action": "open_url",
-            "primary_url": "/?view=sessions#contextHealth",
+            "primary_url": "/?view=watch#contextHealth",
             "skip_label": "Snooze",
             "skip_state": "control_recommended_group",
             "skip_project": "\n".join(project_lines),
             "fresh_start_project_count": project_count,
             "fresh_start_context_label": context_label,
-            "control_url": "/?view=sessions#contextHealth",
-            "watch_url": "/?view=sessions#contextHealth",
+            "control_url": "/?view=watch#contextHealth",
+            "watch_url": "/?view=watch#contextHealth",
             "detail": "Choose which projects to Fresh Start, continue, or snooze in one batch.",
         }
     bubble = summary.get("handoff_bubble")
@@ -5531,7 +5708,7 @@ def build_companion_state() -> dict[str, object]:
                 "label": "Watching quietly",
                 "subtitle": "Fresh Start snoozed for this project",
                 "primary_label": "Console",
-                "primary_url": "/?view=sessions#contextHealth",
+                "primary_url": "/?view=watch#contextHealth",
                 "detail": "The project still appears in Watch, but the Companion will not blink for it during the cooldown.",
             }
         try:
@@ -5552,7 +5729,7 @@ def build_companion_state() -> dict[str, object]:
                     "label": "Watching quietly",
                     "subtitle": "Fresh Start snoozed for this project",
                     "primary_label": "Console",
-                    "primary_url": "/?view=sessions#contextHealth",
+                    "primary_url": "/?view=watch#contextHealth",
                     "detail": "AIWatcher will stay quiet for this project during the cooldown unless a stronger intervention is justified.",
                 }
             if decision in {"new_chat", "copy_handoff"}:
@@ -5608,7 +5785,7 @@ def build_companion_state() -> dict[str, object]:
                 "label": "Watching quietly",
                 "subtitle": subtitle,
                 "primary_label": "Console",
-                "primary_url": "/?view=sessions#contextHealth",
+                "primary_url": "/?view=watch#contextHealth",
                 "detail": "Fresh Start nudges only blink when the matching AI tool or terminal is foreground.",
             }
         return {
@@ -5682,7 +5859,7 @@ def build_companion_state() -> dict[str, object]:
                 "title": "Optimize workspace",
                 "subtitle": str(top.get("summary") or optimize.get("summary") or "Cleanup opportunity found."),
                 "primary_label": "Review",
-                "primary_url": "/?view=prompt#optimizeWorkspace",
+                "primary_url": "/?view=control#optimizeWorkspace",
                 "skip_label": "Skip",
                 "skip_state": "optimize_available",
                 "skip_project": project,
@@ -6080,15 +6257,17 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/handoff-demo",
             "/api/handoff-decision",
             "/api/handoff-receipts-viewed",
+            "/api/first-run-dismissed",
             "/api/optimize-decision",
             "/api/companion-skip",
             "/api/ambient-intervention-action",
             "/api/runtime-return",
+            "/api/session-resume",
         }:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
-        if content_type != "application/json" and parsed.path != "/api/handoff-receipts-viewed":
+        if content_type != "application/json" and parsed.path not in _POST_WITHOUT_BODY:
             self._send(415, json.dumps({"error": "Content-Type must be application/json"}), "application/json; charset=utf-8")
             return
         try:
@@ -6237,6 +6416,23 @@ class UIHandler(BaseHTTPRequestHandler):
                 "application/json; charset=utf-8",
             )
             return
+        if parsed.path == "/api/session-resume":
+            session_id = str(payload.get("session_id", payload.get("id", ""))).strip()
+            if not session_id:
+                self._send(400, json.dumps({"error": "session_id is required"}), "application/json; charset=utf-8")
+                return
+            raw_days = payload.get("days", 30)
+            try:
+                days = max(1, min(90, int(raw_days)))
+            except (TypeError, ValueError):
+                days = 30
+            result = build_session_resume(session_id, days, launch=bool(payload.get("launch")))
+            self._send(
+                404 if result.get("error") == "session not found" else 200,
+                json.dumps(result),
+                "application/json; charset=utf-8",
+            )
+            return
         if parsed.path == "/api/handoff-decision":
             session_id = str(payload.get("session_id", "")).strip()
             decision = str(payload.get("decision", "")).strip()
@@ -6281,6 +6477,20 @@ class UIHandler(BaseHTTPRequestHandler):
                 )
                 return
             self._send(200, json.dumps(record), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/first-run-dismissed":
+            # No body: the only fact is that it happened, and the timestamp is
+            # the server's rather than the page's.
+            try:
+                at = dismiss_first_run()
+            except OSError as exc:
+                self._send(
+                    500,
+                    json.dumps({"error": f"Could not record the first-run dismissal: {exc}"}),
+                    "application/json; charset=utf-8",
+                )
+                return
+            self._send(200, json.dumps({"ok": True, "dismissed_at": at}), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/handoff-receipts-viewed":
             try:
