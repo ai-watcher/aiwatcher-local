@@ -120,7 +120,8 @@ change without a deprecation period.
 `/api/companion-scan`, `/api/sessions`, `/api/session`,
 `/api/session-summary`, `/api/project`, `/api/report`, `/api/journal`,
 `/api/handoff-basic`, `/api/handoff`, `/api/handoff-demo`,
-`/api/context-health`, `/api/ambient-intervention`, `/api/update-status`
+`/api/context-health`, `/api/ambient-intervention`, `/api/update-status`,
+`/api/ai-assist-status`
 
 `/api/ambient-intervention` returns the content-free local signal metadata
 needed to keep the browser fallback consistent with the native companion.
@@ -135,6 +136,10 @@ Start test flow. `/api/update-status` checks the installed source checkout
 against GitHub when the dashboard asks for it and reports whether a clean
 fast-forward is available. The top-bar update badge uses this route for
 low-frequency status checks and user-triggered refreshes.
+`/api/ai-assist-status` returns the optional AI Assist mode, detected local
+providers, cloud-key presence by environment-variable name, privacy posture, and
+candidate workflows. It never returns secret values and never calls a model.
+
 `POST` — `/api/second-opinion` runs the Plan screen's Stage 2 analysis: it
 spawns the user's own agent CLI as a throwaway sibling process in
 `<project>/.aiwatcher/analyst/`. Claude Code and Codex can both host it, and
@@ -153,16 +158,29 @@ opinions. Asked once per project, before the first spawn, with the cost in the
 question. `/api/second-opinion-contents` records whether the analyst may open
 files in that project rather than only being given their paths. Off unless set,
 and deliberately separate from consent: agreeing to pay for a second opinion is
-not agreeing to let it read your source. `/api/ask-aiwatcher` answers dashboard-only local questions from
-indexed metadata. `/api/handoff-basic`, `/api/handoff`, and
-`/api/handoff-demo` accept the same dashboard-only Fresh Start options as their
-`GET` forms. `/api/handoff-decision` records which action you took on a Fresh
-Start companion, `/api/handoff-receipts-viewed` marks proof-pending receipts as
-seen, `/api/first-run-dismissed` records that the once-only first-run screen has
-been seen so it does not return (no body; the timestamp is the server's), `/api/optimize-decision` records an Improve action, `/api/companion-skip`
+not agreeing to let it read your source. `/api/ask-aiwatcher` answers
+dashboard-only local questions from indexed metadata. `/api/handoff-basic`,
+`/api/handoff`, and `/api/handoff-demo` accept the same dashboard-only Fresh
+Start options as their `GET` forms. `/api/handoff-ai-assist` runs the optional
+Fresh Start brief improvement workflow after the user explicitly asks for it;
+it appends an AI Assist refinement to the deterministic brief and records a
+privacy-safe run receipt, but does not change source-session evidence or proof
+claims. `/api/handoff-decision` records which action you took on a Fresh Start
+companion, `/api/handoff-receipts-viewed` marks proof-pending receipts as seen,
+`/api/first-run-dismissed` records that the once-only first-run screen has been
+seen so it does not return (no body; the timestamp is the server's),
+`/api/optimize-decision` records an Improve action, `/api/companion-skip`
 snoozes a non-blocking companion reminder, and
 `/api/ambient-intervention-action` records the native companion lifecycle
 (`displayed`, `acted`, `snoozed`, `dismissed`, or `failed`).
+`/api/ai-assist-config` saves the optional AI Assist mode. Supported modes are
+`off`, `local`, and `cloud`; source access is `metadata_only`, `prompt_opt_in`,
+or `source_opt_in`. For cloud mode, `api_key` may be supplied for the selected
+provider (`openai`, `anthropic`, or `openai_compatible`) and is stored only in
+local AIWatcher state. Responses never return the raw key; they expose
+`stored_keys` booleans instead. `clear_api_key: true` removes the saved key for
+the selected provider. Environment keys (`OPENAI_API_KEY`,
+`ANTHROPIC_API_KEY`, or `AIWATCHER_AI_API_KEY`) are still supported.
 `/api/runtime-return` asks AIWatcher to open the safest available return target
 for a local session: exact process attachment when a host exposes enough
 metadata, otherwise app/workspace return, otherwise a Fresh Start fallback.

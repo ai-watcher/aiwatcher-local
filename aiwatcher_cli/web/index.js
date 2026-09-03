@@ -164,6 +164,27 @@ let lastPressedButton = null;
 document.addEventListener('click', event => {
   const node = event.target && event.target.closest ? event.target.closest('button') : null;
   lastPressedButton = node || null;
+  if (node && node.dataset.aiAssistMode) {
+    event.preventDefault();
+    setAiAssistPreset(node.dataset.aiAssistMode, node.dataset.aiAssistProvider || '');
+  }
+  if (node && node.dataset.aiAssistCopyCommand) {
+    event.preventDefault();
+    copyText(node.dataset.command || '', 'Setup command copied');
+  }
+}, true);
+
+document.addEventListener('change', event => {
+  const node = event.target && event.target.closest ? event.target.closest('[data-ai-assist-provider]') : null;
+  if (node) {
+    aiAssistFormDirty = true;
+    updateAiAssistFormVisibility();
+  }
+}, true);
+
+document.addEventListener('input', event => {
+  const node = event.target && event.target.closest ? event.target.closest('#aiAssistSettingsMount input, #aiAssistSettingsMount select') : null;
+  if (node) aiAssistFormDirty = true;
 }, true);
 
 function pressedButton() {
@@ -1538,6 +1559,55 @@ function freshStartReceiptWidget({ reason = '', expected = '', copy = '', contro
     ${controls ? `<div class="actions" style="margin-top:14px">${controls}</div>` : ''}
   </div>`;
 }
+function renderFreshStartAiAssist(capsule) {
+  if (!capsule || capsule.demo) return '';
+  const status = capsule.ai_assist || {};
+  const config = status.config || {};
+  const result = capsule.ai_assist_result || null;
+  if (result && result.status === 'used') {
+    return `<div class="ai-assist-run-card ready">
+      <div>
+        <strong>AI Assist added</strong>
+        <p>Refined the human guidance with ${esc(result.provider || 'provider')} / ${esc(result.model || 'model')}. Local evidence and proof claims stayed unchanged.</p>
+      </div>
+      <span class="confidence-chip observed">receipt saved</span>
+    </div>`;
+  }
+  if (result && result.status) {
+    return `<div class="ai-assist-run-card needs-setup">
+      <div>
+        <strong>AI Assist not used</strong>
+        <p>${esc(result.reason || 'AI Assist was not ready for this run.')}</p>
+      </div>
+      <button class="btn-quiet" onclick="showView('setup'); showSettingsPanel('ai'); closeDrawer()">Settings</button>
+    </div>`;
+  }
+  if ((status.mode || 'off') === 'off') {
+    return `<div class="ai-assist-run-card">
+      <div>
+        <strong>Local brief only</strong>
+        <p>AI Assist is off, so this handoff uses deterministic local metadata and costs nothing extra.</p>
+      </div>
+      <button class="btn-quiet" onclick="showView('setup'); showSettingsPanel('ai'); closeDrawer()">Configure AI Assist</button>
+    </div>`;
+  }
+  if (!status.ready) {
+    return `<div class="ai-assist-run-card needs-setup">
+      <div>
+        <strong>AI Assist needs setup</strong>
+        <p>${esc(status.setup_hint || 'Finish AI Assist settings before using it on Fresh Start.')}</p>
+      </div>
+      <button class="btn-quiet" onclick="showView('setup'); showSettingsPanel('ai'); closeDrawer()">Settings</button>
+    </div>`;
+  }
+  return `<div class="ai-assist-run-card ready">
+    <div>
+      <strong>AI Assist available</strong>
+      <p>Optional: spend one small provider call to make the copied brief more contextual. Nothing runs until you confirm.</p>
+    </div>
+    <button class="btn-quiet" onclick="improveFreshStartWithAiAssist('${esc(capsule.session_id)}','${esc(capsule.target || 'generic')}', ${capsule.include_prompt_excerpt ? 'true' : 'false'})">Improve brief</button>
+  </div>`;
+}
 function renderHandoff(capsule) {
   const usage = capsule.usage || {};
   const evidence = capsule.evidence || {};
@@ -1572,6 +1642,7 @@ function renderHandoff(capsule) {
         ${isDemo ? `<button class="btn-quiet" onclick="showView('sessions'); closeDrawer()">Find real sessions</button>` : `<button class="btn-quiet" onclick="selectSession('${esc(capsule.session_id)}')">Inspect source session</button>`}
       </div>
     </div>
+    ${renderFreshStartAiAssist(capsule)}
     <!-- Refinement first but folded away, then the brief. The output used to
          sit above the five empty fields that shape it, which reads as "this is
          waiting for you" when in fact it is ready to copy. -->
@@ -1647,6 +1718,38 @@ async function regenerateHandoff(sessionId, target = 'generic', includePrompt = 
     await openDemoHandoff(target, includePrompt, options);
   } else {
     await openHandoff(sessionId, target, includePrompt, options);
+  }
+}
+async function improveFreshStartWithAiAssist(sessionId, target = 'generic', includePrompt = false) {
+  const status = currentData && currentData.ai_assist ? currentData.ai_assist : null;
+  const config = status && status.config ? status.config : {};
+  const label = (status && status.active_label) || 'AI Assist';
+  if (config.require_confirmation !== false) {
+    const ok = window.confirm(`${label} will make one small model call using your configured provider to refine this Fresh Start brief. Continue?`);
+    if (!ok) return;
+  }
+  const options = handoffOptionsFromForm();
+  const payload = handoffPayload(sessionId, target, includePrompt, options);
+  const statusNode = document.getElementById('handoffStatus');
+  if (statusNode) {
+    statusNode.insertAdjacentHTML('afterend', '<div id="aiAssistWorking" class="loading">AI Assist is improving the Fresh Start brief...</div>');
+  }
+  try {
+    const capsule = await postJson('/api/handoff-ai-assist', payload);
+    const working = document.getElementById('aiAssistWorking');
+    if (working) working.remove();
+    if (capsule.error) {
+      showToast(capsule.error, 'error');
+      return;
+    }
+    setDrawerContent(renderHandoff(capsule));
+    const result = capsule.ai_assist_result || {};
+    if (result.status === 'used') showToast('AI Assist refinement added');
+    else showToast(result.reason || 'AI Assist was not used', 'error');
+  } catch (error) {
+    const working = document.getElementById('aiAssistWorking');
+    if (working) working.remove();
+    showToast('AI Assist could not improve this brief.', 'error');
   }
 }
 async function openDemoHandoff(target = 'generic', includePrompt = false, options = null) {
@@ -3028,6 +3131,245 @@ function renderCoverage(rows) {
   </p>`;
 }
 
+function renderAiAssistSettings(status) {
+  const s = status || {};
+  const c = s.config || {};
+  const mode = c.mode || 'off';
+  const provider = c.provider || (mode === 'off' ? 'none' : 'auto');
+  const localProviders = s.local_providers || [];
+  const cloudProviders = s.cloud_providers || [];
+  const storedKeys = c.stored_keys || s.stored_keys || {};
+  const firstLocal = localProviders.find(row => row.available);
+  const cloudById = id => cloudProviders.find(row => row.id === id) || {};
+  const providerDetail = id => {
+    const row = [...localProviders, ...cloudProviders].find(item => item.id === id);
+    return row ? row.detail : '';
+  };
+  const providerOptions = [
+    { id: 'none', label: 'No provider', modes: ['off'], detail: 'AIWatcher will use local deterministic rules.', secretEnv: '' },
+    { id: 'auto', label: 'Auto-detect local runtime', modes: ['local'], detail: 'AIWatcher chooses from detected local providers.', secretEnv: '' },
+    { id: 'ollama', label: 'Ollama', modes: ['local'], detail: providerDetail('ollama') || 'Local model runtime.', secretEnv: '' },
+    { id: 'lmstudio', label: 'LM Studio', modes: ['local'], detail: providerDetail('lmstudio') || 'Local OpenAI-compatible runtime.', secretEnv: '' },
+    { id: 'llama_cpp', label: 'llama.cpp', modes: ['local'], detail: providerDetail('llama_cpp') || 'Local OpenAI-compatible runtime.', secretEnv: '' },
+    { id: 'openai', label: 'OpenAI', modes: ['cloud'], detail: providerDetail('openai') || 'Paste an OpenAI API key below.', secretEnv: 'OPENAI_API_KEY', keyFound: !!cloudById('openai').available || !!storedKeys.openai },
+    { id: 'anthropic', label: 'Claude', modes: ['cloud'], detail: providerDetail('anthropic') || 'Paste a Claude API key below.', secretEnv: 'ANTHROPIC_API_KEY', keyFound: !!cloudById('anthropic').available || !!storedKeys.anthropic },
+    { id: 'openai_compatible', label: 'Custom endpoint', modes: ['cloud'], detail: providerDetail('openai_compatible') || 'Paste the key and endpoint URL below.', secretEnv: 'AIWATCHER_AI_API_KEY', keyFound: !!cloudById('openai_compatible').available || !!storedKeys.openai_compatible },
+  ];
+  const providerSelectOptions = providerOptions.map(row => {
+    const hidden = !row.modes.includes(mode) ? ' hidden' : '';
+    return `<option value="${esc(row.id)}" data-modes="${esc(row.modes.join(','))}" data-detail="${esc(row.detail || '')}" data-secret-env="${esc(row.secretEnv || '')}" data-key-found="${row.keyFound ? '1' : '0'}" ${provider === row.id ? 'selected' : ''}${hidden}>${esc(row.label)}</option>`;
+  }).join('');
+  const currentProvider = providerOptions.find(row => row.id === provider) || providerOptions[0];
+  const keySaved = mode === 'cloud' && !!storedKeys[provider];
+  const showProvider = mode !== 'off';
+  const showApiKey = mode === 'cloud';
+  const showEndpoint = mode !== 'off' && provider === 'openai_compatible';
+  const keyPlaceholder = keySaved ? 'Saved locally. Paste a new key to replace it.' : 'Paste API key';
+  const workflowSummary = (s.workflows || [])
+    .filter(row => ['first', 'second'].includes(row.priority))
+    .map(row => esc(row.label))
+    .join(' and ');
+  return `<div class="ai-assist-simple mode-${esc(mode)}">
+    <div class="ai-assist-status ${s.ready ? 'ready' : 'needs-setup'}">
+      <div>
+        <strong>${esc(s.active_label || 'Local rules only')}</strong>
+        <span>${esc(s.setup_hint || 'No model calls happen from Settings.')}</span>
+      </div>
+      <span class="status-pill">${esc(s.status_label || 'Off')}</span>
+    </div>
+
+    <div class="ai-assist-mode-grid" role="group" aria-label="AI Assist mode">
+      <button class="ai-assist-mode-card rules ${mode === 'off' ? 'selected' : ''}" data-ai-assist-mode="off" data-ai-assist-provider="none" type="button">
+        <strong>Local rules</strong>
+        <span>Best default. No keys, model calls, or extra spend.</span>
+      </button>
+      <button class="ai-assist-mode-card local ${mode === 'local' ? 'selected' : ''}" data-ai-assist-mode="local" data-ai-assist-provider="${esc((firstLocal && firstLocal.id) || 'auto')}" type="button">
+        <strong>Local model</strong>
+        <span>Use detected local runtimes for smarter briefs.</span>
+      </button>
+      <button class="ai-assist-mode-card cloud ${mode === 'cloud' ? 'selected' : ''}" data-ai-assist-mode="cloud" data-ai-assist-provider="openai" type="button">
+        <strong>Cloud key</strong>
+        <span>Paste an OpenAI or Claude key for confirmed AI Assist runs.</span>
+      </button>
+    </div>
+
+    <input id="aiAssistMode" type="hidden" value="${esc(mode)}">
+
+    <div class="ai-assist-fields">
+      <div class="ai-assist-provider-row" id="aiAssistProviderRow" ${showProvider ? '' : 'hidden'}>
+        <label><span class="label">Provider</span><select id="aiAssistProvider" data-ai-assist-provider>${providerSelectOptions}</select></label>
+        <p id="aiAssistProviderHint" class="receipt-note">${esc(currentProvider.detail || '')}</p>
+      </div>
+
+      <label id="aiAssistApiKeyRow" ${showApiKey ? '' : 'hidden'}><span class="label">API key</span><input id="aiAssistApiKey" type="password" autocomplete="off" value="" placeholder="${esc(keyPlaceholder)}"></label>
+      <input id="aiAssistClearKey" type="hidden" value="0">
+      <p id="aiAssistKeyStatus" class="receipt-note" ${showApiKey ? '' : 'hidden'}>${keySaved ? 'Key saved locally. Leave blank to keep it, or paste a new key to replace it.' : 'Paste once. AIWatcher stores it locally and redacts it from the UI/API.'}</p>
+
+      <div id="aiAssistSetupBox" class="ai-assist-setup-box">
+        <div>
+          <strong id="aiAssistSetupTitle">No setup needed</strong>
+          <p id="aiAssistSetupCopy">Save keeps AIWatcher on local rules. No provider, key, or model call is used.</p>
+        </div>
+        <button id="aiAssistForgetKey" class="btn-quiet" onclick="clearAiAssistSavedKey()" type="button" ${keySaved ? '' : 'hidden'}>Forget key</button>
+      </div>
+
+      <label id="aiAssistBaseUrlRow" ${showEndpoint ? '' : 'hidden'}><span class="label">Endpoint URL</span><input id="aiAssistBaseUrl" value="${esc(c.base_url || '')}" placeholder="OpenAI-compatible /v1 endpoint"></label>
+
+      <details class="ai-assist-advanced">
+        <summary>Advanced options</summary>
+        <label><span class="label">Model, optional</span><input id="aiAssistModel" value="${esc(c.model || '')}" placeholder="Leave blank for provider default"></label>
+        <label><span class="label">Daily cap for cloud mode</span><input id="aiAssistCap" type="number" min="0" step="0.01" value="${esc(c.max_daily_usd ?? 0.25)}"></label>
+        <label><span class="label">Source access</span><select id="aiAssistSourceAccess">
+          <option value="metadata_only" ${c.source_access === 'metadata_only' ? 'selected' : ''}>Metadata only</option>
+          <option value="prompt_opt_in" ${c.source_access === 'prompt_opt_in' ? 'selected' : ''}>Prompt text only after confirmation</option>
+          <option value="source_opt_in" ${c.source_access === 'source_opt_in' ? 'selected' : ''}>Source files only after confirmation</option>
+        </select></label>
+        <label class="check-row"><input id="aiAssistConfirm" type="checkbox" ${c.require_confirmation !== false ? 'checked' : ''}> Ask before every AI Assist run</label>
+        <div class="ai-assist-provider-strip">
+          ${localProviders.map(row => `<span class="provider-chip ${row.available ? 'ready' : ''}">${esc(row.label)}: ${esc(row.detail)}</span>`).join('')}
+          ${cloudProviders.map(row => `<span class="provider-chip ${row.available ? 'ready' : ''}">${esc(row.label)}: ${esc(row.detail || (row.available ? 'key found' : row.secret_env))}</span>`).join('')}
+        </div>
+      </details>
+
+      <div class="copy-row"><button class="btn-primary" onclick="saveAiAssistSettings()">Save AI Assist settings</button></div>
+      <p class="receipt-note">Used first for ${esc(workflowSummary || 'Fresh Start and Prompt Plan')}. Settings only saves configuration; workflows ask before using a model.</p>
+    </div>
+
+  </div>`;
+}
+
+function setAiAssistPreset(mode, provider) {
+  aiAssistFormDirty = true;
+  const modeEl = document.getElementById('aiAssistMode');
+  const providerEl = document.getElementById('aiAssistProvider');
+  if (modeEl) modeEl.value = mode;
+  if (providerEl) providerEl.value = provider || (mode === 'off' ? 'none' : 'auto');
+  updateAiAssistFormVisibility();
+}
+
+function updateAiAssistFormVisibility() {
+  const modeEl = document.getElementById('aiAssistMode');
+  const mode = (modeEl || {}).value || 'off';
+  if (modeEl && !modeEl.value) modeEl.value = mode;
+  const providerEl = document.getElementById('aiAssistProvider');
+  const provider = providerEl ? providerEl.value : 'none';
+  document.querySelectorAll('.ai-assist-mode-card').forEach(card => {
+    const label = (card.textContent || '').toLowerCase();
+    const selected = (mode === 'off' && label.includes('local rules'))
+      || (mode === 'local' && label.includes('local model'))
+      || (mode === 'cloud' && label.includes('cloud key'));
+    card.classList.toggle('selected', selected);
+  });
+  if (providerEl) {
+    Array.from(providerEl.options).forEach(option => {
+      const modes = String(option.dataset.modes || '').split(',');
+      option.hidden = !modes.includes(mode);
+    });
+    if (mode === 'off') {
+      providerEl.value = 'none';
+      providerEl.disabled = true;
+    } else {
+      providerEl.disabled = false;
+      const selected = providerEl.selectedOptions[0];
+      if (!selected || selected.hidden || providerEl.value === 'none') providerEl.value = 'auto';
+    }
+  }
+  const currentProvider = providerEl ? providerEl.value : provider;
+  const selectedOption = providerEl && providerEl.selectedOptions ? providerEl.selectedOptions[0] : null;
+  const selectedSecret = selectedOption ? String(selectedOption.dataset.secretEnv || '') : '';
+  const keyFound = selectedOption ? selectedOption.dataset.keyFound === '1' : false;
+  const baseUrlRow = document.getElementById('aiAssistBaseUrlRow');
+  if (baseUrlRow) baseUrlRow.hidden = mode === 'off' || currentProvider !== 'openai_compatible';
+  const apiKeyRow = document.getElementById('aiAssistApiKeyRow');
+  if (apiKeyRow) apiKeyRow.hidden = mode !== 'cloud';
+  const clearKey = document.getElementById('aiAssistClearKey');
+  if (clearKey) clearKey.value = '0';
+  const setupBox = document.getElementById('aiAssistSetupBox');
+  const setupTitle = document.getElementById('aiAssistSetupTitle');
+  const setupCopy = document.getElementById('aiAssistSetupCopy');
+  const forgetKey = document.getElementById('aiAssistForgetKey');
+  const keyStatus = document.getElementById('aiAssistKeyStatus');
+  const apiKeyInput = document.getElementById('aiAssistApiKey');
+  if (setupBox && setupTitle && setupCopy) {
+    setupBox.classList.toggle('ready', mode === 'off' || (mode === 'cloud' && keyFound));
+    setupBox.classList.toggle('needs-setup', mode !== 'off' && !(mode === 'cloud' && keyFound));
+    if (mode === 'off') {
+      setupTitle.textContent = 'No setup needed';
+      setupCopy.textContent = 'Save keeps AIWatcher on local rules. No provider, key, or model call is used.';
+      if (forgetKey) forgetKey.hidden = true;
+      if (keyStatus) keyStatus.hidden = true;
+    } else if (mode === 'local') {
+      setupTitle.textContent = currentProvider === 'auto' ? 'Use the detected local runtime' : 'Use this local runtime';
+      setupCopy.textContent = 'Save persists this choice. Start the local model runtime separately when AI Assist workflows need it.';
+      if (forgetKey) forgetKey.hidden = true;
+      if (keyStatus) keyStatus.hidden = true;
+    } else {
+      const secret = selectedSecret || 'OPENAI_API_KEY';
+      const saved = keyFound && selectedOption && selectedOption.dataset.detail === 'key saved locally';
+      setupTitle.textContent = keyFound ? 'Cloud key ready' : 'Add API key';
+      setupCopy.textContent = keyFound
+        ? 'AIWatcher can use this provider after confirmation and within your daily cap.'
+        : 'Paste a key and save. It stays local to this machine.';
+      if (forgetKey) forgetKey.hidden = !keyFound;
+      if (keyStatus) {
+        keyStatus.hidden = false;
+        keyStatus.textContent = keyFound
+          ? (saved ? 'Key saved locally. Leave blank to keep it, or paste a new key to replace it.' : `${secret} is available in the environment.`)
+          : 'Paste once. AIWatcher stores it locally and redacts it from the UI/API.';
+      }
+      if (apiKeyInput) {
+        apiKeyInput.placeholder = keyFound ? 'Saved. Paste a new key to replace it.' : 'Paste API key';
+      }
+    }
+  }
+  const providerRow = document.getElementById('aiAssistProviderRow');
+  if (providerRow) providerRow.hidden = mode === 'off';
+  const providerHint = document.getElementById('aiAssistProviderHint');
+  if (providerHint && providerEl) {
+    providerHint.textContent = mode === 'off'
+      ? 'AIWatcher will use local deterministic rules.'
+      : (selectedOption || {}).dataset?.detail || '';
+  }
+}
+
+function clearAiAssistSavedKey() {
+  const clearKey = document.getElementById('aiAssistClearKey');
+  const apiKeyInput = document.getElementById('aiAssistApiKey');
+  if (clearKey) clearKey.value = '1';
+  if (apiKeyInput) apiKeyInput.value = '';
+  saveAiAssistSettings();
+}
+
+async function saveAiAssistSettings() {
+  const payload = {
+    mode: document.getElementById('aiAssistMode').value,
+    provider: document.getElementById('aiAssistProvider').value,
+    api_key: document.getElementById('aiAssistApiKey').value,
+    clear_api_key: document.getElementById('aiAssistClearKey').value === '1',
+    model: document.getElementById('aiAssistModel').value,
+    base_url: document.getElementById('aiAssistBaseUrl').value,
+    max_daily_usd: Number(document.getElementById('aiAssistCap').value || 0),
+    source_access: document.getElementById('aiAssistSourceAccess').value,
+    require_confirmation: document.getElementById('aiAssistConfirm').checked,
+  };
+  try {
+    const res = await fetch('/api/ai-assist-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const status = await res.json();
+    if (!res.ok) throw new Error(status.error || 'save failed');
+    aiAssistFormDirty = false;
+    if (currentData) currentData.ai_assist = status;
+    const mount = document.getElementById('aiAssistSettingsMount') || document.getElementById('aiAssistSettings');
+    if (mount) mount.innerHTML = renderAiAssistSettings(status);
+    updateAiAssistFormVisibility();
+    showToast('AI Assist settings saved');
+  } catch (error) {
+    showToast(`Could not save AI Assist settings: ${error.message || 'unknown error'}`, 'error');
+  }
+}
 function renderSetup(rows) {
   if (!rows.length) return '<div class="empty">Setup checklist unavailable.</div>';
   return rows.map((row, index) => `<div class="coverage-card">
@@ -4254,6 +4596,8 @@ let sessionsLoadedForDays = null;
 let reportLoadedForDays = null;
 let reportLoading = false;
 let freshStartReceiptsMarkedViewed = false;
+let activeSettingsPanel = new URLSearchParams(location.search).get('settings') || 'general';
+let aiAssistFormDirty = false;
 // context_health rows, kept so the session drawer can show the health of the
 // session it opened. Watch ranks; the drawer diagnoses -- and the diagnosis
 // lives in this payload, not in /api/session.
@@ -4391,6 +4735,7 @@ function showView(view) {
 }
 function showSettingsPanel(panel) {
   const selected = panel || 'general';
+  activeSettingsPanel = selected;
   document.querySelectorAll('[data-settings-panel-content]').forEach(node => {
     node.hidden = node.dataset.settingsPanelContent !== selected;
   });
@@ -5043,6 +5388,13 @@ async function loadOnce(resetDetail, forceRefresh) {
   updateSortIndicators('change', changeSort, ['committed_at', 'project', 'cost_usd', 'lines_changed', 'usd_per_line', 'survival_pct', 'usd_per_surviving_line']);
   const coverage = data.coverage || [];
   document.getElementById('coverageRowsSettings').innerHTML = renderCoverage(coverage);
+  const aiAssistNode = document.getElementById('aiAssistSettingsMount') || document.getElementById('aiAssistSettings');
+  if (aiAssistNode && !(aiAssistFormDirty && activeSettingsPanel === 'ai')) {
+    aiAssistNode.innerHTML = renderAiAssistSettings(data.ai_assist || {});
+    updateAiAssistFormVisibility();
+  }
+  const settingsVisible = !document.getElementById('view-setup').hidden;
+  if (settingsVisible) showSettingsPanel(activeSettingsPanel);
   // Counts on both headings. Setup steps is still folded, and a folded section
   // with a bare title hides whether there is anything inside. Coverage is not
   // folded any more -- it sits under the privacy card, whose promise it

@@ -515,6 +515,13 @@ class TrimmedHomeTest(unittest.TestCase):
         # load() writes by id; a lookup with no element throws and stops the whole
         # dashboard rendering, which is the way this change could break quietly.
         built_at_runtime = {
+            "aiAssistApiKey", "aiAssistApiKeyRow", "aiAssistBaseUrl",
+            "aiAssistBaseUrlRow", "aiAssistCap", "aiAssistClearKey",
+            "aiAssistConfirm", "aiAssistForgetKey", "aiAssistKeyStatus",
+            "aiAssistMode", "aiAssistModel", "aiAssistProvider",
+            "aiAssistProviderHint", "aiAssistProviderRow", "aiAssistSettings",
+            "aiAssistSetupBox", "aiAssistSetupCopy",
+            "aiAssistSetupTitle", "aiAssistSourceAccess", "aiAssistWorking",
             "evidencePanel", "handoffAcceptance", "handoffBrief", "handoffConstraints",
             "handoffObjective", "handoffSources", "handoffStatus", "handoffType",
             "optimizeReward", "outcomePanel", "planDerivedZone", "promptBrief",
@@ -1444,6 +1451,27 @@ class SettingsTest(unittest.TestCase):
         self.assertIn(".settings-panel[hidden]", css)
         self.assertIn("display: none", css)
 
+    def test_ai_assist_hidden_fields_stay_hidden(self):
+        # AI Assist fields live under classes that set display explicitly.
+        # The custom endpoint row should not appear for normal OpenAI/Claude
+        # setup just because a label selector overrode the hidden attribute.
+        css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+        self.assertIn(".ai-assist-fields [hidden]", css)
+        self.assertIn("const showEndpoint = mode !== 'off' && provider === 'openai_compatible'", self.js)
+        self.assertIn('id="aiAssistBaseUrlRow" ${showEndpoint ? \'\' : \'hidden\'}', self.js)
+        self.assertIn('id="aiAssistApiKeyRow" ${showApiKey ? \'\' : \'hidden\'}', self.js)
+        self.assertIn("currentProvider !== 'openai_compatible'", self.js)
+
+    def test_settings_subpage_survives_refresh(self):
+        self.assertIn("activeSettingsPanel", self.js)
+        self.assertIn("showSettingsPanel(activeSettingsPanel)", self.js)
+
+    def test_ai_assist_form_survives_background_refresh(self):
+        self.assertIn("let aiAssistFormDirty = false", self.js)
+        self.assertIn("aiAssistFormDirty = true", self.js)
+        self.assertIn("aiAssistFormDirty = false", self.js)
+        self.assertIn("!(aiAssistFormDirty && activeSettingsPanel === 'ai')", self.js)
+
     def test_coverage_is_in_the_trust_subpage(self):
         """What AIWatcher can see is the other half of what it promises not to
         do, and the half that admits limits -- Cursor is detected and not
@@ -1477,6 +1505,20 @@ class SettingsTest(unittest.TestCase):
         # Nothing tracks completion, so calling it a checklist promises a state
         # the data does not have.
         self.assertNotIn("Setup checklist", self.html)
+
+    def test_ai_assist_settings_are_visible_but_optional(self):
+        setup = self.html[self.html.index('<section id="view-setup"'):]
+        self.assertIn('id="aiAssistSettingsMount"', setup)
+        self.assertIn("AIWatcher works without this", setup)
+        self.assertIn("function renderAiAssistSettings", self.js)
+        self.assertIn("Local model", self.js)
+        self.assertIn("Cloud key", self.js)
+        self.assertIn("Custom endpoint", self.js)
+        self.assertIn("Claude", self.js)
+        self.assertIn("Paste API key", self.js)
+        self.assertIn("mode-${esc(mode)}", self.js)
+        self.assertIn("/api/ai-assist-config", self.js)
+
 
 class ChangesLedgerTest(unittest.TestCase):
     """The ledger's widest column held a value identical on 47 of 49 rows, and

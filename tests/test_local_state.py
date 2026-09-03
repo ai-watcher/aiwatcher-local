@@ -116,6 +116,90 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(recent[0]["id"], record["id"])
         self.assertNotIn("prompt", json.dumps(recent).lower())
 
+    def test_ai_assist_runs_store_receipts_without_prompt_or_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_ai_assist_config({
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "api_key": "sk-secret",
+                })
+                record = local_state.record_ai_assist_run(
+                    workflow="fresh_start",
+                    status="used",
+                    provider="openai",
+                    model="gpt-test",
+                    mode="cloud",
+                    session_id="session-1",
+                    input_chars=1200,
+                    output_chars=500,
+                    source_access="metadata_only",
+                    reason="User clicked Improve with AI Assist.",
+                    usage={"prompt_tokens": 300, "completion_tokens": 90, "ignored": "raw text"},
+                )
+                recent = local_state.recent_ai_assist_runs()
+
+        self.assertEqual(record["phase"], "control")
+        self.assertEqual(record["workflow"], "fresh_start")
+        self.assertEqual(record["status"], "used")
+        self.assertEqual(record["usage"]["prompt_tokens"], 300)
+        self.assertEqual(recent[0]["session_id"], "session-1")
+        self.assertNotIn("sk-secret", json.dumps(recent))
+        self.assertNotIn("raw text", json.dumps(recent))
+
+    def test_ai_assist_config_defaults_off_and_sanitizes_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                default = local_state.ai_assist_config()
+                saved = local_state.record_ai_assist_config({
+                    "mode": "local",
+                    "provider": "openai",
+                    "model": "llama3.1",
+                    "max_daily_usd": "0.50",
+                    "source_access": "source_opt_in",
+                    "require_confirmation": False,
+                    "enabled_workflows": ["fresh_start", "ask_aiwatcher", "prompt_plan"],
+                })
+                reread = local_state.ai_assist_config()
+                custom = local_state.record_ai_assist_config({
+                    "mode": "cloud",
+                    "provider": "openai_compatible",
+                    "base_url": "https://llm.example.com/v1",
+                })
+                keyed = local_state.record_ai_assist_config({
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "api_key": "sk-local-test",
+                })
+                retained = local_state.record_ai_assist_config({
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "api_key": "",
+                })
+                cleared = local_state.record_ai_assist_config({
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "clear_api_key": True,
+                })
+
+        self.assertEqual(default["mode"], "off")
+        self.assertEqual(default["provider"], "none")
+        self.assertEqual(saved["mode"], "local")
+        self.assertEqual(saved["provider"], "auto")
+        self.assertEqual(saved["max_daily_usd"], 0.5)
+        self.assertEqual(saved["source_access"], "source_opt_in")
+        self.assertFalse(saved["require_confirmation"])
+        self.assertEqual(saved["enabled_workflows"], ["fresh_start", "prompt_plan"])
+        self.assertEqual(reread, saved)
+        self.assertEqual(custom["mode"], "cloud")
+        self.assertEqual(custom["provider"], "openai_compatible")
+        self.assertEqual(custom["base_url"], "https://llm.example.com/v1")
+        self.assertEqual(keyed["api_keys"], {"openai": "sk-local-test"})
+        self.assertEqual(retained["api_keys"], {"openai": "sk-local-test"})
+        self.assertEqual(cleared["api_keys"], {})
+
     def test_link_handoff_decision_next_session_keeps_source_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")

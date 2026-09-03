@@ -25,6 +25,85 @@ else:
 STATE_VERSION = 2
 VALID_OUTCOMES = {"useful", "rework", "abandoned"}
 
+AI_ASSIST_MODES = {"off", "local", "cloud"}
+AI_ASSIST_PROVIDERS = {
+    "none",
+    "auto",
+    "ollama",
+    "lmstudio",
+    "llama_cpp",
+    "openai_compatible",
+    "openai",
+    "anthropic",
+}
+AI_ASSIST_SOURCE_ACCESS = {"metadata_only", "prompt_opt_in", "source_opt_in"}
+AI_ASSIST_WORKFLOWS = {"fresh_start", "prompt_plan", "session_summary", "receipt_explanation"}
+AI_ASSIST_KEY_PROVIDERS = {"openai", "anthropic", "openai_compatible"}
+
+
+def default_ai_assist_config() -> dict[str, Any]:
+    return {
+        "mode": "off",
+        "provider": "none",
+        "model": None,
+        "base_url": None,
+        "max_daily_usd": 0.25,
+        "source_access": "metadata_only",
+        "require_confirmation": True,
+        "enabled_workflows": ["fresh_start", "prompt_plan"],
+        "api_keys": {},
+    }
+
+
+def _safe_float(value: Any, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if number < 0:
+        return default
+    return round(min(number, 100.0), 4)
+
+
+def _normalize_ai_assist_config(value: Any) -> dict[str, Any]:
+    config = default_ai_assist_config()
+    if not isinstance(value, dict):
+        return config
+    mode = str(value.get("mode") or config["mode"]).strip().lower()
+    provider = str(value.get("provider") or config["provider"]).strip().lower()
+    source_access = str(value.get("source_access") or config["source_access"]).strip().lower()
+    config["mode"] = mode if mode in AI_ASSIST_MODES else "off"
+    config["provider"] = provider if provider in AI_ASSIST_PROVIDERS else "none"
+    if config["mode"] == "off":
+        config["provider"] = "none"
+    if config["mode"] == "local" and config["provider"] in {"openai", "anthropic"}:
+        config["provider"] = "auto"
+    if config["mode"] == "cloud" and config["provider"] in {"ollama", "lmstudio", "llama_cpp"}:
+        config["provider"] = "auto"
+    model = value.get("model")
+    config["model"] = str(model).strip()[:120] if isinstance(model, str) and model.strip() else None
+    base_url = value.get("base_url")
+    config["base_url"] = str(base_url).strip()[:500] if isinstance(base_url, str) and base_url.strip() else None
+    api_keys = value.get("api_keys")
+    if isinstance(api_keys, dict):
+        clean_keys: dict[str, str] = {}
+        for key_provider, secret in api_keys.items():
+            provider_name = str(key_provider).strip().lower()
+            if provider_name not in AI_ASSIST_KEY_PROVIDERS:
+                continue
+            secret_value = str(secret).strip() if isinstance(secret, str) else ""
+            if secret_value:
+                clean_keys[provider_name] = secret_value[:5000]
+        config["api_keys"] = clean_keys
+    config["max_daily_usd"] = _safe_float(value.get("max_daily_usd"), float(config["max_daily_usd"]))
+    config["source_access"] = source_access if source_access in AI_ASSIST_SOURCE_ACCESS else "metadata_only"
+    config["require_confirmation"] = bool(value.get("require_confirmation", True))
+    workflows = value.get("enabled_workflows")
+    if isinstance(workflows, list):
+        normalized = [str(item).strip().lower() for item in workflows]
+        config["enabled_workflows"] = [item for item in normalized if item in AI_ASSIST_WORKFLOWS]
+    return config
+
 # How long an issued brief/capsule token remains redeemable. Short enough to
 # limit the window a leaked local-state.json could be replayed in, long
 # enough to cover copy-paste into a fresh session.
@@ -195,6 +274,8 @@ def _empty_state() -> dict[str, Any]:
         # still be true, and a per-session log would grow without ever being
         # read past its head.
         "session_waiting": {},
+        "ai_assist": default_ai_assist_config(),
+        "ai_assist_runs": [],
     }
 
 
@@ -267,6 +348,8 @@ def _load() -> dict[str, Any]:
     data.setdefault("ui_server", None)
     data.setdefault("watcher_heartbeat", None)
     data.setdefault("session_waiting", {})
+    data["ai_assist"] = _normalize_ai_assist_config(data.get("ai_assist"))
+    data.setdefault("ai_assist_runs", [])
     data.setdefault("first_run_dismissed_at", None)
     return data
 
@@ -1011,6 +1094,7 @@ def recent_watch_notifications(limit: int = 10) -> list[dict[str, Any]]:
 VALID_HANDOFF_DECISIONS = {"new_chat", "continue_here", "copy_handoff", "dismissed"}
 MAX_HANDOFF_DECISIONS_STORED = 200
 MAX_OPTIMIZE_DECISIONS_STORED = 200
+MAX_AI_ASSIST_RUNS_STORED = 200
 
 
 def record_handoff_decision(
@@ -1126,6 +1210,111 @@ def recent_optimize_decisions(limit: int = 10) -> list[dict[str, Any]]:
     except OSError:
         return []
     rows = [row for row in data["optimize_decisions"] if isinstance(row, dict)]
+    return list(reversed(rows[-max(1, limit):]))
+
+
+def ai_assist_config() -> dict[str, Any]:
+    """Return the optional AI Assist settings.
+
+    Off by default. This config is intentionally separate from Second Opinion:
+    Second Opinion asks the user's own CLI for a narrow prompt analysis, while
+    AI Assist is the future provider switch for improving AIWatcher workflows
+    such as Fresh Start and Plan.
+    """
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return default_ai_assist_config()
+    return _normalize_ai_assist_config(data.get("ai_assist"))
+
+
+def record_ai_assist_config(settings: dict[str, Any]) -> dict[str, Any]:
+    """Persist optional AI Assist settings.
+
+    Provider keys are optional and local-only. They are stored in the same local
+    state file as the rest of AIWatcher config, but redacted before the dashboard
+    receives settings back through the HTTP API.
+    """
+    if not isinstance(settings, dict):
+        raise ValueError("settings must be an object")
+    with _locked_state():
+        data = _load()
+        existing = _normalize_ai_assist_config(data.get("ai_assist"))
+        merged = {**existing, **settings}
+        merged["api_keys"] = dict(existing.get("api_keys") or {})
+        provider = str(settings.get("provider") or existing.get("provider") or "").strip().lower()
+        if provider in AI_ASSIST_KEY_PROVIDERS:
+            if settings.get("clear_api_key"):
+                merged["api_keys"].pop(provider, None)
+            else:
+                new_key = settings.get("api_key")
+                if isinstance(new_key, str) and new_key.strip():
+                    merged["api_keys"][provider] = new_key.strip()
+        config = _normalize_ai_assist_config(merged)
+        data["ai_assist"] = config
+        _save(data)
+    return config
+
+
+def record_ai_assist_run(
+    *,
+    workflow: str,
+    status: str,
+    provider: str | None = None,
+    model: str | None = None,
+    mode: str | None = None,
+    session_id: str | None = None,
+    input_chars: int | None = None,
+    output_chars: int | None = None,
+    source_access: str | None = None,
+    reason: str | None = None,
+    usage: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Record a privacy-safe receipt for an optional AI Assist workflow."""
+    workflow_value = workflow.strip().lower()
+    if workflow_value not in AI_ASSIST_WORKFLOWS:
+        raise ValueError(f"workflow must be one of: {', '.join(sorted(AI_ASSIST_WORKFLOWS))}")
+    status_value = status.strip().lower()
+    if status_value not in {"used", "skipped", "failed"}:
+        raise ValueError("status must be used, skipped, or failed")
+    safe_usage: dict[str, Any] = {}
+    if isinstance(usage, dict):
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens", "input_tokens", "output_tokens"):
+            value = usage.get(key)
+            if isinstance(value, int) and value >= 0:
+                safe_usage[key] = value
+    record = {
+        "id": str(uuid.uuid4()),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "phase": "control",
+        "workflow": workflow_value,
+        "status": status_value,
+        "provider": provider.strip()[:80] if isinstance(provider, str) and provider.strip() else None,
+        "model": model.strip()[:120] if isinstance(model, str) and model.strip() else None,
+        "mode": mode.strip()[:40] if isinstance(mode, str) and mode.strip() else None,
+        "session_id": session_id.strip()[:120] if isinstance(session_id, str) and session_id.strip() else None,
+        "input_chars": int(input_chars) if isinstance(input_chars, int) and input_chars >= 0 else None,
+        "output_chars": int(output_chars) if isinstance(output_chars, int) and output_chars >= 0 else None,
+        "source_access": source_access if source_access in AI_ASSIST_SOURCE_ACCESS else "metadata_only",
+        "reason": reason.strip()[:500] if isinstance(reason, str) and reason.strip() else None,
+        "usage": safe_usage,
+    }
+    with _locked_state():
+        data = _load()
+        data["ai_assist_runs"].append(record)
+        data["ai_assist_runs"] = data["ai_assist_runs"][-MAX_AI_ASSIST_RUNS_STORED:]
+        _save(data)
+    return record
+
+
+def recent_ai_assist_runs(limit: int = 10) -> list[dict[str, Any]]:
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return []
+    rows = [row for row in data["ai_assist_runs"] if isinstance(row, dict)]
     return list(reversed(rows[-max(1, limit):]))
 
 

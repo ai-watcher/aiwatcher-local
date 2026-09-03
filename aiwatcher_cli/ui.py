@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
 from . import analyst, prompt_signals, statusline
+from .ai_assist import AiAssistUnavailable, build_ai_assist_status, improve_fresh_start_brief
 from .cli import (
     SEARCH_RANK_FIELDS,
     SEARCH_RANK_TOPIC,
@@ -52,6 +53,7 @@ from .local_state import (
     VALID_OUTCOMES,
     active_command_gate,
     active_prompt_gate,
+    ai_assist_config,
     analyst_consent,
     analyst_contents_allowed,
     analyst_month_spend,
@@ -62,6 +64,7 @@ from .local_state import (
     outcome_counts,
     outcomes_for_sessions,
     recent_ambient_interventions,
+    recent_ai_assist_runs,
     recent_command_decisions,
     recent_handoff_decisions,
     recent_interventions,
@@ -72,6 +75,8 @@ from .local_state import (
     mark_recent_handoff_receipts_viewed,
     record_companion_skip,
     record_ambient_intervention_action,
+    record_ai_assist_config,
+    record_ai_assist_run,
     record_analyst_consent,
     record_analyst_contents,
     record_analyst_run,
@@ -1957,6 +1962,13 @@ def build_basic_handoff_detail(
     same_project_count = _same_project_session_count(row)
     project = row.project_path if is_reliable_project_path(row.project_path) else "unknown"
     usage = _usage_summary(row)
+    ai_assist = build_ai_assist_status(ai_assist_config())
+    assist_mode = str(ai_assist.get("mode") or "off")
+    assist_line = (
+        "AI Assist is off; this brief is assembled from local metadata only."
+        if assist_mode == "off" else
+        f"AI Assist mode is {ai_assist.get('active_label')}; only use it after explicit user confirmation."
+    )
     warnings = [
         (
             f"Source session had {usage['tokens_label']} tokens, "
@@ -2024,6 +2036,7 @@ def build_basic_handoff_detail(
         "Workspace",
         f"- Project: {project}",
         f"- Source tool/model: {row.tool} / {row.model or 'unknown'}",
+        f"- AIWatcher assist: {assist_line}",
         "",
         "What remains uncertain",
         "- Detailed git, timeline, and prompt evidence is still loading.",
@@ -2079,6 +2092,7 @@ def build_basic_handoff_detail(
         "constraints": (constraints or [])[:8],
         "acceptance_criteria": (acceptance_criteria or [])[:8],
         "include_prompt_excerpt": False,
+        "ai_assist": ai_assist,
         "costliest_prompt": None,
         "decisions": [],
         "related_workspaces": [],
@@ -2128,6 +2142,102 @@ def build_handoff_detail(
         runtime_attachment=attachment.to_json(),
         same_project_session_count=_same_project_session_count(row),
     )
+    capsule["ai_assist"] = build_ai_assist_status(ai_assist_config())
+    return capsule
+
+
+def build_ai_assisted_handoff_detail(
+    session_id: str,
+    days: int = 30,
+    target: str = "generic",
+    handoff_type: str = "coding",
+    objective: str | None = None,
+    source_refs: list[str] | None = None,
+    constraints: list[str] | None = None,
+    acceptance_criteria: list[str] | None = None,
+) -> dict[str, object]:
+    """Append a user-requested AI refinement to a deterministic Fresh Start brief."""
+    capsule = build_basic_handoff_detail(
+        session_id,
+        days=days,
+        target=target,
+        handoff_type=handoff_type,
+        objective=objective,
+        source_refs=source_refs,
+        constraints=constraints,
+        acceptance_criteria=acceptance_criteria,
+    )
+    if capsule.get("error"):
+        return capsule
+    config = ai_assist_config()
+    if str(config.get("mode") or "off") == "cloud" and float(config.get("max_daily_usd") or 0) <= 0:
+        reason = "Cloud AI Assist daily cap is set to $0.00."
+        record_ai_assist_run(
+            workflow="fresh_start",
+            status="skipped",
+            session_id=session_id,
+            mode="cloud",
+            source_access=str(config.get("source_access") or "metadata_only"),
+            reason=reason,
+        )
+        capsule["ai_assist_result"] = {"status": "skipped", "reason": reason}
+        return capsule
+    try:
+        result = improve_fresh_start_brief(config, local_brief=str(capsule.get("next_brief") or ""))
+    except AiAssistUnavailable as exc:
+        record = record_ai_assist_run(
+            workflow="fresh_start",
+            status="failed",
+            session_id=session_id,
+            mode=str(config.get("mode") or "off"),
+            provider=str(config.get("provider") or "none"),
+            model=str(config.get("model") or "") or None,
+            source_access=str(config.get("source_access") or "metadata_only"),
+            reason=str(exc),
+        )
+        capsule["ai_assist_result"] = {
+            "status": "failed",
+            "reason": str(exc),
+            "receipt": record,
+        }
+        return capsule
+    refinement = str(result.get("text") or "").strip()
+    record = record_ai_assist_run(
+        workflow="fresh_start",
+        status="used",
+        session_id=session_id,
+        mode=str(result.get("mode") or ""),
+        provider=str(result.get("provider") or ""),
+        model=str(result.get("model") or ""),
+        input_chars=int(result.get("input_chars") or 0),
+        output_chars=int(result.get("output_chars") or 0),
+        source_access=str(result.get("source_access") or "metadata_only"),
+        reason="User clicked Improve with AI Assist on a Fresh Start brief.",
+        usage=result.get("usage") if isinstance(result.get("usage"), dict) else {},
+    )
+    receipt_text = "\n".join([
+        "AI Assist receipt",
+        f"- Provider/model: {result.get('provider') or 'unknown'} / {result.get('model') or 'unknown'}",
+        f"- Source access: {result.get('source_access') or 'metadata_only'}",
+        "- Scope: Added inferred guidance only; local evidence and proof claims above remain authoritative.",
+    ])
+    capsule["next_brief"] = "\n\n".join([
+        str(capsule.get("next_brief") or "").rstrip(),
+        refinement,
+        receipt_text,
+    ]).rstrip()
+    capsule["ai_assist_result"] = {
+        "status": "used",
+        "provider": result.get("provider"),
+        "model": result.get("model"),
+        "mode": result.get("mode"),
+        "source_access": result.get("source_access"),
+        "input_chars": result.get("input_chars"),
+        "output_chars": result.get("output_chars"),
+        "usage": result.get("usage"),
+        "receipt": record,
+    }
+    capsule["ai_assist"] = build_ai_assist_status(config)
     return capsule
 
 
@@ -2199,6 +2309,7 @@ def build_demo_handoff_detail(
     capsule["demo"] = True
     capsule["basic"] = False
     capsule["enrichment_status"] = "complete"
+    capsule["ai_assist"] = build_ai_assist_status(ai_assist_config())
     return capsule
 
 
@@ -5053,6 +5164,8 @@ def build_summary(
         "coverage": [row.to_json() for row in surface_coverage(all_rows)],
         "setup": setup_checklist(),
         "watcher": get_watcher_status(),
+        "ai_assist": build_ai_assist_status(ai_assist_config()),
+        "ai_assist_runs": recent_ai_assist_runs(limit=10),
         "context_health": context_health,
         "context_health_status": "ready",
         # Distance from the last checkpoint in the repo the charted session is
@@ -5157,6 +5270,10 @@ def _cached_session_rows() -> list[LocalSession]:
 def _mark_summary_cache(summary: dict[str, object], *, status: str, source: str, refreshing: bool) -> dict[str, object]:
     copy = dict(summary)
     copy.pop("_session_index", None)
+    # Summary payloads can be served from memory or disk for speed, but Settings
+    # must reflect the current local config. Otherwise saving AI Assist briefly
+    # renders the new mode before the next poll repaints an older cached mode.
+    copy["ai_assist"] = build_ai_assist_status(ai_assist_config())
     generated_at = copy.get("generated_at") if isinstance(copy.get("generated_at"), str) else None
     copy["cache_schema_version"] = SUMMARY_CACHE_SCHEMA_VERSION
     copy["cache"] = {
@@ -5367,6 +5484,8 @@ def _build_summary_shell(
         "coverage": [row.to_json() for row in surface_coverage(all_rows)],
         "setup": setup_checklist(),
         "watcher": get_watcher_status(),
+        "ai_assist": build_ai_assist_status(ai_assist_config()),
+        "ai_assist_runs": recent_ai_assist_runs(limit=10),
         "context_health": [],
         "context_health_status": "pending",
         "optimize": optimize,
@@ -6850,6 +6969,13 @@ class UIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/companion-state":
             self._send(200, json.dumps(build_companion_state()), "application/json; charset=utf-8")
             return
+        if parsed.path == "/api/ai-assist-status":
+            self._send(
+                200,
+                json.dumps(build_ai_assist_status(ai_assist_config())),
+                "application/json; charset=utf-8",
+            )
+            return
         if parsed.path == "/api/companion-scan":
             try:
                 _refresh_summary_cache(7)
@@ -7030,6 +7156,7 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/second-opinion",
             "/api/second-opinion-consent",
             "/api/second-opinion-contents",
+            "/api/ai-assist-config",
             "/api/ask-aiwatcher",
             "/api/handoff-basic",
             "/api/handoff",
@@ -7119,6 +7246,25 @@ class UIHandler(BaseHTTPRequestHandler):
             self._send(200, json.dumps({"allowed": allowed, "project_path": project}),
                        "application/json; charset=utf-8")
             return
+        if parsed.path == "/api/ai-assist-config":
+            try:
+                config = record_ai_assist_config(payload)
+            except ValueError as exc:
+                self._send(400, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")
+                return
+            except OSError as exc:
+                self._send(
+                    500,
+                    json.dumps({"error": f"Could not save AI Assist settings: {exc}"}),
+                    "application/json; charset=utf-8",
+                )
+                return
+            self._send(
+                200,
+                json.dumps(build_ai_assist_status(config)),
+                "application/json; charset=utf-8",
+            )
+            return
         if parsed.path == "/api/ask-aiwatcher":
             question = str(payload.get("question", "")).strip()
             raw_days = payload.get("days", 7)
@@ -7129,7 +7275,7 @@ class UIHandler(BaseHTTPRequestHandler):
             response = answer_local_question(question, days=days)
             self._send(200, json.dumps(response), "application/json; charset=utf-8")
             return
-        if parsed.path in {"/api/handoff-basic", "/api/handoff", "/api/handoff-demo"}:
+        if parsed.path in {"/api/handoff-basic", "/api/handoff-ai-assist", "/api/handoff", "/api/handoff-demo"}:
             target = str(payload.get("target", "generic")).strip() or "generic"
             if parsed.path == "/api/handoff-demo":
                 handoff_options = _handoff_options_from_payload(payload, default_type="product")
@@ -7151,6 +7297,8 @@ class UIHandler(BaseHTTPRequestHandler):
             handoff_options = _handoff_options_from_payload(payload)
             if parsed.path == "/api/handoff-basic":
                 response = build_basic_handoff_detail(session_id, days, target, **handoff_options)
+            elif parsed.path == "/api/handoff-ai-assist":
+                response = build_ai_assisted_handoff_detail(session_id, days, target, **handoff_options)
             else:
                 include_prompt_excerpt = bool(payload.get("prompt", False))
                 response = build_handoff_detail(

@@ -22,6 +22,7 @@ from aiwatcher_cli.pricing import estimate_cost
 from aiwatcher_cli.ui import money
 from aiwatcher_cli.local_state import (
     link_handoff_decision_next_session,
+    recent_ai_assist_runs,
     recent_handoff_decisions,
     record_command_decision,
     record_evidence_snapshot,
@@ -286,6 +287,34 @@ class DashboardServeTests(unittest.TestCase):
             finally:
                 thread.join(timeout=5)
                 server.server_close()
+
+    def test_ai_assist_config_post_is_routable_and_sanitized(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                server, thread, base = self._serve_one()
+                payload = json.dumps({
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "api_key": "sk-local-test",
+                }).encode("utf-8")
+                http_request = request.Request(
+                    f"{base}/api/ai-assist-config",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                try:
+                    with request.urlopen(http_request, timeout=5) as response:
+                        body = json.loads(response.read().decode("utf-8"))
+                finally:
+                    thread.join(timeout=5)
+                    server.server_close()
+
+        self.assertEqual(body["config"]["mode"], "cloud")
+        self.assertEqual(body["config"]["provider"], "openai")
+        self.assertTrue(body["config"]["stored_keys"]["openai"])
+        self.assertNotIn("sk-local-test", json.dumps(body))
 
     def test_companion_group_snooze_records_project_cooldowns(self) -> None:
         server, thread, base = self._serve_one()
@@ -2870,6 +2899,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(summary["context_health"][0]["action"]["label"], "Start fresh")
         self.assertEqual(summary["handoff_bubble"]["session_id"], "bloated")
         self.assertIn("Fresh Start recommended", summary["handoff_bubble"]["title"])
+        self.assertEqual(summary["ai_assist"]["active_label"], "Local rules only")
         # Measured cache reads on the latest turn, not latest_turn_tokens * bloat_ratio.
         self.assertEqual(summary["handoff_bubble"]["expected_saved_context_tokens"], 220_000)
         self.assertEqual(summary["handoff_decisions"], [])
@@ -3163,6 +3193,28 @@ class DashboardWindowTests(unittest.TestCase):
                 payload["summary_complete"] = True
                 cache_path.write_text(json.dumps(payload), encoding="utf-8")
                 self.assertIsNotNone(ui._read_summary_disk_cache(7))
+
+    def test_marked_cached_summary_uses_current_ai_assist_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}, clear=True):
+                record = ui.record_ai_assist_config({
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "api_key": "sk-local-test",
+                })
+                marked = ui._mark_summary_cache(
+                    {"summary_complete": True, "ai_assist": {"mode": "off"}},
+                    status="stale",
+                    source="disk",
+                    refreshing=False,
+                )
+
+        self.assertEqual(record["mode"], "cloud")
+        self.assertEqual(marked["ai_assist"]["mode"], "cloud")
+        self.assertEqual(marked["ai_assist"]["provider"], "openai")
+        self.assertTrue(marked["ai_assist"]["config"]["stored_keys"]["openai"])
+        self.assertNotIn("sk-local-test", json.dumps(marked))
 
     def test_shared_refresh_scans_once_and_materializes_all_windows(self) -> None:
         now = datetime.now(timezone.utc)
@@ -3709,6 +3761,58 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Continuation type: Bug bash continuation.", capsule["next_brief"])
         self.assertIn("Reproduce and fix", capsule["next_brief"])
         self.assertIn("Keep privacy opt-in.", capsule["next_brief"])
+
+    def test_ai_assisted_handoff_appends_refinement_and_receipt(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="ai-brief",
+            tool="codex-cli",
+            project_path="/repo/ai",
+            started_at=now - timedelta(hours=2),
+            updated_at=now - timedelta(minutes=5),
+            tokens_in=160_000,
+            tokens_out=10_000,
+            cost_usd=0.9,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with ui._SUMMARY_CACHE_LOCK:
+                ui._SESSION_INDEX.clear()
+                ui._SUMMARY_CACHE.clear()
+            ui._index_sessions([row])
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "safe_runtime_processes", return_value=[]),
+                patch.object(ui, "ai_assist_config", return_value={
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "max_daily_usd": 0.25,
+                    "source_access": "metadata_only",
+                    "enabled_workflows": ["fresh_start"],
+                    "api_keys": {"openai": "sk-secret"},
+                }),
+                patch.object(ui, "improve_fresh_start_brief", return_value={
+                    "status": "used",
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "model": "gpt-test",
+                    "input_chars": 1200,
+                    "output_chars": 240,
+                    "source_access": "metadata_only",
+                    "text": "AI Assist refinement\n- Likely objective: keep the next checkpoint small.",
+                    "usage": {"prompt_tokens": 300, "completion_tokens": 80, "raw": "ignored"},
+                }),
+            ):
+                capsule = ui.build_ai_assisted_handoff_detail("ai-brief", days=7, target="codex")
+                runs = recent_ai_assist_runs()
+
+        self.assertEqual(capsule["ai_assist_result"]["status"], "used")
+        self.assertIn("AI Assist refinement", capsule["next_brief"])
+        self.assertIn("local evidence and proof claims above remain authoritative", capsule["next_brief"])
+        self.assertEqual(runs[0]["workflow"], "fresh_start")
+        self.assertEqual(runs[0]["status"], "used")
+        self.assertEqual(runs[0]["usage"]["prompt_tokens"], 300)
+        self.assertNotIn("sk-secret", json.dumps(runs))
 
     def test_demo_handoff_is_seeded_privacy_safe_and_not_live(self) -> None:
         capsule = ui.build_demo_handoff_detail(
