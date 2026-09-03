@@ -1207,6 +1207,92 @@ async function postJson(path, payload) {
   });
   return res.json();
 }
+function renderUpdateStatus(update) {
+  const data = update || {};
+  const applyButton = document.getElementById('updateApplyButton');
+  if (applyButton) applyButton.hidden = !data.can_apply;
+  const guidance = Array.isArray(data.guidance) && data.install_kind !== 'source'
+    ? `<div class="copy-row">${data.guidance.map(item => `<button class="btn-quiet" data-command="${esc(item.command || '')}" onclick="copyText(this.dataset.command, 'Update command copied')">${esc(item.label || 'Copy')}</button>`).join('')}</div>`
+    : '';
+  const meta = data.install_kind === 'source'
+    ? `<div class="pill-row">
+        <span class="pill">${esc(data.current || 'unknown')}</span>
+        <span class="pill">${esc(data.remote_ref || 'origin/main')}</span>
+        <span class="pill">${esc(data.dirty ? 'local changes present' : 'clean checkout')}</span>
+      </div>`
+    : '';
+  const action = data.can_apply
+    ? '<p>Apply will fast-forward this clean checkout, then you should restart AIWatcher.</p>'
+    : data.update_available
+      ? '<p>Resolve local changes or branch divergence before applying from the UI.</p>'
+      : '';
+  return `<div class="update-status ${data.ok ? '' : 'warning'}">
+    <strong>${esc(data.message || 'Update status unavailable.')}</strong>
+    ${meta}
+    ${action}
+    ${guidance}
+  </div>`;
+}
+async function checkForUpdates(button) {
+  const target = document.getElementById('updateStatus');
+  if (!target) return;
+  const original = button ? button.textContent : '';
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Checking...';
+  }
+  try {
+    const response = await fetch('/api/update-status?fetch=1');
+    const data = await response.json();
+    target.innerHTML = renderUpdateStatus(data);
+    if (button) {
+      button.textContent = data.update_available
+        ? `${data.behind || ''} update${Number(data.behind) === 1 ? '' : 's'} available`.trim()
+        : 'Up to date';
+    }
+    showToast(data.message || 'Update check complete', data.ok ? 'success' : 'error');
+  } catch (error) {
+    target.innerHTML = '<div class="empty">Could not reach the local AIWatcher server for update status.</div>';
+    showToast('Could not check for updates.', 'error');
+    if (button) button.textContent = original || 'Check for updates';
+  } finally {
+    if (button) {
+      window.setTimeout(() => {
+        button.disabled = false;
+        if (button.textContent === 'Up to date') button.textContent = 'Check again';
+      }, 800);
+    }
+  }
+}
+async function applyUpdates(button) {
+  const target = document.getElementById('updateStatus');
+  if (!target) return;
+  const original = button ? button.textContent : '';
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Applying...';
+  }
+  try {
+    const response = await fetch('/api/update-apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const data = await response.json();
+    target.innerHTML = renderUpdateStatus(data);
+    showToast(data.message || 'Update finished', response.ok ? 'success' : 'error');
+    if (button) {
+      button.hidden = !data.can_apply;
+      button.textContent = original || 'Apply update';
+    }
+  } catch (error) {
+    target.innerHTML = '<div class="empty">Could not reach the local AIWatcher server to apply updates.</div>';
+    showToast('Could not apply update.', 'error');
+    if (button) button.textContent = original || 'Apply update';
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
 function renderHandoffForm(capsule) {
   const selected = capsule.handoff_type || 'coding';
   const sourceRefs = (capsule.source_refs || []).join('\n');
@@ -1218,7 +1304,7 @@ function renderHandoffForm(capsule) {
         <h3>Shape the next session</h3>
         <p>Keep this brief specific enough that the new chat can continue from evidence, not from hidden memory.</p>
       </div>
-      <span class="pill">${esc(capsule.demo ? 'sample data' : 'local only')}</span>
+      <span class="pill">${esc(capsule.demo ? 'sample data' : 'private')}</span>
     </div>
     <div class="handoff-form-grid">
       <label><span class="label">Work type</span><select id="handoffType">${HANDOFF_TYPES.map(item => `<option value="${esc(item.id)}" ${item.id === selected ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}</select></label>

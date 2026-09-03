@@ -169,6 +169,55 @@ class DashboardServeTests(unittest.TestCase):
                 thread.join(timeout=5)
                 server.server_close()
 
+    def test_update_status_endpoint_reports_source_updates(self) -> None:
+        server, thread, base = self._serve_one()
+        payload = {
+            "ok": True,
+            "install_kind": "source",
+            "message": "2 update(s) available.",
+            "behind": 2,
+            "can_apply": True,
+        }
+        with patch.object(ui, "check_for_updates", return_value=payload) as check:
+            try:
+                with request.urlopen(f"{base}/api/update-status?fetch=1", timeout=5) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
+        self.assertEqual(body["behind"], 2)
+        self.assertTrue(body["can_apply"])
+        check.assert_called_once_with(fetch=True)
+
+    def test_update_apply_endpoint_returns_conflict_when_update_is_not_safe(self) -> None:
+        server, thread, base = self._serve_one()
+        payload = json.dumps({}).encode("utf-8")
+        http_request = request.Request(
+            f"{base}/api/update-apply",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        result = {
+            "ok": False,
+            "install_kind": "source",
+            "message": "Working tree has local changes.",
+            "can_apply": False,
+        }
+        with patch.object(ui, "apply_updates", return_value=result) as apply:
+            try:
+                with self.assertRaises(error.HTTPError) as raised:
+                    request.urlopen(http_request, timeout=5)
+                body = json.loads(raised.exception.read().decode("utf-8"))
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
+        self.assertEqual(raised.exception.code, 409)
+        self.assertEqual(body["message"], "Working tree has local changes.")
+        apply.assert_called_once_with(fetch=True)
+
     def test_serve_records_the_actually_bound_port(self) -> None:
         """Issue #31 (S-32): `watch --notify`'s dashboard deep link has to
         know where the dashboard actually landed after auto-port fallback,

@@ -1545,6 +1545,9 @@
     .privacy-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-2); }
     .privacy-item { display: flex; align-items: center; gap: var(--sp-2); color: var(--text-quiet); padding: 10px 0; }
     .privacy-check { color: var(--green); font-weight: var(--fw-bold); }
+    .update-status { display: grid; gap: var(--sp-2); color: var(--text-quiet); }
+    .update-status strong { color: var(--text-bright); font-size: var(--fs-3); }
+    .update-status.warning strong { color: var(--amber); }
     .prompt-shell { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, .86fr); gap: var(--sp-4); align-items: start; }
     .prompt-box, .brief-box {
       width: 100%;

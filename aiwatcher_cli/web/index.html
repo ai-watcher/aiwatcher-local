@@ -257,7 +257,7 @@
     <div class="card">
       <div class="section-title">
         <div><h2>Sessions</h2><p>Search sessions, inspect projects, and continue prior local AI work. Prompt text is shown for your own review only, never uploaded.</p></div>
-        <span class="note-chip local">Local only</span>
+        <span class="note-chip local">Private</span>
       </div>
       <div class="session-filters">
         <input id="sessionSearch" type="text" placeholder="Search project, tool, model, session id, or a file/topic keyword" oninput="debounceSessionSearch()">
@@ -356,7 +356,7 @@
       <div class="section-title">
         <div><h2 id="optimizeWorkspaceSummary">Optimize workspace</h2>
           <p class="optimize-lede">Stale chats, pending Fresh Starts, AI worktrees, and runtime clutter worth clearing.</p></div>
-        <span class="note-chip local">Local only</span>
+        <span class="note-chip local">Private</span>
       </div>
       <div id="optimizeWorkspaceBody"><div class="empty">Loading workspace cleanup evidence...</div></div>
     </section>
@@ -370,7 +370,7 @@
     <section class="card" style="margin-bottom:14px">
       <div class="section-title">
         <div><h2>Was any of this worth it?</h2><p>What the spend bought, what it did not, and how much of it can be judged yet.</p></div>
-        <span class="note-chip local">Local only</span>
+        <span class="note-chip local">Private</span>
       </div>
       <div id="proveClaim"></div>
     </section>
@@ -422,7 +422,7 @@
     <div class="card" style="margin-bottom:14px">
       <div class="section-title">
         <div><h2>Fresh Start receipts</h2><p><strong id="preflightDecisions">-</strong> preflight decisions &middot; <span id="windowLabel">-</span>. When AIWatcher suggested a fresh session, what you chose, and whether a follow-up session was observed. Proof stays pending until a later session in the same project is observed.</p></div>
-        <div class="actions"><button class="btn-quiet" aria-pressed="false" onclick="quietFreshStartReminders()">Quiet reminders</button><span class="note-chip local">Local only</span></div>
+        <div class="actions"><button class="btn-quiet" aria-pressed="false" onclick="quietFreshStartReminders()">Quiet reminders</button><span class="note-chip local">Private</span></div>
       </div>
       <div class="table-wrap"><table>
         <thead><tr><th>Time</th><th>Decision</th><th>Expected context at risk</th><th>Proof</th><th>Sessions</th><th></th></tr></thead>
@@ -432,7 +432,7 @@
     <div class="card">
       <div class="section-title">
         <div><h2>Intervention receipts</h2><p>Risk decisions, predicted impact, resulting usage, and developer outcomes.</p></div>
-        <span class="note-chip local">Local only</span>
+        <span class="note-chip local">Private</span>
       </div>
       <div class="table-wrap"><table>
         <thead><tr><th>Time</th><th>Tool / project</th><th>Decision</th><th>Risk change</th><th>Result</th><th></th></tr></thead>
@@ -445,7 +445,7 @@
     <section class="card" style="margin-bottom:14px">
       <div class="section-title">
         <div><h2>Spend and improvement signals</h2><p>Ranked by money, context pressure, and what to change next.</p></div>
-        <span class="note-chip local">Local only</span>
+        <span class="note-chip local">Private</span>
       </div>
       <div id="insightHeadline"></div>
       <!-- Spec 6. What Second Opinion cost, beside the spend it is reporting
@@ -481,7 +481,7 @@
     <section class="card" style="margin-bottom:14px">
       <div class="section-title">
         <div><h2 id="coverageSummary">Surface coverage</h2><p>Detected tools, hook confidence, and what AIWatcher can honestly measure.</p></div>
-        <span class="note-chip local">Local only</span>
+        <span class="note-chip local">Private</span>
       </div>
       <!-- Not .coverage-grid any more. That is a two-column card grid, and
            coverage is a table now -- it made the table one grid item and the
@@ -494,9 +494,17 @@
     <div class="card">
       <div class="section-title">
         <div><h2>Settings</h2><p>Setup, coverage, privacy, and local companion behavior.</p></div>
-        <span class="note-chip local">Local only</span>
+        <span class="note-chip local">Private</span>
       </div>
       <p class="receipt-note">Ambient Watch starts with the dashboard by default. For standalone mode, run <code>aiwatcher watch --notify --overlay --interval 60</code>.</p>
+      <div class="handoff-cta" id="updatePanel" style="margin-top:14px">
+        <h4>Updates</h4>
+        <p id="updateStatus">Check GitHub when you want to see whether this source checkout has newer AIWatcher changes.</p>
+        <div class="actions">
+          <button class="btn-quiet" id="updateCheckButton" onclick="checkForUpdates(this)">Check for updates</button>
+          <button class="btn-primary" id="updateApplyButton" onclick="applyUpdates(this)" hidden>Apply update</button>
+        </div>
+      </div>
       <!-- Setup steps stay folded. They are recommendations about what to
            install next, not a statement about what the tool can see, so they
            do not carry the weight coverage does. -->

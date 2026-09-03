@@ -145,6 +145,7 @@ from .scanner import (
 )
 from .session_health import analyze_session_health
 from .session_presence import presence_for_session
+from .updater import apply_updates, check_for_updates
 
 
 CLOUD_URL = "https://www.getaiwatcher.com"
@@ -3503,103 +3504,61 @@ def command_start(args: argparse.Namespace) -> int:
     return 0
 
 
-def _repo_root_from_package() -> Path:
-    return Path(__file__).resolve().parent.parent
-
-
-def _git_capture(repo: Path, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", "-C", str(repo), *args],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-
-
-def _git_count(repo: Path, rev_range: str) -> int | None:
-    result = _git_capture(repo, ["rev-list", "--count", rev_range])
-    if result.returncode != 0:
-        return None
-    try:
-        return int(result.stdout.strip() or "0")
-    except ValueError:
-        return None
-
-
 def command_update(args: argparse.Namespace) -> int:
     """Check for, and optionally apply, updates for a Git checkout install."""
-    repo = Path(str(getattr(args, "repo", "") or _repo_root_from_package())).expanduser().resolve()
-    remote = str(getattr(args, "remote", "origin") or "origin")
-    branch = str(getattr(args, "branch", "main") or "main")
-    remote_ref = f"{remote}/{branch}"
+    apply = bool(getattr(args, "apply", False))
+    result = (apply_updates if apply else check_for_updates)(
+        repo=getattr(args, "repo", None),
+        remote=str(getattr(args, "remote", "origin") or "origin"),
+        branch=str(getattr(args, "branch", "main") or "main"),
+        fetch=not getattr(args, "no_fetch", False),
+    )
 
     print("AIWatcher update check\n")
-    if not (repo / ".git").exists():
-        print(f"{repo} is not a Git checkout.")
+    if result.get("install_kind") != "source":
+        print(str(result.get("message") or "This install is not a Git checkout."))
         print("For package installs, update with your installer instead:")
-        print("- pipx:  pipx upgrade aiwatcher-cli")
-        print("- pip:   python -m pip install --upgrade aiwatcher-cli")
-        print("- GitHub one-liner: python -m pip install --upgrade git+https://github.com/ai-watcher/aiwatcher-local.git")
+        for item in result.get("guidance", []):
+            if isinstance(item, dict):
+                print(f"- {item.get('label')}: {item.get('command')}")
         return 2
 
-    if not getattr(args, "no_fetch", False):
-        fetched = _git_capture(repo, ["fetch", "--quiet", remote])
-        if fetched.returncode != 0:
-            print(f"Could not fetch {remote}: {fetched.stderr.strip() or fetched.stdout.strip()}", file=sys.stderr)
+    print(f"Checkout: {result.get('repo')}")
+    print(f"Current:  {result.get('current', 'unknown')}")
+    print(f"Remote:   {result.get('remote_ref')}")
+    print(str(result.get("message") or ""))
+    if not result.get("ok"):
+        if result.get("ahead"):
+            print("Refusing to auto-update a diverged branch.")
+            print("Create a branch or resolve the divergence manually, then rerun `aiwatcher update`.")
+        elif result.get("dirty"):
+            print("Working tree has local changes. No files were changed.")
+            print("Commit, stash, or discard your local changes before running `aiwatcher update --apply`.")
+        else:
             print("No files were changed.")
-            return 2
-
-    head = _git_capture(repo, ["rev-parse", "--short", "HEAD"])
-    remote_check = _git_capture(repo, ["rev-parse", "--verify", "--quiet", remote_ref])
-    if remote_check.returncode != 0:
-        print(f"Could not find {remote_ref}. Try --remote or --branch for your checkout.", file=sys.stderr)
         return 2
-
-    behind = _git_count(repo, f"HEAD..{remote_ref}")
-    ahead = _git_count(repo, f"{remote_ref}..HEAD")
-    if behind is None or ahead is None:
-        print("Could not compare local HEAD with the remote branch.", file=sys.stderr)
-        return 2
-
-    current = head.stdout.strip() or "unknown"
-    print(f"Checkout: {repo}")
-    print(f"Current:  {current}")
-    print(f"Remote:   {remote_ref}")
-
-    if behind == 0:
-        print("Already up to date.")
-        if ahead:
-            print(f"Local checkout is {ahead} commit(s) ahead of {remote_ref}; nothing to pull.")
+    if not result.get("update_available"):
+        if result.get("ahead"):
+            print(f"Local checkout is {result.get('ahead')} commit(s) ahead of {result.get('remote_ref')}; nothing to pull.")
         return 0
-
-    print(f"{behind} update(s) available.")
-    if ahead:
-        print(f"Local checkout is also {ahead} commit(s) ahead; refusing to auto-update a diverged branch.")
+    if result.get("ahead"):
+        print("Refusing to auto-update a diverged branch.")
         print("Create a branch or resolve the divergence manually, then rerun `aiwatcher update`.")
         return 2
-
-    if not getattr(args, "apply", False):
-        print("Run `aiwatcher update --apply` to fast-forward this checkout.")
-        print("The update command never changes files unless --apply is present.")
-        return 0
-
-    status = _git_capture(repo, ["status", "--porcelain"])
-    if status.returncode != 0:
-        print(f"Could not inspect checkout status: {status.stderr.strip()}", file=sys.stderr)
-        return 2
-    if status.stdout.strip():
+    if result.get("dirty"):
         print("Working tree has local changes. No files were changed.")
         print("Commit, stash, or discard your local changes before running `aiwatcher update --apply`.")
         return 2
-
-    pulled = _git_capture(repo, ["pull", "--ff-only", remote, branch])
-    if pulled.returncode != 0:
-        print(f"Update failed: {pulled.stderr.strip() or pulled.stdout.strip()}", file=sys.stderr)
+    if not apply:
+        print("Run `aiwatcher update --apply` to fast-forward this checkout.")
+        print("The update command never changes files unless --apply is present.")
+        return 0
+    if not result.get("applied"):
+        print(str(result.get("message") or "Update failed."), file=sys.stderr)
         return 2
 
-    print(pulled.stdout.strip() or "Fast-forwarded to the latest version.")
+    if result.get("output"):
+        print(str(result.get("output")))
     print("Restart AIWatcher with `aiwatcher start --open-ui` so the dashboard and Companion use the new code.")
     return 0
 

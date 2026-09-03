@@ -283,10 +283,11 @@ The source-checkout update path is deliberately conservative:
 - It changes nothing unless `--apply` is passed.
 - After applying, the user restarts with `aiwatcher start --open-ui`.
 
-The future Console version should call the same check, show an "updates
-available" badge, apply only after a click, then restart or relaunch the
-dashboard and Companion with an explicit status message. It should not silently
-pull code in the background.
+The Console Settings page calls the same check, shows an updates-available
+state after a user click, applies only after a second click, then tells the user
+to restart or relaunch the dashboard and Companion. A future persistent badge
+can reuse the same endpoint, but AIWatcher should not silently pull code in the
+background.
 
 ## The Wow Moment
 
@@ -448,8 +449,9 @@ What to check:
 
 ## Current MVP Limits
 
-- `start` covers the normal first-run product flow, but update/restart is still
-  CLI-first; the Console update badge is a next UI layer.
+- `start` covers the normal first-run product flow, and Settings can check or
+  apply source-checkout updates; automatic update polling/restart is still a
+  later layer.
 - Claude Code has the richest support today.
 - Codex per-session estimates require rollout `token_count` events. Desktop or
   older records that only expose cumulative totals remain visible but are not

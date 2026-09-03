@@ -30,7 +30,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from aiwatcher_cli import cli, local_state, ui
+from aiwatcher_cli import cli, local_state, ui, updater
 from aiwatcher_cli.local_state import recent_decisions
 from aiwatcher_cli.outcome_evidence import OutcomeEvidence
 from aiwatcher_cli.processes import RuntimeProcess
@@ -364,6 +364,8 @@ class UpdateCommandCliTests(unittest.TestCase):
 
             def fake_git(_repo: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
                 calls.append(args)
+                if args == ["rev-parse", "--is-inside-work-tree"]:
+                    return self._git_result(args, stdout="true\n")
                 if args[:2] == ["fetch", "--quiet"]:
                     return self._git_result(args)
                 if args == ["rev-parse", "--short", "HEAD"]:
@@ -374,10 +376,12 @@ class UpdateCommandCliTests(unittest.TestCase):
                     return self._git_result(args, stdout="2\n")
                 if args == ["rev-list", "--count", "origin/main..HEAD"]:
                     return self._git_result(args, stdout="0\n")
+                if args == ["status", "--porcelain"]:
+                    return self._git_result(args, stdout="")
                 raise AssertionError(f"unexpected git call: {args}")
 
             with (
-                patch.object(cli, "_git_capture", side_effect=fake_git),
+                patch.object(updater, "git_capture", side_effect=fake_git),
                 patch("sys.stdout", new_callable=io.StringIO) as stdout,
             ):
                 result = cli.command_update(SimpleNamespace(
@@ -400,6 +404,8 @@ class UpdateCommandCliTests(unittest.TestCase):
 
             def fake_git(_repo: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
                 calls.append(args)
+                if args == ["rev-parse", "--is-inside-work-tree"]:
+                    return self._git_result(args, stdout="true\n")
                 if args[:2] == ["fetch", "--quiet"]:
                     return self._git_result(args)
                 if args == ["rev-parse", "--short", "HEAD"]:
@@ -415,7 +421,7 @@ class UpdateCommandCliTests(unittest.TestCase):
                 raise AssertionError(f"unexpected git call: {args}")
 
             with (
-                patch.object(cli, "_git_capture", side_effect=fake_git),
+                patch.object(updater, "git_capture", side_effect=fake_git),
                 patch("sys.stdout", new_callable=io.StringIO) as stdout,
             ):
                 result = cli.command_update(SimpleNamespace(

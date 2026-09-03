@@ -1,4 +1,4 @@
-"""Local-only dashboard for AIWatcher Local."""
+"""Private-by-default dashboard for AIWatcher Local."""
 
 from __future__ import annotations
 
@@ -129,6 +129,7 @@ from .scanner import (
     segment_session_by_prompt,
     surface_coverage,
 )
+from .updater import apply_updates, check_for_updates
 
 
 MAX_REQUEST_BYTES = 64 * 1024
@@ -5926,7 +5927,7 @@ def build_companion_state() -> dict[str, object]:
         "control_url": "/?view=prompt",
         "watch_url": "/",
         "console_url": "/",
-        "detail": "Local-only. No prompt or source text is shown in the Companion.",
+        "detail": "Private by default. No prompt or source text is shown in the Companion.",
         "presence": _presence_block(presence_rows),
         # In the base payload, not only the finished state: the bubble's blue
         # badge must survive whatever state owns the bar, or a finished
@@ -6504,8 +6505,17 @@ class UIHandler(BaseHTTPRequestHandler):
             self._send(200, json.dumps({
                 "service": "aiwatcher-local",
                 "version": __version__,
-                "capabilities": ["preflight"],
+                "capabilities": ["preflight", "source-update"],
             }), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/update-status":
+            params = parse_qs(parsed.query)
+            fetch = params.get("fetch", ["1"])[0] != "0"
+            try:
+                payload = check_for_updates(fetch=fetch)
+            except (OSError, subprocess.SubprocessError) as exc:
+                payload = {"ok": False, "message": f"Could not check for updates: {exc}"}
+            self._send(200, json.dumps(payload), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/ambient-intervention":
             params = parse_qs(parsed.query)
@@ -6737,6 +6747,7 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/ambient-intervention-action",
             "/api/runtime-return",
             "/api/session-resume",
+            "/api/update-apply",
         }:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
@@ -6760,6 +6771,15 @@ class UIHandler(BaseHTTPRequestHandler):
             response = build_prompt_preflight(prompt, tool=tool, cwd=cwd)
             status = 400 if response.get("error") else 200
             self._send(status, json.dumps(response), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/update-apply":
+            fetch = not bool(payload.get("no_fetch"))
+            try:
+                result = apply_updates(fetch=fetch)
+            except (OSError, subprocess.SubprocessError) as exc:
+                result = {"ok": False, "message": f"Could not apply update: {exc}"}
+            status = 200 if result.get("ok") else 409
+            self._send(status, json.dumps(result), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/second-opinion":
             # Stage 2, on its own request. Stage 1 has already rendered by
@@ -7235,7 +7255,7 @@ def serve(
     server = ThreadingHTTPServer((host, selected_port), UIHandler)
     record_ui_server(host, selected_port)
     print(f"AIWatcher Local UI running at http://{host}:{selected_port}")
-    print("Local-only. No data leaves this machine. Press Ctrl+C to stop.")
+    print("Private by default. No data leaves this machine unless you configure it. Press Ctrl+C to stop.")
     started_resource = None
     if on_started:
         started_resource = on_started(host, selected_port)

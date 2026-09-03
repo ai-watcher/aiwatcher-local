@@ -218,7 +218,7 @@ function renderBubble(bubble, intervention) {
       <button id="dismiss">Dismiss</button>
     </div>
   </div>
-  <div class="foot">Local-only. Prompt/source content is not stored in this decision.</div>`;
+  <div class="foot">Private by default. Prompt/source content is not stored in this decision.</div>`;
   document.getElementById('primaryAction').onclick = () => {
     if (presentation.primaryMode === 'return') return returnToSession(bubble);
     if (presentation.primaryMode === 'inspect') return inspectIntervention(bubble);

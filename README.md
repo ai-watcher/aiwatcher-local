@@ -234,8 +234,9 @@ python -m aiwatcher_cli start --open-ui
 `update` fetches GitHub only when you run it. It reports how many updates are
 available, refuses diverged or locally modified checkouts, and never changes
 files unless `--apply` is present. This is the command the future Console
-update badge can use: show "updates available", apply a fast-forward, then ask
-the user to restart the dashboard and Companion.
+update badge can use. The Settings page already exposes the same safe flow as a
+button: check GitHub, show whether updates are available, apply only a clean
+fast-forward, then ask the user to restart the dashboard and Companion.
 
 For package installs after release:
 
