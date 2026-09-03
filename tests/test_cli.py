@@ -4724,7 +4724,7 @@ class CommandGateAnalyzerTests(unittest.TestCase):
             reason="Reading a credential/secret file can expose its contents.",
             pattern_id="credential-read",
             tool_label="Claude Code",
-            timeout_seconds=5,
+            remaining_seconds=5,
         )
         self.assertIn("This gate expires in 5s", page)
         self.assertIn("setButtonsDisabled(true)", page)
@@ -5852,6 +5852,63 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertEqual(len(warnings), 1)
         self.assertIn("Claude user command gate", warnings[0])
         self.assertIn("install-claude-command-gate", warnings[0])
+
+    def test_hook_status_checks_each_hook_command_source_independently(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            claude_settings = os.path.join(temp_dir, "claude-user.json")
+            package_root = os.path.abspath(os.path.join(os.path.dirname(cli.__file__), os.pardir))
+            if os.name == "nt":
+                package_root = package_root.replace("\\", "/")
+            with open(claude_settings, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "hooks": {
+                        "UserPromptSubmit": [
+                            {"hooks": [{
+                                "type": "command",
+                                "command": (
+                                    f"PYTHONPATH={package_root}:${{PYTHONPATH:-}} "
+                                    "python3 -m aiwatcher_cli claude-hook --gate"
+                                ),
+                            }]}
+                        ],
+                        "PreToolUse": [
+                            {
+                                "matcher": "Bash",
+                                "hooks": [{
+                                    "type": "command",
+                                    "command": (
+                                        "PYTHONPATH=/tmp/old-aiwatcher:${PYTHONPATH:-} "
+                                        "python3 -m aiwatcher_cli claude-pretooluse-hook"
+                                    ),
+                                }],
+                            }
+                        ],
+                    }
+                }, handle)
+            with (
+                patch.object(
+                    cli,
+                    "_claude_settings_path",
+                    side_effect=lambda scope, project_dir=None: claude_settings
+                    if scope == "user"
+                    else os.path.join(temp_dir, f"claude-{scope}.json"),
+                ),
+                patch.object(
+                    cli,
+                    "_codex_hooks_path",
+                    side_effect=lambda scope, project_dir=None: os.path.join(temp_dir, f"codex-{scope}.json"),
+                ),
+                patch.object(
+                    cli,
+                    "_cursor_hooks_path",
+                    side_effect=lambda scope, project_dir=None: os.path.join(temp_dir, f"cursor-{scope}.json"),
+                ),
+            ):
+                warnings = cli._configured_aiwatcher_source_warnings()
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("Claude user command gate", warnings[0])
+        self.assertNotIn("Claude user hook", warnings[0])
 
     def test_hook_status_shows_handoff_bubble_decisions(self) -> None:
         with (

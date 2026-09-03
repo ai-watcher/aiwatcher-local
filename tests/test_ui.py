@@ -1778,6 +1778,7 @@ class DashboardWindowTests(unittest.TestCase):
                 "pattern_id": "credential-read",
                 "reason": "Reading a credential/secret file can expose its contents.",
                 "url": "http://127.0.0.1:9998/",
+                "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat(),
             }),
             patch.object(ui, "mark_active_command_gate_seen") as mark_seen,
             patch.object(ui, "build_summary_cached", return_value={
@@ -1796,10 +1797,11 @@ class DashboardWindowTests(unittest.TestCase):
 
         self.assertEqual(state["state"], "command_gate")
         self.assertEqual(state["label"], "Command Gate")
-        self.assertEqual(state["primary_label"], "Review command")
+        self.assertEqual(state["primary_label"], "Review")
         self.assertEqual(state["primary_action"], "open_prompt_gate")
         self.assertEqual(state["primary_url"], "http://127.0.0.1:9998/")
         self.assertIn("cat .env", state["subtitle"])
+        self.assertIsInstance(state["expires_in_seconds"], int)
         mark_seen.assert_called_once_with("cmd-gate-1")
 
     def test_companion_state_surfaces_fresh_start_proof_as_passive_status(self) -> None:
@@ -3825,7 +3827,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("2 sessions need attention", app_card["group_note"])
         self.assertEqual(len(app_card["related_sessions"]), 2)
 
-    def test_context_health_hides_projects_during_fresh_start_cooldown(self) -> None:
+    def test_context_health_preserves_quieted_projects_as_evidence(self) -> None:
         now = datetime.now(timezone.utc)
         rows = [
             LocalSession(session_id="quiet", tool="codex-cli", project_path="/repo/quiet", updated_at=now),
@@ -3875,7 +3877,13 @@ class DashboardWindowTests(unittest.TestCase):
         ):
             cards = ui._context_health_cards(rows, [])
 
-        self.assertEqual([card["project_full"] for card in cards], ["/repo/ready"])
+        self.assertEqual({card["project_full"] for card in cards}, {"/repo/ready", "/repo/quiet"})
+        quiet_card = next(card for card in cards if card["project_full"] == "/repo/quiet")
+        ready_card = next(card for card in cards if card["project_full"] == "/repo/ready")
+        self.assertTrue(quiet_card["fresh_start_quiet"])
+        self.assertFalse(quiet_card["actionable"])
+        self.assertFalse(ready_card["fresh_start_quiet"])
+        self.assertTrue(ready_card["actionable"])
 
     def test_session_detail_degrades_when_state_snapshot_read_fails(self) -> None:
         now = datetime.now(timezone.utc)

@@ -755,6 +755,32 @@ class LocalStateTests(unittest.TestCase):
                 self.assertIsNone(local_state.active_command_gate())
 
                 local_state.record_active_command_gate(
+                    gate_id="cmd-gate-a",
+                    tool="Claude Code",
+                    command_preview="cat .env",
+                    pattern_id="credential-read",
+                    reason="Reading a credential/secret file can expose its contents.",
+                    url="http://127.0.0.1:9998/",
+                    expires_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+                )
+                local_state.record_active_command_gate(
+                    gate_id="cmd-gate-b",
+                    tool="Claude Code",
+                    command_preview="git push --force",
+                    pattern_id="force-push",
+                    reason="Force push can overwrite remote history.",
+                    url="http://127.0.0.1:9997/",
+                    expires_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+                )
+                self.assertEqual(local_state.active_command_gate()["id"], "cmd-gate-a")
+                local_state.mark_active_command_gate_seen("cmd-gate-b")
+                self.assertTrue(local_state.active_command_gate_seen("cmd-gate-b"))
+                local_state.clear_active_command_gate("cmd-gate-a")
+                self.assertEqual(local_state.active_command_gate()["id"], "cmd-gate-b")
+                local_state.clear_active_command_gate()
+                self.assertIsNone(local_state.active_command_gate())
+
+                local_state.record_active_command_gate(
                     gate_id="cmd-gate-2",
                     tool="Claude Code",
                     command_preview="cat .env",

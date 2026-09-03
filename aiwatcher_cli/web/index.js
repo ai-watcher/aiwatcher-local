@@ -2865,10 +2865,16 @@ function headroomLabel(chart) {
 function healthRow(row, waitingById, index) {
   const reason = healthReason(row, waitingById);
   const room = headroomLabel(row.chart);
+  const project = String(row.project_full || '');
+  const quieted = row.fresh_start_quiet || row.actionable === false;
   // Fresh Start is a different action from opening the session, so it stops the
   // click reaching the row underneath it.
-  const action = row.can_handoff
-    ? `<button class="btn-primary" onclick="event.stopPropagation(); startFreshFromBubble('${esc(row.session_id)}')">Fresh Start</button>`
+  const action = quieted
+    ? '<button class="btn-quiet" disabled title="Quieted for this project; evidence remains visible here.">Quieted 48h</button>'
+    : row.can_handoff
+      ? `<button class="btn-primary" onclick="event.stopPropagation(); startFreshFromBubble(${jsArg(row.session_id)})">Fresh Start</button>
+        <button class="btn-quiet" onclick="event.stopPropagation(); continueFreshStartProject(${jsArg(row.session_id)}, ${jsArg(project)})">Continue 48h</button>
+        <button class="btn-quiet" onclick="event.stopPropagation(); snoozeFreshStartProject(${jsArg(project)}, this)">Snooze 48h</button>`
     : `<button class="btn-quiet" onclick="event.stopPropagation(); selectSession('${esc(row.session_id)}')">Review</button>`;
   // The whole row opens the session: the reason and the numbers are as much a
   // description of it as the title is, and a target the width of the card is
@@ -2887,7 +2893,7 @@ function healthRow(row, waitingById, index) {
   // intent, the context a Fresh Start would carry, the meter and the facts
   // strip all still render -- in the drawer this row opens. Watch answers
   // "which one first"; the drawer answers "what is going on in it".
-  return `<div class="health-rank-row" data-project-full="${esc(row.project_full || '')}"
+  return `<div class="health-rank-row${quieted ? ' muted-card' : ''}" data-project-full="${esc(project)}" data-fresh-start-actionable="${quieted ? 'false' : 'true'}"
     data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">
     <span class="rank-n">${index + 1}</span>
     <span class="rank-dot ${esc(row.severity)}"></span>
@@ -2908,7 +2914,7 @@ function healthRow(row, waitingById, index) {
 }
 function renderContextHealth(rows, statusArg, presence) {
   const status = arguments.length > 1 ? arguments[1] : 'ready';
-  rows = (rows || []).filter(row => !quietedFreshStartProjects.has(String((row && (row.project_full || row.project)) || '')));
+  rows = rows || [];
   // Keyed by session so the rank and the reason read the same source; a second
   // list here would be a second thing to keep in step with presence.
   const waitingById = new Map(
@@ -2922,7 +2928,7 @@ function renderContextHealth(rows, statusArg, presence) {
     const ar = healthRank(a, keys), br = healthRank(b, keys);
     return br[0] - ar[0] || br[1] - ar[1] || br[2] - ar[2];
   });
-  const snoozable = ranked.filter(row => row.can_handoff && (row.severity === 'critical' || row.severity === 'warning'));
+  const snoozable = ranked.filter(row => row.can_handoff && row.actionable !== false && !row.fresh_start_quiet && (row.severity === 'critical' || row.severity === 'warning'));
   const batch = snoozable.length > 1
     ? `<div class="health-batch"><button class="btn-quiet" onclick="snoozeVisibleFreshStartProjects(this)">Snooze all 48h</button></div>`
     : '';
@@ -4210,7 +4216,6 @@ let freshStartReceiptsMarkedViewed = false;
 // session it opened. Watch ranks; the drawer diagnoses -- and the diagnosis
 // lives in this payload, not in /api/session.
 let contextHealthCache = [];
-const quietedFreshStartProjects = new Set();
 let sessionRowsCache = [];
 let changeRowsCache = [];
 let sessionSort = { key: 'updated_at', dir: 'desc' };
@@ -4263,7 +4268,6 @@ async function snoozeFreshStartProjects(projects, message) {
       body: JSON.stringify({ state: 'control_recommended_group', projects: clean }),
     });
     if (!response.ok) throw new Error('snooze failed');
-    clean.forEach(project => quietedFreshStartProjects.add(project));
     showToast(message || `Fresh Start snoozed for ${clean.length} project${clean.length === 1 ? '' : 's'} for 48h.`);
     await load(true, true);
     return true;
@@ -4275,15 +4279,18 @@ async function snoozeFreshStartProjects(projects, message) {
 async function snoozeFreshStartProject(project, button) {
   const ok = await snoozeFreshStartProjects([project], 'Fresh Start snoozed for this project for 48h.');
   if (ok && button) {
-    const card = button.closest('.health-card');
-    if (card) card.classList.add('muted-card');
+    const row = button.closest('[data-project-full]');
+    if (row) {
+      row.classList.add('muted-card');
+      row.dataset.freshStartActionable = 'false';
+    }
   }
 }
 function visibleFreshStartProjects() {
   // Any element carrying a project, not only .health-card. This screen shows
   // one lead card and the rest as compact rows, so matching on the card class
   // would have snoozed a single project while the button said it snoozed all.
-  const cards = Array.from(document.querySelectorAll('#sessionContextHealth [data-project-full]'));
+  const cards = Array.from(document.querySelectorAll('#sessionContextHealth [data-project-full][data-fresh-start-actionable="true"]'));
   return [...new Set(cards.map(card => card.dataset.projectFull || '').filter(Boolean))];
 }
 async function snoozeVisibleFreshStartProjects(button) {
@@ -4303,10 +4310,9 @@ async function continueFreshStartProject(sessionId, project) {
     showToast('Could not save the Fresh Start decision yet.', 'error');
     return;
   }
-  const projects = visibleFreshStartProjects();
   const quieted = await snoozeFreshStartProjects(
-    projects.length ? projects : [project],
-    'Context review quieted for the visible projects for 48h.'
+    [project],
+    'Context review quieted for this project for 48h.'
   );
   if (!quieted) await load(true, true);
 }

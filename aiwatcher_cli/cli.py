@@ -3153,8 +3153,9 @@ def _command_gate_html(
     reason: str,
     pattern_id: str,
     tool_label: str,
-    timeout_seconds: int = PROMPT_GATE_TIMEOUT_SECONDS,
+    remaining_seconds: int = PROMPT_GATE_TIMEOUT_SECONDS,
 ) -> str:
+    remaining_seconds = max(1, int(remaining_seconds))
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>AIWatcher command gate</title>
 <style>
@@ -3182,11 +3183,11 @@ button:disabled {{ opacity:.56; cursor:not-allowed; }}
 <button class="block" onclick="decide('block')">Block</button>
 <button class="always" onclick="decide('always_allow')">Always allow this pattern</button>
 </div>
-<div class="status" id="status">Waiting for your choice. This gate expires in {max(1, int(timeout_seconds))}s.</div>
+<div class="status" id="status">Waiting for your choice. This gate expires in {remaining_seconds}s.</div>
 </div>
 <script>
 let resolved = false;
-let remainingSeconds = {max(1, int(timeout_seconds))};
+let remainingSeconds = {remaining_seconds};
 const statusEl = document.getElementById('status');
 const buttons = Array.from(document.querySelectorAll('button'));
 
@@ -3291,6 +3292,7 @@ def run_command_gate(
         return _fallback_command_gate(command=command, reason=reason, pattern_id=pattern_id)
 
     gate_id = uuid.uuid4().hex
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=max(1, timeout_seconds))
     decision_event = threading.Event()
     state: dict[str, str] = {}
 
@@ -3319,7 +3321,7 @@ def run_command_gate(
                     reason=reason,
                     pattern_id=pattern_id,
                     tool_label=tool_label,
-                    timeout_seconds=timeout_seconds,
+                    remaining_seconds=max(1, int((expires_at - datetime.now(timezone.utc)).total_seconds())),
                 ),
             )
 
@@ -3354,7 +3356,7 @@ def run_command_gate(
                 pattern_id=pattern_id,
                 reason=reason,
                 url=url,
-                expires_at=datetime.now(timezone.utc) + timedelta(seconds=max(1, timeout_seconds)),
+                expires_at=expires_at,
             )
         except OSError:
             pass
@@ -3395,7 +3397,8 @@ def run_command_gate(
                     except OSError:
                         pass
                     return _fallback_command_gate(command=command, reason=reason, pattern_id=pattern_id)
-        if not decision_event.wait(max(1, timeout_seconds)):
+        remaining_wait = max(0.0, (expires_at - datetime.now(timezone.utc)).total_seconds())
+        if not decision_event.wait(remaining_wait):
             return None
         return state.get("decision")
     finally:
@@ -8452,6 +8455,34 @@ def _configured_aiwatcher_source_warnings() -> list[str]:
     package_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
     if os.name == "nt":
         package_root = package_root.replace("\\", "/")
+
+    def matching_commands(text: str, marker: str) -> list[str]:
+        if marker not in text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return [
+                line.strip()
+                for line in text.splitlines()
+                if marker in line
+            ]
+        found: list[str] = []
+
+        def visit(value: object) -> None:
+            if isinstance(value, dict):
+                command = value.get("command")
+                if isinstance(command, str) and marker in command:
+                    found.append(command)
+                for child in value.values():
+                    visit(child)
+            elif isinstance(value, list):
+                for child in value:
+                    visit(child)
+
+        visit(parsed)
+        return found
+
     checks = [
         ("Claude project hook", _claude_settings_path("project"), "claude-hook",
          "python -m aiwatcher_cli install-claude-hook --write --scope project --gate"),
@@ -8473,10 +8504,14 @@ def _configured_aiwatcher_source_warnings() -> list[str]:
     warnings: list[str] = []
     for label, path, marker, repair in checks:
         text = _file_text(path)
-        if marker not in text:
+        commands = matching_commands(text, marker)
+        if not commands:
             continue
-        normalized = text.replace("\\", "/")
-        if package_root not in normalized:
+        stale_commands = [
+            command for command in commands
+            if package_root not in command.replace("\\", "/")
+        ]
+        if stale_commands:
             warnings.append(
                 f"{label} is installed from a different AIWatcher checkout. Reinstall it from this repo so hooks, "
                 f"Companion, and gates use the same code. Path: {path}. Repair: {repair}"

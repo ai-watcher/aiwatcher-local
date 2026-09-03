@@ -2565,19 +2565,21 @@ def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) ->
         # path reads last_token_usage and does have genuine per-turn prompt sizes,
         # which is why it deliberately carries no cumulative note and is charted.
         # Same exclusion _insight_feed already applies via pressure_rows.
-        if (
-            representative.severity in {"critical", "warning"}
-            and _fresh_start_project_quiet(representative.project_path)
-        ):
-            continue
         plottable = session is not None and not has_cumulative_totals(session)
-        cards.append(_context_health_card(
+        card = _context_health_card(
             representative,
             session,
             group=group,
             turn_series=turns_by_session.get(representative.session_id, []) if plottable else None,
             charted_because_live=_still_reachable(representative),
-        ))
+        )
+        quiet = (
+            representative.severity in {"critical", "warning"}
+            and _fresh_start_project_quiet(representative.project_path)
+        )
+        card["fresh_start_quiet"] = quiet
+        card["actionable"] = not quiet
+        cards.append(card)
     cards.sort(key=lambda item: (
         severity_order.get(str(item.get("severity")), 9),
         -int(item.get("estimated_replayed_context_tokens") or 0),
@@ -6018,20 +6020,29 @@ def build_companion_state() -> dict[str, object]:
         tool = str(command_gate.get("tool") or "Claude Code")
         reason = str(command_gate.get("reason") or "A local command needs review before it runs.")
         preview = str(command_gate.get("command_preview") or "").strip()
+        gate_expires = _parse_iso_datetime(command_gate.get("expires_at"))
         subtitle = reason
         if preview:
-            subtitle = f"{reason} Command: {preview}"
+            subtitle = f"{preview} · {reason}"
         return {
             **base,
             "state": "command_gate",
             "label": "Command Gate",
             "title": "Review command",
             "subtitle": subtitle,
-            "primary_label": "Review command",
+            "expires_in_seconds": (
+                max(0, int((gate_expires - datetime.now(timezone.utc)).total_seconds()))
+                if gate_expires is not None
+                else None
+            ),
+            "primary_label": "Review",
             "primary_action": "open_prompt_gate",
             "primary_url": str(command_gate.get("url") or "/?view=control"),
             "control_url": str(command_gate.get("url") or "/?view=control"),
-            "detail": f"{tool} paused a shell command locally. Choose Allow once, Block, or Always allow before it continues.",
+            "detail": (
+                f"{tool} paused a shell command locally. Choose Allow once, Block, or Always allow before it continues."
+                + (f" Command preview: {preview}" if preview else "")
+            ),
         }
     # Second only to the prompt gate, and ahead of every advisory state below.
     # The gate outranks it because there AIWatcher is itself holding a prompt

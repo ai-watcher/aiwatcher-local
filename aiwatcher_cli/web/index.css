@@ -1191,6 +1191,7 @@
     }
     .health-rank-row { cursor: pointer; }
     .health-rank-row:hover { background: var(--surface-hover); }
+    .health-rank-row.muted-card { opacity: .72; }
     .rank-n { font-family: var(--mono); font-size: var(--fs-2); color: var(--faint); font-variant-numeric: tabular-nums; }
     .rank-dot { width: 8px; height: 8px; border-radius: var(--r-pill); background: var(--faint); }
     .rank-dot.critical { background: var(--red); }
@@ -1203,6 +1204,7 @@
     .rank-why { font-size: var(--fs-2); color: var(--muted); line-height: 1.45; }
     .rank-room { font-family: var(--mono); font-size: var(--fs-2); color: var(--muted); text-align: right; }
     .rank-trend { display: block; }
+    .rank-act { display: flex; justify-content: flex-end; gap: var(--sp-2); flex-wrap: wrap; }
     @media (max-width: 1100px) {
       /* The trend and the headroom are the first to go: the rank, the reason
          and the action are what the row is for. */

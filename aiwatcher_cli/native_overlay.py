@@ -1609,7 +1609,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         let incomingState = json["state"] as? String ?? "watching"
         if let hold = suppressPassiveRefreshUntil,
            hold > Date(),
-           incomingState != "prompt_gate",
+           !["prompt_gate", "command_gate"].contains(incomingState),
            ["fresh_start_copied", "clipboard_confirm"].contains(self.stateName) {
             self.updateAppearance()
             return
@@ -1668,7 +1668,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         }
         self.titleLabel.stringValue = String((json["label"] as? String ?? "AIWatcher").prefix(18))
         var subtitleText = String((json["subtitle"] as? String ?? "Watching quietly").prefix(46))
-        if incomingState == "prompt_gate", let remaining = json["expires_in_seconds"] as? Int, remaining >= 0 {
+        if ["prompt_gate", "command_gate"].contains(incomingState), let remaining = json["expires_in_seconds"] as? Int, remaining >= 0 {
             subtitleText += " · \(remaining)s"
         }
         self.subtitleLabel.stringValue = subtitleText
@@ -2364,7 +2364,7 @@ def run_native_presence(
         if (
             suppress_passive_refresh_until.get() > time.time()
             and state_var.get() in {"fresh_start_copied", "clipboard_confirm"}
-            and incoming_state != "prompt_gate"
+            and incoming_state not in {"prompt_gate", "command_gate"}
         ):
             return
         if suppress_passive_refresh_until.get() <= time.time():
@@ -2441,7 +2441,7 @@ def run_native_presence(
         title_var.set(str(payload.get("label") or "AIWatcher")[:18])
         subtitle_text = str(payload.get("subtitle") or "Watching quietly")[:46]
         remaining = payload.get("expires_in_seconds")
-        if incoming_state == "prompt_gate" and isinstance(remaining, int) and remaining >= 0:
+        if incoming_state in {"prompt_gate", "command_gate"} and isinstance(remaining, int) and remaining >= 0:
             subtitle_text += f" · {remaining}s"
         subtitle_var.set(subtitle_text)
         primary_label_var.set(str(payload.get("primary_label") or "Watch")[:12])

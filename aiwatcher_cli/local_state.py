@@ -174,6 +174,7 @@ def _empty_state() -> dict[str, Any]:
         "sent_notification_keys": [],
         "active_prompt_gate": None,
         "active_command_gate": None,
+        "active_command_gates": [],
         # Second Opinion spends the user's own money on their own key, so
         # consent is per project and the spend ledger is what the monthly cap
         # is enforced against.
@@ -262,6 +263,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("sent_notification_keys", [])
     data.setdefault("active_prompt_gate", None)
     data.setdefault("active_command_gate", None)
+    data.setdefault("active_command_gates", [])
     data.setdefault("ui_server", None)
     data.setdefault("watcher_heartbeat", None)
     data.setdefault("session_waiting", {})
@@ -572,6 +574,8 @@ def mark_active_prompt_gate_seen(gate_id: str) -> None:
         gate = data.get("active_prompt_gate")
         if not isinstance(gate, dict) or gate.get("id") != gate_id:
             return
+        if gate.get("companion_seen_at"):
+            return
         gate["companion_seen_at"] = datetime.now(timezone.utc).isoformat()
         data["active_prompt_gate"] = gate
         _save(data)
@@ -580,6 +584,46 @@ def mark_active_prompt_gate_seen(gate_id: str) -> None:
 def active_prompt_gate_seen(gate_id: str) -> bool:
     gate = active_prompt_gate()
     return bool(isinstance(gate, dict) and gate.get("id") == gate_id and gate.get("companion_seen_at"))
+
+
+def _active_gate_expires_at(gate: dict[str, Any]) -> datetime | None:
+    try:
+        expires_at = datetime.fromisoformat(str(gate.get("expires_at")))
+    except (TypeError, ValueError):
+        return None
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at.astimezone(timezone.utc)
+
+
+def _fresh_command_gates(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return unexpired command gates, including the legacy single-slot field."""
+    now = datetime.now(timezone.utc)
+    by_id: dict[str, dict[str, Any]] = {}
+    raw_gates = data.get("active_command_gates")
+    if isinstance(raw_gates, list):
+        for item in raw_gates:
+            if isinstance(item, dict):
+                gate = dict(item)
+                gate_id = str(gate.get("id") or "")
+                expires_at = _active_gate_expires_at(gate)
+                if gate_id and expires_at and expires_at >= now:
+                    by_id[gate_id] = gate
+    legacy = data.get("active_command_gate")
+    if isinstance(legacy, dict):
+        gate = dict(legacy)
+        gate_id = str(gate.get("id") or "")
+        expires_at = _active_gate_expires_at(gate)
+        if gate_id and expires_at and expires_at >= now:
+            by_id.setdefault(gate_id, gate)
+    gates = list(by_id.values())
+    gates.sort(key=lambda gate: str(gate.get("created_at") or gate.get("expires_at") or ""))
+    return gates
+
+
+def _sync_command_gates(data: dict[str, Any], gates: list[dict[str, Any]]) -> None:
+    data["active_command_gates"] = gates
+    data["active_command_gate"] = gates[0] if gates else None
 
 
 def record_active_command_gate(
@@ -594,7 +638,11 @@ def record_active_command_gate(
 ) -> None:
     with _locked_state():
         data = _load()
-        data["active_command_gate"] = {
+        gates = [
+            gate for gate in _fresh_command_gates(data)
+            if str(gate.get("id") or "") != gate_id
+        ]
+        gates.append({
             "id": gate_id,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "expires_at": expires_at.astimezone(timezone.utc).isoformat(),
@@ -604,57 +652,74 @@ def record_active_command_gate(
             "reason": reason.strip()[:500],
             "url": url,
             "companion_seen_at": None,
-        }
+        })
+        gates.sort(key=lambda gate: str(gate.get("created_at") or gate.get("expires_at") or ""))
+        _sync_command_gates(data, gates[:20])
         _save(data)
 
 
 def clear_active_command_gate(gate_id: str | None = None) -> None:
     with _locked_state():
         data = _load()
-        gate = data.get("active_command_gate")
-        if not isinstance(gate, dict):
-            data["active_command_gate"] = None
+        gates = _fresh_command_gates(data)
+        if gate_id is None:
+            if not gates and not data.get("active_command_gate") and not data.get("active_command_gates"):
+                return
+            _sync_command_gates(data, [])
             _save(data)
             return
-        if gate_id is not None and gate.get("id") != gate_id:
+        kept = [gate for gate in gates if str(gate.get("id") or "") != gate_id]
+        if len(kept) == len(gates):
+            _sync_command_gates(data, gates)
             return
-        data["active_command_gate"] = None
+        _sync_command_gates(data, kept)
         _save(data)
 
 
 def active_command_gate() -> dict[str, Any] | None:
     with _locked_state():
         data = _load()
-        gate = data.get("active_command_gate")
-        if not isinstance(gate, dict):
+        gates = _fresh_command_gates(data)
+        if not gates:
+            if data.get("active_command_gate") is not None or data.get("active_command_gates"):
+                _sync_command_gates(data, [])
+                _save(data)
             return None
-        try:
-            expires_at = datetime.fromisoformat(str(gate.get("expires_at")))
-        except ValueError:
-            expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if expires_at.astimezone(timezone.utc) < datetime.now(timezone.utc):
-            data["active_command_gate"] = None
+        if data.get("active_command_gate") != gates[0] or data.get("active_command_gates") != gates:
+            _sync_command_gates(data, gates)
             _save(data)
-            return None
-        return dict(gate)
+        return dict(gates[0])
 
 
 def mark_active_command_gate_seen(gate_id: str) -> None:
     with _locked_state():
         data = _load()
-        gate = data.get("active_command_gate")
-        if not isinstance(gate, dict) or gate.get("id") != gate_id:
+        gates = _fresh_command_gates(data)
+        changed = False
+        for gate in gates:
+            if str(gate.get("id") or "") != gate_id:
+                continue
+            if gate.get("companion_seen_at"):
+                _sync_command_gates(data, gates)
+                return
+            gate["companion_seen_at"] = datetime.now(timezone.utc).isoformat()
+            changed = True
+            break
+        if not changed:
             return
-        gate["companion_seen_at"] = datetime.now(timezone.utc).isoformat()
-        data["active_command_gate"] = gate
+        _sync_command_gates(data, gates)
         _save(data)
 
 
 def active_command_gate_seen(gate_id: str) -> bool:
-    gate = active_command_gate()
-    return bool(isinstance(gate, dict) and gate.get("id") == gate_id and gate.get("companion_seen_at"))
+    with _locked_state():
+        data = _load()
+        gates = _fresh_command_gates(data)
+        _sync_command_gates(data, gates)
+        return any(
+            str(gate.get("id") or "") == gate_id and bool(gate.get("companion_seen_at"))
+            for gate in gates
+        )
 
 
 def _prune_companion_skips(data: dict[str, Any]) -> None:
