@@ -8,6 +8,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -156,6 +157,16 @@ SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
 # Bump whenever build_summary's payload shape changes, so a cache written by an
 # older build is discarded instead of rendering blank sections in a newer UI.
 SUMMARY_CACHE_SCHEMA_VERSION = 8
+
+
+def _restart_current_process() -> None:
+    os.execv(sys.executable, [sys.executable, *sys.argv])
+
+
+def schedule_dashboard_restart(delay_seconds: float = 0.8) -> None:
+    timer = threading.Timer(delay_seconds, _restart_current_process)
+    timer.daemon = True
+    timer.start()
 
 # POST endpoints whose only fact is that they happened, so they carry no JSON
 # body and are exempt from the content-type check. Named rather than written
@@ -6774,10 +6785,15 @@ class UIHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/update-apply":
             fetch = not bool(payload.get("no_fetch"))
+            restart = bool(payload.get("restart"))
             try:
                 result = apply_updates(fetch=fetch)
             except (OSError, subprocess.SubprocessError) as exc:
                 result = {"ok": False, "message": f"Could not apply update: {exc}"}
+            if result.get("ok") and result.get("applied") and restart:
+                result["restart_requested"] = True
+                result["message"] = "Updated. Restarting AIWatcher so the dashboard and Companion use the new code."
+                schedule_dashboard_restart()
             status = 200 if result.get("ok") else 409
             self._send(status, json.dumps(result), "application/json; charset=utf-8")
             return

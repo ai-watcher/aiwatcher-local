@@ -591,6 +591,36 @@
     .btn-primary { background: var(--btn-bg); border-color: var(--btn-line); color: var(--on-accent); }
     .btn-primary:hover { background: var(--btn-bg-hover); border-color: var(--btn-line-hover); }
     .btn-quiet { background: transparent; border-color: var(--line); color: var(--text-bright); }
+    .update-banner {
+      display: inline-flex; align-items: center; justify-content: center; gap: var(--sp-2);
+      min-width: 142px; border-radius: var(--r-pill);
+      font-size: var(--fs-2); font-weight: var(--fw-bold);
+      font-variant-numeric: tabular-nums; white-space: nowrap;
+    }
+    .update-banner-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: currentColor; box-shadow: 0 0 0 3px rgba(var(--hairline-rgb), .10);
+    }
+    .update-banner.unknown, .update-banner.checking, .update-banner.package {
+      color: var(--on-brand);
+      border-color: rgba(var(--blue-rgb), .40);
+      background: var(--blue-soft);
+    }
+    .update-banner.current {
+      color: var(--on-success);
+      border-color: rgba(var(--green-rgb), .42);
+      background: var(--green-soft);
+    }
+    .update-banner.available {
+      color: var(--on-warning);
+      border-color: rgba(var(--amber-rgb), .48);
+      background: var(--amber-soft);
+    }
+    .update-banner.blocked, .update-banner.error {
+      color: var(--on-danger);
+      border-color: rgba(var(--red-rgb), .46);
+      background: var(--red-soft);
+    }
     .link-button {
       text-decoration: none;
       border: 1px solid var(--btn-line-quiet);

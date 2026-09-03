@@ -218,6 +218,38 @@ class DashboardServeTests(unittest.TestCase):
         self.assertEqual(body["message"], "Working tree has local changes.")
         apply.assert_called_once_with(fetch=True)
 
+    def test_update_apply_can_request_dashboard_restart_after_success(self) -> None:
+        server, thread, base = self._serve_one()
+        payload = json.dumps({"restart": True}).encode("utf-8")
+        http_request = request.Request(
+            f"{base}/api/update-apply",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        result = {
+            "ok": True,
+            "install_kind": "source",
+            "message": "Updated.",
+            "applied": True,
+            "can_apply": False,
+        }
+        with (
+            patch.object(ui, "apply_updates", return_value=result) as apply,
+            patch.object(ui, "schedule_dashboard_restart") as restart,
+        ):
+            try:
+                with request.urlopen(http_request, timeout=5) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
+        self.assertTrue(body["restart_requested"])
+        self.assertIn("Restarting AIWatcher", body["message"])
+        apply.assert_called_once_with(fetch=True)
+        restart.assert_called_once_with()
+
     def test_serve_records_the_actually_bound_port(self) -> None:
         """Issue #31 (S-32): `watch --notify`'s dashboard deep link has to
         know where the dashboard actually landed after auto-port fallback,
@@ -346,6 +378,10 @@ class DashboardWindowTests(unittest.TestCase):
         # The standalone coverage view is gone; Settings holds the one copy.
         self.assertIn('id="coverageRowsSettings"', ui.HTML)
         self.assertIn('id="setupRows"', ui.HTML)
+        self.assertIn('id="updateBanner"', ui.HTML)
+        self.assertIn("handleUpdateBannerClick", ui.HTML)
+        self.assertIn("restart: !!options.restart", ui.HTML)
+        self.assertIn("scheduleHeaderUpdateCheck", ui.HTML)
         self.assertIn('id="promptInput"', ui.HTML)
         self.assertIn("const requestedView = new URLSearchParams(location.search).get('view')", ui.HTML)
         self.assertIn("showView(requestedView)", ui.HTML)

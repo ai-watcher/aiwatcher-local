@@ -60,6 +60,16 @@
            reader that cannot see which way the page went. -->
       <button id="themeToggle" class="btn-quiet" aria-pressed="false" onclick="toggleTheme()">Light</button>
       <button id="refreshButton" class="btn-quiet" onclick="load(false, true)">Refresh data</button>
+      <button
+        id="updateBanner"
+        class="update-banner unknown"
+        title="Click to check GitHub for the latest AIWatcher changes"
+        onclick="handleUpdateBannerClick(this)"
+        aria-live="polite"
+      >
+        <span class="update-banner-dot" aria-hidden="true"></span>
+        <span id="updateBannerText">Check updates</span>
+      </button>
       <a class="link-button" href="https://www.getaiwatcher.com" target="_blank" rel="noreferrer">Enterprise</a>
     </div>
   </header>
@@ -502,7 +512,7 @@
         <p id="updateStatus">Check GitHub when you want to see whether this source checkout has newer AIWatcher changes.</p>
         <div class="actions">
           <button class="btn-quiet" id="updateCheckButton" onclick="checkForUpdates(this)">Check for updates</button>
-          <button class="btn-primary" id="updateApplyButton" onclick="applyUpdates(this)" hidden>Apply update</button>
+          <button class="btn-primary" id="updateApplyButton" onclick="applyUpdates(this, {restart: true})" hidden>Apply update</button>
         </div>
       </div>
       <!-- Setup steps stay folded. They are recommendations about what to

@@ -18,6 +18,9 @@ const HANDOFF_TYPES = [
   { id: 'investigation', label: 'Investigation continuation' },
   { id: 'general', label: 'General work continuation' },
 ];
+const UPDATE_AUTO_CHECK_MS = 6 * 60 * 60 * 1000;
+const UPDATE_CACHE_KEY = 'aiw-update-status-v1';
+let updateState = { status: 'unknown', data: null, checkedAt: 0 };
 function maxValue(rows, key = 'api_value_usd') {
   return Math.max(0.000001, ...rows.map(r => Number(r[key] || 0)));
 }
@@ -1207,6 +1210,79 @@ async function postJson(path, payload) {
   });
   return res.json();
 }
+function classifyUpdateStatus(data) {
+  if (!data) return 'unknown';
+  if (data.install_kind && data.install_kind !== 'source') return 'package';
+  if (data.update_available && !data.can_apply) return 'blocked';
+  if (!data.ok) return 'error';
+  if (data.update_available && data.can_apply) return 'available';
+  return 'current';
+}
+function updateBannerLabel(status, data) {
+  const count = Number((data && data.behind) || 0);
+  if (status === 'checking') return 'Checking...';
+  if (status === 'available') return `${count || ''} update${count === 1 ? '' : 's'} available`.trim();
+  if (status === 'blocked') return `${count || ''} update${count === 1 ? '' : 's'} blocked`.trim();
+  if (status === 'current') return 'Up to date';
+  if (status === 'package') return 'Package install';
+  if (status === 'error') return 'Update check failed';
+  return 'Check updates';
+}
+function updateBannerTitle(status, data) {
+  if (status === 'available') {
+    return `Click to apply latest changes from ${data.remote_ref || 'origin/main'} and restart AIWatcher`;
+  }
+  if (status === 'blocked') return (data && data.message) || 'Resolve local changes before applying updates';
+  if (status === 'current') return 'AIWatcher is current. Click to check GitHub again.';
+  if (status === 'package') return 'Click to show package upgrade commands';
+  if (status === 'error') return (data && data.message) || 'Click to retry the GitHub update check';
+  if (status === 'checking') return 'Checking GitHub for AIWatcher updates';
+  return 'Click to check GitHub for the latest AIWatcher changes';
+}
+function setUpdateState(status, data, checkedAt = Date.now()) {
+  updateState = { status, data: data || null, checkedAt };
+  const banner = document.getElementById('updateBanner');
+  const label = document.getElementById('updateBannerText');
+  if (banner) {
+    banner.className = `update-banner ${status}`;
+    banner.disabled = status === 'checking';
+    banner.title = updateBannerTitle(status, data || null);
+    banner.setAttribute('aria-label', banner.title);
+  }
+  if (label) label.textContent = updateBannerLabel(status, data || null);
+  if (data && status !== 'checking') {
+    try {
+      localStorage.setItem(UPDATE_CACHE_KEY, JSON.stringify({ checkedAt, data }));
+    } catch (error) {}
+  }
+}
+function restoreCachedUpdateState() {
+  try {
+    const cached = JSON.parse(localStorage.getItem(UPDATE_CACHE_KEY) || 'null');
+    if (cached && cached.data) {
+      setUpdateState(classifyUpdateStatus(cached.data), cached.data, Number(cached.checkedAt || 0) || Date.now());
+      return cached;
+    }
+  } catch (error) {}
+  setUpdateState('unknown', null, 0);
+  return null;
+}
+async function refreshHeaderUpdate(options = {}) {
+  const fetchRemote = options.fetch !== false;
+  if (!options.quiet) setUpdateState('checking', updateState.data, updateState.checkedAt || Date.now());
+  try {
+    const response = await fetch(`/api/update-status?fetch=${fetchRemote ? '1' : '0'}`);
+    const data = await response.json();
+    setUpdateState(classifyUpdateStatus(data), data);
+    if (!options.quiet) showToast(data.message || 'Update check complete', data.ok ? 'success' : 'error');
+    return data;
+  } catch (error) {
+    const data = { ok: false, message: 'Could not reach the local AIWatcher server for update status.' };
+    setUpdateState('error', data);
+    if (!options.quiet) showToast('Could not check for updates.', 'error');
+    return data;
+  }
+}
 function renderUpdateStatus(update) {
   const data = update || {};
   const applyButton = document.getElementById('updateApplyButton');
@@ -1222,7 +1298,7 @@ function renderUpdateStatus(update) {
       </div>`
     : '';
   const action = data.can_apply
-    ? '<p>Apply will fast-forward this clean checkout, then you should restart AIWatcher.</p>'
+    ? '<p>Apply will fast-forward this clean checkout. The dashboard update action restarts AIWatcher after a successful apply.</p>'
     : data.update_available
       ? '<p>Resolve local changes or branch divergence before applying from the UI.</p>'
       : '';
@@ -1233,7 +1309,7 @@ function renderUpdateStatus(update) {
     ${guidance}
   </div>`;
 }
-async function checkForUpdates(button) {
+async function checkForUpdates(button, options = {}) {
   const target = document.getElementById('updateStatus');
   if (!target) return;
   const original = button ? button.textContent : '';
@@ -1242,8 +1318,7 @@ async function checkForUpdates(button) {
     button.textContent = 'Checking...';
   }
   try {
-    const response = await fetch('/api/update-status?fetch=1');
-    const data = await response.json();
+    const data = await refreshHeaderUpdate({ fetch: options.fetch !== false, quiet: !button });
     target.innerHTML = renderUpdateStatus(data);
     if (button) {
       button.textContent = data.update_available
@@ -1264,34 +1339,67 @@ async function checkForUpdates(button) {
     }
   }
 }
-async function applyUpdates(button) {
+async function applyUpdates(button, options = {}) {
   const target = document.getElementById('updateStatus');
-  if (!target) return;
   const original = button ? button.textContent : '';
   if (button) {
     button.disabled = true;
     button.textContent = 'Applying...';
   }
+  setUpdateState('checking', updateState.data, updateState.checkedAt || Date.now());
   try {
     const response = await fetch('/api/update-apply', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ restart: !!options.restart }),
     });
     const data = await response.json();
-    target.innerHTML = renderUpdateStatus(data);
+    setUpdateState(classifyUpdateStatus(data), data);
+    if (target) target.innerHTML = renderUpdateStatus(data);
     showToast(data.message || 'Update finished', response.ok ? 'success' : 'error');
     if (button) {
       button.hidden = !data.can_apply;
       button.textContent = original || 'Apply update';
     }
+    if (data.restart_requested) {
+      window.setTimeout(() => window.location.reload(), 2500);
+    }
+    return data;
   } catch (error) {
-    target.innerHTML = '<div class="empty">Could not reach the local AIWatcher server to apply updates.</div>';
+    const data = { ok: false, message: 'Could not reach the local AIWatcher server to apply updates.' };
+    setUpdateState('error', data);
+    if (target) target.innerHTML = '<div class="empty">Could not reach the local AIWatcher server to apply updates.</div>';
     showToast('Could not apply update.', 'error');
     if (button) button.textContent = original || 'Apply update';
+    return data;
   } finally {
     if (button) button.disabled = false;
   }
+}
+async function handleUpdateBannerClick(button) {
+  if (updateState.status === 'available' && updateState.data && updateState.data.can_apply) {
+    if (button) button.disabled = true;
+    const data = await applyUpdates(null, { restart: true });
+    if (button) button.disabled = false;
+    const target = document.getElementById('updateStatus');
+    if (target) target.innerHTML = renderUpdateStatus(data);
+    return;
+  }
+  const data = await refreshHeaderUpdate({ fetch: true, quiet: false });
+  const target = document.getElementById('updateStatus');
+  if (target) target.innerHTML = renderUpdateStatus(data);
+  const status = classifyUpdateStatus(data);
+  if (status === 'blocked' || status === 'package' || status === 'error') {
+    showView('setup');
+    const panel = document.getElementById('updatePanel');
+    if (panel) window.setTimeout(() => panel.scrollIntoView({ block: 'center' }), 50);
+  }
+}
+function scheduleHeaderUpdateCheck() {
+  const cached = restoreCachedUpdateState();
+  const last = cached ? Number(cached.checkedAt || 0) : 0;
+  if (Date.now() - last < UPDATE_AUTO_CHECK_MS) return;
+  window.setTimeout(() => refreshHeaderUpdate({ fetch: true, quiet: true }), 1200);
 }
 function renderHandoffForm(capsule) {
   const selected = capsule.handoff_type || 'coding';
@@ -4918,6 +5026,7 @@ document.addEventListener('keydown', event => { if (event.key === 'Escape') clos
   // does not exist yet.
   applyTheme(currentTheme());
   await load();
+  scheduleHeaderUpdateCheck();
   const requestedView = new URLSearchParams(location.search).get('view');
   // Every view id, or a ?view= deep link at one of them silently does nothing.
   // test_deep_link_allowlist_covers_every_view pins this against the markup so

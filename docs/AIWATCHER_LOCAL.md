@@ -281,13 +281,13 @@ The source-checkout update path is deliberately conservative:
 - It reports the number of updates available.
 - It refuses dirty or diverged checkouts.
 - It changes nothing unless `--apply` is passed.
-- After applying, the user restarts with `aiwatcher start --open-ui`.
+- After CLI applying, the user restarts with `aiwatcher start --open-ui`.
 
-The Console Settings page calls the same check, shows an updates-available
-state after a user click, applies only after a second click, then tells the user
-to restart or relaunch the dashboard and Companion. A future persistent badge
-can reuse the same endpoint, but AIWatcher should not silently pull code in the
-background.
+The dashboard top bar calls the same check, shows `Up to date` or an
+updates-available badge, and applies a clean fast-forward in one click when the
+checkout is safe. The dashboard sends an explicit restart request only after a
+successful apply. Package installs get copyable `pipx`, `pip`, or GitHub package
+upgrade commands instead of pretending a source fast-forward is possible.
 
 ## The Wow Moment
 

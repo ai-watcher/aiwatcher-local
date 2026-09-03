@@ -132,8 +132,9 @@ refresh local watch evidence without waiting for the next polling interval.
 timeline, git, or prompt enrichment; `/api/handoff` returns the enriched drawer
 payload; `/api/handoff-demo` returns seeded demo data for the in-dashboard Fresh
 Start test flow. `/api/update-status` checks the installed source checkout
-against GitHub only when the dashboard asks for it and reports whether a clean
-fast-forward is available.
+against GitHub when the dashboard asks for it and reports whether a clean
+fast-forward is available. The top-bar update badge uses this route for
+low-frequency status checks and user-triggered refreshes.
 
 `POST` — `/api/second-opinion` runs the Plan screen's Stage 2 analysis: it
 spawns the user's own agent CLI as a throwaway sibling process in
@@ -177,7 +178,9 @@ whose ids AIWatcher synthesises rather than reads (Cursor) return `"available":
 false` with the reason.
 `/api/update-apply` applies the same conservative source-checkout update as the
 CLI: it fast-forwards only a clean, non-diverged Git checkout and reports
-package-installer guidance otherwise.
+package-installer guidance otherwise. When the dashboard posts
+`{"restart": true}` after a successful apply, the local server restarts so the
+dashboard and Companion use the new code.
 These endpoints are called by the dashboard or native companion only.
 
 If you need one of these programmatically, prefer the equivalent CLI command
