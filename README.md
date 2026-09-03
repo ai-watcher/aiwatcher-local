@@ -7,7 +7,7 @@ AIWatcher Local is a private control loop for Claude Code, Codex, Cursor, and
 other local AI coding tools. It scores prompts before they run, watches sessions
 while they do, then attributes what you spent to the commits it produced, so
 "was that worth it?" has an answer instead of a token count. No account, no
-cloud upload, no LLM calls.
+cloud upload, and no LLM calls unless you explicitly configure one.
 
 AIWatcher focuses on the local developer experience: prompt review before work
 starts, calm nudges while work is running, and lightweight evidence after the
@@ -25,6 +25,7 @@ work is done.
   - [4. Install hooks so work is reviewed before it runs](#4-install-hooks-so-work-is-reviewed-before-it-runs)
     - [Prompt preflight hook](#prompt-preflight-hook)
     - [Dangerous-command gate](#dangerous-command-gate)
+- [Keep AIWatcher Updated](#keep-aiwatcher-updated)
 - [How AIWatcher Helps While You Code](#how-aiwatcher-helps-while-you-code)
 - [Use AIWatcher Day To Day](#use-aiwatcher-day-to-day)
 - [Command Guide](#command-guide)
@@ -42,9 +43,9 @@ work is done.
 
 ## Privacy
 
-- Local-only by default
+- Private by default
 - Read-only
-- No LLM calls
+- No LLM calls unless you explicitly configure an optional reviewer or enhancer
 - No prompt or source-code upload
 - No cloud account required
 - Works on macOS, Linux, and Windows
@@ -58,12 +59,21 @@ reads and why, it should not read it.
 
 Python 3.9+ on macOS, Linux, or Windows:
 
+Until the first `aiwatcher-cli` release lands on PyPI, the easiest install is
+directly from GitHub:
+
 ```sh
-pip install aiwatcher-cli
+python -m pip install --upgrade git+https://github.com/ai-watcher/aiwatcher-local.git
 ```
 
-Until that release lands on PyPI, run from a clone instead — same commands, no
-install step:
+If you prefer an isolated command-line app and already use `pipx`:
+
+```sh
+pipx install git+https://github.com/ai-watcher/aiwatcher-local.git
+```
+
+For contributors, or early users who want to inspect and update the source with
+Git:
 
 ```sh
 git clone https://github.com/ai-watcher/aiwatcher-local.git
@@ -73,6 +83,12 @@ python -m pip install -e .
 
 On Windows PowerShell the same commands work. If `python` is not on PATH, use
 the Python launcher (`py -m pip install -e .`).
+
+Once the PyPI package is published, the shortest install path will be:
+
+```sh
+pipx install aiwatcher-cli
+```
 
 Examples below use `python -m aiwatcher_cli`, which works from a clone with no
 install at all. Once installed, `aiwatcher <command>` is equivalent everywhere.
@@ -200,6 +216,33 @@ python -m aiwatcher_cli uninstall-claude-command-gate --scope user
 See [Hook coverage by tool](#hook-coverage-by-tool) for per-tool
 setup notes and which surfaces do and do not support hooks.
 
+## Keep AIWatcher Updated
+
+For a clone-based install, check whether your checkout is behind GitHub:
+
+```sh
+python -m aiwatcher_cli update
+```
+
+If updates are available and your working tree is clean, apply them with:
+
+```sh
+python -m aiwatcher_cli update --apply
+python -m aiwatcher_cli start --open-ui
+```
+
+`update` fetches GitHub only when you run it. It reports how many updates are
+available, refuses diverged or locally modified checkouts, and never changes
+files unless `--apply` is present. This is the command the future Console
+update badge can use: show "updates available", apply a fast-forward, then ask
+the user to restart the dashboard and Companion.
+
+For package installs after release:
+
+```sh
+pipx upgrade aiwatcher-cli
+```
+
 ## How AIWatcher Helps While You Code
 
 AIWatcher Local adds a private control loop around your AI coding tools: review
@@ -285,8 +328,9 @@ usage history.
 
 ## Command Guide
 
-Every command is local-first and runs against the history your tools already
-keep. Run from a clone with `python -m aiwatcher_cli <command>`, or just
+Normal workflow commands are private by default and run against the history your
+tools already keep. Commands that contact GitHub or a configured reviewer say so
+explicitly. Run from a clone with `python -m aiwatcher_cli <command>`, or just
 `aiwatcher <command>` once installed.
 
 Cost is shown as **API-equivalent value**. AIWatcher Local separates API-priced
@@ -301,6 +345,7 @@ These are enough for a normal first week:
 | --- | --- |
 | `setup` | Detect tools, hook coverage, and recommended next steps |
 | `start --open-ui` | Start the Console dashboard plus the floating Companion |
+| `update` | Check whether a GitHub checkout has newer AIWatcher changes |
 | `hook-status` | Verify whether Claude, Codex, or Cursor actually invoked AIWatcher |
 | `today` | Show today's local usage by tool, model, project, and API-equivalent value |
 | `sessions` | Search and review recent local AI sessions |
@@ -514,8 +559,9 @@ shapes, the origin and size limits, and which endpoints are internal and may
 change are in the [HTTP API reference](docs/HTTP-API.md).
 
 Optional semantic risk review: by default AIWatcher scores prompts locally with
-fast deterministic rules and makes no LLM calls. If you want a local model or
-internal policy service to double-check intent, set:
+fast deterministic rules and makes no LLM calls. If you want a local model,
+internal policy service, or user-configured provider key to double-check intent,
+set:
 
 ```sh
 export AIWATCHER_RISK_REVIEW_CMD='python /path/to/risk_reviewer.py'
@@ -523,10 +569,12 @@ export AIWATCHER_RISK_REVIEW_CMD='python /path/to/risk_reviewer.py'
 
 AIWatcher sends that command JSON on stdin with the prompt, tool, cwd, and
 baseline score; the command returns JSON with `risk`, `score`, `findings`, and
-`suggestions`. This lets teams plug in Ollama, a private model, or an
-Enterprise policy scorer without hardcoding every destructive phrase. External
-reviewers can raise risk by default; lowering deterministic safety findings
-requires explicitly setting `AIWATCHER_RISK_REVIEW_ALLOW_LOWERING=1`.
+`suggestions`. This lets users or teams plug in Ollama, Claude, OpenAI, a
+private model, or an Enterprise policy scorer without hardcoding every
+destructive phrase. That command is explicit opt-in and receives the prompt you
+asked it to review; external reviewers can raise risk by default, while lowering
+deterministic safety findings requires explicitly setting
+`AIWATCHER_RISK_REVIEW_ALLOW_LOWERING=1`.
 
 ## What It Reads
 

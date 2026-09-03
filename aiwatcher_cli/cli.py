@@ -3450,7 +3450,7 @@ def command_start(args: argparse.Namespace) -> int:
             port_attempts=int(getattr(args, "ui_port_attempts", 20)),
         )
     sessions = sessions_since(1)
-    print("AIWatcher v0.1.0 - local mode")
+    print("AIWatcher v0.1.0 - private-by-default mode")
     print("Read-only scan. No data leaves this machine.\n")
     print("Surface coverage:")
     for row in surface_coverage(sessions):
@@ -3500,6 +3500,107 @@ def command_start(args: argparse.Namespace) -> int:
             else:
                 print("Could not open the browser automatically; use the Dashboard UI URL above.", file=sys.stderr)
     print("Connect Cloud later for team spend, budget guardrails, and audit evidence.")
+    return 0
+
+
+def _repo_root_from_package() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _git_capture(repo: Path, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+
+
+def _git_count(repo: Path, rev_range: str) -> int | None:
+    result = _git_capture(repo, ["rev-list", "--count", rev_range])
+    if result.returncode != 0:
+        return None
+    try:
+        return int(result.stdout.strip() or "0")
+    except ValueError:
+        return None
+
+
+def command_update(args: argparse.Namespace) -> int:
+    """Check for, and optionally apply, updates for a Git checkout install."""
+    repo = Path(str(getattr(args, "repo", "") or _repo_root_from_package())).expanduser().resolve()
+    remote = str(getattr(args, "remote", "origin") or "origin")
+    branch = str(getattr(args, "branch", "main") or "main")
+    remote_ref = f"{remote}/{branch}"
+
+    print("AIWatcher update check\n")
+    if not (repo / ".git").exists():
+        print(f"{repo} is not a Git checkout.")
+        print("For package installs, update with your installer instead:")
+        print("- pipx:  pipx upgrade aiwatcher-cli")
+        print("- pip:   python -m pip install --upgrade aiwatcher-cli")
+        print("- GitHub one-liner: python -m pip install --upgrade git+https://github.com/ai-watcher/aiwatcher-local.git")
+        return 2
+
+    if not getattr(args, "no_fetch", False):
+        fetched = _git_capture(repo, ["fetch", "--quiet", remote])
+        if fetched.returncode != 0:
+            print(f"Could not fetch {remote}: {fetched.stderr.strip() or fetched.stdout.strip()}", file=sys.stderr)
+            print("No files were changed.")
+            return 2
+
+    head = _git_capture(repo, ["rev-parse", "--short", "HEAD"])
+    remote_check = _git_capture(repo, ["rev-parse", "--verify", "--quiet", remote_ref])
+    if remote_check.returncode != 0:
+        print(f"Could not find {remote_ref}. Try --remote or --branch for your checkout.", file=sys.stderr)
+        return 2
+
+    behind = _git_count(repo, f"HEAD..{remote_ref}")
+    ahead = _git_count(repo, f"{remote_ref}..HEAD")
+    if behind is None or ahead is None:
+        print("Could not compare local HEAD with the remote branch.", file=sys.stderr)
+        return 2
+
+    current = head.stdout.strip() or "unknown"
+    print(f"Checkout: {repo}")
+    print(f"Current:  {current}")
+    print(f"Remote:   {remote_ref}")
+
+    if behind == 0:
+        print("Already up to date.")
+        if ahead:
+            print(f"Local checkout is {ahead} commit(s) ahead of {remote_ref}; nothing to pull.")
+        return 0
+
+    print(f"{behind} update(s) available.")
+    if ahead:
+        print(f"Local checkout is also {ahead} commit(s) ahead; refusing to auto-update a diverged branch.")
+        print("Create a branch or resolve the divergence manually, then rerun `aiwatcher update`.")
+        return 2
+
+    if not getattr(args, "apply", False):
+        print("Run `aiwatcher update --apply` to fast-forward this checkout.")
+        print("The update command never changes files unless --apply is present.")
+        return 0
+
+    status = _git_capture(repo, ["status", "--porcelain"])
+    if status.returncode != 0:
+        print(f"Could not inspect checkout status: {status.stderr.strip()}", file=sys.stderr)
+        return 2
+    if status.stdout.strip():
+        print("Working tree has local changes. No files were changed.")
+        print("Commit, stash, or discard your local changes before running `aiwatcher update --apply`.")
+        return 2
+
+    pulled = _git_capture(repo, ["pull", "--ff-only", remote, branch])
+    if pulled.returncode != 0:
+        print(f"Update failed: {pulled.stderr.strip() or pulled.stdout.strip()}", file=sys.stderr)
+        return 2
+
+    print(pulled.stdout.strip() or "Fast-forwarded to the latest version.")
+    print("Restart AIWatcher with `aiwatcher start --open-ui` so the dashboard and Companion use the new code.")
     return 0
 
 
@@ -3578,6 +3679,12 @@ def setup_checklist() -> list[dict[str, str]]:
             "title": "Verify local history coverage",
             "why": "Shows which tools are scanned automatically and which are companion-only.",
             "command": "aiwatcher doctor",
+            "status": "recommended",
+        },
+        {
+            "title": "Check for GitHub updates",
+            "why": "For clone-based installs, reports whether the checkout is behind main and gives a safe fast-forward command.",
+            "command": "aiwatcher update",
             "status": "recommended",
         },
         {
@@ -3661,8 +3768,8 @@ def command_status(_args: argparse.Namespace) -> int:
     for row in surface_coverage(sessions):
         marker = _surface_marker(row.status)
         print(f"{marker} {row.label:26} {row.status_label:28} {row.session_count:>5} sessions")
-    print("\nMode: local-only")
-    print("Network: disabled unless hosted sync is configured separately")
+    print("\nMode: private by default")
+    print("Network: disabled unless you run an update command or configure a connected workflow")
     return 0
 
 
@@ -8257,7 +8364,7 @@ def command_doctor(_args: argparse.Namespace) -> int:
     for row in surface_coverage(scan_all()):
         marker = _surface_marker(row.status)
         print(f"- {marker} {row.label}: {row.status_label}. {row.action}")
-    print("\nPrivacy: local-only; AIWatcher Local does not upload prompts, source, or telemetry.")
+    print("\nPrivacy: private by default; AIWatcher does not upload prompts, source, or telemetry unless you explicitly configure a connected workflow.")
     if os.name == "nt":
         print("Note: core scanning works on Windows; the Codex zsh wrapper is not available in PowerShell yet.")
     return 0
@@ -8869,7 +8976,7 @@ def command_ui(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="aiwatcher", description="AIWatcher Local: private AI coding usage visibility")
+    parser = argparse.ArgumentParser(prog="aiwatcher", description="AIWatcher Local: private-by-default AI coding usage visibility")
     sub = parser.add_subparsers(dest="command", required=True)
 
     start = sub.add_parser("start", help="Start AIWatcher Local: dashboard UI plus Companion")
@@ -8895,6 +9002,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     start.set_defaults(func=command_start)
     sub.add_parser("setup", help="Show first-run setup, hook, coverage, and ambient watch steps").set_defaults(func=command_setup)
+    update = sub.add_parser("update", help="Check for GitHub updates, and optionally fast-forward a source checkout")
+    update.add_argument("--apply", action="store_true", help="Fast-forward the checkout when updates are available")
+    update.add_argument("--no-fetch", action="store_true", help="Compare against the last fetched remote state")
+    update.add_argument("--repo", help="Git checkout to update; defaults to the installed AIWatcher source checkout")
+    update.add_argument("--remote", default="origin", help="Git remote to check")
+    update.add_argument("--branch", default="main", help="Remote branch to check")
+    update.set_defaults(func=command_update)
     sub.add_parser("status", help="Show detected tools and local AIWatcher status").set_defaults(func=command_status)
     companion = sub.add_parser("companion", help="Run the local runtime-nudge companion without the dashboard")
     companion_sub = companion.add_subparsers(
@@ -9418,7 +9532,7 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--days", type=int, default=30, help="How many days to export when --since is not given")
     export.set_defaults(func=command_export)
 
-    ui = sub.add_parser("ui", help="Run the local-only AIWatcher dashboard")
+    ui = sub.add_parser("ui", help="Run the private-by-default AIWatcher dashboard")
     ui.add_argument("--host", default="127.0.0.1", help="Address to bind; stays on loopback by default")
     ui.add_argument("--port", type=int, default=DEFAULT_UI_PORT, help="Port to serve the dashboard on")
     ui.add_argument("--port-attempts", type=int, default=20, help="How many sequential ports to try when the requested port is busy")
