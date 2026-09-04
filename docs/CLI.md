@@ -22,7 +22,7 @@ anywhere. See [Privacy](../README.md#privacy) for the full contract.
 - [Prompt review and launch](#prompt-review-and-launch) -- `preflight`, `codex`, `claude`
 - [Continuity](#continuity) -- `handoff`, `resume`, `open-session`, `return-session`, `log-decision`
 - [Monitoring](#monitoring) -- `watch`, `companion`, `statusline`, `processes`, `run`
-- [Hooks and wrappers](#hooks-and-wrappers) -- `install-claude-hook`, `uninstall-claude-hook`, `install-claude-command-gate`, `uninstall-claude-command-gate`, `install-claude-activity-hook`, `uninstall-claude-activity-hook`, `install-claude-decision-log`, `uninstall-claude-decision-log`, `install-codex-hook`, `uninstall-codex-hook`, `install-cursor-hook`, `uninstall-cursor-hook`, `install-codex-wrapper`, `uninstall-codex-wrapper`, `install-commit-hook`, `uninstall-commit-hook`, `install-statusline`, `uninstall-statusline`, `hook-status`
+- [Hooks and wrappers](#hooks-and-wrappers) -- `install-claude-hook`, `uninstall-claude-hook`, `install-claude-command-gate`, `uninstall-claude-command-gate`, `install-claude-activity-hook`, `uninstall-claude-activity-hook`, `install-claude-stop-hook`, `uninstall-claude-stop-hook`, `install-claude-decision-log`, `uninstall-claude-decision-log`, `install-codex-hook`, `uninstall-codex-hook`, `install-cursor-hook`, `uninstall-cursor-hook`, `install-codex-wrapper`, `uninstall-codex-wrapper`, `install-commit-hook`, `uninstall-commit-hook`, `install-statusline`, `uninstall-statusline`, `hook-status`
 - [Data and integrations](#data-and-integrations) -- `export`, `mcp`, `ui`
 - [Internal hook commands](#internal-hook-commands)
 
@@ -920,6 +920,51 @@ aiwatcher uninstall-claude-activity-hook --scope project
 | `--scope` | `project`, `user` | `user` | Remove from your user-level Claude settings (default) or this project's |
 | `--project-dir` | text |  | Project to target with --scope project; defaults to the current directory |
 
+### `aiwatcher install-claude-stop-hook`
+
+Print or install the Claude Code stop hook, so AIWatcher knows when a session's turn has ended
+
+```sh
+aiwatcher install-claude-stop-hook [--write]
+                                   [--scope {project,user}]
+                                   [--project-dir PROJECT_DIR]
+                                   [--command COMMAND]
+```
+
+Examples:
+
+```sh
+aiwatcher install-claude-stop-hook                    # print, write nothing
+aiwatcher install-claude-stop-hook --write
+```
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--write` | flag |  | Write the hook into Claude settings |
+| `--scope` | `project`, `user` | `user` | Write to your user-level Claude settings (default) or this project's |
+| `--project-dir` | text |  | Project to target with --scope project; defaults to the current directory |
+| `--command` | text |  | AIWatcher command to put in Claude settings |
+
+### `aiwatcher uninstall-claude-stop-hook`
+
+Remove the AIWatcher Claude Code stop hook
+
+```sh
+aiwatcher uninstall-claude-stop-hook [--scope {project,user}]
+                                     [--project-dir PROJECT_DIR]
+```
+
+Example:
+
+```sh
+aiwatcher uninstall-claude-stop-hook --scope project
+```
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--scope` | `project`, `user` | `user` | Remove from your user-level Claude settings (default) or this project's |
+| `--project-dir` | text |  | Project to target with --scope project; defaults to the current directory |
+
 ### `aiwatcher install-claude-decision-log`
 
 Print or install a personal Claude Code convention for logging rejected decisions
@@ -1248,3 +1293,4 @@ recognizable.
 | `aiwatcher cursor-hook` | Cursor prompt handler. Accepts `--text` and `--gate`. |
 | `aiwatcher claude-pretooluse-hook` | Claude Code PreToolUse dangerous-command gate. Accepts `--text` and `--gate`. |
 | `aiwatcher claude-activity-hook` | Claude Code Notification handler. Records that a session is waiting on you, and nothing it said. |
+| `aiwatcher claude-stop-hook` | Claude Code Stop handler. Records that a session's turn ended, and nothing it produced. |

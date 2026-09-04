@@ -76,6 +76,8 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
             "uninstall-claude-command-gate",
             "install-claude-activity-hook",
             "uninstall-claude-activity-hook",
+            "install-claude-stop-hook",
+            "uninstall-claude-stop-hook",
             "install-claude-decision-log",
             "uninstall-claude-decision-log",
             "install-codex-hook",
@@ -174,6 +176,11 @@ EXAMPLES: dict[str, list[str]] = {
         "aiwatcher install-claude-activity-hook --write",
     ],
     "uninstall-claude-activity-hook": ["aiwatcher uninstall-claude-activity-hook --scope project"],
+    "install-claude-stop-hook": [
+        "aiwatcher install-claude-stop-hook                    # print, write nothing",
+        "aiwatcher install-claude-stop-hook --write",
+    ],
+    "uninstall-claude-stop-hook": ["aiwatcher uninstall-claude-stop-hook --scope project"],
     "install-claude-command-gate": [
         "aiwatcher install-claude-command-gate                    # print, write nothing",
         "aiwatcher install-claude-command-gate --write --scope user",
@@ -202,6 +209,7 @@ INTERNAL_COMMANDS: list[tuple[str, str]] = [
     ("cursor-hook", "Cursor prompt handler. Accepts `--text` and `--gate`."),
     ("claude-pretooluse-hook", "Claude Code PreToolUse dangerous-command gate. Accepts `--text` and `--gate`."),
     ("claude-activity-hook", "Claude Code Notification handler. Records that a session is waiting on you, and nothing it said."),
+    ("claude-stop-hook", "Claude Code Stop handler. Records that a session's turn ended, and nothing it produced."),
 ]
 
 HEADER = """<!--

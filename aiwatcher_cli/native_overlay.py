@@ -586,6 +586,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var primaryURL = dashboardURL
     var primaryAction = "open_url"
     var primarySessionID = ""
+    var taskID = ""
     var primaryRuntimeAvailable = false
     var continueAction = ""
     var continueURL = ""
@@ -1039,6 +1040,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             openURL(primaryURL)
             return
         }
+        if primaryAction == "task_ask" && !taskID.isEmpty {
+            answerTaskAsk("done")
+            return
+        }
         if primaryAction == "copy_fresh_start" && !primarySessionID.isEmpty {
             copyFreshStartFromCompanion()
             return
@@ -1169,7 +1174,45 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         }.resume()
     }
 
+    // The "finished?" question: Done and Not done both go here, Same goes
+    // through skipCurrent as the task_finished skip state. One endpoint, one
+    // shape, so the server owns what each answer means.
+    func answerTaskAsk(_ answer: String) {
+        guard !taskID.isEmpty, let url = URL(string: dashboardBaseURL + "/api/task-ask") else {
+            return
+        }
+        let payload: [String: Any] = ["task_id": taskID, "answer": answer]
+        guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            DispatchQueue.main.async {
+                let ok = error == nil && ((response as? HTTPURLResponse)?.statusCode ?? 500) >= 200 && ((response as? HTTPURLResponse)?.statusCode ?? 500) < 300
+                if ok {
+                    self.taskID = ""
+                    self.stateName = "watching"
+                    self.titleLabel.stringValue = "Watching quietly"
+                    self.subtitleLabel.stringValue = answer == "done" ? "Task banked" : "Task kept open"
+                    self.primaryURL = dashboardURL
+                } else {
+                    self.titleLabel.stringValue = "Still pending"
+                    self.subtitleLabel.stringValue = "Could not save the answer"
+                }
+                self.updateAppearance()
+                if ok { self.scheduleAutoCollapse(after: 1.2) }
+            }
+        }.resume()
+    }
+
     @objc func continueHere() {
+        if continueAction == "task_ask" && !taskID.isEmpty {
+            answerTaskAsk("not_done")
+            return
+        }
         if stateName == "prompt_gate" && continueAction == "run_original_prompt" && !continueURL.isEmpty {
             continuePromptGate()
             return
@@ -1323,7 +1366,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     // not the second: they earn the primary and the compact layout, but
     // "review when ready" must not wear the orange "blocked on you" treatment.
     func hasPrimaryAction() -> Bool {
-        return ["prompt_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm", "session_waiting", "session_finished", "away_digest"].contains(stateName)
+        return ["prompt_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm", "session_waiting", "session_finished", "away_digest", "task_finished"].contains(stateName)
     }
 
     func needsAttentionState() -> Bool {
@@ -1337,6 +1380,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         // Soft attention: finished work and the away digest force the window
         // visible even in nudges-only mode, without the orange treatment.
         if ["session_finished", "away_digest"].contains(stateName) {
+            return true
+        }
+        // "Finished that task?" is the same kind of soft attention: shown, never orange.
+        if stateName == "task_finished" {
             return true
         }
         if visibilityMode == "nudges-only" {
@@ -1680,6 +1727,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         self.primaryButton.title = String((json["primary_label"] as? String ?? "Watch").prefix(12))
         self.primaryAction = json["primary_action"] as? String ?? "open_url"
         self.primarySessionID = json["primary_session_id"] as? String ?? ""
+        self.taskID = json["task_id"] as? String ?? ""
         self.primaryRuntimeAvailable = json["primary_runtime_available"] as? Bool ?? false
         self.primaryURL = absoluteURL(json["primary_url"] as? String ?? "/")
         self.continueButton.title = String((json["continue_label"] as? String ?? "Continue").prefix(10))
@@ -2281,6 +2329,7 @@ def run_native_presence(
     subtitle_var = tk.StringVar(value="Watching quietly")
     primary_label_var = tk.StringVar(value="Watch")
     primary_action_var = tk.StringVar(value="open_url")
+    task_id_var = tk.StringVar(value="")
     primary_session_id_var = tk.StringVar(value="")
     primary_runtime_available_var = tk.BooleanVar(value=False)
     primary_url_var = tk.StringVar(value=url)
@@ -2447,6 +2496,7 @@ def run_native_presence(
         primary_label_var.set(str(payload.get("primary_label") or "Watch")[:12])
         primary_action_var.set(str(payload.get("primary_action") or "open_url"))
         primary_session_id_var.set(str(payload.get("primary_session_id") or ""))
+        task_id_var.set(str(payload.get("task_id") or ""))
         primary_runtime_available_var.set(bool(payload.get("primary_runtime_available")))
         primary_path = str(payload.get("primary_url") or "/")
         primary_url_var.set(primary_path if primary_path.startswith("http") else f"{url.rstrip('/')}{primary_path}")
@@ -2486,7 +2536,39 @@ def run_native_presence(
             subtitle_var.set("Open UI for details")
         update_attention_style()
 
+    def answer_task_ask(answer: str) -> None:
+        task_id = task_id_var.get().strip()
+        if not task_id:
+            return
+        request = urllib.request.Request(
+            f"{url.rstrip('/')}/api/task-ask",
+            data=json.dumps({"task_id": task_id, "answer": answer}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        saved = False
+        try:
+            with urllib.request.urlopen(request, timeout=1.5):
+                saved = True
+        except (OSError, urllib.error.URLError):
+            pass
+        if not saved:
+            title_var.set("Still pending")
+            subtitle_var.set("Could not save the answer")
+            update_attention_style()
+            return
+        task_id_var.set("")
+        state_var.set("watching")
+        title_var.set("Watching quietly")
+        subtitle_var.set("Task banked" if answer == "done" else "Task kept open")
+        primary_url_var.set(url)
+        update_attention_style()
+        schedule_auto_collapse(1200)
+
     def open_primary() -> None:
+        if primary_action_var.get() == "task_ask" and task_id_var.get().strip():
+            answer_task_ask("done")
+            return
         if state_var.get() == "proof_pending":
             request = urllib.request.Request(f"{url.rstrip('/')}/api/handoff-receipts-viewed", method="POST")
             saved = False
@@ -2598,6 +2680,9 @@ def run_native_presence(
             webbrowser.open(primary_url_var.get() or url)
 
     def continue_here() -> None:
+        if continue_action_var.get() == "task_ask" and task_id_var.get().strip():
+            answer_task_ask("not_done")
+            return
         if (
             state_var.get() == "prompt_gate"
             and continue_action_var.get() == "run_original_prompt"
@@ -2744,7 +2829,7 @@ def run_native_presence(
         # it, so "review when ready" never wears the orange treatment.
         return state_var.get() in {
             "prompt_gate", "control_recommended", "optimize_available", "clipboard_confirm",
-            "session_waiting", "session_finished", "away_digest",
+            "session_waiting", "session_finished", "away_digest", "task_finished",
         }
 
     def visible_waiting_rows() -> int:
