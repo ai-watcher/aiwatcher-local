@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
 from . import analyst, prompt_signals, statusline
+from .ai_assist import build_ai_assist_status
 from .cli import (
     SEARCH_RANK_FIELDS,
     SEARCH_RANK_TOPIC,
@@ -52,6 +53,7 @@ from .local_state import (
     VALID_OUTCOMES,
     active_command_gate,
     active_prompt_gate,
+    ai_assist_config,
     analyst_consent,
     analyst_contents_allowed,
     analyst_month_spend,
@@ -72,6 +74,7 @@ from .local_state import (
     mark_recent_handoff_receipts_viewed,
     record_companion_skip,
     record_ambient_intervention_action,
+    record_ai_assist_config,
     record_analyst_consent,
     record_analyst_contents,
     record_analyst_run,
@@ -1775,6 +1778,13 @@ def build_basic_handoff_detail(
     same_project_count = _same_project_session_count(row)
     project = row.project_path if is_reliable_project_path(row.project_path) else "unknown"
     usage = _usage_summary(row)
+    ai_assist = build_ai_assist_status(ai_assist_config())
+    assist_mode = str(ai_assist.get("mode") or "off")
+    assist_line = (
+        "AI Assist is off; this brief is assembled from local metadata only."
+        if assist_mode == "off" else
+        f"AI Assist mode is {ai_assist.get('active_label')}; only use it after explicit user confirmation."
+    )
     warnings = [
         (
             f"Source session had {usage['tokens_label']} tokens, "
@@ -1842,6 +1852,7 @@ def build_basic_handoff_detail(
         "Workspace",
         f"- Project: {project}",
         f"- Source tool/model: {row.tool} / {row.model or 'unknown'}",
+        f"- AIWatcher assist: {assist_line}",
         "",
         "What remains uncertain",
         "- Detailed git, timeline, and prompt evidence is still loading.",
@@ -1897,6 +1908,7 @@ def build_basic_handoff_detail(
         "constraints": (constraints or [])[:8],
         "acceptance_criteria": (acceptance_criteria or [])[:8],
         "include_prompt_excerpt": False,
+        "ai_assist": ai_assist,
         "costliest_prompt": None,
         "decisions": [],
         "related_workspaces": [],
@@ -4871,6 +4883,7 @@ def build_summary(
         "coverage": [row.to_json() for row in surface_coverage(all_rows)],
         "setup": setup_checklist(),
         "watcher": get_watcher_status(),
+        "ai_assist": build_ai_assist_status(ai_assist_config()),
         "context_health": context_health,
         "context_health_status": "ready",
         # Distance from the last checkpoint in the repo the charted session is
@@ -5185,6 +5198,7 @@ def _build_summary_shell(
         "coverage": [row.to_json() for row in surface_coverage(all_rows)],
         "setup": setup_checklist(),
         "watcher": get_watcher_status(),
+        "ai_assist": build_ai_assist_status(ai_assist_config()),
         "context_health": [],
         "context_health_status": "pending",
         "optimize": optimize,
@@ -6622,6 +6636,13 @@ class UIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/companion-state":
             self._send(200, json.dumps(build_companion_state()), "application/json; charset=utf-8")
             return
+        if parsed.path == "/api/ai-assist-status":
+            self._send(
+                200,
+                json.dumps(build_ai_assist_status(ai_assist_config())),
+                "application/json; charset=utf-8",
+            )
+            return
         if parsed.path == "/api/companion-scan":
             try:
                 _refresh_summary_cache(7)
@@ -6802,6 +6823,7 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/second-opinion",
             "/api/second-opinion-consent",
             "/api/second-opinion-contents",
+            "/api/ai-assist-config",
             "/api/ask-aiwatcher",
             "/api/handoff-basic",
             "/api/handoff",
@@ -6885,6 +6907,25 @@ class UIHandler(BaseHTTPRequestHandler):
             record_analyst_contents(project, allowed=allowed)
             self._send(200, json.dumps({"allowed": allowed, "project_path": project}),
                        "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/ai-assist-config":
+            try:
+                config = record_ai_assist_config(payload)
+            except ValueError as exc:
+                self._send(400, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")
+                return
+            except OSError as exc:
+                self._send(
+                    500,
+                    json.dumps({"error": f"Could not save AI Assist settings: {exc}"}),
+                    "application/json; charset=utf-8",
+                )
+                return
+            self._send(
+                200,
+                json.dumps(build_ai_assist_status(config)),
+                "application/json; charset=utf-8",
+            )
             return
         if parsed.path == "/api/ask-aiwatcher":
             question = str(payload.get("question", "")).strip()

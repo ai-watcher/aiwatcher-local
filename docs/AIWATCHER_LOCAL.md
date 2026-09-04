@@ -213,6 +213,19 @@ Secret-bearing substrings such as database URL credentials, token values,
 password env vars, and password/API-key flags are redacted before storage or
 before the hook returns a block reason to the AI tool.
 
+Command protection is intentionally graded by surface:
+
+- **Block** — the host exposes a verified pre-tool lifecycle event, so
+  AIWatcher can pause a risky command before it runs. Today this is Claude Code
+  `PreToolUse` for `Bash`, verified on Claude Code CLI.
+- **Verify host** — the host may share the same hook surface, but the exact
+  local app/build must prove it fired before AIWatcher calls it protected.
+- **Warn + observe** — AIWatcher can steer risky intent through Prompt Gate and
+  report local command/session evidence afterwards, but it cannot stop the
+  command at execution time.
+- **Manual/observed only** — use Companion Plan/Scan before work; AIWatcher
+  should not claim interception.
+
 This wording is deliberate. Claude's `UserPromptSubmit` hook can add context
 alongside a submitted prompt or block it; it cannot replace the submitted text.
 Gate installations configure a 210-second host timeout around AIWatcher's
@@ -439,6 +452,12 @@ What to check:
 - The same intervention should not appear simultaneously as a native panel,
   browser companion, and OS notification. Native UI is preferred, with browser
   fallback only when native UI is unavailable.
+- AI Assist should be visible in Settings but optional. Default mode is local
+  rules only. Local model assist may use an already-running provider such as
+  Ollama, LM Studio, or llama.cpp; cloud assist may use user-provided
+  `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`. AIWatcher should not store provider
+  secrets, should not make hidden background model calls, and should use assist
+  first for Fresh Start and Prompt Plan rather than for a generic chat feature.
 - `resume`/`handoff` without `--include-prompt-excerpt` should not contain
   prompt text; with it, the brief should contain a labeled excerpt and nothing
   else in the surrounding output should change.

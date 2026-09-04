@@ -285,6 +285,29 @@ class DashboardServeTests(unittest.TestCase):
                 thread.join(timeout=5)
                 server.server_close()
 
+    def test_ai_assist_config_post_is_routable_and_sanitized(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                server, thread, base = self._serve_one()
+                payload = json.dumps({"mode": "cloud", "provider": "ollama"}).encode("utf-8")
+                http_request = request.Request(
+                    f"{base}/api/ai-assist-config",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                try:
+                    with request.urlopen(http_request, timeout=5) as response:
+                        body = json.loads(response.read().decode("utf-8"))
+                finally:
+                    thread.join(timeout=5)
+                    server.server_close()
+
+        self.assertEqual(body["config"]["mode"], "cloud")
+        self.assertEqual(body["config"]["provider"], "auto")
+        self.assertNotIn("API_KEY", json.dumps(body.get("config", {})))
+
     def test_companion_group_snooze_records_project_cooldowns(self) -> None:
         server, thread, base = self._serve_one()
         payload = json.dumps({
@@ -2786,6 +2809,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(summary["context_health"][0]["action"]["label"], "Start fresh")
         self.assertEqual(summary["handoff_bubble"]["session_id"], "bloated")
         self.assertIn("Fresh Start recommended", summary["handoff_bubble"]["title"])
+        self.assertEqual(summary["ai_assist"]["active_label"], "Local rules only")
         # Measured cache reads on the latest turn, not latest_turn_tokens * bloat_ratio.
         self.assertEqual(summary["handoff_bubble"]["expected_saved_context_tokens"], 220_000)
         self.assertEqual(summary["handoff_decisions"], [])

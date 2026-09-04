@@ -517,6 +517,8 @@ class TrimmedHomeTest(unittest.TestCase):
             "handoffObjective", "handoffSources", "handoffStatus", "handoffType",
             "optimizeReward", "outcomePanel", "planDerivedZone", "promptBrief",
             "todayDigest",
+            "aiAssistCap", "aiAssistConfirm", "aiAssistMode", "aiAssistModel",
+            "aiAssistProvider", "aiAssistSourceAccess",
         }
         ids = set(re.findall(r'id="([\w-]+)"', self.html))
         looked_up = set(re.findall(r"""getElementById\(['"]([\w-]+)['"]\)""", self.js))
@@ -1456,6 +1458,13 @@ class SettingsTest(unittest.TestCase):
         # Nothing tracks completion, so calling it a checklist promises a state
         # the data does not have.
         self.assertNotIn("Setup checklist", self.html)
+
+    def test_ai_assist_settings_are_visible_but_optional(self):
+        setup = self.html[self.html.index('<section id="view-setup"'):]
+        self.assertIn('id="aiAssistSettings"', setup)
+        self.assertIn("AIWatcher works without this", setup)
+        self.assertIn("function renderAiAssistSettings", self.js)
+        self.assertIn("/api/ai-assist-config", self.js)
 
 
 class ChangesLedgerTest(unittest.TestCase):

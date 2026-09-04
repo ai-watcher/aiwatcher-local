@@ -116,6 +116,32 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(recent[0]["id"], record["id"])
         self.assertNotIn("prompt", json.dumps(recent).lower())
 
+    def test_ai_assist_config_defaults_off_and_sanitizes_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                default = local_state.ai_assist_config()
+                saved = local_state.record_ai_assist_config({
+                    "mode": "local",
+                    "provider": "openai",
+                    "model": "llama3.1",
+                    "max_daily_usd": "0.50",
+                    "source_access": "source_opt_in",
+                    "require_confirmation": False,
+                    "enabled_workflows": ["fresh_start", "ask_aiwatcher", "prompt_plan"],
+                })
+                reread = local_state.ai_assist_config()
+
+        self.assertEqual(default["mode"], "off")
+        self.assertEqual(default["provider"], "none")
+        self.assertEqual(saved["mode"], "local")
+        self.assertEqual(saved["provider"], "auto")
+        self.assertEqual(saved["max_daily_usd"], 0.5)
+        self.assertEqual(saved["source_access"], "source_opt_in")
+        self.assertFalse(saved["require_confirmation"])
+        self.assertEqual(saved["enabled_workflows"], ["fresh_start", "prompt_plan"])
+        self.assertEqual(reread, saved)
+
     def test_link_handoff_decision_next_session_keeps_source_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")

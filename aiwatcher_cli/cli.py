@@ -8696,6 +8696,31 @@ def _hook_surface_verification_rows(events: list[dict[str, object]]) -> list[tup
     ]
 
 
+def _command_surface_posture_rows() -> list[tuple[str, str, str]]:
+    return [
+        (
+            "Claude Code CLI",
+            "can block risky Bash commands",
+            "Install `aiwatcher install-claude-command-gate --write --scope user`, then verify a PreToolUse event.",
+        ),
+        (
+            "Claude Desktop Code tab",
+            "verify before claiming protected",
+            "Some builds may invoke Claude PreToolUse; confirm with `aiwatcher hook-status` after a known risky Bash command.",
+        ),
+        (
+            "Codex CLI/Desktop",
+            "warn + observe",
+            "AIWatcher can gate risky prompt intent and report local evidence, but has no verified pre-tool command hook yet.",
+        ),
+        (
+            "Cursor/other tools",
+            "warn + observe or manual",
+            "Use Companion Plan/Scan unless the host exposes and verifies a pre-tool command lifecycle.",
+        ),
+    ]
+
+
 def command_hook_status(_args: argparse.Namespace) -> int:
     state_error: OSError | None = None
     try:
@@ -8738,6 +8763,9 @@ def command_hook_status(_args: argparse.Namespace) -> int:
             print(f"- {diagnostic}")
     print("\nSurface verification")
     for label, status, next_step in _hook_surface_verification_rows(events):
+        print(f"- {label}: {status}. {next_step}")
+    print("\nCommand protection")
+    for label, status, next_step in _command_surface_posture_rows():
         print(f"- {label}: {status}. {next_step}")
     if interventions:
         print("\nRecent preflight decisions")
@@ -9518,7 +9546,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     install_command_gate = sub.add_parser(
         "install-claude-command-gate",
-        help="Print or install the Claude Code dangerous-command gate (PreToolUse, S-19). Claude Code CLI only.",
+        help="Print or install the Claude Code dangerous-command gate (PreToolUse, S-19). Verify each surface.",
     )
     install_command_gate.add_argument("--write", action="store_true", help="Write the hook into Claude settings")
     install_command_gate.add_argument(

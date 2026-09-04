@@ -2959,11 +2959,25 @@ function coverageGate(row) {
   const [label, cls] = map[row.status] || ['Unknown', 'unverified'];
   return `<span class="coverage-status ${esc(cls)}">${esc(label)}</span>`;
 }
+function commandProtection(row) {
+  const clsMap = {
+    block: 'automatic',
+    verify_host: 'unverified',
+    warn_observe: 'companion',
+    observe_only: 'limited',
+    manual: 'companion',
+    unsupported: 'unsupported',
+    not_detected: 'not_detected',
+  };
+  const cls = clsMap[row.command_protection] || 'unverified';
+  return `<span class="coverage-status ${esc(cls)}">${esc(row.command_protection_label || 'Unknown')}</span>
+    ${row.command_protection_detail ? `<span class="cell-note">${esc(row.command_protection_detail)}</span>` : ''}`;
+}
 function renderCoverage(rows) {
   if (!rows.length) return '<div class="empty">Coverage could not be determined on this machine.</div>';
   return `<div class="table-wrap"><table class="coverage-table">
     <thead><tr>
-      <th>Tool</th><th>Coverage</th><th>Gate</th><th class="num">Sessions</th><th>Next</th>
+      <th>Tool</th><th>Coverage</th><th>Prompt</th><th>Command</th><th class="num">Sessions</th><th>Next</th>
     </tr></thead>
     <tbody>${rows.map(row => `<tr>
       <td>
@@ -2975,6 +2989,7 @@ function renderCoverage(rows) {
         ${row.history ? `<span class="cell-note">${esc(row.history)}</span>` : ''}
       </td>
       <td>${coverageGate(row)}</td>
+      <td>${commandProtection(row)}</td>
       <td class="num">${esc(row.session_count)}</td>
       <td><span class="cell-note">${esc(row.action || '')}</span></td>
     </tr>`).join('')}</tbody>
@@ -2983,8 +2998,85 @@ function renderCoverage(rows) {
     <strong>Protection:</strong> <b>Automatic</b> is intercepted when the tool invokes its hook.
     <b>Unverified</b> means history is visible but interception has not been proven on this exact
     surface. <b>Companion only</b> means AIWatcher can help, but is not intercepting directly.
+    <b>Warn + observe</b> means prompt intent can be steered before work and command evidence can
+    be reported afterwards, but commands are not blocked before execution.
     <b>Not detected</b> and <b>Not supported</b> claim nothing.
   </p>`;
+}
+
+function renderAiAssistSettings(status) {
+  const s = status || {};
+  const c = s.config || {};
+  const localProviders = s.local_providers || [];
+  const cloudProviders = s.cloud_providers || [];
+  const providerOptions = [
+    ['none', 'No provider'],
+    ['auto', 'Auto-detect'],
+    ['ollama', 'Ollama'],
+    ['lmstudio', 'LM Studio'],
+    ['llama_cpp', 'llama.cpp'],
+    ['openai', 'OpenAI'],
+    ['anthropic', 'Anthropic'],
+  ].map(([id, label]) => `<option value="${id}" ${c.provider === id ? 'selected' : ''}>${label}</option>`).join('');
+  const localRows = localProviders.map(row => `<li><strong>${esc(row.label)}</strong> <span class="sub">${esc(row.detail)}</span></li>`).join('');
+  const cloudRows = cloudProviders.map(row => `<li><strong>${esc(row.label)}</strong> <span class="sub">${esc(row.detail)} (${esc(row.secret_env)})</span></li>`).join('');
+  const workflows = (s.workflows || []).map(row => `<div class="ai-assist-workflow">
+    <strong>${esc(row.label)}</strong>
+    <span class="pill">${esc(row.priority)}</span>
+    <p>${esc(row.reason)}</p>
+  </div>`).join('');
+  return `<div class="ai-assist-grid">
+    <div class="ai-assist-panel">
+      <div class="pill-row"><span class="pill">${esc(s.active_label || 'Local rules only')}</span><span class="pill">${esc(s.status_label || 'Off')}</span></div>
+      <p>${esc(s.privacy || 'AI Assist is optional and off by default.')}</p>
+      <label><span class="label">Mode</span><select id="aiAssistMode">
+        <option value="off" ${c.mode === 'off' ? 'selected' : ''}>Local rules only</option>
+        <option value="local" ${c.mode === 'local' ? 'selected' : ''}>Local model assist</option>
+        <option value="cloud" ${c.mode === 'cloud' ? 'selected' : ''}>Cloud key assist</option>
+      </select></label>
+      <label><span class="label">Provider</span><select id="aiAssistProvider">${providerOptions}</select></label>
+      <label><span class="label">Model override, optional</span><input id="aiAssistModel" value="${esc(c.model || '')}" placeholder="Leave blank for provider default"></label>
+      <label><span class="label">Daily cap for cloud mode</span><input id="aiAssistCap" type="number" min="0" step="0.01" value="${esc(c.max_daily_usd ?? 0.25)}"></label>
+      <label><span class="label">Source access</span><select id="aiAssistSourceAccess">
+        <option value="metadata_only" ${c.source_access === 'metadata_only' ? 'selected' : ''}>Metadata only</option>
+        <option value="prompt_opt_in" ${c.source_access === 'prompt_opt_in' ? 'selected' : ''}>Prompt text only after confirmation</option>
+        <option value="source_opt_in" ${c.source_access === 'source_opt_in' ? 'selected' : ''}>Source files only after confirmation</option>
+      </select></label>
+      <label class="check-row"><input id="aiAssistConfirm" type="checkbox" ${c.require_confirmation !== false ? 'checked' : ''}> Require confirmation before every AI Assist run</label>
+      <div class="copy-row"><button class="btn-primary" onclick="saveAiAssistSettings()">Save AI Assist settings</button></div>
+    </div>
+    <div class="ai-assist-panel">
+      <h3>Detected providers</h3>
+      <ul class="prompt-list">${localRows || '<li>No local model provider detected.</li>'}</ul>
+      <ul class="prompt-list">${cloudRows || '<li>No cloud keys detected in the environment.</li>'}</ul>
+      <h3>Workflows</h3>
+      ${workflows}
+    </div>
+  </div>`;
+}
+
+async function saveAiAssistSettings() {
+  const payload = {
+    mode: document.getElementById('aiAssistMode').value,
+    provider: document.getElementById('aiAssistProvider').value,
+    model: document.getElementById('aiAssistModel').value,
+    max_daily_usd: Number(document.getElementById('aiAssistCap').value || 0),
+    source_access: document.getElementById('aiAssistSourceAccess').value,
+    require_confirmation: document.getElementById('aiAssistConfirm').checked,
+  };
+  try {
+    const res = await fetch('/api/ai-assist-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const status = await res.json();
+    if (!res.ok) throw new Error(status.error || 'save failed');
+    document.getElementById('aiAssistSettings').innerHTML = renderAiAssistSettings(status);
+    showToast('AI Assist settings saved');
+  } catch (error) {
+    showToast(`Could not save AI Assist settings: ${error.message || 'unknown error'}`, 'error');
+  }
 }
 function renderSetup(rows) {
   if (!rows.length) return '<div class="empty">Setup checklist unavailable.</div>';
@@ -5001,6 +5093,10 @@ async function loadOnce(resetDetail, forceRefresh) {
   updateSortIndicators('change', changeSort, ['committed_at', 'project', 'cost_usd', 'lines_changed', 'usd_per_line', 'survival_pct', 'usd_per_surviving_line']);
   const coverage = data.coverage || [];
   document.getElementById('coverageRowsSettings').innerHTML = renderCoverage(coverage);
+  const aiAssistNode = document.getElementById('aiAssistSettings');
+  if (aiAssistNode) {
+    aiAssistNode.innerHTML = renderAiAssistSettings(data.ai_assist || {});
+  }
   // Counts on both headings. Setup steps is still folded, and a folded section
   // with a bare title hides whether there is anything inside. Coverage is not
   // folded any more -- it sits under the privacy card, whose promise it

@@ -5758,6 +5758,8 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertIn("Codex hook is installed", output)
         self.assertIn("this surface did not invoke the hook", output)
         self.assertIn("Companion -> Plan / Prompt", output)
+        self.assertIn("Command protection", output)
+        self.assertIn("Codex CLI/Desktop: warn + observe", output)
 
     def test_hook_status_warns_when_hook_points_at_different_aiwatcher_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

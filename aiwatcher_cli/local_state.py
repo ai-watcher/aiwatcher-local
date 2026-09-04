@@ -25,6 +25,63 @@ else:
 STATE_VERSION = 2
 VALID_OUTCOMES = {"useful", "rework", "abandoned"}
 
+AI_ASSIST_MODES = {"off", "local", "cloud"}
+AI_ASSIST_PROVIDERS = {"none", "auto", "ollama", "lmstudio", "llama_cpp", "openai", "anthropic"}
+AI_ASSIST_SOURCE_ACCESS = {"metadata_only", "prompt_opt_in", "source_opt_in"}
+AI_ASSIST_WORKFLOWS = {"fresh_start", "prompt_plan", "session_summary", "receipt_explanation"}
+
+
+def default_ai_assist_config() -> dict[str, Any]:
+    return {
+        "mode": "off",
+        "provider": "none",
+        "model": None,
+        "base_url": None,
+        "max_daily_usd": 0.25,
+        "source_access": "metadata_only",
+        "require_confirmation": True,
+        "enabled_workflows": ["fresh_start", "prompt_plan"],
+    }
+
+
+def _safe_float(value: Any, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if number < 0:
+        return default
+    return round(min(number, 100.0), 4)
+
+
+def _normalize_ai_assist_config(value: Any) -> dict[str, Any]:
+    config = default_ai_assist_config()
+    if not isinstance(value, dict):
+        return config
+    mode = str(value.get("mode") or config["mode"]).strip().lower()
+    provider = str(value.get("provider") or config["provider"]).strip().lower()
+    source_access = str(value.get("source_access") or config["source_access"]).strip().lower()
+    config["mode"] = mode if mode in AI_ASSIST_MODES else "off"
+    config["provider"] = provider if provider in AI_ASSIST_PROVIDERS else "none"
+    if config["mode"] == "off":
+        config["provider"] = "none"
+    if config["mode"] == "local" and config["provider"] in {"openai", "anthropic"}:
+        config["provider"] = "auto"
+    if config["mode"] == "cloud" and config["provider"] in {"ollama", "lmstudio", "llama_cpp"}:
+        config["provider"] = "auto"
+    model = value.get("model")
+    config["model"] = str(model).strip()[:120] if isinstance(model, str) and model.strip() else None
+    base_url = value.get("base_url")
+    config["base_url"] = str(base_url).strip()[:500] if isinstance(base_url, str) and base_url.strip() else None
+    config["max_daily_usd"] = _safe_float(value.get("max_daily_usd"), float(config["max_daily_usd"]))
+    config["source_access"] = source_access if source_access in AI_ASSIST_SOURCE_ACCESS else "metadata_only"
+    config["require_confirmation"] = bool(value.get("require_confirmation", True))
+    workflows = value.get("enabled_workflows")
+    if isinstance(workflows, list):
+        normalized = [str(item).strip().lower() for item in workflows]
+        config["enabled_workflows"] = [item for item in normalized if item in AI_ASSIST_WORKFLOWS]
+    return config
+
 # How long an issued brief/capsule token remains redeemable. Short enough to
 # limit the window a leaked local-state.json could be replayed in, long
 # enough to cover copy-paste into a fresh session.
@@ -195,6 +252,7 @@ def _empty_state() -> dict[str, Any]:
         # still be true, and a per-session log would grow without ever being
         # read past its head.
         "session_waiting": {},
+        "ai_assist": default_ai_assist_config(),
     }
 
 
@@ -267,6 +325,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("ui_server", None)
     data.setdefault("watcher_heartbeat", None)
     data.setdefault("session_waiting", {})
+    data["ai_assist"] = _normalize_ai_assist_config(data.get("ai_assist"))
     data.setdefault("first_run_dismissed_at", None)
     return data
 
@@ -1127,6 +1186,34 @@ def recent_optimize_decisions(limit: int = 10) -> list[dict[str, Any]]:
         return []
     rows = [row for row in data["optimize_decisions"] if isinstance(row, dict)]
     return list(reversed(rows[-max(1, limit):]))
+
+
+def ai_assist_config() -> dict[str, Any]:
+    """Return the optional AI Assist settings.
+
+    Off by default. This config is intentionally separate from Second Opinion:
+    Second Opinion asks the user's own CLI for a narrow prompt analysis, while
+    AI Assist is the future provider switch for improving AIWatcher workflows
+    such as Fresh Start and Plan.
+    """
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return default_ai_assist_config()
+    return _normalize_ai_assist_config(data.get("ai_assist"))
+
+
+def record_ai_assist_config(settings: dict[str, Any]) -> dict[str, Any]:
+    """Persist optional AI Assist settings without storing provider secrets."""
+    if not isinstance(settings, dict):
+        raise ValueError("settings must be an object")
+    config = _normalize_ai_assist_config(settings)
+    with _locked_state():
+        data = _load()
+        data["ai_assist"] = config
+        _save(data)
+    return config
 
 
 def mark_recent_handoff_receipts_viewed(limit: int = 20) -> int:
