@@ -4484,6 +4484,16 @@ def command_report(args: argparse.Namespace) -> int:
     prompt_gate = digest["prompt_gate"]
     if prompt_gate["flagged"]:
         print(f"\nRisky prompts modified: {prompt_gate['modified']} of {prompt_gate['flagged']} flagged")
+        # Acceptance is the other question: of the times the gate stopped and
+        # asked, how often was the brief taken. Older digests lack the keys.
+        if prompt_gate.get("measurable"):
+            print(
+                f"Gate brief taken: {prompt_gate.get('taken', 0)} of {prompt_gate.get('asks', 0)} asks "
+                f"({prompt_gate.get('ran_original', 0)} ran the original; "
+                f"{prompt_gate.get('silent_briefs', 0)} silent briefs and {prompt_gate.get('blocked', 0)} blocks outside the ratio)"
+            )
+        elif "measurable" in prompt_gate:
+            print(f"Gate brief taken: not measurable -- {prompt_gate.get('reason')}")
 
     survival = digest["survival"]
     if survival.get("available"):

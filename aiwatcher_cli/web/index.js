@@ -3262,12 +3262,22 @@ function renderReport(report) {
     </div>`);
   }
   if (digest.command_gate.gates_fired > 0 || digest.prompt_gate.flagged > 0) {
+    // Two different questions, kept apart on purpose: "modified" counts every
+    // preflight including briefs added silently, "taken" counts only the times
+    // the gate stopped and asked. The second is the one that says whether the
+    // gate is earning its interruptions.
+    const g = digest.prompt_gate;
+    const acceptance = g.measurable
+      ? `<span class="pill">Gate asked ${esc(g.asks)} time${g.asks === 1 ? '' : 's'} · brief taken ${esc(g.taken)}, original run ${esc(g.ran_original)}${g.cancelled ? `, cancelled ${esc(g.cancelled)}` : ''}</span>`
+      : (g.flagged ? `<span class="pill">Gate never asked this window · ${esc(g.silent_briefs || 0)} brief${g.silent_briefs === 1 ? '' : 's'} added silently${g.blocked ? `, ${esc(g.blocked)} blocked` : ''}</span>` : '');
     sections.push(`<div class="detail-section">
       <h2>Guardrails this window</h2>
       <div class="pill-row">
         ${digest.command_gate.gates_fired ? `<span class="pill">${esc(digest.command_gate.commands_blocked)} of ${esc(digest.command_gate.gates_fired)} dangerous commands blocked</span>` : ''}
-        ${digest.prompt_gate.flagged ? `<span class="pill">${esc(digest.prompt_gate.modified)} of ${esc(digest.prompt_gate.flagged)} risky prompts modified</span>` : ''}
+        ${g.flagged ? `<span class="pill">${esc(g.modified)} of ${esc(g.flagged)} risky prompts modified</span>` : ''}
+        ${acceptance}
       </div>
+      ${g.measurable ? `<p class="sub">${esc(g.taken)} of ${esc(g.asks)} asks took the brief. Silent briefs (${esc(g.silent_briefs || 0)}) and blocks (${esc(g.blocked || 0)}) were not choices and sit outside that ratio.</p>` : ''}
     </div>`);
   }
   if (digest.survival && digest.survival.available) {

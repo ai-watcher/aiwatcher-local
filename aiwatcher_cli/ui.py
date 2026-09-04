@@ -1243,6 +1243,28 @@ GATE_ASK_DECISIONS = {"brief_accepted", "brief_edited", "allowed_original", "can
 GATE_TAKEN_DECISIONS = {"brief_accepted", "brief_edited"}
 
 
+def _gate_acceptance(decisions: list[str]) -> dict[str, object]:
+    """Q: when Prompt Gate asked, how often was the brief taken?
+
+    The ratio is asks to briefs taken. Silent briefs (context_added) never asked
+    and blocks were never a choice, so both sit beside the ratio, not inside it.
+    No asks in the window is "not measurable", never 0 of 0.
+    """
+    asks = sum(1 for decision in decisions if decision in GATE_ASK_DECISIONS)
+    taken = sum(1 for decision in decisions if decision in GATE_TAKEN_DECISIONS)
+    gate: dict[str, object] = {
+        "measurable": asks > 0,
+        "asks": asks,
+        "taken": taken,
+        "ran_original": sum(1 for decision in decisions if decision == "allowed_original"),
+        "cancelled": sum(1 for decision in decisions if decision == "cancelled"),
+        "silent_briefs": sum(1 for decision in decisions if decision == "context_added"),
+        "blocked": sum(1 for decision in decisions if decision in {"blocked", "auto_block_headless"}),
+        "reason": None if asks else "Prompt Gate did not ask you anything in this window.",
+    }
+    return gate
+
+
 def _median(values: list[float]) -> float | None:
     if not values:
         return None
@@ -1351,19 +1373,9 @@ def build_tasks_view(days: int = 7) -> dict[str, object]:
     # Silent briefs (context_added) never asked, so they are outside the ratio and
     # reported beside it; blocked prompts were not a choice either.
     window_interventions = recent_interventions(limit=5000, days=days)
-    decisions = [str(row.get("decision") or "") for row in window_interventions if row.get("intervention_type") == "prompt_preflight"]
-    asks = sum(1 for decision in decisions if decision in GATE_ASK_DECISIONS)
-    taken = sum(1 for decision in decisions if decision in GATE_TAKEN_DECISIONS)
-    gate: dict[str, object] = {
-        "measurable": asks > 0,
-        "asks": asks,
-        "taken": taken,
-        "ran_original": sum(1 for decision in decisions if decision == "allowed_original"),
-        "silent_briefs": sum(1 for decision in decisions if decision == "context_added"),
-        "blocked": sum(1 for decision in decisions if decision in {"blocked", "auto_block_headless"}),
-    }
-    if asks == 0:
-        gate["reason"] = "Prompt Gate did not ask you anything in this window."
+    gate = _gate_acceptance(
+        [str(row.get("decision") or "") for row in window_interventions if row.get("intervention_type") == "prompt_preflight"]
+    )
     sessions_with_tasks = {task["session_id"] for task in tasks}
     return {
         "days": days,
@@ -2485,8 +2497,13 @@ def build_weekly_digest(days: int = 7) -> dict[str, object]:
             "commands_blocked": len(blocked),
         },
         "prompt_gate": {
+            # "flagged"/"modified" count every preflight, silent briefs included;
+            # the acceptance keys count only the times the gate actually asked.
             "flagged": len(prompt_interventions),
             "modified": len(prompts_modified),
+            **_gate_acceptance(
+                [str(row.get("decision") or "") for row in prompt_interventions if row.get("intervention_type") == "prompt_preflight"]
+            ),
         },
         "survival": survival,
         "recommendation": recommendation,
