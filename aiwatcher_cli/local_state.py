@@ -172,6 +172,17 @@ def _empty_state() -> dict[str, Any]:
         "companion_skips": [],
         "ambient_interventions": [],
         "sent_notification_keys": [],
+        # Tasks are re-derived from transcripts on every build, like sessions.
+        # Only the user's corrections to the rules persist: a boundary decision
+        # per (session, turn), and a verdict per task id.
+        "task_boundaries": [],
+        "task_verdicts": [],
+        # "Finished that task?" asks the Companion bar has shown or will show,
+        # one per task id, so a boundary is asked about once and a restart
+        # cannot ask again. Answers are mirrored into verdicts/boundaries.
+        "task_asks": [],
+        # Latest turn-end per session from the Stop hook: {session_id: {at, tool, cwd}}.
+        "session_turn_ends": {},
         "active_prompt_gate": None,
         # Second Opinion spends the user's own money on their own key, so
         # consent is per project and the spend ledger is what the monthly cap
@@ -259,6 +270,10 @@ def _load() -> dict[str, Any]:
     data.setdefault("companion_skips", [])
     data.setdefault("ambient_interventions", [])
     data.setdefault("sent_notification_keys", [])
+    data.setdefault("task_boundaries", [])
+    data.setdefault("task_verdicts", [])
+    data.setdefault("task_asks", [])
+    data.setdefault("session_turn_ends", {})
     data.setdefault("active_prompt_gate", None)
     data.setdefault("ui_server", None)
     data.setdefault("watcher_heartbeat", None)
@@ -1391,6 +1406,208 @@ def link_intervention_session(intervention_id: str, session_id: str) -> bool:
                 _save(data)
                 return True
     return False
+
+
+VALID_TASK_VERDICTS = {"done", "not_done"}
+MAX_TASK_BOUNDARIES_STORED = 500
+MAX_TASK_VERDICTS_STORED = 500
+
+
+def record_task_boundary(session_id: str, turn: int, boundary: bool) -> dict[str, Any]:
+    """Persist the user's decision about whether a turn starts a new task.
+
+    True is a split (force a boundary there), False a merge (suppress the one the
+    rules found). One record per (session, turn), latest wins, so a user can change
+    their mind without leaving a trail the builder has to reconcile.
+    """
+    session_id = session_id.strip()
+    if not session_id:
+        raise ValueError("session_id is required")
+    if not isinstance(turn, int) or isinstance(turn, bool) or turn < 2:
+        raise ValueError("turn must be an integer of 2 or more; the first turn always starts a task")
+    with _locked_state():
+        data = _load()
+        record = {
+            "session_id": session_id,
+            "turn": turn,
+            "boundary": bool(boundary),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        data["task_boundaries"] = [
+            row for row in data["task_boundaries"]
+            if not (row.get("session_id") == session_id and row.get("turn") == turn)
+        ]
+        data["task_boundaries"].append(record)
+        data["task_boundaries"] = data["task_boundaries"][-MAX_TASK_BOUNDARIES_STORED:]
+        _save(data)
+    return record
+
+
+def task_boundary_overrides() -> dict[str, dict[int, bool]]:
+    """{session_id: {turn: boundary}} for every stored correction."""
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return {}
+    overrides: dict[str, dict[int, bool]] = {}
+    for row in data.get("task_boundaries", []):
+        if not isinstance(row, dict):
+            continue
+        session_id = str(row.get("session_id") or "")
+        turn = row.get("turn")
+        if session_id and isinstance(turn, int):
+            overrides.setdefault(session_id, {})[turn] = bool(row.get("boundary"))
+    return overrides
+
+
+def record_task_verdict(task_id: str, verdict: str, session_id: str | None = None) -> dict[str, Any]:
+    """The user's answer to "finished?" for one task. One record per task, latest wins."""
+    task_id = task_id.strip()
+    if not task_id:
+        raise ValueError("task_id is required")
+    if verdict not in VALID_TASK_VERDICTS:
+        raise ValueError(f"verdict must be one of: {', '.join(sorted(VALID_TASK_VERDICTS))}")
+    with _locked_state():
+        data = _load()
+        record = {
+            "task_id": task_id,
+            "session_id": (session_id or "").strip() or None,
+            "verdict": verdict,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        data["task_verdicts"] = [row for row in data["task_verdicts"] if row.get("task_id") != task_id]
+        data["task_verdicts"].append(record)
+        data["task_verdicts"] = data["task_verdicts"][-MAX_TASK_VERDICTS_STORED:]
+        _save(data)
+    return record
+
+
+def task_verdicts() -> dict[str, str]:
+    """{task_id: verdict} for every stored verdict."""
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return {}
+    return {
+        str(row["task_id"]): str(row["verdict"])
+        for row in data.get("task_verdicts", [])
+        if isinstance(row, dict) and row.get("task_id") and row.get("verdict") in VALID_TASK_VERDICTS
+    }
+
+
+TASK_ASK_TTL_SECONDS = 2 * 3600
+MAX_TASK_ASKS_STORED = 200
+VALID_TASK_ASK_ANSWERS = {"done", "not_done", "same_task", "dismissed"}
+_TASK_ASK_FIELDS = (
+    "task_id", "session_id", "tool", "project_path", "label", "turns", "tokens", "cost_usd",
+    "tool_calls", "boundary_turn", "confidence",
+)
+
+
+def record_task_ask(ask: dict[str, Any]) -> dict[str, Any] | None:
+    """Queue a "finished?" question for one task. Returns None if that task was already asked about."""
+    task_id = str(ask.get("task_id") or "").strip()
+    if not task_id:
+        raise ValueError("task_id is required")
+    with _locked_state():
+        data = _load()
+        if any(isinstance(row, dict) and row.get("task_id") == task_id for row in data["task_asks"]):
+            return None
+        record: dict[str, Any] = {key: ask.get(key) for key in _TASK_ASK_FIELDS}
+        record["label"] = str(record.get("label") or "")[:120]
+        record["created_at"] = datetime.now(timezone.utc).isoformat()
+        record["answer"] = None
+        record["answered_at"] = None
+        data["task_asks"].append(record)
+        data["task_asks"] = data["task_asks"][-MAX_TASK_ASKS_STORED:]
+        _save(data)
+    return record
+
+
+def open_task_ask(now: datetime | None = None) -> dict[str, Any] | None:
+    """The newest unanswered ask that is still fresh, or None. Stale asks are simply not shown."""
+    now = now or datetime.now(timezone.utc)
+    try:
+        data = _load()
+    except (StateReadError, OSError):
+        return None
+    for row in reversed(data.get("task_asks", [])):
+        if not isinstance(row, dict) or row.get("answer"):
+            continue
+        created = _parse_waiting_stamp(row.get("created_at"))
+        if created and (now - created).total_seconds() <= TASK_ASK_TTL_SECONDS:
+            return dict(row)
+    return None
+
+
+def task_ask_for(task_id: str) -> dict[str, Any] | None:
+    try:
+        data = _load()
+    except (StateReadError, OSError):
+        return None
+    for row in data.get("task_asks", []):
+        if isinstance(row, dict) and row.get("task_id") == task_id:
+            return dict(row)
+    return None
+
+
+def answer_task_ask(task_id: str, answer: str) -> dict[str, Any] | None:
+    if answer not in VALID_TASK_ASK_ANSWERS:
+        raise ValueError(f"answer must be one of: {', '.join(sorted(VALID_TASK_ASK_ANSWERS))}")
+    with _locked_state():
+        data = _load()
+        for row in data["task_asks"]:
+            if isinstance(row, dict) and row.get("task_id") == task_id:
+                row["answer"] = answer
+                row["answered_at"] = datetime.now(timezone.utc).isoformat()
+                _save(data)
+                return dict(row)
+    return None
+
+
+TURN_END_TTL_SECONDS = 24 * 3600
+MAX_TURN_END_SIGNALS = 200
+
+
+def record_session_turn_end(*, session_id: str, tool: str, cwd: str | None = None) -> None:
+    """Note that a session's assistant turn just ended (the tool's Stop hook).
+
+    Stores a timestamp per session and nothing else: no output, no reason. It
+    tells the task builder that the last prompt has been answered, which is what
+    separates "still working on it" from "idle since the answer".
+    """
+    now = datetime.now(timezone.utc)
+    with _locked_state():
+        data = _load()
+        ends = data.get("session_turn_ends")
+        if not isinstance(ends, dict):
+            ends = {}
+        fresh: dict[str, Any] = {}
+        for key, value in ends.items():
+            if not isinstance(value, dict):
+                continue
+            stamp = _parse_waiting_stamp(value.get("at"))
+            if stamp and (now - stamp).total_seconds() <= TURN_END_TTL_SECONDS:
+                fresh[key] = value
+        fresh[session_id] = {"at": now.isoformat(), "tool": tool, "cwd": cwd}
+        if len(fresh) > MAX_TURN_END_SIGNALS:
+            fresh = dict(sorted(fresh.items(), key=lambda item: str(item[1].get("at") or ""), reverse=True)[:MAX_TURN_END_SIGNALS])
+        data["session_turn_ends"] = fresh
+        _save(data)
+
+
+def session_turn_ends() -> dict[str, dict[str, Any]]:
+    """Latest turn-end per session; empty when the store cannot be read."""
+    try:
+        data = _load()
+    except (StateReadError, OSError):
+        return {}
+    ends = data.get("session_turn_ends")
+    if not isinstance(ends, dict):
+        return {}
+    return {str(key): value for key, value in ends.items() if isinstance(value, dict) and value.get("at")}
 
 
 def record_outcome(session_id: str, outcome: str, note: str | None = None) -> dict[str, Any]:
