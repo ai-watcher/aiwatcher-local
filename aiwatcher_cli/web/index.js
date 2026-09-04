@@ -99,10 +99,19 @@ function renderHandoffDecisionRows(decisions) {
             ? decision.proof_reason || decision.outcome || decision.inferred_outcome || decision.proof_confidence
             : decision.outcome || decision.inferred_outcome);
       return specific ? `<br><span class="sub">${esc(specific)}</span>` : '';
-    })()}${decision.proof_evidence ? `<br><span class="sub">${esc(decision.proof_evidence.label)} · ${esc(decision.proof_evidence.commits)} commits · ${esc(decision.proof_evidence.tests)} tests</span>` : ''}</td>
+    })()}${decision.proof_evidence ? `<br><span class="sub">${esc(decision.proof_evidence.label)} · ${esc(decision.proof_evidence.commits)} commits · ${esc(decision.proof_evidence.tests)} tests</span>` : ''}${renderRestartMeasurement(decision.restart_measurement)}</td>
     <td><span class="sub">source</span> ${esc(decision.source_session_id || decision.session_id || 'unknown')}<br><span class="sub">next</span> ${esc(decision.next_session_id || 'waiting')}</td>
     <td>${decision.next_session_id ? `<button class="row-action" onclick="selectSession('${esc(decision.next_session_id)}')">Inspect next</button>` : decision.source_session_id ? `<button class="row-action" onclick="selectSession('${esc(decision.source_session_id)}')">Inspect source</button>` : ''}</td>
   </tr>`).join('');
+}
+// The per-turn before/after. Measured rows get the sentence; a filling
+// window says how far along it is; nothing is printed for a decision that
+// was not a restart.
+function renderRestartMeasurement(m) {
+  if (!m || m.status === 'not_a_restart') return '';
+  if (m.status === 'measured') return `<br><span class="sub restart-measured">${esc(m.label)}</span>`;
+  if (m.status === 'measuring') return `<br><span class="sub">Before/after: ${esc(m.after_turns_so_far)} of ${esc(m.window_turns)} turns after the restart so far.</span>`;
+  return `<br><span class="sub">Before/after: ${esc(m.reason || 'not measured')}</span>`;
 }
 function openReceipt(receiptId) {
   const receipt = receiptCache.find(item => item.id === receiptId);
@@ -3200,6 +3209,22 @@ function renderReport(report) {
       </div>
     </div>`);
   }
+  if (digest.fresh_starts) {
+    const f = digest.fresh_starts;
+    const cut = f.median_tokens_per_turn_change_pct;
+    sections.push(`<div class="detail-section">
+      <h2>Fresh Start restarts</h2>
+      ${f.measurable
+        ? `<div class="mini-grid">
+            <div class="mini"><span class="label">Taken</span><strong>${esc(f.taken)}</strong></div>
+            <div class="mini"><span class="label">Measured</span><strong>${esc(f.measured)}</strong></div>
+            <div class="mini"><span class="label">Tokens per turn after</span><strong>${cut > 0 ? `${esc(cut)}% fewer` : `${esc(Math.abs(cut))}% more`}</strong></div>
+            <div class="mini"><span class="label">API value per turn after</span><strong>${f.median_cost_per_turn_change_pct == null ? '—' : f.median_cost_per_turn_change_pct > 0 ? `${esc(f.median_cost_per_turn_change_pct)}% less` : `${esc(Math.abs(f.median_cost_per_turn_change_pct))}% more`}</strong></div>
+          </div>
+          <p class="sub">Median across measured restarts: the last 5 turns before each restart against the first 5 after it, on the same work. Measured, not estimated.${f.measuring ? ` ${esc(f.measuring)} still filling the after window.` : ''}${f.unlinked ? ` ${esc(f.unlinked)} not linked to a follow-up session.` : ''}</p>`
+        : `<p class="sub">${esc(f.reason || 'Not measured.')}${f.taken ? ` Taken: ${esc(f.taken)}${f.measuring ? `, ${esc(f.measuring)} still filling the after window` : ''}${f.unlinked ? `, ${esc(f.unlinked)} not linked to a follow-up session` : ''}.` : ''}</p>`}
+    </div>`);
+  }
   if (digest.highest_cost_useful_session) {
     const h = digest.highest_cost_useful_session;
     sections.push(`<div class="detail-section">
@@ -4108,7 +4133,13 @@ function taskInterventionLabel(task) {
         : row.decision === 'auto_brief_headless' ? 'brief added (headless)'
         : `brief ${row.decision === 'brief_edited' ? 'edited' : 'accepted'}${Number.isFinite(row.score) && Number.isFinite(row.selected_score) ? ` · risk ${row.score} → ${row.selected_score}` : ''}`);
     } else if (row.kind === 'fresh_start') {
-      parts.push(`Fresh Start taken${row.link_status === 'linked' ? '' : row.link_status === 'waiting' ? ' · next session not seen yet' : row.link_status === 'ambiguous' ? ' · next session unclear' : ''}`);
+      const m = row.measurement || {};
+      const detail = m.status === 'measured' && m.tokens_per_turn_change_pct != null
+        ? ` · ${m.tokens_per_turn_change_pct > 0 ? `${m.tokens_per_turn_change_pct}% fewer` : `${Math.abs(m.tokens_per_turn_change_pct)}% more`} tokens per turn after`
+        : m.status === 'measuring' ? ` · measuring (${m.after_turns_so_far || 0} of ${m.window_turns || 5} turns after)`
+        : row.link_status === 'waiting' ? ' · next session not seen yet'
+        : row.link_status === 'ambiguous' ? ' · next session unclear' : '';
+      parts.push(`Fresh Start taken${detail}`);
     }
   }
   // Collapse repeats: "brief added silently ×3" reads; three copies do not.

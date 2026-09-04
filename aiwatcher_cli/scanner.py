@@ -401,13 +401,20 @@ def segment_session_by_prompt(source_path: str | None, *, max_chars: int = 2000)
                             "at": obj.get("timestamp") or obj.get("createdAt"),
                             "cost_usd": 0.0,
                             "tokens": 0,
+                            "cache_read_tokens": 0,
                             "tool_calls": 0,
                             "events": 0,
+                            "compacted": False,
                         }
                         segments.append(current)
                         continue
                 if current is None:
                     continue
+                # Claude Code marks a context compaction with a system line; the
+                # turn it lands in is flagged so a before/after comparison can
+                # say the tool already shrank the context on its own.
+                if (obj.get("type") == "system" and obj.get("subtype") == "compact_boundary") or obj.get("isCompactSummary") is True:
+                    current["compacted"] = True
                 tokens = _anthropic_usage(message.get("usage") or obj.get("usage") or {})
                 model = message.get("model") or obj.get("model")
                 current["cost_usd"] = float(current["cost_usd"]) + estimate_cost(
@@ -420,6 +427,7 @@ def segment_session_by_prompt(source_path: str | None, *, max_chars: int = 2000)
                     when=_parse_ts(obj.get("timestamp") or obj.get("createdAt")),
                 )
                 current["tokens"] = int(current["tokens"]) + _billed_input(tokens) + tokens["output"]
+                current["cache_read_tokens"] = int(current["cache_read_tokens"]) + int(tokens["cache_read"])
                 current["events"] = int(current["events"]) + 1
                 content = message.get("content")
                 if isinstance(content, list):
@@ -522,8 +530,10 @@ def segment_codex_session_by_prompt(source_path: str | None, *, max_chars: int =
                         "at": row.get("timestamp"),
                         "cost_usd": 0.0,
                         "tokens": 0,
+                        "cache_read_tokens": 0,
                         "tool_calls": 0,
                         "events": 0,
+                        "compacted": False,
                     }
                     segments.append(current)
                     continue
@@ -544,6 +554,7 @@ def segment_codex_session_by_prompt(source_path: str | None, *, max_chars: int =
                 event_input = int(last.get("input_tokens") or 0)
                 event_output = int(last.get("output_tokens") or 0)
                 current["tokens"] = int(current["tokens"]) + event_input + event_output
+                current["cache_read_tokens"] = int(current["cache_read_tokens"]) + int(last.get("cached_input_tokens") or 0)
                 current["cost_usd"] = float(current["cost_usd"]) + estimate_cost(
                     model, event_input, event_output, when=_parse_ts(row.get("timestamp"))
                 )

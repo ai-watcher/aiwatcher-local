@@ -1846,3 +1846,4 @@
     .task-turns-foot { max-width: 760px; }
     .task-pr { font-size: var(--fs-2); font-weight: var(--fw-med); color: var(--success); text-decoration: none; white-space: nowrap; }
     .task-pr:hover { text-decoration: underline; }
+    .restart-measured { color: var(--text-bright); }

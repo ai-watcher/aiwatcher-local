@@ -96,6 +96,7 @@ from .outcome_evidence import VALID_EVIDENCE_OUTCOMES, build_outcome_evidence, e
 from .local_state import dismiss_first_run, first_run_dismissed_at
 from .ledger import build_ledger
 from .pull_requests import list_pull_requests
+from .restart_measure import measure_restart, summarize_restarts
 from .scanner import _git_root
 from .tasks import build_tasks, find_fresh_boundaries
 from .ledger import (
@@ -1315,6 +1316,26 @@ def build_tasks_view(days: int = 7) -> dict[str, object]:
         now=now,
     )
     tasks = list(built["tasks"])
+    rows_by_id = {row.session_id: row for row in rows}
+    for task in tasks:
+        for intervention in task.get("interventions", []):
+            if intervention.get("kind") != "fresh_start":
+                continue
+            decision = {
+                "decision": intervention.get("decision"),
+                "created_at": intervention.get("at"),
+                "next_session_correlation": {"status": intervention.get("link_status")},
+            }
+            next_id = intervention.get("next_session_id")
+            measurement = measure_restart(
+                decision=decision,
+                source=rows_by_id.get(str(task["session_id"])),
+                next_session=rows_by_id.get(str(next_id)) if isinstance(next_id, str) else None,
+            )
+            intervention["measurement"] = {
+                key: measurement.get(key)
+                for key in ("status", "reason", "label", "tokens_per_turn_change_pct", "cost_per_turn_change_pct", "after_turns_so_far", "window_turns", "compacted_before")
+            }
     # Q: how many pieces of work did you start in this window? Count, this window.
     # Q: how many prompts does one piece of work take you? Median over those tasks.
     # Q: how many tokens does one piece of work cost you? Median, billed input + output.
@@ -2316,6 +2337,20 @@ def _recommend_weekly_improvement(
     return "No urgent signal this window -- local usage looks healthy."
 
 
+def _fresh_start_digest(rows: list[LocalSession], days: int) -> dict[str, object]:
+    by_id = {row.session_id: row for row in rows}
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    measurements = []
+    for decision in recent_handoff_decisions(limit=200):
+        taken_at = _parse_iso_datetime(decision.get("created_at"))
+        if taken_at is None or taken_at < cutoff:
+            continue
+        source_id = str(decision.get("source_session_id") or decision.get("session_id") or "")
+        next_id = decision.get("next_session_id") if isinstance(decision.get("next_session_id"), str) else ""
+        measurements.append(measure_restart(decision=decision, source=by_id.get(source_id), next_session=by_id.get(next_id)))
+    return summarize_restarts(measurements)
+
+
 def build_weekly_digest(days: int = 7) -> dict[str, object]:
     """P1-5 (S-26): richer weekly signals layered onto build_report's plain totals --
     outcome breakdown, highest-cost useful session, top sessions, loop/runaway
@@ -2455,6 +2490,10 @@ def build_weekly_digest(days: int = 7) -> dict[str, object]:
         },
         "survival": survival,
         "recommendation": recommendation,
+        # Q: when you took a Fresh Start, what did it do to the cost of a turn?
+        # Median per-turn change across restarts measured in this window; a
+        # window with no measured restart says so instead of printing 0%.
+        "fresh_starts": _fresh_start_digest(rows, days),
     }
 
 
@@ -3950,6 +3989,10 @@ def _handoff_decision_rows(
             "inferred_outcome": next_evidence.get("inferred_outcome") if isinstance(next_evidence, dict) else None,
             "proof_evidence": proof_evidence,
             "observed_followup": observed_followup,
+            # The per-turn before/after: last 5 turns before the restart vs the
+            # first 5 after it, on the same work. Measured, not estimated, and
+            # "measuring" until the after window fills.
+            "restart_measurement": measure_restart(decision=row, source=source_session, next_session=next_session),
         })
     return rows
 
