@@ -332,28 +332,6 @@ Command awareness follows the same loop:
 - **Improve:** the Console shows whether a tool is command-protected,
   warn-only, observed-only, or unsupported so setup gaps are obvious.
 
-### Optional AI Assist
-
-AIWatcher Local does not need an OpenAI, Anthropic, or local-model key to be
-useful. The default mode is **Local rules only**: prompt gates, Fresh Start,
-session health, receipts, spend, and outcomes are all computed from local
-metadata and deterministic rules.
-
-If you want model help later, open **Settings -> AI Assist** and choose one of
-three modes:
-
-- **Local rules only:** no model calls and no extra AI spend.
-- **Local model assist:** use a model runtime already on your machine, such as
-  Ollama, LM Studio, or llama.cpp. AIWatcher detects availability but does not
-  download model weights.
-- **Cloud key assist:** use your own `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for
-  explicit, confirmed workflows only. AIWatcher reads keys from the environment
-  and does not store them in local state.
-
-AI Assist is deliberately aimed at high-leverage workflows first: improving a
-Fresh Start brief and tightening a broad Prompt Plan. Ask AIWatcher remains a
-local evidence navigator until a stronger user need is proven.
-
 The Console tabs are:
 
 - **Home:** the few actions most likely to save context, reduce rework, or

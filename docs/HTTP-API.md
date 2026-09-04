@@ -135,7 +135,6 @@ Start test flow. `/api/update-status` checks the installed source checkout
 against GitHub when the dashboard asks for it and reports whether a clean
 fast-forward is available. The top-bar update badge uses this route for
 low-frequency status checks and user-triggered refreshes.
-
 `POST` — `/api/second-opinion` runs the Plan screen's Stage 2 analysis: it
 spawns the user's own agent CLI as a throwaway sibling process in
 `<project>/.aiwatcher/analyst/`. Claude Code and Codex can both host it, and
@@ -164,10 +163,6 @@ been seen so it does not return (no body; the timestamp is the server's), `/api/
 snoozes a non-blocking companion reminder, and
 `/api/ambient-intervention-action` records the native companion lifecycle
 (`displayed`, `acted`, `snoozed`, `dismissed`, or `failed`).
-`/api/ai-assist-config` saves the optional AI Assist mode. Supported modes are
-`off`, `local`, and `cloud`; source access is `metadata_only`, `prompt_opt_in`,
-or `source_opt_in`. Provider secrets are not accepted in this payload; cloud
-keys are read from `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` at runtime.
 `/api/runtime-return` asks AIWatcher to open the safest available return target
 for a local session: exact process attachment when a host exposes enough
 metadata, otherwise app/workspace return, otherwise a Fresh Start fallback.

@@ -1669,30 +1669,6 @@
     .handoff-cta h4 { margin: 0; font-size: var(--fs-2); }
     .handoff-cta p { font-size: var(--fs-2); }
     .handoff-cta .btn-primary { width: fit-content; }
-    .ai-assist-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, .8fr); gap: var(--sp-3); }
-    .ai-assist-panel {
-      border: 1px solid var(--line);
-      border-radius: var(--r-2);
-      background: rgba(var(--well-rgb), .28);
-      padding: 14px;
-      display: grid;
-      gap: var(--sp-2);
-      min-width: 0;
-    }
-    .ai-assist-panel label { display: grid; gap: var(--sp-1); min-width: 0; }
-    .ai-assist-panel input, .ai-assist-panel select {
-      width: 100%;
-      border: 1px solid var(--line-strong);
-      border-radius: var(--r-2);
-      background: var(--ground-deep);
-      color: var(--text);
-      padding: 9px 10px;
-      font: inherit;
-    }
-    .ai-assist-panel .check-row { display: flex; align-items: center; gap: var(--sp-2); color: var(--text-quiet); }
-    .ai-assist-panel .check-row input { width: 16px; height: 16px; accent-color: var(--blue); }
-    .ai-assist-workflow { padding-top: 10px; border-top: 1px solid var(--line); }
-    .ai-assist-workflow p { margin-top: 4px; font-size: var(--fs-2); color: var(--muted); }
     .handoff-form {
       margin-top: 14px;
       padding: 14px;
