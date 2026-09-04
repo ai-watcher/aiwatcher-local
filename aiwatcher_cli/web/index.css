@@ -1603,6 +1603,7 @@
       background: var(--blue-soft);
     }
     .settings-panel { display: grid; gap: var(--sp-3); }
+    .settings-panel[hidden] { display: none; }
     .settings-card {
       border: 1px solid var(--line);
       border-radius: var(--r-2);
