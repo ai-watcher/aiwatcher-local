@@ -118,9 +118,27 @@ change without a deprecation period.
 
 `GET` — `/api/health`, `/api/summary`, `/api/companion-state`,
 `/api/companion-scan`, `/api/sessions`, `/api/session`,
-`/api/session-summary`, `/api/project`, `/api/report`, `/api/journal`,
+`/api/session-summary`, `/api/project`, `/api/tasks`, `/api/report`, `/api/journal`,
 `/api/handoff-basic`, `/api/handoff`, `/api/handoff-demo`,
 `/api/context-health`, `/api/ambient-intervention`
+
+`/api/tasks?days=N` returns each session in the window split into tasks —
+prompt-bounded runs of work — with turns, tokens, API value, tool calls, the
+commits that landed during each, and what AIWatcher changed (an applied brief,
+a Fresh Start taken). Task labels are the first words of the user's own prompts
+and are served for review, not persisted. `POST /api/task-boundary`
+(`{"session_id", "turn", "boundary": true|false}`) saves a split or merge
+correction for one turn; `POST /api/task-verdict`
+(`{"task_id", "verdict": "done"|"not_done", "session_id"?}`) saves the answer to
+"finished?" for one task. `POST /api/task-ask` (`{"task_id", "answer":
+"done"|"not_done"|"same_task"|"dismissed"}`) is the Companion bar's version of
+the same question: it answers the pending ask the bar showed, and mirrors the
+answer into a verdict (done / not done) or a merge (same task). The
+`/api/companion-state` `task_finished` state carries `task_id`, `task_label`,
+`task_turns`, `task_tokens`, `task_cost_usd` and `task_tool_calls` for it, and
+`POST /api/companion-skip` with `state: "task_finished"` is the bar's "Same"
+button. Together with `/api/task-boundary` and `/api/task-verdict` these are
+the only task data written to local state.
 
 `/api/ambient-intervention` returns the content-free local signal metadata
 needed to keep the browser fallback consistent with the native companion.

@@ -94,6 +94,7 @@
     <button class="nav-tab" data-view="insights" onclick="showView('insights')">Improve</button>
     <button class="nav-tab" data-view="projects" onclick="showView('projects')">Projects</button>
     <button class="nav-tab nav-sub" data-view="sessions" onclick="showView('sessions')">Sessions</button>
+    <button class="nav-tab nav-sub" data-view="tasks" onclick="showView('tasks')">Tasks</button>
     <button class="nav-tab" data-view="setup" onclick="showView('setup')">Settings</button>
   </nav>
 
@@ -287,6 +288,42 @@
         </tr></thead>
         <tbody id="sessionRows"></tbody>
       </table></div>
+    </div>
+  </section>
+
+  <!-- Tasks: each session split into the pieces of work it held. A session is a
+       unit of tooling; the unit people reason about is "review the PR", then
+       "now fix the pricing table", usually inside one thread. Boundaries are
+       found by rules over the prompt text and every row says how sure the
+       rules were; the user's merge/split corrections override them. -->
+  <section id="view-tasks" class="view" hidden>
+    <div class="card">
+      <div class="section-title">
+        <div><h2>Tasks</h2><p>Every session in this window, split into the pieces of work it held. Task labels are the first words of your own prompts, shown for your review only, never uploaded.</p></div>
+        <span class="note-chip local">Local only</span>
+      </div>
+      <section class="grid kpis task-kpis" id="taskSummary"></section>
+      <div class="task-toolbar">
+        <span class="receipt-note" id="taskResultsNote"></span>
+        <span class="receipt-note task-hint" id="taskHint">Tick two neighbouring tasks in one session to merge them. Open a task to split it at a turn.</span>
+        <button class="btn-quiet" id="taskMergeBtn" onclick="mergeSelectedTasks()" disabled>Merge selected</button>
+      </div>
+      <div class="table-wrap"><table class="task-table">
+        <thead><tr>
+          <th></th>
+          <th>Task</th>
+          <th class="num">Turns</th>
+          <th class="num">Tokens</th>
+          <th class="num">API value</th>
+          <th class="num">Tool calls</th>
+          <th>Milestones</th>
+          <th>AIWatcher did</th>
+          <th>Detected</th>
+          <th>Finished?</th>
+        </tr></thead>
+        <tbody id="taskRows"></tbody>
+      </table></div>
+      <p class="receipt-note" id="taskFootnote"></p>
     </div>
   </section>
 

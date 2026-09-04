@@ -44,6 +44,19 @@ from .metrics import (
     replayed_context_cost,
 )
 from .local_state import (
+    VALID_TASK_ASK_ANSWERS,
+    VALID_TASK_VERDICTS,
+    answer_task_ask,
+    open_task_ask,
+    record_task_ask,
+    record_task_boundary,
+    record_task_verdict,
+    recent_handoff_decisions,
+    recent_interventions,
+    session_turn_ends,
+    task_ask_for,
+    task_boundary_overrides,
+    task_verdicts,
     session_waiting_signals,
     COMMAND_GATE_BLOCKED_DECISIONS,
     MAX_COMMAND_DECISIONS_STORED,
@@ -81,6 +94,10 @@ from .local_state import (
 )
 from .outcome_evidence import VALID_EVIDENCE_OUTCOMES, build_outcome_evidence, evidence_for_sessions
 from .local_state import dismiss_first_run, first_run_dismissed_at
+from .ledger import build_ledger
+from .pull_requests import list_pull_requests
+from .scanner import _git_root
+from .tasks import build_tasks, find_fresh_boundaries
 from .ledger import (
     UNBANKED_OUTSIDE_REPO,
     Ledger,
@@ -1193,6 +1210,165 @@ def _session_row_json(
 
 
 SESSION_SEARCH_RESULT_LIMIT = 50
+
+
+# Task count per live session from the previous Companion poll. Process-local
+# on purpose: a fresh server sets its baseline on the first look and asks about
+# nothing that happened before it was watching.
+_TASK_COUNT_BASELINE: dict[str, int] = {}
+TASK_ASK_LIVE_WINDOW = timedelta(minutes=30)
+
+
+def _task_finished_ask(session_rows: list[LocalSession], now: datetime) -> dict[str, object] | None:
+    """Detect a task that just closed in a live session, queue the ask, and return the one to show."""
+    live: list[LocalSession] = []
+    for row in session_rows:
+        stamp = row.updated_at
+        if stamp is None:
+            continue
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        if (now - stamp) <= TASK_ASK_LIVE_WINDOW:
+            live.append(row)
+    try:
+        for ask in find_fresh_boundaries(live, overrides=task_boundary_overrides(), baseline=_TASK_COUNT_BASELINE, now=now):
+            record_task_ask(ask)
+        return open_task_ask(now)
+    except Exception:  # a bookkeeping question must never take the bar down
+        return None
+
+
+GATE_ASK_DECISIONS = {"brief_accepted", "brief_edited", "allowed_original", "cancelled"}
+GATE_TAKEN_DECISIONS = {"brief_accepted", "brief_edited"}
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return float(ordered[middle])
+    return (ordered[middle - 1] + ordered[middle]) / 2
+
+
+def _answer_task_ask(task_id: str, answer: str) -> dict[str, object] | None:
+    """Apply a bar answer: Done / Not done become verdicts, Same becomes a merge, dismissed is just noted."""
+    ask = task_ask_for(task_id)
+    if ask is None:
+        return None
+    session_id = str(ask.get("session_id") or "") or None
+    if answer in {"done", "not_done"}:
+        record_task_verdict(task_id, answer, session_id)
+    elif answer == "same_task":
+        boundary_turn = ask.get("boundary_turn")
+        if session_id and isinstance(boundary_turn, int) and boundary_turn >= 2:
+            record_task_boundary(session_id, boundary_turn, False)
+    return answer_task_ask(task_id, answer)
+
+
+def build_tasks_view(days: int = 7) -> dict[str, object]:
+    """Tasks: the pieces of work inside every session in the window.
+
+    Scope of every figure here is "tasks started in this window, this machine".
+    Each summary figure states the question it answers beside it; anything the
+    data cannot answer is returned as unmeasurable with the reason, never as 0.
+    """
+    rows = rows_for_window(days, prefer_cache=True)
+    with _SUMMARY_CACHE_LOCK:
+        event_index_ready = _EVENT_INDEX_READY
+        events = [event for items in _EVENT_INDEX.values() for event in items] if _EVENT_INDEX_READY else []
+    now = datetime.now(timezone.utc)
+    changes: list[object] = []
+    commits_note: str | None = None
+    if event_index_ready and events:
+        try:
+            changes = list(build_ledger(events, days=days, now=now).changes)
+        except Exception as exc:  # git failures must not take the page down
+            commits_note = f"Commits could not be linked: {exc}"
+    else:
+        commits_note = "Commits are not linked yet: the local event index is still warming up."
+    # Pull requests come from `gh`, once per repository in the window. A repo
+    # where gh cannot answer is reported by name rather than counted as "no PRs".
+    repo_roots: dict[str, str] = {}
+    for row in rows:
+        if row.project_path and row.project_path not in repo_roots:
+            repo_roots[row.project_path] = _git_root(row.project_path) or row.project_path
+    pull_requests: list[dict[str, object]] = []
+    pr_notes: list[str] = []
+    for root in sorted(set(repo_roots.values())):
+        lookup = list_pull_requests(root)
+        if lookup.available:
+            pull_requests.extend(lookup.pull_requests)
+        elif lookup.reason and lookup.reason not in pr_notes:
+            pr_notes.append(lookup.reason)
+    built = build_tasks(
+        rows,
+        overrides=task_boundary_overrides(),
+        verdicts=task_verdicts(),
+        changes=changes,
+        pull_requests=pull_requests,
+        interventions=recent_interventions(limit=5000, days=days + 1),
+        handoffs=recent_handoff_decisions(limit=500),
+        repo_roots=repo_roots,
+        turn_ends=session_turn_ends(),
+        now=now,
+    )
+    tasks = list(built["tasks"])
+    # Q: how many pieces of work did you start in this window? Count, this window.
+    # Q: how many prompts does one piece of work take you? Median over those tasks.
+    # Q: how many tokens does one piece of work cost you? Median, billed input + output.
+    # No threshold on any of them: there is no external "right" number of turns, so
+    # they are shown against the user's own size buckets and nothing else.
+    turns = [float(task["turns"]) for task in tasks if task["turns"] > 0]
+    tokens = [float(task["tokens"]) for task in tasks if task["tokens"] > 0]
+    by_size: dict[str, float | None] = {}
+    if built["sized"]:
+        for size in ("small", "medium", "large"):
+            by_size[size] = _median([float(task["turns"]) for task in tasks if task["size"] == size and task["turns"] > 0])
+    # Q: when the gate asked, how often did you take the brief? Asks in this window.
+    # Silent briefs (context_added) never asked, so they are outside the ratio and
+    # reported beside it; blocked prompts were not a choice either.
+    window_interventions = recent_interventions(limit=5000, days=days)
+    decisions = [str(row.get("decision") or "") for row in window_interventions if row.get("intervention_type") == "prompt_preflight"]
+    asks = sum(1 for decision in decisions if decision in GATE_ASK_DECISIONS)
+    taken = sum(1 for decision in decisions if decision in GATE_TAKEN_DECISIONS)
+    gate: dict[str, object] = {
+        "measurable": asks > 0,
+        "asks": asks,
+        "taken": taken,
+        "ran_original": sum(1 for decision in decisions if decision == "allowed_original"),
+        "silent_briefs": sum(1 for decision in decisions if decision == "context_added"),
+        "blocked": sum(1 for decision in decisions if decision in {"blocked", "auto_block_headless"}),
+    }
+    if asks == 0:
+        gate["reason"] = "Prompt Gate did not ask you anything in this window."
+    sessions_with_tasks = {task["session_id"] for task in tasks}
+    return {
+        "days": days,
+        "generated_at": now.isoformat(),
+        "tasks": tasks,
+        "summary": {
+            "task_count": len(tasks),
+            "session_count": len(sessions_with_tasks),
+            "with_commit": sum(1 for task in tasks if task["commits"]),
+            "with_pull_request": sum(1 for task in tasks if task.get("pull_requests")),
+            "with_intervention": sum(1 for task in tasks if task["interventions"]),
+            "median_turns": _median(turns),
+            "median_tokens": _median(tokens),
+            "median_turns_by_size": by_size,
+            "sized": built["sized"],
+            "sizing_note": None if built["sized"] else "Size buckets need at least six tasks with usage in the window.",
+            "gate": gate,
+        },
+        "commits_linked": commits_note is None,
+        "commits_note": commits_note,
+        "pull_requests_note": " ".join(pr_notes) or None,
+        "twin_sessions_folded": built["twin_sessions_folded"],
+        "unmeasurable": built["unmeasurable"],
+        "privacy": "Task labels are the first words of your own prompts, shown here for your review. "
+                   "Only your merge/split corrections and finished? answers are saved locally.",
+    }
 
 
 def build_session_search(
@@ -6054,6 +6230,49 @@ def build_companion_state() -> dict[str, object]:
             if len(waiting_rows) == 1
             else "These sessions asked for permission and have done nothing since.",
         }
+    # A task that just closed because the developer moved on to something
+    # else, inside a session that is still live. Soft: it earns the primary and
+    # the compact layout but never the orange -- nothing is blocked. Below
+    # "waiting" because a blocked session is worth more than a bookkeeping
+    # question, above the away digest because the ask is fresh by construction.
+    ask = _task_finished_ask(session_rows, datetime.now(timezone.utc))
+    if ask:
+        ask_session = str(ask.get("session_id") or "")
+        turns = int(ask.get("turns") or 0)
+        tokens = int(ask.get("tokens") or 0)
+        tokens_label = f"{tokens / 1e6:.1f}M" if tokens >= 1e6 else f"{tokens // 1000}k" if tokens >= 1000 else str(tokens)
+        # Subtitle budget is 46 characters on both bars; the numbers are the
+        # part worth keeping, so the label is what gets trimmed.
+        figures = f" · {turns} turn{'s' if turns != 1 else ''} · {tokens_label}"
+        label = str(ask.get("label") or "that task")
+        room = max(8, 46 - len(figures))
+        subtitle = (label if len(label) <= room else label[: room - 1] + "…") + figures
+        return {
+            **base,
+            "state": "task_finished",
+            "label": "Task finished?",
+            "title": "Task finished?",
+            "subtitle": subtitle,
+            "task_id": str(ask.get("task_id") or ""),
+            "task_label": label,
+            "task_turns": turns,
+            "task_tokens": tokens,
+            "task_cost_usd": ask.get("cost_usd"),
+            "task_tool_calls": ask.get("tool_calls"),
+            "primary_label": "Done",
+            "primary_action": "task_ask",
+            "primary_session_id": ask_session,
+            "primary_url": "/?view=tasks",
+            "continue_label": "Not done",
+            "continue_action": "task_ask",
+            "continue_session_id": ask_session,
+            "skip_label": "Same",
+            "skip_state": "task_finished",
+            "skip_session_id": ask_session,
+            "skip_project": str(ask.get("project_path") or ""),
+            "detail": "AIWatcher thinks you moved on to something new. Done banks this task's numbers; "
+                      "Not done keeps it open; Same merges it into what you are doing now.",
+        }
 
     # The away digest sits between a blocked session (which still outranks
     # everything but the gate) and the single-finish notice: it is the same
@@ -6595,6 +6814,14 @@ class UIHandler(BaseHTTPRequestHandler):
                 "application/json; charset=utf-8",
             )
             return
+        if parsed.path == "/api/tasks":
+            params = parse_qs(parsed.query)
+            try:
+                days = max(1, min(90, int(params.get("days", ["7"])[0])))
+            except ValueError:
+                days = 7
+            self._send(200, json.dumps(build_tasks_view(days)), "application/json; charset=utf-8")
+            return
         if parsed.path == "/api/project":
             params = parse_qs(parsed.query)
             try:
@@ -6737,6 +6964,9 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/ambient-intervention-action",
             "/api/runtime-return",
             "/api/session-resume",
+            "/api/task-boundary",
+            "/api/task-verdict",
+            "/api/task-ask",
         }:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
@@ -6952,6 +7182,71 @@ class UIHandler(BaseHTTPRequestHandler):
                 return
             self._send(200, json.dumps(record), "application/json; charset=utf-8")
             return
+        if parsed.path == "/api/task-boundary":
+            session_id = str(payload.get("session_id", "")).strip()
+            turn = payload.get("turn")
+            boundary = payload.get("boundary")
+            if not session_id:
+                self._send(400, json.dumps({"error": "session_id is required"}), "application/json; charset=utf-8")
+                return
+            if not isinstance(turn, int) or isinstance(turn, bool):
+                self._send(400, json.dumps({"error": "turn must be an integer"}), "application/json; charset=utf-8")
+                return
+            if not isinstance(boundary, bool):
+                self._send(400, json.dumps({"error": "boundary must be true (split here) or false (merge with the task before)"}), "application/json; charset=utf-8")
+                return
+            try:
+                record = record_task_boundary(session_id, turn, boundary)
+            except ValueError as exc:
+                self._send(400, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")
+                return
+            except OSError as exc:
+                self._send(500, json.dumps({"error": f"Could not save task boundary: {exc}"}), "application/json; charset=utf-8")
+                return
+            self._send(200, json.dumps(record), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/task-ask":
+            task_id = str(payload.get("task_id", "")).strip()
+            answer = str(payload.get("answer", "")).strip()
+            if not task_id:
+                self._send(400, json.dumps({"error": "task_id is required"}), "application/json; charset=utf-8")
+                return
+            if answer not in VALID_TASK_ASK_ANSWERS:
+                self._send(400, json.dumps({"error": "answer must be done, not_done, same_task, or dismissed"}), "application/json; charset=utf-8")
+                return
+            try:
+                record = _answer_task_ask(task_id, answer)
+            except ValueError as exc:
+                self._send(400, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")
+                return
+            except OSError as exc:
+                self._send(500, json.dumps({"error": f"Could not save task answer: {exc}"}), "application/json; charset=utf-8")
+                return
+            if record is None:
+                self._send(404, json.dumps({"error": "no such task ask"}), "application/json; charset=utf-8")
+                return
+            self._send(200, json.dumps(record), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/task-verdict":
+            task_id = str(payload.get("task_id", "")).strip()
+            verdict = str(payload.get("verdict", "")).strip()
+            session_id = str(payload.get("session_id", "")).strip() or None
+            if not task_id:
+                self._send(400, json.dumps({"error": "task_id is required"}), "application/json; charset=utf-8")
+                return
+            if verdict not in VALID_TASK_VERDICTS:
+                self._send(400, json.dumps({"error": "verdict must be done or not_done"}), "application/json; charset=utf-8")
+                return
+            try:
+                record = record_task_verdict(task_id, verdict, session_id)
+            except ValueError as exc:
+                self._send(400, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")
+                return
+            except OSError as exc:
+                self._send(500, json.dumps({"error": f"Could not save task verdict: {exc}"}), "application/json; charset=utf-8")
+                return
+            self._send(200, json.dumps(record), "application/json; charset=utf-8")
+            return
         if parsed.path == "/api/first-run-dismissed":
             # No body: the only fact is that it happened, and the timestamp is
             # the server's rather than the page's.
@@ -7022,6 +7317,16 @@ class UIHandler(BaseHTTPRequestHandler):
                 )
                 return
             try:
+                if state == "task_finished":
+                    # The bar's third button: "Same" -- this was not a new task,
+                    # merge it into the one now running.
+                    current = open_task_ask()
+                    if current is None:
+                        self._send(400, json.dumps({"error": "No task question is open."}), "application/json; charset=utf-8")
+                        return
+                    record = _answer_task_ask(str(current.get("task_id") or ""), "same_task")
+                    self._send(200, json.dumps({"ok": True, "answer": record}), "application/json; charset=utf-8")
+                    return
                 if state == "proof_pending":
                     updated = mark_recent_handoff_receipts_viewed()
                     record_companion_skip(key="proof_pending", reason="User skipped the proof-pending Companion reminder.")

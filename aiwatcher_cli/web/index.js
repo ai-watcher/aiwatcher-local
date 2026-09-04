@@ -4075,13 +4075,218 @@ function showView(view) {
   });
   const days = document.getElementById('days').value;
   if (view === 'sessions' && sessionsLoadedForDays !== days) loadSessions();
+  if (view === 'tasks' && tasksLoadedForDays !== days) loadTasks();
   if (view === 'insights' && reportLoadedForDays !== days) loadReport();
   if (view === 'receipts') markFreshStartReceiptsViewed();
 }
 function changeWindow() {
   sessionsLoadedForDays = null;
+  tasksLoadedForDays = null;
   reportLoadedForDays = null;
   load();
+}
+
+// ---- Tasks -----------------------------------------------------------------
+// Rows are re-derived server-side on every load; the page holds only what it
+// last fetched plus which rows are ticked or opened. Every correction is a
+// POST followed by a reload, so the numbers on screen are always the server's.
+let tasksLoadedForDays = null;
+let taskRowsCache = [];
+let taskSelection = new Set();
+let taskExpanded = null;
+function taskWhen(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+function taskInterventionLabel(task) {
+  const parts = [];
+  for (const row of task.interventions || []) {
+    if (row.kind === 'prompt_brief') {
+      parts.push(row.decision === 'context_added' ? 'brief added silently'
+        : row.decision === 'auto_brief_headless' ? 'brief added (headless)'
+        : `brief ${row.decision === 'brief_edited' ? 'edited' : 'accepted'}${Number.isFinite(row.score) && Number.isFinite(row.selected_score) ? ` · risk ${row.score} → ${row.selected_score}` : ''}`);
+    } else if (row.kind === 'fresh_start') {
+      parts.push(`Fresh Start taken${row.link_status === 'linked' ? '' : row.link_status === 'waiting' ? ' · next session not seen yet' : row.link_status === 'ambiguous' ? ' · next session unclear' : ''}`);
+    }
+  }
+  // Collapse repeats: "brief added silently ×3" reads; three copies do not.
+  const counts = new Map();
+  parts.forEach(p => counts.set(p, (counts.get(p) || 0) + 1));
+  return [...counts.entries()].map(([p, n]) => n > 1 ? `${p} ×${n}` : p).join('; ');
+}
+function taskDetectedChip(task) {
+  if (task.corrected) return '<span class="signal-chip task-chip task-chip-user">you corrected</span>';
+  if (task.verdict) return '<span class="signal-chip task-chip task-chip-user">you confirmed</span>';
+  if (task.boundary_method === 'session_start') return '<span class="signal-chip task-chip">session start</span>';
+  return `<span class="signal-chip task-chip task-chip-${esc(task.confidence)}">rules · ${esc(task.confidence)}</span>`;
+}
+function taskVerdictCell(task) {
+  if (task.verdict === 'done') return '<span class="task-verdict task-verdict-done">Done</span>';
+  if (task.verdict === 'not_done') return '<span class="task-verdict">Not done</span>';
+  if (task.status === 'open') return '<span class="task-open">open</span>';
+  return '<span class="task-none">not asked</span>';
+}
+function taskVerdictButtons(task) {
+  return `<span class="task-verdict-ask"><span class="task-verdict-q">Finished?</span>
+    <button class="btn-quiet task-verdict-btn" onclick="event.stopPropagation(); setTaskVerdict('${esc(task.id)}', '${esc(task.session_id)}', 'done')">Done</button>
+    <button class="btn-quiet task-verdict-btn" onclick="event.stopPropagation(); setTaskVerdict('${esc(task.id)}', '${esc(task.session_id)}', 'not_done')">Not done</button></span>`;
+}
+function renderTaskSummary(data) {
+  const s = data.summary || {};
+  const tokens = tokenColumnFormatter([s.median_tokens || 0]);
+  const bySize = s.sized && s.median_turns_by_size
+    ? ['small', 'medium', 'large'].map(k => `${k} ${s.median_turns_by_size[k] == null ? '—' : s.median_turns_by_size[k]}`).join(' · ')
+    : esc(s.sizing_note || '');
+  const gate = s.gate || {};
+  const gateValue = gate.measurable ? `${gate.taken}<small> of ${gate.asks} asks</small>` : '<small>not asked</small>';
+  const gateSub = gate.measurable
+    ? `${gate.ran_original} ran the original · ${gate.silent_briefs} silent brief${gate.silent_briefs === 1 ? '' : 's'} · ${gate.blocked} blocked`
+    : esc(gate.reason || '');
+  document.getElementById('taskSummary').innerHTML = `
+    <div class="card metric-card metric-neutral"><div class="label">Tasks started</div><div class="value">${s.task_count || 0}</div><div class="sub">in ${s.session_count || 0} session${s.session_count === 1 ? '' : 's'} · ${s.with_commit || 0} reached a commit · ${s.with_pull_request || 0} opened a PR · ${s.with_intervention || 0} had AIWatcher change something</div></div>
+    <div class="card metric-card metric-neutral"><div class="label">Prompts per task</div><div class="value">${s.median_turns == null ? '—' : s.median_turns}<small> median</small></div><div class="sub">${bySize}</div></div>
+    <div class="card metric-card metric-neutral"><div class="label">Tokens per task</div><div class="value">${s.median_tokens == null ? '—' : tokens(s.median_tokens)}<small> median</small></div><div class="sub">billed input and output, per task</div></div>
+    <div class="card metric-card metric-neutral"><div class="label">Gate brief taken</div><div class="value">${gateValue}</div><div class="sub">${gateSub}</div></div>`;
+}
+function renderTaskRows() {
+  const rows = taskRowsCache;
+  const body = document.getElementById('taskRows');
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="10"><div class="empty">No tasks in this window: no session here has a readable prompt transcript yet.</div></td></tr>';
+    return;
+  }
+  const tokens = tokenColumnFormatter(rows.map(t => t.tokens));
+  let html = '';
+  let lastSession = null;
+  rows.forEach((task, index) => {
+    if (task.session_id !== lastSession) {
+      lastSession = task.session_id;
+      const title = task.session_title || (task.label + ' (opening line; session has no title)');
+      html += `<tr class="task-session-row"><td colspan="10"><b>${esc(title)}</b><span class="mono task-sid">${esc(task.session_id.slice(0, 8))}</span> · ${esc(task.tool)} · ${esc(taskWhen(task.started_at))}</td></tr>`;
+    }
+    const prs = task.pull_requests || [];
+    const prLabel = prs.length
+      ? prs.map(pr => `<a class="task-pr" href="${esc(pr.url || '#')}" target="_blank" rel="noopener" title="${esc(pr.title || '')}" onclick="event.stopPropagation()">PR #${esc(pr.number)}${pr.state === 'merged' ? ' ✓' : ''}</a>`).join(' ')
+      : '';
+    const commitLabel = task.commits && task.commits.length
+      ? `<span class="mono task-commits" title="${esc(task.commits.map(c => `${c.sha.slice(0, 7)} ${c.subject}`).join('\n'))}">${prs.length ? `${task.commits.length} commit${task.commits.length === 1 ? '' : 's'}` : task.commits.slice(0, 2).map(c => esc(c.sha.slice(0, 7))).join(' ') + (task.commits.length > 2 ? ` +${task.commits.length - 2}` : '')}</span>`
+      : '';
+    const commits = prLabel || commitLabel
+      ? `${prLabel}${prLabel && commitLabel ? ' · ' : ''}${commitLabel}`
+      : '<span class="task-none">—</span>';
+    const did = taskInterventionLabel(task);
+    const selected = taskSelection.has(task.id);
+    html += `<tr class="clickable task-row${selected ? ' task-row-selected' : ''}" onclick="toggleTaskExpand('${esc(task.id)}')">
+      <td class="task-check"><input type="checkbox" aria-label="Select task" ${selected ? 'checked' : ''} onclick="event.stopPropagation()" onchange="toggleTaskSelect('${esc(task.id)}', this.checked)"></td>
+      <td><span class="task-label" title="${esc(task.label)}">${esc(task.label)}</span><span class="task-when">${esc(taskWhen(task.started_at))}${task.size === 'unsized' ? '' : ` · <span class="task-size">${esc(task.size)}</span>`}</span></td>
+      <td class="mono num">${task.turns}</td>
+      <td class="mono num">${tokens(task.tokens)}</td>
+      <td class="mono num">${moneyLabel(task.cost_usd)}</td>
+      <td class="mono num">${task.tool_calls}</td>
+      <td>${commits}</td>
+      <td>${did ? `<span class="task-did">${esc(did)}</span>` : '<span class="task-none">nothing</span>'}</td>
+      <td>${taskDetectedChip(task)}</td>
+      <td>${taskVerdictCell(task)}</td>
+    </tr>`;
+    if (taskExpanded === task.id) {
+      const details = task.turn_details || [];
+      const turnTokens = tokenColumnFormatter(details.map(d => d.tokens));
+      html += `<tr class="task-turns-row"><td colspan="10"><div class="task-turns">${details.map((d, i) => `
+        <div class="task-turn">
+          <span class="mono task-turn-n">#${d.turn}</span>
+          <span class="task-turn-label">${esc(d.label)}</span>
+          <span class="mono num task-turn-tokens">${turnTokens(d.tokens)}</span>
+          ${i === 0 ? '<span></span>' : `<button class="btn-quiet task-split-btn" onclick="event.stopPropagation(); splitTaskAt('${esc(task.session_id)}', ${d.turn})">Split here</button>`}
+        </div>`).join('')}</div>${task.verdict ? '' : `<div class="task-turns-foot">${taskVerdictButtons(task)}</div>`}</td></tr>`;
+    }
+  });
+  body.innerHTML = html;
+  updateTaskMergeButton();
+}
+function updateTaskMergeButton() {
+  const ids = [...taskSelection];
+  const btn = document.getElementById('taskMergeBtn');
+  const hint = document.getElementById('taskHint');
+  let ok = false;
+  if (ids.length === 2) {
+    const a = taskRowsCache.findIndex(t => t.id === ids[0]);
+    const b = taskRowsCache.findIndex(t => t.id === ids[1]);
+    ok = a >= 0 && b >= 0 && Math.abs(a - b) === 1 && taskRowsCache[a].session_id === taskRowsCache[b].session_id;
+  }
+  btn.disabled = !ok;
+  hint.textContent = ids.length === 2 && !ok
+    ? 'Only neighbouring tasks in the same session can merge.'
+    : 'Tick two neighbouring tasks in one session to merge them. Open a task to split it at a turn.';
+}
+function toggleTaskSelect(id, checked) {
+  if (checked) taskSelection.add(id); else taskSelection.delete(id);
+  updateTaskMergeButton();
+}
+function toggleTaskExpand(id) {
+  taskExpanded = taskExpanded === id ? null : id;
+  renderTaskRows();
+}
+async function postTaskCorrection(path, body) {
+  const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!res.ok) {
+    let message = `Could not save (${res.status})`;
+    try { message = (await res.json()).error || message; } catch (e) { /* keep the status message */ }
+    document.getElementById('taskResultsNote').textContent = message;
+    return false;
+  }
+  tasksLoadedForDays = null;
+  await loadTasks();
+  return true;
+}
+async function mergeSelectedTasks() {
+  const ids = [...taskSelection];
+  if (ids.length !== 2) return;
+  const [a, b] = ids.map(id => taskRowsCache.find(t => t.id === id)).sort((x, y) => x.start_turn - y.start_turn);
+  if (!a || !b || a.session_id !== b.session_id) return;
+  taskSelection.clear();
+  taskExpanded = null;
+  await postTaskCorrection('/api/task-boundary', { session_id: b.session_id, turn: b.start_turn, boundary: false });
+}
+async function splitTaskAt(sessionId, turn) {
+  taskExpanded = null;
+  await postTaskCorrection('/api/task-boundary', { session_id: sessionId, turn, boundary: true });
+}
+async function setTaskVerdict(taskId, sessionId, verdict) {
+  await postTaskCorrection('/api/task-verdict', { task_id: taskId, session_id: sessionId, verdict });
+}
+let taskLoadToken = 0;
+async function loadTasks() {
+  const days = document.getElementById('days').value;
+  const token = ++taskLoadToken;
+  document.getElementById('taskResultsNote').textContent = 'Splitting local sessions into tasks...';
+  const res = await fetch(`/api/tasks?days=${encodeURIComponent(days)}`);
+  const data = await res.json();
+  if (token !== taskLoadToken) return;
+  taskRowsCache = data.tasks || [];
+  renderTaskSummary(data);
+  renderTaskRows();
+  const notes = [];
+  notes.push(`${taskRowsCache.length} task${taskRowsCache.length === 1 ? '' : 's'} in this window.`);
+  if (data.twin_sessions_folded) notes.push(`${data.twin_sessions_folded} forked session cop${data.twin_sessions_folded === 1 ? 'y' : 'ies'} folded into the original.`);
+  document.getElementById('taskResultsNote').textContent = notes.join(' ');
+  const foot = [];
+  if (data.commits_note) foot.push(data.commits_note);
+  if (data.pull_requests_note) foot.push(data.pull_requests_note);
+  if (data.unmeasurable && data.unmeasurable.length) {
+    foot.push(`${data.unmeasurable.length} session${data.unmeasurable.length === 1 ? '' : 's'} not split: ${[...new Set(data.unmeasurable.map(u => u.reason))].join('; ')}.`);
+  }
+  if (data.privacy) foot.push(data.privacy);
+  document.getElementById('taskFootnote').textContent = foot.join(' ');
+  tasksLoadedForDays = days;
+  // The first paint after the server starts can land before its event index is
+  // warm, which leaves every commit column empty. One retry, once, rather than
+  // a poll: when the index is ready the numbers stop changing.
+  if (!data.commits_linked && !loadTasks.retried) {
+    loadTasks.retried = true;
+    setTimeout(() => { if (tasksLoadedForDays === days) { tasksLoadedForDays = null; loadTasks(); } }, 15000);
+  }
 }
 let sessionSearchTimer = null;
 function debounceSessionSearch() {
@@ -4836,7 +5041,7 @@ document.addEventListener('keydown', event => { if (event.key === 'Escape') clos
   // Every view id, or a ?view= deep link at one of them silently does nothing.
   // test_deep_link_allowlist_covers_every_view pins this against the markup so
   // adding a section cannot quietly leave it unreachable by link.
-  if (requestedView && ['today','prompt','watch','sessions','control','projects','changes','receipts','insights','setup','first-run'].includes(requestedView)) {
+  if (requestedView && ['today','prompt','watch','sessions','tasks','control','projects','changes','receipts','insights','setup','first-run'].includes(requestedView)) {
     showView(requestedView);
     if (requestedView === 'prompt') {
       document.getElementById('promptInput').focus();
