@@ -12,6 +12,7 @@ import threading
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from urllib import error, request
 from unittest.mock import Mock, patch
@@ -188,6 +189,7 @@ class DashboardServeTests(unittest.TestCase):
 
         self.assertEqual(body["behind"], 2)
         self.assertTrue(body["can_apply"])
+        self.assertEqual(body["process_cwd"], str(Path.cwd().resolve()))
         check.assert_called_once_with(fetch=True)
 
     def test_update_apply_endpoint_returns_conflict_when_update_is_not_safe(self) -> None:
@@ -382,6 +384,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn('id="aiAssistSettingsMount"', ui.HTML)
         self.assertIn("showSettingsPanel", ui.HTML)
         self.assertIn('id="updateBanner"', ui.HTML)
+        self.assertIn('id="updateBannerLocation"', ui.HTML)
+        self.assertIn("Source checkout", ui.HTML)
+        self.assertIn("Launched from", ui.HTML)
         self.assertIn("handleUpdateBannerClick", ui.HTML)
         self.assertIn("restart: !!options.restart", ui.HTML)
         self.assertIn("scheduleHeaderUpdateCheck", ui.HTML)
