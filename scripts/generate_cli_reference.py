@@ -39,7 +39,7 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
     (
         "Getting started",
         "First run, detection, and health checks.",
-        ["start", "setup", "status", "doctor"],
+        ["start", "setup", "update", "status", "doctor"],
     ),
     (
         "Daily loop",
@@ -218,8 +218,9 @@ run in order. This page is for lookup.
 Run any command as `aiwatcher <command>` once installed, or
 `python -m aiwatcher_cli <command>` from a clone.
 
-Every command reads local history your AI tools already keep. Nothing is sent
-anywhere. See [Privacy](../README.md#privacy) for the full contract.
+Normal workflow commands read local history your AI tools already keep and send
+nothing anywhere. Commands that contact GitHub or a configured reviewer say so
+explicitly. See [Privacy](../README.md#privacy) for the full contract.
 """
 
 

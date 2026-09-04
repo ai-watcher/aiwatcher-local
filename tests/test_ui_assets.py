@@ -462,7 +462,7 @@ class TrimmedHomeTest(unittest.TestCase):
     # rather than record the first hop and rot.
     MOVED = {
         "Models and Tools": "view-projects",
-        "Privacy at a glance": "view-setup",
+        "Trust boundary": "view-setup",
         # Lowercase because it is no longer a tile label: the count folded into
         # the Fresh Start receipts subtitle, where it reads as a sentence
         # ("6 preflight decisions, last 7 days") rather than a floating card.
@@ -1389,20 +1389,16 @@ class SettingsTest(unittest.TestCase):
         self.assertNotIn("showView('coverage')", self.html)
         self.assertNotIn("showView('coverage')", self.js)
 
-    def _details_bodies(self):
-        setup = self.html[self.html.index('<section id="view-setup"'):]
-        return re.findall(r"<details.*?</details>", setup, re.S)
-
-    def test_setup_steps_open_on_demand(self):
-        # Recommendations about what to install next. Reference material you
-        # consult, so it folds.
+    def test_settings_steps_are_in_a_subpage(self):
+        # Recommendations about what to install next should not crowd the
+        # default Settings screen, but they should stay one click away.
         self.assertIn("setupSummary", self.html)
         self.assertIn("setupSummary", self.js)
-        self.assertTrue(
-            any("setupSummary" in d for d in self._details_bodies()),
-            "setup steps should still be behind a details")
+        self.assertIn('data-settings-panel="setup"', self.html)
+        self.assertIn('data-settings-panel-content="setup"', self.html)
+        self.assertIn("showSettingsPanel", self.js)
 
-    def test_coverage_is_not_behind_a_fold(self):
+    def test_coverage_is_in_the_trust_subpage(self):
         """What AIWatcher can see is the other half of what it promises not to
         do, and the half that admits limits -- Cursor is detected and not
         measured, and that has to be as visible as the reassurance above it.
@@ -1412,15 +1408,13 @@ class SettingsTest(unittest.TestCase):
         """
         self.assertIn("coverageSummary", self.html)
         self.assertIn("coverageSummary", self.js)
-        self.assertFalse(
-            any("coverageSummary" in d for d in self._details_bodies()),
-            "surface coverage is folded again; it qualifies the privacy card "
-            "and should render with it")
+        self.assertIn('data-settings-panel="trust"', self.html)
+        self.assertIn('data-settings-panel-content="trust"', self.html)
 
     def test_the_coverage_heading_carries_the_gated_count(self):
         # A bare "Surface coverage" lets a reader assume the tools listed are
         # the tools covered. The count is what stops that.
-        self.assertIn('<h2 id="coverageSummary"', self.html)
+        self.assertIn('id="coverageSummary"', self.html)
         self.assertIn("gated automatically", self.js)
 
     def test_summaries_count_what_the_payload_actually_carries(self):
@@ -2712,7 +2706,8 @@ class CorrectnessSweepTest(unittest.TestCase):
 
     def test_one_verb_opens_the_fresh_start_drawer(self):
         self.assertNotIn("Try Fresh Start demo", self.html)
-        self.assertIn("Try it with sample data", self.html)
+        self.assertNotIn("Test Fresh Start with sample data", self.html)
+        self.assertNotIn("Try it with sample data", self.html)
         self.assertNotIn('"primary_label": "Open Fresh Start"', inspect.getsource(ui))
         # Home keeps its own name because it copies rather than opens; naming it
         # "Start fresh" would be the label lying about the behaviour again.

@@ -1,4 +1,4 @@
-"""Local-only dashboard for AIWatcher Local."""
+"""Private-by-default dashboard for AIWatcher Local."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -129,6 +130,7 @@ from .scanner import (
     segment_session_by_prompt,
     surface_coverage,
 )
+from .updater import apply_updates, check_for_updates
 
 
 MAX_REQUEST_BYTES = 64 * 1024
@@ -155,6 +157,16 @@ SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
 # Bump whenever build_summary's payload shape changes, so a cache written by an
 # older build is discarded instead of rendering blank sections in a newer UI.
 SUMMARY_CACHE_SCHEMA_VERSION = 8
+
+
+def _restart_current_process() -> None:
+    os.execv(sys.executable, [sys.executable, *sys.argv])
+
+
+def schedule_dashboard_restart(delay_seconds: float = 0.8) -> None:
+    timer = threading.Timer(delay_seconds, _restart_current_process)
+    timer.daemon = True
+    timer.start()
 
 # POST endpoints whose only fact is that they happened, so they carry no JSON
 # body and are exempt from the content-type check. Named rather than written
@@ -2680,11 +2692,10 @@ def build_prompt_preflight(prompt: str, *, tool: str = "agent", cwd: str | None 
 # $0.028. Stated as a range so it does not read as a quote.
 PRIVACY_CLAIMS = [
     "Read-only local scan",
-    "No calls of ours. AIWatcher never sends your data anywhere.",
-    "Second opinion runs your own agent, on your machine, with your key.",
-    "It sees your prompt and your file paths. Never file contents, unless you turn "
-    "that on for a project.",
-    "No cloud upload unless you connect Cloud",
+    "No AIWatcher cloud call unless you connect or configure one.",
+    "Second opinion and AI Assist use your configured tools and keys.",
+    "Prompt and file-path access is workflow-scoped; file contents require opt-in.",
+    "Source stays local unless a connected workflow is explicitly enabled.",
 ]
 
 # Measured across both hosts, and the spread is real: the same prompt has
@@ -5926,7 +5937,7 @@ def build_companion_state() -> dict[str, object]:
         "control_url": "/?view=prompt",
         "watch_url": "/",
         "console_url": "/",
-        "detail": "Local-only. No prompt or source text is shown in the Companion.",
+        "detail": "Private by default. No prompt or source text is shown in the Companion.",
         "presence": _presence_block(presence_rows),
         # In the base payload, not only the finished state: the bubble's blue
         # badge must survive whatever state owns the bar, or a finished
@@ -6504,8 +6515,17 @@ class UIHandler(BaseHTTPRequestHandler):
             self._send(200, json.dumps({
                 "service": "aiwatcher-local",
                 "version": __version__,
-                "capabilities": ["preflight"],
+                "capabilities": ["preflight", "source-update"],
             }), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/update-status":
+            params = parse_qs(parsed.query)
+            fetch = params.get("fetch", ["1"])[0] != "0"
+            try:
+                payload = check_for_updates(fetch=fetch)
+            except (OSError, subprocess.SubprocessError) as exc:
+                payload = {"ok": False, "message": f"Could not check for updates: {exc}"}
+            self._send(200, json.dumps(payload), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/ambient-intervention":
             params = parse_qs(parsed.query)
@@ -6737,6 +6757,7 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/ambient-intervention-action",
             "/api/runtime-return",
             "/api/session-resume",
+            "/api/update-apply",
         }:
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
@@ -6760,6 +6781,20 @@ class UIHandler(BaseHTTPRequestHandler):
             response = build_prompt_preflight(prompt, tool=tool, cwd=cwd)
             status = 400 if response.get("error") else 200
             self._send(status, json.dumps(response), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/update-apply":
+            fetch = not bool(payload.get("no_fetch"))
+            restart = bool(payload.get("restart"))
+            try:
+                result = apply_updates(fetch=fetch)
+            except (OSError, subprocess.SubprocessError) as exc:
+                result = {"ok": False, "message": f"Could not apply update: {exc}"}
+            if result.get("ok") and result.get("applied") and restart:
+                result["restart_requested"] = True
+                result["message"] = "Updated. Restarting AIWatcher so the dashboard and Companion use the new code."
+                schedule_dashboard_restart()
+            status = 200 if result.get("ok") else 409
+            self._send(status, json.dumps(result), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/second-opinion":
             # Stage 2, on its own request. Stage 1 has already rendered by
@@ -7235,7 +7270,7 @@ def serve(
     server = ThreadingHTTPServer((host, selected_port), UIHandler)
     record_ui_server(host, selected_port)
     print(f"AIWatcher Local UI running at http://{host}:{selected_port}")
-    print("Local-only. No data leaves this machine. Press Ctrl+C to stop.")
+    print("Private by default. No data leaves this machine unless you configure it. Press Ctrl+C to stop.")
     started_resource = None
     if on_started:
         started_resource = on_started(host, selected_port)

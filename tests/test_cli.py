@@ -30,7 +30,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from aiwatcher_cli import cli, local_state, ui
+from aiwatcher_cli import cli, local_state, ui, updater
 from aiwatcher_cli.local_state import recent_decisions
 from aiwatcher_cli.outcome_evidence import OutcomeEvidence
 from aiwatcher_cli.processes import RuntimeProcess
@@ -350,6 +350,107 @@ class StartCommandCliTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("companion presence", detail)
         native_overlay.assert_not_called()
+
+
+class UpdateCommandCliTests(unittest.TestCase):
+    @staticmethod
+    def _git_result(args: list[str], returncode: int = 0, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=["git", *args], returncode=returncode, stdout=stdout, stderr=stderr)
+
+    def test_update_check_reports_available_updates_without_applying(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, ".git").mkdir()
+            calls: list[list[str]] = []
+
+            def fake_git(_repo: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+                calls.append(args)
+                if args == ["rev-parse", "--is-inside-work-tree"]:
+                    return self._git_result(args, stdout="true\n")
+                if args[:2] == ["fetch", "--quiet"]:
+                    return self._git_result(args)
+                if args == ["rev-parse", "--short", "HEAD"]:
+                    return self._git_result(args, stdout="abc123\n")
+                if args[:3] == ["rev-parse", "--verify", "--quiet"]:
+                    return self._git_result(args, stdout="origin/main\n")
+                if args == ["rev-list", "--count", "HEAD..origin/main"]:
+                    return self._git_result(args, stdout="2\n")
+                if args == ["rev-list", "--count", "origin/main..HEAD"]:
+                    return self._git_result(args, stdout="0\n")
+                if args == ["status", "--porcelain"]:
+                    return self._git_result(args, stdout="")
+                raise AssertionError(f"unexpected git call: {args}")
+
+            with (
+                patch.object(updater, "git_capture", side_effect=fake_git),
+                patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                result = cli.command_update(SimpleNamespace(
+                    repo=tmp,
+                    remote="origin",
+                    branch="main",
+                    apply=False,
+                    no_fetch=False,
+                ))
+
+        self.assertEqual(result, 0)
+        self.assertIn("2 update(s) available", stdout.getvalue())
+        self.assertIn("never changes files unless --apply", stdout.getvalue())
+        self.assertNotIn(["pull", "--ff-only", "origin", "main"], calls)
+
+    def test_update_apply_refuses_dirty_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, ".git").mkdir()
+            calls: list[list[str]] = []
+
+            def fake_git(_repo: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+                calls.append(args)
+                if args == ["rev-parse", "--is-inside-work-tree"]:
+                    return self._git_result(args, stdout="true\n")
+                if args[:2] == ["fetch", "--quiet"]:
+                    return self._git_result(args)
+                if args == ["rev-parse", "--short", "HEAD"]:
+                    return self._git_result(args, stdout="abc123\n")
+                if args[:3] == ["rev-parse", "--verify", "--quiet"]:
+                    return self._git_result(args, stdout="origin/main\n")
+                if args == ["rev-list", "--count", "HEAD..origin/main"]:
+                    return self._git_result(args, stdout="1\n")
+                if args == ["rev-list", "--count", "origin/main..HEAD"]:
+                    return self._git_result(args, stdout="0\n")
+                if args == ["status", "--porcelain"]:
+                    return self._git_result(args, stdout=" M README.md\n")
+                raise AssertionError(f"unexpected git call: {args}")
+
+            with (
+                patch.object(updater, "git_capture", side_effect=fake_git),
+                patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                result = cli.command_update(SimpleNamespace(
+                    repo=tmp,
+                    remote="origin",
+                    branch="main",
+                    apply=True,
+                    no_fetch=False,
+                ))
+
+        self.assertEqual(result, 2)
+        self.assertIn("Working tree has local changes", stdout.getvalue())
+        self.assertNotIn(["pull", "--ff-only", "origin", "main"], calls)
+
+    def test_update_explains_package_upgrade_when_not_git_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                result = cli.command_update(SimpleNamespace(
+                    repo=tmp,
+                    remote="origin",
+                    branch="main",
+                    apply=False,
+                    no_fetch=False,
+                ))
+
+        self.assertEqual(result, 2)
+        output = stdout.getvalue()
+        self.assertIn("is not a Git checkout", output)
+        self.assertIn("pipx upgrade aiwatcher-cli", output)
 
 
 class ProjectAttributionCliTests(unittest.TestCase):

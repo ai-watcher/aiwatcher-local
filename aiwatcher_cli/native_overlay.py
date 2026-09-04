@@ -375,7 +375,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         moreButton.bezelStyle = .rounded
         view.addSubview(moreButton)
 
-        statusLabel = NSTextField(labelWithString: "Local-only. Prompt/source content is not stored in this decision.")
+        statusLabel = NSTextField(labelWithString: "Private by default. Prompt/source content is not stored in this decision.")
         statusLabel.frame = NSRect(x: 452, y: 44, width: 196, height: 18)
         statusLabel.alignment = .right
         statusLabel.font = NSFont.systemFont(ofSize: 11)
@@ -3255,7 +3255,7 @@ def run_native_overlay(
         fill="x", pady=(12, 18), anchor="w"
     )
 
-    status = tk.StringVar(value="Local-only; auto-hides in 20 seconds")
+    status = tk.StringVar(value="Private by default; auto-hides in 20 seconds")
     button_row = ttk.Frame(frame, style="AIW.TFrame")
     button_row.pack(fill="x", pady=(0, 12))
 

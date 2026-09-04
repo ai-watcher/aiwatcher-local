@@ -32,23 +32,22 @@ is bigger than collection:
 
 ## Privacy Contract
 
-- Local-only by default.
+- Private by default.
 - Read-only.
-- No LLM API calls.
-- No phone-home telemetry.
+- No LLM API calls unless the user explicitly configures an optional reviewer,
+  enhancer, or connected workflow.
+- No phone-home telemetry by default.
 - No source-code or prompt-content storage in persisted summaries.
 - No cloud upload unless the user explicitly connects AIWatcher Enterprise.
 
 This trust boundary is the product. If AIWatcher Local cannot explain what it
 reads and why, it should not read it.
 
-One explicit exception to the prompt-content rule, stated precisely rather than
-implied away: `resume`/`handoff --include-prompt-excerpt` (off by default, a
-labeled opt-in in both the CLI and the dashboard) embeds your own highest-cost
-prompt from the session into the one-time brief you copy elsewhere. It is never
-written to the persisted local-state file — only into that ephemeral output —
-but it is real prompt text, and the docs should say so rather than let the
-blanket claim above cover it by omission.
+One explicit exception to the prompt-content rule: `resume`/`handoff
+--include-prompt-excerpt` is off by default, labeled as opt-in in both the CLI
+and the dashboard, and embeds the user's own highest-cost prompt from the
+session into the one-time brief they copy elsewhere. It is never written to the
+persisted local-state file, but it is real prompt text in that ephemeral output.
 
 ## Platform Support
 
@@ -95,6 +94,21 @@ aiwatcher today
 aiwatcher ui
 ```
 
+Before the PyPI release, early users can install without keeping a clone:
+
+```bash
+python -m pip install --upgrade git+https://github.com/ai-watcher/aiwatcher-local.git
+```
+
+Users who prefer isolated command-line apps can use:
+
+```bash
+pipx install git+https://github.com/ai-watcher/aiwatcher-local.git
+```
+
+After the PyPI release, `pipx install aiwatcher-cli` should become the
+recommended public install path.
+
 ## Run From This Repo
 
 Before a PyPI release you can run everything straight from a clone (Python 3.9+):
@@ -121,7 +135,9 @@ python -m aiwatcher_cli export --format json --level events --days 7
 python -m aiwatcher_cli ui
 ```
 
-`start` is a one-time local scan, not a long-running daemon.
+`start` performs the first local scan, starts the dashboard in the background,
+and starts the Companion by default. Use `--no-ui`, `--no-companion`, or
+`--no-presence` to narrow that startup behavior.
 
 ## Lifecycle Model
 
@@ -146,9 +162,10 @@ selected-prompt risk, observed usage, and outcomes. It does not store original
 or suggested prompt text. Comparisons to historical baselines are labeled as
 inferences, not guaranteed counterfactual savings.
 
-The canonical lifecycle requirements and scenario suite lives at
-[`docs/aiwatcher-scenario-tests.html`](aiwatcher-scenario-tests.html). Use it as
-the release checklist for Plan, Watch, Control, Prove, and Improve coverage.
+The canonical lifecycle requirements and scenario suite are owner-only release
+checks. This public repository keeps the generator and workflow documented in
+[`docs/README.md`](README.md) while keeping private scenario source data out of
+the OSS repo.
 
 When a session is inspected or confirmed, AIWatcher also stores a local
 privacy-safe evidence snapshot: commit SHAs, hashes of file paths/test
@@ -245,6 +262,40 @@ This is intentionally useful on its own, and it creates the local API contract
 for future extensions. Browser/editor integrations can call
 `POST /api/preflight` on the local AIWatcher server and show the same decision
 inside the user's current workflow.
+
+## Updates For Early Users
+
+There are three public install/update paths:
+
+1. **Published package:** `pipx install aiwatcher-cli`, then `pipx upgrade
+   aiwatcher-cli` when a new release lands.
+2. **GitHub package install:** `python -m pip install --upgrade
+   git+https://github.com/ai-watcher/aiwatcher-local.git`.
+3. **Contributor or early-adopter clone:** `git clone`, `python -m pip install
+   -e .`, then `aiwatcher update` to check GitHub and `aiwatcher update --apply`
+   to fast-forward a clean checkout.
+
+The source-checkout update path is deliberately conservative:
+
+- `aiwatcher update` fetches GitHub only when the user runs it.
+- It reports the number of updates available.
+- It refuses dirty or diverged checkouts.
+- It changes nothing unless `--apply` is passed.
+- After CLI applying, the user restarts with `aiwatcher start --open-ui`.
+
+The dashboard top bar calls the same check, shows `Up to date` or an
+updates-available badge, and applies a clean fast-forward in one click when the
+checkout is safe. The dashboard sends an explicit restart request only after a
+successful apply. Package installs get copyable `pipx`, `pip`, or GitHub package
+upgrade commands instead of pretending a source fast-forward is possible.
+
+Settings is organized as subpages:
+
+- **General:** Companion behavior and update details.
+- **AI Assist:** the mount point for optional local-model or user-key
+  configuration.
+- **Trust:** privacy boundary and surface coverage.
+- **Setup:** install and verification commands.
 
 ## The Wow Moment
 
@@ -406,7 +457,9 @@ What to check:
 
 ## Current MVP Limits
 
-- `start` is a one-time local scan, not a long-running daemon.
+- `start` covers the normal first-run product flow, and Settings can check or
+  apply source-checkout updates; automatic update polling/restart is still a
+  later layer.
 - Claude Code has the richest support today.
 - Codex per-session estimates require rollout `token_count` events. Desktop or
   older records that only expose cumulative totals remain visible but are not
@@ -454,4 +507,5 @@ The remaining OSS work completes the loop rather than adding more dashboards:
 6. Package the Codex integration as a plugin and add browser/editor companion
    extensions that call the local `/api/preflight` endpoint where true hooks are
    unavailable.
-7. Add `pipx` and Homebrew installation only after the workflow is stable.
+7. Add Homebrew installation only after package release and update behavior are
+   stable.

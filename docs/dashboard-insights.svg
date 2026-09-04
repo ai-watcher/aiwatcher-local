@@ -145,7 +145,7 @@
   <rect x="54" y="896" width="146" height="26" rx="13" fill="#0e2a22" stroke="#244134"/>
   <text x="127" y="914" font-size="11" fill="#9fe1cb" text-anchor="middle">Read-only local scan</text>
   <rect x="208" y="896" width="98" height="26" rx="13" fill="#0e2a22" stroke="#244134"/>
-  <text x="257" y="914" font-size="11" fill="#9fe1cb" text-anchor="middle">No LLM calls</text>
+  <text x="257" y="914" font-size="11" fill="#9fe1cb" text-anchor="middle">No LLM by default</text>
   <rect x="54" y="930" width="256" height="26" rx="13" fill="#0e2a22" stroke="#244134"/>
   <text x="182" y="948" font-size="11" fill="#9fe1cb" text-anchor="middle">No source/prompt content in summaries</text>
   <rect x="318" y="930" width="222" height="26" rx="13" fill="#0e2a22" stroke="#244134"/>

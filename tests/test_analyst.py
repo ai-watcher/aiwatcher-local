@@ -733,13 +733,13 @@ class PrivacyClaimTest(unittest.TestCase):
         from aiwatcher_cli import ui
         claims = " ".join(ui.PRIVACY_CLAIMS)
         self.assertNotIn("No LLM calls", claims)
-        self.assertIn("never sends your data anywhere", claims)
-        self.assertIn("your own agent", claims)
+        self.assertIn("No AIWatcher cloud call unless you connect or configure one", claims)
+        self.assertIn("your configured tools and keys", claims)
         # The contents claim has to carry its own exception now that there is
         # one. "Never file contents" full stop stopped being true the moment a
         # switch could turn it on.
-        self.assertIn("Never file contents", claims)
-        self.assertIn("unless you turn that on", claims)
+        self.assertIn("file contents require opt-in", claims)
+        self.assertIn("Source stays local unless", claims)
 
 
 class CacheKeyTest(unittest.TestCase):

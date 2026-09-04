@@ -591,6 +591,36 @@
     .btn-primary { background: var(--btn-bg); border-color: var(--btn-line); color: var(--on-accent); }
     .btn-primary:hover { background: var(--btn-bg-hover); border-color: var(--btn-line-hover); }
     .btn-quiet { background: transparent; border-color: var(--line); color: var(--text-bright); }
+    .update-banner {
+      display: inline-flex; align-items: center; justify-content: center; gap: var(--sp-2);
+      min-width: 142px; border-radius: var(--r-pill);
+      font-size: var(--fs-2); font-weight: var(--fw-bold);
+      font-variant-numeric: tabular-nums; white-space: nowrap;
+    }
+    .update-banner-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: currentColor; box-shadow: 0 0 0 3px rgba(var(--hairline-rgb), .10);
+    }
+    .update-banner.unknown, .update-banner.checking, .update-banner.package {
+      color: var(--on-brand);
+      border-color: rgba(var(--blue-rgb), .40);
+      background: var(--blue-soft);
+    }
+    .update-banner.current {
+      color: var(--on-success);
+      border-color: rgba(var(--green-rgb), .42);
+      background: var(--green-soft);
+    }
+    .update-banner.available {
+      color: var(--on-warning);
+      border-color: rgba(var(--amber-rgb), .48);
+      background: var(--amber-soft);
+    }
+    .update-banner.blocked, .update-banner.error {
+      color: var(--on-danger);
+      border-color: rgba(var(--red-rgb), .46);
+      background: var(--red-soft);
+    }
     .link-button {
       text-decoration: none;
       border: 1px solid var(--btn-line-quiet);
@@ -1541,10 +1571,41 @@
     .section-title { display: flex; justify-content: space-between; align-items: flex-end; gap: var(--sp-3); margin: 0 0 16px; }
     .section-title h2 { margin: 0; }
     .section-title p { font-size: var(--fs-2); }
+    .compact-title { margin-bottom: 10px; align-items: flex-start; }
     .mono { font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .settings-tabs {
+      display: flex; flex-wrap: wrap; gap: var(--sp-2);
+      margin: 0 0 var(--sp-4);
+      padding-bottom: var(--sp-3);
+      border-bottom: 1px solid var(--line);
+    }
+    .settings-tab {
+      min-height: 34px; padding: 7px 12px;
+      border-color: var(--line);
+      background: transparent;
+      color: var(--text-quiet);
+      border-radius: var(--r-pill);
+      font-size: var(--fs-2);
+    }
+    .settings-tab.active {
+      color: var(--on-brand);
+      border-color: rgba(var(--blue-rgb), .42);
+      background: var(--blue-soft);
+    }
+    .settings-panel { display: grid; gap: var(--sp-3); }
+    .settings-card {
+      border: 1px solid var(--line);
+      border-radius: var(--r-2);
+      padding: 14px;
+      background: rgba(var(--ink-mid-rgb), .62);
+    }
+    .settings-card h3 { margin-bottom: 8px; }
     .privacy-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-2); }
     .privacy-item { display: flex; align-items: center; gap: var(--sp-2); color: var(--text-quiet); padding: 10px 0; }
     .privacy-check { color: var(--green); font-weight: var(--fw-bold); }
+    .update-status { display: grid; gap: var(--sp-2); color: var(--text-quiet); }
+    .update-status strong { color: var(--text-bright); font-size: var(--fs-3); }
+    .update-status.warning strong { color: var(--amber); }
     .prompt-shell { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, .86fr); gap: var(--sp-4); align-items: start; }
     .prompt-box, .brief-box {
       width: 100%;

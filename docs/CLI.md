@@ -12,12 +12,13 @@ run in order. This page is for lookup.
 Run any command as `aiwatcher <command>` once installed, or
 `python -m aiwatcher_cli <command>` from a clone.
 
-Every command reads local history your AI tools already keep. Nothing is sent
-anywhere. See [Privacy](../README.md#privacy) for the full contract.
+Normal workflow commands read local history your AI tools already keep and send
+nothing anywhere. Commands that contact GitHub or a configured reviewer say so
+explicitly. See [Privacy](../README.md#privacy) for the full contract.
 
 ## Contents
 
-- [Getting started](#getting-started) -- `start`, `setup`, `status`, `doctor`
+- [Getting started](#getting-started) -- `start`, `setup`, `update`, `status`, `doctor`
 - [Daily loop](#daily-loop) -- `today`, `last`, `timeline`, `journal`, `sessions`, `changes`, `commit-receipt`, `outcome`, `report`, `tools`, `projects`
 - [Prompt review and launch](#prompt-review-and-launch) -- `preflight`, `codex`, `claude`
 - [Continuity](#continuity) -- `handoff`, `resume`, `open-session`, `return-session`, `log-decision`
@@ -65,6 +66,23 @@ aiwatcher setup
 ```
 
 Takes no arguments.
+
+### `aiwatcher update`
+
+Check for GitHub updates, and optionally fast-forward a source checkout
+
+```sh
+aiwatcher update [--apply] [--no-fetch] [--repo REPO]
+                 [--remote REMOTE] [--branch BRANCH]
+```
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--apply` | flag |  | Fast-forward the checkout when updates are available |
+| `--no-fetch` | flag |  | Compare against the last fetched remote state |
+| `--repo` | text |  | Git checkout to update; defaults to the installed AIWatcher source checkout |
+| `--remote` | text | `origin` | Git remote to check |
+| `--branch` | text | `main` | Remote branch to check |
 
 ### `aiwatcher status`
 
@@ -1210,7 +1228,7 @@ when the agent chooses to call it.
 
 ### `aiwatcher ui`
 
-Run the local-only AIWatcher dashboard
+Run the private-by-default AIWatcher dashboard
 
 ```sh
 aiwatcher ui [--host HOST] [--port PORT]

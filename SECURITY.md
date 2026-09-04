@@ -1,8 +1,9 @@
 # Security Policy
 
-AIWatcher Local is designed to be local-only and read-only. It does not make LLM
-API calls, does not phone home, and does not upload prompts or source code. If
-you believe any of these guarantees is violated, we want to hear from you.
+AIWatcher Local is designed to be private by default and read-only. It does not
+make LLM API calls, phone home, or upload prompts or source code unless the user
+explicitly configures a connected workflow or optional reviewer. If you believe
+these guarantees are violated, we want to hear from you.
 
 ## Reporting a vulnerability
 
