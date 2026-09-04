@@ -458,6 +458,8 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
         state = self._state(self._summary(), sessions=[self._session()], signals=self._signal())
         self.assertEqual(state["state"], "session_waiting")
         self.assertEqual(state["presence"]["waiting"], 1)
+        self.assertEqual(state["badge"]["count"], 1)
+        self.assertEqual(state["badge"]["tone"], "attention")
 
     def test_the_waiting_queue_is_preworded_capped_and_longest_first(self):
         sessions = [
@@ -480,6 +482,33 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
         self.assertEqual(first["project"], "myapp")
         self.assertEqual(first["waited_label"], "15m")
         self.assertEqual(first["url"], "/?session=s-long")
+
+    def test_passive_context_review_badge_matches_the_review_count(self):
+        health = []
+        for index in range(5):
+            health.append({
+                "session_id": f"s{index}",
+                "project_full": f"/repo/project-{index}",
+                "project": f"project-{index}",
+                "tool": "codex-cli",
+                "severity": "critical",
+                "can_handoff": True,
+                "estimated_replayed_context_tokens": 1000,
+            })
+        with patch.object(ui, "_foreground_matches_fresh_start_bubble", return_value=False):
+            state = self._state(self._summary(context_health=health), sessions=[])
+
+        self.assertEqual(state["state"], "context_review")
+        self.assertEqual(state["label"], "Context review")
+        self.assertEqual(state["primary_label"], "Review list")
+        self.assertIn("5 projects", state["subtitle"])
+        self.assertEqual(state["badge"]["count"], 5)
+        self.assertEqual(state["badge"]["tone"], "info")
+
+    def test_resting_state_with_no_badge_contract_shows_no_badge(self):
+        state = self._state(self._summary(), sessions=[])
+        self.assertEqual(state["state"], "watching")
+        self.assertIsNone(state["badge"])
 
     def test_queue_rows_carry_the_wants_bucket(self):
         # Joined from the hook's waiting signal: the closed-vocabulary phrase,

@@ -5958,6 +5958,7 @@ def build_companion_state() -> dict[str, object]:
         "console_url": "/",
         "detail": "Private by default. No prompt or source text is shown in the Companion.",
         "presence": _presence_block(presence_rows),
+        "badge": None,
         # In the base payload, not only the finished state: the bubble's blue
         # badge must survive whatever state owns the bar, or a finished
         # session vanishes from the glanceable surface the moment anything
@@ -6118,6 +6119,11 @@ def build_companion_state() -> dict[str, object]:
             "primary_session_id": session_id,
             "primary_url": f"/?session={quote(session_id, safe='')}" if session_id else "/",
             "waiting_sessions": queue,
+            "badge": {
+                "count": len(waiting_rows),
+                "tone": "attention",
+                "label": f"{len(waiting_rows)} waiting session{'s' if len(waiting_rows) != 1 else ''}",
+            },
             "detail": "This session asked for permission and has done nothing since."
             if len(waiting_rows) == 1
             else "These sessions asked for permission and have done nothing since.",
@@ -6151,6 +6157,11 @@ def build_companion_state() -> dict[str, object]:
             "skip_label": "Dismiss",
             "skip_state": "away_digest",
             "digest_rows": digest_rows,
+            "badge": {
+                "count": len(digest_rows),
+                "tone": "info",
+                "label": f"{len(digest_rows)} away item{'s' if len(digest_rows) != 1 else ''}",
+            },
             "detail": "Reconstructed from local records inside the gap. Dismiss clears this summary; the evidence stays in the dashboard.",
         }
 
@@ -6185,6 +6196,11 @@ def build_companion_state() -> dict[str, object]:
             "skip_label": "Skip",
             "skip_state": "session_finished",
             "skip_session_id": finished_id,
+            "badge": {
+                "count": len(finished_payload),
+                "tone": "info",
+                "label": f"{len(finished_payload)} finished session{'s' if len(finished_payload) != 1 else ''}",
+            },
             "detail": "This session was working a moment ago and has gone quiet -- likely a completed turn awaiting review.",
         }
 
@@ -6206,11 +6222,22 @@ def build_companion_state() -> dict[str, object]:
         if foreground_candidate is None:
             return {
                 **base,
-                "state": "watching",
-                "label": "Watching quietly",
+                "state": "context_review",
+                "label": "Context review",
                 "subtitle": f"{project_count} projects ready for context review in Console",
-                "primary_label": "Console",
+                "primary_label": "Review list",
+                "primary_action": "open_url",
                 "primary_url": "/?view=watch#contextHealth",
+                "skip_label": "Snooze",
+                "skip_state": "control_recommended_group",
+                "skip_project": "\n".join(project_lines),
+                "fresh_start_project_count": project_count,
+                "fresh_start_context_label": context_label,
+                "badge": {
+                    "count": project_count,
+                    "tone": "info",
+                    "label": f"{project_count} context review project{'s' if project_count != 1 else ''}",
+                },
                 "detail": "Fresh Start review is batched in Watch and only blinks while an affected AI surface is foreground.",
             }
         return {
@@ -6229,6 +6256,11 @@ def build_companion_state() -> dict[str, object]:
             "skip_project": "\n".join(project_lines),
             "fresh_start_project_count": project_count,
             "fresh_start_context_label": context_label,
+            "badge": {
+                "count": project_count,
+                "tone": "attention",
+                "label": f"{project_count} context review project{'s' if project_count != 1 else ''}",
+            },
             "control_url": "/?view=watch#contextHealth",
             "watch_url": "/?view=watch#contextHealth",
             "detail": "Choose which projects to Fresh Start, continue, or snooze in one batch.",
@@ -6321,7 +6353,11 @@ def build_companion_state() -> dict[str, object]:
                 "label": "Watching quietly",
                 "subtitle": subtitle,
                 "primary_label": "Console",
+                "primary_action": "open_url",
                 "primary_url": "/?view=watch#contextHealth",
+                "skip_label": "Snooze",
+                "skip_state": "control_recommended_group",
+                "skip_project": bubble_project,
                 "detail": "Fresh Start nudges only blink when the matching AI tool or terminal is foreground.",
             }
         return {
@@ -6432,6 +6468,11 @@ def build_companion_state() -> dict[str, object]:
         appended = f"{quiet_subtitle} · {len(finished_notices)} finished"
         if len(appended) <= 46:
             quiet_subtitle = appended
+            base["badge"] = {
+                "count": len(finished_notices),
+                "tone": "info",
+                "label": f"{len(finished_notices)} finished session{'s' if len(finished_notices) != 1 else ''}",
+            }
     return {
         **base,
         "state": "watching" if running else "offline",

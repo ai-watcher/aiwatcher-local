@@ -190,6 +190,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         # the mark's blue ring turning orange.
         self.assertIn("collapsedBadge", mac)
         self.assertIn("collapsedBadge.stringValue = waitingCount > 0", mac)
+        self.assertIn('json.keys.contains("badge")', mac)
         self.assertIn("titleLabel.toolTip", mac)
         # A queue means per-row Open buttons, not a duplicated primary.
         self.assertIn("hasPrimaryAction() && rowsShown == 0", mac)
@@ -201,6 +202,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("def open_waiting_row", tk_source)
         self.assertIn("def apply_waiting_rows", tk_source)
         self.assertIn("create_text(\n                27, 10, text=str(badge_count)", tk_source)
+        self.assertIn('"badge" in payload', tk_source)
         self.assertIn("visible_waiting_rows() == 0", tk_source)
 
     def test_presence_bars_draw_the_meter_and_missed_signal_chip(self) -> None:

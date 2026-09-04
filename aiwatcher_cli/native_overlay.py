@@ -1323,7 +1323,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     // not the second: they earn the primary and the compact layout, but
     // "review when ready" must not wear the orange "blocked on you" treatment.
     func hasPrimaryAction() -> Bool {
-        return ["prompt_gate", "command_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm", "session_waiting", "session_finished", "away_digest"].contains(stateName)
+        return ["prompt_gate", "command_gate", "control_recommended", "control_review", "context_review", "optimize_available", "clipboard_confirm", "session_waiting", "session_finished", "away_digest"].contains(stateName)
     }
 
     func needsAttentionState() -> Bool {
@@ -1647,11 +1647,23 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             (row["kind"] as? String) ?? ""
         }
         let presence = json["presence"] as? [String: Any]
-        self.waitingCount = presence?["waiting"] as? Int ?? self.waitingRowTexts.count
         self.workingCount = presence?["working"] as? Int ?? 0
         let finishedList = json["finished_sessions"] as? [[String: Any]] ?? []
         let digestList = json["digest_rows"] as? [[String: Any]] ?? []
-        self.finishedCount = finishedList.isEmpty ? digestList.count : finishedList.count
+        if json.keys.contains("badge") {
+            if let badge = json["badge"] as? [String: Any] {
+                let count = badge["count"] as? Int ?? 0
+                let tone = badge["tone"] as? String ?? "info"
+                self.waitingCount = tone == "attention" ? count : 0
+                self.finishedCount = tone == "attention" ? 0 : count
+            } else {
+                self.waitingCount = 0
+                self.finishedCount = 0
+            }
+        } else {
+            self.waitingCount = presence?["waiting"] as? Int ?? self.waitingRowTexts.count
+            self.finishedCount = finishedList.isEmpty ? digestList.count : finishedList.count
+        }
         let pressure = json["pressure"] as? [String: Any]
         self.pressureAvailable = pressure?["available"] as? Bool ?? false
         self.pressurePct = pressure?["pct_of_turn_limit"] as? Int ?? 0
@@ -2399,22 +2411,38 @@ def run_native_presence(
                 waiting_row_kinds.append(str(row.get("kind") or ""))
         presence = payload.get("presence")
         try:
-            waiting_count = int(presence.get("waiting") or 0) if isinstance(presence, dict) else 0
+            presence_waiting_count = int(presence.get("waiting") or 0) if isinstance(presence, dict) else 0
         except (TypeError, ValueError):
-            waiting_count = 0
-        waiting_count_var.set(waiting_count or len(waiting_row_texts))
+            presence_waiting_count = 0
         try:
             working_count_var.set(int(presence.get("working") or 0) if isinstance(presence, dict) else 0)
         except (TypeError, ValueError, tk.TclError):
             working_count_var.set(0)
         finished_sessions = payload.get("finished_sessions")
         digest_rows = payload.get("digest_rows")
-        if isinstance(finished_sessions, list) and finished_sessions:
-            finished_count_var.set(len(finished_sessions))
-        elif isinstance(digest_rows, list):
-            finished_count_var.set(len(digest_rows))
-        else:
+        badge = payload.get("badge")
+        if "badge" in payload and isinstance(badge, dict):
+            try:
+                badge_count = int(badge.get("count") or 0)
+            except (TypeError, ValueError):
+                badge_count = 0
+            if badge.get("tone") == "attention":
+                waiting_count_var.set(badge_count)
+                finished_count_var.set(0)
+            else:
+                waiting_count_var.set(0)
+                finished_count_var.set(badge_count)
+        elif "badge" in payload:
+            waiting_count_var.set(0)
             finished_count_var.set(0)
+        else:
+            waiting_count_var.set(presence_waiting_count or len(waiting_row_texts))
+            if isinstance(finished_sessions, list) and finished_sessions:
+                finished_count_var.set(len(finished_sessions))
+            elif isinstance(digest_rows, list):
+                finished_count_var.set(len(digest_rows))
+            else:
+                finished_count_var.set(0)
         pressure = payload.get("pressure")
         if isinstance(pressure, dict) and pressure.get("available"):
             pressure_available_var.set(True)
@@ -2743,7 +2771,7 @@ def run_native_presence(
         # update_attention_style's needs_attention set deliberately excludes
         # it, so "review when ready" never wears the orange treatment.
         return state_var.get() in {
-            "prompt_gate", "command_gate", "control_recommended", "optimize_available", "clipboard_confirm",
+            "prompt_gate", "command_gate", "control_recommended", "context_review", "optimize_available", "clipboard_confirm",
             "session_waiting", "session_finished", "away_digest",
         }
 
@@ -2832,7 +2860,12 @@ def run_native_presence(
             root.geometry(f"{expanded_width}x{expanded_height + row_height * rows}")
 
     def should_show_window() -> bool:
-        if has_primary_action():
+        if state_var.get() in {
+            "prompt_gate", "command_gate", "control_recommended", "control_review", "optimize_available",
+            "clipboard_confirm", "session_waiting",
+        }:
+            return True
+        if state_var.get() in {"session_finished", "away_digest"}:
             return True
         if visibility == "nudges-only":
             return False
