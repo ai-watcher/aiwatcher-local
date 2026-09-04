@@ -1799,3 +1799,51 @@
     .health-row:hover { background: var(--surface-hover); }
     tbody tr.clickable:focus-within,
     tbody tr:has(.row-action):focus-within { background: var(--surface-hover); }
+
+    /* ---- Tasks view ---------------------------------------------------- */
+    .task-kpis { margin: 0 0 var(--sp-4); }
+    .task-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-3); margin-bottom: var(--sp-3); }
+    .task-toolbar .task-hint { flex: 1; min-width: 200px; }
+    .task-table td { vertical-align: middle; }
+    .task-session-row td { background: var(--bg-muted); color: var(--t-muted); font-size: var(--fs-2); padding-top: 6px; padding-bottom: 6px; border-top: 1px solid var(--border-strong); }
+    .task-session-row b { color: var(--t-base); font-weight: var(--fw-med); }
+    .task-sid { color: var(--t-light); margin-left: var(--sp-2); font-size: var(--fs-1); }
+    .task-row-selected td { background: var(--primary-soft); }
+    .task-check { width: 30px; padding-right: 0; }
+    .task-check input { accent-color: var(--brand-blue); width: 14px; height: 14px; }
+    .task-label { display: block; max-width: 34ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: var(--fw-med); }
+    .task-when, .task-size { font-size: var(--fs-1); color: var(--t-light); }
+    .task-size { text-transform: uppercase; letter-spacing: .05em; }
+    .task-none { color: var(--t-light); }
+    .task-did, .task-commits { font-size: var(--fs-2); color: var(--t-muted); white-space: nowrap; }
+    .task-chip { white-space: nowrap; }
+    .task-chip::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--t-light); margin-right: 5px; vertical-align: 1px; }
+    .task-chip-high::before { background: var(--success); }
+    .task-chip-medium::before { background: var(--warning); }
+    .task-chip-low::before { background: var(--danger); }
+    .task-chip-user { border-color: var(--primary); color: var(--primary); }
+    .task-chip-user::before { background: var(--primary); }
+    .task-verdict { font-size: var(--fs-2); color: var(--t-muted); font-weight: var(--fw-med); }
+    .task-verdict-done { color: var(--success); }
+    .task-verdict-ask { display: inline-flex; align-items: center; gap: var(--sp-1); white-space: nowrap; }
+    .task-open { font-size: var(--fs-1); color: var(--warning); text-transform: uppercase; letter-spacing: .05em; }
+    .task-verdict-btn, .task-split-btn { min-height: 26px; padding: 2px 8px; font-size: var(--fs-1); }
+    .task-turns-row td { background: var(--bg-muted); padding: 6px 12px 10px 42px; }
+    .task-turns { display: grid; gap: var(--sp-1); }
+    .task-turn { display: grid; grid-template-columns: 44px minmax(0, 1fr) 80px auto; gap: var(--sp-2); align-items: center; font-size: var(--fs-2); color: var(--t-muted); padding: 4px 8px; border-radius: var(--r-1); background: var(--bg-card); border: 1px solid var(--border); }
+    .task-turn-n { color: var(--t-light); }
+    .task-turn-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--t-base); }
+    .task-turns-foot { margin-top: var(--sp-2); display: flex; justify-content: flex-end; }
+    .task-verdict-q { font-size: var(--fs-2); color: var(--t-muted); margin-right: var(--sp-1); }
+    /* A spanning cell is the row's last cell, and the table default sends every
+       last cell right. These rows are text, not figures. */
+    .task-table .task-session-row td, .task-table .task-turns-row td { text-align: left; }
+    .task-table th, .task-table td { vertical-align: middle; }
+    .task-table th:nth-child(2) { width: 30%; }
+    .task-turn-label { text-align: left; }
+    .task-turn-tokens { text-align: right; }
+    .task-turns { max-width: 760px; }
+    .task-turns-foot { max-width: 760px; }
+    .task-pr { font-size: var(--fs-2); font-weight: var(--fw-med); color: var(--success); text-decoration: none; white-space: nowrap; }
+    .task-pr:hover { text-decoration: underline; }
+    .restart-measured { color: var(--text-bright); }

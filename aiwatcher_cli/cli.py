@@ -76,7 +76,9 @@ from .local_state import (
     record_evidence_snapshot,
     record_intervention,
     record_hook_event,
+    record_session_turn_end,
     record_session_waiting,
+    session_turn_ends,
     session_waiting_signals,
     record_notification_sent,
     record_outcome,
@@ -4483,6 +4485,16 @@ def command_report(args: argparse.Namespace) -> int:
     prompt_gate = digest["prompt_gate"]
     if prompt_gate["flagged"]:
         print(f"\nRisky prompts modified: {prompt_gate['modified']} of {prompt_gate['flagged']} flagged")
+        # Acceptance is the other question: of the times the gate stopped and
+        # asked, how often was the brief taken. Older digests lack the keys.
+        if prompt_gate.get("measurable"):
+            print(
+                f"Gate brief taken: {prompt_gate.get('taken', 0)} of {prompt_gate.get('asks', 0)} asks "
+                f"({prompt_gate.get('ran_original', 0)} ran the original; "
+                f"{prompt_gate.get('silent_briefs', 0)} silent briefs and {prompt_gate.get('blocked', 0)} blocks outside the ratio)"
+            )
+        elif "measurable" in prompt_gate:
+            print(f"Gate brief taken: not measurable -- {prompt_gate.get('reason')}")
 
     survival = digest["survival"]
     if survival.get("available"):
@@ -7914,6 +7926,140 @@ def command_uninstall_claude_activity_hook(args: argparse.Namespace) -> int:
     return 0
 
 
+# Claude Code fires Stop when an assistant turn ends. That is the one moment
+# the transcript cannot name by itself: a quiet file means either "answered and
+# waiting for you" or "still thinking", and only the tool knows which. Same
+# cost posture as the Notification hook: once per turn, ~100ms, no stdout.
+def command_claude_stop_hook(args: argparse.Namespace) -> int:
+    """Record that a Claude Code session finished its turn. Never fails the host."""
+    payload, _ = _hook_payload_and_prompt(args)
+    session_id = str(payload.get("session_id") or payload.get("sessionId") or "").strip()
+    if not session_id:
+        return 0
+    try:
+        record_session_turn_end(
+            session_id=session_id,
+            tool="claude-code",
+            cwd=str(payload.get("cwd") or "") or None,
+        )
+    except Exception:
+        return 0
+    return 0
+
+
+def _merge_claude_stop_hook(settings: dict[str, object], command: str) -> dict[str, object]:
+    """Register the Stop hook that reports a turn ending. Its own event, its own entry."""
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+    event_hooks = hooks.get("Stop")
+    if not isinstance(event_hooks, list):
+        event_hooks = []
+    event_hooks = [
+        item for item in event_hooks
+        if not (
+            isinstance(item, dict)
+            and any(
+                isinstance(hook, dict) and "claude-stop-hook" in str(hook.get("command", ""))
+                for hook in item.get("hooks", [])
+            )
+        )
+    ]
+    event_hooks.append({"hooks": [{
+        "type": "command",
+        "command": f"{command} claude-stop-hook",
+    }]})
+    hooks["Stop"] = event_hooks
+    settings["hooks"] = hooks
+    return settings
+
+
+def _remove_claude_stop_hook(settings: dict[str, object]) -> tuple[dict[str, object], bool]:
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return settings, False
+    event_hooks = hooks.get("Stop")
+    if not isinstance(event_hooks, list):
+        return settings, False
+    filtered = [
+        item for item in event_hooks
+        if not (
+            isinstance(item, dict)
+            and any(
+                isinstance(hook, dict) and "claude-stop-hook" in str(hook.get("command", ""))
+                for hook in item.get("hooks", [])
+            )
+        )
+    ]
+    if len(filtered) == len(event_hooks):
+        return settings, False
+    if filtered:
+        hooks["Stop"] = filtered
+    else:
+        hooks.pop("Stop", None)
+    if hooks:
+        settings["hooks"] = hooks
+    else:
+        settings.pop("hooks", None)
+    return settings, True
+
+
+def command_install_claude_stop_hook(args: argparse.Namespace) -> int:
+    """Install the Stop hook behind 'turn ended'."""
+    command = args.command or _cli_command_for_current_file()
+    snippet = _merge_claude_stop_hook({}, command)
+    if not args.write:
+        print("Add this to your Claude Code settings JSON:")
+        print(json.dumps(snippet, indent=2))
+        print("\nProject-local path: .claude/settings.local.json")
+        print("User-global path: ~/.claude/settings.json")
+        print("\nIt records only that a session's turn ended, and when.")
+        print("No output text, no prompt content, and nothing leaves this machine.")
+        return 0
+
+    settings_path = _claude_settings_path(args.scope, args.project_dir)
+    os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+    existing: dict[str, object] = {}
+    if os.path.exists(settings_path):
+        with open(settings_path, "r", encoding="utf-8") as handle:
+            try:
+                existing = json.load(handle)
+            except json.JSONDecodeError:
+                backup = settings_path + ".aiwatcher.bak"
+                shutil.copyfile(settings_path, backup)
+                print(f"Existing settings were not valid JSON. Backed up to {backup}.")
+    merged = _merge_claude_stop_hook(existing, command)
+    with open(settings_path, "w", encoding="utf-8") as handle:
+        json.dump(merged, handle, indent=2)
+        handle.write("\n")
+    print(f"Installed AIWatcher Claude Code stop hook at {settings_path}")
+    print("Restart Claude Code so it picks up the new hook.")
+    print("The Tasks view will show an open task as idle once its last prompt has been answered.")
+    return 0
+
+
+def command_uninstall_claude_stop_hook(args: argparse.Namespace) -> int:
+    settings_path = _claude_settings_path(args.scope, args.project_dir)
+    if not os.path.exists(settings_path):
+        print(f"No Claude settings file found at {settings_path}.")
+        return 0
+    try:
+        with open(settings_path, "r", encoding="utf-8") as handle:
+            settings = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Could not read Claude settings at {settings_path}: {exc}", file=sys.stderr)
+        return 2
+    updated, removed = _remove_claude_stop_hook(settings)
+    if not removed:
+        print(f"No AIWatcher stop hook found in {settings_path}.")
+        return 0
+    with open(settings_path, "w", encoding="utf-8") as handle:
+        json.dump(updated, handle, indent=2)
+        handle.write("\n")
+    print(f"Removed AIWatcher stop hook from {settings_path}")
+    return 0
+
+
 def command_uninstall_claude_command_gate(args: argparse.Namespace) -> int:
     settings_path = _claude_settings_path(args.scope, args.project_dir)
     if not os.path.exists(settings_path):
@@ -8263,6 +8409,47 @@ def command_doctor(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _signal_age_label(stamp: str) -> str:
+    try:
+        when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return "at an unreadable time"
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    seconds = max(0, int((datetime.now(timezone.utc) - when).total_seconds()))
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
+
+
+def _session_hook_status_lines() -> list[str]:
+    """One line per per-turn hook: where it is installed, and when it last fired.
+
+    These hooks write no hook_events row (they carry no prompt to score), so the
+    proof they run is the latest signal they stored -- which is also the answer
+    to "is it firing", not just "is it configured".
+    """
+    lines: list[str] = []
+    for label, needle, reader, noun in (
+        ("Activity hook (Notification)", "claude-activity-hook", session_waiting_signals, "waiting signal"),
+        ("Stop hook (Stop)", "claude-stop-hook", session_turn_ends, "turn-end signal"),
+    ):
+        installed = [scope for scope in ("project", "user") if _file_contains(_claude_settings_path(scope), needle)]
+        try:
+            signals = reader()
+        except Exception:
+            signals = {}
+        latest = max((str(value.get("at") or "") for value in signals.values()), default="")
+        where = f"installed in {' and '.join(installed)} settings" if installed else "not installed"
+        fired = f"last {noun} {_signal_age_label(latest)}" if latest else f"no {noun} recorded yet"
+        lines.append(f"{label}: {where}; {fired}")
+    return lines
+
+
 def _file_contains(path: str, needle: str) -> bool:
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -8522,6 +8709,9 @@ def command_hook_status(_args: argparse.Namespace) -> int:
         print("\nCoverage diagnosis")
         for diagnostic in diagnostics:
             print(f"- {diagnostic}")
+    print("\nSession hooks")
+    for line in _session_hook_status_lines():
+        print(f"- {line}")
     print("\nSurface verification")
     for label, status, next_step in _hook_surface_verification_rows(events):
         print(f"- {label}: {status}. {next_step}")
@@ -9341,6 +9531,29 @@ def build_parser() -> argparse.ArgumentParser:
     uninstall_activity_hook.add_argument("--project-dir", help="Project to target with --scope project; defaults to the current directory")
     uninstall_activity_hook.set_defaults(func=command_uninstall_claude_activity_hook)
 
+    install_stop_hook = sub.add_parser(
+        "install-claude-stop-hook",
+        help="Print or install the Claude Code stop hook, so AIWatcher knows when a session's turn has ended",
+    )
+    install_stop_hook.add_argument("--write", action="store_true", help="Write the hook into Claude settings")
+    install_stop_hook.add_argument(
+        "--scope", choices=["project", "user"], default="user",
+        help="Write to your user-level Claude settings (default) or this project's",
+    )
+    install_stop_hook.add_argument("--project-dir", help="Project to target with --scope project; defaults to the current directory")
+    install_stop_hook.add_argument("--command", help="AIWatcher command to put in Claude settings")
+    install_stop_hook.set_defaults(func=command_install_claude_stop_hook)
+
+    uninstall_stop_hook = sub.add_parser(
+        "uninstall-claude-stop-hook", help="Remove the AIWatcher Claude Code stop hook",
+    )
+    uninstall_stop_hook.add_argument(
+        "--scope", choices=["project", "user"], default="user",
+        help="Remove from your user-level Claude settings (default) or this project's",
+    )
+    uninstall_stop_hook.add_argument("--project-dir", help="Project to target with --scope project; defaults to the current directory")
+    uninstall_stop_hook.set_defaults(func=command_uninstall_claude_stop_hook)
+
     install_decision_log = sub.add_parser(
         "install-claude-decision-log",
         help="Print or install a personal Claude Code convention for logging rejected decisions",
@@ -9435,7 +9648,7 @@ def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments and arguments[0] in {
         "claude-hook", "codex-hook", "cursor-hook", "claude-pretooluse-hook",
-        "claude-activity-hook",
+        "claude-activity-hook", "claude-stop-hook",
     }:
         hook_parser = argparse.ArgumentParser(add_help=False)
         hook_parser.add_argument("--text")
@@ -9447,6 +9660,7 @@ def main(argv: list[str] | None = None) -> int:
             "cursor-hook": command_cursor_hook,
             "claude-pretooluse-hook": command_claude_pretooluse_hook,
             "claude-activity-hook": command_claude_activity_hook,
+            "claude-stop-hook": command_claude_stop_hook,
         }
         handler = handlers[arguments[0]]
         return int(handler(hook_args))
