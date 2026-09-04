@@ -1239,6 +1239,7 @@ def _task_finished_ask(session_rows: list[LocalSession], now: datetime) -> dict[
         return None
 
 
+SILENT_BRIEF_DECISIONS = {"context_added", "auto_brief_headless"}
 GATE_ASK_DECISIONS = {"brief_accepted", "brief_edited", "allowed_original", "cancelled"}
 GATE_TAKEN_DECISIONS = {"brief_accepted", "brief_edited"}
 
@@ -1387,6 +1388,17 @@ def build_tasks_view(days: int = 7) -> dict[str, object]:
             "with_commit": sum(1 for task in tasks if task["commits"]),
             "with_pull_request": sum(1 for task in tasks if task.get("pull_requests")),
             "with_intervention": sum(1 for task in tasks if task["interventions"]),
+            # A silent brief changed what Claude saw, but nobody chose it. The
+            # tile leads with tasks where the user applied something, and says
+            # how many more only had a silent brief.
+            "with_applied_intervention": sum(
+                1 for task in tasks
+                if any(iv.get("kind") != "prompt_brief" or iv.get("decision") not in SILENT_BRIEF_DECISIONS for iv in task["interventions"])
+            ),
+            "silent_brief_only": sum(
+                1 for task in tasks
+                if task["interventions"] and all(iv.get("kind") == "prompt_brief" and iv.get("decision") in SILENT_BRIEF_DECISIONS for iv in task["interventions"])
+            ),
             "median_turns": _median(turns),
             "median_tokens": _median(tokens),
             "median_turns_by_size": by_size,

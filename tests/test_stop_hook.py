@@ -77,6 +77,22 @@ class ClaudeStopHookTests(unittest.TestCase):
         _, removed = cli._remove_claude_stop_hook({"hooks": {}})
         self.assertFalse(removed)
 
+    def test_hook_status_reports_whether_it_is_installed_and_firing(self):
+        settings = os.path.join(self._home, "settings.json")
+        with open(settings, "w", encoding="utf-8") as handle:
+            json.dump(cli._merge_claude_stop_hook({}, "aiwatcher"), handle)
+        with patch.object(cli, "_claude_settings_path", return_value=settings):
+            before = cli._session_hook_status_lines()
+            self._run(json.dumps({"session_id": "abc"}))
+            after = cli._session_hook_status_lines()
+        stop_before = next(line for line in before if line.startswith("Stop hook"))
+        stop_after = next(line for line in after if line.startswith("Stop hook"))
+        self.assertIn("installed in project and user settings", stop_before)
+        self.assertIn("no turn-end signal recorded yet", stop_before)
+        self.assertIn("last turn-end signal just now", stop_after)
+        activity = next(line for line in after if line.startswith("Activity hook"))
+        self.assertIn("not installed", activity)
+
     def test_main_routes_the_hook_name(self):
         with patch.object(cli, "_read_stdin_text", return_value=json.dumps({"session_id": "xyz"})):
             self.assertEqual(cli.main(["claude-stop-hook"]), 0)

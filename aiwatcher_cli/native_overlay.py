@@ -1329,7 +1329,29 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         }.resume()
     }
 
+    // Collapsing by hand while "Task finished?" is up is an answer of its own:
+    // not now. The question is dismissed rather than left to reappear on every
+    // expansion for two hours. Auto-collapse does not count -- nobody chose it.
+    func dismissTaskAsk() {
+        guard !taskID.isEmpty, let url = URL(string: dashboardBaseURL + "/api/task-ask") else {
+            return
+        }
+        let payload: [String: Any] = ["task_id": taskID, "answer": "dismissed"]
+        guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
+            return
+        }
+        taskID = ""
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+        URLSession.shared.dataTask(with: request) { _, _, _ in }.resume()
+    }
+
     @objc func toggleCollapsed() {
+        if !collapsed && stateName == "task_finished" {
+            dismissTaskAsk()
+        }
         setCollapsed(!collapsed)
         if !collapsed {
             scheduleAutoCollapse(after: 10.0)
@@ -2818,7 +2840,28 @@ def run_native_presence(
             root.geometry(f"{expanded_width}x{expanded_height + row_height * visible_waiting_rows()}")
         update_attention_style()
 
+    def dismiss_task_ask() -> None:
+        # A manual collapse while the task question is up means "not now";
+        # the ask is dismissed rather than left to reappear for two hours.
+        task_id = task_id_var.get().strip()
+        if not task_id:
+            return
+        task_id_var.set("")
+        request = urllib.request.Request(
+            f"{url.rstrip('/')}/api/task-ask",
+            data=json.dumps({"task_id": task_id, "answer": "dismissed"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=1.5):
+                pass
+        except (OSError, urllib.error.URLError):
+            pass
+
     def toggle_collapsed() -> None:
+        if not collapsed.get() and state_var.get() == "task_finished":
+            dismiss_task_ask()
         set_collapsed(not collapsed.get())
         if not collapsed.get():
             schedule_auto_collapse(10000)

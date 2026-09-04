@@ -78,6 +78,7 @@ from .local_state import (
     record_hook_event,
     record_session_turn_end,
     record_session_waiting,
+    session_turn_ends,
     session_waiting_signals,
     record_notification_sent,
     record_outcome,
@@ -8408,6 +8409,47 @@ def command_doctor(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _signal_age_label(stamp: str) -> str:
+    try:
+        when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return "at an unreadable time"
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    seconds = max(0, int((datetime.now(timezone.utc) - when).total_seconds()))
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
+
+
+def _session_hook_status_lines() -> list[str]:
+    """One line per per-turn hook: where it is installed, and when it last fired.
+
+    These hooks write no hook_events row (they carry no prompt to score), so the
+    proof they run is the latest signal they stored -- which is also the answer
+    to "is it firing", not just "is it configured".
+    """
+    lines: list[str] = []
+    for label, needle, reader, noun in (
+        ("Activity hook (Notification)", "claude-activity-hook", session_waiting_signals, "waiting signal"),
+        ("Stop hook (Stop)", "claude-stop-hook", session_turn_ends, "turn-end signal"),
+    ):
+        installed = [scope for scope in ("project", "user") if _file_contains(_claude_settings_path(scope), needle)]
+        try:
+            signals = reader()
+        except Exception:
+            signals = {}
+        latest = max((str(value.get("at") or "") for value in signals.values()), default="")
+        where = f"installed in {' and '.join(installed)} settings" if installed else "not installed"
+        fired = f"last {noun} {_signal_age_label(latest)}" if latest else f"no {noun} recorded yet"
+        lines.append(f"{label}: {where}; {fired}")
+    return lines
+
+
 def _file_contains(path: str, needle: str) -> bool:
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -8667,6 +8709,9 @@ def command_hook_status(_args: argparse.Namespace) -> int:
         print("\nCoverage diagnosis")
         for diagnostic in diagnostics:
             print(f"- {diagnostic}")
+    print("\nSession hooks")
+    for line in _session_hook_status_lines():
+        print(f"- {line}")
     print("\nSurface verification")
     for label, status, next_step in _hook_surface_verification_rows(events):
         print(f"- {label}: {status}. {next_step}")

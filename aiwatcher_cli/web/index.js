@@ -4135,9 +4135,21 @@ function taskWhen(iso) {
   if (Number.isNaN(d.getTime())) return '';
   return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
+// Silent briefs changed what Claude saw, but the developer chose nothing, and
+// twenty of them drown the one brief that was accepted. Hidden by default;
+// the toolbar toggle shows them, and the tile always says how many there are.
+let showSilentBriefs = false;
+const SILENT_BRIEF_DECISIONS = new Set(['context_added', 'auto_brief_headless']);
+function toggleSilentBriefs() {
+  showSilentBriefs = !showSilentBriefs;
+  const btn = document.getElementById('taskSilentToggle');
+  if (btn) btn.textContent = showSilentBriefs ? 'Hide silent briefs' : 'Show silent briefs';
+  renderTaskRows();
+}
 function taskInterventionLabel(task) {
   const parts = [];
   for (const row of task.interventions || []) {
+    if (row.kind === 'prompt_brief' && !showSilentBriefs && SILENT_BRIEF_DECISIONS.has(row.decision)) continue;
     if (row.kind === 'prompt_brief') {
       parts.push(row.decision === 'context_added' ? 'brief added silently'
         : row.decision === 'auto_brief_headless' ? 'brief added (headless)'
@@ -4186,7 +4198,7 @@ function renderTaskSummary(data) {
     ? `${gate.ran_original} ran the original · ${gate.silent_briefs} silent brief${gate.silent_briefs === 1 ? '' : 's'} · ${gate.blocked} blocked`
     : esc(gate.reason || '');
   document.getElementById('taskSummary').innerHTML = `
-    <div class="card metric-card metric-neutral"><div class="label">Tasks started</div><div class="value">${s.task_count || 0}</div><div class="sub">in ${s.session_count || 0} session${s.session_count === 1 ? '' : 's'} · ${s.with_commit || 0} reached a commit · ${s.with_pull_request || 0} opened a PR · ${s.with_intervention || 0} had AIWatcher change something</div></div>
+    <div class="card metric-card metric-neutral"><div class="label">Tasks started</div><div class="value">${s.task_count || 0}</div><div class="sub">in ${s.session_count || 0} session${s.session_count === 1 ? '' : 's'} · ${s.with_commit || 0} reached a commit · ${s.with_pull_request || 0} opened a PR · ${s.with_applied_intervention || 0} had AIWatcher change something${s.silent_brief_only ? ` (+${s.silent_brief_only} with only a silent brief)` : ''}</div></div>
     <div class="card metric-card metric-neutral"><div class="label">Prompts per task</div><div class="value">${s.median_turns == null ? '—' : s.median_turns}<small> median</small></div><div class="sub">${bySize}</div></div>
     <div class="card metric-card metric-neutral"><div class="label">Tokens per task</div><div class="value">${s.median_tokens == null ? '—' : tokens(s.median_tokens)}<small> median</small></div><div class="sub">billed input and output, per task</div></div>
     <div class="card metric-card metric-neutral"><div class="label">Gate brief taken</div><div class="value">${gateValue}</div><div class="sub">${gateSub}</div></div>`;
