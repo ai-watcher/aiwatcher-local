@@ -1391,6 +1391,7 @@ async function handleUpdateBannerClick(button) {
   const status = classifyUpdateStatus(data);
   if (status === 'blocked' || status === 'package' || status === 'error') {
     showView('setup');
+    showSettingsPanel('general');
     const panel = document.getElementById('updatePanel');
     if (panel) window.setTimeout(() => panel.scrollIntoView({ block: 'center' }), 50);
   }
@@ -4272,6 +4273,17 @@ function showView(view) {
   if (view === 'insights' && reportLoadedForDays !== days) loadReport();
   if (view === 'receipts') markFreshStartReceiptsViewed();
 }
+function showSettingsPanel(panel) {
+  const selected = panel || 'general';
+  document.querySelectorAll('[data-settings-panel-content]').forEach(node => {
+    node.hidden = node.dataset.settingsPanelContent !== selected;
+  });
+  document.querySelectorAll('.settings-tab').forEach(node => {
+    const active = node.dataset.settingsPanel === selected;
+    node.classList.toggle('active', active);
+    node.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+}
 function changeWindow() {
   sessionsLoadedForDays = null;
   reportLoadedForDays = null;
@@ -5033,6 +5045,10 @@ document.addEventListener('keydown', event => { if (event.key === 'Escape') clos
   // adding a section cannot quietly leave it unreachable by link.
   if (requestedView && ['today','prompt','watch','sessions','control','projects','changes','receipts','insights','setup','first-run'].includes(requestedView)) {
     showView(requestedView);
+    if (requestedView === 'setup') {
+      const requestedPanel = new URLSearchParams(location.search).get('settings') || 'general';
+      if (['general','ai','trust','setup'].includes(requestedPanel)) showSettingsPanel(requestedPanel);
+    }
     if (requestedView === 'prompt') {
       document.getElementById('promptInput').focus();
     }

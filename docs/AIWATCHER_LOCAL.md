@@ -289,6 +289,14 @@ checkout is safe. The dashboard sends an explicit restart request only after a
 successful apply. Package installs get copyable `pipx`, `pip`, or GitHub package
 upgrade commands instead of pretending a source fast-forward is possible.
 
+Settings is organized as subpages:
+
+- **General:** Companion behavior and update details.
+- **AI Assist:** the mount point for optional local-model or user-key
+  configuration.
+- **Trust:** privacy boundary and surface coverage.
+- **Setup:** install and verification commands.
+
 ## The Wow Moment
 
 `aiwatcher ui` should be the first thing a developer shows a friend. It answers:

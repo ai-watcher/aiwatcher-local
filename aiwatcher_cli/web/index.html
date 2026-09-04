@@ -465,71 +465,73 @@
       <div id="insightFeed"></div>
     </section>
     <p class="receipt-note" style="margin-top:4px">
-      Read-only local scan &middot; no LLM calls &middot; no source or prompt content in summaries &middot;
-      nothing leaves this machine unless you connect Cloud.
+      Read-only local scan &middot; no model calls unless configured &middot; no source or prompt content in summaries &middot;
+      nothing leaves this machine unless you enable a connected workflow.
     </p>
   </section>
   <section id="view-setup" class="view" hidden>
-    <section class="card" style="margin-bottom:14px">
-      <div class="section-title"><div><h2>Privacy at a glance</h2><p>Your local trust boundary stays visible.</p></div></div>
-      <div class="privacy-grid" id="privacy"></div>
-    </section>
-
-    <!-- Out of the fold, and directly under the promise it qualifies. Privacy
-         at a glance says what AIWatcher will not do; this says what it can
-         actually see, which is the other half of the same answer and the half
-         that admits limits -- Cursor is installed but keeps no local cost
-         history, so it is listed as detected and not measured rather than
-         quietly dropped.
-
-         Someone deciding whether to keep this running wants both halves at
-         once. One click away is not far, but it is far enough that the
-         reassuring half was visible by default and the qualifying half was
-         not. The heading is the count element, so it reads "Surface coverage
-         (2 of 4 gated automatically)" rather than needing a summary line to
-         say whether there is anything inside. -->
-    <section class="card" style="margin-bottom:14px">
-      <div class="section-title">
-        <div><h2 id="coverageSummary">Surface coverage</h2><p>Detected tools, hook confidence, and what AIWatcher can honestly measure.</p></div>
-        <span class="note-chip local">Private</span>
-      </div>
-      <!-- Not .coverage-grid any more. That is a two-column card grid, and
-           coverage is a table now -- it made the table one grid item and the
-           legend beneath it another, so they sat side by side and the table
-           rendered at half width. Setup steps below still use the grid,
-           because those are cards. -->
-      <div id="coverageRowsSettings"></div>
-    </section>
-
     <div class="card">
       <div class="section-title">
-        <div><h2>Settings</h2><p>Setup, coverage, privacy, and local companion behavior.</p></div>
+        <div><h2>Settings</h2><p>Updates, AI Assist, trust, and install steps.</p></div>
         <span class="note-chip local">Private</span>
       </div>
-      <p class="receipt-note">Ambient Watch starts with the dashboard by default. For standalone mode, run <code>aiwatcher watch --notify --overlay --interval 60</code>.</p>
-      <div class="handoff-cta" id="updatePanel" style="margin-top:14px">
-        <h4>Updates</h4>
-        <p id="updateStatus">Check GitHub when you want to see whether this source checkout has newer AIWatcher changes.</p>
-        <div class="actions">
-          <button class="btn-quiet" id="updateCheckButton" onclick="checkForUpdates(this)">Check for updates</button>
-          <button class="btn-primary" id="updateApplyButton" onclick="applyUpdates(this, {restart: true})" hidden>Apply update</button>
-        </div>
+
+      <div class="settings-tabs" role="tablist" aria-label="Settings sections">
+        <button class="settings-tab active" data-settings-panel="general" onclick="showSettingsPanel('general')" role="tab" aria-selected="true">General</button>
+        <button class="settings-tab" data-settings-panel="ai" onclick="showSettingsPanel('ai')" role="tab" aria-selected="false">AI Assist</button>
+        <button class="settings-tab" data-settings-panel="trust" onclick="showSettingsPanel('trust')" role="tab" aria-selected="false">Trust</button>
+        <button class="settings-tab" data-settings-panel="setup" onclick="showSettingsPanel('setup')" role="tab" aria-selected="false">Setup</button>
       </div>
-      <!-- Setup steps stay folded. They are recommendations about what to
-           install next, not a statement about what the tool can see, so they
-           do not carry the weight coverage does. -->
-      <details class="aiw-details">
-        <summary><span id="setupSummary">Setup steps</span></summary>
-        <div class="details-body">
-          <p class="optimize-lede">What AIWatcher needs installed to gate prompts and prove what it caught. These are recommendations, not a checklist &mdash; nothing here tracks completion.</p>
+
+      <section id="settings-panel-general" class="settings-panel" data-settings-panel-content="general">
+        <div class="settings-card">
+          <h3>Companion</h3>
+          <p class="receipt-note">Ambient Watch starts with the dashboard. Standalone mode: <code>aiwatcher watch --notify --overlay --interval 60</code>.</p>
+        </div>
+        <div class="settings-card" id="updatePanel">
+          <h3>Updates</h3>
+          <p id="updateStatus">Check GitHub when you want to see whether this source checkout has newer AIWatcher changes.</p>
+          <div class="actions">
+            <button class="btn-quiet" id="updateCheckButton" onclick="checkForUpdates(this)">Check for updates</button>
+            <button class="btn-primary" id="updateApplyButton" onclick="applyUpdates(this, {restart: true})" hidden>Apply update</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="settings-panel-ai" class="settings-panel" data-settings-panel-content="ai" hidden>
+        <div class="settings-card">
+          <div class="section-title compact-title">
+            <div><h3>AI Assist</h3><p>Optional model help for Fresh Start and second opinion workflows.</p></div>
+            <span class="note-chip">Optional</span>
+          </div>
+          <div id="aiAssistSettingsMount" class="empty">AI Assist configuration can appear here when enabled.</div>
+        </div>
+      </section>
+
+      <section id="settings-panel-trust" class="settings-panel" data-settings-panel-content="trust" hidden>
+        <div class="settings-card">
+          <div class="section-title compact-title">
+            <div><h3>Trust boundary</h3><p>What AIWatcher can see and when data can leave the machine.</p></div>
+          </div>
+          <div class="privacy-grid" id="privacy"></div>
+        </div>
+        <div class="settings-card">
+          <div class="section-title compact-title">
+            <div><h3 id="coverageSummary">Surface coverage</h3><p>Detected tools, hook confidence, and what AIWatcher can honestly measure.</p></div>
+            <span class="note-chip local">Private</span>
+          </div>
+          <div id="coverageRowsSettings"></div>
+        </div>
+      </section>
+
+      <section id="settings-panel-setup" class="settings-panel" data-settings-panel-content="setup" hidden>
+        <div class="settings-card">
+          <div class="section-title compact-title">
+            <div><h3 id="setupSummary">Setup steps</h3><p>Install and verify the local surfaces you want AIWatcher to protect.</p></div>
+          </div>
           <div id="setupRows" class="coverage-grid"></div>
         </div>
-      </details>
-      <div class="handoff-cta" style="margin-top:14px">
-        <h4>Test Fresh Start with sample data</h4>
-        <p>Open a seeded context-pressure case, tune the continuation brief, and verify the copy flow without waiting for a real bloated session.</p>
-        <button class="btn-primary" onclick="openDemoHandoff()">Try it with sample data</button>
-      </div>
+      </section>
     </div>
   </section>
 </main>

@@ -378,6 +378,9 @@ class DashboardWindowTests(unittest.TestCase):
         # The standalone coverage view is gone; Settings holds the one copy.
         self.assertIn('id="coverageRowsSettings"', ui.HTML)
         self.assertIn('id="setupRows"', ui.HTML)
+        self.assertIn('data-settings-panel="ai"', ui.HTML)
+        self.assertIn('id="aiAssistSettingsMount"', ui.HTML)
+        self.assertIn("showSettingsPanel", ui.HTML)
         self.assertIn('id="updateBanner"', ui.HTML)
         self.assertIn("handleUpdateBannerClick", ui.HTML)
         self.assertIn("restart: !!options.restart", ui.HTML)
@@ -413,7 +416,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("openDemoHandoff", ui.HTML)
         # One verb opens the drawer. "Open Fresh Start", "Start fresh" and
         # "Try Fresh Start demo" were three names for the same action.
-        self.assertIn("Try it with sample data", ui.HTML)
+        self.assertNotIn("Test Fresh Start with sample data", ui.HTML)
+        self.assertNotIn("Try it with sample data", ui.HTML)
         self.assertIn('id="handoffType"', ui.HTML)
         self.assertIn('id="handoffObjective"', ui.HTML)
         self.assertIn('id="handoffSources"', ui.HTML)

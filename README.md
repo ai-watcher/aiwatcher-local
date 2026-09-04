@@ -311,14 +311,16 @@ The Console tabs are:
 
 - **Home:** the few actions most likely to save context, reduce rework, or
   improve proof.
-- **Control:** prompt review, Prompt Gate decisions, and Fresh Start actions.
-- **Work:** sessions, projects, active/historical logs, and the changes ledger.
-- **Evidence:** Fresh Start receipts, prompt decisions, outcomes, and proof
-  labels.
-- **Spend:** today/week/month usage, API-equivalent value, subscription-limited
-  pressure, and cost per useful work.
-- **Settings:** setup, hooks, coverage, Companion behavior, privacy, and
-  troubleshooting.
+- **Plan:** prompt review and execution briefs before expensive AI work starts.
+- **Watch:** live context pressure, blocked sessions, sessions, and the changes
+  ledger.
+- **Control:** Prompt Gate decisions, Fresh Start actions, and workspace
+  optimization nudges.
+- **Prove:** Fresh Start receipts, prompt decisions, outcomes, and proof labels.
+- **Improve:** spend, API-equivalent value, subscription-limited pressure, and
+  cost per useful work.
+- **Settings:** General, AI Assist, Trust, and Setup subpages for updates,
+  optional model configuration, coverage, hooks, and Companion behavior.
 
 The mockups below use synthetic data. This README does not embed real dashboard
 screenshots, since those can expose private local paths, project names, and AI

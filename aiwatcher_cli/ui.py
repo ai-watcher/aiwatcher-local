@@ -2692,11 +2692,10 @@ def build_prompt_preflight(prompt: str, *, tool: str = "agent", cwd: str | None 
 # $0.028. Stated as a range so it does not read as a quote.
 PRIVACY_CLAIMS = [
     "Read-only local scan",
-    "No calls of ours. AIWatcher never sends your data anywhere.",
-    "Second opinion runs your own agent, on your machine, with your key.",
-    "It sees your prompt and your file paths. Never file contents, unless you turn "
-    "that on for a project.",
-    "No cloud upload unless you connect Cloud",
+    "No AIWatcher cloud call unless you connect or configure one.",
+    "Second opinion and AI Assist use your configured tools and keys.",
+    "Prompt and file-path access is workflow-scoped; file contents require opt-in.",
+    "Source stays local unless a connected workflow is explicitly enabled.",
 ]
 
 # Measured across both hosts, and the spread is real: the same prompt has
