@@ -44,13 +44,23 @@ work is done.
 
 - Local-only by default
 - Read-only
-- No LLM calls
+- No LLM calls by AIWatcher itself. Second Opinion, off by default, runs your
+  own agent on your machine.
 - No prompt or source-code upload
 - No cloud account required
 - Works on macOS, Linux, and Windows
 
 This trust boundary is the product. If AIWatcher Local cannot explain what it
 reads and why, it should not read it.
+
+Two things it keeps that are worth knowing, stated here rather than left to
+the fine print. The **Tasks** view labels each piece of work with the first
+few words of your own prompt; those labels live in local state only inside
+the "finished?" questions the Companion asks, and nowhere else. And if the
+GitHub CLI (`gh`) is installed and signed in, AIWatcher runs `gh pr list` per
+repository to link your own pull requests to tasks — the one command that
+talks to a network service, through your own login, read-only. See
+[What It Reads](#what-it-reads).
 
 ## Quickstart
 
@@ -440,7 +450,9 @@ choose per prompt, rather than reading about the decision afterwards. The
 layer down, at the shell command rather than the prompt.
 
 Prompt content is processed locally. AIWatcher stores hashes, decisions,
-predicted impact, and outcomes, not the original or suggested prompt text.
+predicted impact, and outcomes, not the original or suggested prompt text. The
+one exception is the Tasks view's labels, described under
+[What It Reads](#what-it-reads).
 
 ### Hook coverage by tool
 
@@ -546,6 +558,24 @@ requires explicitly setting `AIWATCHER_RISK_REVIEW_ALLOW_LOWERING=1`.
   session id, and SHA-256 command hash. Secret-bearing substrings such as
   database URL credentials, token values, and password/API-key flags are
   redacted before anything is persisted or returned to the AI tool.
+- **Tasks:** the Tasks view splits each session into the pieces of work it
+  held by reading your own prompts from the same Claude Code and Codex
+  transcripts above. Task labels are the first few words of a prompt. They are
+  shown in the dashboard for your review and kept in local state only inside
+  the "finished?" questions the Companion bar asks (one per task, answered or
+  expired within two hours). Your merge/split corrections and Done / Not done
+  answers are stored by session id, turn number, and task id, never by text.
+  Nothing from a task is uploaded.
+- **Pull requests:** when the GitHub CLI (`gh`) is installed and signed in,
+  AIWatcher runs `gh pr list --author @me` once per repository (cached for a
+  few minutes) to link your own pull requests to the task that was open when
+  each was created. This is the only command AIWatcher runs that reaches a
+  network service; it goes through your own `gh` login and only reads. Without
+  `gh`, the Tasks view says pull requests could not be linked rather than
+  showing none.
+- **Stop hook:** `install-claude-stop-hook` records one timestamp per session
+  when Claude Code finishes a turn — no output text, no reason — so an open
+  task can be shown as idle once its last prompt has been answered.
 
 Tool coverage depends on what each vendor stores on your machine. When a tool is
 installed but token/cost history is not exposed, AIWatcher Local says so instead

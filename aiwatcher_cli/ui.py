@@ -2860,6 +2860,9 @@ PRIVACY_CLAIMS = [
     "Second opinion runs your own agent, on your machine, with your key.",
     "It sees your prompt and your file paths. Never file contents, unless you turn "
     "that on for a project.",
+    "Tasks are labelled with the first words of your own prompts, kept only in the "
+    "finished? questions it asks you.",
+    "Pull requests come from your own gh login, read-only, only if gh is installed.",
     "No cloud upload unless you connect Cloud",
 ]
 

@@ -34,7 +34,8 @@ is bigger than collection:
 
 - Local-only by default.
 - Read-only.
-- No LLM API calls.
+- No LLM API calls by AIWatcher itself. Second Opinion, off by default, spawns
+  your own agent CLI on your machine with your own key.
 - No phone-home telemetry.
 - No source-code or prompt-content storage in persisted summaries.
 - No cloud upload unless the user explicitly connects AIWatcher Enterprise.
@@ -49,6 +50,20 @@ prompt from the session into the one-time brief you copy elsewhere. It is never
 written to the persisted local-state file — only into that ephemeral output —
 but it is real prompt text, and the docs should say so rather than let the
 blanket claim above cover it by omission.
+
+A second exception, added with the Tasks view: a task's label is the first few
+words of your own prompt. Labels are served to the dashboard for your review
+and persisted only inside the "finished?" asks the Companion bar shows -- one
+record per task, answered or expired within two hours, capped at 200. Every
+other task record (a merge/split correction, a Done / Not done answer) is
+stored by session id, turn number, and task id, never by text.
+
+A third, about the network rather than storage: linking your own pull requests
+to tasks runs `gh pr list --author @me` through the GitHub CLI, once per
+repository, read-only, only when `gh` is installed and signed in. It is the one
+command AIWatcher runs that reaches a service, and it uses your login, not
+ours. When `gh` is absent the Tasks view reports that pull requests could not
+be linked instead of showing none.
 
 ## Platform Support
 
@@ -143,7 +158,8 @@ keeping authority with the individual developer:
 
 The local state connects intervention hashes, predicted impact, session IDs,
 selected-prompt risk, observed usage, and outcomes. It does not store original
-or suggested prompt text. Comparisons to historical baselines are labeled as
+or suggested prompt text, with the single task-label exception stated in the
+privacy contract above. Comparisons to historical baselines are labeled as
 inferences, not guaranteed counterfactual savings.
 
 The canonical lifecycle requirements and scenario suite lives at
@@ -403,6 +419,13 @@ What to check:
   fallback.
 - Cursor: detects local AI log activity where available, but cost/token detail is
   intentionally marked limited because Cursor does not reliably expose it locally.
+- Tasks: splits Claude Code and Codex transcripts into prompt-bounded pieces of
+  work using the same files; reads prompt text to find the boundaries and to
+  label each task with its first few words (see the privacy contract for what
+  of that is kept).
+- Pull requests: `gh pr list --author @me` per repository, read-only, only when
+  the GitHub CLI is installed and signed in.
+- Stop hook: one turn-ended timestamp per Claude Code session, when installed.
 
 ## Current MVP Limits
 
