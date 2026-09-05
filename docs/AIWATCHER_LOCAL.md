@@ -191,8 +191,9 @@ python -m aiwatcher_cli install-codex-hook --write --scope user --gate
 After installing the Codex hook, open Codex and run `/hooks` to inspect and
 trust the command. Low-risk prompts pass unchanged, medium-risk prompts receive
 an execution brief as additional context, and high-risk prompts pause before
-execution. With Prompt Gate enabled, medium and high-risk prompts open a
-one-shot localhost page with four choices:
+execution. With Prompt Gate enabled, medium and high-risk prompts pause locally.
+When the floating Companion is running it lights up first; clicking **Review
+Gate** opens the one-shot localhost page with four choices:
 
 - **Add safer brief** — add AIWatcher's scoped execution brief as controlling
   context beside the original request.
@@ -204,12 +205,26 @@ The Prompt Gate page may display the prompt while you decide, but it does not
 persist prompt text. Local state stores hashes, decisions, risk findings, and
 predicted impact only.
 
-The Claude Code dangerous-command gate follows the same trust posture. The
-local decision page may display the command while you decide, but persisted
-receipts keep a command preview plus SHA-256 hash. Secret-bearing substrings
-such as database URL credentials, token values, password env vars, and
-password/API-key flags are redacted before storage or before the hook returns a
-block reason to the AI tool.
+The Claude Code dangerous-command gate follows the same trust posture. When the
+floating Companion is running it lights up as **Review command**; otherwise the
+local decision page opens directly. The page may display the command while you
+decide, but persisted receipts keep a command preview plus SHA-256 hash.
+Secret-bearing substrings such as database URL credentials, token values,
+password env vars, and password/API-key flags are redacted before storage or
+before the hook returns a block reason to the AI tool.
+
+Command protection is intentionally graded by surface:
+
+- **Block** — the host exposes a verified pre-tool lifecycle event, so
+  AIWatcher can pause a risky command before it runs. Today this is Claude Code
+  `PreToolUse` for `Bash`, verified on Claude Code CLI.
+- **Verify host** — the host may share the same hook surface, but the exact
+  local app/build must prove it fired before AIWatcher calls it protected.
+- **Warn + observe** — AIWatcher can steer risky intent through Prompt Gate and
+  report local command/session evidence afterwards, but it cannot stop the
+  command at execution time.
+- **Manual/observed only** — use Companion Plan/Scan before work; AIWatcher
+  should not claim interception.
 
 This wording is deliberate. Claude's `UserPromptSubmit` hook can add context
 alongside a submitted prompt or block it; it cannot replace the submitted text.
@@ -460,6 +475,8 @@ What to check:
 - `start` covers the normal first-run product flow, and Settings can check or
   apply source-checkout updates; automatic update polling/restart is still a
   later layer.
+- `start` is the normal two-mode entry point: Console plus Companion by
+  default, with flags to run either mode separately.
 - Claude Code has the richest support today.
 - Codex per-session estimates require rollout `token_count` events. Desktop or
   older records that only expose cumulative totals remain visible but are not

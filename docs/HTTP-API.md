@@ -135,7 +135,6 @@ Start test flow. `/api/update-status` checks the installed source checkout
 against GitHub when the dashboard asks for it and reports whether a clean
 fast-forward is available. The top-bar update badge uses this route for
 low-frequency status checks and user-triggered refreshes.
-
 `POST` — `/api/second-opinion` runs the Plan screen's Stage 2 analysis: it
 spawns the user's own agent CLI as a throwaway sibling process in
 `<project>/.aiwatcher/analyst/`. Claude Code and Codex can both host it, and

@@ -809,7 +809,7 @@ aiwatcher uninstall-claude-hook --scope user
 
 ### `aiwatcher install-claude-command-gate`
 
-Print or install the Claude Code dangerous-command gate (PreToolUse, S-19). Claude Code CLI only.
+Print or install the Claude Code dangerous-command gate (PreToolUse, S-19). Verify each surface.
 
 ```sh
 aiwatcher install-claude-command-gate [--write]

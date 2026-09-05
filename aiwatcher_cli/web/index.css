@@ -1201,6 +1201,7 @@
     }
     .health-rank-row { cursor: pointer; }
     .health-rank-row:hover { background: var(--surface-hover); }
+    .health-rank-row.muted-card { opacity: .72; }
     .rank-n { font-family: var(--mono); font-size: var(--fs-2); color: var(--faint); font-variant-numeric: tabular-nums; }
     .rank-dot { width: 8px; height: 8px; border-radius: var(--r-pill); background: var(--faint); }
     .rank-dot.critical { background: var(--red); }
@@ -1213,6 +1214,7 @@
     .rank-why { font-size: var(--fs-2); color: var(--muted); line-height: 1.45; }
     .rank-room { font-family: var(--mono); font-size: var(--fs-2); color: var(--muted); text-align: right; }
     .rank-trend { display: block; }
+    .rank-act { display: flex; justify-content: flex-end; gap: var(--sp-2); flex-wrap: wrap; }
     @media (max-width: 1100px) {
       /* The trend and the headroom are the first to go: the rank, the reason
          and the action are what the row is for. */
@@ -1541,6 +1543,13 @@
     .optimize-lede { margin: 0 0 12px; color: var(--muted); font-size: var(--fs-2); line-height: 1.5; }
     #optimizeWorkspace { padding: 8px 0; }
     #optimizeWorkspace > details.aiw-details { margin-top: 0; }
+    .runtime-review-card { border-left-color: var(--amber); background: rgba(var(--amber-rgb), .04); }
+    .runtime-review-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-2); margin: 10px 0 12px; }
+    .runtime-command { margin: 10px 0; padding: 10px 12px; border: 1px solid var(--drawer-line); border-radius: var(--r-2); background: rgba(5,9,14,.28); }
+    .runtime-command code { display: block; margin-top: 5px; color: var(--text); font-family: var(--mono); font-size: var(--fs-2); overflow-wrap: anywhere; }
+    .runtime-review-steps { margin: 10px 0; padding-left: 22px; color: var(--text); line-height: 1.5; }
+    .runtime-review-steps li + li { margin-top: 4px; }
+    .runtime-review-card.review-command-copied { box-shadow: inset 0 0 0 1px rgba(var(--amber-rgb), .28); }
     details.aiw-details { border: 1px solid var(--drawer-line); border-radius: var(--r-2); background: rgba(var(--well-rgb), .22); margin-top: 12px; }
     details.aiw-details summary { cursor: pointer; padding: 12px 14px; color: var(--text-bright); font-weight: var(--fw-bold); }
     details.aiw-details[open] summary { border-bottom: 1px solid var(--drawer-line); }
@@ -1864,7 +1873,7 @@
       .brand-copy p, .link-button { display: none; }
       .kpis { grid-template-columns: 1fr; }
       .metric-card { min-height: 104px; }
-      .mini-grid, .session-hero-grid, .outcome-options, .privacy-grid { grid-template-columns: 1fr; }
+      .mini-grid, .runtime-review-grid, .session-hero-grid, .outcome-options, .privacy-grid { grid-template-columns: 1fr; }
       .drawer { width: 100vw; }
       .drawer-header, .drawer-content { padding-left: 16px; padding-right: 16px; }
       table { min-width: 620px; }

@@ -76,6 +76,36 @@ class ProjectPathTests(unittest.TestCase):
         self.assertEqual(coverage_with_hooks["claude-desktop-code"].status, "limited")
         self.assertEqual(coverage_with_hooks["claude-desktop-code"].status_label, "History seen; hook unverified")
 
+    def test_surface_coverage_separates_prompt_gate_from_command_posture(self) -> None:
+        tools = {
+            "claude-code": True,
+            "codex-cli": True,
+            "cursor": True,
+            "cline": False,
+            "windsurf": False,
+            "ollama": False,
+        }
+        rows = [
+            scanner.LocalSession(
+                session_id="codex-desktop",
+                tool="codex-cli",
+                surface="desktop",
+                tokens_in=10,
+            )
+        ]
+        with (
+            patch.object(scanner, "discover_tools", return_value=tools),
+            patch.object(scanner, "recent_hook_events", return_value=[{"tool": "codex", "event": "received"}]),
+        ):
+            coverage = {row.surface_id: row for row in scanner.surface_coverage(rows)}
+
+        self.assertEqual(coverage["claude-code-cli"].command_protection, "block")
+        self.assertIn("PreToolUse", coverage["claude-code-cli"].command_protection_detail)
+        self.assertEqual(coverage["codex-cli"].command_protection, "warn_observe")
+        self.assertIn("No verified Codex pre-tool command hook", coverage["codex-cli"].command_protection_detail)
+        self.assertEqual(coverage["codex-desktop"].command_protection, "warn_observe")
+        self.assertEqual(coverage["cursor"].command_protection_label, "Warn + observe")
+
     def test_decode_claude_path_preserves_hyphenated_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir) / "my-project"

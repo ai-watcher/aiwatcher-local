@@ -1315,6 +1315,7 @@ class PlanControlTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
         cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
 
     def _view(self, name, nxt):
@@ -1368,6 +1369,30 @@ class PlanControlTest(unittest.TestCase):
         server = inspect.getsource(ui.build_optimize_inventory)
         self.assertNotIn('else "context at risk"', server)
         self.assertNotIn("item.impact_label || 'review'", self.js)
+
+    def test_stale_processes_get_a_runtime_review_card(self):
+        self.assertIn("function renderRuntimeOptimizeCard", self.js)
+        self.assertIn("item.kind === 'stale_processes'", self.js)
+        self.assertIn("aiwatcher processes --stale-only", self.js)
+        self.assertIn("Nothing is stopped from this dashboard", self.js)
+        self.assertIn(".runtime-review-card", self.css)
+
+    def test_context_review_continue_quiets_only_that_project(self):
+        self.assertIn("function visibleFreshStartProjects", self.js)
+        body = self.js[self.js.index("async function continueFreshStartProject"):]
+        body = body[:body.index(chr(10) + "}")]
+        self.assertIn("const saved = await recordHandoffDecision", body)
+        self.assertIn("if (!saved)", body)
+        self.assertIn("[project]", body)
+        self.assertIn("Context review quieted for this project for 48h.", body)
+
+    def test_context_health_defers_quieted_projects_to_server_truth(self):
+        self.assertNotIn("const quietedFreshStartProjects = new Set()", self.js)
+        self.assertNotIn("clean.forEach(project => quietedFreshStartProjects.add(project))", self.js)
+        body = self.js[self.js.index("function renderContextHealth"):]
+        body = body[:body.index(chr(10) + "}")]
+        self.assertNotIn("quietedFreshStartProjects.has", body)
+        self.assertIn("row.actionable !== false", body)
 
 
 class SettingsTest(unittest.TestCase):
@@ -1439,7 +1464,6 @@ class SettingsTest(unittest.TestCase):
         # Nothing tracks completion, so calling it a checklist promises a state
         # the data does not have.
         self.assertNotIn("Setup checklist", self.html)
-
 
 class ChangesLedgerTest(unittest.TestCase):
     """The ledger's widest column held a value identical on 47 of 49 rows, and

@@ -314,6 +314,10 @@ class DashboardServeTests(unittest.TestCase):
             "control_recommended_project:/repo/app",
             "control_recommended_project:/repo/api",
         ])
+        self.assertTrue(all(
+            call.kwargs["minutes"] == ui.FRESH_START_PROJECT_COOLDOWN_MINUTES
+            for call in record_skip.call_args_list
+        ))
 
         server, thread, base = self._serve_one()
         http_request = request.Request(
@@ -328,6 +332,35 @@ class DashboardServeTests(unittest.TestCase):
             finally:
                 thread.join(timeout=5)
                 server.server_close()
+
+    def test_handoff_decision_accepts_project_full_alias_for_cooldown(self) -> None:
+        server, thread, base = self._serve_one()
+        payload = json.dumps({
+            "session_id": "sess-1",
+            "decision": "continue_here",
+            "project_full": "/repo/app",
+        }).encode("utf-8")
+        http_request = request.Request(
+            f"{base}/api/handoff-decision",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with (
+            patch.object(ui, "_find_session_row", return_value=None),
+            patch.object(ui, "record_handoff_decision", return_value={}) as record_decision,
+            patch.object(ui, "record_companion_skip", return_value={}) as record_skip,
+        ):
+            try:
+                with request.urlopen(http_request, timeout=5) as response:
+                    self.assertEqual(response.status, 200)
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
+        self.assertEqual(record_decision.call_args.kwargs["source_project_path"], "/repo/app")
+        keys = [call.kwargs["key"] for call in record_skip.call_args_list]
+        self.assertIn("control_recommended_project:/repo/app", keys)
 
 
 class DashboardWindowTests(unittest.TestCase):
@@ -1740,6 +1773,42 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["continue_url"], "http://127.0.0.1:9999/")
         mark_seen.assert_called_once_with("gate-1")
 
+    def test_companion_state_surfaces_active_command_gate(self) -> None:
+        with (
+            patch.object(ui, "active_prompt_gate", return_value=None),
+            patch.object(ui, "active_command_gate", return_value={
+                "id": "cmd-gate-1",
+                "tool": "Claude Code",
+                "command_preview": "cat .env",
+                "pattern_id": "credential-read",
+                "reason": "Reading a credential/secret file can expose its contents.",
+                "url": "http://127.0.0.1:9998/",
+                "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat(),
+            }),
+            patch.object(ui, "mark_active_command_gate_seen") as mark_seen,
+            patch.object(ui, "build_summary_cached", return_value={
+                "handoff_bubble": {
+                    "session_id": "sess-1",
+                    "severity": "critical",
+                    "body": "Context is getting expensive.",
+                },
+                "intervention_receipts": [],
+                "handoff_decisions": [],
+                "insights": [],
+                "watcher": {"running": True},
+            }),
+        ):
+            state = ui.build_companion_state()
+
+        self.assertEqual(state["state"], "command_gate")
+        self.assertEqual(state["label"], "Command Gate")
+        self.assertEqual(state["primary_label"], "Review")
+        self.assertEqual(state["primary_action"], "open_prompt_gate")
+        self.assertEqual(state["primary_url"], "http://127.0.0.1:9998/")
+        self.assertIn("cat .env", state["subtitle"])
+        self.assertIsInstance(state["expires_in_seconds"], int)
+        mark_seen.assert_called_once_with("cmd-gate-1")
+
     def test_companion_state_surfaces_fresh_start_proof_as_passive_status(self) -> None:
         with (
             patch.object(ui, "build_summary_cached", return_value={
@@ -2113,6 +2182,26 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Copy", inventory["top"]["action_label"])
         self.assertIn("Do not delete", inventory["top"]["checklist"])
         self.assertIn("/repo/app", inventory["top"]["checklist"])
+
+    def test_optimize_inventory_surfaces_stale_runtime_review_plan(self) -> None:
+        runtime = SimpleNamespace(stale=True, rss_kb=147251)
+        with (
+            patch.object(ui, "safe_runtime_processes", return_value=[runtime]),
+            patch.object(ui, "_worktree_rows", return_value=[]),
+            patch.object(ui, "recent_optimize_decisions", return_value=[]),
+        ):
+            inventory = ui.build_optimize_inventory([], outcomes={}, handoff_decisions=[])
+
+        self.assertEqual(inventory["status"], "needs_action")
+        self.assertEqual(inventory["top"]["kind"], "stale_processes")
+        self.assertEqual(inventory["top"]["project"], "Local machine")
+        self.assertEqual(inventory["top"]["review_command"], "aiwatcher processes --stale-only")
+        self.assertIn("143.8 MB RSS observed", inventory["top"]["impact_label"])
+        self.assertIn("not provider billing", inventory["top"]["evidence"])
+        self.assertIn("not model/API spend", inventory["top"]["resource_note"])
+        self.assertIn("prompt/source content", inventory["top"]["privacy_note"])
+        self.assertIn("Run: aiwatcher processes --stale-only", inventory["top"]["safe_review_steps"])
+        self.assertIn("Leave unknown processes alone", inventory["top"]["checklist"])
 
     def test_detected_tools_are_listed_without_measured_spend(self) -> None:
         rows = [{
@@ -3742,6 +3831,64 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Workspace only", app_card["return_label"])
         self.assertIn("2 sessions need attention", app_card["group_note"])
         self.assertEqual(len(app_card["related_sessions"]), 2)
+
+    def test_context_health_preserves_quieted_projects_as_evidence(self) -> None:
+        now = datetime.now(timezone.utc)
+        rows = [
+            LocalSession(session_id="quiet", tool="codex-cli", project_path="/repo/quiet", updated_at=now),
+            LocalSession(session_id="ready", tool="codex-cli", project_path="/repo/ready", updated_at=now),
+        ]
+
+        def _health(session_id: str, project_path: str) -> ui.ContextHealth:
+            return ui.ContextHealth(
+                session_id=session_id,
+                tool="codex-cli",
+                project_path=project_path,
+                age_hours=1,
+                age_days=1 / 24,
+                event_count=4,
+                total_input_tokens=400_000,
+                total_output_tokens=1_000,
+                latest_turn_tokens=200_000,
+                peak_turn_tokens=200_000,
+                avg_turn_tokens=200_000,
+                growth_rate=1_000,
+                bloat_ratio=0.98,
+                efficiency_pct=2.0,
+                bloat_measurable=True,
+                replayed_cost_usd=0.25,
+                analyzed_cost_usd=0.5,
+                latest_turn_replayed_tokens=196_000,
+                is_stale=False,
+                is_critical_stale=False,
+                is_context_pressure=True,
+                is_context_critical=True,
+                is_high_bloat=True,
+                is_extreme_bloat=True,
+                severity="critical",
+                recommendations=["Start a fresh session before continuing."],
+            )
+
+        with (
+            patch.object(ui, "analyze_all_sessions", return_value=[
+                _health("quiet", "/repo/quiet"),
+                _health("ready", "/repo/ready"),
+            ]),
+            patch.object(
+                ui,
+                "companion_skip_active",
+                side_effect=lambda key: key == "control_recommended_project:/repo/quiet",
+            ),
+        ):
+            cards = ui._context_health_cards(rows, [])
+
+        self.assertEqual({card["project_full"] for card in cards}, {"/repo/ready", "/repo/quiet"})
+        quiet_card = next(card for card in cards if card["project_full"] == "/repo/quiet")
+        ready_card = next(card for card in cards if card["project_full"] == "/repo/ready")
+        self.assertTrue(quiet_card["fresh_start_quiet"])
+        self.assertFalse(quiet_card["actionable"])
+        self.assertFalse(ready_card["fresh_start_quiet"])
+        self.assertTrue(ready_card["actionable"])
 
     def test_session_detail_degrades_when_state_snapshot_read_fails(self) -> None:
         now = datetime.now(timezone.utc)

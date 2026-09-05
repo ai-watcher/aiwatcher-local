@@ -4718,6 +4718,94 @@ class CommandGateAnalyzerTests(unittest.TestCase):
         self.assertIsNone(cli.analyze_tool_call("Bash", {"command": ""}))
         self.assertIsNone(cli.analyze_tool_call("Bash", {}))
 
+    def test_command_gate_page_disables_after_decision_and_explains_expiry(self) -> None:
+        page = cli._command_gate_html(
+            command="cat .env",
+            reason="Reading a credential/secret file can expose its contents.",
+            pattern_id="credential-read",
+            tool_label="Claude Code",
+            remaining_seconds=5,
+        )
+        self.assertIn("This gate expires in 5s", page)
+        self.assertIn("setButtonsDisabled(true)", page)
+        self.assertIn("Decision recorded", page)
+        self.assertIn("hook may have timed out", page)
+
+    def test_run_command_gate_lets_companion_own_browser_open_when_presence_is_running(self) -> None:
+        probe = socket.socket()
+        try:
+            probe.bind(("127.0.0.1", 0))
+        except PermissionError:
+            self.skipTest("loopback sockets are unavailable in this test sandbox")
+        finally:
+            probe.close()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+
+            def allow_gate(url: str) -> None:
+                gate = local_state.active_command_gate()
+                self.assertIsNotNone(gate)
+                self.assertEqual(gate["url"], url)
+                self.assertEqual(gate["pattern_id"], "credential-read")
+                payload = json.dumps({"decision": "allow_once"}).encode("utf-8")
+                request = urllib.request.Request(
+                    url + "decision",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=5):
+                    pass
+
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(cli, "_display_available", return_value=True),
+                patch.object(cli, "_companion_can_own_blocking_gate", return_value=True),
+                patch.object(cli, "webbrowser") as webbrowser_mock,
+            ):
+                decision = cli.run_command_gate(
+                    command="cat .env",
+                    reason="Reading a credential/secret file can expose its contents.",
+                    pattern_id="credential-read",
+                    timeout_seconds=5,
+                    ready_callback=allow_gate,
+                )
+                self.assertIsNone(local_state.active_command_gate())
+
+        webbrowser_mock.open.assert_not_called()
+        self.assertEqual(decision, "allow_once")
+
+    def test_run_command_gate_falls_back_when_companion_presence_is_stale(self) -> None:
+        probe = socket.socket()
+        try:
+            probe.bind(("127.0.0.1", 0))
+        except PermissionError:
+            self.skipTest("loopback sockets are unavailable in this test sandbox")
+        finally:
+            probe.close()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(cli, "_display_available", return_value=True),
+                patch.object(cli, "_companion_can_own_blocking_gate", return_value=True),
+                patch.object(cli, "active_command_gate_seen", return_value=False),
+                patch.object(cli, "webbrowser") as webbrowser_mock,
+                patch.object(cli, "_fallback_command_gate", return_value="block") as fallback_mock,
+            ):
+                webbrowser_mock.open.return_value = False
+                decision = cli.run_command_gate(
+                    command="cat .env",
+                    reason="Reading a credential/secret file can expose its contents.",
+                    pattern_id="credential-read",
+                    timeout_seconds=1,
+                )
+                self.assertIsNone(local_state.active_command_gate())
+
+        webbrowser_mock.open.assert_called_once()
+        fallback_mock.assert_called_once()
+        self.assertEqual(decision, "block")
+
 
 class CommandGateHookTests(unittest.TestCase):
     def test_safe_command_passes_through_with_empty_output(self) -> None:
@@ -5670,6 +5758,8 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertIn("Codex hook is installed", output)
         self.assertIn("this surface did not invoke the hook", output)
         self.assertIn("Companion -> Plan / Prompt", output)
+        self.assertIn("Command protection", output)
+        self.assertIn("Codex CLI/Desktop: warn + observe", output)
 
     def test_hook_status_warns_when_hook_points_at_different_aiwatcher_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -5716,6 +5806,111 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertEqual(len(warnings), 1)
         self.assertIn("different AIWatcher checkout", warnings[0])
         self.assertIn("Reinstall it from this repo", warnings[0])
+        self.assertIn("install-codex-hook", warnings[0])
+
+    def test_hook_status_warns_when_command_gate_points_at_different_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            claude_settings = os.path.join(temp_dir, "claude-user.json")
+            with open(claude_settings, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "Bash",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": (
+                                            "PYTHONPATH=/tmp/old-aiwatcher:${PYTHONPATH:-} "
+                                            "python3 -m aiwatcher_cli claude-pretooluse-hook"
+                                        ),
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                }, handle)
+            with (
+                patch.object(
+                    cli,
+                    "_claude_settings_path",
+                    side_effect=lambda scope, project_dir=None: claude_settings
+                    if scope == "user"
+                    else os.path.join(temp_dir, f"claude-{scope}.json"),
+                ),
+                patch.object(
+                    cli,
+                    "_codex_hooks_path",
+                    side_effect=lambda scope, project_dir=None: os.path.join(temp_dir, f"codex-{scope}.json"),
+                ),
+                patch.object(
+                    cli,
+                    "_cursor_hooks_path",
+                    side_effect=lambda scope, project_dir=None: os.path.join(temp_dir, f"cursor-{scope}.json"),
+                ),
+            ):
+                warnings = cli._configured_aiwatcher_source_warnings()
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("Claude user command gate", warnings[0])
+        self.assertIn("install-claude-command-gate", warnings[0])
+
+    def test_hook_status_checks_each_hook_command_source_independently(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            claude_settings = os.path.join(temp_dir, "claude-user.json")
+            package_root = os.path.abspath(os.path.join(os.path.dirname(cli.__file__), os.pardir))
+            if os.name == "nt":
+                package_root = package_root.replace("\\", "/")
+            with open(claude_settings, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "hooks": {
+                        "UserPromptSubmit": [
+                            {"hooks": [{
+                                "type": "command",
+                                "command": (
+                                    f"PYTHONPATH={package_root}:${{PYTHONPATH:-}} "
+                                    "python3 -m aiwatcher_cli claude-hook --gate"
+                                ),
+                            }]}
+                        ],
+                        "PreToolUse": [
+                            {
+                                "matcher": "Bash",
+                                "hooks": [{
+                                    "type": "command",
+                                    "command": (
+                                        "PYTHONPATH=/tmp/old-aiwatcher:${PYTHONPATH:-} "
+                                        "python3 -m aiwatcher_cli claude-pretooluse-hook"
+                                    ),
+                                }],
+                            }
+                        ],
+                    }
+                }, handle)
+            with (
+                patch.object(
+                    cli,
+                    "_claude_settings_path",
+                    side_effect=lambda scope, project_dir=None: claude_settings
+                    if scope == "user"
+                    else os.path.join(temp_dir, f"claude-{scope}.json"),
+                ),
+                patch.object(
+                    cli,
+                    "_codex_hooks_path",
+                    side_effect=lambda scope, project_dir=None: os.path.join(temp_dir, f"codex-{scope}.json"),
+                ),
+                patch.object(
+                    cli,
+                    "_cursor_hooks_path",
+                    side_effect=lambda scope, project_dir=None: os.path.join(temp_dir, f"cursor-{scope}.json"),
+                ),
+            ):
+                warnings = cli._configured_aiwatcher_source_warnings()
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("Claude user command gate", warnings[0])
+        self.assertNotIn("Claude user hook", warnings[0])
 
     def test_hook_status_shows_handoff_bubble_decisions(self) -> None:
         with (

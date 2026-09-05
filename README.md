@@ -146,7 +146,7 @@ install either, or both:
 | Hook | Event | Reviews | Tools |
 | --- | --- | --- | --- |
 | **Prompt preflight** | `UserPromptSubmit` | Your prompt, before the agent starts | Claude, Codex, Cursor |
-| **Dangerous-command gate** | `PreToolUse` | A shell command, before it executes | Claude Code CLI only |
+| **Dangerous-command gate** | `PreToolUse` | A shell command, before it executes | Claude Code CLI verified; Claude Desktop Code tab must be verified on that build |
 
 #### Prompt preflight hook
 
@@ -192,14 +192,26 @@ about to run, independently of how the prompt that produced them was handled:
 python -m aiwatcher_cli install-claude-command-gate --write --scope user
 ```
 
-**Claude Code CLI only.** Unlike prompt preflight, there is no Codex or Cursor
-equivalent — this hook needs the host to expose a lifecycle event *before a tool
-call*, and Claude Code's `PreToolUse` is the only one AIWatcher supports today.
-On Codex and Cursor, prompt preflight is the whole story.
+**Verified today for Claude Code CLI.** Unlike prompt preflight, command gating
+needs the host to expose a lifecycle event *before a tool call*. Claude Code's
+`PreToolUse` is the only command lifecycle AIWatcher supports today. Some
+Claude Desktop Code builds may invoke the same hook, but verify that exact
+surface with `aiwatcher hook-status` before calling it protected.
+
+On Codex, Cursor, and other surfaces without a verified pre-tool command hook,
+AIWatcher uses **warn + observe** instead: Prompt Gate catches risky intent
+before the agent starts, Watch tracks local evidence where the tool exposes it,
+and Prove/Improve report command-risk posture and blocked-command history
+without claiming command-level interception.
 
 Where it is available, running both is the normal setup: the prompt hook catches
 risky *intent*, the command gate catches a risky *command* that a perfectly
 reasonable prompt happened to produce.
+
+When the Companion is running, the command gate follows the same interaction
+model as Prompt Gate: the Companion lights up as **Review command**, and opens
+the local decision page only when you click it. If the Companion is not running,
+AIWatcher falls back to opening the one-shot local page directly.
 
 #### Verify and undo
 
@@ -306,6 +318,19 @@ AIWatcher is organized around the same loop in the Companion and Console:
 
 The Companion answers "what should I do right now?" The Console answers "what
 happened, what mattered, and what should I improve next?"
+
+Command awareness follows the same loop:
+
+- **Plan:** risky command intent is caught before the prompt runs when a prompt
+  hook is available.
+- **Watch:** local sessions and tool evidence are scanned for risky command
+  patterns, loops, and runaway work where the host exposes history.
+- **Control:** Claude Code `PreToolUse` can pause matching Bash commands before
+  execution on verified surfaces; other tools fall back to warn + observe.
+- **Prove:** blocked commands and user decisions are stored as redacted local
+  receipts, never raw secret-bearing commands.
+- **Improve:** the Console shows whether a tool is command-protected,
+  warn-only, observed-only, or unsupported so setup gaps are obvious.
 
 The Console tabs are:
 
@@ -524,12 +549,12 @@ chat pages. Use `aiwatcher hook-status` after a test prompt to verify actual
 coverage instead of assuming that a similarly branded chat surface shares the
 same lifecycle.
 
-Current verified boundary: Claude Desktop's **Code** tab invokes the Claude
-hook. General Claude Desktop chat does not. The current Codex Desktop
-conversation surface tested by the project does not invoke the configured
-`UserPromptSubmit` hook; use the Prompt Companion, MCP, wrapper, or a Codex
-CLI/TUI surface that records a hook event. AIWatcher does not claim silent
-interception where a host application provides no lifecycle API.
+Current verified boundary: Claude Code CLI invokes both the prompt hook and the
+Claude `PreToolUse` command gate when trusted. Claude Desktop's **Code** tab
+and Codex Desktop can invoke prompt hooks on some builds, but verify the exact
+surface/session with `aiwatcher hook-status`; general vendor chat surfaces do
+not expose the same local lifecycle. AIWatcher does not claim silent
+interception where a host application provides no verified lifecycle API.
 
 For that gap, the [shell wrapper](#prompt-preflight-hook) is a shell-level
 fallback rather than a native hook: it intercepts `codex` invocations at the

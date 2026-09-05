@@ -730,6 +730,67 @@ class LocalStateTests(unittest.TestCase):
                 )
                 self.assertIsNone(local_state.active_prompt_gate())
 
+    def test_active_command_gate_expires_and_clears(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_active_command_gate(
+                    gate_id="cmd-gate-1",
+                    tool="Claude Code",
+                    command_preview="cat .env",
+                    pattern_id="credential-read",
+                    reason="Reading a credential/secret file can expose its contents.",
+                    url="http://127.0.0.1:9999/",
+                    expires_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+                )
+                gate = local_state.active_command_gate()
+                self.assertEqual(gate["id"], "cmd-gate-1")
+                self.assertEqual(gate["pattern_id"], "credential-read")
+                self.assertFalse(local_state.active_command_gate_seen("cmd-gate-1"))
+                local_state.mark_active_command_gate_seen("cmd-gate-1")
+                self.assertTrue(local_state.active_command_gate_seen("cmd-gate-1"))
+                local_state.clear_active_command_gate("other-gate")
+                self.assertEqual(local_state.active_command_gate()["id"], "cmd-gate-1")
+                local_state.clear_active_command_gate("cmd-gate-1")
+                self.assertIsNone(local_state.active_command_gate())
+
+                local_state.record_active_command_gate(
+                    gate_id="cmd-gate-a",
+                    tool="Claude Code",
+                    command_preview="cat .env",
+                    pattern_id="credential-read",
+                    reason="Reading a credential/secret file can expose its contents.",
+                    url="http://127.0.0.1:9998/",
+                    expires_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+                )
+                local_state.record_active_command_gate(
+                    gate_id="cmd-gate-b",
+                    tool="Claude Code",
+                    command_preview="git push --force",
+                    pattern_id="force-push",
+                    reason="Force push can overwrite remote history.",
+                    url="http://127.0.0.1:9997/",
+                    expires_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+                )
+                self.assertEqual(local_state.active_command_gate()["id"], "cmd-gate-a")
+                local_state.mark_active_command_gate_seen("cmd-gate-b")
+                self.assertTrue(local_state.active_command_gate_seen("cmd-gate-b"))
+                local_state.clear_active_command_gate("cmd-gate-a")
+                self.assertEqual(local_state.active_command_gate()["id"], "cmd-gate-b")
+                local_state.clear_active_command_gate()
+                self.assertIsNone(local_state.active_command_gate())
+
+                local_state.record_active_command_gate(
+                    gate_id="cmd-gate-2",
+                    tool="Claude Code",
+                    command_preview="cat .env",
+                    pattern_id="credential-read",
+                    reason="Reading a credential/secret file can expose its contents.",
+                    url="http://127.0.0.1:9999/",
+                    expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+                )
+                self.assertIsNone(local_state.active_command_gate())
+
     def test_stale_lockfile_left_behind_does_not_deadlock_future_writes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "local-state.json")

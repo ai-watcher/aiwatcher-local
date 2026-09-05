@@ -185,6 +185,14 @@ async function copyText(value, label = 'Copied') {
     return false;
   }
 }
+async function copyOptimizeRuntimeCommand(command, button = null) {
+  lastPressedButton = button || pressedButton();
+  const copied = await copyText(command || 'aiwatcher processes --stale-only', 'Review command copied');
+  if (copied) {
+    const row = button && button.closest ? button.closest('.runtime-review-card') : null;
+    if (row) row.classList.add('review-command-copied');
+  }
+}
 async function recordOptimizeDecision(decision, project = '', impact = '', button = null) {
   try {
     const res = await fetch('/api/optimize-decision', {
@@ -1700,9 +1708,9 @@ function handoffDecisionBubble(sessionId) {
   };
 }
 async function recordHandoffDecision(bubble, decision) {
-  if (!bubble || !bubble.session_id) return;
+  if (!bubble || !bubble.session_id) return false;
   try {
-    await fetch('/api/handoff-decision', {
+    const response = await fetch('/api/handoff-decision', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1714,8 +1722,10 @@ async function recordHandoffDecision(bubble, decision) {
         action_channel: 'dashboard',
       })
     });
+    return response.ok;
   } catch (error) {
-    // Decision receipts should never block the user's flow.
+    // Callers decide whether a failed receipt save should block their flow.
+    return false;
   }
 }
 async function startFreshFromBubble(sessionId) {
@@ -1901,6 +1911,9 @@ function renderOptimizeWorkspace(optimize) {
     <p class="receipt-note" style="margin-bottom:12px">AIWatcher cannot archive or delete anything for you. Review one item, act only in the owning app, then mark it reviewed to quiet the nudge for 24 hours.</p>
     <div class="action-queue">${candidates.map(item => {
       const itemChecklist = item.checklist || checklist;
+      if (item.kind === 'stale_processes') {
+        return renderRuntimeOptimizeCard(item, itemChecklist);
+      }
       return `<div class="action-row ${item.tokens_at_risk ? 'medium' : 'low'}">
       <div>
         <div class="action-title">${esc(item.title)} <span class="pill">${esc(item.evidence_label || 'Observed')}</span></div>
@@ -1918,6 +1931,38 @@ function renderOptimizeWorkspace(optimize) {
     <div class="copy-row" style="margin-top:12px">
       <button class="btn-quiet" onclick="copyText(${jsArg(checklist)}, 'Global review queue copied')">Copy all review items</button>
     </div>`;
+}
+function renderRuntimeOptimizeCard(item, itemChecklist) {
+  const steps = Array.isArray(item.safe_review_steps) && item.safe_review_steps.length
+    ? item.safe_review_steps
+    : ['Run: aiwatcher processes --stale-only', 'Confirm each process is not attached to live AI work.', 'Stop only stale/orphaned runtimes you recognize.', 'Leave unknown processes alone.'];
+  const command = item.review_command || 'aiwatcher processes --stale-only';
+  return `<div class="action-row low runtime-review-card">
+    <div>
+      <div class="action-title">${esc(item.title || 'Review stale AI runtimes')} <span class="pill local">Local machine</span></div>
+      <p>${esc(item.why_inactive || 'Local process metadata shows AI-related runtimes with stale/orphan signals.')}</p>
+      <div class="runtime-review-grid">
+        <div class="mini"><span class="label">Goal</span><strong>${esc(item.title || 'Review stale AI runtimes')}</strong></div>
+        <div class="mini"><span class="label">Evidence</span><strong>${esc(item.evidence_label || 'Observed')}</strong><span class="mini-note">${esc(item.evidence || 'Observed from local process metadata, not provider billing.')}</span></div>
+        <div class="mini"><span class="label">Impact signal</span><strong>${esc(item.impact_label || 'runtime clutter')}</strong><span class="mini-note">${esc(item.resource_note || 'RSS/CPU are local machine resources, not model/API spend.')}</span></div>
+      </div>
+      <div class="runtime-command">
+        <span class="label">Review command</span>
+        <code>${esc(command)}</code>
+      </div>
+      <ol class="runtime-review-steps">
+        ${steps.map(step => `<li>${esc(step)}</li>`).join('')}
+      </ol>
+      <p class="receipt-note">${esc(item.privacy_note || 'This checklist uses local metadata only. It does not include prompt/source content.')}</p>
+      <p class="receipt-note">Nothing is stopped from this dashboard. Run the command, confirm live work is not attached, then stop only a runtime you recognize.</p>
+    </div>
+    <div class="actions">
+      <button class="btn-primary" onclick="copyOptimizeRuntimeCommand(${jsArg(command)}, this)">Copy command</button>
+      <button class="btn-quiet" onclick="copyText(${jsArg(itemChecklist)}, 'Safe review steps copied')">${esc(item.action_label || 'Copy safe review steps')}</button>
+      <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('marked_done', this.dataset.project, this.dataset.impact, this)">Reviewed</button>
+      <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('skipped', this.dataset.project, this.dataset.impact, this)">Skip</button>
+    </div>
+  </div>`;
 }
 /* ---------------------------------------------------------------------------
    Chart core.
@@ -2838,10 +2883,16 @@ function headroomLabel(chart) {
 function healthRow(row, waitingById, index) {
   const reason = healthReason(row, waitingById);
   const room = headroomLabel(row.chart);
+  const project = String(row.project_full || '');
+  const quieted = row.fresh_start_quiet || row.actionable === false;
   // Fresh Start is a different action from opening the session, so it stops the
   // click reaching the row underneath it.
-  const action = row.can_handoff
-    ? `<button class="btn-primary" onclick="event.stopPropagation(); startFreshFromBubble('${esc(row.session_id)}')">Fresh Start</button>`
+  const action = quieted
+    ? '<button class="btn-quiet" disabled title="Quieted for this project; evidence remains visible here.">Quieted 48h</button>'
+    : row.can_handoff
+      ? `<button class="btn-primary" onclick="event.stopPropagation(); startFreshFromBubble(${jsArg(row.session_id)})">Fresh Start</button>
+        <button class="btn-quiet" onclick="event.stopPropagation(); continueFreshStartProject(${jsArg(row.session_id)}, ${jsArg(project)})">Continue 48h</button>
+        <button class="btn-quiet" onclick="event.stopPropagation(); snoozeFreshStartProject(${jsArg(project)}, this)">Snooze 48h</button>`
     : `<button class="btn-quiet" onclick="event.stopPropagation(); selectSession('${esc(row.session_id)}')">Review</button>`;
   // The whole row opens the session: the reason and the numbers are as much a
   // description of it as the title is, and a target the width of the card is
@@ -2860,7 +2911,7 @@ function healthRow(row, waitingById, index) {
   // intent, the context a Fresh Start would carry, the meter and the facts
   // strip all still render -- in the drawer this row opens. Watch answers
   // "which one first"; the drawer answers "what is going on in it".
-  return `<div class="health-rank-row" data-project-full="${esc(row.project_full || '')}"
+  return `<div class="health-rank-row${quieted ? ' muted-card' : ''}" data-project-full="${esc(project)}" data-fresh-start-actionable="${quieted ? 'false' : 'true'}"
     data-session="${esc(row.session_id)}" onclick="selectSession(this.dataset.session)">
     <span class="rank-n">${index + 1}</span>
     <span class="rank-dot ${esc(row.severity)}"></span>
@@ -2881,6 +2932,9 @@ function healthRow(row, waitingById, index) {
 }
 function renderContextHealth(rows, statusArg, presence) {
   const status = arguments.length > 1 ? arguments[1] : 'ready';
+  rows = rows || [];
+  // Keyed by session so the rank and the reason read the same source; a second
+  // list here would be a second thing to keep in step with presence.
   const waitingById = new Map(
     (((presence || {}).sessions) || [])
       .filter(entry => entry.state === 'waiting')
@@ -2892,7 +2946,7 @@ function renderContextHealth(rows, statusArg, presence) {
     const ar = healthRank(a, keys), br = healthRank(b, keys);
     return br[0] - ar[0] || br[1] - ar[1] || br[2] - ar[2];
   });
-  const snoozable = ranked.filter(row => row.can_handoff && (row.severity === 'critical' || row.severity === 'warning'));
+  const snoozable = ranked.filter(row => row.can_handoff && row.actionable !== false && !row.fresh_start_quiet && (row.severity === 'critical' || row.severity === 'warning'));
   const batch = snoozable.length > 1
     ? `<div class="health-batch"><button class="btn-quiet" onclick="snoozeVisibleFreshStartProjects(this)">Snooze all 48h</button></div>`
     : '';
@@ -2923,11 +2977,25 @@ function coverageGate(row) {
   const [label, cls] = map[row.status] || ['Unknown', 'unverified'];
   return `<span class="coverage-status ${esc(cls)}">${esc(label)}</span>`;
 }
+function commandProtection(row) {
+  const clsMap = {
+    block: 'automatic',
+    verify_host: 'unverified',
+    warn_observe: 'companion',
+    observe_only: 'limited',
+    manual: 'companion',
+    unsupported: 'unsupported',
+    not_detected: 'not_detected',
+  };
+  const cls = clsMap[row.command_protection] || 'unverified';
+  return `<span class="coverage-status ${esc(cls)}">${esc(row.command_protection_label || 'Unknown')}</span>
+    ${row.command_protection_detail ? `<span class="cell-note">${esc(row.command_protection_detail)}</span>` : ''}`;
+}
 function renderCoverage(rows) {
   if (!rows.length) return '<div class="empty">Coverage could not be determined on this machine.</div>';
   return `<div class="table-wrap"><table class="coverage-table">
     <thead><tr>
-      <th>Tool</th><th>Coverage</th><th>Gate</th><th class="num">Sessions</th><th>Next</th>
+      <th>Tool</th><th>Coverage</th><th>Prompt</th><th>Command</th><th class="num">Sessions</th><th>Next</th>
     </tr></thead>
     <tbody>${rows.map(row => `<tr>
       <td>
@@ -2939,6 +3007,7 @@ function renderCoverage(rows) {
         ${row.history ? `<span class="cell-note">${esc(row.history)}</span>` : ''}
       </td>
       <td>${coverageGate(row)}</td>
+      <td>${commandProtection(row)}</td>
       <td class="num">${esc(row.session_count)}</td>
       <td><span class="cell-note">${esc(row.action || '')}</span></td>
     </tr>`).join('')}</tbody>
@@ -2947,9 +3016,12 @@ function renderCoverage(rows) {
     <strong>Protection:</strong> <b>Automatic</b> is intercepted when the tool invokes its hook.
     <b>Unverified</b> means history is visible but interception has not been proven on this exact
     surface. <b>Companion only</b> means AIWatcher can help, but is not intercepting directly.
+    <b>Warn + observe</b> means prompt intent can be steered before work and command evidence can
+    be reported afterwards, but commands are not blocked before execution.
     <b>Not detected</b> and <b>Not supported</b> claim nothing.
   </p>`;
 }
+
 function renderSetup(rows) {
   if (!rows.length) return '<div class="empty">Setup checklist unavailable.</div>';
   return rows.map((row, index) => `<div class="coverage-card">
@@ -4240,25 +4312,45 @@ async function snoozeFreshStartProjects(projects, message) {
     return false;
   }
 }
+async function snoozeFreshStartProject(project, button) {
+  const ok = await snoozeFreshStartProjects([project], 'Fresh Start snoozed for this project for 48h.');
+  if (ok && button) {
+    const row = button.closest('[data-project-full]');
+    if (row) {
+      row.classList.add('muted-card');
+      row.dataset.freshStartActionable = 'false';
+    }
+  }
+}
+function visibleFreshStartProjects() {
+  // Any element carrying a project, not only .health-card. This screen shows
+  // one lead card and the rest as compact rows, so matching on the card class
+  // would have snoozed a single project while the button said it snoozed all.
+  const cards = Array.from(document.querySelectorAll('#sessionContextHealth [data-project-full][data-fresh-start-actionable="true"]'));
+  return [...new Set(cards.map(card => card.dataset.projectFull || '').filter(Boolean))];
+}
 async function snoozeVisibleFreshStartProjects(button) {
-  // Any element carrying a project. Matching on a card class would have
-  // snoozed a single project while the button said it snoozed all -- and there
-  // are no cards on this screen any more, only ranked rows.
-  const cards = Array.from(document.querySelectorAll('#sessionContextHealth [data-project-full]'));
-  const projects = [...new Set(cards.map(card => card.dataset.projectFull || '').filter(Boolean))];
+  const projects = visibleFreshStartProjects();
   const ok = await snoozeFreshStartProjects(projects, `Fresh Start snoozed for ${projects.length} project${projects.length === 1 ? '' : 's'} for 48h.`);
   if (ok && button) button.disabled = true;
 }
 async function continueFreshStartProject(sessionId, project) {
-  await recordHandoffDecision({
+  const saved = await recordHandoffDecision({
     session_id: sessionId,
     project_full: project,
     reason: 'User chose to continue this project from the context review list.',
     body: 'User chose to continue this project from the context review list.',
     expected_saved_context_tokens: null,
   }, 'continue_here');
-  showToast('Fresh Start snoozed for this project for 48h.');
-  await load(true, true);
+  if (!saved) {
+    showToast('Could not save the Fresh Start decision yet.', 'error');
+    return;
+  }
+  const quieted = await snoozeFreshStartProjects(
+    [project],
+    'Context review quieted for this project for 48h.'
+  );
+  if (!quieted) await load(true, true);
 }
 function showView(view) {
   document.querySelectorAll('.view').forEach(node => {

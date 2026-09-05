@@ -50,6 +50,7 @@ from .local_state import (
     MAX_COMMAND_DECISIONS_STORED,
     PROMPT_MODIFIED_DECISIONS,
     VALID_OUTCOMES,
+    active_command_gate,
     active_prompt_gate,
     analyst_consent,
     analyst_contents_allowed,
@@ -66,6 +67,7 @@ from .local_state import (
     recent_interventions,
     recent_optimize_decisions,
     get_ambient_intervention,
+    mark_active_command_gate_seen,
     mark_active_prompt_gate_seen,
     mark_recent_handoff_receipts_viewed,
     record_companion_skip,
@@ -979,6 +981,7 @@ def build_optimize_inventory(
         stale_processes = []
     if stale_processes:
         rss_kb = sum(process.rss_kb or 0 for process in stale_processes)
+        review_command = "aiwatcher processes --stale-only"
         candidates.append({
             "id": "stale-processes",
             "kind": "stale_processes",
@@ -993,7 +996,16 @@ def build_optimize_inventory(
             "tokens_at_risk": 0,
             "session_count": len(stale_processes),
             "updated_label": "now",
-            "action_label": "Copy cleanup checklist",
+            "action_label": "Copy safe review steps",
+            "review_command": review_command,
+            "resource_note": "RSS/CPU are local machine resources, not model/API spend.",
+            "privacy_note": "This checklist uses local metadata only. It does not include prompt/source content.",
+            "safe_review_steps": [
+                f"Run: {review_command}",
+                "Confirm each process is not attached to live AI work.",
+                "Stop only stale/orphaned runtimes you recognize.",
+                "Leave unknown processes alone.",
+            ],
         })
 
     candidates = _group_pending_fresh_starts(candidates)
@@ -2554,13 +2566,20 @@ def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) ->
         # which is why it deliberately carries no cumulative note and is charted.
         # Same exclusion _insight_feed already applies via pressure_rows.
         plottable = session is not None and not has_cumulative_totals(session)
-        cards.append(_context_health_card(
+        card = _context_health_card(
             representative,
             session,
             group=group,
             turn_series=turns_by_session.get(representative.session_id, []) if plottable else None,
             charted_because_live=_still_reachable(representative),
-        ))
+        )
+        quiet = (
+            representative.severity in {"critical", "warning"}
+            and _fresh_start_project_quiet(representative.project_path)
+        )
+        card["fresh_start_quiet"] = quiet
+        card["actionable"] = not quiet
+        cards.append(card)
     cards.sort(key=lambda item: (
         severity_order.get(str(item.get("severity")), 9),
         -int(item.get("estimated_replayed_context_tokens") or 0),
@@ -5939,6 +5958,7 @@ def build_companion_state() -> dict[str, object]:
         "console_url": "/",
         "detail": "Private by default. No prompt or source text is shown in the Companion.",
         "presence": _presence_block(presence_rows),
+        "badge": None,
         # In the base payload, not only the finished state: the bubble's blue
         # badge must survive whatever state owns the bar, or a finished
         # session vanishes from the glanceable surface the moment anything
@@ -5986,6 +6006,44 @@ def build_companion_state() -> dict[str, object]:
             "continue_url": str(gate.get("url") or ""),
             "control_url": str(gate.get("url") or "/?view=prompt"),
             "detail": "A hook paused this prompt locally. Review it before the AI tool continues.",
+        }
+    try:
+        command_gate = active_command_gate()
+    except OSError:
+        command_gate = None
+    if isinstance(command_gate, dict):
+        gate_id = command_gate.get("id")
+        if isinstance(gate_id, str) and gate_id:
+            try:
+                mark_active_command_gate_seen(gate_id)
+            except OSError:
+                pass
+        tool = str(command_gate.get("tool") or "Claude Code")
+        reason = str(command_gate.get("reason") or "A local command needs review before it runs.")
+        preview = str(command_gate.get("command_preview") or "").strip()
+        gate_expires = _parse_iso_datetime(command_gate.get("expires_at"))
+        subtitle = reason
+        if preview:
+            subtitle = f"{preview} · {reason}"
+        return {
+            **base,
+            "state": "command_gate",
+            "label": "Command Gate",
+            "title": "Review command",
+            "subtitle": subtitle,
+            "expires_in_seconds": (
+                max(0, int((gate_expires - datetime.now(timezone.utc)).total_seconds()))
+                if gate_expires is not None
+                else None
+            ),
+            "primary_label": "Review",
+            "primary_action": "open_prompt_gate",
+            "primary_url": str(command_gate.get("url") or "/?view=control"),
+            "control_url": str(command_gate.get("url") or "/?view=control"),
+            "detail": (
+                f"{tool} paused a shell command locally. Choose Allow once, Block, or Always allow before it continues."
+                + (f" Command preview: {preview}" if preview else "")
+            ),
         }
     # Second only to the prompt gate, and ahead of every advisory state below.
     # The gate outranks it because there AIWatcher is itself holding a prompt
@@ -6061,6 +6119,11 @@ def build_companion_state() -> dict[str, object]:
             "primary_session_id": session_id,
             "primary_url": f"/?session={quote(session_id, safe='')}" if session_id else "/",
             "waiting_sessions": queue,
+            "badge": {
+                "count": len(waiting_rows),
+                "tone": "attention",
+                "label": f"{len(waiting_rows)} waiting session{'s' if len(waiting_rows) != 1 else ''}",
+            },
             "detail": "This session asked for permission and has done nothing since."
             if len(waiting_rows) == 1
             else "These sessions asked for permission and have done nothing since.",
@@ -6094,6 +6157,11 @@ def build_companion_state() -> dict[str, object]:
             "skip_label": "Dismiss",
             "skip_state": "away_digest",
             "digest_rows": digest_rows,
+            "badge": {
+                "count": len(digest_rows),
+                "tone": "info",
+                "label": f"{len(digest_rows)} away item{'s' if len(digest_rows) != 1 else ''}",
+            },
             "detail": "Reconstructed from local records inside the gap. Dismiss clears this summary; the evidence stays in the dashboard.",
         }
 
@@ -6128,6 +6196,11 @@ def build_companion_state() -> dict[str, object]:
             "skip_label": "Skip",
             "skip_state": "session_finished",
             "skip_session_id": finished_id,
+            "badge": {
+                "count": len(finished_payload),
+                "tone": "info",
+                "label": f"{len(finished_payload)} finished session{'s' if len(finished_payload) != 1 else ''}",
+            },
             "detail": "This session was working a moment ago and has gone quiet -- likely a completed turn awaiting review.",
         }
 
@@ -6149,11 +6222,22 @@ def build_companion_state() -> dict[str, object]:
         if foreground_candidate is None:
             return {
                 **base,
-                "state": "watching",
-                "label": "Watching quietly",
+                "state": "context_review",
+                "label": "Context review",
                 "subtitle": f"{project_count} projects ready for context review in Console",
-                "primary_label": "Console",
+                "primary_label": "Review list",
+                "primary_action": "open_url",
                 "primary_url": "/?view=watch#contextHealth",
+                "skip_label": "Snooze",
+                "skip_state": "control_recommended_group",
+                "skip_project": "\n".join(project_lines),
+                "fresh_start_project_count": project_count,
+                "fresh_start_context_label": context_label,
+                "badge": {
+                    "count": project_count,
+                    "tone": "info",
+                    "label": f"{project_count} context review project{'s' if project_count != 1 else ''}",
+                },
                 "detail": "Fresh Start review is batched in Watch and only blinks while an affected AI surface is foreground.",
             }
         return {
@@ -6172,6 +6256,11 @@ def build_companion_state() -> dict[str, object]:
             "skip_project": "\n".join(project_lines),
             "fresh_start_project_count": project_count,
             "fresh_start_context_label": context_label,
+            "badge": {
+                "count": project_count,
+                "tone": "attention",
+                "label": f"{project_count} context review project{'s' if project_count != 1 else ''}",
+            },
             "control_url": "/?view=watch#contextHealth",
             "watch_url": "/?view=watch#contextHealth",
             "detail": "Choose which projects to Fresh Start, continue, or snooze in one batch.",
@@ -6264,7 +6353,11 @@ def build_companion_state() -> dict[str, object]:
                 "label": "Watching quietly",
                 "subtitle": subtitle,
                 "primary_label": "Console",
+                "primary_action": "open_url",
                 "primary_url": "/?view=watch#contextHealth",
+                "skip_label": "Snooze",
+                "skip_state": "control_recommended_group",
+                "skip_project": bubble_project,
                 "detail": "Fresh Start nudges only blink when the matching AI tool or terminal is foreground.",
             }
         return {
@@ -6375,6 +6468,11 @@ def build_companion_state() -> dict[str, object]:
         appended = f"{quiet_subtitle} · {len(finished_notices)} finished"
         if len(appended) <= 46:
             quiet_subtitle = appended
+            base["badge"] = {
+                "count": len(finished_notices),
+                "tone": "info",
+                "label": f"{len(finished_notices)} finished session{'s' if len(finished_notices) != 1 else ''}",
+            }
     return {
         **base,
         "state": "watching" if running else "offline",
@@ -6956,7 +7054,12 @@ class UIHandler(BaseHTTPRequestHandler):
             session_id = str(payload.get("session_id", "")).strip()
             decision = str(payload.get("decision", "")).strip()
             reason = str(payload.get("reason", "")).strip()
-            source_project_path = str(payload.get("source_project_path", "")).strip()
+            source_project_path = str(
+                payload.get("source_project_path")
+                or payload.get("project_full")
+                or payload.get("project")
+                or ""
+            ).strip()
             action_channel = str(payload.get("action_channel", "dashboard")).strip() or "dashboard"
             expected = payload.get("expected_saved_context_tokens")
             if not session_id:

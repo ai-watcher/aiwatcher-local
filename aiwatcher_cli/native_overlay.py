@@ -1323,11 +1323,11 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     // not the second: they earn the primary and the compact layout, but
     // "review when ready" must not wear the orange "blocked on you" treatment.
     func hasPrimaryAction() -> Bool {
-        return ["prompt_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm", "session_waiting", "session_finished", "away_digest"].contains(stateName)
+        return ["prompt_gate", "command_gate", "control_recommended", "control_review", "context_review", "optimize_available", "clipboard_confirm", "session_waiting", "session_finished", "away_digest"].contains(stateName)
     }
 
     func needsAttentionState() -> Bool {
-        return ["prompt_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm", "session_waiting"].contains(stateName)
+        return ["prompt_gate", "command_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm", "session_waiting"].contains(stateName)
     }
 
     func shouldShowWindow() -> Bool {
@@ -1609,7 +1609,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         let incomingState = json["state"] as? String ?? "watching"
         if let hold = suppressPassiveRefreshUntil,
            hold > Date(),
-           incomingState != "prompt_gate",
+           !["prompt_gate", "command_gate"].contains(incomingState),
            ["fresh_start_copied", "clipboard_confirm"].contains(self.stateName) {
             self.updateAppearance()
             return
@@ -1647,11 +1647,23 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             (row["kind"] as? String) ?? ""
         }
         let presence = json["presence"] as? [String: Any]
-        self.waitingCount = presence?["waiting"] as? Int ?? self.waitingRowTexts.count
         self.workingCount = presence?["working"] as? Int ?? 0
         let finishedList = json["finished_sessions"] as? [[String: Any]] ?? []
         let digestList = json["digest_rows"] as? [[String: Any]] ?? []
-        self.finishedCount = finishedList.isEmpty ? digestList.count : finishedList.count
+        if json.keys.contains("badge") {
+            if let badge = json["badge"] as? [String: Any] {
+                let count = badge["count"] as? Int ?? 0
+                let tone = badge["tone"] as? String ?? "info"
+                self.waitingCount = tone == "attention" ? count : 0
+                self.finishedCount = tone == "attention" ? 0 : count
+            } else {
+                self.waitingCount = 0
+                self.finishedCount = 0
+            }
+        } else {
+            self.waitingCount = presence?["waiting"] as? Int ?? self.waitingRowTexts.count
+            self.finishedCount = finishedList.isEmpty ? digestList.count : finishedList.count
+        }
         let pressure = json["pressure"] as? [String: Any]
         self.pressureAvailable = pressure?["available"] as? Bool ?? false
         self.pressurePct = pressure?["pct_of_turn_limit"] as? Int ?? 0
@@ -1668,7 +1680,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         }
         self.titleLabel.stringValue = String((json["label"] as? String ?? "AIWatcher").prefix(18))
         var subtitleText = String((json["subtitle"] as? String ?? "Watching quietly").prefix(46))
-        if incomingState == "prompt_gate", let remaining = json["expires_in_seconds"] as? Int, remaining >= 0 {
+        if ["prompt_gate", "command_gate"].contains(incomingState), let remaining = json["expires_in_seconds"] as? Int, remaining >= 0 {
             subtitleText += " · \(remaining)s"
         }
         self.subtitleLabel.stringValue = subtitleText
@@ -2364,7 +2376,7 @@ def run_native_presence(
         if (
             suppress_passive_refresh_until.get() > time.time()
             and state_var.get() in {"fresh_start_copied", "clipboard_confirm"}
-            and incoming_state != "prompt_gate"
+            and incoming_state not in {"prompt_gate", "command_gate"}
         ):
             return
         if suppress_passive_refresh_until.get() <= time.time():
@@ -2399,22 +2411,38 @@ def run_native_presence(
                 waiting_row_kinds.append(str(row.get("kind") or ""))
         presence = payload.get("presence")
         try:
-            waiting_count = int(presence.get("waiting") or 0) if isinstance(presence, dict) else 0
+            presence_waiting_count = int(presence.get("waiting") or 0) if isinstance(presence, dict) else 0
         except (TypeError, ValueError):
-            waiting_count = 0
-        waiting_count_var.set(waiting_count or len(waiting_row_texts))
+            presence_waiting_count = 0
         try:
             working_count_var.set(int(presence.get("working") or 0) if isinstance(presence, dict) else 0)
         except (TypeError, ValueError, tk.TclError):
             working_count_var.set(0)
         finished_sessions = payload.get("finished_sessions")
         digest_rows = payload.get("digest_rows")
-        if isinstance(finished_sessions, list) and finished_sessions:
-            finished_count_var.set(len(finished_sessions))
-        elif isinstance(digest_rows, list):
-            finished_count_var.set(len(digest_rows))
-        else:
+        badge = payload.get("badge")
+        if "badge" in payload and isinstance(badge, dict):
+            try:
+                badge_count = int(badge.get("count") or 0)
+            except (TypeError, ValueError):
+                badge_count = 0
+            if badge.get("tone") == "attention":
+                waiting_count_var.set(badge_count)
+                finished_count_var.set(0)
+            else:
+                waiting_count_var.set(0)
+                finished_count_var.set(badge_count)
+        elif "badge" in payload:
+            waiting_count_var.set(0)
             finished_count_var.set(0)
+        else:
+            waiting_count_var.set(presence_waiting_count or len(waiting_row_texts))
+            if isinstance(finished_sessions, list) and finished_sessions:
+                finished_count_var.set(len(finished_sessions))
+            elif isinstance(digest_rows, list):
+                finished_count_var.set(len(digest_rows))
+            else:
+                finished_count_var.set(0)
         pressure = payload.get("pressure")
         if isinstance(pressure, dict) and pressure.get("available"):
             pressure_available_var.set(True)
@@ -2441,7 +2469,7 @@ def run_native_presence(
         title_var.set(str(payload.get("label") or "AIWatcher")[:18])
         subtitle_text = str(payload.get("subtitle") or "Watching quietly")[:46]
         remaining = payload.get("expires_in_seconds")
-        if incoming_state == "prompt_gate" and isinstance(remaining, int) and remaining >= 0:
+        if incoming_state in {"prompt_gate", "command_gate"} and isinstance(remaining, int) and remaining >= 0:
             subtitle_text += f" · {remaining}s"
         subtitle_var.set(subtitle_text)
         primary_label_var.set(str(payload.get("primary_label") or "Watch")[:12])
@@ -2743,7 +2771,7 @@ def run_native_presence(
         # update_attention_style's needs_attention set deliberately excludes
         # it, so "review when ready" never wears the orange treatment.
         return state_var.get() in {
-            "prompt_gate", "control_recommended", "optimize_available", "clipboard_confirm",
+            "prompt_gate", "command_gate", "control_recommended", "context_review", "optimize_available", "clipboard_confirm",
             "session_waiting", "session_finished", "away_digest",
         }
 
@@ -2832,7 +2860,12 @@ def run_native_presence(
             root.geometry(f"{expanded_width}x{expanded_height + row_height * rows}")
 
     def should_show_window() -> bool:
-        if has_primary_action():
+        if state_var.get() in {
+            "prompt_gate", "command_gate", "control_recommended", "control_review", "optimize_available",
+            "clipboard_confirm", "session_waiting",
+        }:
+            return True
+        if state_var.get() in {"session_finished", "away_digest"}:
             return True
         if visibility == "nudges-only":
             return False
@@ -2876,7 +2909,7 @@ def run_native_presence(
 
     def update_attention_style() -> None:
         needs_attention = state_var.get() in {
-            "prompt_gate", "control_recommended", "control_review", "optimize_available",
+            "prompt_gate", "command_gate", "control_recommended", "control_review", "optimize_available",
             "clipboard_confirm", "session_waiting",
         }
         attention_bg = "#ed6a24" if pulse_var.get() else "#b84816"

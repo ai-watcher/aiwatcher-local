@@ -282,6 +282,9 @@ class SurfaceCoverage:
     action: str
     detail: str
     session_count: int = 0
+    command_protection: str = "unknown"
+    command_protection_label: str = "Unknown"
+    command_protection_detail: str = "Command-level protection has not been classified for this surface yet."
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -295,6 +298,9 @@ class SurfaceCoverage:
             "action": self.action,
             "detail": self.detail,
             "session_count": self.session_count,
+            "command_protection": self.command_protection,
+            "command_protection_label": self.command_protection_label,
+            "command_protection_detail": self.command_protection_detail,
         }
 
 
@@ -1070,6 +1076,15 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
             action="Verify with `aiwatcher hook-status`.",
             detail="Best-covered Claude surface. Prompt/source content stays local.",
             session_count=claude_sessions,
+            command_protection="block" if detected.get("claude-code") else "not_detected",
+            command_protection_label=(
+                "Can block risky commands" if detected.get("claude-code") else "Not detected"
+            ),
+            command_protection_detail=(
+                "Claude Code PreToolUse lets AIWatcher pause risky Bash commands before they run."
+                if detected.get("claude-code") else
+                "Install Claude Code before enabling command protection."
+            ),
         ),
         SurfaceCoverage(
             surface_id="claude-desktop-code",
@@ -1092,6 +1107,15 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
             ),
             detail="Claude hook events were observed somewhere on this machine; Desktop interception still needs same-surface proof.",
             session_count=claude_desktop_sessions,
+            command_protection="verify_host" if detected.get("claude-code") else "not_detected",
+            command_protection_label=(
+                "Verify command gate" if detected.get("claude-code") else "Not detected"
+            ),
+            command_protection_detail=(
+                "If this Desktop Code build invokes Claude PreToolUse, AIWatcher can block risky Bash commands; otherwise use prompt preflight plus Watch."
+                if detected.get("claude-code") else
+                "No Claude Code surface was detected on this machine."
+            ),
         ),
         SurfaceCoverage(
             surface_id="claude-desktop-chat",
@@ -1103,6 +1127,9 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
             history="No reliable local token/cost scanner yet",
             action="Use the Prompt tab or MCP/manual preflight before sending risky prompts.",
             detail="AIWatcher should not claim automatic protection for general chat.",
+            command_protection="manual",
+            command_protection_label="Manual only",
+            command_protection_detail="General chat does not expose a verified pre-tool command lifecycle to AIWatcher.",
         ),
         SurfaceCoverage(
             surface_id="claude-ai-browser",
@@ -1114,6 +1141,9 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
             history="No local session history scanner",
             action="Use Prompt Companion or the browser extension when available.",
             detail="Browser surfaces are protected only by explicit local companion tooling.",
+            command_protection="manual",
+            command_protection_label="Manual only",
+            command_protection_detail="Use prompt planning before execution; command calls are not locally interceptable yet.",
         ),
         SurfaceCoverage(
             surface_id="codex-cli",
@@ -1126,6 +1156,15 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
             action="Use `/hooks` and `aiwatcher hook-status` to verify invocation.",
             detail="Codex local token totals can be cumulative, so AIWatcher labels estimates carefully.",
             session_count=codex_sessions,
+            command_protection="warn_observe" if detected.get("codex-cli") else "not_detected",
+            command_protection_label=(
+                "Warn + observe" if detected.get("codex-cli") else "Not detected"
+            ),
+            command_protection_detail=(
+                "No verified Codex pre-tool command hook yet; AIWatcher uses prompt intent gating and local history evidence."
+                if detected.get("codex-cli") else
+                "Install Codex before enabling prompt or command awareness."
+            ),
         ),
         SurfaceCoverage(
             surface_id="codex-desktop",
@@ -1158,6 +1197,15 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
                 else "This surface needs real-device verification before stronger claims."
             ),
             session_count=codex_desktop_sessions,
+            command_protection="warn_observe" if codex_desktop_sessions else "manual",
+            command_protection_label=(
+                "Warn + observe" if codex_desktop_sessions else "Manual until verified"
+            ),
+            command_protection_detail=(
+                "Prompt hooks can catch risky intent when this Desktop build invokes them; command execution is observed from local evidence where available."
+                if codex_desktop_sessions else
+                "Use Companion Plan/Scan until this surface writes readable history or invokes hooks."
+            ),
         ),
         SurfaceCoverage(
             surface_id="cursor",
@@ -1170,6 +1218,15 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
             action="Treat Cursor numbers as coverage-limited until session fixtures improve.",
             detail="AIWatcher should be honest when Cursor is installed but not measurable.",
             session_count=cursor_sessions,
+            command_protection="warn_observe" if detected.get("cursor") else "not_detected",
+            command_protection_label=(
+                "Warn + observe" if detected.get("cursor") else "Not detected"
+            ),
+            command_protection_detail=(
+                "Prompt hooks can warn before risky intent; command-level blocking needs a verified host lifecycle event."
+                if detected.get("cursor") else
+                "Install Cursor before checking its local coverage."
+            ),
         ),
         SurfaceCoverage(
             surface_id="ollama",
@@ -1181,6 +1238,15 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
             history="Runtime/model presence only; no local prompt, token, or cost scanner yet",
             action="Use Prompt Companion before expensive local-agent work; treat Ollama as detected but unmeasured.",
             detail="Local model runtime presence is useful coverage context, but AIWatcher should not claim spend or outcome evidence without an integration.",
+            command_protection="observe_only" if detected.get("ollama") else "not_detected",
+            command_protection_label=(
+                "Observed only" if detected.get("ollama") else "Not detected"
+            ),
+            command_protection_detail=(
+                "AIWatcher can see local runtime presence, but cannot intercept the commands a separate agent sends to it."
+                if detected.get("ollama") else
+                "No local model runtime was detected."
+            ),
         ),
         SurfaceCoverage(
             surface_id="cline",
@@ -1192,6 +1258,9 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
             history="Not scanned yet",
             action="No local cost/session claims yet.",
             detail="Detection is not coverage; this avoids a false green check.",
+            command_protection="unsupported" if detected.get("cline") else "not_detected",
+            command_protection_label="Not supported" if detected.get("cline") else "Not detected",
+            command_protection_detail="AIWatcher has no verified Cline command lifecycle integration yet.",
         ),
         SurfaceCoverage(
             surface_id="windsurf",
@@ -1203,6 +1272,9 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
             history="Not scanned yet",
             action="No local cost/session claims yet.",
             detail="Detection is not coverage; this avoids a false green check.",
+            command_protection="unsupported" if detected.get("windsurf") else "not_detected",
+            command_protection_label="Not supported" if detected.get("windsurf") else "Not detected",
+            command_protection_detail="AIWatcher has no verified Windsurf command lifecycle integration yet.",
         ),
     ]
 
