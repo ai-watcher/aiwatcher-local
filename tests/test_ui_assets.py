@@ -121,6 +121,7 @@ class LiveRefreshTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
         cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
 
     def test_cadence_constants(self):
@@ -169,6 +170,7 @@ class AmbientSurfaceTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
         cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
         cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
 
@@ -1375,6 +1377,9 @@ class PlanControlTest(unittest.TestCase):
         self.assertIn("item.kind === 'stale_processes'", self.js)
         self.assertIn("aiwatcher processes --stale-only", self.js)
         self.assertIn("Nothing is stopped from this dashboard", self.js)
+        self.assertIn("before-minus-after local memory signal", self.js)
+        self.assertIn("Do not count dollar savings from process RSS alone", self.js)
+        self.assertIn("<span class=\"label\">Reward</span>", self.js)
         self.assertIn(".runtime-review-card", self.css)
 
     def test_context_review_continue_quiets_only_that_project(self):
@@ -1393,7 +1398,6 @@ class PlanControlTest(unittest.TestCase):
         body = body[:body.index(chr(10) + "}")]
         self.assertNotIn("quietedFreshStartProjects.has", body)
         self.assertIn("row.actionable !== false", body)
-
 
 class SettingsTest(unittest.TestCase):
     """Settings was 4.2 screens, most of it a nine-tool table and an eleven-step

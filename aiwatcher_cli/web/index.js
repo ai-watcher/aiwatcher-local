@@ -1935,7 +1935,7 @@ function renderOptimizeWorkspace(optimize) {
 function renderRuntimeOptimizeCard(item, itemChecklist) {
   const steps = Array.isArray(item.safe_review_steps) && item.safe_review_steps.length
     ? item.safe_review_steps
-    : ['Run: aiwatcher processes --stale-only', 'Confirm each process is not attached to live AI work.', 'Stop only stale/orphaned runtimes you recognize.', 'Leave unknown processes alone.'];
+    : ['Run: aiwatcher processes --stale-only', 'Use PID, runtime, session id, and working directory to match each row to an AI app/window.', 'Confirm each process is not attached to live AI work.', 'Stop only stale/orphaned runtimes you recognize.', 'Run the command again; reclaimed RSS is the before-minus-after local memory signal.', 'Leave unknown processes alone.'];
   const command = item.review_command || 'aiwatcher processes --stale-only';
   return `<div class="action-row low runtime-review-card">
     <div>
@@ -1945,6 +1945,7 @@ function renderRuntimeOptimizeCard(item, itemChecklist) {
         <div class="mini"><span class="label">Goal</span><strong>${esc(item.title || 'Review stale AI runtimes')}</strong></div>
         <div class="mini"><span class="label">Evidence</span><strong>${esc(item.evidence_label || 'Observed')}</strong><span class="mini-note">${esc(item.evidence || 'Observed from local process metadata, not provider billing.')}</span></div>
         <div class="mini"><span class="label">Impact signal</span><strong>${esc(item.impact_label || 'runtime clutter')}</strong><span class="mini-note">${esc(item.resource_note || 'RSS/CPU are local machine resources, not model/API spend.')}</span></div>
+        <div class="mini"><span class="label">Reward</span><strong>${esc(item.reward_label || 'Less RAM/CPU pressure after confirmed cleanup')}</strong><span class="mini-note">${esc(item.cost_note || 'Do not count dollar savings from process RSS alone.')}</span></div>
       </div>
       <div class="runtime-command">
         <span class="label">Review command</span>

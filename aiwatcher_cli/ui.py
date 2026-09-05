@@ -711,6 +711,7 @@ def _worktree_rows(projects: set[str]) -> list[dict[str, object]]:
             if not line:
                 path = current.get("path")
                 if isinstance(path, str) and path not in seen:
+                    current.setdefault("source", "git_worktree")
                     seen.add(path)
                     rows.append(current)
                 current = {}
@@ -723,6 +724,102 @@ def _worktree_rows(projects: set[str]) -> list[dict[str, object]]:
                 current["bare"] = True
             elif line == "detached":
                 current["detached"] = True
+    return rows
+
+
+AGENT_WORKSPACE_SCAN_MAX_DEPTH = 3
+AGENT_WORKSPACE_SCAN_MAX_DIRS = 1200
+AGENT_WORKSPACE_MIN_AGE_HOURS = 4
+AGENT_WORKSPACE_PREFIXES = ("agent-", "claude-", "codex-")
+
+
+def _agent_workspace_scan_roots(projects: set[str]) -> list[Path]:
+    roots = {
+        Path("/tmp").resolve(),
+        Path("/private/tmp").resolve(),
+        Path(tempfile.gettempdir()).resolve(),
+    }
+    for project in projects:
+        try:
+            root = Path(project).expanduser()
+        except (TypeError, ValueError):
+            continue
+        roots.update({root / ".worktrees", root / ".claude" / "worktrees"})
+    existing: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        try:
+            resolved = root.resolve()
+        except OSError:
+            resolved = root
+        key = str(resolved)
+        if key in seen or not resolved.exists() or not resolved.is_dir():
+            continue
+        seen.add(key)
+        existing.append(resolved)
+    return sorted(existing, key=str)
+
+
+def _looks_agent_workspace_path(path: Path) -> bool:
+    normalized = str(path).replace("\\", "/")
+    if "/.claude/worktrees/" in normalized or "/.worktrees/" in normalized:
+        return True
+    name = path.name.lower()
+    return name.startswith(AGENT_WORKSPACE_PREFIXES)
+
+
+def _scan_agent_workspace_root(root: Path, seen: set[str]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    stack: list[tuple[Path, int]] = [(root, 0)]
+    visited = 0
+    while stack and visited < AGENT_WORKSPACE_SCAN_MAX_DIRS:
+        current, depth = stack.pop()
+        try:
+            children = list(current.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if visited >= AGENT_WORKSPACE_SCAN_MAX_DIRS:
+                break
+            try:
+                is_dir = child.is_dir()
+            except OSError:
+                continue
+            if not is_dir:
+                continue
+            visited += 1
+            try:
+                resolved = child.resolve()
+            except OSError:
+                resolved = child
+            key = str(resolved)
+            if _looks_agent_workspace_path(resolved) and key not in seen:
+                try:
+                    stat = resolved.stat()
+                except OSError:
+                    stat = None
+                seen.add(key)
+                rows.append({
+                    "path": key,
+                    "source": "scratch_scan",
+                    "agent_owned": True,
+                    "mtime": (
+                        datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+                        if stat is not None
+                        else None
+                    ),
+                })
+                continue
+            if depth < AGENT_WORKSPACE_SCAN_MAX_DEPTH and child.name not in {".git", "node_modules"}:
+                stack.append((resolved, depth + 1))
+    return rows
+
+
+def _agent_workspace_rows(projects: set[str]) -> list[dict[str, object]]:
+    rows = _worktree_rows(projects)
+    seen = {str(row.get("path") or "") for row in rows if row.get("path")}
+    for root in _agent_workspace_scan_roots(projects):
+        rows.extend(_scan_agent_workspace_root(root, seen))
     return rows
 
 
@@ -766,18 +863,33 @@ def _optimize_candidate_checklist(item: dict[str, object]) -> str:
             "3. Remove the worktree only through git/worktree-safe commands after confirmation.",
             "4. Do not delete the folder directly from this checklist.",
         ])
+    elif kind == "agent_workspace":
+        lines.extend([
+            f"1. Inspect: {project_full or '<workspace>'}",
+            "2. Confirm it is AI-created scratch space and not a real project.",
+            "3. Keep or move any files you still need.",
+            "4. Delete only after that review; AIWatcher will not delete it from this checklist.",
+        ])
     elif kind == "stale_processes":
         lines.extend([
             "1. Run: aiwatcher processes --stale-only",
-            "2. Confirm each process is not attached to live AI work.",
-            "3. Stop only stale/orphaned runtimes you recognize.",
-            "4. Leave unknown processes alone.",
+            "2. Use PID, runtime, session id, and working directory to match each row to an AI app/window.",
+            "3. Confirm each process is not attached to live AI work.",
+            "4. Stop only stale/orphaned runtimes you recognize.",
+            "5. Run the command again; reclaimed RSS is the before-minus-after local memory signal.",
+            "6. Leave unknown processes alone.",
         ])
     else:
         lines.extend([
             "1. Review the local evidence in AIWatcher.",
             "2. Confirm the work is finished before taking action.",
             "3. Prefer archive/mark-done actions over deletion.",
+        ])
+    if kind == "stale_processes":
+        lines.extend([
+            "",
+            f"Reward: {item.get('reward_label') or 'Potential local reward: less RAM/CPU/battery pressure after verified cleanup.'}",
+            f"Cost guardrail: {item.get('cost_note') or 'Do not count dollar savings from process RSS alone.'}",
         ])
     lines.extend([
         "",
@@ -946,32 +1058,47 @@ def build_optimize_inventory(
         })
 
     projects = {project for project in by_project if is_reliable_project_path(project)}
-    for worktree in _worktree_rows(projects):
+    for worktree in _agent_workspace_rows(projects):
         path = str(worktree.get("path") or "")
         if not path or path in projects or path in suppressed_projects:
             continue
         path_obj = Path(path)
-        looks_agent_owned = ".claude/worktrees" in path or "/.worktrees/" in path or path_obj.name.startswith(("agent-", "codex-"))
+        source = str(worktree.get("source") or "git_worktree")
+        looks_agent_owned = bool(worktree.get("agent_owned")) or _looks_agent_workspace_path(path_obj)
         if not looks_agent_owned:
             continue
         related_sessions = [row for row in rows if row.project_path and _is_inside_path(Path(row.project_path), path_obj)]
         latest = max((row.updated_at or row.started_at for row in related_sessions if (row.updated_at or row.started_at)), default=None)
         if latest is not None and now - latest.astimezone(timezone.utc) < timedelta(hours=12):
             continue
+        mtime = worktree.get("mtime")
+        if latest is None and isinstance(mtime, datetime) and now - mtime.astimezone(timezone.utc) < timedelta(hours=AGENT_WORKSPACE_MIN_AGE_HOURS):
+            continue
+        title = "Review stale AI worktree" if source == "git_worktree" else "Review AI scratch workspace"
+        why = (
+            "The worktree path looks agent-created and no recent same-path local session activity was observed."
+            if source == "git_worktree"
+            else f"The folder name looks AI-created and it has not changed for {AGENT_WORKSPACE_MIN_AGE_HOURS}+ hours."
+        )
+        evidence = (
+            "Inferred from git worktree path shape and local session age."
+            if source == "git_worktree"
+            else "Inferred from local temp/scratch path shape and directory modified time."
+        )
         candidates.append({
             "id": f"worktree:{path}",
-            "kind": "worktree",
-            "title": "Review stale AI worktree",
+            "kind": "worktree" if source == "git_worktree" else "agent_workspace",
+            "title": title,
             "project": short_path(path),
             "project_full": path,
-            "summary": "This looks like an AI-created worktree. AIWatcher will not delete it automatically; check git status first.",
-            "why_inactive": "The worktree path looks agent-created and no recent same-path local session activity was observed.",
+            "summary": "This looks like AI-created scratch space. AIWatcher will not delete it automatically; review it first.",
+            "why_inactive": why,
             "evidence_label": "Inferred",
-            "evidence": "Inferred from git worktree path shape and local session age.",
+            "evidence": evidence,
             "impact_label": "disk cleanup possible",
             "tokens_at_risk": 0,
             "session_count": len(related_sessions),
-            "updated_label": _elapsed_label(latest, now=now) if latest else "no recent session",
+            "updated_label": _elapsed_label(latest, now=now) if latest else _elapsed_label(mtime, now=now) if isinstance(mtime, datetime) else "no recent session",
             "action_label": "Copy cleanup checklist",
         })
 
@@ -981,6 +1108,12 @@ def build_optimize_inventory(
         stale_processes = []
     if stale_processes:
         rss_kb = sum(process.rss_kb or 0 for process in stale_processes)
+        rss_impact = f"{bytes_label(int(rss_kb * 1024))} RSS observed" if rss_kb else "runtime clutter"
+        reward_label = (
+            f"Potential local reward: up to {bytes_label(int(rss_kb * 1024))} RAM relief after confirmed cleanup."
+            if rss_kb
+            else "Potential local reward: less runtime clutter after confirmed cleanup."
+        )
         review_command = "aiwatcher processes --stale-only"
         candidates.append({
             "id": "stale-processes",
@@ -992,8 +1125,11 @@ def build_optimize_inventory(
             "why_inactive": "Local process metadata shows AI-related runtimes with stale/orphan signals.",
             "evidence_label": "Observed",
             "evidence": "Observed from local process metadata, not provider billing.",
-            "impact_label": f"{bytes_label(int(rss_kb * 1024))} RSS observed" if rss_kb else "runtime clutter",
+            "impact_label": rss_impact,
+            "reward_label": reward_label,
+            "cost_note": "Cost savings are unknown from RSS alone; attach provider billing or session-token evidence before claiming dollars.",
             "tokens_at_risk": 0,
+            "rss_kb": rss_kb,
             "session_count": len(stale_processes),
             "updated_label": "now",
             "action_label": "Copy safe review steps",
@@ -1002,8 +1138,10 @@ def build_optimize_inventory(
             "privacy_note": "This checklist uses local metadata only. It does not include prompt/source content.",
             "safe_review_steps": [
                 f"Run: {review_command}",
+                "Use PID, runtime, session id, and working directory to match each row to an AI app/window.",
                 "Confirm each process is not attached to live AI work.",
                 "Stop only stale/orphaned runtimes you recognize.",
+                "Run the command again; reclaimed RSS is the before-minus-after local memory signal.",
                 "Leave unknown processes alone.",
             ],
         })
@@ -1013,11 +1151,18 @@ def build_optimize_inventory(
     for item in candidates:
         item["checklist"] = _optimize_candidate_checklist(item)
     total_tokens = sum(int(item.get("tokens_at_risk") or 0) for item in candidates)
+    total_rss_kb = sum(int(item.get("rss_kb") or 0) for item in candidates)
+    if total_tokens:
+        impact_label = f"~{compact_int(total_tokens)} context at risk"
+    elif total_rss_kb:
+        impact_label = f"{bytes_label(int(total_rss_kb * 1024))} local RSS to review"
+    else:
+        impact_label = "no context savings claim"
     return {
         "status": "needs_action" if candidates else "quiet",
         "title": "Optimize workspace" if candidates else "Workspace clean",
         "summary": f"{len(candidates)} cleanup opportunity{'ies' if len(candidates) != 1 else 'y'} found." if candidates else "No stale forks, worktrees, or runtime cleanup opportunities stood out.",
-        "impact_label": f"~{compact_int(total_tokens)} context at risk" if total_tokens else "no context savings claim",
+        "impact_label": impact_label,
         "evidence_label": "Observed/inferred" if candidates else "Observed",
         "candidates": candidates[:8],
         "top": candidates[0] if candidates else None,

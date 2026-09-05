@@ -1171,6 +1171,11 @@
     .action-row p { margin: 6px 0 0; color: var(--muted); line-height: 1.45; }
     .action-meta { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: 10px; }
     .action-row .actions { justify-content: flex-end; }
+    .runtime-review-card { align-items: start; }
+    .runtime-review-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--sp-2); margin-top: 12px; }
+    .runtime-command { display: grid; gap: var(--sp-1); margin-top: 12px; }
+    .runtime-command code { overflow-wrap: anywhere; }
+    .runtime-review-steps { margin: 12px 0 0; padding-left: 20px; color: var(--text-bright); line-height: 1.45; }
     .coverage-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-3); }
     /* The coverage table. Rows align on one axis so ten tools can be compared
        rather than read one card at a time; the quiet second line in a cell is

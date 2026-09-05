@@ -4743,10 +4743,16 @@ def command_processes(args: argparse.Namespace) -> int:
             print(f"        suggest: review, then run `{process.kill_command}` only if this runtime is safe to stop")
     stale_count = sum(1 for process in processes if process.stale)
     total_rss = sum(process.rss_kb or 0 for process in processes)
+    stale_rss = sum(process.rss_kb or 0 for process in processes if process.stale)
     print(
         f"\nSummary: {len(processes)} AI-related process{'es' if len(processes) != 1 else ''}; "
         f"{stale_count} likely stale; {rss_label(total_rss)} RSS observed locally."
     )
+    if stale_count:
+        print(
+            f"Potential local reward: up to {rss_label(stale_rss)} RAM relief after confirmed cleanup; "
+            "dollar/API savings need provider billing or session-token evidence."
+        )
     return 0
 
 
