@@ -1398,6 +1398,14 @@ class SettingsTest(unittest.TestCase):
         self.assertIn('data-settings-panel-content="setup"', self.html)
         self.assertIn("showSettingsPanel", self.js)
 
+    def test_hidden_settings_subpages_do_not_render(self):
+        # The tab JS already toggled `hidden`, but `.settings-panel { display:
+        # grid; }` overrode the browser's hidden display rule and made every
+        # subpage stack into one crowded Settings screen.
+        css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+        self.assertIn(".settings-panel[hidden]", css)
+        self.assertIn("display: none", css)
+
     def test_coverage_is_in_the_trust_subpage(self):
         """What AIWatcher can see is the other half of what it promises not to
         do, and the half that admits limits -- Cursor is detected and not

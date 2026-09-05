@@ -1229,20 +1229,30 @@ function updateBannerLabel(status, data) {
   return 'Check updates';
 }
 function updateBannerTitle(status, data) {
+  const source = data && data.repo ? `Source checkout: ${data.repo}` : 'Source checkout unknown';
+  const launched = data && data.process_cwd ? `Launched from: ${data.process_cwd}` : '';
+  const location = launched ? `\n${source}\n${launched}` : `\n${source}`;
   if (status === 'available') {
-    return `Click to apply latest changes from ${data.remote_ref || 'origin/main'} and restart AIWatcher`;
+    return `Click to apply latest changes from ${data.remote_ref || 'origin/main'} and restart AIWatcher${location}`;
   }
-  if (status === 'blocked') return (data && data.message) || 'Resolve local changes before applying updates';
-  if (status === 'current') return 'AIWatcher is current. Click to check GitHub again.';
-  if (status === 'package') return 'Click to show package upgrade commands';
-  if (status === 'error') return (data && data.message) || 'Click to retry the GitHub update check';
-  if (status === 'checking') return 'Checking GitHub for AIWatcher updates';
-  return 'Click to check GitHub for the latest AIWatcher changes';
+  if (status === 'blocked') return `${(data && data.message) || 'Resolve local changes before applying updates'}${location}`;
+  if (status === 'current') return `AIWatcher is current. Click to check GitHub again.${location}`;
+  if (status === 'package') return `Click to show package upgrade commands${location}`;
+  if (status === 'error') return `${(data && data.message) || 'Click to retry the GitHub update check'}${location}`;
+  if (status === 'checking') return `Checking GitHub for AIWatcher updates${location}`;
+  return `Click to check GitHub for the latest AIWatcher changes${location}`;
+}
+function updateLocationLabel(data) {
+  if (!data) return 'Source unknown';
+  const source = data.repo || data.process_cwd || '';
+  if (!source) return 'Source unknown';
+  return `Running from ${projectName({ project_full: source })}`;
 }
 function setUpdateState(status, data, checkedAt = Date.now()) {
   updateState = { status, data: data || null, checkedAt };
   const banner = document.getElementById('updateBanner');
   const label = document.getElementById('updateBannerText');
+  const location = document.getElementById('updateBannerLocation');
   if (banner) {
     banner.className = `update-banner ${status}`;
     banner.disabled = status === 'checking';
@@ -1250,6 +1260,7 @@ function setUpdateState(status, data, checkedAt = Date.now()) {
     banner.setAttribute('aria-label', banner.title);
   }
   if (label) label.textContent = updateBannerLabel(status, data || null);
+  if (location) location.textContent = updateLocationLabel(data || null);
   if (data && status !== 'checking') {
     try {
       localStorage.setItem(UPDATE_CACHE_KEY, JSON.stringify({ checkedAt, data }));
@@ -1297,6 +1308,12 @@ function renderUpdateStatus(update) {
         <span class="pill">${esc(data.dirty ? 'local changes present' : 'clean checkout')}</span>
       </div>`
     : '';
+  const location = data.repo || data.process_cwd
+    ? `<div class="update-location">
+        ${data.repo ? `<span><b>Source checkout</b> <code>${esc(data.repo)}</code></span>` : ''}
+        ${data.process_cwd ? `<span><b>Launched from</b> <code>${esc(data.process_cwd)}</code></span>` : ''}
+      </div>`
+    : '';
   const action = data.can_apply
     ? '<p>Apply will fast-forward this clean checkout. The dashboard update action restarts AIWatcher after a successful apply.</p>'
     : data.update_available
@@ -1304,6 +1321,7 @@ function renderUpdateStatus(update) {
       : '';
   return `<div class="update-status ${data.ok ? '' : 'warning'}">
     <strong>${esc(data.message || 'Update status unavailable.')}</strong>
+    ${location}
     ${meta}
     ${action}
     ${guidance}

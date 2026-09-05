@@ -593,13 +593,23 @@
     .btn-quiet { background: transparent; border-color: var(--line); color: var(--text-bright); }
     .update-banner {
       display: inline-flex; align-items: center; justify-content: center; gap: var(--sp-2);
-      min-width: 142px; border-radius: var(--r-pill);
+      min-width: 176px; border-radius: var(--r-pill);
       font-size: var(--fs-2); font-weight: var(--fw-bold);
       font-variant-numeric: tabular-nums; white-space: nowrap;
+      padding-top: 7px; padding-bottom: 7px;
     }
     .update-banner-dot {
       width: 8px; height: 8px; border-radius: 50%;
       background: currentColor; box-shadow: 0 0 0 3px rgba(var(--hairline-rgb), .10);
+    }
+    .update-banner-copy {
+      display: grid; gap: 0; justify-items: start; min-width: 0;
+    }
+    .update-banner-location {
+      max-width: 210px;
+      overflow: hidden; text-overflow: ellipsis;
+      font-size: var(--fs-1); font-weight: var(--fw-med);
+      color: currentColor; opacity: .78;
     }
     .update-banner.unknown, .update-banner.checking, .update-banner.package {
       color: var(--on-brand);
@@ -1593,6 +1603,7 @@
       background: var(--blue-soft);
     }
     .settings-panel { display: grid; gap: var(--sp-3); }
+    .settings-panel[hidden] { display: none; }
     .settings-card {
       border: 1px solid var(--line);
       border-radius: var(--r-2);
@@ -1606,6 +1617,16 @@
     .update-status { display: grid; gap: var(--sp-2); color: var(--text-quiet); }
     .update-status strong { color: var(--text-bright); font-size: var(--fs-3); }
     .update-status.warning strong { color: var(--amber); }
+    .update-location {
+      display: grid; gap: var(--sp-1);
+      font-size: var(--fs-2); color: var(--muted);
+    }
+    .update-location span {
+      min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .update-location b { color: var(--text-quiet); font-weight: var(--fw-bold); }
+    .update-location code { color: var(--text-bright); font-size: var(--fs-1); }
     .prompt-shell { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, .86fr); gap: var(--sp-4); align-items: start; }
     .prompt-box, .brief-box {
       width: 100%;

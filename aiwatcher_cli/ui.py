@@ -6523,8 +6523,13 @@ class UIHandler(BaseHTTPRequestHandler):
             fetch = params.get("fetch", ["1"])[0] != "0"
             try:
                 payload = check_for_updates(fetch=fetch)
+                payload["process_cwd"] = str(Path.cwd().resolve())
             except (OSError, subprocess.SubprocessError) as exc:
-                payload = {"ok": False, "message": f"Could not check for updates: {exc}"}
+                payload = {
+                    "ok": False,
+                    "message": f"Could not check for updates: {exc}",
+                    "process_cwd": str(Path.cwd().resolve()),
+                }
             self._send(200, json.dumps(payload), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/ambient-intervention":
@@ -6787,8 +6792,13 @@ class UIHandler(BaseHTTPRequestHandler):
             restart = bool(payload.get("restart"))
             try:
                 result = apply_updates(fetch=fetch)
+                result["process_cwd"] = str(Path.cwd().resolve())
             except (OSError, subprocess.SubprocessError) as exc:
-                result = {"ok": False, "message": f"Could not apply update: {exc}"}
+                result = {
+                    "ok": False,
+                    "message": f"Could not apply update: {exc}",
+                    "process_cwd": str(Path.cwd().resolve()),
+                }
             if result.get("ok") and result.get("applied") and restart:
                 result["restart_requested"] = True
                 result["message"] = "Updated. Restarting AIWatcher so the dashboard and Companion use the new code."
