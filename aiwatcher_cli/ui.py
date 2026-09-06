@@ -83,6 +83,7 @@ from .local_state import (
     record_ambient_intervention_action,
     record_ai_assist_cache,
     record_ai_assist_config,
+    record_ai_assist_provider_check,
     record_ai_assist_run,
     record_analyst_consent,
     record_analyst_contents,
@@ -2295,12 +2296,24 @@ def build_ai_assisted_handoff_detail(
     try:
         result = improve_fresh_start_brief(config, local_brief=local_brief)
     except AiAssistUnavailable as exc:
+        provider = str(config.get("provider") or "none")
+        if str(config.get("mode") or "off") == "cloud" and provider in {"openai", "anthropic", "openai_compatible"}:
+            status_value = "failed" if getattr(exc, "status_code", None) in {401, 403} else "untested"
+            try:
+                record_ai_assist_provider_check(
+                    provider,
+                    status_value,
+                    message=str(exc),
+                    code=str(getattr(exc, "provider_code", "") or getattr(exc, "status_code", "") or ""),
+                )
+            except (OSError, ValueError):
+                pass
         record = record_ai_assist_run(
             workflow="fresh_start",
             status="failed",
             session_id=session_id,
             mode=str(config.get("mode") or "off"),
-            provider=str(config.get("provider") or "none"),
+            provider=provider,
             model=str(config.get("model") or "") or None,
             source_access=str(config.get("source_access") or "metadata_only"),
             reason=str(exc),
@@ -2310,8 +2323,20 @@ def build_ai_assisted_handoff_detail(
             "reason": str(exc),
             "receipt": record,
         }
+        capsule["ai_assist"] = build_ai_assist_status(ai_assist_config())
         return capsule
     composed_brief = str(result.get("text") or "").strip()
+    result_provider = str(result.get("provider") or "")
+    if str(result.get("mode") or "") == "cloud" and result_provider in {"openai", "anthropic", "openai_compatible"}:
+        try:
+            record_ai_assist_provider_check(
+                result_provider,
+                "verified",
+                message="Last AI Assist call succeeded.",
+                code="",
+            )
+        except (OSError, ValueError):
+            pass
     record = record_ai_assist_run(
         workflow="fresh_start",
         status="used",
@@ -2423,20 +2448,44 @@ def build_ai_assisted_optimize_cleanup_prompt(candidate_id: str, days: int = 7) 
     try:
         result = compose_optimize_cleanup_prompt(config, local_prompt=local_prompt)
     except AiAssistUnavailable as exc:
+        provider = str(config.get("provider") or "none")
+        if str(config.get("mode") or "off") == "cloud" and provider in {"openai", "anthropic", "openai_compatible"}:
+            status_value = "failed" if getattr(exc, "status_code", None) in {401, 403} else "untested"
+            try:
+                record_ai_assist_provider_check(
+                    provider,
+                    status_value,
+                    message=str(exc),
+                    code=str(getattr(exc, "provider_code", "") or getattr(exc, "status_code", "") or ""),
+                )
+            except (OSError, ValueError):
+                pass
         record = record_ai_assist_run(
             workflow="optimize_cleanup",
             status="failed",
             session_id=normalized_id,
             mode=str(config.get("mode") or "off"),
-            provider=str(config.get("provider") or "none"),
+            provider=provider,
             model=str(config.get("model") or "") or None,
             source_access=str(config.get("source_access") or "metadata_only"),
             reason=str(exc),
             evidence_hash=evidence_hash,
         )
+        response["ai_assist"] = build_ai_assist_status(ai_assist_config())
         response["ai_assist_result"] = {"status": "failed", "reason": str(exc), "receipt": record}
         return response
     prompt = str(result.get("text") or "").strip()
+    result_provider = str(result.get("provider") or "")
+    if str(result.get("mode") or "") == "cloud" and result_provider in {"openai", "anthropic", "openai_compatible"}:
+        try:
+            record_ai_assist_provider_check(
+                result_provider,
+                "verified",
+                message="Last AI Assist call succeeded.",
+                code="",
+            )
+        except (OSError, ValueError):
+            pass
     cache_record = record_ai_assist_cache(
         workflow="optimize_cleanup",
         evidence_hash=evidence_hash,

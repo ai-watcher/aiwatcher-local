@@ -45,6 +45,7 @@ AI_ASSIST_WORKFLOWS = {
     "receipt_explanation",
 }
 AI_ASSIST_KEY_PROVIDERS = {"openai", "anthropic", "openai_compatible"}
+AI_ASSIST_PROVIDER_CHECK_STATUSES = {"untested", "verified", "failed"}
 
 
 def default_ai_assist_config() -> dict[str, Any]:
@@ -58,6 +59,7 @@ def default_ai_assist_config() -> dict[str, Any]:
         "require_confirmation": True,
         "enabled_workflows": ["fresh_start", "prompt_plan", "optimize_cleanup"],
         "api_keys": {},
+        "provider_checks": {},
     }
 
 
@@ -101,6 +103,23 @@ def _normalize_ai_assist_config(value: Any) -> dict[str, Any]:
             if secret_value:
                 clean_keys[provider_name] = secret_value[:5000]
         config["api_keys"] = clean_keys
+    provider_checks = value.get("provider_checks")
+    if isinstance(provider_checks, dict):
+        clean_checks: dict[str, dict[str, str]] = {}
+        for check_provider, check in provider_checks.items():
+            provider_name = str(check_provider).strip().lower()
+            if provider_name not in AI_ASSIST_KEY_PROVIDERS or not isinstance(check, dict):
+                continue
+            status = str(check.get("status") or "").strip().lower()
+            if status not in AI_ASSIST_PROVIDER_CHECK_STATUSES:
+                continue
+            clean_checks[provider_name] = {
+                "status": status,
+                "checked_at": str(check.get("checked_at") or "").strip()[:80],
+                "message": str(check.get("message") or "").strip()[:240],
+                "code": str(check.get("code") or "").strip()[:40],
+            }
+        config["provider_checks"] = clean_checks
     config["max_daily_usd"] = _safe_float(value.get("max_daily_usd"), float(config["max_daily_usd"]))
     config["source_access"] = source_access if source_access in AI_ASSIST_SOURCE_ACCESS else "metadata_only"
     config["require_confirmation"] = bool(value.get("require_confirmation", True))
@@ -1258,14 +1277,52 @@ def record_ai_assist_config(settings: dict[str, Any]) -> dict[str, Any]:
         if provider in AI_ASSIST_KEY_PROVIDERS:
             if settings.get("clear_api_key"):
                 merged["api_keys"].pop(provider, None)
+                merged.setdefault("provider_checks", {}).pop(provider, None)
             else:
                 new_key = settings.get("api_key")
                 if isinstance(new_key, str) and new_key.strip():
                     merged["api_keys"][provider] = new_key.strip()
+                    merged.setdefault("provider_checks", {})[provider] = {
+                        "status": "untested",
+                        "checked_at": datetime.now(timezone.utc).isoformat(),
+                        "message": "Saved locally; not tested yet.",
+                        "code": "",
+                    }
         config = _normalize_ai_assist_config(merged)
         data["ai_assist"] = config
         _save(data)
     return config
+
+
+def record_ai_assist_provider_check(
+    provider: str,
+    status: str,
+    *,
+    message: str | None = None,
+    code: str | None = None,
+) -> dict[str, str]:
+    """Persist a privacy-safe provider validation result."""
+    provider_value = str(provider or "").strip().lower()
+    if provider_value not in AI_ASSIST_KEY_PROVIDERS:
+        raise ValueError("provider must be a cloud key provider")
+    status_value = str(status or "").strip().lower()
+    if status_value not in AI_ASSIST_PROVIDER_CHECK_STATUSES:
+        raise ValueError("status must be untested, verified, or failed")
+    record = {
+        "status": status_value,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "message": str(message or "").strip()[:240],
+        "code": str(code or "").strip()[:40],
+    }
+    with _locked_state():
+        data = _load()
+        config = _normalize_ai_assist_config(data.get("ai_assist"))
+        checks = dict(config.get("provider_checks") or {})
+        checks[provider_value] = record
+        config["provider_checks"] = checks
+        data["ai_assist"] = _normalize_ai_assist_config(config)
+        _save(data)
+    return record
 
 
 def _ai_assist_cache_key(workflow: str, evidence_hash: str) -> str:

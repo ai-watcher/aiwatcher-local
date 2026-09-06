@@ -2413,6 +2413,58 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(runs[1]["evidence_hash"], candidate["evidence_hash"])
         self.assertNotIn("sk-secret", json.dumps(runs))
 
+    def test_ai_assist_provider_auth_failure_marks_key_rejected(self) -> None:
+        candidate = {
+            "id": "sessions:/repo/app",
+            "kind": "session_cluster",
+            "title": "Archive completed or stale chats",
+            "project": "repo/app",
+            "project_full": "/repo/app",
+            "summary": "Three inactive sessions are carrying context.",
+            "evidence_label": "Observed",
+            "evidence": "Observed from local session timestamps.",
+            "impact_label": "~780.0k context at risk",
+            "session_count": 3,
+            "tool": "codex-cli",
+            "last_activity": "2026-09-05T12:00:00+00:00",
+        }
+        candidate["cleanup_prompt"] = ui._optimize_candidate_prompt(candidate)
+        candidate["evidence_hash"] = ui._optimize_candidate_evidence_hash(candidate)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}, clear=True),
+                patch.object(ui, "build_summary_cached", return_value={"optimize": {"candidates": [candidate]}}),
+                patch.object(
+                    ui,
+                    "compose_optimize_cleanup_prompt",
+                    side_effect=ui.AiAssistUnavailable(
+                        "AI Assist provider rejected the API key or credentials (HTTP 401). "
+                        "Paste a valid replacement key in Settings -> AI Assist, then try again.",
+                        status_code=401,
+                        provider_code="invalid_api_key",
+                    ),
+                ),
+            ):
+                ui.record_ai_assist_config({
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "api_key": "sk-secret-value",
+                    "enabled_workflows": ["optimize_cleanup"],
+                })
+                result = ui.build_ai_assisted_optimize_cleanup_prompt("sessions:/repo/app", days=7)
+                config = ui.ai_assist_config()
+                runs = recent_ai_assist_runs(limit=1)
+
+        self.assertEqual(result["ai_assist_result"]["status"], "failed")
+        self.assertEqual(result["ai_assist"]["status_label"], "Key rejected")
+        self.assertFalse(result["ai_assist"]["ready"])
+        self.assertEqual(config["provider_checks"]["openai"]["status"], "failed")
+        self.assertEqual(config["provider_checks"]["openai"]["code"], "invalid_api_key")
+        self.assertIn("provider rejected the API key", result["ai_assist_result"]["reason"])
+        self.assertNotIn("sk-secret-value", json.dumps(result))
+        self.assertNotIn("sk-secret-value", json.dumps(runs))
+
     def test_detected_tools_are_listed_without_measured_spend(self) -> None:
         rows = [{
             "name": "claude-code (desktop)",

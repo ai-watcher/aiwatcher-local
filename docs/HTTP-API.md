@@ -138,7 +138,9 @@ fast-forward is available. The top-bar update badge uses this route for
 low-frequency status checks and user-triggered refreshes.
 `/api/ai-assist-status` returns the optional AI Assist mode, detected local
 providers, cloud-key presence by environment-variable name, privacy posture, and
-candidate workflows. It never returns secret values and never calls a model.
+candidate workflows. Cloud keys report whether they are untested, verified, or
+rejected; a key is verified only after an explicit workflow call succeeds. It
+never returns secret values and never calls a model.
 
 `POST` — `/api/second-opinion` runs the Plan screen's Stage 2 analysis: it
 spawns the user's own agent CLI as a throwaway sibling process in
@@ -190,9 +192,10 @@ snoozes a non-blocking companion reminder, and
 or `source_opt_in`. For cloud mode, `api_key` may be supplied for the selected
 provider (`openai`, `anthropic`, or `openai_compatible`) and is stored only in
 local AIWatcher state. Responses never return the raw key; they expose
-`stored_keys` booleans instead. `clear_api_key: true` removes the saved key for
-the selected provider. Environment keys (`OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY`, or `AIWATCHER_AI_API_KEY`) are still supported.
+`stored_keys` booleans and provider-check status instead. `clear_api_key: true`
+removes the saved key for the selected provider. Environment keys
+(`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `AIWATCHER_AI_API_KEY`) are still
+supported.
 `/api/runtime-return` asks AIWatcher to open the safest available return target
 for a local session: exact process attachment when a host exposes enough
 metadata, otherwise app/workspace return, otherwise a Fresh Start fallback.

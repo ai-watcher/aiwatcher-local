@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import io
 import unittest
 from unittest.mock import patch
+import urllib.error
 
 from aiwatcher_cli import ai_assist
 
@@ -18,7 +20,7 @@ class AiAssistTests(unittest.TestCase):
         self.assertNotIn("sk-test", repr(rows))
         self.assertFalse(anthropic["available"])
 
-    def test_saved_cloud_key_makes_status_ready_without_echoing_secret(self) -> None:
+    def test_saved_cloud_key_is_configured_without_echoing_secret(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
             status = ai_assist.build_ai_assist_status({
                 "mode": "cloud",
@@ -27,9 +29,61 @@ class AiAssistTests(unittest.TestCase):
             })
 
         self.assertTrue(status["ready"])
+        self.assertEqual(status["status_label"], "Configured, not tested")
         self.assertTrue(status["stored_keys"]["openai"])
         self.assertTrue(status["config"]["stored_keys"]["openai"])
         self.assertNotIn("sk-local-test", repr(status))
+
+    def test_rejected_cloud_key_is_not_ready(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            status = ai_assist.build_ai_assist_status({
+                "mode": "cloud",
+                "provider": "openai",
+                "api_keys": {"openai": "sk-local-test"},
+                "provider_checks": {
+                    "openai": {
+                        "status": "failed",
+                        "message": "AI Assist provider rejected the API key or credentials.",
+                        "code": "invalid_api_key",
+                    },
+                },
+            })
+
+        openai = next(row for row in status["cloud_providers"] if row["id"] == "openai")
+        self.assertFalse(status["ready"])
+        self.assertEqual(status["status_label"], "Key rejected")
+        self.assertFalse(openai["available"])
+        self.assertEqual(openai["check_status"], "failed")
+        self.assertNotIn("sk-local-test", repr(status))
+
+    def test_provider_http_error_is_sanitized(self) -> None:
+        raw = (
+            b'{ "error": { "message": "Incorrect API key provided: sk-secret-value. '
+            b'You can find your API key at https://platform.openai.com/account/api-keys.", '
+            b'"code": "invalid_api_key" } }'
+        )
+        error = urllib.error.HTTPError(
+            "https://api.openai.com/v1/chat/completions",
+            401,
+            "Unauthorized",
+            {},
+            io.BytesIO(raw),
+        )
+        with patch.object(ai_assist.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaises(ai_assist.AiAssistUnavailable) as raised:
+                ai_assist._openai_compatible_chat(
+                    base_url="https://api.openai.com/v1",
+                    model="gpt-test",
+                    messages=[{"role": "user", "content": "hello"}],
+                    api_key="sk-secret-value",
+                )
+
+        message = str(raised.exception)
+        self.assertEqual(raised.exception.status_code, 401)
+        self.assertEqual(raised.exception.provider_code, "invalid_api_key")
+        self.assertIn("provider rejected the API key", message)
+        self.assertNotIn("sk-secret-value", message)
+        self.assertNotIn("Incorrect API key provided", message)
 
     def test_status_keeps_off_mode_ready_without_any_provider(self) -> None:
         with (
@@ -101,7 +155,7 @@ class AiAssistTests(unittest.TestCase):
         self.assertFalse(missing_url["ready"])
         self.assertEqual(missing_url["status_label"], "Base URL required")
         self.assertTrue(ready["ready"])
-        self.assertEqual(ready["status_label"], "Ready")
+        self.assertEqual(ready["status_label"], "Configured, not tested")
         self.assertTrue(auto_ready["ready"])
 
     def test_specific_cloud_provider_must_have_its_own_key(self) -> None:
@@ -117,6 +171,7 @@ class AiAssistTests(unittest.TestCase):
             anthropic = ai_assist.build_ai_assist_status({"mode": "cloud", "provider": "anthropic"})
 
         self.assertTrue(openai["ready"])
+        self.assertEqual(openai["status_label"], "Configured, not tested")
         self.assertFalse(anthropic["ready"])
 
     def test_fresh_start_improvement_composes_bounded_handoff(self) -> None:

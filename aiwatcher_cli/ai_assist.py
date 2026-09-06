@@ -42,6 +42,11 @@ MAX_OPTIMIZE_CLEANUP_PROMPT_CHARS = 7000
 class AiAssistUnavailable(RuntimeError):
     """Raised when a workflow asks for AI Assist before it is ready."""
 
+    def __init__(self, message: str, *, status_code: int | None = None, provider_code: str | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.provider_code = provider_code
+
 
 def _port_open(host: str, port: int, *, timeout: float = 0.06) -> bool:
     try:
@@ -79,48 +84,89 @@ def detect_local_providers() -> list[dict[str, object]]:
     return providers
 
 
-def cloud_provider_status(stored_keys: dict[str, bool] | None = None) -> list[dict[str, object]]:
+def _provider_check(provider: str, checks: dict[str, object] | None) -> dict[str, str]:
+    row = (checks or {}).get(provider)
+    if not isinstance(row, dict):
+        return {}
+    return {
+        "status": str(row.get("status") or "").strip().lower(),
+        "checked_at": str(row.get("checked_at") or "").strip(),
+        "message": str(row.get("message") or "").strip(),
+        "code": str(row.get("code") or "").strip(),
+    }
+
+
+def _cloud_row(
+    *,
+    provider: str,
+    label: str,
+    secret_env: str,
+    stored: bool,
+    env_present: bool,
+    setup_detail: str,
+    checks: dict[str, object] | None,
+) -> dict[str, object]:
+    check = _provider_check(provider, checks)
+    check_status = check.get("status") or ("untested" if stored or env_present else "missing")
+    configured = bool(stored or env_present)
+    rejected = check_status == "failed"
+    if rejected:
+        detail = "key rejected; paste a replacement"
+    elif check_status == "verified":
+        detail = "key verified"
+    elif stored:
+        detail = "key saved locally, not tested yet"
+    elif env_present:
+        detail = f"key available in {secret_env}, not tested yet"
+    else:
+        detail = setup_detail
+    return {
+        "id": provider,
+        "label": label,
+        "available": bool(configured and not rejected),
+        "configured": configured,
+        "stored": stored,
+        "verified": check_status == "verified",
+        "check_status": check_status,
+        "check_message": check.get("message") or "",
+        "secret_env": secret_env,
+        "detail": detail,
+    }
+
+
+def cloud_provider_status(
+    stored_keys: dict[str, bool] | None = None,
+    provider_checks: dict[str, object] | None = None,
+) -> list[dict[str, object]]:
     stored = stored_keys or {}
     return [
-        {
-            "id": "openai",
-            "label": "OpenAI",
-            "available": bool(os.environ.get("OPENAI_API_KEY") or stored.get("openai")),
-            "stored": bool(stored.get("openai")),
-            "secret_env": "OPENAI_API_KEY",
-            "detail": (
-                "key saved locally" if stored.get("openai") else
-                "key available in environment" if os.environ.get("OPENAI_API_KEY") else
-                "paste key below or use OPENAI_API_KEY"
-            ),
-        },
-        {
-            "id": "anthropic",
-            "label": "Claude",
-            "available": bool(os.environ.get("ANTHROPIC_API_KEY") or stored.get("anthropic")),
-            "stored": bool(stored.get("anthropic")),
-            "secret_env": "ANTHROPIC_API_KEY",
-            "detail": (
-                "key saved locally" if stored.get("anthropic") else
-                "key available in environment" if os.environ.get("ANTHROPIC_API_KEY") else
-                "paste key below or use ANTHROPIC_API_KEY"
-            ),
-        },
-        {
-            "id": "openai_compatible",
-            "label": "OpenAI-compatible",
-            "available": bool(os.environ.get("AIWATCHER_AI_API_KEY") or stored.get("openai_compatible")),
-            "stored": bool(stored.get("openai_compatible")),
-            "secret_env": "AIWATCHER_AI_API_KEY",
-            "detail": (
-                "key saved locally"
-                if stored.get("openai_compatible")
-                else
-                "key available in environment"
-                if os.environ.get("AIWATCHER_AI_API_KEY")
-                else "paste key below and add endpoint URL"
-            ),
-        },
+        _cloud_row(
+            provider="openai",
+            label="OpenAI",
+            secret_env="OPENAI_API_KEY",
+            stored=bool(stored.get("openai")),
+            env_present=bool(os.environ.get("OPENAI_API_KEY")),
+            setup_detail="paste key below or use OPENAI_API_KEY",
+            checks=provider_checks,
+        ),
+        _cloud_row(
+            provider="anthropic",
+            label="Claude",
+            secret_env="ANTHROPIC_API_KEY",
+            stored=bool(stored.get("anthropic")),
+            env_present=bool(os.environ.get("ANTHROPIC_API_KEY")),
+            setup_detail="paste key below or use ANTHROPIC_API_KEY",
+            checks=provider_checks,
+        ),
+        _cloud_row(
+            provider="openai_compatible",
+            label="OpenAI-compatible",
+            secret_env="AIWATCHER_AI_API_KEY",
+            stored=bool(stored.get("openai_compatible")),
+            env_present=bool(os.environ.get("AIWATCHER_AI_API_KEY")),
+            setup_detail="paste key below and add endpoint URL",
+            checks=provider_checks,
+        ),
     ]
 
 
@@ -137,8 +183,10 @@ def build_ai_assist_status(config: dict[str, Any]) -> dict[str, object]:
     public_config = dict(config)
     public_config.pop("api_keys", None)
     public_config["stored_keys"] = stored_keys
+    provider_checks = config.get("provider_checks") if isinstance(config.get("provider_checks"), dict) else {}
+    public_config["provider_checks"] = provider_checks
     local = detect_local_providers()
-    cloud = cloud_provider_status(stored_keys)
+    cloud = cloud_provider_status(stored_keys, provider_checks)
     def selected_available(rows: list[dict[str, object]], provider_ids: set[str]) -> bool:
         if provider in {"none", "auto"}:
             return any(row.get("available") for row in rows)
@@ -154,8 +202,11 @@ def build_ai_assist_status(config: dict[str, Any]) -> dict[str, object]:
         provider in {"auto", "openai_compatible"}
         and bool(configured_base_url)
         and bool(os.environ.get("AIWATCHER_AI_API_KEY") or stored_keys.get("openai_compatible"))
+        and _provider_check("openai_compatible", provider_checks).get("status") != "failed"
     )
     cloud_ready = custom_cloud_ready or selected_available(cloud, {"openai", "anthropic"})
+    selected_cloud = next((row for row in cloud if row.get("id") == provider), None)
+    selected_check_status = str((selected_cloud or {}).get("check_status") or "")
     active_label = "Local rules only"
     if mode == "local":
         active_label = "Local AI Assist"
@@ -170,9 +221,15 @@ def build_ai_assist_status(config: dict[str, Any]) -> dict[str, object]:
     elif mode == "local":
         status_label = "Start or configure a local model"
         setup_hint = "Start Ollama, LM Studio, llama.cpp, or enter a local OpenAI-compatible base URL."
-    elif mode == "cloud" and cloud_ready:
+    elif mode == "cloud" and selected_check_status == "failed":
+        status_label = "Key rejected"
+        setup_hint = "The provider rejected this key. Paste a replacement in Settings -> AI Assist."
+    elif mode == "cloud" and cloud_ready and selected_check_status == "verified":
         status_label = "Ready"
         setup_hint = "Cloud Assist can run only after confirmation and within the daily cap."
+    elif mode == "cloud" and cloud_ready:
+        status_label = "Configured, not tested"
+        setup_hint = "AIWatcher will test this key on the next confirmed AI Assist run."
     elif mode == "cloud" and provider == "openai_compatible" and not configured_base_url:
         status_label = "Base URL required"
         setup_hint = "Enter the custom endpoint URL and add its API key."
@@ -280,10 +337,34 @@ def _post_json(url: str, payload: dict[str, object], headers: dict[str, str], *,
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:500]
-        raise AiAssistUnavailable(f"AI Assist provider returned HTTP {exc.code}: {detail}") from exc
+        detail = exc.read().decode("utf-8", errors="replace")[:1500]
+        message, provider_code = _safe_provider_error(exc.code, detail)
+        raise AiAssistUnavailable(message, status_code=exc.code, provider_code=provider_code) from exc
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
         raise AiAssistUnavailable(f"AI Assist provider call failed: {exc}") from exc
+
+
+def _safe_provider_error(status_code: int, detail: str) -> tuple[str, str | None]:
+    provider_code = None
+    message = ""
+    try:
+        parsed = json.loads(detail)
+    except json.JSONDecodeError:
+        parsed = {}
+    if isinstance(parsed, dict):
+        error = parsed.get("error")
+        if isinstance(error, dict):
+            provider_code = str(error.get("code") or "").strip() or None
+            message = str(error.get("message") or "").strip()
+    if status_code in {401, 403}:
+        return (
+            f"AI Assist provider rejected the API key or credentials (HTTP {status_code}). "
+            "Paste a valid replacement key in Settings -> AI Assist, then try again.",
+            provider_code,
+        )
+    if provider_code:
+        return f"AI Assist provider returned HTTP {status_code} ({provider_code}).", provider_code
+    return f"AI Assist provider returned HTTP {status_code}.", provider_code
 
 
 def _openai_compatible_chat(

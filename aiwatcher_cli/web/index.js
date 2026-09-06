@@ -632,7 +632,8 @@ async function preflightPrompt() {
 let toastTimer;
 function showToast(message, kind = 'success') {
   const toast = document.getElementById('toast');
-  toast.textContent = message;
+  const text = String(message || '');
+  toast.textContent = text.length > 220 ? `${text.slice(0, 217)}...` : text;
   toast.className = `toast ${kind === 'error' ? 'error' : ''} show`;
   window.clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => { toast.className = 'toast'; }, 3200);
@@ -3259,13 +3260,13 @@ function renderAiAssistSettings(status) {
     { id: 'ollama', label: 'Ollama', modes: ['local'], detail: providerDetail('ollama') || 'Local model runtime.', secretEnv: '' },
     { id: 'lmstudio', label: 'LM Studio', modes: ['local'], detail: providerDetail('lmstudio') || 'Local OpenAI-compatible runtime.', secretEnv: '' },
     { id: 'llama_cpp', label: 'llama.cpp', modes: ['local'], detail: providerDetail('llama_cpp') || 'Local OpenAI-compatible runtime.', secretEnv: '' },
-    { id: 'openai', label: 'OpenAI', modes: ['cloud'], detail: providerDetail('openai') || 'Paste an OpenAI API key below.', secretEnv: 'OPENAI_API_KEY', keyFound: !!cloudById('openai').available || !!storedKeys.openai },
-    { id: 'anthropic', label: 'Claude', modes: ['cloud'], detail: providerDetail('anthropic') || 'Paste a Claude API key below.', secretEnv: 'ANTHROPIC_API_KEY', keyFound: !!cloudById('anthropic').available || !!storedKeys.anthropic },
-    { id: 'openai_compatible', label: 'Custom endpoint', modes: ['cloud'], detail: providerDetail('openai_compatible') || 'Paste the key and endpoint URL below.', secretEnv: 'AIWATCHER_AI_API_KEY', keyFound: !!cloudById('openai_compatible').available || !!storedKeys.openai_compatible },
+    { id: 'openai', label: 'OpenAI', modes: ['cloud'], detail: providerDetail('openai') || 'Paste an OpenAI API key below.', secretEnv: 'OPENAI_API_KEY', keyFound: !!cloudById('openai').available, keyConfigured: !!cloudById('openai').configured || !!storedKeys.openai, checkStatus: cloudById('openai').check_status || 'missing' },
+    { id: 'anthropic', label: 'Claude', modes: ['cloud'], detail: providerDetail('anthropic') || 'Paste a Claude API key below.', secretEnv: 'ANTHROPIC_API_KEY', keyFound: !!cloudById('anthropic').available, keyConfigured: !!cloudById('anthropic').configured || !!storedKeys.anthropic, checkStatus: cloudById('anthropic').check_status || 'missing' },
+    { id: 'openai_compatible', label: 'Custom endpoint', modes: ['cloud'], detail: providerDetail('openai_compatible') || 'Paste the key and endpoint URL below.', secretEnv: 'AIWATCHER_AI_API_KEY', keyFound: !!cloudById('openai_compatible').available, keyConfigured: !!cloudById('openai_compatible').configured || !!storedKeys.openai_compatible, checkStatus: cloudById('openai_compatible').check_status || 'missing' },
   ];
   const providerSelectOptions = providerOptions.map(row => {
     const hidden = !row.modes.includes(mode) ? ' hidden' : '';
-    return `<option value="${esc(row.id)}" data-modes="${esc(row.modes.join(','))}" data-detail="${esc(row.detail || '')}" data-secret-env="${esc(row.secretEnv || '')}" data-key-found="${row.keyFound ? '1' : '0'}" ${provider === row.id ? 'selected' : ''}${hidden}>${esc(row.label)}</option>`;
+    return `<option value="${esc(row.id)}" data-modes="${esc(row.modes.join(','))}" data-detail="${esc(row.detail || '')}" data-secret-env="${esc(row.secretEnv || '')}" data-key-found="${row.keyFound ? '1' : '0'}" data-key-configured="${row.keyConfigured ? '1' : '0'}" data-check-status="${esc(row.checkStatus || '')}" ${provider === row.id ? 'selected' : ''}${hidden}>${esc(row.label)}</option>`;
   }).join('');
   const currentProvider = providerOptions.find(row => row.id === provider) || providerOptions[0];
   const keySaved = mode === 'cloud' && !!storedKeys[provider];
@@ -3386,6 +3387,8 @@ function updateAiAssistFormVisibility() {
   const selectedOption = providerEl && providerEl.selectedOptions ? providerEl.selectedOptions[0] : null;
   const selectedSecret = selectedOption ? String(selectedOption.dataset.secretEnv || '') : '';
   const keyFound = selectedOption ? selectedOption.dataset.keyFound === '1' : false;
+  const keyConfigured = selectedOption ? selectedOption.dataset.keyConfigured === '1' : false;
+  const checkStatus = selectedOption ? String(selectedOption.dataset.checkStatus || '') : '';
   const baseUrlRow = document.getElementById('aiAssistBaseUrlRow');
   if (baseUrlRow) baseUrlRow.hidden = mode === 'off' || currentProvider !== 'openai_compatible';
   const apiKeyRow = document.getElementById('aiAssistApiKeyRow');
@@ -3413,20 +3416,35 @@ function updateAiAssistFormVisibility() {
       if (keyStatus) keyStatus.hidden = true;
     } else {
       const secret = selectedSecret || 'OPENAI_API_KEY';
-      const saved = keyFound && selectedOption && selectedOption.dataset.detail === 'key saved locally';
-      setupTitle.textContent = keyFound ? 'Cloud key ready' : 'Add API key';
-      setupCopy.textContent = keyFound
-        ? 'AIWatcher can use this provider after confirmation and within your daily cap.'
-        : 'Paste a key and save. It stays local to this machine.';
-      if (forgetKey) forgetKey.hidden = !keyFound;
+      const saved = keyConfigured && selectedOption && String(selectedOption.dataset.detail || '').includes('saved locally');
+      if (checkStatus === 'failed') {
+        setupTitle.textContent = 'Cloud key rejected';
+        setupCopy.textContent = 'The provider rejected this key. Paste a replacement and save before using AI Assist.';
+      } else if (checkStatus === 'verified') {
+        setupTitle.textContent = 'Cloud key verified';
+        setupCopy.textContent = 'AIWatcher can use this provider after confirmation and within your daily cap.';
+      } else if (keyConfigured) {
+        setupTitle.textContent = 'Cloud key saved';
+        setupCopy.textContent = 'AIWatcher will test this key on the next confirmed AI Assist run.';
+      } else {
+        setupTitle.textContent = 'Add API key';
+        setupCopy.textContent = 'Paste a key and save. It stays local to this machine.';
+      }
+      if (forgetKey) forgetKey.hidden = !keyConfigured;
       if (keyStatus) {
         keyStatus.hidden = false;
-        keyStatus.textContent = keyFound
-          ? (saved ? 'Key saved locally. Leave blank to keep it, or paste a new key to replace it.' : `${secret} is available in the environment.`)
-          : 'Paste once. AIWatcher stores it locally and redacts it from the UI/API.';
+        if (checkStatus === 'failed') {
+          keyStatus.textContent = 'OpenAI/Claude did not accept the saved key. Paste a valid replacement; AIWatcher will not show the key again.';
+        } else if (keyConfigured) {
+          keyStatus.textContent = saved
+            ? 'Key saved locally. Leave blank to keep it, or paste a new key to replace it.'
+            : `${secret} is available in the environment.`;
+        } else {
+          keyStatus.textContent = 'Paste once. AIWatcher stores it locally and redacts it from the UI/API.';
+        }
       }
       if (apiKeyInput) {
-        apiKeyInput.placeholder = keyFound ? 'Saved. Paste a new key to replace it.' : 'Paste API key';
+        apiKeyInput.placeholder = keyConfigured ? 'Saved. Paste a new key to replace it.' : 'Paste API key';
       }
     }
   }

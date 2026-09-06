@@ -173,6 +173,13 @@ class LocalStateTests(unittest.TestCase):
                     "provider": "openai",
                     "api_key": "sk-local-test",
                 })
+                checked = local_state.record_ai_assist_provider_check(
+                    "openai",
+                    "failed",
+                    message="AI Assist provider rejected the API key or credentials.",
+                    code="invalid_api_key",
+                )
+                failed = local_state.ai_assist_config()
                 retained = local_state.record_ai_assist_config({
                     "mode": "cloud",
                     "provider": "openai",
@@ -197,8 +204,13 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(custom["provider"], "openai_compatible")
         self.assertEqual(custom["base_url"], "https://llm.example.com/v1")
         self.assertEqual(keyed["api_keys"], {"openai": "sk-local-test"})
+        self.assertEqual(keyed["provider_checks"]["openai"]["status"], "untested")
+        self.assertEqual(checked["status"], "failed")
+        self.assertEqual(failed["provider_checks"]["openai"]["code"], "invalid_api_key")
         self.assertEqual(retained["api_keys"], {"openai": "sk-local-test"})
+        self.assertEqual(retained["provider_checks"]["openai"]["status"], "failed")
         self.assertEqual(cleared["api_keys"], {})
+        self.assertEqual(cleared["provider_checks"], {})
 
     def test_ai_assist_cache_stores_bounded_output_without_secret(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
