@@ -769,10 +769,15 @@ async function resumeSession(sessionId, launch = true) {
     showToast('Could not reach the local AIWatcher server.', 'error');
   }
 }
-function openDrawer(title) {
+function setDrawerSubtitle(value) {
+  const node = document.getElementById('drawerSubtitle');
+  if (node) node.textContent = value || 'Local metadata only';
+}
+function openDrawer(title, subtitle = 'Local metadata only') {
   const content = document.getElementById('detailContent');
   if (content) content.aiwSettled = null;
   document.getElementById('drawerTitle').textContent = title;
+  setDrawerSubtitle(subtitle);
   document.getElementById('drawerBackdrop').classList.add('open');
   document.getElementById('detailDrawer').classList.add('open');
   document.getElementById('detailDrawer').setAttribute('aria-hidden', 'false');
@@ -888,15 +893,17 @@ function identityTone(runtime) {
 function renderIdentityStrip(item, runtime, sourcePath) {
   runtime = runtime || {};
   const sessionId = item.session_id || runtime.session_id || '';
-  const project = item.project || item.project_short || runtime.project_path || 'unknown';
+  const project = item.project || item.project_short || runtime.project_path || sourcePath || 'unknown';
   const surface = runtime.surface || item.surface || 'unknown surface';
+  const tool = item.tool || runtime.tool || 'unknown tool';
   const identityLabel = runtime.identity_label || runtime.label || 'Historical log only';
   return `<div class="session-identity-card">
     <div class="session-identity-row">
       <span class="confidence-chip ${esc(identityTone(runtime))}">${esc(identityLabel)}</span>
-      <div class="session-identity-main">${esc(item.tool || runtime.tool || 'unknown tool')} · ${esc(surface)} · ${esc(project)}</div>
-      <span class="session-id-chip">${esc(shortSessionId(sessionId))}</span>
+      <span class="session-id-chip" title="${esc(sessionId)}">session ${esc(shortSessionId(sessionId))}</span>
     </div>
+    <div class="session-identity-main">${esc(tool)} · ${esc(surface)}</div>
+    <div class="session-identity-path" title="${esc(project)}">${esc(project)}</div>
   </div>`;
 }
 function confidenceLabel(s) {
@@ -1331,6 +1338,7 @@ function handoffPayload(sessionId, target, includePrompt, options) {
     source_refs: next.sources || [],
     constraints: next.constraints || [],
     acceptance_criteria: next.acceptance || [],
+    local_brief: next.localBrief || '',
   };
 }
 async function postJson(path, payload) {
@@ -1723,6 +1731,8 @@ function renderHandoff(capsule) {
   const aiResult = capsule.ai_assist_result || {};
   const assisted = aiResult.status === 'used' || aiResult.status === 'cached';
   const aiReady = !isDemo && aiAssist.ready && (aiAssist.mode || 'off') !== 'off' && !assisted;
+  const sourceAccess = ((aiAssist.config || {}).source_access || aiResult.source_access || 'metadata_only');
+  setDrawerSubtitle(assisted ? `AI-assisted handoff · ${sourceAccess}` : aiReady ? `AI Assist available · ${sourceAccess}` : 'Local metadata only');
   const enrichment = capsule.basic
     ? '<div class="loading">Basic brief is ready. Loading timeline, git evidence, and prompt enrichment...</div>'
     : '';
@@ -1837,7 +1847,7 @@ async function regenerateHandoff(sessionId, target = 'generic', includePrompt = 
   }
 }
 async function improveFreshStartWithAiAssist(sessionId, target = 'generic', includePrompt = false) {
-  const status = currentData && currentData.ai_assist ? currentData.ai_assist : null;
+  const status = (typeof currentData !== 'undefined' && currentData && currentData.ai_assist) ? currentData.ai_assist : null;
   const config = status && status.config ? status.config : {};
   const label = (status && status.active_label) || 'AI Assist';
   if (config.require_confirmation !== false) {
@@ -1845,6 +1855,12 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
     if (!ok) return;
   }
   const options = handoffOptionsFromForm();
+  const briefNode = document.getElementById('handoffBrief');
+  const currentBrief = briefNode ? briefNode.value : '';
+  const sourceAccess = config.source_access || 'metadata_only';
+  if (currentBrief && (!includePrompt || sourceAccess === 'prompt_opt_in' || sourceAccess === 'source_opt_in')) {
+    options.localBrief = currentBrief;
+  }
   const payload = handoffPayload(sessionId, target, includePrompt, options);
   const statusNode = document.getElementById('handoffStatus');
   if (statusNode) {

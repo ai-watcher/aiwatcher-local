@@ -1461,15 +1461,16 @@
     .session-hero .session-meta { margin-bottom: 12px; }
     .session-identity-card {
       display: grid;
-      gap: var(--sp-2);
+      gap: 6px;
       border: 1px solid rgba(var(--hairline-lift-rgb), .24);
       border-radius: var(--r-2);
       background: rgba(var(--ink-deep-rgb), .42);
       padding: 12px;
       margin: 12px 0;
     }
-    .session-identity-row { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
-    .session-identity-main { min-width: 0; flex: 1; color: var(--text-bright); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .session-identity-row { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); min-width: 0; }
+    .session-identity-main { color: var(--text-bright); font-weight: var(--fw-med); overflow-wrap: anywhere; }
+    .session-identity-path { color: var(--muted); font-size: var(--fs-2); overflow-wrap: anywhere; }
     .session-id-chip { font: 700 12px/1.1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--on-warning-lift); border: 1px solid rgba(var(--amber-rgb), .42); background: rgba(var(--amber-rgb), .12); border-radius: var(--r-pill); padding: 6px 9px; white-space: nowrap; }
     /* Replaces the four-fact hero grid: only context pressure varies enough to
        earn the space, and the rest each had their own section directly below. */

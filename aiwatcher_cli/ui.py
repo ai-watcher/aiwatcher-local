@@ -2290,22 +2290,45 @@ def build_ai_assisted_handoff_detail(
     source_refs: list[str] | None = None,
     constraints: list[str] | None = None,
     acceptance_criteria: list[str] | None = None,
+    local_brief_override: str | None = None,
 ) -> dict[str, object]:
     """Return a user-requested AI-composed Fresh Start brief with receipt."""
     config = ai_assist_config()
     source_access = str(config.get("source_access") or "metadata_only")
     effective_prompt_excerpt = bool(include_prompt_excerpt and source_access in {"prompt_opt_in", "source_opt_in"})
-    capsule = build_handoff_detail(
-        session_id,
-        days=days,
-        target=target,
-        include_prompt_excerpt=effective_prompt_excerpt,
-        handoff_type=handoff_type,
-        objective=objective,
-        source_refs=source_refs,
-        constraints=constraints,
-        acceptance_criteria=acceptance_criteria,
-    )
+    local_brief_from_client = str(local_brief_override or "").strip()
+    if source_access == "metadata_only" and (
+        "Task context (your own prompt" in local_brief_from_client
+        or "Prompt excerpt" in local_brief_from_client
+    ):
+        local_brief_from_client = ""
+    if local_brief_from_client:
+        capsule = build_basic_handoff_detail(
+            session_id,
+            days=days,
+            target=target,
+            handoff_type=handoff_type,
+            objective=objective,
+            source_refs=source_refs,
+            constraints=constraints,
+            acceptance_criteria=acceptance_criteria,
+        )
+        if not capsule.get("error"):
+            capsule["next_brief"] = local_brief_from_client[:20_000]
+            capsule["basic"] = False
+            capsule["enrichment_status"] = "client_handoff_brief"
+    else:
+        capsule = build_handoff_detail(
+            session_id,
+            days=days,
+            target=target,
+            include_prompt_excerpt=effective_prompt_excerpt,
+            handoff_type=handoff_type,
+            objective=objective,
+            source_refs=source_refs,
+            constraints=constraints,
+            acceptance_criteria=acceptance_criteria,
+        )
     if capsule.get("error"):
         return capsule
     capsule["ai_assist_prompt_excerpt_requested"] = bool(include_prompt_excerpt)
@@ -2359,7 +2382,7 @@ def build_ai_assisted_handoff_detail(
         capsule["ai_assist"] = build_ai_assist_status(ai_assist_config())
         return capsule
     try:
-        result = improve_fresh_start_brief(config, local_brief=local_brief)
+        result = improve_fresh_start_brief(config, local_brief=local_brief, timeout=20)
     except AiAssistUnavailable as exc:
         provider = str(config.get("provider") or "none")
         if str(config.get("mode") or "off") == "cloud" and provider in {"openai", "anthropic", "openai_compatible"}:
@@ -7674,6 +7697,7 @@ class UIHandler(BaseHTTPRequestHandler):
                     days,
                     target,
                     include_prompt_excerpt,
+                    local_brief_override=str(payload.get("local_brief") or ""),
                     **handoff_options,
                 )
             else:

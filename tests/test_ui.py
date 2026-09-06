@@ -3916,6 +3916,72 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Reproduce and fix", capsule["next_brief"])
         self.assertIn("Keep privacy opt-in.", capsule["next_brief"])
 
+    def test_ai_assisted_handoff_can_reuse_visible_brief_without_rescanning_events(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="ai-fast",
+            tool="claude-code",
+            surface="desktop",
+            project_path="/repo/fast",
+            started_at=now - timedelta(hours=3),
+            updated_at=now - timedelta(minutes=7),
+            tokens_in=90_000,
+            tokens_out=4_000,
+            cost_usd=0.34,
+        )
+        visible_brief = "\n".join([
+            "AIWatcher Fresh Start brief",
+            "",
+            "Workspace",
+            "- Project: /repo/fast",
+            "",
+            "Local evidence to inspect",
+            "- Changed files: aiwatcher_cli/web/index.js",
+        ])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with ui._SUMMARY_CACHE_LOCK:
+                ui._SESSION_INDEX.clear()
+                ui._SUMMARY_CACHE.clear()
+            ui._index_sessions([row])
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all_events", side_effect=AssertionError("visible brief should skip full event enrichment")),
+                patch.object(ui, "safe_runtime_processes", return_value=[]),
+                patch.object(ui, "ai_assist_config", return_value={
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "max_daily_usd": 0.25,
+                    "source_access": "metadata_only",
+                    "enabled_workflows": ["fresh_start"],
+                    "api_keys": {"openai": "sk-secret"},
+                }),
+                patch.object(ui, "improve_fresh_start_brief", return_value={
+                    "status": "used",
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "model": "gpt-test",
+                    "input_chars": len(visible_brief),
+                    "output_chars": 80,
+                    "source_access": "metadata_only",
+                    "text": "AIWatcher AI-assisted Fresh Start brief\n\nNext ask\n- Inspect aiwatcher_cli/web/index.js first.",
+                    "structured": {"next_ask": "Inspect aiwatcher_cli/web/index.js first."},
+                    "usage": {"prompt_tokens": 150, "completion_tokens": 50},
+                }) as improve,
+            ):
+                capsule = ui.build_ai_assisted_handoff_detail(
+                    "ai-fast",
+                    days=7,
+                    target="claude",
+                    include_prompt_excerpt=False,
+                    local_brief_override=visible_brief,
+                )
+
+        self.assertEqual(capsule["ai_assist_result"]["status"], "used")
+        self.assertIn("Inspect aiwatcher_cli/web/index.js first", capsule["next_brief"])
+        self.assertEqual(improve.call_args.kwargs["local_brief"], visible_brief)
+        self.assertEqual(capsule["enrichment_status"], "client_handoff_brief")
+
     def test_ai_assisted_handoff_composes_paste_ready_brief_and_receipt(self) -> None:
         now = datetime.now(timezone.utc)
         row = LocalSession(

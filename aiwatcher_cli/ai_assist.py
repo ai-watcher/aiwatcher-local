@@ -650,13 +650,16 @@ def improve_fresh_start_brief(
             "role": "system",
             "content": (
                 "You are AIWatcher's Fresh Start handoff composer. Your job is to turn local handoff "
-                "evidence into a useful continuation prompt for a new AI work session. Be concrete and "
-                "operational: extract the likely work done, context worth preserving, files or commands "
-                "to inspect first, what the next agent should avoid redoing, and the smallest next ask. "
+                "evidence into a useful continuation prompt for a new AI work session. Be concrete, "
+                "specific, and operational: extract the likely work done, user intent when it is actually "
+                "present in the evidence, context worth preserving, files or commands to inspect first, "
+                "what the next agent should avoid redoing, and the smallest next ask. "
                 "Preserve deterministic evidence boundaries: do not invent saved tokens, commits, tests, "
                 "files, outcomes, exact chat links, secrets, or prior conversation content. If prompt text "
                 "or transcript content is not present, say the task must be reconstructed from repo state "
-                "and local evidence. Prefer specific evidence from the handoff over generic advice."
+                "and local evidence. Prefer specific evidence from the handoff over generic advice. Every "
+                "useful bullet should carry a concrete path, file, session id, count, decision, command, "
+                "or explicit uncertainty from the evidence when one exists."
             ),
         },
         {
@@ -674,7 +677,9 @@ def improve_fresh_start_brief(
                 "Make the result useful for a fresh chat, forked chat, or subagent. The next_ask should "
                 "tell the new AI session exactly what to do first. Avoid echoing the section names and "
                 "boilerplate from the local handoff unless the evidence is genuinely missing. Keep it short "
-                "enough to paste without carrying the whole old conversation.\n\n"
+                "enough to paste without carrying the whole old conversation. Do not use vague goals like "
+                "\"reconstruct the current work\" unless no stronger objective is present; tie the goal to "
+                "the observed workspace/tool/path/evidence instead.\n\n"
                 "Local AIWatcher handoff evidence:\n"
                 f"{trimmed}"
             ),

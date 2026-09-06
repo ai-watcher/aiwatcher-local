@@ -2408,6 +2408,11 @@ class InformationArchitectureTest(unittest.TestCase):
         self.assertIn("Compose AI handoff", self.js)
         self.assertIn("AI handoff ready", self.js)
         self.assertIn("Next ask", self.js)
+        self.assertIn("setDrawerSubtitle", self.js)
+        self.assertIn("AI-assisted handoff", self.js)
+        self.assertIn("session-identity-path", self.js)
+        self.assertIn("local_brief: next.localBrief", self.js)
+        self.assertIn("typeof currentData !== 'undefined'", self.js)
         self.assertIn(".fresh-preview-next", self.css)
 
     def test_copy_feedback_lands_on_the_button(self):
