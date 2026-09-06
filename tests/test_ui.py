@@ -501,7 +501,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Fresh Start", ui.HTML)
         self.assertIn("renderIdentityStrip", ui.HTML)
         self.assertIn("identity_label", ui.HTML)
-        self.assertIn("Copy it into a fresh chat only after the identity below matches", ui.HTML)
+        self.assertIn("Review the handoff, then copy it into a fresh", ui.HTML)
         self.assertIn("copyFreshStartFromDrawer", ui.HTML)
         self.assertIn("const canOpenRuntime = !!runtime.available", ui.HTML)
         self.assertNotIn("runtime.available && runtime.level !== 'app'", ui.HTML)
