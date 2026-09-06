@@ -830,11 +830,14 @@ def _optimize_candidate_checklist(item: dict[str, object]) -> str:
     impact = str(item.get("impact_label") or "No savings claim")
     evidence = str(item.get("evidence") or "Local metadata only.")
     project_full = str(item.get("project_full") or "")
+    signal = str(item.get("activity_summary") or item.get("summary") or reason)
     kind = str(item.get("kind") or "")
     lines = [
         f"AIWatcher Optimize review: {project}",
         "",
         f"Goal: {title}.",
+        f"Full path: {project_full}" if project_full else "Full path: Local machine or unattributed",
+        f"Signal: {signal}",
         f"Why AIWatcher surfaced this: {reason}",
         f"Evidence: {evidence}",
         f"Impact signal: {impact}",
@@ -909,8 +912,11 @@ def _optimize_checklist(candidates: list[dict[str, object]]) -> str:
         lines.append("- No optimize candidates stood out in the current local window.")
         return "\n".join(lines)
     for index, item in enumerate(candidates, start=1):
+        full_path = str(item.get("project_full") or "")
         lines.extend([
             f"{index}. {item.get('title')}: {item.get('project')}",
+            f"   Path: {full_path}" if full_path else "   Path: Local machine or unattributed",
+            f"   Signal: {item.get('activity_summary') or item.get('summary')}",
             f"   Why: {item.get('why_inactive') or item.get('summary')}",
             f"   Evidence: {item.get('evidence_label')} - {item.get('evidence')}",
             f"   Impact: {item.get('impact_label')}",
@@ -951,6 +957,9 @@ def _group_pending_fresh_starts(candidates: list[dict[str, object]]) -> list[dic
         first["summary"] = (
             f"{count} Fresh Start briefs were copied without a linked follow-up session. "
             "Mark the old chats done, or paste each brief into its new chat."
+        )
+        first["activity_summary"] = (
+            f"{count} Fresh Start receipts · oldest copied {first.get('updated_label') or 'unknown age'} · follow-up proof pending"
         )
     return out
 
@@ -1000,9 +1009,13 @@ def build_optimize_inventory(
         completed = sum(1 for row in inactive if outcomes.get(row.session_id, {}).get("outcome") == "useful")
         tools = sorted({row.tool for row in inactive if row.tool})
         latest_label = _elapsed_label(latest, now=now)
+        tool_label = ", ".join(tools[:3]) if tools else "local AI tools"
+        activity_summary = f"{len(inactive)} sessions · last {latest_label} · {tool_label} · ~{compact_int(tokens)} context"
+        if completed:
+            activity_summary += f" · {completed} useful outcome{'s' if completed != 1 else ''}"
         why_inactive = (
             f"Last local activity was {latest_label}; {len(inactive)} same-project sessions "
-            f"from {', '.join(tools[:3]) if tools else 'local AI tools'} are still carrying context."
+            f"from {tool_label} are still carrying context."
         )
         if completed:
             why_inactive += f" {completed} already have useful outcomes, so archive review is lower risk."
@@ -1013,6 +1026,7 @@ def build_optimize_inventory(
             "project": project_label(project),
             "project_full": project,
             "summary": f"{len(inactive)} inactive same-project sessions are carrying ~{compact_int(tokens)} context. Archive or mark done once the work is no longer active.",
+            "activity_summary": activity_summary,
             "why_inactive": why_inactive,
             "evidence_label": "Observed",
             "evidence": "Observed from local session timestamps, project path, token pressure, and outcome metadata. Archive action must happen in the AI app.",
@@ -1046,6 +1060,7 @@ def build_optimize_inventory(
             "project": project_label(project),
             "project_full": project if is_reliable_project_path(project) else "",
             "summary": "A Fresh Start brief was copied, but no follow-up proof is linked yet. Mark the old chat done or paste the brief into the new chat.",
+            "activity_summary": f"Fresh Start receipt · copied {_elapsed_label(created_at, now=now)} · follow-up proof pending",
             "why_inactive": "AIWatcher saw a Fresh Start decision but has not linked a later same-project session yet.",
             "evidence_label": "Observed",
             "evidence": "Observed from AIWatcher Fresh Start receipt metadata.",
@@ -1092,6 +1107,11 @@ def build_optimize_inventory(
             "project": short_path(path),
             "project_full": path,
             "summary": "This looks like AI-created scratch space. AIWatcher will not delete it automatically; review it first.",
+            "activity_summary": (
+                f"{'Git worktree' if source == 'git_worktree' else 'Scratch workspace'} · "
+                f"last signal {_elapsed_label(latest, now=now) if latest else _elapsed_label(mtime, now=now) if isinstance(mtime, datetime) else 'not found'} · "
+                f"{len(related_sessions)} linked session{'s' if len(related_sessions) != 1 else ''}"
+            ),
             "why_inactive": why,
             "evidence_label": "Inferred",
             "evidence": evidence,
@@ -1122,6 +1142,7 @@ def build_optimize_inventory(
             "project": "Local machine",
             "project_full": "",
             "summary": f"{len(stale_processes)} AI-related runtime process(es) look stale or orphaned. Review before killing anything.",
+            "activity_summary": f"{len(stale_processes)} stale runtime process{'es' if len(stale_processes) != 1 else ''} · {rss_impact}",
             "why_inactive": "Local process metadata shows AI-related runtimes with stale/orphan signals.",
             "evidence_label": "Observed",
             "evidence": "Observed from local process metadata, not provider billing.",

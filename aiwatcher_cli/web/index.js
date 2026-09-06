@@ -1914,11 +1914,16 @@ function renderOptimizeWorkspace(optimize) {
       if (item.kind === 'stale_processes') {
         return renderRuntimeOptimizeCard(item, itemChecklist);
       }
+      const fullPath = item.project_full || item.project || '';
+      const pathLine = fullPath ? `<div class="optimize-full-path"><span class="label">Full path</span><code>${esc(fullPath)}</code></div>` : '';
+      const activityLine = item.activity_summary ? `<p class="optimize-activity-line">${esc(item.activity_summary)}</p>` : '';
       return `<div class="action-row ${item.tokens_at_risk ? 'medium' : 'low'}">
       <div>
         <div class="action-title">${esc(item.title)} <span class="pill">${esc(item.evidence_label || 'Observed')}</span></div>
         <p>${esc(item.why_inactive || item.summary || '')}</p>
-        <div class="action-meta"><span class="pill" title="${esc(item.project || '')}">${esc(item.project ? projectName({ project_full: item.project }) : 'Local machine')}</span>${item.impact_label ? `<span class="pill">${esc(item.impact_label)}</span>` : ''}<span class="pill">${esc(item.updated_label || '')}</span></div>
+        ${activityLine}
+        <div class="action-meta"><span class="pill" title="${esc(fullPath)}">${esc(item.project ? projectName({ project_full: item.project }) : 'Local machine')}</span>${item.impact_label ? `<span class="pill">${esc(item.impact_label)}</span>` : ''}<span class="pill">${esc(item.updated_label || '')}</span></div>
+        ${pathLine}
         <p class="receipt-note">${esc(item.evidence || '')}</p>
       </div>
       <div class="actions">

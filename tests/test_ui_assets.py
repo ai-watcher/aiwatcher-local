@@ -1382,6 +1382,13 @@ class PlanControlTest(unittest.TestCase):
         self.assertIn("<span class=\"label\">Reward</span>", self.js)
         self.assertIn(".runtime-review-card", self.css)
 
+    def test_optimize_cards_render_full_path_and_activity_signal(self):
+        self.assertIn("item.activity_summary", self.js)
+        self.assertIn("optimize-activity-line", self.js)
+        self.assertIn("optimize-full-path", self.js)
+        self.assertIn("<span class=\"label\">Full path</span>", self.js)
+        self.assertIn(".optimize-full-path code", self.css)
+
     def test_context_review_continue_quiets_only_that_project(self):
         self.assertIn("function visibleFreshStartProjects", self.js)
         body = self.js[self.js.index("async function continueFreshStartProject"):]

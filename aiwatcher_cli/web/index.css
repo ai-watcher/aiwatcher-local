@@ -1170,6 +1170,24 @@
     .action-title { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; font-weight: var(--fw-bold); color: var(--t-base); }
     .action-row p { margin: 6px 0 0; color: var(--muted); line-height: 1.45; }
     .action-meta { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: 10px; }
+    .optimize-activity-line { color: var(--text-quiet); font-size: var(--fs-2); }
+    .optimize-full-path {
+      display: grid;
+      gap: var(--sp-1);
+      max-width: min(100%, 760px);
+      margin-top: 10px;
+      padding: 8px 10px;
+      border: 1px solid rgba(var(--hairline-rgb), .18);
+      border-radius: var(--r-1);
+      background: rgba(var(--ground-rgb), .42);
+    }
+    .optimize-full-path code {
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: var(--fs-1);
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
     .action-row .actions { justify-content: flex-end; }
     .runtime-review-card { align-items: start; }
     .runtime-review-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--sp-2); margin-top: 12px; }
