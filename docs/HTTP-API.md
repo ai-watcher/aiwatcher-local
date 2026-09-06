@@ -162,10 +162,13 @@ not agreeing to let it read your source. `/api/ask-aiwatcher` answers
 dashboard-only local questions from indexed metadata. `/api/handoff-basic`,
 `/api/handoff`, and `/api/handoff-demo` accept the same dashboard-only Fresh
 Start options as their `GET` forms. `/api/handoff-ai-assist` runs the optional
-Fresh Start brief improvement workflow after the user explicitly asks for it;
-it appends an AI Assist refinement to the deterministic brief and records a
-privacy-safe run receipt, but does not change source-session evidence or proof
-claims. `/api/handoff-decision` records which action you took on a Fresh Start
+Fresh Start handoff composition workflow after the user explicitly asks for it;
+it makes one bounded model call, returns a compact paste-ready brief composed
+from local handoff evidence, and records a privacy-safe run receipt. It does
+not change source-session evidence, identity confidence, or proof claims.
+Prompt excerpts are included only when both the request and saved AI Assist
+source-access setting allow them.
+`/api/handoff-decision` records which action you took on a Fresh Start
 companion, `/api/handoff-receipts-viewed` marks proof-pending receipts as seen,
 `/api/first-run-dismissed` records that the once-only first-run screen has been
 seen so it does not return (no body; the timestamp is the server's),

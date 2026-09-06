@@ -158,8 +158,8 @@ function flashCopied(button, text = 'Copied') {
 
 // The pressed button is recorded on the way down, because window.event is only
 // set while a synchronous handler runs -- and several copy paths await a fetch
-// first (startFreshFromBubble builds the brief before copying it), by which
-// time it is gone. Capture phase, so it fires before the handler.
+// first, by which time it is gone. Capture phase, so it fires before the
+// handler.
 let lastPressedButton = null;
 document.addEventListener('click', event => {
   const node = event.target && event.target.closest ? event.target.closest('button') : null;
@@ -1530,11 +1530,16 @@ function listPreview(items, fallback) {
 function renderFreshStartPreview(capsule) {
   const objective = capsule.objective || 'Reconstruct the current work from repo state, recent commits, changed files, and the evidence below.';
   const decisions = capsule.decisions || [];
+  const result = capsule.ai_assist_result || {};
+  const structured = result.structured || {};
+  const assisted = result.status === 'used';
+  const nextAsk = structured.next_ask || '';
   return `<div class="fresh-preview">
     <div class="fresh-preview-head">
-      <div><h3>Ready to copy</h3><p>This is the structured context the next AI session receives. Refine it above first if anything is missing.</p></div>
-      <span class="confidence-chip observed">Metadata only</span>
+      <div><h3>${assisted ? 'AI handoff ready' : 'Ready to copy'}</h3><p>${assisted ? 'AI Assist composed the fresh-session brief from local evidence. Review it, then copy it into the new chat.' : 'This is the structured context the next AI session receives. Refine it above first if anything is missing.'}</p></div>
+      <span class="confidence-chip observed">${assisted ? 'AI assisted' : 'Metadata only'}</span>
     </div>
+    ${assisted && nextAsk ? `<div class="fresh-preview-next"><strong>Next ask</strong><p>${esc(nextAsk)}</p></div>` : ''}
     <div class="fresh-preview-grid">
       <div class="fresh-preview-row"><strong>Objective</strong><p>${esc(objective)}</p></div>
       <div class="fresh-preview-row"><strong>Source of truth</strong><p>${listPreview(capsule.source_refs, 'Repository state, local session metadata, changed files, and the source log.')}</p></div>
@@ -1565,10 +1570,12 @@ function renderFreshStartAiAssist(capsule) {
   const config = status.config || {};
   const result = capsule.ai_assist_result || null;
   if (result && result.status === 'used') {
+    const structured = result.structured || {};
+    const nextAsk = structured.next_ask || 'Copy the AI-assisted brief into a fresh chat and keep the first checkpoint small.';
     return `<div class="ai-assist-run-card ready">
       <div>
-        <strong>AI Assist added</strong>
-        <p>Refined the human guidance with ${esc(result.provider || 'provider')} / ${esc(result.model || 'model')}. Local evidence and proof claims stayed unchanged.</p>
+        <strong>AI handoff ready</strong>
+        <p>${esc(result.provider || 'provider')} / ${esc(result.model || 'model')} composed a paste-ready brief from local evidence. Next: ${esc(nextAsk)}</p>
       </div>
       <span class="confidence-chip observed">receipt saved</span>
     </div>`;
@@ -1603,9 +1610,9 @@ function renderFreshStartAiAssist(capsule) {
   return `<div class="ai-assist-run-card ready">
     <div>
       <strong>AI Assist available</strong>
-      <p>Optional: spend one small provider call to make the copied brief more contextual. Nothing runs until you confirm.</p>
+      <p>Optional: spend one small provider call to compose a cleaner handoff with work done, context to preserve, next ask, and acceptance check. Nothing runs until you confirm.</p>
     </div>
-    <button class="btn-quiet" onclick="improveFreshStartWithAiAssist('${esc(capsule.session_id)}','${esc(capsule.target || 'generic')}', ${capsule.include_prompt_excerpt ? 'true' : 'false'})">Improve brief</button>
+    <button class="btn-quiet" onclick="improveFreshStartWithAiAssist('${esc(capsule.session_id)}','${esc(capsule.target || 'generic')}', ${capsule.include_prompt_excerpt ? 'true' : 'false'})">Compose handoff</button>
   </div>`;
 }
 function renderHandoff(capsule) {
@@ -1732,7 +1739,14 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
   const payload = handoffPayload(sessionId, target, includePrompt, options);
   const statusNode = document.getElementById('handoffStatus');
   if (statusNode) {
-    statusNode.insertAdjacentHTML('afterend', '<div id="aiAssistWorking" class="loading">AI Assist is improving the Fresh Start brief...</div>');
+    statusNode.insertAdjacentHTML('afterend', `<div id="aiAssistWorking" class="ai-loading-panel">
+      <div class="ai-loading-mark">AI</div>
+      <div>
+        <strong>Composing handoff</strong>
+        <p>AI Assist is turning local evidence into a compact fresh-session brief. Proof and savings claims stay evidence-backed.</p>
+        <div class="ai-loading-bar" aria-hidden="true"><span></span></div>
+      </div>
+    </div>`);
   }
   try {
     const capsule = await postJson('/api/handoff-ai-assist', payload);
@@ -1744,7 +1758,7 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
     }
     setDrawerContent(renderHandoff(capsule));
     const result = capsule.ai_assist_result || {};
-    if (result.status === 'used') showToast('AI Assist refinement added');
+    if (result.status === 'used') showToast('AI handoff ready');
     else showToast(result.reason || 'AI Assist was not used', 'error');
   } catch (error) {
     const working = document.getElementById('aiAssistWorking');
@@ -1832,29 +1846,8 @@ async function recordHandoffDecision(bubble, decision) {
   }
 }
 async function startFreshFromBubble(sessionId) {
-  const res = await fetch(`/api/handoff-basic?id=${encodeURIComponent(sessionId)}&target=generic`);
-  const capsule = await res.json();
-  if (capsule.error) {
-    showToast(capsule.error, 'error');
-    return;
-  }
-  const copied = await copyText(capsule.next_brief || '', 'Fresh Start brief copied');
-  if (!copied) return;
-  const bubble = handoffDecisionBubble(sessionId);
-  await recordHandoffDecision(bubble, 'copy_handoff');
-  const runtime = (bubble || {}).runtime_attachment || {};
-  if (runtime.available) {
-    try {
-      const returnRes = await requestRuntimeReturn(sessionId);
-      const returned = await returnRes.json();
-      showToast(returned.message || 'Brief copied and return target opened.', returned.ok ? 'success' : 'error');
-    } catch (error) {
-      showToast('Brief copied. Open a fresh chat in the same workspace and paste it.', 'success');
-    }
-  } else {
-    showToast('Brief copied. Open a fresh chat in the same workspace and paste it.', 'success');
-  }
-  renderHandoffCopied(bubble, sessionId);
+  await openHandoff(sessionId, 'generic', false);
+  showToast('Fresh Start brief opened. Review it, compose with AI Assist if useful, then copy.');
 }
 async function continueFromSession(sessionId) {
   await recordHandoffDecision({
@@ -4035,7 +4028,7 @@ function renderControlStrip(data) {
       fresh.innerHTML = `<div class="label">Fresh Start ready</div>
         <div class="value">${esc(bubble.saved_context_label)}</div>
         <div class="sub">context saved if you start fresh &middot;
-          <button class="link-inline" onclick="startFreshFromBubble('${esc(bubble.session_id)}')">copy brief</button></div>`;
+          <button class="link-inline" onclick="startFreshFromBubble('${esc(bubble.session_id)}')">review brief</button></div>`;
     } else { fresh.hidden = true; }
   }
 
@@ -4987,7 +4980,7 @@ function ambientRunning(card, presence) {
     meter: meterSvg([{ value: latest, colour: tone }], marks, trackMax) + ambientScaleLabels(scale),
     sentence: runway + bloat,
     actions: (card.can_handoff
-      ? '<button class="btn-primary" onclick="startFreshFromBubble(\'' + esc(card.session_id) + '\')">Copy Fresh Start brief</button>'
+      ? '<button class="btn-primary" onclick="startFreshFromBubble(\'' + esc(card.session_id) + '\')">Review Fresh Start</button>'
       : '')
       + '<button class="btn-quiet" onclick="selectSession(\'' + esc(card.session_id) + '\')">Inspect session</button>',
     facts: [

@@ -171,6 +171,36 @@ class DashboardServeTests(unittest.TestCase):
                 thread.join(timeout=5)
                 server.server_close()
 
+    def test_handoff_ai_assist_post_reaches_builder_with_prompt_opt_in(self) -> None:
+        server, thread, base = self._serve_one()
+        payload = json.dumps({
+            "session_id": "sess-1",
+            "target": "codex",
+            "prompt": True,
+            "type": "coding",
+            "objective": "Continue the AI Assist handoff.",
+        }).encode("utf-8")
+        http_request = request.Request(
+            f"{base}/api/handoff-ai-assist",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with patch.object(ui, "build_ai_assisted_handoff_detail", return_value={"session_id": "sess-1", "ok": True}) as builder:
+            try:
+                with request.urlopen(http_request, timeout=5) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
+        self.assertTrue(body["ok"])
+        builder.assert_called_once()
+        args, kwargs = builder.call_args
+        self.assertEqual(args[:4], ("sess-1", 30, "codex", True))
+        self.assertEqual(kwargs["handoff_type"], "coding")
+        self.assertEqual(kwargs["objective"], "Continue the AI Assist handoff.")
+
     def test_update_status_endpoint_reports_source_updates(self) -> None:
         server, thread, base = self._serve_one()
         payload = {
@@ -3762,7 +3792,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Reproduce and fix", capsule["next_brief"])
         self.assertIn("Keep privacy opt-in.", capsule["next_brief"])
 
-    def test_ai_assisted_handoff_appends_refinement_and_receipt(self) -> None:
+    def test_ai_assisted_handoff_composes_paste_ready_brief_and_receipt(self) -> None:
         now = datetime.now(timezone.utc)
         row = LocalSession(
             session_id="ai-brief",
@@ -3782,6 +3812,7 @@ class DashboardWindowTests(unittest.TestCase):
             ui._index_sessions([row])
             with (
                 patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all_events", return_value=[]),
                 patch.object(ui, "safe_runtime_processes", return_value=[]),
                 patch.object(ui, "ai_assist_config", return_value={
                     "mode": "cloud",
@@ -3799,16 +3830,41 @@ class DashboardWindowTests(unittest.TestCase):
                     "input_chars": 1200,
                     "output_chars": 240,
                     "source_access": "metadata_only",
-                    "text": "AI Assist refinement\n- Likely objective: keep the next checkpoint small.",
+                    "text": "\n".join([
+                        "AIWatcher AI-assisted Fresh Start brief",
+                        "",
+                        "Goal",
+                        "- Validate Fresh Start.",
+                        "",
+                        "What appears done",
+                        "- AI Assist settings are configured.",
+                        "",
+                        "Next ask",
+                        "- Inspect only the handoff flow and verify the smallest checkpoint.",
+                    ]),
+                    "structured": {
+                        "next_ask": "Inspect only the handoff flow and verify the smallest checkpoint.",
+                    },
                     "usage": {"prompt_tokens": 300, "completion_tokens": 80, "raw": "ignored"},
                 }),
             ):
-                capsule = ui.build_ai_assisted_handoff_detail("ai-brief", days=7, target="codex")
+                capsule = ui.build_ai_assisted_handoff_detail(
+                    "ai-brief",
+                    days=7,
+                    target="codex",
+                    include_prompt_excerpt=True,
+                )
                 runs = recent_ai_assist_runs()
 
         self.assertEqual(capsule["ai_assist_result"]["status"], "used")
-        self.assertIn("AI Assist refinement", capsule["next_brief"])
-        self.assertIn("local evidence and proof claims above remain authoritative", capsule["next_brief"])
+        self.assertIn("AIWatcher AI-assisted Fresh Start brief", capsule["next_brief"])
+        self.assertIn("What appears done", capsule["next_brief"])
+        self.assertIn("AI Assist receipt", capsule["next_brief"])
+        self.assertIn("local_next_brief", capsule)
+        self.assertFalse(capsule["include_prompt_excerpt"])
+        self.assertTrue(capsule["ai_assist_prompt_excerpt_requested"])
+        self.assertFalse(capsule["ai_assist_prompt_excerpt_included"])
+        self.assertIn("local session identity, token/cost totals, files, commits, outcomes, and proof claims remain authoritative", capsule["next_brief"])
         self.assertEqual(runs[0]["workflow"], "fresh_start")
         self.assertEqual(runs[0]["status"], "used")
         self.assertEqual(runs[0]["usage"]["prompt_tokens"], 300)

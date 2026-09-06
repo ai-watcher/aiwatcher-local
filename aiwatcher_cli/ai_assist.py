@@ -33,6 +33,7 @@ DEFAULT_MODELS = {
 
 MAX_FRESH_START_INPUT_CHARS = 9000
 MAX_FRESH_START_OUTPUT_TOKENS = 700
+MAX_FRESH_START_BRIEF_CHARS = 6000
 
 
 class AiAssistUnavailable(RuntimeError):
@@ -417,17 +418,104 @@ def _call_configured_chat(
     raise AiAssistUnavailable("Choose OpenAI, Claude, Custom endpoint, or a local runtime.")
 
 
+def _json_object_from_text(text: str) -> dict[str, object] | None:
+    value = str(text or "").strip()
+    if not value:
+        return None
+    if value.startswith("```"):
+        value = value.strip("`")
+        if value.lower().startswith("json"):
+            value = value[4:].strip()
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        start = value.find("{")
+        end = value.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            parsed = json.loads(value[start:end + 1])
+        except json.JSONDecodeError:
+            return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _clean_line(value: object, *, limit: int = 220) -> str:
+    text = " ".join(str(value or "").split())
+    return text[:limit].rstrip()
+
+
+def _clean_list(value: object, *, limit: int = 6) -> list[str]:
+    if isinstance(value, list):
+        items = value
+    elif isinstance(value, str) and value.strip():
+        items = [value]
+    else:
+        items = []
+    cleaned: list[str] = []
+    for item in items:
+        line = _clean_line(item)
+        if line:
+            cleaned.append(line)
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
+def _section(title: str, lines: list[str]) -> list[str]:
+    if not lines:
+        return []
+    return ["", title, *[f"- {line}" for line in lines]]
+
+
+def _structured_handoff_text(parsed: dict[str, object]) -> str:
+    goal = _clean_line(parsed.get("goal"), limit=360)
+    next_ask = _clean_line(parsed.get("next_ask"), limit=420)
+    what_done = _clean_list(parsed.get("what_is_done") or parsed.get("done"), limit=7)
+    context = _clean_list(parsed.get("context_to_preserve") or parsed.get("context"), limit=7)
+    inspect = _clean_list(parsed.get("inspect_first"), limit=7)
+    avoid = _clean_list(parsed.get("do_not_redo") or parsed.get("avoid"), limit=5)
+    uncertainties = _clean_list(parsed.get("uncertainties"), limit=5)
+    acceptance = _clean_list(parsed.get("acceptance_check") or parsed.get("acceptance"), limit=5)
+
+    lines = [
+        "AIWatcher AI-assisted Fresh Start brief",
+        "",
+        "You are starting a fresh AI work session from an AIWatcher handoff.",
+        "Do not assume access to the previous chat, hidden memory, or unstated decisions.",
+        "Continue from the repository/workspace state and AIWatcher evidence below.",
+        "",
+        "Goal",
+        f"- {goal or 'Continue the same user goal from the source workspace after verifying the evidence.'}",
+        *_section("What appears done", what_done or ["Reconstruct the prior work from the changed files, recent commits, and source-session evidence before editing."]),
+        *_section("Context to preserve", context or ["Preserve the source workspace, constraints, and small next checkpoint rather than replaying the whole prior chat."]),
+        *_section("Inspect first", inspect or ["Run `git status --short` and inspect the changed files or source-of-truth docs listed in the handoff evidence."]),
+        *_section("Do not redo", avoid or ["Do not repeat broad discovery from the bloated session unless the evidence is insufficient."]),
+        "",
+        "Next ask",
+        f"- {next_ask or 'State what appears done, what remains uncertain, and the smallest safe checkpoint before editing.'}",
+        *_section("Acceptance check", acceptance or ["Report changed files, verification run, remaining uncertainty, and whether the result looks useful."]),
+        *_section("Uncertainty to verify", uncertainties),
+        "",
+        "Guardrails",
+        "- Preserve unrelated changes.",
+        "- Do not expose secrets.",
+        "- Stop before destructive changes, force pushes, broad refactors, production writes, or unrelated cleanup.",
+    ]
+    return "\n".join(lines).strip()
+
+
 def improve_fresh_start_brief(
     config: dict[str, Any],
     *,
     local_brief: str,
     timeout: float = 35,
 ) -> dict[str, object]:
-    """Return a bounded AI-written refinement for a Fresh Start handoff.
+    """Return a bounded AI-composed Fresh Start handoff.
 
-    Deterministic evidence remains in the original brief. The model gets only
-    the already-generated metadata handoff and writes one small inferred block
-    that the UI appends below it after an explicit user action.
+    Deterministic evidence remains authoritative. The model gets only the
+    already-generated handoff and composes a clearer paste-ready continuation
+    brief after an explicit user action.
     """
     normalized_brief = str(local_brief or "").strip()
     if not normalized_brief:
@@ -443,23 +531,28 @@ def improve_fresh_start_brief(
         {
             "role": "system",
             "content": (
-                "You improve AIWatcher Fresh Start handoffs. Preserve all deterministic evidence, "
-                "session identity, token/cost claims, and privacy boundaries exactly. Do not invent "
-                "saved tokens, commits, tests, files, or outcomes. Write concise bullets only."
+                "You are AIWatcher's Fresh Start handoff composer. Create a compact, paste-ready "
+                "brief for a new AI coding session. Preserve deterministic evidence boundaries: do "
+                "not invent saved tokens, commits, tests, files, outcomes, exact chat links, or secret "
+                "content. Use only facts present in the local handoff. Label uncertain things as uncertain."
             ),
         },
         {
             "role": "user",
             "content": (
-                "Rewrite only the human guidance as a short inferred refinement for the next AI session. "
-                "Use this exact format and no preamble:\n\n"
-                "AI Assist refinement\n"
-                "- Likely objective: ...\n"
-                "- Inspect first: ...\n"
-                "- Smallest next checkpoint: ...\n"
-                "- Ask the user if: ...\n"
-                "- Acceptance check: ...\n\n"
-                "Local Fresh Start brief:\n"
+                "Return JSON only with these keys:\n"
+                "goal: string\n"
+                "what_is_done: string[]\n"
+                "context_to_preserve: string[]\n"
+                "inspect_first: string[]\n"
+                "do_not_redo: string[]\n"
+                "next_ask: string\n"
+                "acceptance_check: string[]\n"
+                "uncertainties: string[]\n\n"
+                "Make the result useful for a fresh chat, forked chat, or subagent. The next_ask should "
+                "tell the new AI session exactly what to do first. Keep it short enough to paste without "
+                "carrying the whole old conversation.\n\n"
+                "Local AIWatcher handoff evidence:\n"
                 f"{trimmed}"
             ),
         },
@@ -471,8 +564,8 @@ def improve_fresh_start_brief(
         timeout=timeout,
     )
     text = str(response.get("text") or "").strip()
-    if "AI Assist refinement" not in text.splitlines()[0:2]:
-        text = "AI Assist refinement\n" + text
+    parsed = _json_object_from_text(text)
+    text = _structured_handoff_text(parsed) if parsed else _structured_handoff_text({"next_ask": text})
     return {
         "workflow": "fresh_start",
         "status": "used",
@@ -482,6 +575,7 @@ def improve_fresh_start_brief(
         "input_chars": len(trimmed),
         "output_chars": len(text),
         "source_access": config.get("source_access") or "metadata_only",
-        "text": text[:3000],
+        "text": text[:MAX_FRESH_START_BRIEF_CHARS],
+        "structured": parsed or {},
         "usage": response.get("usage") if isinstance(response.get("usage"), dict) else {},
     }

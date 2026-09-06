@@ -1914,6 +1914,24 @@
     }
     .fresh-preview-head, .receipt-widget-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-3); margin-bottom: 12px; }
     .fresh-preview-head h3, .receipt-widget-head h3 { margin: 0; font-size: var(--fs-4); }
+    .fresh-preview-next {
+      margin: 0 0 12px;
+      padding: 12px 14px;
+      border: 1px solid rgba(var(--blue-rgb), .26);
+      border-radius: var(--r-2);
+      background:
+        linear-gradient(135deg, rgba(var(--blue-rgb), .08), transparent 68%),
+        rgba(var(--well-rgb), .26);
+    }
+    .fresh-preview-next strong {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--text-bright);
+      font-size: var(--fs-2);
+      text-transform: uppercase;
+      letter-spacing: .06em;
+    }
+    .fresh-preview-next p { color: var(--text-bright); overflow-wrap: anywhere; }
     .fresh-preview-grid { display: grid; gap: var(--sp-2); }
     .fresh-preview-row {
       display: grid;

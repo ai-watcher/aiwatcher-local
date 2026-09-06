@@ -2150,17 +2150,22 @@ def build_ai_assisted_handoff_detail(
     session_id: str,
     days: int = 30,
     target: str = "generic",
+    include_prompt_excerpt: bool = False,
     handoff_type: str = "coding",
     objective: str | None = None,
     source_refs: list[str] | None = None,
     constraints: list[str] | None = None,
     acceptance_criteria: list[str] | None = None,
 ) -> dict[str, object]:
-    """Append a user-requested AI refinement to a deterministic Fresh Start brief."""
-    capsule = build_basic_handoff_detail(
+    """Return a user-requested AI-composed Fresh Start brief with receipt."""
+    config = ai_assist_config()
+    source_access = str(config.get("source_access") or "metadata_only")
+    effective_prompt_excerpt = bool(include_prompt_excerpt and source_access in {"prompt_opt_in", "source_opt_in"})
+    capsule = build_handoff_detail(
         session_id,
         days=days,
         target=target,
+        include_prompt_excerpt=effective_prompt_excerpt,
         handoff_type=handoff_type,
         objective=objective,
         source_refs=source_refs,
@@ -2169,7 +2174,8 @@ def build_ai_assisted_handoff_detail(
     )
     if capsule.get("error"):
         return capsule
-    config = ai_assist_config()
+    capsule["ai_assist_prompt_excerpt_requested"] = bool(include_prompt_excerpt)
+    capsule["ai_assist_prompt_excerpt_included"] = effective_prompt_excerpt
     if str(config.get("mode") or "off") == "cloud" and float(config.get("max_daily_usd") or 0) <= 0:
         reason = "Cloud AI Assist daily cap is set to $0.00."
         record_ai_assist_run(
@@ -2182,8 +2188,10 @@ def build_ai_assisted_handoff_detail(
         )
         capsule["ai_assist_result"] = {"status": "skipped", "reason": reason}
         return capsule
+    local_brief = str(capsule.get("next_brief") or "")
+    capsule["local_next_brief"] = local_brief
     try:
-        result = improve_fresh_start_brief(config, local_brief=str(capsule.get("next_brief") or ""))
+        result = improve_fresh_start_brief(config, local_brief=local_brief)
     except AiAssistUnavailable as exc:
         record = record_ai_assist_run(
             workflow="fresh_start",
@@ -2201,7 +2209,7 @@ def build_ai_assisted_handoff_detail(
             "receipt": record,
         }
         return capsule
-    refinement = str(result.get("text") or "").strip()
+    composed_brief = str(result.get("text") or "").strip()
     record = record_ai_assist_run(
         workflow="fresh_start",
         status="used",
@@ -2219,13 +2227,11 @@ def build_ai_assisted_handoff_detail(
         "AI Assist receipt",
         f"- Provider/model: {result.get('provider') or 'unknown'} / {result.get('model') or 'unknown'}",
         f"- Source access: {result.get('source_access') or 'metadata_only'}",
-        "- Scope: Added inferred guidance only; local evidence and proof claims above remain authoritative.",
+        "- Scope: Composed the paste-ready handoff from local AIWatcher evidence.",
+        "- Evidence boundary: local session identity, token/cost totals, files, commits, outcomes, and proof claims remain authoritative.",
+        "- Cost boundary: one user-confirmed bounded model call; no saved-token claim is made by this AI step.",
     ])
-    capsule["next_brief"] = "\n\n".join([
-        str(capsule.get("next_brief") or "").rstrip(),
-        refinement,
-        receipt_text,
-    ]).rstrip()
+    capsule["next_brief"] = "\n\n".join([composed_brief, receipt_text]).rstrip()
     capsule["ai_assist_result"] = {
         "status": "used",
         "provider": result.get("provider"),
@@ -2235,6 +2241,7 @@ def build_ai_assisted_handoff_detail(
         "input_chars": result.get("input_chars"),
         "output_chars": result.get("output_chars"),
         "usage": result.get("usage"),
+        "structured": result.get("structured") if isinstance(result.get("structured"), dict) else {},
         "receipt": record,
     }
     capsule["ai_assist"] = build_ai_assist_status(config)
@@ -7159,6 +7166,7 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/ai-assist-config",
             "/api/ask-aiwatcher",
             "/api/handoff-basic",
+            "/api/handoff-ai-assist",
             "/api/handoff",
             "/api/handoff-demo",
             "/api/handoff-decision",
@@ -7298,7 +7306,14 @@ class UIHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/handoff-basic":
                 response = build_basic_handoff_detail(session_id, days, target, **handoff_options)
             elif parsed.path == "/api/handoff-ai-assist":
-                response = build_ai_assisted_handoff_detail(session_id, days, target, **handoff_options)
+                include_prompt_excerpt = bool(payload.get("prompt", False))
+                response = build_ai_assisted_handoff_detail(
+                    session_id,
+                    days,
+                    target,
+                    include_prompt_excerpt,
+                    **handoff_options,
+                )
             else:
                 include_prompt_excerpt = bool(payload.get("prompt", False))
                 response = build_handoff_detail(

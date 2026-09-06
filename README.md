@@ -357,13 +357,17 @@ AI Assist is deliberately aimed at high-leverage workflows first: improving a
 Fresh Start brief and tightening a broad Prompt Plan. Ask AIWatcher remains a
 local evidence navigator until a stronger user need is proven.
 
-The first model-backed workflow is **Fresh Start handoff composition**. AIWatcher
-always builds the free local brief first. If AI Assist is configured and ready,
-the Fresh Start drawer leads with an explicit **Compose AI handoff** action.
-That action makes one bounded provider call, replaces the local template with a
-compact paste-ready handoff, and records a local receipt with provider/model and
+The first model-backed workflow is **Fresh Start handoff composition**.
+AIWatcher always builds the free local brief first. If AI Assist is configured
+and ready, the Fresh Start drawer leads with an explicit **Compose AI handoff**
+action.
+That action makes one bounded provider call, turns local handoff evidence into
+a compact paste-ready brief with work done, context to preserve, next ask, and
+acceptance checks, and records a local receipt with provider/model and
 token-count metadata when the provider returns it. It does not change local
-evidence, identity confidence, or saved-token claims.
+evidence, identity confidence, or saved-token claims. Prompt excerpts are sent
+only when both the drawer checkbox and the saved AI Assist source-access setting
+allow them.
 
 The Console tabs are:
 

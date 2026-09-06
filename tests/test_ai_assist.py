@@ -119,7 +119,7 @@ class AiAssistTests(unittest.TestCase):
         self.assertTrue(openai["ready"])
         self.assertFalse(anthropic["ready"])
 
-    def test_fresh_start_improvement_is_bounded_and_labels_ai_output(self) -> None:
+    def test_fresh_start_improvement_composes_bounded_handoff(self) -> None:
         with (
             patch.object(ai_assist, "build_ai_assist_status", return_value={
                 "ready": True,
@@ -130,7 +130,16 @@ class AiAssistTests(unittest.TestCase):
                 "mode": "cloud",
                 "provider": "openai",
                 "model": "gpt-test",
-                "text": "- Likely objective: finish the smallest checkpoint.",
+                "text": (
+                    '{"goal":"Finish the smallest checkpoint.",'
+                    '"what_is_done":["Settings page exists"],'
+                    '"context_to_preserve":["AI Assist is optional"],'
+                    '"inspect_first":["git status --short"],'
+                    '"do_not_redo":["Do not rerun broad discovery"],'
+                    '"next_ask":"Inspect settings files, then patch only the AI Assist config UX.",'
+                    '"acceptance_check":["node --check passes"],'
+                    '"uncertainties":["Confirm user-selected provider persists"]}'
+                ),
                 "usage": {"prompt_tokens": 200, "completion_tokens": 50},
             }) as call,
         ):
@@ -147,7 +156,11 @@ class AiAssistTests(unittest.TestCase):
 
         payload = call.call_args.args[1][1]["content"]
         self.assertLessEqual(result["input_chars"], ai_assist.MAX_FRESH_START_INPUT_CHARS)
-        self.assertIn("AI Assist refinement", result["text"])
+        self.assertIn("AIWatcher AI-assisted Fresh Start brief", result["text"])
+        self.assertIn("What appears done", result["text"])
+        self.assertIn("Settings page exists", result["text"])
+        self.assertIn("Next ask", result["text"])
+        self.assertEqual(result["structured"]["goal"], "Finish the smallest checkpoint.")
         self.assertNotIn("sk-secret", payload)
         self.assertLess(len(payload), 10_000)
 

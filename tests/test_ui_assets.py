@@ -2391,6 +2391,12 @@ class InformationArchitectureTest(unittest.TestCase):
         preview_at = self.js.index("${renderFreshStartPreview(capsule)}")
         self.assertLess(refine_at, preview_at)
 
+    def test_ai_assist_reads_as_handoff_composition(self):
+        self.assertIn("Compose handoff", self.js)
+        self.assertIn("AI handoff ready", self.js)
+        self.assertIn("Next ask", self.js)
+        self.assertIn(".fresh-preview-next", self.css)
+
     def test_copy_feedback_lands_on_the_button(self):
         # The toast renders up to 750px from the control, and two copy buttons
         # fired none at all.
@@ -2796,9 +2802,8 @@ class CorrectnessSweepTest(unittest.TestCase):
         self.assertNotIn("Test Fresh Start with sample data", self.html)
         self.assertNotIn("Try it with sample data", self.html)
         self.assertNotIn('"primary_label": "Open Fresh Start"', inspect.getsource(ui))
-        # Home keeps its own name because it copies rather than opens; naming it
-        # "Start fresh" would be the label lying about the behaviour again.
-        self.assertIn("Copy Fresh Start brief", self.js)
+        self.assertIn("Review Fresh Start", self.js)
+        self.assertIn("Fresh Start brief opened. Review it, compose with AI Assist if useful, then copy.", self.js)
 
     def test_copy_labels_name_artifacts(self):
         self.assertNotIn("Copy without opening", self.js)
