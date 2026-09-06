@@ -168,6 +168,15 @@ from local handoff evidence, and records a privacy-safe run receipt. It does
 not change source-session evidence, identity confidence, or proof claims.
 Prompt excerpts are included only when both the request and saved AI Assist
 source-access setting allow them.
+`/api/optimize-ai-assist` runs the optional Optimize cleanup prompt composition
+workflow after the user explicitly asks for it. The request supplies only an
+Optimize candidate id and day window; the server rebuilds the candidate from
+local metadata, computes the evidence hash, and either returns a cached
+AI-composed prompt or makes one bounded model call. The prompt is for safe
+review only: it classifies stale chats, worktrees, and runtimes into
+safe-to-review, keep-active, unknown, and next-action buckets. It does not
+delete files, kill processes, archive sessions, or authorize destructive
+cleanup.
 `/api/handoff-decision` records which action you took on a Fresh Start
 companion, `/api/handoff-receipts-viewed` marks proof-pending receipts as seen,
 `/api/first-run-dismissed` records that the once-only first-run screen has been

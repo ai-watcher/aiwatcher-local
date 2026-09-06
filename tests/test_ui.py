@@ -2253,6 +2253,11 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Do not stop any running process", inventory["top"]["checklist"])
         self.assertIn("latest branch, PR, commit, or handoff receipt", inventory["top"]["checklist"])
         self.assertIn("/repo/app", inventory["top"]["checklist"])
+        self.assertIn("cleanup_prompt", inventory["top"])
+        self.assertIn("Full path: /repo/app", inventory["top"]["cleanup_prompt"])
+        self.assertIn("Tool: codex-cli", inventory["top"]["cleanup_prompt"])
+        self.assertIn("Return these buckets", inventory["top"]["cleanup_prompt"])
+        self.assertIn("evidence_hash", inventory["top"])
 
     def test_optimize_inventory_surfaces_stale_runtime_review_plan(self) -> None:
         runtime = SimpleNamespace(stale=True, rss_kb=147251)
@@ -2279,6 +2284,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Reward: Potential local reward", inventory["top"]["checklist"])
         self.assertIn("aiwatcher processes --stale-only", inventory["top"]["checklist"])
         self.assertIn("Unknown", inventory["top"]["checklist"])
+        self.assertIn("Copy safe review steps", inventory["top"]["action_label"])
+        self.assertIn("Do not kill processes", inventory["top"]["cleanup_prompt"])
 
     def test_optimize_inventory_surfaces_old_agent_scratch_workspace(self) -> None:
         now = datetime.now(timezone.utc)
@@ -2340,6 +2347,71 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual([row["path"] for row in rows], [str(codex_workspace.resolve())])
         self.assertEqual(rows[0]["source"], "scratch_scan")
         self.assertTrue(rows[0]["agent_owned"])
+
+    def test_ai_assisted_optimize_cleanup_prompt_uses_cache(self) -> None:
+        candidate = {
+            "id": "sessions:/repo/app",
+            "kind": "session_cluster",
+            "title": "Archive completed or stale chats",
+            "project": "repo/app",
+            "project_full": "/repo/app",
+            "summary": "Three inactive sessions are carrying context.",
+            "why_inactive": "Last local activity was 8h ago.",
+            "evidence_label": "Observed",
+            "evidence": "Observed from local session timestamps.",
+            "impact_label": "~780.0k context at risk",
+            "session_count": 3,
+            "tool": "codex-cli",
+            "last_activity": "2026-09-05T12:00:00+00:00",
+            "updated_label": "8h ago",
+        }
+        candidate["cleanup_prompt"] = ui._optimize_candidate_prompt(candidate)
+        candidate["evidence_hash"] = ui._optimize_candidate_evidence_hash(candidate)
+        config = {
+            "mode": "cloud",
+            "provider": "openai",
+            "max_daily_usd": 0.25,
+            "source_access": "metadata_only",
+            "enabled_workflows": ["optimize_cleanup"],
+            "api_keys": {"openai": "sk-secret"},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "build_summary_cached", return_value={"optimize": {"candidates": [candidate]}}),
+                patch.object(ui, "ai_assist_config", return_value=config),
+                patch.object(ui, "build_ai_assist_status", return_value={
+                    "ready": True,
+                    "mode": "cloud",
+                    "active_label": "Cloud AI Assist",
+                    "config": {"source_access": "metadata_only", "require_confirmation": True},
+                }),
+                patch.object(ui, "compose_optimize_cleanup_prompt", return_value={
+                    "status": "used",
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "model": "gpt-test",
+                    "input_chars": 700,
+                    "output_chars": 320,
+                    "source_access": "metadata_only",
+                    "text": "AIWatcher AI-assisted Optimize cleanup prompt\n\nNext action\n- Review only.",
+                    "structured": {"next_action": ["Review only."]},
+                    "usage": {"prompt_tokens": 120, "completion_tokens": 60},
+                }) as compose,
+            ):
+                first = ui.build_ai_assisted_optimize_cleanup_prompt("sessions:/repo/app", days=7)
+                second = ui.build_ai_assisted_optimize_cleanup_prompt("sessions:/repo/app", days=7)
+                runs = recent_ai_assist_runs(limit=5)
+
+        self.assertEqual(first["ai_assist_result"]["status"], "used")
+        self.assertEqual(second["ai_assist_result"]["status"], "cached")
+        self.assertEqual(compose.call_count, 1)
+        self.assertIn("AIWatcher AI-assisted Optimize cleanup prompt", second["prompt"])
+        self.assertEqual(runs[0]["workflow"], "optimize_cleanup")
+        self.assertTrue(runs[0]["cache_hit"])
+        self.assertEqual(runs[1]["evidence_hash"], candidate["evidence_hash"])
+        self.assertNotIn("sk-secret", json.dumps(runs))
 
     def test_detected_tools_are_listed_without_measured_spend(self) -> None:
         rows = [{

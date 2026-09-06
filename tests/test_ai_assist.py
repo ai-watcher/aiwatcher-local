@@ -164,6 +164,51 @@ class AiAssistTests(unittest.TestCase):
         self.assertNotIn("sk-secret", payload)
         self.assertLess(len(payload), 10_000)
 
+    def test_optimize_cleanup_prompt_composes_buckets_and_guardrails(self) -> None:
+        with (
+            patch.object(ai_assist, "build_ai_assist_status", return_value={
+                "ready": True,
+                "mode": "cloud",
+                "setup_hint": "Ready",
+            }),
+            patch.object(ai_assist, "_call_configured_chat", return_value={
+                "mode": "cloud",
+                "provider": "openai",
+                "model": "gpt-test",
+                "text": (
+                    '{"safe_to_archive_or_review":["Old Codex chat can be reviewed in the app"],'
+                    '"keep_active":["Keep sessions with recent activity"],'
+                    '"unknown":["Process ownership is not proven"],'
+                    '"next_action":["Open the owning app and verify the chat is done"],'
+                    '"guardrails":["Do not delete files","Do not kill processes"]}'
+                ),
+                "usage": {"prompt_tokens": 180, "completion_tokens": 70},
+            }) as call,
+        ):
+            result = ai_assist.compose_optimize_cleanup_prompt(
+                {
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "source_access": "metadata_only",
+                    "enabled_workflows": ["optimize_cleanup"],
+                    "api_keys": {"openai": "sk-secret"},
+                },
+                local_prompt="AIWatcher Optimize cleanup prompt\nFull path: /repo/app\n" + ("x" * 20_000),
+            )
+
+        payload = call.call_args.args[1][1]["content"]
+        self.assertLessEqual(result["input_chars"], ai_assist.MAX_OPTIMIZE_CLEANUP_INPUT_CHARS)
+        self.assertIn("AIWatcher AI-assisted Optimize cleanup prompt", result["text"])
+        self.assertIn("Safe to archive/review", result["text"])
+        self.assertIn("Keep active", result["text"])
+        self.assertIn("Unknown", result["text"])
+        self.assertIn("Next action", result["text"])
+        self.assertIn("Do not delete files", result["text"])
+        self.assertIn("Full path: /repo/app", result["text"])
+        self.assertEqual(result["structured"]["next_action"], ["Open the owning app and verify the chat is done"])
+        self.assertNotIn("sk-secret", payload)
+        self.assertLess(len(payload), 8_000)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -34,6 +34,9 @@ DEFAULT_MODELS = {
 MAX_FRESH_START_INPUT_CHARS = 9000
 MAX_FRESH_START_OUTPUT_TOKENS = 700
 MAX_FRESH_START_BRIEF_CHARS = 6000
+MAX_OPTIMIZE_CLEANUP_INPUT_CHARS = 7000
+MAX_OPTIMIZE_CLEANUP_OUTPUT_TOKENS = 600
+MAX_OPTIMIZE_CLEANUP_PROMPT_CHARS = 7000
 
 
 class AiAssistUnavailable(RuntimeError):
@@ -208,6 +211,12 @@ def build_ai_assist_status(config: dict[str, Any]) -> dict[str, object]:
                 "label": "Prompt Plan rewrite",
                 "priority": "second",
                 "reason": "Useful when local rules can see risk but cannot understand the task deeply.",
+            },
+            {
+                "id": "optimize_cleanup",
+                "label": "Optimize cleanup prompt",
+                "priority": "second",
+                "reason": "Turns stale chat, worktree, and runtime evidence into a safe review prompt.",
             },
             {
                 "id": "session_summary",
@@ -505,6 +514,34 @@ def _structured_handoff_text(parsed: dict[str, object]) -> str:
     return "\n".join(lines).strip()
 
 
+def _structured_optimize_cleanup_text(parsed: dict[str, object], *, local_prompt: str) -> str:
+    safe = _clean_list(parsed.get("safe_to_archive_or_review") or parsed.get("safe_to_review"), limit=6)
+    keep = _clean_list(parsed.get("keep_active"), limit=6)
+    unknown = _clean_list(parsed.get("unknown"), limit=6)
+    next_action = _clean_list(parsed.get("next_action"), limit=5)
+    guardrails = _clean_list(parsed.get("guardrails"), limit=6)
+    lines = [
+        "AIWatcher AI-assisted Optimize cleanup prompt",
+        "",
+        "Use this in a focused review session. The job is to classify local AI work safely, not to clean it up automatically.",
+        "Do not delete files, kill processes, archive chats, or rewrite history from this prompt.",
+        *_section("Safe to archive/review", safe or ["Only mark something safe after verifying it in the owning AI app, git worktree, or runtime tool."]),
+        *_section("Keep active", keep or ["Keep any session, worktree, or process that may still be connected to live work."]),
+        *_section("Unknown", unknown or ["Treat missing identity, stale metadata, and ambiguous ownership as unknown until verified."]),
+        *_section("Next action", next_action or ["Review the candidate below, choose one bucket, and report the evidence for that choice without performing cleanup."]),
+        *_section("Guardrails", guardrails or [
+            "Do not delete files or folders.",
+            "Do not kill processes.",
+            "Do not archive chats or sessions automatically.",
+            "Ask before any destructive or irreversible action.",
+        ]),
+        "",
+        "Local evidence to verify",
+        str(local_prompt or "").strip()[:MAX_OPTIMIZE_CLEANUP_PROMPT_CHARS],
+    ]
+    return "\n".join(lines).strip()
+
+
 def improve_fresh_start_brief(
     config: dict[str, Any],
     *,
@@ -576,6 +613,82 @@ def improve_fresh_start_brief(
         "output_chars": len(text),
         "source_access": config.get("source_access") or "metadata_only",
         "text": text[:MAX_FRESH_START_BRIEF_CHARS],
+        "structured": parsed or {},
+        "usage": response.get("usage") if isinstance(response.get("usage"), dict) else {},
+    }
+
+
+def compose_optimize_cleanup_prompt(
+    config: dict[str, Any],
+    *,
+    local_prompt: str,
+    timeout: float = 35,
+) -> dict[str, object]:
+    """Return a bounded AI-composed Optimize cleanup review prompt.
+
+    The deterministic local prompt remains the evidence boundary. The model is
+    only allowed to make the review more useful; it cannot authorize cleanup.
+    """
+    normalized_prompt = str(local_prompt or "").strip()
+    if not normalized_prompt:
+        raise AiAssistUnavailable("Optimize cleanup prompt is empty.")
+    workflows = config.get("enabled_workflows")
+    if isinstance(workflows, list) and "optimize_cleanup" not in workflows:
+        raise AiAssistUnavailable("Optimize cleanup AI Assist is disabled in settings.")
+    status = build_ai_assist_status(config)
+    if not status.get("ready") or status.get("mode") == "off":
+        raise AiAssistUnavailable(str(status.get("setup_hint") or "AI Assist is not ready."))
+    trimmed = normalized_prompt[:MAX_OPTIMIZE_CLEANUP_INPUT_CHARS]
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are AIWatcher's Optimize cleanup prompt composer. Create a compact, paste-ready "
+                "review prompt for stale AI chats, worktrees, or runtimes. Preserve deterministic evidence "
+                "boundaries: do not invent paths, sessions, costs, outcomes, or source text. Never authorize "
+                "deleting files, killing processes, archiving chats, force pushing, or other destructive cleanup."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "Return JSON only with these keys:\n"
+                "safe_to_archive_or_review: string[]\n"
+                "keep_active: string[]\n"
+                "unknown: string[]\n"
+                "next_action: string[]\n"
+                "guardrails: string[]\n\n"
+                "The final prompt must help another AI session classify the candidate into those buckets, "
+                "but the AI session must only recommend; the user performs any action later in the owning app/tool. "
+                "Keep this short and concrete.\n\n"
+                "Local AIWatcher cleanup evidence:\n"
+                f"{trimmed}"
+            ),
+        },
+    ]
+    response = _call_configured_chat(
+        config,
+        messages,
+        max_tokens=MAX_OPTIMIZE_CLEANUP_OUTPUT_TOKENS,
+        timeout=timeout,
+    )
+    text = str(response.get("text") or "").strip()
+    parsed = _json_object_from_text(text)
+    final_text = (
+        _structured_optimize_cleanup_text(parsed, local_prompt=trimmed)
+        if parsed
+        else _structured_optimize_cleanup_text({"next_action": text}, local_prompt=trimmed)
+    )
+    return {
+        "workflow": "optimize_cleanup",
+        "status": "used",
+        "mode": response.get("mode"),
+        "provider": response.get("provider"),
+        "model": response.get("model"),
+        "input_chars": len(trimmed),
+        "output_chars": len(final_text),
+        "source_access": config.get("source_access") or "metadata_only",
+        "text": final_text[:MAX_OPTIMIZE_CLEANUP_PROMPT_CHARS],
         "structured": parsed or {},
         "usage": response.get("usage") if isinstance(response.get("usage"), dict) else {},
     }

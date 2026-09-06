@@ -354,8 +354,9 @@ mode, add a custom endpoint URL only if you are using one, then save.
   state on this machine and are redacted from dashboard/API responses.
 
 AI Assist is deliberately aimed at high-leverage workflows first: improving a
-Fresh Start brief and tightening a broad Prompt Plan. Ask AIWatcher remains a
-local evidence navigator until a stronger user need is proven.
+Fresh Start brief, composing safe Optimize cleanup prompts, and eventually
+tightening a broad Prompt Plan. Ask AIWatcher remains a local evidence navigator
+until a stronger user need is proven.
 
 The first model-backed workflow is **Fresh Start handoff composition**.
 AIWatcher always builds the free local brief first. If AI Assist is configured
@@ -368,6 +369,15 @@ token-count metadata when the provider returns it. It does not change local
 evidence, identity confidence, or saved-token claims. Prompt excerpts are sent
 only when both the drawer checkbox and the saved AI Assist source-access setting
 allow them.
+
+Optimize cleanup follows the same rule. Each Optimize card has a free **Copy
+cleanup prompt** action built from local metadata. If AI Assist is ready, the
+card also offers **Compose AI cleanup prompt**. That makes one confirmed,
+bounded model call and caches the result by candidate/evidence hash so repeated
+clicks do not spend again for unchanged evidence. The generated prompt helps a
+user or another AI session classify stale chats, worktrees, and runtimes into
+safe review buckets, but it never deletes files, kills processes, archives
+sessions, or authorizes destructive cleanup.
 
 The Console tabs are:
 

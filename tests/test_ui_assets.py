@@ -524,8 +524,8 @@ class TrimmedHomeTest(unittest.TestCase):
             "aiAssistSetupTitle", "aiAssistSourceAccess", "aiAssistWorking",
             "evidencePanel", "handoffAcceptance", "handoffBrief", "handoffConstraints",
             "handoffObjective", "handoffSources", "handoffStatus", "handoffType",
-            "optimizeReward", "outcomePanel", "planDerivedZone", "promptBrief",
-            "todayDigest",
+            "optimizeCleanupPrompt", "optimizeReward", "outcomePanel",
+            "planDerivedZone", "promptBrief", "todayDigest",
         }
         ids = set(re.findall(r'id="([\w-]+)"', self.html))
         looked_up = set(re.findall(r"""getElementById\(['"]([\w-]+)['"]\)""", self.js))
@@ -1397,6 +1397,15 @@ class PlanControlTest(unittest.TestCase):
         self.assertIn("Copy cleanup prompt", self.js)
         self.assertIn("Cleanup prompt copied", self.js)
         self.assertIn(".optimize-full-path code", self.css)
+
+    def test_optimize_cards_offer_local_and_ai_cleanup_prompts(self):
+        self.assertIn("Copy cleanup prompt", self.js)
+        self.assertIn("Compose AI cleanup prompt", self.js)
+        self.assertIn("function renderOptimizeCleanupPrompt", self.js)
+        self.assertIn("function composeOptimizeCleanupPrompt", self.js)
+        self.assertIn("/api/optimize-ai-assist", inspect.getsource(ui))
+        self.assertIn("optimize_cleanup", inspect.getsource(ui))
+        self.assertIn("Optimize cleanup prompt", inspect.getsource(ui))
 
     def test_context_review_continue_quiets_only_that_project(self):
         self.assertIn("function visibleFreshStartProjects", self.js)

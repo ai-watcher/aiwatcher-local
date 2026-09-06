@@ -37,7 +37,13 @@ AI_ASSIST_PROVIDERS = {
     "anthropic",
 }
 AI_ASSIST_SOURCE_ACCESS = {"metadata_only", "prompt_opt_in", "source_opt_in"}
-AI_ASSIST_WORKFLOWS = {"fresh_start", "prompt_plan", "session_summary", "receipt_explanation"}
+AI_ASSIST_WORKFLOWS = {
+    "fresh_start",
+    "prompt_plan",
+    "optimize_cleanup",
+    "session_summary",
+    "receipt_explanation",
+}
 AI_ASSIST_KEY_PROVIDERS = {"openai", "anthropic", "openai_compatible"}
 
 
@@ -50,7 +56,7 @@ def default_ai_assist_config() -> dict[str, Any]:
         "max_daily_usd": 0.25,
         "source_access": "metadata_only",
         "require_confirmation": True,
-        "enabled_workflows": ["fresh_start", "prompt_plan"],
+        "enabled_workflows": ["fresh_start", "prompt_plan", "optimize_cleanup"],
         "api_keys": {},
     }
 
@@ -102,6 +108,8 @@ def _normalize_ai_assist_config(value: Any) -> dict[str, Any]:
     if isinstance(workflows, list):
         normalized = [str(item).strip().lower() for item in workflows]
         config["enabled_workflows"] = [item for item in normalized if item in AI_ASSIST_WORKFLOWS]
+        if "optimize_cleanup" not in config["enabled_workflows"]:
+            config["enabled_workflows"].append("optimize_cleanup")
     return config
 
 # How long an issued brief/capsule token remains redeemable. Short enough to
@@ -276,6 +284,7 @@ def _empty_state() -> dict[str, Any]:
         "session_waiting": {},
         "ai_assist": default_ai_assist_config(),
         "ai_assist_runs": [],
+        "ai_assist_cache": {},
     }
 
 
@@ -350,6 +359,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("session_waiting", {})
     data["ai_assist"] = _normalize_ai_assist_config(data.get("ai_assist"))
     data.setdefault("ai_assist_runs", [])
+    data.setdefault("ai_assist_cache", {})
     data.setdefault("first_run_dismissed_at", None)
     return data
 
@@ -1095,6 +1105,7 @@ VALID_HANDOFF_DECISIONS = {"new_chat", "continue_here", "copy_handoff", "dismiss
 MAX_HANDOFF_DECISIONS_STORED = 200
 MAX_OPTIMIZE_DECISIONS_STORED = 200
 MAX_AI_ASSIST_RUNS_STORED = 200
+MAX_AI_ASSIST_CACHE_STORED = 100
 
 
 def record_handoff_decision(
@@ -1257,6 +1268,81 @@ def record_ai_assist_config(settings: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
+def _ai_assist_cache_key(workflow: str, evidence_hash: str) -> str:
+    return f"{workflow.strip().lower()}:{evidence_hash.strip().lower()}"
+
+
+def ai_assist_cache_get(workflow: str, evidence_hash: str) -> dict[str, Any] | None:
+    """Return a cached AI Assist artifact for the same local evidence hash."""
+    workflow_value = workflow.strip().lower()
+    evidence_value = evidence_hash.strip().lower()
+    if workflow_value not in AI_ASSIST_WORKFLOWS or not evidence_value:
+        return None
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return None
+    cache = data.get("ai_assist_cache")
+    if not isinstance(cache, dict):
+        return None
+    record = cache.get(_ai_assist_cache_key(workflow_value, evidence_value))
+    return dict(record) if isinstance(record, dict) else None
+
+
+def record_ai_assist_cache(
+    *,
+    workflow: str,
+    evidence_hash: str,
+    text: str,
+    provider: str | None = None,
+    model: str | None = None,
+    mode: str | None = None,
+    source_access: str | None = None,
+    structured: dict[str, Any] | None = None,
+    usage: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Cache a bounded, local-only AI Assist output by deterministic evidence hash."""
+    workflow_value = workflow.strip().lower()
+    if workflow_value not in AI_ASSIST_WORKFLOWS:
+        raise ValueError(f"workflow must be one of: {', '.join(sorted(AI_ASSIST_WORKFLOWS))}")
+    evidence_value = evidence_hash.strip().lower()
+    if not evidence_value:
+        raise ValueError("evidence_hash is required")
+    safe_usage: dict[str, Any] = {}
+    if isinstance(usage, dict):
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens", "input_tokens", "output_tokens"):
+            value = usage.get(key)
+            if isinstance(value, int) and value >= 0:
+                safe_usage[key] = value
+    record = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "workflow": workflow_value,
+        "evidence_hash": evidence_value[:128],
+        "text": str(text or "").strip()[:12_000],
+        "provider": provider.strip()[:80] if isinstance(provider, str) and provider.strip() else None,
+        "model": model.strip()[:120] if isinstance(model, str) and model.strip() else None,
+        "mode": mode.strip()[:40] if isinstance(mode, str) and mode.strip() else None,
+        "source_access": source_access if source_access in AI_ASSIST_SOURCE_ACCESS else "metadata_only",
+        "structured": structured if isinstance(structured, dict) else {},
+        "usage": safe_usage,
+    }
+    with _locked_state():
+        data = _load()
+        cache = data["ai_assist_cache"] if isinstance(data.get("ai_assist_cache"), dict) else {}
+        cache[_ai_assist_cache_key(workflow_value, evidence_value)] = record
+        if len(cache) > MAX_AI_ASSIST_CACHE_STORED:
+            ordered = sorted(
+                ((value.get("created_at", ""), key) for key, value in cache.items() if isinstance(value, dict)),
+                key=lambda pair: pair[0],
+            )
+            for _, key in ordered[:len(cache) - MAX_AI_ASSIST_CACHE_STORED]:
+                cache.pop(key, None)
+        data["ai_assist_cache"] = cache
+        _save(data)
+    return record
+
+
 def record_ai_assist_run(
     *,
     workflow: str,
@@ -1270,6 +1356,8 @@ def record_ai_assist_run(
     source_access: str | None = None,
     reason: str | None = None,
     usage: dict[str, Any] | None = None,
+    evidence_hash: str | None = None,
+    cache_hit: bool | None = None,
 ) -> dict[str, Any]:
     """Record a privacy-safe receipt for an optional AI Assist workflow."""
     workflow_value = workflow.strip().lower()
@@ -1299,6 +1387,8 @@ def record_ai_assist_run(
         "source_access": source_access if source_access in AI_ASSIST_SOURCE_ACCESS else "metadata_only",
         "reason": reason.strip()[:500] if isinstance(reason, str) and reason.strip() else None,
         "usage": safe_usage,
+        "evidence_hash": evidence_hash.strip()[:128] if isinstance(evidence_hash, str) and evidence_hash.strip() else None,
+        "cache_hit": bool(cache_hit) if cache_hit is not None else False,
     }
     with _locked_state():
         data = _load()

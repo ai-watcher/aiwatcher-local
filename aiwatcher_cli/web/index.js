@@ -245,6 +245,106 @@ async function recordOptimizeDecision(decision, project = '', impact = '', butto
     showToast(`Could not save Optimize decision: ${error.message || 'unknown error'}`, 'error');
   }
 }
+function optimizeAiAssistReady() {
+  const status = currentData && currentData.ai_assist ? currentData.ai_assist : {};
+  return !!(status.ready && (status.mode || 'off') !== 'off');
+}
+function optimizeAiButton(candidateId) {
+  if (!optimizeAiAssistReady()) return '';
+  return `<button class="btn-quiet" onclick="composeOptimizeCleanupPrompt(${jsArg(candidateId)}, this)">Compose AI cleanup prompt</button>`;
+}
+function renderOptimizeCleanupPrompt(result) {
+  const candidate = result.candidate || {};
+  const ai = result.ai_assist_result || {};
+  const status = ai.status || 'local_fallback';
+  const statusLabel = status === 'cached'
+    ? 'Cached AI Assist'
+    : status === 'used'
+      ? 'AI Assist'
+      : status === 'failed' || status === 'skipped'
+        ? 'Local fallback'
+        : 'Local rules';
+  const provider = [ai.provider, ai.model].filter(Boolean).join(' / ');
+  return `<section class="detail-section">
+    <h2>Cleanup prompt</h2>
+    <p>Review this prompt, then paste it into your AI tool only if you want help classifying stale local work. It does not authorize cleanup.</p>
+    <div class="ai-assist-run-card ${status === 'used' || status === 'cached' ? 'ready' : status === 'failed' || status === 'skipped' ? 'needs-setup' : ''}">
+      <div>
+        <strong>${esc(statusLabel)}</strong>
+        <p>${provider ? esc(provider) + ' · ' : ''}${status === 'cached' ? 'Reused cached output for the same evidence hash.' : status === 'used' ? 'Composed from local Optimize evidence after confirmation.' : esc(ai.reason || 'Using deterministic local cleanup prompt.')}</p>
+      </div>
+      <span class="confidence-chip observed">${esc((result.ai_assist || {}).config?.source_access || 'metadata_only')}</span>
+    </div>
+    <div class="fresh-preview">
+      <div class="fresh-preview-head">
+        <div><h3>${esc(candidate.title || 'Optimize review')}</h3><p>${esc(candidate.summary || candidate.why_inactive || 'Local cleanup evidence.')}</p></div>
+        <span class="confidence-chip observed">${esc(candidate.evidence_label || 'Observed')}</span>
+      </div>
+      <div class="fresh-preview-grid">
+        <div class="fresh-preview-row"><strong>Full path</strong><p>${esc(candidate.project_full || 'Local machine')}</p></div>
+        <div class="fresh-preview-row"><strong>Last activity</strong><p>${esc(candidate.last_activity || candidate.updated_label || 'unknown')}</p></div>
+        <div class="fresh-preview-row"><strong>Tool</strong><p>${esc(candidate.tool || (Array.isArray(candidate.tools) ? candidate.tools.join(', ') : 'local AI metadata'))}</p></div>
+        <div class="fresh-preview-row"><strong>Impact</strong><p>${esc(candidate.impact_label || 'No savings claim')}</p></div>
+      </div>
+    </div>
+    <div class="brief-focus">
+      <div class="brief-focus-head">
+        <div><h3>Prompt to paste</h3><p>It asks for buckets: safe to archive/review, keep active, unknown, and next action.</p></div>
+        <span class="confidence-chip observed">${esc(statusLabel)}</span>
+      </div>
+      <textarea id="optimizeCleanupPrompt" class="brief-box">${esc(result.prompt || result.local_prompt || '')}</textarea>
+      <div class="copy-row"><button class="btn-primary" onclick="copyText(document.getElementById('optimizeCleanupPrompt').value, 'Cleanup prompt copied')">Copy cleanup prompt</button></div>
+    </div>
+    <details class="aiw-details">
+      <summary>Local fallback and evidence hash</summary>
+      <div class="details-body">
+        <p class="receipt-note">Evidence hash: ${esc(result.evidence_hash || '')}</p>
+        <textarea class="brief-box" readonly>${esc(result.local_prompt || '')}</textarea>
+      </div>
+    </details>
+  </section>`;
+}
+async function composeOptimizeCleanupPrompt(candidateId, button = null) {
+  const status = currentData && currentData.ai_assist ? currentData.ai_assist : {};
+  const config = status.config || {};
+  if (config.require_confirmation !== false) {
+    const label = status.active_label || 'AI Assist';
+    const ok = window.confirm(`${label} will make one small model call to compose a safe Optimize cleanup review prompt. Continue?`);
+    if (!ok) return;
+  }
+  if (button) {
+    button.dataset.copyRestore = button.textContent;
+    button.textContent = 'Composing...';
+    button.disabled = true;
+  }
+  try {
+    const daysEl = document.getElementById('days');
+    const result = await postJson('/api/optimize-ai-assist', {
+      candidate_id: candidateId,
+      days: Number(daysEl ? daysEl.value : 7) || 7,
+    });
+    if (button) {
+      button.disabled = false;
+      button.textContent = button.dataset.copyRestore || 'Compose AI cleanup prompt';
+      delete button.dataset.copyRestore;
+    }
+    if (result.error) {
+      showToast(result.error, 'error');
+      return;
+    }
+    openDrawer('Cleanup prompt');
+    setDrawerContent(renderOptimizeCleanupPrompt(result));
+    const ai = result.ai_assist_result || {};
+    showToast(ai.status === 'cached' ? 'Cached AI cleanup prompt ready' : ai.status === 'used' ? 'AI cleanup prompt ready' : 'Cleanup prompt ready');
+  } catch (error) {
+    if (button) {
+      button.disabled = false;
+      button.textContent = button.dataset.copyRestore || 'Compose AI cleanup prompt';
+      delete button.dataset.copyRestore;
+    }
+    showToast(`Could not compose cleanup prompt: ${error.message || 'unknown error'}`, 'error');
+  }
+}
 // Scoped to the textarea. It used to wipe the Route result too -- the route,
 // risk score, findings, suggestions and paste-ready brief -- with no
 // confirmation, from a quiet button sitting 20px from the primary action. An
@@ -2015,6 +2115,8 @@ function renderOptimizeWorkspace(optimize) {
     <p class="receipt-note" style="margin-bottom:12px">AIWatcher cannot archive or delete anything for you. Review one item, act only in the owning app, then mark it reviewed to quiet the nudge for 24 hours.</p>
     <div class="action-queue">${candidates.map(item => {
       const itemChecklist = item.checklist || checklist;
+      const cleanupPrompt = item.cleanup_prompt || itemChecklist;
+      const aiCleanup = optimizeAiButton(item.id || '');
       if (item.kind === 'stale_processes') {
         return renderRuntimeOptimizeCard(item, itemChecklist);
       }
@@ -2031,7 +2133,8 @@ function renderOptimizeWorkspace(optimize) {
         <p class="receipt-note">${esc(item.evidence || '')}</p>
       </div>
       <div class="actions">
-        ${item.view ? `<button class="btn-primary" onclick="showView('${esc(item.view)}')">${esc(item.action_label || 'Review')}</button>` : `<button class="btn-primary" onclick="copyText(${jsArg(itemChecklist)}, 'Cleanup prompt copied')">${esc(item.action_label || 'Copy cleanup prompt')}</button>`}
+        ${item.view ? `<button class="btn-primary" onclick="showView('${esc(item.view)}')">${esc(item.action_label || 'Review')}</button><button class="btn-quiet" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">Copy cleanup prompt</button>` : `<button class="btn-primary" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">Copy cleanup prompt</button>`}
+        ${aiCleanup}
         <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('marked_done', this.dataset.project, this.dataset.impact, this)">Reviewed</button>
         <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('skipped', this.dataset.project, this.dataset.impact, this)">Skip</button>
       </div>
@@ -2046,6 +2149,8 @@ function renderRuntimeOptimizeCard(item, itemChecklist) {
     ? item.safe_review_steps
     : ['Run: aiwatcher processes --stale-only', 'Use PID, runtime, session id, and working directory to match each row to an AI app/window.', 'Confirm each process is not attached to live AI work.', 'Stop only stale/orphaned runtimes you recognize.', 'Run the command again; reclaimed RSS is the before-minus-after local memory signal.', 'Leave unknown processes alone.'];
   const command = item.review_command || 'aiwatcher processes --stale-only';
+  const cleanupPrompt = item.cleanup_prompt || itemChecklist;
+  const aiCleanup = optimizeAiButton(item.id || '');
   return `<div class="action-row low runtime-review-card">
     <div>
       <div class="action-title">${esc(item.title || 'Review stale AI runtimes')} <span class="pill local">Local machine</span></div>
@@ -2069,6 +2174,8 @@ function renderRuntimeOptimizeCard(item, itemChecklist) {
     <div class="actions">
       <button class="btn-primary" onclick="copyOptimizeRuntimeCommand(${jsArg(command)}, this)">Copy command</button>
       <button class="btn-quiet" onclick="copyText(${jsArg(itemChecklist)}, 'Safe review steps copied')">${esc(item.action_label || 'Copy safe review steps')}</button>
+      <button class="btn-quiet" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">Copy cleanup prompt</button>
+      ${aiCleanup}
       <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('marked_done', this.dataset.project, this.dataset.impact, this)">Reviewed</button>
       <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('skipped', this.dataset.project, this.dataset.impact, this)">Skip</button>
     </div>
