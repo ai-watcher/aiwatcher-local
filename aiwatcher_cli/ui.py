@@ -1014,6 +1014,37 @@ def _optimize_candidate_evidence_hash(item: dict[str, object]) -> str:
     return hash_prompt(json.dumps(evidence, sort_keys=True, default=str))
 
 
+def _fresh_start_evidence_hash(
+    capsule: dict[str, object],
+    *,
+    source_access: str = "metadata_only",
+) -> str:
+    evidence = {
+        "session_id": capsule.get("session_id"),
+        "project": capsule.get("project"),
+        "project_reliable": capsule.get("project_reliable"),
+        "tool": capsule.get("tool"),
+        "model": capsule.get("model"),
+        "target": capsule.get("target"),
+        "handoff_type": capsule.get("handoff_type"),
+        "objective": capsule.get("objective"),
+        "source_refs": capsule.get("source_refs"),
+        "constraints": capsule.get("constraints"),
+        "acceptance_criteria": capsule.get("acceptance_criteria"),
+        "updated_at": capsule.get("updated_at"),
+        "usage": capsule.get("usage"),
+        "outcome": capsule.get("outcome"),
+        "evidence": capsule.get("evidence"),
+        "warnings": capsule.get("warnings"),
+        "runtime_attachment": capsule.get("runtime_attachment"),
+        "same_project_session_count": capsule.get("same_project_session_count"),
+        "include_prompt_excerpt": capsule.get("include_prompt_excerpt"),
+        "source_access": source_access,
+        "next_brief": capsule.get("next_brief"),
+    }
+    return hash_prompt(json.dumps(evidence, sort_keys=True, default=str))
+
+
 def _optimize_checklist(candidates: list[dict[str, object]]) -> str:
     lines = [
         "AIWatcher Optimize Workspace review",
@@ -2293,6 +2324,40 @@ def build_ai_assisted_handoff_detail(
         return capsule
     local_brief = str(capsule.get("next_brief") or "")
     capsule["local_next_brief"] = local_brief
+    evidence_hash = _fresh_start_evidence_hash(capsule, source_access=source_access)
+    cached = ai_assist_cache_get("fresh_start", evidence_hash)
+    if cached and cached.get("text"):
+        record = record_ai_assist_run(
+            workflow="fresh_start",
+            status="used",
+            session_id=session_id,
+            mode=str(cached.get("mode") or ""),
+            provider=str(cached.get("provider") or ""),
+            model=str(cached.get("model") or ""),
+            input_chars=len(local_brief),
+            output_chars=len(str(cached.get("text") or "")),
+            source_access=str(cached.get("source_access") or "metadata_only"),
+            reason="User clicked Compose AI handoff on a Fresh Start brief; cached output reused.",
+            usage=cached.get("usage") if isinstance(cached.get("usage"), dict) else {},
+            evidence_hash=evidence_hash,
+            cache_hit=True,
+        )
+        capsule["next_brief"] = str(cached.get("text") or "")
+        capsule["ai_assist_result"] = {
+            "status": "cached",
+            "provider": cached.get("provider"),
+            "model": cached.get("model"),
+            "mode": cached.get("mode"),
+            "source_access": cached.get("source_access"),
+            "input_chars": len(local_brief),
+            "output_chars": len(str(cached.get("text") or "")),
+            "usage": cached.get("usage") if isinstance(cached.get("usage"), dict) else {},
+            "structured": cached.get("structured") if isinstance(cached.get("structured"), dict) else {},
+            "receipt": record,
+            "cache": {"evidence_hash": evidence_hash},
+        }
+        capsule["ai_assist"] = build_ai_assist_status(ai_assist_config())
+        return capsule
     try:
         result = improve_fresh_start_brief(config, local_brief=local_brief)
     except AiAssistUnavailable as exc:
@@ -2349,6 +2414,8 @@ def build_ai_assisted_handoff_detail(
         source_access=str(result.get("source_access") or "metadata_only"),
         reason="User clicked Improve with AI Assist on a Fresh Start brief.",
         usage=result.get("usage") if isinstance(result.get("usage"), dict) else {},
+        evidence_hash=evidence_hash,
+        cache_hit=False,
     )
     receipt_text = "\n".join([
         "AI Assist receipt",
@@ -2358,7 +2425,19 @@ def build_ai_assisted_handoff_detail(
         "- Evidence boundary: local session identity, token/cost totals, files, commits, outcomes, and proof claims remain authoritative.",
         "- Cost boundary: one user-confirmed bounded model call; no saved-token claim is made by this AI step.",
     ])
-    capsule["next_brief"] = "\n\n".join([composed_brief, receipt_text]).rstrip()
+    final_brief = "\n\n".join([composed_brief, receipt_text]).rstrip()
+    cache_record = record_ai_assist_cache(
+        workflow="fresh_start",
+        evidence_hash=evidence_hash,
+        text=final_brief,
+        mode=str(result.get("mode") or ""),
+        provider=str(result.get("provider") or ""),
+        model=str(result.get("model") or ""),
+        source_access=str(result.get("source_access") or "metadata_only"),
+        structured=result.get("structured") if isinstance(result.get("structured"), dict) else {},
+        usage=result.get("usage") if isinstance(result.get("usage"), dict) else {},
+    )
+    capsule["next_brief"] = final_brief
     capsule["ai_assist_result"] = {
         "status": "used",
         "provider": result.get("provider"),
@@ -2370,8 +2449,9 @@ def build_ai_assisted_handoff_detail(
         "usage": result.get("usage"),
         "structured": result.get("structured") if isinstance(result.get("structured"), dict) else {},
         "receipt": record,
+        "cache": {"evidence_hash": cache_record.get("evidence_hash")},
     }
-    capsule["ai_assist"] = build_ai_assist_status(config)
+    capsule["ai_assist"] = build_ai_assist_status(ai_assist_config())
     return capsule
 
 

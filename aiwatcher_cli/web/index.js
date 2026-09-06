@@ -1671,13 +1671,13 @@ function renderFreshStartAiAssist(capsule) {
   const status = capsule.ai_assist || {};
   const config = status.config || {};
   const result = capsule.ai_assist_result || null;
-  if (result && result.status === 'used') {
+  if (result && (result.status === 'used' || result.status === 'cached')) {
     const structured = result.structured || {};
     const nextAsk = structured.next_ask || 'Copy the AI-assisted brief into a fresh chat and keep the first checkpoint small.';
     return `<div class="ai-assist-run-card ready">
       <div>
-        <strong>AI handoff ready</strong>
-        <p>${esc(result.provider || 'provider')} / ${esc(result.model || 'model')} composed a paste-ready brief from local evidence. Next: ${esc(nextAsk)}</p>
+        <strong>${result.status === 'cached' ? 'Cached AI handoff ready' : 'AI handoff ready'}</strong>
+        <p>${esc(result.provider || 'provider')} / ${esc(result.model || 'model')} ${result.status === 'cached' ? 'reused a cached handoff for the same local evidence' : 'composed a paste-ready brief from local evidence'}. Next: ${esc(nextAsk)}</p>
       </div>
       <span class="confidence-chip observed">receipt saved</span>
     </div>`;
@@ -1721,8 +1721,8 @@ function renderHandoff(capsule) {
   const canOpenRuntime = !!runtime.available;
   const aiAssist = capsule.ai_assist || {};
   const aiResult = capsule.ai_assist_result || {};
-  const aiReady = !isDemo && aiAssist.ready && (aiAssist.mode || 'off') !== 'off' && aiResult.status !== 'used';
-  const assisted = aiResult.status === 'used';
+  const assisted = aiResult.status === 'used' || aiResult.status === 'cached';
+  const aiReady = !isDemo && aiAssist.ready && (aiAssist.mode || 'off') !== 'off' && !assisted;
   const enrichment = capsule.basic
     ? '<div class="loading">Basic brief is ready. Loading timeline, git evidence, and prompt enrichment...</div>'
     : '';
@@ -1757,7 +1757,7 @@ function renderHandoff(capsule) {
       <div class="brief-focus-head">
         <div>
           <h3>${assisted ? 'AI-assisted prompt to paste' : 'Prompt to paste'}</h3>
-          <p>${assisted ? 'This is the composed handoff. Review once, copy, then paste into the fresh session.' : 'This local brief is ready now. Compose with AI Assist first if you want a tighter handoff.'}</p>
+          <p>${assisted ? (aiResult.status === 'cached' ? 'This handoff was reused from the AI Assist cache for the same evidence. Review once, copy, then paste into the fresh session.' : 'This is the composed handoff. Review once, copy, then paste into the fresh session.') : 'This local brief is ready now. Compose with AI Assist first if you want a tighter handoff.'}</p>
         </div>
         <span class="confidence-chip observed">${assisted ? 'AI assisted' : 'local rules'}</span>
       </div>

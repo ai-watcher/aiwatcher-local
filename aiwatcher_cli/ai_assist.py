@@ -649,10 +649,14 @@ def improve_fresh_start_brief(
         {
             "role": "system",
             "content": (
-                "You are AIWatcher's Fresh Start handoff composer. Create a compact, paste-ready "
-                "brief for a new AI coding session. Preserve deterministic evidence boundaries: do "
-                "not invent saved tokens, commits, tests, files, outcomes, exact chat links, or secret "
-                "content. Use only facts present in the local handoff. Label uncertain things as uncertain."
+                "You are AIWatcher's Fresh Start handoff composer. Your job is to turn local handoff "
+                "evidence into a useful continuation prompt for a new AI work session. Be concrete and "
+                "operational: extract the likely work done, context worth preserving, files or commands "
+                "to inspect first, what the next agent should avoid redoing, and the smallest next ask. "
+                "Preserve deterministic evidence boundaries: do not invent saved tokens, commits, tests, "
+                "files, outcomes, exact chat links, secrets, or prior conversation content. If prompt text "
+                "or transcript content is not present, say the task must be reconstructed from repo state "
+                "and local evidence. Prefer specific evidence from the handoff over generic advice."
             ),
         },
         {
@@ -668,8 +672,9 @@ def improve_fresh_start_brief(
                 "acceptance_check: string[]\n"
                 "uncertainties: string[]\n\n"
                 "Make the result useful for a fresh chat, forked chat, or subagent. The next_ask should "
-                "tell the new AI session exactly what to do first. Keep it short enough to paste without "
-                "carrying the whole old conversation.\n\n"
+                "tell the new AI session exactly what to do first. Avoid echoing the section names and "
+                "boilerplate from the local handoff unless the evidence is genuinely missing. Keep it short "
+                "enough to paste without carrying the whole old conversation.\n\n"
                 "Local AIWatcher handoff evidence:\n"
                 f"{trimmed}"
             ),

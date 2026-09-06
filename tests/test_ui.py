@@ -3970,8 +3970,14 @@ class DashboardWindowTests(unittest.TestCase):
                         "next_ask": "Inspect only the handoff flow and verify the smallest checkpoint.",
                     },
                     "usage": {"prompt_tokens": 300, "completion_tokens": 80, "raw": "ignored"},
-                }),
+                }) as improve,
             ):
+                first_capsule = ui.build_ai_assisted_handoff_detail(
+                    "ai-brief",
+                    days=7,
+                    target="codex",
+                    include_prompt_excerpt=True,
+                )
                 capsule = ui.build_ai_assisted_handoff_detail(
                     "ai-brief",
                     days=7,
@@ -3980,7 +3986,9 @@ class DashboardWindowTests(unittest.TestCase):
                 )
                 runs = recent_ai_assist_runs()
 
-        self.assertEqual(capsule["ai_assist_result"]["status"], "used")
+        self.assertEqual(first_capsule["ai_assist_result"]["status"], "used")
+        self.assertEqual(capsule["ai_assist_result"]["status"], "cached")
+        self.assertEqual(improve.call_count, 1)
         self.assertIn("AIWatcher AI-assisted Fresh Start brief", capsule["next_brief"])
         self.assertIn("What appears done", capsule["next_brief"])
         self.assertIn("AI Assist receipt", capsule["next_brief"])
@@ -3991,7 +3999,10 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("local session identity, token/cost totals, files, commits, outcomes, and proof claims remain authoritative", capsule["next_brief"])
         self.assertEqual(runs[0]["workflow"], "fresh_start")
         self.assertEqual(runs[0]["status"], "used")
-        self.assertEqual(runs[0]["usage"]["prompt_tokens"], 300)
+        self.assertTrue(runs[0]["cache_hit"])
+        self.assertEqual(runs[1]["status"], "used")
+        self.assertFalse(runs[1]["cache_hit"])
+        self.assertEqual(runs[1]["usage"]["prompt_tokens"], 300)
         self.assertNotIn("sk-secret", json.dumps(runs))
 
     def test_demo_handoff_is_seeded_privacy_safe_and_not_live(self) -> None:
