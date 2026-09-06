@@ -89,21 +89,22 @@ This avoids import-name collisions while still giving developers the clean
 command they expect:
 
 ```bash
-pip install aiwatcher-cli
+pipx install aiwatcher-cli
 aiwatcher today
 aiwatcher ui
 ```
 
-Before the PyPI release, early users can install without keeping a clone:
-
-```bash
-python -m pip install --upgrade git+https://github.com/ai-watcher/aiwatcher-local.git
-```
-
-Users who prefer isolated command-line apps can use:
+Before the PyPI release, early users can install an isolated CLI without
+keeping a clone:
 
 ```bash
 pipx install git+https://github.com/ai-watcher/aiwatcher-local.git
+```
+
+Users who want to install into the current Python environment can use:
+
+```bash
+python -m pip install --upgrade git+https://github.com/ai-watcher/aiwatcher-local.git
 ```
 
 After the PyPI release, `pipx install aiwatcher-cli` should become the
@@ -280,13 +281,19 @@ inside the user's current workflow.
 
 ## Updates For Early Users
 
-There are three public install/update paths:
+There are four public install/update paths:
 
 1. **Published package:** `pipx install aiwatcher-cli`, then `pipx upgrade
    aiwatcher-cli` when a new release lands.
-2. **GitHub package install:** `python -m pip install --upgrade
-   git+https://github.com/ai-watcher/aiwatcher-local.git`.
-3. **Contributor or early-adopter clone:** `git clone`, `python -m pip install
+2. **GitHub package install:** `pipx install
+   git+https://github.com/ai-watcher/aiwatcher-local.git` for an isolated CLI,
+   or `python -m pip install --upgrade
+   git+https://github.com/ai-watcher/aiwatcher-local.git` for the current Python
+   environment.
+3. **uv tool install:** `uv tool install
+   git+https://github.com/ai-watcher/aiwatcher-local.git`, then `uv tool
+   upgrade aiwatcher-cli`.
+4. **Contributor or early-adopter clone:** `git clone`, `python -m pip install
    -e .`, then `aiwatcher update` to check GitHub and `aiwatcher update --apply`
    to fast-forward a clean checkout.
 
@@ -481,9 +488,9 @@ What to check:
 
 ## Current MVP Limits
 
-- `start` covers the normal first-run product flow, and Settings can check or
-  apply source-checkout updates; automatic update polling/restart is still a
-  later layer.
+- `start` covers the normal first-run product flow, and the dashboard can check
+  or apply clean source-checkout updates from the top bar or Settings. Package
+  installs still get copyable upgrade commands rather than source fast-forwards.
 - `start` is the normal two-mode entry point: Console plus Companion by
   default, with flags to run either mode separately.
 - Claude Code has the richest support today.
