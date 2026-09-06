@@ -2170,24 +2170,36 @@ class DashboardWindowTests(unittest.TestCase):
         outcomes = {"sess-0": {"outcome": "useful"}}
         with (
             patch.object(ui, "safe_runtime_processes", return_value=[]),
-            patch.object(ui, "_worktree_rows", return_value=[]),
+            patch.object(ui, "_agent_workspace_rows", return_value=[]),
             patch.object(ui, "recent_optimize_decisions", return_value=[]),
         ):
             inventory = ui.build_optimize_inventory(rows, outcomes=outcomes, handoff_decisions=[])
 
         self.assertEqual(inventory["status"], "needs_action")
         self.assertEqual(inventory["top"]["kind"], "session_cluster")
+        self.assertEqual(inventory["top"]["project_full"], "/repo/app")
         self.assertEqual(inventory["top"]["tokens_at_risk"], 780_000)
+        self.assertIn("3 sessions", inventory["top"]["activity_summary"])
+        self.assertIn("codex-cli", inventory["top"]["activity_summary"])
+        self.assertIn("~780.0k context", inventory["top"]["activity_summary"])
         self.assertIn("why_inactive", inventory["top"])
-        self.assertIn("Copy", inventory["top"]["action_label"])
-        self.assertIn("Do not delete", inventory["top"]["checklist"])
+        self.assertEqual(inventory["top"]["action_label"], "Copy cleanup prompt")
+        self.assertIn("AIWatcher Optimize cleanup prompt", inventory["top"]["checklist"])
+        self.assertIn("Full path: /repo/app", inventory["top"]["checklist"])
+        self.assertIn("Signal: 3 sessions", inventory["top"]["checklist"])
+        self.assertIn("Safe to archive or clean up", inventory["top"]["checklist"])
+        self.assertIn("Keep active", inventory["top"]["checklist"])
+        self.assertIn("Unknown", inventory["top"]["checklist"])
+        self.assertIn("Do not delete files", inventory["top"]["checklist"])
+        self.assertIn("Do not stop any running process", inventory["top"]["checklist"])
+        self.assertIn("latest branch, PR, commit, or handoff receipt", inventory["top"]["checklist"])
         self.assertIn("/repo/app", inventory["top"]["checklist"])
 
     def test_optimize_inventory_surfaces_stale_runtime_review_plan(self) -> None:
         runtime = SimpleNamespace(stale=True, rss_kb=147251)
         with (
             patch.object(ui, "safe_runtime_processes", return_value=[runtime]),
-            patch.object(ui, "_worktree_rows", return_value=[]),
+            patch.object(ui, "_agent_workspace_rows", return_value=[]),
             patch.object(ui, "recent_optimize_decisions", return_value=[]),
         ):
             inventory = ui.build_optimize_inventory([], outcomes={}, handoff_decisions=[])
@@ -2196,12 +2208,79 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(inventory["top"]["kind"], "stale_processes")
         self.assertEqual(inventory["top"]["project"], "Local machine")
         self.assertEqual(inventory["top"]["review_command"], "aiwatcher processes --stale-only")
+        self.assertIn("143.8 MB local RSS to review", inventory["impact_label"])
         self.assertIn("143.8 MB RSS observed", inventory["top"]["impact_label"])
+        self.assertIn("143.8 MB RAM relief", inventory["top"]["reward_label"])
         self.assertIn("not provider billing", inventory["top"]["evidence"])
         self.assertIn("not model/API spend", inventory["top"]["resource_note"])
+        self.assertIn("unknown from RSS alone", inventory["top"]["cost_note"])
         self.assertIn("prompt/source content", inventory["top"]["privacy_note"])
         self.assertIn("Run: aiwatcher processes --stale-only", inventory["top"]["safe_review_steps"])
-        self.assertIn("Leave unknown processes alone", inventory["top"]["checklist"])
+        self.assertIn("before-minus-after local memory signal", " ".join(inventory["top"]["safe_review_steps"]))
+        self.assertIn("Reward: Potential local reward", inventory["top"]["checklist"])
+        self.assertIn("aiwatcher processes --stale-only", inventory["top"]["checklist"])
+        self.assertIn("Unknown", inventory["top"]["checklist"])
+
+    def test_optimize_inventory_surfaces_old_agent_scratch_workspace(self) -> None:
+        now = datetime.now(timezone.utc)
+        old_workspace = {
+            "path": "/private/tmp/codex-export-test",
+            "source": "scratch_scan",
+            "agent_owned": True,
+            "mtime": now - timedelta(hours=5),
+        }
+        with (
+            patch.object(ui, "safe_runtime_processes", return_value=[]),
+            patch.object(ui, "_agent_workspace_rows", return_value=[old_workspace]),
+            patch.object(ui, "recent_optimize_decisions", return_value=[]),
+        ):
+            inventory = ui.build_optimize_inventory([], outcomes={}, handoff_decisions=[])
+
+        self.assertEqual(inventory["status"], "needs_action")
+        self.assertEqual(inventory["top"]["kind"], "agent_workspace")
+        self.assertEqual(inventory["top"]["title"], "Review AI scratch workspace")
+        self.assertEqual(inventory["top"]["project_full"], "/private/tmp/codex-export-test")
+        self.assertIn("Scratch workspace", inventory["top"]["activity_summary"])
+        self.assertIn("last signal", inventory["top"]["activity_summary"])
+        self.assertIn("4+ hours", inventory["top"]["why_inactive"])
+        self.assertIn("local temp/scratch path shape", inventory["top"]["evidence"])
+        self.assertEqual(inventory["top"]["action_label"], "Copy cleanup prompt")
+        self.assertIn("disposable scratch space", inventory["top"]["checklist"])
+        self.assertIn("moving anything useful", inventory["top"]["checklist"])
+
+    def test_optimize_inventory_skips_recent_agent_scratch_workspace(self) -> None:
+        now = datetime.now(timezone.utc)
+        recent_workspace = {
+            "path": "/private/tmp/codex-active-test",
+            "source": "scratch_scan",
+            "agent_owned": True,
+            "mtime": now - timedelta(hours=1),
+        }
+        with (
+            patch.object(ui, "safe_runtime_processes", return_value=[]),
+            patch.object(ui, "_agent_workspace_rows", return_value=[recent_workspace]),
+            patch.object(ui, "recent_optimize_decisions", return_value=[]),
+        ):
+            inventory = ui.build_optimize_inventory([], outcomes={}, handoff_decisions=[])
+
+        self.assertEqual(inventory["status"], "quiet")
+        self.assertEqual(inventory["candidates"], [])
+
+    def test_agent_workspace_rows_scans_bounded_temp_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_workspace = Path(temp_dir) / "codex-export-test"
+            plain_folder = Path(temp_dir) / "plain-project"
+            codex_workspace.mkdir()
+            plain_folder.mkdir()
+            with (
+                patch.object(ui, "_worktree_rows", return_value=[]),
+                patch.object(ui, "_agent_workspace_scan_roots", return_value=[Path(temp_dir)]),
+            ):
+                rows = ui._agent_workspace_rows(set())
+
+        self.assertEqual([row["path"] for row in rows], [str(codex_workspace.resolve())])
+        self.assertEqual(rows[0]["source"], "scratch_scan")
+        self.assertTrue(rows[0]["agent_owned"])
 
     def test_detected_tools_are_listed_without_measured_spend(self) -> None:
         rows = [{
@@ -2241,7 +2320,7 @@ class DashboardWindowTests(unittest.TestCase):
         ]
         with (
             patch.object(ui, "safe_runtime_processes", return_value=[]),
-            patch.object(ui, "_worktree_rows", return_value=[]),
+            patch.object(ui, "_agent_workspace_rows", return_value=[]),
             patch.object(ui, "recent_optimize_decisions", return_value=[{
                 "decision": "marked_done",
                 "project_path": "/repo/app",

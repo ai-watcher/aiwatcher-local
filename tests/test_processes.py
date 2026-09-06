@@ -161,6 +161,8 @@ class RuntimeProcessCliTests(unittest.TestCase):
         self.assertIn("runtime hygiene", rendered)
         self.assertIn("RSS/CPU are local machine resources, not model/API spend", rendered)
         self.assertIn("orphaned parent", rendered)
+        self.assertIn("Potential local reward: up to 125MB RAM relief", rendered)
+        self.assertIn("dollar/API savings need provider billing or session-token evidence", rendered)
         expected_kill = "taskkill /PID 321" if os.name == "nt" else "kill 321"
         self.assertIn(f"suggest: review, then run `{expected_kill}`", rendered)
 

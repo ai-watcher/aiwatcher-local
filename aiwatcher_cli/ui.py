@@ -711,6 +711,7 @@ def _worktree_rows(projects: set[str]) -> list[dict[str, object]]:
             if not line:
                 path = current.get("path")
                 if isinstance(path, str) and path not in seen:
+                    current.setdefault("source", "git_worktree")
                     seen.add(path)
                     rows.append(current)
                 current = {}
@@ -726,6 +727,102 @@ def _worktree_rows(projects: set[str]) -> list[dict[str, object]]:
     return rows
 
 
+AGENT_WORKSPACE_SCAN_MAX_DEPTH = 3
+AGENT_WORKSPACE_SCAN_MAX_DIRS = 1200
+AGENT_WORKSPACE_MIN_AGE_HOURS = 4
+AGENT_WORKSPACE_PREFIXES = ("agent-", "claude-", "codex-")
+
+
+def _agent_workspace_scan_roots(projects: set[str]) -> list[Path]:
+    roots = {
+        Path("/tmp").resolve(),
+        Path("/private/tmp").resolve(),
+        Path(tempfile.gettempdir()).resolve(),
+    }
+    for project in projects:
+        try:
+            root = Path(project).expanduser()
+        except (TypeError, ValueError):
+            continue
+        roots.update({root / ".worktrees", root / ".claude" / "worktrees"})
+    existing: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        try:
+            resolved = root.resolve()
+        except OSError:
+            resolved = root
+        key = str(resolved)
+        if key in seen or not resolved.exists() or not resolved.is_dir():
+            continue
+        seen.add(key)
+        existing.append(resolved)
+    return sorted(existing, key=str)
+
+
+def _looks_agent_workspace_path(path: Path) -> bool:
+    normalized = str(path).replace("\\", "/")
+    if "/.claude/worktrees/" in normalized or "/.worktrees/" in normalized:
+        return True
+    name = path.name.lower()
+    return name.startswith(AGENT_WORKSPACE_PREFIXES)
+
+
+def _scan_agent_workspace_root(root: Path, seen: set[str]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    stack: list[tuple[Path, int]] = [(root, 0)]
+    visited = 0
+    while stack and visited < AGENT_WORKSPACE_SCAN_MAX_DIRS:
+        current, depth = stack.pop()
+        try:
+            children = list(current.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if visited >= AGENT_WORKSPACE_SCAN_MAX_DIRS:
+                break
+            try:
+                is_dir = child.is_dir()
+            except OSError:
+                continue
+            if not is_dir:
+                continue
+            visited += 1
+            try:
+                resolved = child.resolve()
+            except OSError:
+                resolved = child
+            key = str(resolved)
+            if _looks_agent_workspace_path(resolved) and key not in seen:
+                try:
+                    stat = resolved.stat()
+                except OSError:
+                    stat = None
+                seen.add(key)
+                rows.append({
+                    "path": key,
+                    "source": "scratch_scan",
+                    "agent_owned": True,
+                    "mtime": (
+                        datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+                        if stat is not None
+                        else None
+                    ),
+                })
+                continue
+            if depth < AGENT_WORKSPACE_SCAN_MAX_DEPTH and child.name not in {".git", "node_modules"}:
+                stack.append((resolved, depth + 1))
+    return rows
+
+
+def _agent_workspace_rows(projects: set[str]) -> list[dict[str, object]]:
+    rows = _worktree_rows(projects)
+    seen = {str(row.get("path") or "") for row in rows if row.get("path")}
+    for root in _agent_workspace_scan_roots(projects):
+        rows.extend(_scan_agent_workspace_root(root, seen))
+    return rows
+
+
 def _optimize_candidate_checklist(item: dict[str, object]) -> str:
     project = str(item.get("project") or "Local machine")
     title = str(item.get("title") or "Review workspace")
@@ -733,51 +830,85 @@ def _optimize_candidate_checklist(item: dict[str, object]) -> str:
     impact = str(item.get("impact_label") or "No savings claim")
     evidence = str(item.get("evidence") or "Local metadata only.")
     project_full = str(item.get("project_full") or "")
+    signal = str(item.get("activity_summary") or item.get("summary") or reason)
     kind = str(item.get("kind") or "")
+    subject = {
+        "session_cluster": "stale chats/sessions",
+        "fresh_start_pending": "pending Fresh Start receipts",
+        "worktree": "AI-created git worktree",
+        "agent_workspace": "AI-created scratch workspace",
+        "stale_processes": "stale local AI runtimes",
+    }.get(kind, "local AI cleanup candidate")
     lines = [
-        f"AIWatcher Optimize review: {project}",
+        "AIWatcher Optimize cleanup prompt",
         "",
-        f"Goal: {title}.",
-        f"Why AIWatcher surfaced this: {reason}",
-        f"Evidence: {evidence}",
-        f"Impact signal: {impact}",
+        "AIWatcher surfaced this as a cleanup candidate.",
         "",
-        "Safe review steps:",
+        "Candidate:",
+        f"- Type: {subject}",
+        f"- Goal: {title}",
+        f"- Project: {project}",
+        f"- Full path: {project_full}" if project_full else "- Full path: Local machine or unattributed",
+        f"- Signal: {signal}",
+        f"- Impact signal: {impact}",
+        "",
+        "Observed evidence:",
+        f"- Why surfaced: {reason}",
+        f"- Evidence: {evidence}",
+        "",
+        "Task:",
+        "Review this candidate and tell me what is safe to archive, clean up, keep active, or leave unknown.",
+        "",
+        "Rules:",
+        "- Do not delete files, branches, worktrees, commits, source code, or notes.",
+        "- Do not stop any running process.",
+        "- Do not archive chats or sessions unless the work appears completed, superseded, or no longer needed.",
+        "- If anything may contain unfinished work, mark it keep active.",
+        "- If evidence is weak or the owner is unclear, mark it unknown.",
+        "- Preserve handoffs, PRs, commits, receipts, useful notes, unresolved tasks, and final source-of-truth files.",
     ]
     if kind == "session_cluster":
         lines.extend([
-            "1. Open the matching AI app and find this project/workspace.",
-            "2. Confirm the work is finished, handed off, or no longer needed.",
-            "3. Archive or mark only those chats done inside the AI app.",
-            "4. Keep final source-of-truth files, commits, receipts, and notes.",
-            "5. Do not delete code, worktrees, chats, or processes from this checklist.",
+            "- Action boundary: archive or mark done only inside the owning AI app after review.",
         ])
     elif kind == "fresh_start_pending":
         lines.extend([
-            "1. If you already started the fresh session, paste or keep the Fresh Start brief there.",
-            "2. If you stayed in the old session, mark the receipt as skipped/continue so AIWatcher stops nudging.",
-            "3. After the new session produces useful work, refresh AIWatcher so it can link proof.",
-            "4. Do not claim saved tokens until AIWatcher observes the follow-up.",
+            "- Action boundary: link the follow-up session or mark the old receipt skipped/continued; do not claim saved tokens without proof.",
         ])
     elif kind == "worktree":
         lines.extend([
-            f"1. Run: git -C {project_full or '<worktree>'} status --short",
-            "2. Confirm the branch is merged, abandoned, or intentionally disposable.",
-            "3. Remove the worktree only through git/worktree-safe commands after confirmation.",
-            "4. Do not delete the folder directly from this checklist.",
+            f"- Inspect first: git -C {project_full or '<worktree>'} status --short",
+            "- Action boundary: remove only with git worktree-safe commands after confirmation.",
+        ])
+    elif kind == "agent_workspace":
+        lines.extend([
+            f"- Inspect first: {project_full or '<workspace>'}",
+            "- Action boundary: delete only after confirming it is disposable scratch space and moving anything useful.",
         ])
     elif kind == "stale_processes":
         lines.extend([
-            "1. Run: aiwatcher processes --stale-only",
-            "2. Confirm each process is not attached to live AI work.",
-            "3. Stop only stale/orphaned runtimes you recognize.",
-            "4. Leave unknown processes alone.",
+            "- Inspect first: aiwatcher processes --stale-only",
+            "- Action boundary: stop only runtimes you recognize and have confirmed are detached from live AI work.",
         ])
     else:
         lines.extend([
-            "1. Review the local evidence in AIWatcher.",
-            "2. Confirm the work is finished before taking action.",
-            "3. Prefer archive/mark-done actions over deletion.",
+            "- Action boundary: prefer archive/mark-done recommendations over deletion.",
+        ])
+    lines.extend([
+        "",
+        "Please return:",
+        "1. Safe to archive or clean up: item ids/names/paths if visible, with one short reason each.",
+        "2. Keep active: anything that might still matter, with one short reason each.",
+        "3. Unknown: anything that needs owner confirmation or stronger evidence.",
+        "4. Project status: latest branch, PR, commit, or handoff receipt if visible.",
+        "5. Cleanup reward: estimate context, RAM, or disk relief only when supported by the evidence above.",
+        "6. Next action: the exact action I should take in the owning app or local tool.",
+    ])
+    if kind == "stale_processes":
+        lines.extend([
+            "",
+            f"Reward: {item.get('reward_label') or 'Potential local reward: less RAM/CPU/battery pressure after verified cleanup.'}",
+            f"Cost guardrail: {item.get('cost_note') or 'Do not count dollar savings from process RSS alone.'}",
         ])
     lines.extend([
         "",
@@ -797,8 +928,11 @@ def _optimize_checklist(candidates: list[dict[str, object]]) -> str:
         lines.append("- No optimize candidates stood out in the current local window.")
         return "\n".join(lines)
     for index, item in enumerate(candidates, start=1):
+        full_path = str(item.get("project_full") or "")
         lines.extend([
             f"{index}. {item.get('title')}: {item.get('project')}",
+            f"   Path: {full_path}" if full_path else "   Path: Local machine or unattributed",
+            f"   Signal: {item.get('activity_summary') or item.get('summary')}",
             f"   Why: {item.get('why_inactive') or item.get('summary')}",
             f"   Evidence: {item.get('evidence_label')} - {item.get('evidence')}",
             f"   Impact: {item.get('impact_label')}",
@@ -839,6 +973,9 @@ def _group_pending_fresh_starts(candidates: list[dict[str, object]]) -> list[dic
         first["summary"] = (
             f"{count} Fresh Start briefs were copied without a linked follow-up session. "
             "Mark the old chats done, or paste each brief into its new chat."
+        )
+        first["activity_summary"] = (
+            f"{count} Fresh Start receipts · oldest copied {first.get('updated_label') or 'unknown age'} · follow-up proof pending"
         )
     return out
 
@@ -888,9 +1025,13 @@ def build_optimize_inventory(
         completed = sum(1 for row in inactive if outcomes.get(row.session_id, {}).get("outcome") == "useful")
         tools = sorted({row.tool for row in inactive if row.tool})
         latest_label = _elapsed_label(latest, now=now)
+        tool_label = ", ".join(tools[:3]) if tools else "local AI tools"
+        activity_summary = f"{len(inactive)} sessions · last {latest_label} · {tool_label} · ~{compact_int(tokens)} context"
+        if completed:
+            activity_summary += f" · {completed} useful outcome{'s' if completed != 1 else ''}"
         why_inactive = (
             f"Last local activity was {latest_label}; {len(inactive)} same-project sessions "
-            f"from {', '.join(tools[:3]) if tools else 'local AI tools'} are still carrying context."
+            f"from {tool_label} are still carrying context."
         )
         if completed:
             why_inactive += f" {completed} already have useful outcomes, so archive review is lower risk."
@@ -901,6 +1042,7 @@ def build_optimize_inventory(
             "project": project_label(project),
             "project_full": project,
             "summary": f"{len(inactive)} inactive same-project sessions are carrying ~{compact_int(tokens)} context. Archive or mark done once the work is no longer active.",
+            "activity_summary": activity_summary,
             "why_inactive": why_inactive,
             "evidence_label": "Observed",
             "evidence": "Observed from local session timestamps, project path, token pressure, and outcome metadata. Archive action must happen in the AI app.",
@@ -909,7 +1051,7 @@ def build_optimize_inventory(
             "session_count": len(inactive),
             "completed_count": completed,
             "updated_label": latest_label,
-            "action_label": "Copy project steps",
+            "action_label": "Copy cleanup prompt",
         })
 
     for decision in handoff_decisions:
@@ -934,6 +1076,7 @@ def build_optimize_inventory(
             "project": project_label(project),
             "project_full": project if is_reliable_project_path(project) else "",
             "summary": "A Fresh Start brief was copied, but no follow-up proof is linked yet. Mark the old chat done or paste the brief into the new chat.",
+            "activity_summary": f"Fresh Start receipt · copied {_elapsed_label(created_at, now=now)} · follow-up proof pending",
             "why_inactive": "AIWatcher saw a Fresh Start decision but has not linked a later same-project session yet.",
             "evidence_label": "Observed",
             "evidence": "Observed from AIWatcher Fresh Start receipt metadata.",
@@ -946,33 +1089,53 @@ def build_optimize_inventory(
         })
 
     projects = {project for project in by_project if is_reliable_project_path(project)}
-    for worktree in _worktree_rows(projects):
+    for worktree in _agent_workspace_rows(projects):
         path = str(worktree.get("path") or "")
         if not path or path in projects or path in suppressed_projects:
             continue
         path_obj = Path(path)
-        looks_agent_owned = ".claude/worktrees" in path or "/.worktrees/" in path or path_obj.name.startswith(("agent-", "codex-"))
+        source = str(worktree.get("source") or "git_worktree")
+        looks_agent_owned = bool(worktree.get("agent_owned")) or _looks_agent_workspace_path(path_obj)
         if not looks_agent_owned:
             continue
         related_sessions = [row for row in rows if row.project_path and _is_inside_path(Path(row.project_path), path_obj)]
         latest = max((row.updated_at or row.started_at for row in related_sessions if (row.updated_at or row.started_at)), default=None)
         if latest is not None and now - latest.astimezone(timezone.utc) < timedelta(hours=12):
             continue
+        mtime = worktree.get("mtime")
+        if latest is None and isinstance(mtime, datetime) and now - mtime.astimezone(timezone.utc) < timedelta(hours=AGENT_WORKSPACE_MIN_AGE_HOURS):
+            continue
+        title = "Review stale AI worktree" if source == "git_worktree" else "Review AI scratch workspace"
+        why = (
+            "The worktree path looks agent-created and no recent same-path local session activity was observed."
+            if source == "git_worktree"
+            else f"The folder name looks AI-created and it has not changed for {AGENT_WORKSPACE_MIN_AGE_HOURS}+ hours."
+        )
+        evidence = (
+            "Inferred from git worktree path shape and local session age."
+            if source == "git_worktree"
+            else "Inferred from local temp/scratch path shape and directory modified time."
+        )
         candidates.append({
             "id": f"worktree:{path}",
-            "kind": "worktree",
-            "title": "Review stale AI worktree",
+            "kind": "worktree" if source == "git_worktree" else "agent_workspace",
+            "title": title,
             "project": short_path(path),
             "project_full": path,
-            "summary": "This looks like an AI-created worktree. AIWatcher will not delete it automatically; check git status first.",
-            "why_inactive": "The worktree path looks agent-created and no recent same-path local session activity was observed.",
+            "summary": "This looks like AI-created scratch space. AIWatcher will not delete it automatically; review it first.",
+            "activity_summary": (
+                f"{'Git worktree' if source == 'git_worktree' else 'Scratch workspace'} · "
+                f"last signal {_elapsed_label(latest, now=now) if latest else _elapsed_label(mtime, now=now) if isinstance(mtime, datetime) else 'not found'} · "
+                f"{len(related_sessions)} linked session{'s' if len(related_sessions) != 1 else ''}"
+            ),
+            "why_inactive": why,
             "evidence_label": "Inferred",
-            "evidence": "Inferred from git worktree path shape and local session age.",
+            "evidence": evidence,
             "impact_label": "disk cleanup possible",
             "tokens_at_risk": 0,
             "session_count": len(related_sessions),
-            "updated_label": _elapsed_label(latest, now=now) if latest else "no recent session",
-            "action_label": "Copy cleanup checklist",
+            "updated_label": _elapsed_label(latest, now=now) if latest else _elapsed_label(mtime, now=now) if isinstance(mtime, datetime) else "no recent session",
+            "action_label": "Copy cleanup prompt",
         })
 
     try:
@@ -981,6 +1144,12 @@ def build_optimize_inventory(
         stale_processes = []
     if stale_processes:
         rss_kb = sum(process.rss_kb or 0 for process in stale_processes)
+        rss_impact = f"{bytes_label(int(rss_kb * 1024))} RSS observed" if rss_kb else "runtime clutter"
+        reward_label = (
+            f"Potential local reward: up to {bytes_label(int(rss_kb * 1024))} RAM relief after confirmed cleanup."
+            if rss_kb
+            else "Potential local reward: less runtime clutter after confirmed cleanup."
+        )
         review_command = "aiwatcher processes --stale-only"
         candidates.append({
             "id": "stale-processes",
@@ -989,11 +1158,15 @@ def build_optimize_inventory(
             "project": "Local machine",
             "project_full": "",
             "summary": f"{len(stale_processes)} AI-related runtime process(es) look stale or orphaned. Review before killing anything.",
+            "activity_summary": f"{len(stale_processes)} stale runtime process{'es' if len(stale_processes) != 1 else ''} · {rss_impact}",
             "why_inactive": "Local process metadata shows AI-related runtimes with stale/orphan signals.",
             "evidence_label": "Observed",
             "evidence": "Observed from local process metadata, not provider billing.",
-            "impact_label": f"{bytes_label(int(rss_kb * 1024))} RSS observed" if rss_kb else "runtime clutter",
+            "impact_label": rss_impact,
+            "reward_label": reward_label,
+            "cost_note": "Cost savings are unknown from RSS alone; attach provider billing or session-token evidence before claiming dollars.",
             "tokens_at_risk": 0,
+            "rss_kb": rss_kb,
             "session_count": len(stale_processes),
             "updated_label": "now",
             "action_label": "Copy safe review steps",
@@ -1002,8 +1175,10 @@ def build_optimize_inventory(
             "privacy_note": "This checklist uses local metadata only. It does not include prompt/source content.",
             "safe_review_steps": [
                 f"Run: {review_command}",
+                "Use PID, runtime, session id, and working directory to match each row to an AI app/window.",
                 "Confirm each process is not attached to live AI work.",
                 "Stop only stale/orphaned runtimes you recognize.",
+                "Run the command again; reclaimed RSS is the before-minus-after local memory signal.",
                 "Leave unknown processes alone.",
             ],
         })
@@ -1013,11 +1188,18 @@ def build_optimize_inventory(
     for item in candidates:
         item["checklist"] = _optimize_candidate_checklist(item)
     total_tokens = sum(int(item.get("tokens_at_risk") or 0) for item in candidates)
+    total_rss_kb = sum(int(item.get("rss_kb") or 0) for item in candidates)
+    if total_tokens:
+        impact_label = f"~{compact_int(total_tokens)} context at risk"
+    elif total_rss_kb:
+        impact_label = f"{bytes_label(int(total_rss_kb * 1024))} local RSS to review"
+    else:
+        impact_label = "no context savings claim"
     return {
         "status": "needs_action" if candidates else "quiet",
         "title": "Optimize workspace" if candidates else "Workspace clean",
         "summary": f"{len(candidates)} cleanup opportunity{'ies' if len(candidates) != 1 else 'y'} found." if candidates else "No stale forks, worktrees, or runtime cleanup opportunities stood out.",
-        "impact_label": f"~{compact_int(total_tokens)} context at risk" if total_tokens else "no context savings claim",
+        "impact_label": impact_label,
         "evidence_label": "Observed/inferred" if candidates else "Observed",
         "candidates": candidates[:8],
         "top": candidates[0] if candidates else None,
