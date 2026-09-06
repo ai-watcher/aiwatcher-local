@@ -158,12 +158,33 @@ function flashCopied(button, text = 'Copied') {
 
 // The pressed button is recorded on the way down, because window.event is only
 // set while a synchronous handler runs -- and several copy paths await a fetch
-// first (startFreshFromBubble builds the brief before copying it), by which
-// time it is gone. Capture phase, so it fires before the handler.
+// first, by which time it is gone. Capture phase, so it fires before the
+// handler.
 let lastPressedButton = null;
 document.addEventListener('click', event => {
   const node = event.target && event.target.closest ? event.target.closest('button') : null;
   lastPressedButton = node || null;
+  if (node && node.dataset.aiAssistMode) {
+    event.preventDefault();
+    setAiAssistPreset(node.dataset.aiAssistMode, node.dataset.aiAssistProvider || '');
+  }
+  if (node && node.dataset.aiAssistCopyCommand) {
+    event.preventDefault();
+    copyText(node.dataset.command || '', 'Setup command copied');
+  }
+}, true);
+
+document.addEventListener('change', event => {
+  const node = event.target && event.target.closest ? event.target.closest('[data-ai-assist-provider]') : null;
+  if (node) {
+    aiAssistFormDirty = true;
+    updateAiAssistFormVisibility();
+  }
+}, true);
+
+document.addEventListener('input', event => {
+  const node = event.target && event.target.closest ? event.target.closest('#aiAssistSettingsMount input, #aiAssistSettingsMount select') : null;
+  if (node) aiAssistFormDirty = true;
 }, true);
 
 function pressedButton() {
@@ -222,6 +243,106 @@ async function recordOptimizeDecision(decision, project = '', impact = '', butto
     showToast(decision === 'skipped' ? 'Optimize nudge skipped for 3 days' : 'Optimize review saved for 3 days');
   } catch (error) {
     showToast(`Could not save Optimize decision: ${error.message || 'unknown error'}`, 'error');
+  }
+}
+function optimizeAiAssistReady() {
+  const status = currentData && currentData.ai_assist ? currentData.ai_assist : {};
+  return !!(status.ready && (status.mode || 'off') !== 'off');
+}
+function optimizeAiButton(candidateId) {
+  if (!optimizeAiAssistReady()) return '';
+  return `<button class="btn-quiet" onclick="composeOptimizeCleanupPrompt(${jsArg(candidateId)}, this)">Compose AI cleanup prompt</button>`;
+}
+function renderOptimizeCleanupPrompt(result) {
+  const candidate = result.candidate || {};
+  const ai = result.ai_assist_result || {};
+  const status = ai.status || 'local_fallback';
+  const statusLabel = status === 'cached'
+    ? 'Cached AI Assist'
+    : status === 'used'
+      ? 'AI Assist'
+      : status === 'failed' || status === 'skipped'
+        ? 'Local fallback'
+        : 'Local rules';
+  const provider = [ai.provider, ai.model].filter(Boolean).join(' / ');
+  return `<section class="detail-section">
+    <h2>Cleanup prompt</h2>
+    <p>Review this prompt, then paste it into your AI tool only if you want help classifying stale local work. It does not authorize cleanup.</p>
+    <div class="ai-assist-run-card ${status === 'used' || status === 'cached' ? 'ready' : status === 'failed' || status === 'skipped' ? 'needs-setup' : ''}">
+      <div>
+        <strong>${esc(statusLabel)}</strong>
+        <p>${provider ? esc(provider) + ' · ' : ''}${status === 'cached' ? 'Reused cached output for the same evidence hash.' : status === 'used' ? 'Composed from local Optimize evidence after confirmation.' : esc(ai.reason || 'Using deterministic local cleanup prompt.')}</p>
+      </div>
+      <span class="confidence-chip observed">${esc((result.ai_assist || {}).config?.source_access || 'metadata_only')}</span>
+    </div>
+    <div class="fresh-preview">
+      <div class="fresh-preview-head">
+        <div><h3>${esc(candidate.title || 'Optimize review')}</h3><p>${esc(candidate.summary || candidate.why_inactive || 'Local cleanup evidence.')}</p></div>
+        <span class="confidence-chip observed">${esc(candidate.evidence_label || 'Observed')}</span>
+      </div>
+      <div class="fresh-preview-grid">
+        <div class="fresh-preview-row"><strong>Full path</strong><p>${esc(candidate.project_full || 'Local machine')}</p></div>
+        <div class="fresh-preview-row"><strong>Last activity</strong><p>${esc(candidate.last_activity || candidate.updated_label || 'unknown')}</p></div>
+        <div class="fresh-preview-row"><strong>Tool</strong><p>${esc(candidate.tool || (Array.isArray(candidate.tools) ? candidate.tools.join(', ') : 'local AI metadata'))}</p></div>
+        <div class="fresh-preview-row"><strong>Impact</strong><p>${esc(candidate.impact_label || 'No savings claim')}</p></div>
+      </div>
+    </div>
+    <div class="brief-focus">
+      <div class="brief-focus-head">
+        <div><h3>Prompt to paste</h3><p>It asks for buckets: safe to archive/review, keep active, unknown, and next action.</p></div>
+        <span class="confidence-chip observed">${esc(statusLabel)}</span>
+      </div>
+      <textarea id="optimizeCleanupPrompt" class="brief-box">${esc(result.prompt || result.local_prompt || '')}</textarea>
+      <div class="copy-row"><button class="btn-primary" onclick="copyText(document.getElementById('optimizeCleanupPrompt').value, 'Cleanup prompt copied')">Copy cleanup prompt</button></div>
+    </div>
+    <details class="aiw-details">
+      <summary>Local fallback and evidence hash</summary>
+      <div class="details-body">
+        <p class="receipt-note">Evidence hash: ${esc(result.evidence_hash || '')}</p>
+        <textarea class="brief-box" readonly>${esc(result.local_prompt || '')}</textarea>
+      </div>
+    </details>
+  </section>`;
+}
+async function composeOptimizeCleanupPrompt(candidateId, button = null) {
+  const status = currentData && currentData.ai_assist ? currentData.ai_assist : {};
+  const config = status.config || {};
+  if (config.require_confirmation !== false) {
+    const label = status.active_label || 'AI Assist';
+    const ok = window.confirm(`${label} will make one small model call to compose a safe Optimize cleanup review prompt. Continue?`);
+    if (!ok) return;
+  }
+  if (button) {
+    button.dataset.copyRestore = button.textContent;
+    button.textContent = 'Composing...';
+    button.disabled = true;
+  }
+  try {
+    const daysEl = document.getElementById('days');
+    const result = await postJson('/api/optimize-ai-assist', {
+      candidate_id: candidateId,
+      days: Number(daysEl ? daysEl.value : 7) || 7,
+    });
+    if (button) {
+      button.disabled = false;
+      button.textContent = button.dataset.copyRestore || 'Compose AI cleanup prompt';
+      delete button.dataset.copyRestore;
+    }
+    if (result.error) {
+      showToast(result.error, 'error');
+      return;
+    }
+    openDrawer('Cleanup prompt');
+    setDrawerContent(renderOptimizeCleanupPrompt(result));
+    const ai = result.ai_assist_result || {};
+    showToast(ai.status === 'cached' ? 'Cached AI cleanup prompt ready' : ai.status === 'used' ? 'AI cleanup prompt ready' : 'Cleanup prompt ready');
+  } catch (error) {
+    if (button) {
+      button.disabled = false;
+      button.textContent = button.dataset.copyRestore || 'Compose AI cleanup prompt';
+      delete button.dataset.copyRestore;
+    }
+    showToast(`Could not compose cleanup prompt: ${error.message || 'unknown error'}`, 'error');
   }
 }
 // Scoped to the textarea. It used to wipe the Route result too -- the route,
@@ -511,7 +632,8 @@ async function preflightPrompt() {
 let toastTimer;
 function showToast(message, kind = 'success') {
   const toast = document.getElementById('toast');
-  toast.textContent = message;
+  const text = String(message || '');
+  toast.textContent = text.length > 220 ? `${text.slice(0, 217)}...` : text;
   toast.className = `toast ${kind === 'error' ? 'error' : ''} show`;
   window.clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => { toast.className = 'toast'; }, 3200);
@@ -647,10 +769,15 @@ async function resumeSession(sessionId, launch = true) {
     showToast('Could not reach the local AIWatcher server.', 'error');
   }
 }
-function openDrawer(title) {
+function setDrawerSubtitle(value) {
+  const node = document.getElementById('drawerSubtitle');
+  if (node) node.textContent = value || 'Local metadata only';
+}
+function openDrawer(title, subtitle = 'Local metadata only') {
   const content = document.getElementById('detailContent');
   if (content) content.aiwSettled = null;
   document.getElementById('drawerTitle').textContent = title;
+  setDrawerSubtitle(subtitle);
   document.getElementById('drawerBackdrop').classList.add('open');
   document.getElementById('detailDrawer').classList.add('open');
   document.getElementById('detailDrawer').setAttribute('aria-hidden', 'false');
@@ -766,15 +893,17 @@ function identityTone(runtime) {
 function renderIdentityStrip(item, runtime, sourcePath) {
   runtime = runtime || {};
   const sessionId = item.session_id || runtime.session_id || '';
-  const project = item.project || item.project_short || runtime.project_path || 'unknown';
+  const project = item.project || item.project_short || runtime.project_path || sourcePath || 'unknown';
   const surface = runtime.surface || item.surface || 'unknown surface';
+  const tool = item.tool || runtime.tool || 'unknown tool';
   const identityLabel = runtime.identity_label || runtime.label || 'Historical log only';
   return `<div class="session-identity-card">
     <div class="session-identity-row">
       <span class="confidence-chip ${esc(identityTone(runtime))}">${esc(identityLabel)}</span>
-      <div class="session-identity-main">${esc(item.tool || runtime.tool || 'unknown tool')} · ${esc(surface)} · ${esc(project)}</div>
-      <span class="session-id-chip">${esc(shortSessionId(sessionId))}</span>
+      <span class="session-id-chip" title="${esc(sessionId)}">session ${esc(shortSessionId(sessionId))}</span>
     </div>
+    <div class="session-identity-main">${esc(tool)} · ${esc(surface)}</div>
+    <div class="session-identity-path" title="${esc(project)}">${esc(project)}</div>
   </div>`;
 }
 function confidenceLabel(s) {
@@ -826,6 +955,7 @@ function runtimeReturnPanel(runtime, sourcePath) {
   </section>`;
 }
 let watcherCommand = 'aiwatcher watch --notify --overlay --interval 60';
+let currentData = null;
 // The dropdown defaulted to whichever option came first in the markup, which
 // was Codex, while every observed session on this machine is claude-code. Set
 // it from the most recent session instead, and only before the user has touched
@@ -1208,6 +1338,7 @@ function handoffPayload(sessionId, target, includePrompt, options) {
     source_refs: next.sources || [],
     constraints: next.constraints || [],
     acceptance_criteria: next.acceptance || [],
+    local_brief: next.localBrief || '',
   };
 }
 async function postJson(path, payload) {
@@ -1509,11 +1640,16 @@ function listPreview(items, fallback) {
 function renderFreshStartPreview(capsule) {
   const objective = capsule.objective || 'Reconstruct the current work from repo state, recent commits, changed files, and the evidence below.';
   const decisions = capsule.decisions || [];
+  const result = capsule.ai_assist_result || {};
+  const structured = result.structured || {};
+  const assisted = result.status === 'used';
+  const nextAsk = structured.next_ask || '';
   return `<div class="fresh-preview">
     <div class="fresh-preview-head">
-      <div><h3>Ready to copy</h3><p>This is the structured context the next AI session receives. Refine it above first if anything is missing.</p></div>
-      <span class="confidence-chip observed">Metadata only</span>
+      <div><h3>${assisted ? 'AI handoff ready' : 'Ready to copy'}</h3><p>${assisted ? 'AI Assist composed the fresh-session brief from local evidence. Review it, then copy it into the new chat.' : 'This is the structured context the next AI session receives. Refine it above first if anything is missing.'}</p></div>
+      <span class="confidence-chip observed">${assisted ? 'AI assisted' : 'Metadata only'}</span>
     </div>
+    ${assisted && nextAsk ? `<div class="fresh-preview-next"><strong>Next ask</strong><p>${esc(nextAsk)}</p></div>` : ''}
     <div class="fresh-preview-grid">
       <div class="fresh-preview-row"><strong>Objective</strong><p>${esc(objective)}</p></div>
       <div class="fresh-preview-row"><strong>Source of truth</strong><p>${listPreview(capsule.source_refs, 'Repository state, local session metadata, changed files, and the source log.')}</p></div>
@@ -1538,8 +1674,52 @@ function freshStartReceiptWidget({ reason = '', expected = '', copy = '', contro
     ${controls ? `<div class="actions" style="margin-top:14px">${controls}</div>` : ''}
   </div>`;
 }
+function renderFreshStartAiAssist(capsule) {
+  if (!capsule || capsule.demo) return '';
+  const status = capsule.ai_assist || {};
+  const config = status.config || {};
+  const result = capsule.ai_assist_result || null;
+  if (result && (result.status === 'used' || result.status === 'cached')) {
+    const structured = result.structured || {};
+    const nextAsk = structured.next_ask || 'Copy the AI-assisted brief into a fresh chat and keep the first checkpoint small.';
+    return `<div class="ai-assist-run-card ready">
+      <div>
+        <strong>${result.status === 'cached' ? 'Cached AI handoff ready' : 'AI handoff ready'}</strong>
+        <p>${esc(result.provider || 'provider')} / ${esc(result.model || 'model')} ${result.status === 'cached' ? 'reused a cached handoff for the same local evidence' : 'composed a paste-ready brief from local evidence'}. Next: ${esc(nextAsk)}</p>
+      </div>
+      <span class="confidence-chip observed">receipt saved</span>
+    </div>`;
+  }
+  if (result && result.status) {
+    return `<div class="ai-assist-run-card needs-setup">
+      <div>
+        <strong>AI Assist not used</strong>
+        <p>${esc(result.reason || 'AI Assist was not ready for this run.')}</p>
+      </div>
+      <button class="btn-quiet" onclick="showView('setup'); showSettingsPanel('ai'); closeDrawer()">Settings</button>
+    </div>`;
+  }
+  if ((status.mode || 'off') === 'off') {
+    return `<div class="ai-assist-run-card">
+      <div>
+        <strong>Local brief only</strong>
+        <p>AI Assist is off, so this handoff uses deterministic local metadata and costs nothing extra.</p>
+      </div>
+      <button class="btn-quiet" onclick="showView('setup'); showSettingsPanel('ai'); closeDrawer()">Configure AI Assist</button>
+    </div>`;
+  }
+  if (!status.ready) {
+    return `<div class="ai-assist-run-card needs-setup">
+      <div>
+        <strong>AI Assist needs setup</strong>
+        <p>${esc(status.setup_hint || 'Finish AI Assist settings before using it on Fresh Start.')}</p>
+      </div>
+      <button class="btn-quiet" onclick="showView('setup'); showSettingsPanel('ai'); closeDrawer()">Settings</button>
+    </div>`;
+  }
+  return '';
+}
 function renderHandoff(capsule) {
-  const usage = capsule.usage || {};
   const evidence = capsule.evidence || {};
   const changedFiles = evidence.changed_files || [];
   const runtime = capsule.runtime_attachment || {};
@@ -1547,6 +1727,12 @@ function renderHandoff(capsule) {
   const includePrompt = !!capsule.include_prompt_excerpt;
   const isDemo = !!capsule.demo;
   const canOpenRuntime = !!runtime.available;
+  const aiAssist = capsule.ai_assist || {};
+  const aiResult = capsule.ai_assist_result || {};
+  const assisted = aiResult.status === 'used' || aiResult.status === 'cached';
+  const aiReady = !isDemo && aiAssist.ready && (aiAssist.mode || 'off') !== 'off' && !assisted;
+  const sourceAccess = ((aiAssist.config || {}).source_access || aiResult.source_access || 'metadata_only');
+  setDrawerSubtitle(assisted ? `AI-assisted handoff · ${sourceAccess}` : aiReady ? `AI Assist available · ${sourceAccess}` : 'Local metadata only');
   const enrichment = capsule.basic
     ? '<div class="loading">Basic brief is ready. Loading timeline, git evidence, and prompt enrichment...</div>'
     : '';
@@ -1554,27 +1740,42 @@ function renderHandoff(capsule) {
   const primaryHelp = canOpenRuntime
     ? 'AIWatcher will copy the brief, open the safest available workspace or app target, and save a local Fresh Start receipt.'
     : 'AIWatcher will copy the brief and save a local Fresh Start receipt. Open the correct AI chat or workspace yourself before pasting.';
+  const actionHelp = aiReady
+    ? 'AI Assist is ready. Compose the handoff first to get a compact brief with work done, context to preserve, next ask, and acceptance checks. It runs only after your confirmation.'
+    : primaryHelp;
+  const primaryAction = aiReady
+    ? `<button class="btn-primary" onclick="improveFreshStartWithAiAssist('${esc(capsule.session_id)}','${esc(target)}', ${includePrompt ? 'true' : 'false'})">Compose AI handoff</button>`
+    : `<button class="btn-primary" data-runtime="${canOpenRuntime ? '1' : '0'}" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', this.dataset.runtime === '1', ${isDemo ? 'true' : 'false'})">${esc(isDemo ? 'Copy demo brief' : primaryLabel)}</button>`;
+  const secondaryCopy = aiReady
+    ? `<button class="btn-quiet" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', false, ${isDemo ? 'true' : 'false'})">Copy local fallback</button>`
+    : '';
   return `<section class="detail-section">
     <h2>Fresh Start</h2>
-    <p>AIWatcher prepared a restart brief for the next ${esc(capsule.target_label || 'AI tool')} session. Copy it into a fresh chat only after the identity below matches the work you intend to continue.</p>
+    <p>Review the handoff, then copy it into a fresh ${esc(capsule.target_label || 'AI tool')} session after the identity matches the work you intend to continue.</p>
     ${renderIdentityStrip(capsule, runtime, capsule.source_path)}
-    <div class="mini-grid">
-      <div class="mini"><span class="label">Previous usage</span><strong>${esc(usage.tokens_label || '—')}</strong></div>
-      <div class="mini"><span class="label">API value</span><strong>${esc(usage.api_value_label || '—')}</strong></div>
-      <div class="mini"><span class="label">Model calls</span><strong>${esc(usage.model_calls ?? '—')}</strong></div>
-      <div class="mini"><span class="label">Evidence</span><strong>${esc((evidence.commits || []).length)} commits</strong></div>
-    </div>
     <div id="handoffStatus" class="verdict-card useful" style="margin-top:14px">
-      <h3>Best next action: start fresh in the same workspace</h3>
-      <p>${esc(primaryHelp)} AIWatcher will watch for a later same-project session as proof.</p>
+      <h3>${aiReady ? 'Best next action: compose AI handoff' : assisted ? 'Best next action: copy AI handoff' : 'Best next action: start fresh in the same workspace'}</h3>
+      <p>${esc(actionHelp)} AIWatcher will watch for a later same-project session as proof.</p>
       <div class="copy-row" style="margin-top:12px">
-        <button class="btn-primary" data-runtime="${canOpenRuntime ? '1' : '0'}" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', this.dataset.runtime === '1', ${isDemo ? 'true' : 'false'})">${esc(isDemo ? 'Copy demo brief' : primaryLabel)}</button>
+        ${primaryAction}
+        ${secondaryCopy}
         ${isDemo ? `<button class="btn-quiet" onclick="showView('sessions'); closeDrawer()">Find real sessions</button>` : `<button class="btn-quiet" onclick="selectSession('${esc(capsule.session_id)}')">Inspect source session</button>`}
       </div>
     </div>
-    <!-- Refinement first but folded away, then the brief. The output used to
-         sit above the five empty fields that shape it, which reads as "this is
-         waiting for you" when in fact it is ready to copy. -->
+    ${renderFreshStartAiAssist(capsule)}
+    <div class="brief-focus">
+      <div class="brief-focus-head">
+        <div>
+          <h3>${assisted ? 'AI-assisted prompt to paste' : 'Prompt to paste'}</h3>
+          <p>${assisted ? (aiResult.status === 'cached' ? 'This handoff was reused from the AI Assist cache for the same evidence. Review once, copy, then paste into the fresh session.' : 'This is the composed handoff. Review once, copy, then paste into the fresh session.') : 'This local brief is ready now. Compose with AI Assist first if you want a tighter handoff.'}</p>
+        </div>
+        <span class="confidence-chip observed">${assisted ? 'AI assisted' : 'local rules'}</span>
+      </div>
+      <textarea id="handoffBrief" class="brief-box">${esc(capsule.next_brief || '')}</textarea>
+      <div class="copy-row"><button class="btn-primary" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', ${canOpenRuntime ? 'true' : 'false'}, ${isDemo ? 'true' : 'false'})">${esc(canOpenRuntime && !isDemo ? 'Copy brief + open workspace' : 'Copy brief')}</button></div>
+    </div>
+    <!-- The brief is the focal object. Optional shaping fields stay below it
+         so a first-time reader sees the paste-ready handoff before the knobs. -->
     <details class="handoff-refine">
       <summary>Refine this brief (optional)</summary>
       ${renderHandoffForm(capsule)}
@@ -1596,11 +1797,7 @@ function renderHandoff(capsule) {
   <section class="detail-section"><h3>Why start fresh now</h3>
     <ul class="insight-list">${(capsule.warnings || []).map(item => `<li>${esc(item)}</li>`).join('')}</ul>
   </section>
-  <section class="detail-section"><h3>Brief that will be copied</h3>
-    <textarea id="handoffBrief" class="brief-box">${esc(capsule.next_brief || '')}</textarea>
-    <div class="copy-row"><button class="btn-quiet" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', false, ${isDemo ? 'true' : 'false'})">Copy brief</button></div>
-    ${changedFiles.length ? `<details class="aiw-details"><summary>${esc(changedFiles.length)} changed file${changedFiles.length === 1 ? '' : 's'} to inspect</summary><div class="details-body"><div class="pill-row">${changedFiles.slice(0, 12).map(file => `<span class="pill">${esc(file)}</span>`).join('')}</div></div></details>` : ''}
-  </section>`;
+  ${changedFiles.length ? `<section class="detail-section"><details class="aiw-details"><summary>${esc(changedFiles.length)} changed file${changedFiles.length === 1 ? '' : 's'} to inspect</summary><div class="details-body"><div class="pill-row">${changedFiles.slice(0, 12).map(file => `<span class="pill">${esc(file)}</span>`).join('')}</div></div></details></section>` : ''}`;
 }
 async function copyFreshStartFromDrawer(sessionId, openRuntime = false, isDemo = false) {
   const brief = document.getElementById('handoffBrief') ? document.getElementById('handoffBrief').value : '';
@@ -1647,6 +1844,51 @@ async function regenerateHandoff(sessionId, target = 'generic', includePrompt = 
     await openDemoHandoff(target, includePrompt, options);
   } else {
     await openHandoff(sessionId, target, includePrompt, options);
+  }
+}
+async function improveFreshStartWithAiAssist(sessionId, target = 'generic', includePrompt = false) {
+  const status = (typeof currentData !== 'undefined' && currentData && currentData.ai_assist) ? currentData.ai_assist : null;
+  const config = status && status.config ? status.config : {};
+  const label = (status && status.active_label) || 'AI Assist';
+  if (config.require_confirmation !== false) {
+    const ok = window.confirm(`${label} will make one small model call using your configured provider to compose this Fresh Start handoff. Continue?`);
+    if (!ok) return;
+  }
+  const options = handoffOptionsFromForm();
+  const briefNode = document.getElementById('handoffBrief');
+  const currentBrief = briefNode ? briefNode.value : '';
+  const sourceAccess = config.source_access || 'metadata_only';
+  if (currentBrief && (!includePrompt || sourceAccess === 'prompt_opt_in' || sourceAccess === 'source_opt_in')) {
+    options.localBrief = currentBrief;
+  }
+  const payload = handoffPayload(sessionId, target, includePrompt, options);
+  const statusNode = document.getElementById('handoffStatus');
+  if (statusNode) {
+    statusNode.insertAdjacentHTML('afterend', `<div id="aiAssistWorking" class="ai-loading-panel">
+      <div class="ai-loading-mark">AI</div>
+      <div>
+        <strong>Composing handoff</strong>
+        <p>AI Assist is turning local evidence into a compact fresh-session brief. Proof and savings claims stay evidence-backed.</p>
+        <div class="ai-loading-bar" aria-hidden="true"><span></span></div>
+      </div>
+    </div>`);
+  }
+  try {
+    const capsule = await postJson('/api/handoff-ai-assist', payload);
+    const working = document.getElementById('aiAssistWorking');
+    if (working) working.remove();
+    if (capsule.error) {
+      showToast(capsule.error, 'error');
+      return;
+    }
+    setDrawerContent(renderHandoff(capsule));
+    const result = capsule.ai_assist_result || {};
+    if (result.status === 'used') showToast('AI handoff ready');
+    else showToast(result.reason || 'AI Assist was not used', 'error');
+  } catch (error) {
+    const working = document.getElementById('aiAssistWorking');
+    if (working) working.remove();
+    showToast('AI Assist could not improve this brief.', 'error');
   }
 }
 async function openDemoHandoff(target = 'generic', includePrompt = false, options = null) {
@@ -1729,29 +1971,8 @@ async function recordHandoffDecision(bubble, decision) {
   }
 }
 async function startFreshFromBubble(sessionId) {
-  const res = await fetch(`/api/handoff-basic?id=${encodeURIComponent(sessionId)}&target=generic`);
-  const capsule = await res.json();
-  if (capsule.error) {
-    showToast(capsule.error, 'error');
-    return;
-  }
-  const copied = await copyText(capsule.next_brief || '', 'Fresh Start brief copied');
-  if (!copied) return;
-  const bubble = handoffDecisionBubble(sessionId);
-  await recordHandoffDecision(bubble, 'copy_handoff');
-  const runtime = (bubble || {}).runtime_attachment || {};
-  if (runtime.available) {
-    try {
-      const returnRes = await requestRuntimeReturn(sessionId);
-      const returned = await returnRes.json();
-      showToast(returned.message || 'Brief copied and return target opened.', returned.ok ? 'success' : 'error');
-    } catch (error) {
-      showToast('Brief copied. Open a fresh chat in the same workspace and paste it.', 'success');
-    }
-  } else {
-    showToast('Brief copied. Open a fresh chat in the same workspace and paste it.', 'success');
-  }
-  renderHandoffCopied(bubble, sessionId);
+  await openHandoff(sessionId, 'generic', false);
+  showToast('Fresh Start brief opened. Review it, compose with AI Assist if useful, then copy.');
 }
 async function continueFromSession(sessionId) {
   await recordHandoffDecision({
@@ -1911,6 +2132,8 @@ function renderOptimizeWorkspace(optimize) {
     <p class="receipt-note" style="margin-bottom:12px">AIWatcher cannot archive or delete anything for you. Review one item, act only in the owning app, then mark it reviewed to quiet the nudge for 24 hours.</p>
     <div class="action-queue">${candidates.map(item => {
       const itemChecklist = item.checklist || checklist;
+      const cleanupPrompt = item.cleanup_prompt || itemChecklist;
+      const aiCleanup = optimizeAiButton(item.id || '');
       if (item.kind === 'stale_processes') {
         return renderRuntimeOptimizeCard(item, itemChecklist);
       }
@@ -1927,7 +2150,8 @@ function renderOptimizeWorkspace(optimize) {
         <p class="receipt-note">${esc(item.evidence || '')}</p>
       </div>
       <div class="actions">
-        ${item.view ? `<button class="btn-primary" onclick="showView('${esc(item.view)}')">${esc(item.action_label || 'Review')}</button>` : `<button class="btn-primary" onclick="copyText(${jsArg(itemChecklist)}, 'Cleanup prompt copied')">${esc(item.action_label || 'Copy cleanup prompt')}</button>`}
+        ${item.view ? `<button class="btn-primary" onclick="showView('${esc(item.view)}')">${esc(item.action_label || 'Review')}</button><button class="btn-quiet" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">Copy cleanup prompt</button>` : `<button class="btn-primary" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">Copy cleanup prompt</button>`}
+        ${aiCleanup}
         <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('marked_done', this.dataset.project, this.dataset.impact, this)">Reviewed</button>
         <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('skipped', this.dataset.project, this.dataset.impact, this)">Skip</button>
       </div>
@@ -1942,6 +2166,8 @@ function renderRuntimeOptimizeCard(item, itemChecklist) {
     ? item.safe_review_steps
     : ['Run: aiwatcher processes --stale-only', 'Use PID, runtime, session id, and working directory to match each row to an AI app/window.', 'Confirm each process is not attached to live AI work.', 'Stop only stale/orphaned runtimes you recognize.', 'Run the command again; reclaimed RSS is the before-minus-after local memory signal.', 'Leave unknown processes alone.'];
   const command = item.review_command || 'aiwatcher processes --stale-only';
+  const cleanupPrompt = item.cleanup_prompt || itemChecklist;
+  const aiCleanup = optimizeAiButton(item.id || '');
   return `<div class="action-row low runtime-review-card">
     <div>
       <div class="action-title">${esc(item.title || 'Review stale AI runtimes')} <span class="pill local">Local machine</span></div>
@@ -1965,6 +2191,8 @@ function renderRuntimeOptimizeCard(item, itemChecklist) {
     <div class="actions">
       <button class="btn-primary" onclick="copyOptimizeRuntimeCommand(${jsArg(command)}, this)">Copy command</button>
       <button class="btn-quiet" onclick="copyText(${jsArg(itemChecklist)}, 'Safe review steps copied')">${esc(item.action_label || 'Copy safe review steps')}</button>
+      <button class="btn-quiet" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">Copy cleanup prompt</button>
+      ${aiCleanup}
       <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('marked_done', this.dataset.project, this.dataset.impact, this)">Reviewed</button>
       <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('skipped', this.dataset.project, this.dataset.impact, this)">Skip</button>
     </div>
@@ -3028,6 +3256,262 @@ function renderCoverage(rows) {
   </p>`;
 }
 
+function renderAiAssistSettings(status) {
+  const s = status || {};
+  const c = s.config || {};
+  const mode = c.mode || 'off';
+  const provider = c.provider || (mode === 'off' ? 'none' : 'auto');
+  const localProviders = s.local_providers || [];
+  const cloudProviders = s.cloud_providers || [];
+  const storedKeys = c.stored_keys || s.stored_keys || {};
+  const firstLocal = localProviders.find(row => row.available);
+  const cloudById = id => cloudProviders.find(row => row.id === id) || {};
+  const providerDetail = id => {
+    const row = [...localProviders, ...cloudProviders].find(item => item.id === id);
+    return row ? row.detail : '';
+  };
+  const providerOptions = [
+    { id: 'none', label: 'No provider', modes: ['off'], detail: 'AIWatcher will use local deterministic rules.', secretEnv: '' },
+    { id: 'auto', label: 'Auto-detect local runtime', modes: ['local'], detail: 'AIWatcher chooses from detected local providers.', secretEnv: '' },
+    { id: 'ollama', label: 'Ollama', modes: ['local'], detail: providerDetail('ollama') || 'Local model runtime.', secretEnv: '' },
+    { id: 'lmstudio', label: 'LM Studio', modes: ['local'], detail: providerDetail('lmstudio') || 'Local OpenAI-compatible runtime.', secretEnv: '' },
+    { id: 'llama_cpp', label: 'llama.cpp', modes: ['local'], detail: providerDetail('llama_cpp') || 'Local OpenAI-compatible runtime.', secretEnv: '' },
+    { id: 'openai', label: 'OpenAI', modes: ['cloud'], detail: providerDetail('openai') || 'Paste an OpenAI API key below.', secretEnv: 'OPENAI_API_KEY', keyFound: !!cloudById('openai').available, keyConfigured: !!cloudById('openai').configured || !!storedKeys.openai, checkStatus: cloudById('openai').check_status || 'missing' },
+    { id: 'anthropic', label: 'Claude', modes: ['cloud'], detail: providerDetail('anthropic') || 'Paste a Claude API key below.', secretEnv: 'ANTHROPIC_API_KEY', keyFound: !!cloudById('anthropic').available, keyConfigured: !!cloudById('anthropic').configured || !!storedKeys.anthropic, checkStatus: cloudById('anthropic').check_status || 'missing' },
+    { id: 'openai_compatible', label: 'Custom endpoint', modes: ['cloud'], detail: providerDetail('openai_compatible') || 'Paste the key and endpoint URL below.', secretEnv: 'AIWATCHER_AI_API_KEY', keyFound: !!cloudById('openai_compatible').available, keyConfigured: !!cloudById('openai_compatible').configured || !!storedKeys.openai_compatible, checkStatus: cloudById('openai_compatible').check_status || 'missing' },
+  ];
+  const providerSelectOptions = providerOptions.map(row => {
+    const hidden = !row.modes.includes(mode) ? ' hidden' : '';
+    return `<option value="${esc(row.id)}" data-modes="${esc(row.modes.join(','))}" data-detail="${esc(row.detail || '')}" data-secret-env="${esc(row.secretEnv || '')}" data-key-found="${row.keyFound ? '1' : '0'}" data-key-configured="${row.keyConfigured ? '1' : '0'}" data-check-status="${esc(row.checkStatus || '')}" ${provider === row.id ? 'selected' : ''}${hidden}>${esc(row.label)}</option>`;
+  }).join('');
+  const currentProvider = providerOptions.find(row => row.id === provider) || providerOptions[0];
+  const keySaved = mode === 'cloud' && !!storedKeys[provider];
+  const showProvider = mode !== 'off';
+  const showApiKey = mode === 'cloud';
+  const showEndpoint = mode !== 'off' && provider === 'openai_compatible';
+  const keyPlaceholder = keySaved ? 'Saved locally. Paste a new key to replace it.' : 'Paste API key';
+  const workflowSummary = (s.workflows || [])
+    .filter(row => ['first', 'second'].includes(row.priority))
+    .map(row => esc(row.label))
+    .join(' and ');
+  return `<div class="ai-assist-simple mode-${esc(mode)}">
+    <div class="ai-assist-status ${s.ready ? 'ready' : 'needs-setup'}">
+      <div>
+        <strong>${esc(s.active_label || 'Local rules only')}</strong>
+        <span>${esc(s.setup_hint || 'No model calls happen from Settings.')}</span>
+      </div>
+      <span class="status-pill">${esc(s.status_label || 'Off')}</span>
+    </div>
+
+    <div class="ai-assist-mode-grid" role="group" aria-label="AI Assist mode">
+      <button class="ai-assist-mode-card rules ${mode === 'off' ? 'selected' : ''}" data-ai-assist-mode="off" data-ai-assist-provider="none" type="button">
+        <strong>Local rules</strong>
+        <span>Best default. No keys, model calls, or extra spend.</span>
+      </button>
+      <button class="ai-assist-mode-card local ${mode === 'local' ? 'selected' : ''}" data-ai-assist-mode="local" data-ai-assist-provider="${esc((firstLocal && firstLocal.id) || 'auto')}" type="button">
+        <strong>Local model</strong>
+        <span>Use detected local runtimes for smarter briefs.</span>
+      </button>
+      <button class="ai-assist-mode-card cloud ${mode === 'cloud' ? 'selected' : ''}" data-ai-assist-mode="cloud" data-ai-assist-provider="openai" type="button">
+        <strong>Cloud key</strong>
+        <span>Paste an OpenAI or Claude key for confirmed AI Assist runs.</span>
+      </button>
+    </div>
+
+    <input id="aiAssistMode" type="hidden" value="${esc(mode)}">
+
+    <form class="ai-assist-fields" id="aiAssistSettingsForm" onsubmit="event.preventDefault(); saveAiAssistSettings();">
+      <div class="ai-assist-provider-row" id="aiAssistProviderRow" ${showProvider ? '' : 'hidden'}>
+        <label><span class="label">Provider</span><select id="aiAssistProvider" data-ai-assist-provider>${providerSelectOptions}</select></label>
+        <p id="aiAssistProviderHint" class="receipt-note">${esc(currentProvider.detail || '')}</p>
+      </div>
+
+      <label id="aiAssistApiKeyRow" ${showApiKey ? '' : 'hidden'}><span class="label">API key</span><input id="aiAssistApiKey" type="password" autocomplete="off" value="" placeholder="${esc(keyPlaceholder)}"></label>
+      <input id="aiAssistClearKey" type="hidden" value="0">
+      <p id="aiAssistKeyStatus" class="receipt-note" ${showApiKey ? '' : 'hidden'}>${keySaved ? 'Key saved locally. Leave blank to keep it, or paste a new key to replace it.' : 'Paste once. AIWatcher stores it locally and redacts it from the UI/API.'}</p>
+
+      <div id="aiAssistSetupBox" class="ai-assist-setup-box">
+        <div>
+          <strong id="aiAssistSetupTitle">No setup needed</strong>
+          <p id="aiAssistSetupCopy">Save keeps AIWatcher on local rules. No provider, key, or model call is used.</p>
+        </div>
+        <button id="aiAssistForgetKey" class="btn-quiet" onclick="clearAiAssistSavedKey()" type="button" ${keySaved ? '' : 'hidden'}>Forget key</button>
+      </div>
+
+      <label id="aiAssistBaseUrlRow" ${showEndpoint ? '' : 'hidden'}><span class="label">Endpoint URL</span><input id="aiAssistBaseUrl" value="${esc(c.base_url || '')}" placeholder="OpenAI-compatible /v1 endpoint"></label>
+
+      <details class="ai-assist-advanced">
+        <summary>Advanced options</summary>
+        <label><span class="label">Model, optional</span><input id="aiAssistModel" value="${esc(c.model || '')}" placeholder="Leave blank for provider default"></label>
+        <label><span class="label">Daily cap for cloud mode</span><input id="aiAssistCap" type="number" min="0" step="0.01" value="${esc(c.max_daily_usd ?? 0.25)}"></label>
+        <label><span class="label">Source access</span><select id="aiAssistSourceAccess">
+          <option value="metadata_only" ${c.source_access === 'metadata_only' ? 'selected' : ''}>Metadata only</option>
+          <option value="prompt_opt_in" ${c.source_access === 'prompt_opt_in' ? 'selected' : ''}>Prompt text only after confirmation</option>
+          <option value="source_opt_in" ${c.source_access === 'source_opt_in' ? 'selected' : ''}>Source files only after confirmation</option>
+        </select></label>
+        <label class="check-row"><input id="aiAssistConfirm" type="checkbox" ${c.require_confirmation !== false ? 'checked' : ''}> Ask before every AI Assist run</label>
+        <div class="ai-assist-provider-strip">
+          ${localProviders.map(row => `<span class="provider-chip ${row.available ? 'ready' : ''}">${esc(row.label)}: ${esc(row.detail)}</span>`).join('')}
+          ${cloudProviders.map(row => `<span class="provider-chip ${row.available ? 'ready' : ''}">${esc(row.label)}: ${esc(row.detail || (row.available ? 'key found' : row.secret_env))}</span>`).join('')}
+        </div>
+      </details>
+
+      <div class="copy-row"><button class="btn-primary" type="submit">Save AI Assist settings</button></div>
+      <p class="receipt-note">Used first for ${esc(workflowSummary || 'Fresh Start and Prompt Plan')}. Settings only saves configuration; workflows ask before using a model.</p>
+    </form>
+
+  </div>`;
+}
+
+function setAiAssistPreset(mode, provider) {
+  aiAssistFormDirty = true;
+  const modeEl = document.getElementById('aiAssistMode');
+  const providerEl = document.getElementById('aiAssistProvider');
+  if (modeEl) modeEl.value = mode;
+  if (providerEl) providerEl.value = provider || (mode === 'off' ? 'none' : 'auto');
+  updateAiAssistFormVisibility();
+}
+
+function updateAiAssistFormVisibility() {
+  const modeEl = document.getElementById('aiAssistMode');
+  const mode = (modeEl || {}).value || 'off';
+  if (modeEl && !modeEl.value) modeEl.value = mode;
+  const providerEl = document.getElementById('aiAssistProvider');
+  const provider = providerEl ? providerEl.value : 'none';
+  document.querySelectorAll('.ai-assist-mode-card').forEach(card => {
+    const label = (card.textContent || '').toLowerCase();
+    const selected = (mode === 'off' && label.includes('local rules'))
+      || (mode === 'local' && label.includes('local model'))
+      || (mode === 'cloud' && label.includes('cloud key'));
+    card.classList.toggle('selected', selected);
+  });
+  if (providerEl) {
+    Array.from(providerEl.options).forEach(option => {
+      const modes = String(option.dataset.modes || '').split(',');
+      option.hidden = !modes.includes(mode);
+    });
+    if (mode === 'off') {
+      providerEl.value = 'none';
+      providerEl.disabled = true;
+    } else {
+      providerEl.disabled = false;
+      const selected = providerEl.selectedOptions[0];
+      if (!selected || selected.hidden || providerEl.value === 'none') providerEl.value = 'auto';
+    }
+  }
+  const currentProvider = providerEl ? providerEl.value : provider;
+  const selectedOption = providerEl && providerEl.selectedOptions ? providerEl.selectedOptions[0] : null;
+  const selectedSecret = selectedOption ? String(selectedOption.dataset.secretEnv || '') : '';
+  const keyFound = selectedOption ? selectedOption.dataset.keyFound === '1' : false;
+  const keyConfigured = selectedOption ? selectedOption.dataset.keyConfigured === '1' : false;
+  const checkStatus = selectedOption ? String(selectedOption.dataset.checkStatus || '') : '';
+  const baseUrlRow = document.getElementById('aiAssistBaseUrlRow');
+  if (baseUrlRow) baseUrlRow.hidden = mode === 'off' || currentProvider !== 'openai_compatible';
+  const apiKeyRow = document.getElementById('aiAssistApiKeyRow');
+  if (apiKeyRow) apiKeyRow.hidden = mode !== 'cloud';
+  const clearKey = document.getElementById('aiAssistClearKey');
+  if (clearKey) clearKey.value = '0';
+  const setupBox = document.getElementById('aiAssistSetupBox');
+  const setupTitle = document.getElementById('aiAssistSetupTitle');
+  const setupCopy = document.getElementById('aiAssistSetupCopy');
+  const forgetKey = document.getElementById('aiAssistForgetKey');
+  const keyStatus = document.getElementById('aiAssistKeyStatus');
+  const apiKeyInput = document.getElementById('aiAssistApiKey');
+  if (setupBox && setupTitle && setupCopy) {
+    setupBox.classList.toggle('ready', mode === 'off' || (mode === 'cloud' && keyFound));
+    setupBox.classList.toggle('needs-setup', mode !== 'off' && !(mode === 'cloud' && keyFound));
+    if (mode === 'off') {
+      setupTitle.textContent = 'No setup needed';
+      setupCopy.textContent = 'Save keeps AIWatcher on local rules. No provider, key, or model call is used.';
+      if (forgetKey) forgetKey.hidden = true;
+      if (keyStatus) keyStatus.hidden = true;
+    } else if (mode === 'local') {
+      setupTitle.textContent = currentProvider === 'auto' ? 'Use the detected local runtime' : 'Use this local runtime';
+      setupCopy.textContent = 'Save persists this choice. Start the local model runtime separately when AI Assist workflows need it.';
+      if (forgetKey) forgetKey.hidden = true;
+      if (keyStatus) keyStatus.hidden = true;
+    } else {
+      const secret = selectedSecret || 'OPENAI_API_KEY';
+      const saved = keyConfigured && selectedOption && String(selectedOption.dataset.detail || '').includes('saved locally');
+      if (checkStatus === 'failed') {
+        setupTitle.textContent = 'Cloud key rejected';
+        setupCopy.textContent = 'The provider rejected this key. Paste a replacement and save before using AI Assist.';
+      } else if (checkStatus === 'verified') {
+        setupTitle.textContent = 'Cloud key verified';
+        setupCopy.textContent = 'AIWatcher can use this provider after confirmation and within your daily cap.';
+      } else if (keyConfigured) {
+        setupTitle.textContent = 'Cloud key saved';
+        setupCopy.textContent = 'AIWatcher will test this key on the next confirmed AI Assist run.';
+      } else {
+        setupTitle.textContent = 'Add API key';
+        setupCopy.textContent = 'Paste a key and save. It stays local to this machine.';
+      }
+      if (forgetKey) forgetKey.hidden = !keyConfigured;
+      if (keyStatus) {
+        keyStatus.hidden = false;
+        if (checkStatus === 'failed') {
+          keyStatus.textContent = 'OpenAI/Claude did not accept the saved key. Paste a valid replacement; AIWatcher will not show the key again.';
+        } else if (keyConfigured) {
+          keyStatus.textContent = saved
+            ? 'Key saved locally. Leave blank to keep it, or paste a new key to replace it.'
+            : `${secret} is available in the environment.`;
+        } else {
+          keyStatus.textContent = 'Paste once. AIWatcher stores it locally and redacts it from the UI/API.';
+        }
+      }
+      if (apiKeyInput) {
+        apiKeyInput.placeholder = keyConfigured ? 'Saved. Paste a new key to replace it.' : 'Paste API key';
+      }
+    }
+  }
+  const providerRow = document.getElementById('aiAssistProviderRow');
+  if (providerRow) providerRow.hidden = mode === 'off';
+  const providerHint = document.getElementById('aiAssistProviderHint');
+  if (providerHint && providerEl) {
+    providerHint.textContent = mode === 'off'
+      ? 'AIWatcher will use local deterministic rules.'
+      : (selectedOption || {}).dataset?.detail || '';
+  }
+}
+
+function clearAiAssistSavedKey() {
+  const clearKey = document.getElementById('aiAssistClearKey');
+  const apiKeyInput = document.getElementById('aiAssistApiKey');
+  if (clearKey) clearKey.value = '1';
+  if (apiKeyInput) apiKeyInput.value = '';
+  saveAiAssistSettings();
+}
+
+async function saveAiAssistSettings() {
+  const payload = {
+    mode: document.getElementById('aiAssistMode').value,
+    provider: document.getElementById('aiAssistProvider').value,
+    api_key: document.getElementById('aiAssistApiKey').value,
+    clear_api_key: document.getElementById('aiAssistClearKey').value === '1',
+    model: document.getElementById('aiAssistModel').value,
+    base_url: document.getElementById('aiAssistBaseUrl').value,
+    max_daily_usd: Number(document.getElementById('aiAssistCap').value || 0),
+    source_access: document.getElementById('aiAssistSourceAccess').value,
+    require_confirmation: document.getElementById('aiAssistConfirm').checked,
+  };
+  try {
+    const res = await fetch('/api/ai-assist-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const status = await res.json();
+    if (!res.ok) throw new Error(status.error || 'save failed');
+    aiAssistFormDirty = false;
+    if (currentData) currentData.ai_assist = status;
+    const mount = document.getElementById('aiAssistSettingsMount') || document.getElementById('aiAssistSettings');
+    if (mount) mount.innerHTML = renderAiAssistSettings(status);
+    updateAiAssistFormVisibility();
+    showToast('AI Assist settings saved');
+  } catch (error) {
+    showToast(`Could not save AI Assist settings: ${error.message || 'unknown error'}`, 'error');
+  }
+}
 function renderSetup(rows) {
   if (!rows.length) return '<div class="empty">Setup checklist unavailable.</div>';
   return rows.map((row, index) => `<div class="coverage-card">
@@ -3693,7 +4177,7 @@ function renderControlStrip(data) {
       fresh.innerHTML = `<div class="label">Fresh Start ready</div>
         <div class="value">${esc(bubble.saved_context_label)}</div>
         <div class="sub">context saved if you start fresh &middot;
-          <button class="link-inline" onclick="startFreshFromBubble('${esc(bubble.session_id)}')">copy brief</button></div>`;
+          <button class="link-inline" onclick="startFreshFromBubble('${esc(bubble.session_id)}')">review brief</button></div>`;
     } else { fresh.hidden = true; }
   }
 
@@ -4254,6 +4738,8 @@ let sessionsLoadedForDays = null;
 let reportLoadedForDays = null;
 let reportLoading = false;
 let freshStartReceiptsMarkedViewed = false;
+let activeSettingsPanel = new URLSearchParams(location.search).get('settings') || 'general';
+let aiAssistFormDirty = false;
 // context_health rows, kept so the session drawer can show the health of the
 // session it opened. Watch ranks; the drawer diagnoses -- and the diagnosis
 // lives in this payload, not in /api/session.
@@ -4391,6 +4877,7 @@ function showView(view) {
 }
 function showSettingsPanel(panel) {
   const selected = panel || 'general';
+  activeSettingsPanel = selected;
   document.querySelectorAll('[data-settings-panel-content]').forEach(node => {
     node.hidden = node.dataset.settingsPanelContent !== selected;
   });
@@ -4642,7 +5129,7 @@ function ambientRunning(card, presence) {
     meter: meterSvg([{ value: latest, colour: tone }], marks, trackMax) + ambientScaleLabels(scale),
     sentence: runway + bloat,
     actions: (card.can_handoff
-      ? '<button class="btn-primary" onclick="startFreshFromBubble(\'' + esc(card.session_id) + '\')">Copy Fresh Start brief</button>'
+      ? '<button class="btn-primary" onclick="startFreshFromBubble(\'' + esc(card.session_id) + '\')">Review Fresh Start</button>'
       : '')
       + '<button class="btn-quiet" onclick="selectSession(\'' + esc(card.session_id) + '\')">Inspect session</button>',
     facts: [
@@ -4929,6 +5416,7 @@ async function loadOnce(resetDetail, forceRefresh) {
   try {
     const summaryRes = await fetch(`/api/summary?days=${days}${forceRefresh ? '&refresh=1' : ''}`);
     data = await summaryRes.json();
+    currentData = data;
   } catch (error) {
     // Keep trying on the normal cadence: a dashboard that gives up after one
     // failed poll looks identical to one showing current data.
@@ -5043,6 +5531,13 @@ async function loadOnce(resetDetail, forceRefresh) {
   updateSortIndicators('change', changeSort, ['committed_at', 'project', 'cost_usd', 'lines_changed', 'usd_per_line', 'survival_pct', 'usd_per_surviving_line']);
   const coverage = data.coverage || [];
   document.getElementById('coverageRowsSettings').innerHTML = renderCoverage(coverage);
+  const aiAssistNode = document.getElementById('aiAssistSettingsMount') || document.getElementById('aiAssistSettings');
+  if (aiAssistNode && !(aiAssistFormDirty && activeSettingsPanel === 'ai')) {
+    aiAssistNode.innerHTML = renderAiAssistSettings(data.ai_assist || {});
+    updateAiAssistFormVisibility();
+  }
+  const settingsVisible = !document.getElementById('view-setup').hidden;
+  if (settingsVisible) showSettingsPanel(activeSettingsPanel);
   // Counts on both headings. Setup steps is still folded, and a folded section
   // with a bare title hides whether there is anything inside. Coverage is not
   // folded any more -- it sits under the privacy card, whose promise it

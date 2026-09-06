@@ -504,10 +504,10 @@
       <section id="settings-panel-ai" class="settings-panel" data-settings-panel-content="ai" hidden>
         <div class="settings-card">
           <div class="section-title compact-title">
-            <div><h3>AI Assist</h3><p>Optional model help for Fresh Start and second opinion workflows.</p></div>
-            <span class="note-chip">Optional</span>
+            <div><h3>AI Assist</h3><p>Optional local or cloud model help for Fresh Start and Plan. AIWatcher works without this.</p></div>
+            <span class="note-chip local">Off by default</span>
           </div>
-          <div id="aiAssistSettingsMount" class="empty">AI Assist configuration can appear here when enabled.</div>
+          <div id="aiAssistSettingsMount" class="empty">Loading AI Assist configuration...</div>
         </div>
       </section>
 
@@ -567,7 +567,7 @@
 <div class="drawer-backdrop" id="drawerBackdrop" onclick="closeDrawer()"></div>
 <aside class="drawer" id="detailDrawer" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="drawerTitle">
   <div class="drawer-header">
-    <div><h2 id="drawerTitle">Work detail</h2><p>Local metadata only</p></div>
+    <div><h2 id="drawerTitle">Work detail</h2><p id="drawerSubtitle">Local metadata only</p></div>
     <button class="btn-quiet" onclick="closeDrawer()" aria-label="Close work detail">Close</button>
   </div>
   <div class="drawer-content" id="detailContent"><div class="loading">Select a project or session to inspect.</div></div>

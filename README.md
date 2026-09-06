@@ -332,6 +332,56 @@ Command awareness follows the same loop:
 - **Improve:** the Console shows whether a tool is command-protected,
   warn-only, observed-only, or unsupported so setup gaps are obvious.
 
+### Optional AI Assist
+
+AIWatcher Local does not need an OpenAI, Claude, or local-model key to be
+useful. The default mode is **Local rules only**: prompt gates, Fresh Start,
+session health, receipts, spend, and outcomes are all computed from local
+metadata and deterministic rules.
+
+If you want model help later, open **Settings -> AI Assist**. The page is a
+short chooser: pick a mode, pick a provider when needed, paste a key for cloud
+mode, add a custom endpoint URL only if you are using one, then save.
+
+- **Local rules:** no model calls and no extra AI spend.
+- **Local model:** use a model runtime already on your machine, such as
+  Ollama, LM Studio, llama.cpp, or a custom local OpenAI-compatible base URL.
+  AIWatcher detects availability but does not download model weights.
+- **Cloud key:** paste and save your own OpenAI or Claude key, or start
+  AIWatcher with `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` in the environment.
+  A hosted OpenAI-compatible endpoint can use a saved custom key or
+  `AIWATCHER_AI_API_KEY` plus its base URL. Saved keys stay in AIWatcher local
+  state on this machine and are redacted from dashboard/API responses. A saved
+  key is marked as configured first, then verified or rejected only after an
+  explicit AI Assist workflow call.
+
+AI Assist is deliberately aimed at high-leverage workflows first: improving a
+Fresh Start brief, composing safe Optimize cleanup prompts, and eventually
+tightening a broad Prompt Plan. Ask AIWatcher remains a local evidence navigator
+until a stronger user need is proven.
+
+The first model-backed workflow is **Fresh Start handoff composition**.
+AIWatcher always builds the free local brief first. If AI Assist is configured
+and not rejected by the provider, the Fresh Start drawer leads with an explicit
+**Compose AI handoff** action.
+That action makes one bounded provider call, turns local handoff evidence into
+a compact paste-ready brief with work done, context to preserve, next ask, and
+acceptance checks, and records a local receipt with provider/model and
+token-count metadata when the provider returns it. It does not change local
+evidence, identity confidence, or saved-token claims. Prompt excerpts are sent
+only when both the drawer checkbox and the saved AI Assist source-access setting
+allow them.
+
+Optimize cleanup follows the same rule. Each Optimize card has a free **Copy
+cleanup prompt** action built from local metadata. If AI Assist is configured
+and not rejected by the provider, the card also offers **Compose AI cleanup
+prompt**. That makes one confirmed,
+bounded model call and caches the result by candidate/evidence hash so repeated
+clicks do not spend again for unchanged evidence. The generated prompt helps a
+user or another AI session classify stale chats, worktrees, and runtimes into
+safe review buckets, but it never deletes files, kills processes, archives
+sessions, or authorizes destructive cleanup.
+
 The Console tabs are:
 
 - **Home:** the few actions most likely to save context, reduce rework, or

@@ -22,6 +22,7 @@ from aiwatcher_cli.pricing import estimate_cost
 from aiwatcher_cli.ui import money
 from aiwatcher_cli.local_state import (
     link_handoff_decision_next_session,
+    recent_ai_assist_runs,
     recent_handoff_decisions,
     record_command_decision,
     record_evidence_snapshot,
@@ -170,6 +171,36 @@ class DashboardServeTests(unittest.TestCase):
                 thread.join(timeout=5)
                 server.server_close()
 
+    def test_handoff_ai_assist_post_reaches_builder_with_prompt_opt_in(self) -> None:
+        server, thread, base = self._serve_one()
+        payload = json.dumps({
+            "session_id": "sess-1",
+            "target": "codex",
+            "prompt": True,
+            "type": "coding",
+            "objective": "Continue the AI Assist handoff.",
+        }).encode("utf-8")
+        http_request = request.Request(
+            f"{base}/api/handoff-ai-assist",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with patch.object(ui, "build_ai_assisted_handoff_detail", return_value={"session_id": "sess-1", "ok": True}) as builder:
+            try:
+                with request.urlopen(http_request, timeout=5) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
+        self.assertTrue(body["ok"])
+        builder.assert_called_once()
+        args, kwargs = builder.call_args
+        self.assertEqual(args[:4], ("sess-1", 30, "codex", True))
+        self.assertEqual(kwargs["handoff_type"], "coding")
+        self.assertEqual(kwargs["objective"], "Continue the AI Assist handoff.")
+
     def test_update_status_endpoint_reports_source_updates(self) -> None:
         server, thread, base = self._serve_one()
         payload = {
@@ -286,6 +317,34 @@ class DashboardServeTests(unittest.TestCase):
             finally:
                 thread.join(timeout=5)
                 server.server_close()
+
+    def test_ai_assist_config_post_is_routable_and_sanitized(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                server, thread, base = self._serve_one()
+                payload = json.dumps({
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "api_key": "sk-local-test",
+                }).encode("utf-8")
+                http_request = request.Request(
+                    f"{base}/api/ai-assist-config",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                try:
+                    with request.urlopen(http_request, timeout=5) as response:
+                        body = json.loads(response.read().decode("utf-8"))
+                finally:
+                    thread.join(timeout=5)
+                    server.server_close()
+
+        self.assertEqual(body["config"]["mode"], "cloud")
+        self.assertEqual(body["config"]["provider"], "openai")
+        self.assertTrue(body["config"]["stored_keys"]["openai"])
+        self.assertNotIn("sk-local-test", json.dumps(body))
 
     def test_companion_group_snooze_records_project_cooldowns(self) -> None:
         server, thread, base = self._serve_one()
@@ -442,7 +501,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Fresh Start", ui.HTML)
         self.assertIn("renderIdentityStrip", ui.HTML)
         self.assertIn("identity_label", ui.HTML)
-        self.assertIn("Copy it into a fresh chat only after the identity below matches", ui.HTML)
+        self.assertIn("Review the handoff, then copy it into a fresh", ui.HTML)
         self.assertIn("copyFreshStartFromDrawer", ui.HTML)
         self.assertIn("const canOpenRuntime = !!runtime.available", ui.HTML)
         self.assertNotIn("runtime.available && runtime.level !== 'app'", ui.HTML)
@@ -2194,6 +2253,11 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Do not stop any running process", inventory["top"]["checklist"])
         self.assertIn("latest branch, PR, commit, or handoff receipt", inventory["top"]["checklist"])
         self.assertIn("/repo/app", inventory["top"]["checklist"])
+        self.assertIn("cleanup_prompt", inventory["top"])
+        self.assertIn("Full path: /repo/app", inventory["top"]["cleanup_prompt"])
+        self.assertIn("Tool: codex-cli", inventory["top"]["cleanup_prompt"])
+        self.assertIn("Return these buckets", inventory["top"]["cleanup_prompt"])
+        self.assertIn("evidence_hash", inventory["top"])
 
     def test_optimize_inventory_surfaces_stale_runtime_review_plan(self) -> None:
         runtime = SimpleNamespace(stale=True, rss_kb=147251)
@@ -2220,6 +2284,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Reward: Potential local reward", inventory["top"]["checklist"])
         self.assertIn("aiwatcher processes --stale-only", inventory["top"]["checklist"])
         self.assertIn("Unknown", inventory["top"]["checklist"])
+        self.assertIn("Copy safe review steps", inventory["top"]["action_label"])
+        self.assertIn("Do not kill processes", inventory["top"]["cleanup_prompt"])
 
     def test_optimize_inventory_surfaces_old_agent_scratch_workspace(self) -> None:
         now = datetime.now(timezone.utc)
@@ -2281,6 +2347,123 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual([row["path"] for row in rows], [str(codex_workspace.resolve())])
         self.assertEqual(rows[0]["source"], "scratch_scan")
         self.assertTrue(rows[0]["agent_owned"])
+
+    def test_ai_assisted_optimize_cleanup_prompt_uses_cache(self) -> None:
+        candidate = {
+            "id": "sessions:/repo/app",
+            "kind": "session_cluster",
+            "title": "Archive completed or stale chats",
+            "project": "repo/app",
+            "project_full": "/repo/app",
+            "summary": "Three inactive sessions are carrying context.",
+            "why_inactive": "Last local activity was 8h ago.",
+            "evidence_label": "Observed",
+            "evidence": "Observed from local session timestamps.",
+            "impact_label": "~780.0k context at risk",
+            "session_count": 3,
+            "tool": "codex-cli",
+            "last_activity": "2026-09-05T12:00:00+00:00",
+            "updated_label": "8h ago",
+        }
+        candidate["cleanup_prompt"] = ui._optimize_candidate_prompt(candidate)
+        candidate["evidence_hash"] = ui._optimize_candidate_evidence_hash(candidate)
+        config = {
+            "mode": "cloud",
+            "provider": "openai",
+            "max_daily_usd": 0.25,
+            "source_access": "metadata_only",
+            "enabled_workflows": ["optimize_cleanup"],
+            "api_keys": {"openai": "sk-secret"},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "build_summary_cached", return_value={"optimize": {"candidates": [candidate]}}),
+                patch.object(ui, "ai_assist_config", return_value=config),
+                patch.object(ui, "build_ai_assist_status", return_value={
+                    "ready": True,
+                    "mode": "cloud",
+                    "active_label": "Cloud AI Assist",
+                    "config": {"source_access": "metadata_only", "require_confirmation": True},
+                }),
+                patch.object(ui, "compose_optimize_cleanup_prompt", return_value={
+                    "status": "used",
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "model": "gpt-test",
+                    "input_chars": 700,
+                    "output_chars": 320,
+                    "source_access": "metadata_only",
+                    "text": "AIWatcher AI-assisted Optimize cleanup prompt\n\nNext action\n- Review only.",
+                    "structured": {"next_action": ["Review only."]},
+                    "usage": {"prompt_tokens": 120, "completion_tokens": 60},
+                }) as compose,
+            ):
+                first = ui.build_ai_assisted_optimize_cleanup_prompt("sessions:/repo/app", days=7)
+                second = ui.build_ai_assisted_optimize_cleanup_prompt("sessions:/repo/app", days=7)
+                runs = recent_ai_assist_runs(limit=5)
+
+        self.assertEqual(first["ai_assist_result"]["status"], "used")
+        self.assertEqual(second["ai_assist_result"]["status"], "cached")
+        self.assertEqual(compose.call_count, 1)
+        self.assertIn("AIWatcher AI-assisted Optimize cleanup prompt", second["prompt"])
+        self.assertEqual(runs[0]["workflow"], "optimize_cleanup")
+        self.assertTrue(runs[0]["cache_hit"])
+        self.assertEqual(runs[1]["evidence_hash"], candidate["evidence_hash"])
+        self.assertNotIn("sk-secret", json.dumps(runs))
+
+    def test_ai_assist_provider_auth_failure_marks_key_rejected(self) -> None:
+        candidate = {
+            "id": "sessions:/repo/app",
+            "kind": "session_cluster",
+            "title": "Archive completed or stale chats",
+            "project": "repo/app",
+            "project_full": "/repo/app",
+            "summary": "Three inactive sessions are carrying context.",
+            "evidence_label": "Observed",
+            "evidence": "Observed from local session timestamps.",
+            "impact_label": "~780.0k context at risk",
+            "session_count": 3,
+            "tool": "codex-cli",
+            "last_activity": "2026-09-05T12:00:00+00:00",
+        }
+        candidate["cleanup_prompt"] = ui._optimize_candidate_prompt(candidate)
+        candidate["evidence_hash"] = ui._optimize_candidate_evidence_hash(candidate)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}, clear=True),
+                patch.object(ui, "build_summary_cached", return_value={"optimize": {"candidates": [candidate]}}),
+                patch.object(
+                    ui,
+                    "compose_optimize_cleanup_prompt",
+                    side_effect=ui.AiAssistUnavailable(
+                        "AI Assist provider rejected the API key or credentials (HTTP 401). "
+                        "Paste a valid replacement key in Settings -> AI Assist, then try again.",
+                        status_code=401,
+                        provider_code="invalid_api_key",
+                    ),
+                ),
+            ):
+                ui.record_ai_assist_config({
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "api_key": "sk-secret-value",
+                    "enabled_workflows": ["optimize_cleanup"],
+                })
+                result = ui.build_ai_assisted_optimize_cleanup_prompt("sessions:/repo/app", days=7)
+                config = ui.ai_assist_config()
+                runs = recent_ai_assist_runs(limit=1)
+
+        self.assertEqual(result["ai_assist_result"]["status"], "failed")
+        self.assertEqual(result["ai_assist"]["status_label"], "Key rejected")
+        self.assertFalse(result["ai_assist"]["ready"])
+        self.assertEqual(config["provider_checks"]["openai"]["status"], "failed")
+        self.assertEqual(config["provider_checks"]["openai"]["code"], "invalid_api_key")
+        self.assertIn("provider rejected the API key", result["ai_assist_result"]["reason"])
+        self.assertNotIn("sk-secret-value", json.dumps(result))
+        self.assertNotIn("sk-secret-value", json.dumps(runs))
 
     def test_detected_tools_are_listed_without_measured_spend(self) -> None:
         rows = [{
@@ -2870,6 +3053,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(summary["context_health"][0]["action"]["label"], "Start fresh")
         self.assertEqual(summary["handoff_bubble"]["session_id"], "bloated")
         self.assertIn("Fresh Start recommended", summary["handoff_bubble"]["title"])
+        self.assertEqual(summary["ai_assist"]["active_label"], "Local rules only")
         # Measured cache reads on the latest turn, not latest_turn_tokens * bloat_ratio.
         self.assertEqual(summary["handoff_bubble"]["expected_saved_context_tokens"], 220_000)
         self.assertEqual(summary["handoff_decisions"], [])
@@ -3163,6 +3347,28 @@ class DashboardWindowTests(unittest.TestCase):
                 payload["summary_complete"] = True
                 cache_path.write_text(json.dumps(payload), encoding="utf-8")
                 self.assertIsNotNone(ui._read_summary_disk_cache(7))
+
+    def test_marked_cached_summary_uses_current_ai_assist_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}, clear=True):
+                record = ui.record_ai_assist_config({
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "api_key": "sk-local-test",
+                })
+                marked = ui._mark_summary_cache(
+                    {"summary_complete": True, "ai_assist": {"mode": "off"}},
+                    status="stale",
+                    source="disk",
+                    refreshing=False,
+                )
+
+        self.assertEqual(record["mode"], "cloud")
+        self.assertEqual(marked["ai_assist"]["mode"], "cloud")
+        self.assertEqual(marked["ai_assist"]["provider"], "openai")
+        self.assertTrue(marked["ai_assist"]["config"]["stored_keys"]["openai"])
+        self.assertNotIn("sk-local-test", json.dumps(marked))
 
     def test_shared_refresh_scans_once_and_materializes_all_windows(self) -> None:
         now = datetime.now(timezone.utc)
@@ -3709,6 +3915,161 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Continuation type: Bug bash continuation.", capsule["next_brief"])
         self.assertIn("Reproduce and fix", capsule["next_brief"])
         self.assertIn("Keep privacy opt-in.", capsule["next_brief"])
+
+    def test_ai_assisted_handoff_can_reuse_visible_brief_without_rescanning_events(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="ai-fast",
+            tool="claude-code",
+            surface="desktop",
+            project_path="/repo/fast",
+            started_at=now - timedelta(hours=3),
+            updated_at=now - timedelta(minutes=7),
+            tokens_in=90_000,
+            tokens_out=4_000,
+            cost_usd=0.34,
+        )
+        visible_brief = "\n".join([
+            "AIWatcher Fresh Start brief",
+            "",
+            "Workspace",
+            "- Project: /repo/fast",
+            "",
+            "Local evidence to inspect",
+            "- Changed files: aiwatcher_cli/web/index.js",
+        ])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with ui._SUMMARY_CACHE_LOCK:
+                ui._SESSION_INDEX.clear()
+                ui._SUMMARY_CACHE.clear()
+            ui._index_sessions([row])
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all_events", side_effect=AssertionError("visible brief should skip full event enrichment")),
+                patch.object(ui, "safe_runtime_processes", return_value=[]),
+                patch.object(ui, "ai_assist_config", return_value={
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "max_daily_usd": 0.25,
+                    "source_access": "metadata_only",
+                    "enabled_workflows": ["fresh_start"],
+                    "api_keys": {"openai": "sk-secret"},
+                }),
+                patch.object(ui, "improve_fresh_start_brief", return_value={
+                    "status": "used",
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "model": "gpt-test",
+                    "input_chars": len(visible_brief),
+                    "output_chars": 80,
+                    "source_access": "metadata_only",
+                    "text": "AIWatcher AI-assisted Fresh Start brief\n\nNext ask\n- Inspect aiwatcher_cli/web/index.js first.",
+                    "structured": {"next_ask": "Inspect aiwatcher_cli/web/index.js first."},
+                    "usage": {"prompt_tokens": 150, "completion_tokens": 50},
+                }) as improve,
+            ):
+                capsule = ui.build_ai_assisted_handoff_detail(
+                    "ai-fast",
+                    days=7,
+                    target="claude",
+                    include_prompt_excerpt=False,
+                    local_brief_override=visible_brief,
+                )
+
+        self.assertEqual(capsule["ai_assist_result"]["status"], "used")
+        self.assertIn("Inspect aiwatcher_cli/web/index.js first", capsule["next_brief"])
+        self.assertEqual(improve.call_args.kwargs["local_brief"], visible_brief)
+        self.assertEqual(capsule["enrichment_status"], "client_handoff_brief")
+
+    def test_ai_assisted_handoff_composes_paste_ready_brief_and_receipt(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="ai-brief",
+            tool="codex-cli",
+            project_path="/repo/ai",
+            started_at=now - timedelta(hours=2),
+            updated_at=now - timedelta(minutes=5),
+            tokens_in=160_000,
+            tokens_out=10_000,
+            cost_usd=0.9,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with ui._SUMMARY_CACHE_LOCK:
+                ui._SESSION_INDEX.clear()
+                ui._SUMMARY_CACHE.clear()
+            ui._index_sessions([row])
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all_events", return_value=[]),
+                patch.object(ui, "safe_runtime_processes", return_value=[]),
+                patch.object(ui, "ai_assist_config", return_value={
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "max_daily_usd": 0.25,
+                    "source_access": "metadata_only",
+                    "enabled_workflows": ["fresh_start"],
+                    "api_keys": {"openai": "sk-secret"},
+                }),
+                patch.object(ui, "improve_fresh_start_brief", return_value={
+                    "status": "used",
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "model": "gpt-test",
+                    "input_chars": 1200,
+                    "output_chars": 240,
+                    "source_access": "metadata_only",
+                    "text": "\n".join([
+                        "AIWatcher AI-assisted Fresh Start brief",
+                        "",
+                        "Goal",
+                        "- Validate Fresh Start.",
+                        "",
+                        "What appears done",
+                        "- AI Assist settings are configured.",
+                        "",
+                        "Next ask",
+                        "- Inspect only the handoff flow and verify the smallest checkpoint.",
+                    ]),
+                    "structured": {
+                        "next_ask": "Inspect only the handoff flow and verify the smallest checkpoint.",
+                    },
+                    "usage": {"prompt_tokens": 300, "completion_tokens": 80, "raw": "ignored"},
+                }) as improve,
+            ):
+                first_capsule = ui.build_ai_assisted_handoff_detail(
+                    "ai-brief",
+                    days=7,
+                    target="codex",
+                    include_prompt_excerpt=True,
+                )
+                capsule = ui.build_ai_assisted_handoff_detail(
+                    "ai-brief",
+                    days=7,
+                    target="codex",
+                    include_prompt_excerpt=True,
+                )
+                runs = recent_ai_assist_runs()
+
+        self.assertEqual(first_capsule["ai_assist_result"]["status"], "used")
+        self.assertEqual(capsule["ai_assist_result"]["status"], "cached")
+        self.assertEqual(improve.call_count, 1)
+        self.assertIn("AIWatcher AI-assisted Fresh Start brief", capsule["next_brief"])
+        self.assertIn("What appears done", capsule["next_brief"])
+        self.assertIn("AI Assist receipt", capsule["next_brief"])
+        self.assertIn("local_next_brief", capsule)
+        self.assertFalse(capsule["include_prompt_excerpt"])
+        self.assertTrue(capsule["ai_assist_prompt_excerpt_requested"])
+        self.assertFalse(capsule["ai_assist_prompt_excerpt_included"])
+        self.assertIn("local session identity, token/cost totals, files, commits, outcomes, and proof claims remain authoritative", capsule["next_brief"])
+        self.assertEqual(runs[0]["workflow"], "fresh_start")
+        self.assertEqual(runs[0]["status"], "used")
+        self.assertTrue(runs[0]["cache_hit"])
+        self.assertEqual(runs[1]["status"], "used")
+        self.assertFalse(runs[1]["cache_hit"])
+        self.assertEqual(runs[1]["usage"]["prompt_tokens"], 300)
+        self.assertNotIn("sk-secret", json.dumps(runs))
 
     def test_demo_handoff_is_seeded_privacy_safe_and_not_live(self) -> None:
         capsule = ui.build_demo_handoff_detail(

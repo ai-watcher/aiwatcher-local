@@ -452,6 +452,15 @@ What to check:
 - The same intervention should not appear simultaneously as a native panel,
   browser companion, and OS notification. Native UI is preferred, with browser
   fallback only when native UI is unavailable.
+- AI Assist should be visible in Settings but optional. Default mode is local
+  rules only. Local model assist may use an already-running provider such as
+  Ollama, LM Studio, llama.cpp, or a custom local OpenAI-compatible base URL;
+  cloud assist may use a pasted OpenAI/Claude/custom key or environment keys
+  (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `AIWATCHER_AI_API_KEY`). Saved keys
+  stay in local AIWatcher state, are redacted from dashboard/API responses, and
+  can be forgotten from Settings. AIWatcher should not make hidden background
+  model calls and should use assist first for Fresh Start and Prompt Plan rather
+  than for a generic chat feature.
 - `resume`/`handoff` without `--include-prompt-excerpt` should not contain
   prompt text; with it, the brief should contain a labeled excerpt and nothing
   else in the surrounding output should change.

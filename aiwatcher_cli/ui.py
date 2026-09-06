@@ -22,6 +22,12 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
 from . import analyst, prompt_signals, statusline
+from .ai_assist import (
+    AiAssistUnavailable,
+    build_ai_assist_status,
+    compose_optimize_cleanup_prompt,
+    improve_fresh_start_brief,
+)
 from .cli import (
     SEARCH_RANK_FIELDS,
     SEARCH_RANK_TOPIC,
@@ -52,6 +58,8 @@ from .local_state import (
     VALID_OUTCOMES,
     active_command_gate,
     active_prompt_gate,
+    ai_assist_cache_get,
+    ai_assist_config,
     analyst_consent,
     analyst_contents_allowed,
     analyst_month_spend,
@@ -62,6 +70,7 @@ from .local_state import (
     outcome_counts,
     outcomes_for_sessions,
     recent_ambient_interventions,
+    recent_ai_assist_runs,
     recent_command_decisions,
     recent_handoff_decisions,
     recent_interventions,
@@ -72,6 +81,10 @@ from .local_state import (
     mark_recent_handoff_receipts_viewed,
     record_companion_skip,
     record_ambient_intervention_action,
+    record_ai_assist_cache,
+    record_ai_assist_config,
+    record_ai_assist_provider_check,
+    record_ai_assist_run,
     record_analyst_consent,
     record_analyst_contents,
     record_analyst_run,
@@ -80,6 +93,7 @@ from .local_state import (
     record_evidence_snapshot,
     record_outcome,
     record_ui_server,
+    hash_prompt,
     state_path,
 )
 from .outcome_evidence import VALID_EVIDENCE_OUTCOMES, build_outcome_evidence, evidence_for_sessions
@@ -917,6 +931,120 @@ def _optimize_candidate_checklist(item: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def _optimize_candidate_prompt(item: dict[str, object]) -> str:
+    project = str(item.get("project") or "Local machine")
+    project_full = str(item.get("project_full") or "")
+    full_path = project_full or "No single filesystem path; review local machine/runtime evidence."
+    title = str(item.get("title") or "Review workspace")
+    kind = str(item.get("kind") or "unknown")
+    tool_value = item.get("tool") or item.get("tools") or "local AI metadata"
+    if isinstance(tool_value, list):
+        tool = ", ".join(str(value) for value in tool_value if value) or "local AI metadata"
+    else:
+        tool = str(tool_value or "local AI metadata")
+    last_activity = str(item.get("last_activity") or item.get("updated_label") or "unknown")
+    session_count = str(item.get("session_count") if item.get("session_count") is not None else "unknown")
+    impact = str(item.get("impact_label") or "No savings claim")
+    evidence_label = str(item.get("evidence_label") or "Observed/inferred")
+    evidence = str(item.get("evidence") or "Local metadata only.")
+    summary = str(item.get("summary") or item.get("why_inactive") or "AIWatcher found local cleanup evidence.")
+    safe_steps = item.get("safe_review_steps")
+    review_steps = [str(step) for step in safe_steps if step] if isinstance(safe_steps, list) else []
+    lines = [
+        "AIWatcher Optimize cleanup prompt",
+        "",
+        "You are reviewing a local AI work cleanup candidate. Classify it, but do not perform cleanup.",
+        "",
+        "Candidate evidence",
+        f"- Title: {title}",
+        f"- Type: {kind}",
+        f"- Project: {project}",
+        f"- Full path: {full_path}",
+        f"- Last activity: {last_activity}",
+        f"- Session count: {session_count}",
+        f"- Tool: {tool}",
+        f"- Impact signal: {impact}",
+        f"- Evidence label: {evidence_label}",
+        f"- Evidence: {evidence}",
+        f"- Reason surfaced: {summary}",
+        "",
+        "Return these buckets",
+        "- Safe to archive/review: only items you can justify after checking the owning app, git worktree, or runtime.",
+        "- Keep active: anything likely still needed, live, recently touched, or linked to current work.",
+        "- Unknown: anything whose identity, ownership, path, or status is not proven.",
+        "- Next action: one small verification step before any user action.",
+        "",
+        "Guardrails",
+        "- Do not delete files or folders.",
+        "- Do not kill processes.",
+        "- Do not archive chats or sessions automatically.",
+        "- Do not rewrite git history, force push, or remove worktrees from this prompt.",
+        "- If evidence is uncertain, ask the user to verify in the owning app/tool.",
+    ]
+    if review_steps:
+        lines.extend(["", "Safe review steps from AIWatcher", *[f"- {step}" for step in review_steps]])
+    lines.extend([
+        "",
+        "Evidence boundary",
+        "- This prompt uses local metadata only.",
+        "- Do not invent prompt text, source code content, costs, saved tokens, or outcomes.",
+    ])
+    return "\n".join(lines)
+
+
+def _optimize_candidate_evidence_hash(item: dict[str, object]) -> str:
+    evidence = {
+        key: item.get(key)
+        for key in (
+            "id",
+            "kind",
+            "project_full",
+            "last_activity",
+            "updated_label",
+            "session_count",
+            "tool",
+            "tools",
+            "impact_label",
+            "evidence_label",
+            "evidence",
+            "summary",
+            "why_inactive",
+        )
+    }
+    return hash_prompt(json.dumps(evidence, sort_keys=True, default=str))
+
+
+def _fresh_start_evidence_hash(
+    capsule: dict[str, object],
+    *,
+    source_access: str = "metadata_only",
+) -> str:
+    evidence = {
+        "session_id": capsule.get("session_id"),
+        "project": capsule.get("project"),
+        "project_reliable": capsule.get("project_reliable"),
+        "tool": capsule.get("tool"),
+        "model": capsule.get("model"),
+        "target": capsule.get("target"),
+        "handoff_type": capsule.get("handoff_type"),
+        "objective": capsule.get("objective"),
+        "source_refs": capsule.get("source_refs"),
+        "constraints": capsule.get("constraints"),
+        "acceptance_criteria": capsule.get("acceptance_criteria"),
+        "updated_at": capsule.get("updated_at"),
+        "usage": capsule.get("usage"),
+        "outcome": capsule.get("outcome"),
+        "evidence": capsule.get("evidence"),
+        "warnings": capsule.get("warnings"),
+        "runtime_attachment": capsule.get("runtime_attachment"),
+        "same_project_session_count": capsule.get("same_project_session_count"),
+        "include_prompt_excerpt": capsule.get("include_prompt_excerpt"),
+        "source_access": source_access,
+        "next_brief": capsule.get("next_brief"),
+    }
+    return hash_prompt(json.dumps(evidence, sort_keys=True, default=str))
+
+
 def _optimize_checklist(candidates: list[dict[str, object]]) -> str:
     lines = [
         "AIWatcher Optimize Workspace review",
@@ -1050,6 +1178,9 @@ def build_optimize_inventory(
             "tokens_at_risk": tokens,
             "session_count": len(inactive),
             "completed_count": completed,
+            "tool": ", ".join(tools[:3]) if tools else "local AI tools",
+            "tools": tools,
+            "last_activity": latest.isoformat() if latest else None,
             "updated_label": latest_label,
             "action_label": "Copy cleanup prompt",
         })
@@ -1083,6 +1214,8 @@ def build_optimize_inventory(
             "impact_label": f"~{compact_int(tokens)} context at risk" if tokens else None,
             "tokens_at_risk": tokens,
             "session_count": 1,
+            "tool": "AIWatcher Fresh Start receipt",
+            "last_activity": created_at.isoformat() if created_at else None,
             "updated_label": _elapsed_label(created_at, now=now),
             "action_label": "Open Fresh Start receipts",
             "view": "receipts",
@@ -1135,6 +1268,8 @@ def build_optimize_inventory(
             "tokens_at_risk": 0,
             "session_count": len(related_sessions),
             "updated_label": _elapsed_label(latest, now=now) if latest else _elapsed_label(mtime, now=now) if isinstance(mtime, datetime) else "no recent session",
+            "tool": "git worktree" if source == "git_worktree" else "local scratch workspace",
+            "last_activity": latest.isoformat() if latest else mtime.isoformat() if isinstance(mtime, datetime) else None,
             "action_label": "Copy cleanup prompt",
         })
 
@@ -1168,6 +1303,8 @@ def build_optimize_inventory(
             "tokens_at_risk": 0,
             "rss_kb": rss_kb,
             "session_count": len(stale_processes),
+            "tool": "local process inventory",
+            "last_activity": "now",
             "updated_label": "now",
             "action_label": "Copy safe review steps",
             "review_command": review_command,
@@ -1187,6 +1324,8 @@ def build_optimize_inventory(
     candidates.sort(key=lambda item: (int(item.get("tokens_at_risk") or 0), int(item.get("session_count") or 0)), reverse=True)
     for item in candidates:
         item["checklist"] = _optimize_candidate_checklist(item)
+        item["cleanup_prompt"] = _optimize_candidate_prompt(item)
+        item["evidence_hash"] = _optimize_candidate_evidence_hash(item)
     total_tokens = sum(int(item.get("tokens_at_risk") or 0) for item in candidates)
     total_rss_kb = sum(int(item.get("rss_kb") or 0) for item in candidates)
     if total_tokens:
@@ -1957,6 +2096,13 @@ def build_basic_handoff_detail(
     same_project_count = _same_project_session_count(row)
     project = row.project_path if is_reliable_project_path(row.project_path) else "unknown"
     usage = _usage_summary(row)
+    ai_assist = build_ai_assist_status(ai_assist_config())
+    assist_mode = str(ai_assist.get("mode") or "off")
+    assist_line = (
+        "AI Assist is off; this brief is assembled from local metadata only."
+        if assist_mode == "off" else
+        f"AI Assist mode is {ai_assist.get('active_label')}; only use it after explicit user confirmation."
+    )
     warnings = [
         (
             f"Source session had {usage['tokens_label']} tokens, "
@@ -2024,6 +2170,7 @@ def build_basic_handoff_detail(
         "Workspace",
         f"- Project: {project}",
         f"- Source tool/model: {row.tool} / {row.model or 'unknown'}",
+        f"- AIWatcher assist: {assist_line}",
         "",
         "What remains uncertain",
         "- Detailed git, timeline, and prompt evidence is still loading.",
@@ -2079,6 +2226,7 @@ def build_basic_handoff_detail(
         "constraints": (constraints or [])[:8],
         "acceptance_criteria": (acceptance_criteria or [])[:8],
         "include_prompt_excerpt": False,
+        "ai_assist": ai_assist,
         "costliest_prompt": None,
         "decisions": [],
         "related_workspaces": [],
@@ -2128,7 +2276,360 @@ def build_handoff_detail(
         runtime_attachment=attachment.to_json(),
         same_project_session_count=_same_project_session_count(row),
     )
+    capsule["ai_assist"] = build_ai_assist_status(ai_assist_config())
     return capsule
+
+
+def build_ai_assisted_handoff_detail(
+    session_id: str,
+    days: int = 30,
+    target: str = "generic",
+    include_prompt_excerpt: bool = False,
+    handoff_type: str = "coding",
+    objective: str | None = None,
+    source_refs: list[str] | None = None,
+    constraints: list[str] | None = None,
+    acceptance_criteria: list[str] | None = None,
+    local_brief_override: str | None = None,
+) -> dict[str, object]:
+    """Return a user-requested AI-composed Fresh Start brief with receipt."""
+    config = ai_assist_config()
+    source_access = str(config.get("source_access") or "metadata_only")
+    effective_prompt_excerpt = bool(include_prompt_excerpt and source_access in {"prompt_opt_in", "source_opt_in"})
+    local_brief_from_client = str(local_brief_override or "").strip()
+    if source_access == "metadata_only" and (
+        "Task context (your own prompt" in local_brief_from_client
+        or "Prompt excerpt" in local_brief_from_client
+    ):
+        local_brief_from_client = ""
+    if local_brief_from_client:
+        capsule = build_basic_handoff_detail(
+            session_id,
+            days=days,
+            target=target,
+            handoff_type=handoff_type,
+            objective=objective,
+            source_refs=source_refs,
+            constraints=constraints,
+            acceptance_criteria=acceptance_criteria,
+        )
+        if not capsule.get("error"):
+            capsule["next_brief"] = local_brief_from_client[:20_000]
+            capsule["basic"] = False
+            capsule["enrichment_status"] = "client_handoff_brief"
+    else:
+        capsule = build_handoff_detail(
+            session_id,
+            days=days,
+            target=target,
+            include_prompt_excerpt=effective_prompt_excerpt,
+            handoff_type=handoff_type,
+            objective=objective,
+            source_refs=source_refs,
+            constraints=constraints,
+            acceptance_criteria=acceptance_criteria,
+        )
+    if capsule.get("error"):
+        return capsule
+    capsule["ai_assist_prompt_excerpt_requested"] = bool(include_prompt_excerpt)
+    capsule["ai_assist_prompt_excerpt_included"] = effective_prompt_excerpt
+    if str(config.get("mode") or "off") == "cloud" and float(config.get("max_daily_usd") or 0) <= 0:
+        reason = "Cloud AI Assist daily cap is set to $0.00."
+        record_ai_assist_run(
+            workflow="fresh_start",
+            status="skipped",
+            session_id=session_id,
+            mode="cloud",
+            source_access=str(config.get("source_access") or "metadata_only"),
+            reason=reason,
+        )
+        capsule["ai_assist_result"] = {"status": "skipped", "reason": reason}
+        return capsule
+    local_brief = str(capsule.get("next_brief") or "")
+    capsule["local_next_brief"] = local_brief
+    evidence_hash = _fresh_start_evidence_hash(capsule, source_access=source_access)
+    cached = ai_assist_cache_get("fresh_start", evidence_hash)
+    if cached and cached.get("text"):
+        record = record_ai_assist_run(
+            workflow="fresh_start",
+            status="used",
+            session_id=session_id,
+            mode=str(cached.get("mode") or ""),
+            provider=str(cached.get("provider") or ""),
+            model=str(cached.get("model") or ""),
+            input_chars=len(local_brief),
+            output_chars=len(str(cached.get("text") or "")),
+            source_access=str(cached.get("source_access") or "metadata_only"),
+            reason="User clicked Compose AI handoff on a Fresh Start brief; cached output reused.",
+            usage=cached.get("usage") if isinstance(cached.get("usage"), dict) else {},
+            evidence_hash=evidence_hash,
+            cache_hit=True,
+        )
+        capsule["next_brief"] = str(cached.get("text") or "")
+        capsule["ai_assist_result"] = {
+            "status": "cached",
+            "provider": cached.get("provider"),
+            "model": cached.get("model"),
+            "mode": cached.get("mode"),
+            "source_access": cached.get("source_access"),
+            "input_chars": len(local_brief),
+            "output_chars": len(str(cached.get("text") or "")),
+            "usage": cached.get("usage") if isinstance(cached.get("usage"), dict) else {},
+            "structured": cached.get("structured") if isinstance(cached.get("structured"), dict) else {},
+            "receipt": record,
+            "cache": {"evidence_hash": evidence_hash},
+        }
+        capsule["ai_assist"] = build_ai_assist_status(ai_assist_config())
+        return capsule
+    try:
+        result = improve_fresh_start_brief(config, local_brief=local_brief, timeout=20)
+    except AiAssistUnavailable as exc:
+        provider = str(config.get("provider") or "none")
+        if str(config.get("mode") or "off") == "cloud" and provider in {"openai", "anthropic", "openai_compatible"}:
+            status_value = "failed" if getattr(exc, "status_code", None) in {401, 403} else "untested"
+            try:
+                record_ai_assist_provider_check(
+                    provider,
+                    status_value,
+                    message=str(exc),
+                    code=str(getattr(exc, "provider_code", "") or getattr(exc, "status_code", "") or ""),
+                )
+            except (OSError, ValueError):
+                pass
+        record = record_ai_assist_run(
+            workflow="fresh_start",
+            status="failed",
+            session_id=session_id,
+            mode=str(config.get("mode") or "off"),
+            provider=provider,
+            model=str(config.get("model") or "") or None,
+            source_access=str(config.get("source_access") or "metadata_only"),
+            reason=str(exc),
+        )
+        capsule["ai_assist_result"] = {
+            "status": "failed",
+            "reason": str(exc),
+            "receipt": record,
+        }
+        capsule["ai_assist"] = build_ai_assist_status(ai_assist_config())
+        return capsule
+    composed_brief = str(result.get("text") or "").strip()
+    result_provider = str(result.get("provider") or "")
+    if str(result.get("mode") or "") == "cloud" and result_provider in {"openai", "anthropic", "openai_compatible"}:
+        try:
+            record_ai_assist_provider_check(
+                result_provider,
+                "verified",
+                message="Last AI Assist call succeeded.",
+                code="",
+            )
+        except (OSError, ValueError):
+            pass
+    record = record_ai_assist_run(
+        workflow="fresh_start",
+        status="used",
+        session_id=session_id,
+        mode=str(result.get("mode") or ""),
+        provider=str(result.get("provider") or ""),
+        model=str(result.get("model") or ""),
+        input_chars=int(result.get("input_chars") or 0),
+        output_chars=int(result.get("output_chars") or 0),
+        source_access=str(result.get("source_access") or "metadata_only"),
+        reason="User clicked Improve with AI Assist on a Fresh Start brief.",
+        usage=result.get("usage") if isinstance(result.get("usage"), dict) else {},
+        evidence_hash=evidence_hash,
+        cache_hit=False,
+    )
+    receipt_text = "\n".join([
+        "AI Assist receipt",
+        f"- Provider/model: {result.get('provider') or 'unknown'} / {result.get('model') or 'unknown'}",
+        f"- Source access: {result.get('source_access') or 'metadata_only'}",
+        "- Scope: Composed the paste-ready handoff from local AIWatcher evidence.",
+        "- Evidence boundary: local session identity, token/cost totals, files, commits, outcomes, and proof claims remain authoritative.",
+        "- Cost boundary: one user-confirmed bounded model call; no saved-token claim is made by this AI step.",
+    ])
+    final_brief = "\n\n".join([composed_brief, receipt_text]).rstrip()
+    cache_record = record_ai_assist_cache(
+        workflow="fresh_start",
+        evidence_hash=evidence_hash,
+        text=final_brief,
+        mode=str(result.get("mode") or ""),
+        provider=str(result.get("provider") or ""),
+        model=str(result.get("model") or ""),
+        source_access=str(result.get("source_access") or "metadata_only"),
+        structured=result.get("structured") if isinstance(result.get("structured"), dict) else {},
+        usage=result.get("usage") if isinstance(result.get("usage"), dict) else {},
+    )
+    capsule["next_brief"] = final_brief
+    capsule["ai_assist_result"] = {
+        "status": "used",
+        "provider": result.get("provider"),
+        "model": result.get("model"),
+        "mode": result.get("mode"),
+        "source_access": result.get("source_access"),
+        "input_chars": result.get("input_chars"),
+        "output_chars": result.get("output_chars"),
+        "usage": result.get("usage"),
+        "structured": result.get("structured") if isinstance(result.get("structured"), dict) else {},
+        "receipt": record,
+        "cache": {"evidence_hash": cache_record.get("evidence_hash")},
+    }
+    capsule["ai_assist"] = build_ai_assist_status(ai_assist_config())
+    return capsule
+
+
+def build_ai_assisted_optimize_cleanup_prompt(candidate_id: str, days: int = 7) -> dict[str, object]:
+    """Return a user-requested AI-composed Optimize cleanup review prompt."""
+    normalized_id = str(candidate_id or "").strip()
+    if not normalized_id:
+        return {"error": "candidate_id is required"}
+    summary = build_summary_cached(days)
+    optimize = summary.get("optimize") if isinstance(summary.get("optimize"), dict) else {}
+    candidates = optimize.get("candidates") if isinstance(optimize.get("candidates"), list) else []
+    candidate = next(
+        (item for item in candidates if isinstance(item, dict) and str(item.get("id") or "") == normalized_id),
+        None,
+    )
+    if candidate is None:
+        return {"error": "optimize candidate not found"}
+    local_prompt = str(candidate.get("cleanup_prompt") or _optimize_candidate_prompt(candidate))
+    evidence_hash = str(candidate.get("evidence_hash") or _optimize_candidate_evidence_hash(candidate))
+    config = ai_assist_config()
+    status = build_ai_assist_status(config)
+    response: dict[str, object] = {
+        "candidate": candidate,
+        "local_prompt": local_prompt,
+        "prompt": local_prompt,
+        "evidence_hash": evidence_hash,
+        "ai_assist": status,
+        "ai_assist_result": {"status": "local_fallback"},
+    }
+    if str(config.get("mode") or "off") == "cloud" and float(config.get("max_daily_usd") or 0) <= 0:
+        reason = "Cloud AI Assist daily cap is set to $0.00."
+        record = record_ai_assist_run(
+            workflow="optimize_cleanup",
+            status="skipped",
+            session_id=normalized_id,
+            mode="cloud",
+            source_access=str(config.get("source_access") or "metadata_only"),
+            reason=reason,
+            evidence_hash=evidence_hash,
+        )
+        response["ai_assist_result"] = {"status": "skipped", "reason": reason, "receipt": record}
+        return response
+    cached = ai_assist_cache_get("optimize_cleanup", evidence_hash)
+    if cached and cached.get("text"):
+        record = record_ai_assist_run(
+            workflow="optimize_cleanup",
+            status="used",
+            session_id=normalized_id,
+            mode=str(cached.get("mode") or ""),
+            provider=str(cached.get("provider") or ""),
+            model=str(cached.get("model") or ""),
+            input_chars=len(local_prompt),
+            output_chars=len(str(cached.get("text") or "")),
+            source_access=str(cached.get("source_access") or "metadata_only"),
+            reason="User clicked Compose AI cleanup prompt on an Optimize candidate; cached output reused.",
+            usage=cached.get("usage") if isinstance(cached.get("usage"), dict) else {},
+            evidence_hash=evidence_hash,
+            cache_hit=True,
+        )
+        response["prompt"] = str(cached.get("text") or "")
+        response["ai_assist_result"] = {
+            "status": "cached",
+            "provider": cached.get("provider"),
+            "model": cached.get("model"),
+            "mode": cached.get("mode"),
+            "source_access": cached.get("source_access"),
+            "input_chars": len(local_prompt),
+            "output_chars": len(str(cached.get("text") or "")),
+            "usage": cached.get("usage") if isinstance(cached.get("usage"), dict) else {},
+            "structured": cached.get("structured") if isinstance(cached.get("structured"), dict) else {},
+            "receipt": record,
+        }
+        return response
+    try:
+        result = compose_optimize_cleanup_prompt(config, local_prompt=local_prompt)
+    except AiAssistUnavailable as exc:
+        provider = str(config.get("provider") or "none")
+        if str(config.get("mode") or "off") == "cloud" and provider in {"openai", "anthropic", "openai_compatible"}:
+            status_value = "failed" if getattr(exc, "status_code", None) in {401, 403} else "untested"
+            try:
+                record_ai_assist_provider_check(
+                    provider,
+                    status_value,
+                    message=str(exc),
+                    code=str(getattr(exc, "provider_code", "") or getattr(exc, "status_code", "") or ""),
+                )
+            except (OSError, ValueError):
+                pass
+        record = record_ai_assist_run(
+            workflow="optimize_cleanup",
+            status="failed",
+            session_id=normalized_id,
+            mode=str(config.get("mode") or "off"),
+            provider=provider,
+            model=str(config.get("model") or "") or None,
+            source_access=str(config.get("source_access") or "metadata_only"),
+            reason=str(exc),
+            evidence_hash=evidence_hash,
+        )
+        response["ai_assist"] = build_ai_assist_status(ai_assist_config())
+        response["ai_assist_result"] = {"status": "failed", "reason": str(exc), "receipt": record}
+        return response
+    prompt = str(result.get("text") or "").strip()
+    result_provider = str(result.get("provider") or "")
+    if str(result.get("mode") or "") == "cloud" and result_provider in {"openai", "anthropic", "openai_compatible"}:
+        try:
+            record_ai_assist_provider_check(
+                result_provider,
+                "verified",
+                message="Last AI Assist call succeeded.",
+                code="",
+            )
+        except (OSError, ValueError):
+            pass
+    cache_record = record_ai_assist_cache(
+        workflow="optimize_cleanup",
+        evidence_hash=evidence_hash,
+        text=prompt,
+        mode=str(result.get("mode") or ""),
+        provider=str(result.get("provider") or ""),
+        model=str(result.get("model") or ""),
+        source_access=str(result.get("source_access") or "metadata_only"),
+        structured=result.get("structured") if isinstance(result.get("structured"), dict) else {},
+        usage=result.get("usage") if isinstance(result.get("usage"), dict) else {},
+    )
+    run_record = record_ai_assist_run(
+        workflow="optimize_cleanup",
+        status="used",
+        session_id=normalized_id,
+        mode=str(result.get("mode") or ""),
+        provider=str(result.get("provider") or ""),
+        model=str(result.get("model") or ""),
+        input_chars=int(result.get("input_chars") or 0),
+        output_chars=int(result.get("output_chars") or 0),
+        source_access=str(result.get("source_access") or "metadata_only"),
+        reason="User clicked Compose AI cleanup prompt on an Optimize candidate.",
+        usage=result.get("usage") if isinstance(result.get("usage"), dict) else {},
+        evidence_hash=evidence_hash,
+        cache_hit=False,
+    )
+    response["prompt"] = prompt
+    response["ai_assist_result"] = {
+        "status": "used",
+        "provider": result.get("provider"),
+        "model": result.get("model"),
+        "mode": result.get("mode"),
+        "source_access": result.get("source_access"),
+        "input_chars": result.get("input_chars"),
+        "output_chars": result.get("output_chars"),
+        "usage": result.get("usage"),
+        "structured": result.get("structured") if isinstance(result.get("structured"), dict) else {},
+        "receipt": run_record,
+        "cache": {"evidence_hash": cache_record.get("evidence_hash")},
+    }
+    return response
 
 
 def build_demo_handoff_detail(
@@ -2199,6 +2700,7 @@ def build_demo_handoff_detail(
     capsule["demo"] = True
     capsule["basic"] = False
     capsule["enrichment_status"] = "complete"
+    capsule["ai_assist"] = build_ai_assist_status(ai_assist_config())
     return capsule
 
 
@@ -5053,6 +5555,8 @@ def build_summary(
         "coverage": [row.to_json() for row in surface_coverage(all_rows)],
         "setup": setup_checklist(),
         "watcher": get_watcher_status(),
+        "ai_assist": build_ai_assist_status(ai_assist_config()),
+        "ai_assist_runs": recent_ai_assist_runs(limit=10),
         "context_health": context_health,
         "context_health_status": "ready",
         # Distance from the last checkpoint in the repo the charted session is
@@ -5157,6 +5661,10 @@ def _cached_session_rows() -> list[LocalSession]:
 def _mark_summary_cache(summary: dict[str, object], *, status: str, source: str, refreshing: bool) -> dict[str, object]:
     copy = dict(summary)
     copy.pop("_session_index", None)
+    # Summary payloads can be served from memory or disk for speed, but Settings
+    # must reflect the current local config. Otherwise saving AI Assist briefly
+    # renders the new mode before the next poll repaints an older cached mode.
+    copy["ai_assist"] = build_ai_assist_status(ai_assist_config())
     generated_at = copy.get("generated_at") if isinstance(copy.get("generated_at"), str) else None
     copy["cache_schema_version"] = SUMMARY_CACHE_SCHEMA_VERSION
     copy["cache"] = {
@@ -5367,6 +5875,8 @@ def _build_summary_shell(
         "coverage": [row.to_json() for row in surface_coverage(all_rows)],
         "setup": setup_checklist(),
         "watcher": get_watcher_status(),
+        "ai_assist": build_ai_assist_status(ai_assist_config()),
+        "ai_assist_runs": recent_ai_assist_runs(limit=10),
         "context_health": [],
         "context_health_status": "pending",
         "optimize": optimize,
@@ -6850,6 +7360,13 @@ class UIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/companion-state":
             self._send(200, json.dumps(build_companion_state()), "application/json; charset=utf-8")
             return
+        if parsed.path == "/api/ai-assist-status":
+            self._send(
+                200,
+                json.dumps(build_ai_assist_status(ai_assist_config())),
+                "application/json; charset=utf-8",
+            )
+            return
         if parsed.path == "/api/companion-scan":
             try:
                 _refresh_summary_cache(7)
@@ -7030,13 +7547,16 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/second-opinion",
             "/api/second-opinion-consent",
             "/api/second-opinion-contents",
+            "/api/ai-assist-config",
             "/api/ask-aiwatcher",
             "/api/handoff-basic",
+            "/api/handoff-ai-assist",
             "/api/handoff",
             "/api/handoff-demo",
             "/api/handoff-decision",
             "/api/handoff-receipts-viewed",
             "/api/first-run-dismissed",
+            "/api/optimize-ai-assist",
             "/api/optimize-decision",
             "/api/companion-skip",
             "/api/ambient-intervention-action",
@@ -7119,6 +7639,25 @@ class UIHandler(BaseHTTPRequestHandler):
             self._send(200, json.dumps({"allowed": allowed, "project_path": project}),
                        "application/json; charset=utf-8")
             return
+        if parsed.path == "/api/ai-assist-config":
+            try:
+                config = record_ai_assist_config(payload)
+            except ValueError as exc:
+                self._send(400, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")
+                return
+            except OSError as exc:
+                self._send(
+                    500,
+                    json.dumps({"error": f"Could not save AI Assist settings: {exc}"}),
+                    "application/json; charset=utf-8",
+                )
+                return
+            self._send(
+                200,
+                json.dumps(build_ai_assist_status(config)),
+                "application/json; charset=utf-8",
+            )
+            return
         if parsed.path == "/api/ask-aiwatcher":
             question = str(payload.get("question", "")).strip()
             raw_days = payload.get("days", 7)
@@ -7129,7 +7668,7 @@ class UIHandler(BaseHTTPRequestHandler):
             response = answer_local_question(question, days=days)
             self._send(200, json.dumps(response), "application/json; charset=utf-8")
             return
-        if parsed.path in {"/api/handoff-basic", "/api/handoff", "/api/handoff-demo"}:
+        if parsed.path in {"/api/handoff-basic", "/api/handoff-ai-assist", "/api/handoff", "/api/handoff-demo"}:
             target = str(payload.get("target", "generic")).strip() or "generic"
             if parsed.path == "/api/handoff-demo":
                 handoff_options = _handoff_options_from_payload(payload, default_type="product")
@@ -7151,6 +7690,16 @@ class UIHandler(BaseHTTPRequestHandler):
             handoff_options = _handoff_options_from_payload(payload)
             if parsed.path == "/api/handoff-basic":
                 response = build_basic_handoff_detail(session_id, days, target, **handoff_options)
+            elif parsed.path == "/api/handoff-ai-assist":
+                include_prompt_excerpt = bool(payload.get("prompt", False))
+                response = build_ai_assisted_handoff_detail(
+                    session_id,
+                    days,
+                    target,
+                    include_prompt_excerpt,
+                    local_brief_override=str(payload.get("local_brief") or ""),
+                    **handoff_options,
+                )
             else:
                 include_prompt_excerpt = bool(payload.get("prompt", False))
                 response = build_handoff_detail(
@@ -7161,6 +7710,17 @@ class UIHandler(BaseHTTPRequestHandler):
                     **handoff_options,
                 )
             status = 404 if response.get("error") == "session not found" else 200
+            self._send(status, json.dumps(response), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/optimize-ai-assist":
+            candidate_id = str(payload.get("candidate_id", "")).strip()
+            raw_days = payload.get("days", 7)
+            try:
+                days = max(1, min(90, int(raw_days)))
+            except (TypeError, ValueError):
+                days = 7
+            response = build_ai_assisted_optimize_cleanup_prompt(candidate_id, days=days)
+            status = 404 if response.get("error") == "optimize candidate not found" else 400 if response.get("error") else 200
             self._send(status, json.dumps(response), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/ambient-intervention-action":

@@ -515,10 +515,17 @@ class TrimmedHomeTest(unittest.TestCase):
         # load() writes by id; a lookup with no element throws and stops the whole
         # dashboard rendering, which is the way this change could break quietly.
         built_at_runtime = {
+            "aiAssistApiKey", "aiAssistApiKeyRow", "aiAssistBaseUrl",
+            "aiAssistBaseUrlRow", "aiAssistCap", "aiAssistClearKey",
+            "aiAssistConfirm", "aiAssistForgetKey", "aiAssistKeyStatus",
+            "aiAssistMode", "aiAssistModel", "aiAssistProvider",
+            "aiAssistProviderHint", "aiAssistProviderRow", "aiAssistSettings",
+            "aiAssistSetupBox", "aiAssistSetupCopy",
+            "aiAssistSetupTitle", "aiAssistSourceAccess", "aiAssistWorking",
             "evidencePanel", "handoffAcceptance", "handoffBrief", "handoffConstraints",
             "handoffObjective", "handoffSources", "handoffStatus", "handoffType",
-            "optimizeReward", "outcomePanel", "planDerivedZone", "promptBrief",
-            "todayDigest",
+            "optimizeCleanupPrompt", "optimizeReward", "outcomePanel",
+            "planDerivedZone", "promptBrief", "todayDigest",
         }
         ids = set(re.findall(r'id="([\w-]+)"', self.html))
         looked_up = set(re.findall(r"""getElementById\(['"]([\w-]+)['"]\)""", self.js))
@@ -1391,6 +1398,15 @@ class PlanControlTest(unittest.TestCase):
         self.assertIn("Cleanup prompt copied", self.js)
         self.assertIn(".optimize-full-path code", self.css)
 
+    def test_optimize_cards_offer_local_and_ai_cleanup_prompts(self):
+        self.assertIn("Copy cleanup prompt", self.js)
+        self.assertIn("Compose AI cleanup prompt", self.js)
+        self.assertIn("function renderOptimizeCleanupPrompt", self.js)
+        self.assertIn("function composeOptimizeCleanupPrompt", self.js)
+        self.assertIn("/api/optimize-ai-assist", inspect.getsource(ui))
+        self.assertIn("optimize_cleanup", inspect.getsource(ui))
+        self.assertIn("Optimize cleanup prompt", inspect.getsource(ui))
+
     def test_context_review_continue_quiets_only_that_project(self):
         self.assertIn("function visibleFreshStartProjects", self.js)
         body = self.js[self.js.index("async function continueFreshStartProject"):]
@@ -1444,6 +1460,27 @@ class SettingsTest(unittest.TestCase):
         self.assertIn(".settings-panel[hidden]", css)
         self.assertIn("display: none", css)
 
+    def test_ai_assist_hidden_fields_stay_hidden(self):
+        # AI Assist fields live under classes that set display explicitly.
+        # The custom endpoint row should not appear for normal OpenAI/Claude
+        # setup just because a label selector overrode the hidden attribute.
+        css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+        self.assertIn(".ai-assist-fields [hidden]", css)
+        self.assertIn("const showEndpoint = mode !== 'off' && provider === 'openai_compatible'", self.js)
+        self.assertIn('id="aiAssistBaseUrlRow" ${showEndpoint ? \'\' : \'hidden\'}', self.js)
+        self.assertIn('id="aiAssistApiKeyRow" ${showApiKey ? \'\' : \'hidden\'}', self.js)
+        self.assertIn("currentProvider !== 'openai_compatible'", self.js)
+
+    def test_settings_subpage_survives_refresh(self):
+        self.assertIn("activeSettingsPanel", self.js)
+        self.assertIn("showSettingsPanel(activeSettingsPanel)", self.js)
+
+    def test_ai_assist_form_survives_background_refresh(self):
+        self.assertIn("let aiAssistFormDirty = false", self.js)
+        self.assertIn("aiAssistFormDirty = true", self.js)
+        self.assertIn("aiAssistFormDirty = false", self.js)
+        self.assertIn("!(aiAssistFormDirty && activeSettingsPanel === 'ai')", self.js)
+
     def test_coverage_is_in_the_trust_subpage(self):
         """What AIWatcher can see is the other half of what it promises not to
         do, and the half that admits limits -- Cursor is detected and not
@@ -1477,6 +1514,20 @@ class SettingsTest(unittest.TestCase):
         # Nothing tracks completion, so calling it a checklist promises a state
         # the data does not have.
         self.assertNotIn("Setup checklist", self.html)
+
+    def test_ai_assist_settings_are_visible_but_optional(self):
+        setup = self.html[self.html.index('<section id="view-setup"'):]
+        self.assertIn('id="aiAssistSettingsMount"', setup)
+        self.assertIn("AIWatcher works without this", setup)
+        self.assertIn("function renderAiAssistSettings", self.js)
+        self.assertIn("Local model", self.js)
+        self.assertIn("Cloud key", self.js)
+        self.assertIn("Custom endpoint", self.js)
+        self.assertIn("Claude", self.js)
+        self.assertIn("Paste API key", self.js)
+        self.assertIn("mode-${esc(mode)}", self.js)
+        self.assertIn("/api/ai-assist-config", self.js)
+
 
 class ChangesLedgerTest(unittest.TestCase):
     """The ledger's widest column held a value identical on 47 of 49 rows, and
@@ -2339,15 +2390,30 @@ class InformationArchitectureTest(unittest.TestCase):
         self.assertIn("const settled = s.outcome === 'useful'", actions)
         self.assertIn(".recommended-action.settled", self.css)
 
-    def test_the_brief_comes_after_the_form_that_shapes_it(self):
-        # The generated output sat above five empty fields, so a first-time
-        # reader could not tell whether it was ready or waiting on them.
-        body = self.js[self.js.index("handoff-refine"):]
+    def test_the_copied_brief_is_the_fresh_start_focus(self):
+        # The drawer should lead with the handoff the user will paste. The
+        # shaping form stays available, but it is no longer the thing a first
+        # time reader has to decode before finding the prompt.
         self.assertIn("Refine this brief (optional)", self.js)
-        self.assertIn("Ready to copy", self.js)
+        self.assertIn("Prompt to paste", self.js)
+        self.assertIn("brief-focus", self.js)
+        self.assertIn("Copy local fallback", self.js)
+        focus_at = self.js.index("brief-focus")
         refine_at = self.js.index("handoff-refine")
         preview_at = self.js.index("${renderFreshStartPreview(capsule)}")
+        self.assertLess(focus_at, refine_at)
         self.assertLess(refine_at, preview_at)
+
+    def test_ai_assist_reads_as_handoff_composition(self):
+        self.assertIn("Compose AI handoff", self.js)
+        self.assertIn("AI handoff ready", self.js)
+        self.assertIn("Next ask", self.js)
+        self.assertIn("setDrawerSubtitle", self.js)
+        self.assertIn("AI-assisted handoff", self.js)
+        self.assertIn("session-identity-path", self.js)
+        self.assertIn("local_brief: next.localBrief", self.js)
+        self.assertIn("typeof currentData !== 'undefined'", self.js)
+        self.assertIn(".fresh-preview-next", self.css)
 
     def test_copy_feedback_lands_on_the_button(self):
         # The toast renders up to 750px from the control, and two copy buttons
@@ -2754,9 +2820,8 @@ class CorrectnessSweepTest(unittest.TestCase):
         self.assertNotIn("Test Fresh Start with sample data", self.html)
         self.assertNotIn("Try it with sample data", self.html)
         self.assertNotIn('"primary_label": "Open Fresh Start"', inspect.getsource(ui))
-        # Home keeps its own name because it copies rather than opens; naming it
-        # "Start fresh" would be the label lying about the behaviour again.
-        self.assertIn("Copy Fresh Start brief", self.js)
+        self.assertIn("Review Fresh Start", self.js)
+        self.assertIn("Fresh Start brief opened. Review it, compose with AI Assist if useful, then copy.", self.js)
 
     def test_copy_labels_name_artifacts(self):
         self.assertNotIn("Copy without opening", self.js)
