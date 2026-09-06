@@ -488,9 +488,9 @@ What to check:
 
 ## Current MVP Limits
 
-- `start` covers the normal first-run product flow, and Settings can check or
-  apply source-checkout updates; automatic update polling/restart is still a
-  later layer.
+- `start` covers the normal first-run product flow, and the dashboard can check
+  or apply clean source-checkout updates from the top bar or Settings. Package
+  installs still get copyable upgrade commands rather than source fast-forwards.
 - `start` is the normal two-mode entry point: Console plus Companion by
   default, with flags to run either mode separately.
 - Claude Code has the richest support today.

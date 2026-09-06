@@ -13,7 +13,7 @@ AIWatcher focuses on the local developer experience: prompt review before work
 starts, calm nudges while work is running, and lightweight evidence after the
 work is done.
 
-![The AIWatcher Local dashboard's Today tab: latest AI work and one thing worth changing up top; useful outcomes, preflight decisions, sessions observed, and API-equivalent value tiles; the latest receipt with proof status; projects driving usage and recent sessions below.](docs/dashboard.svg)
+![AIWatcher Local Console overview: Home, Plan, Watch, Control, Prove, Improve, and Settings wrapped around local AI work, Prompt Gate decisions, sessions, receipts, outcomes, and API-equivalent usage.](docs/dashboard.svg)
 
 ## Contents
 
@@ -26,6 +26,7 @@ work is done.
     - [Prompt preflight hook](#prompt-preflight-hook)
     - [Dangerous-command gate](#dangerous-command-gate)
 - [Keep AIWatcher Updated](#keep-aiwatcher-updated)
+- [What You Should See](#what-you-should-see)
 - [How AIWatcher Helps While You Code](#how-aiwatcher-helps-while-you-code)
 - [Use AIWatcher Day To Day](#use-aiwatcher-day-to-day)
 - [Command Guide](#command-guide)
@@ -100,6 +101,10 @@ Once the PyPI package is published, the shortest install path will be:
 ```sh
 pipx install aiwatcher-cli
 ```
+
+Maintainers preparing a public registry release should use
+[docs/RELEASE.md](docs/RELEASE.md) for the scan, artifact inspection, and
+PyPI/npm publishing boundary.
 
 Examples below use the installed `aiwatcher` command. From a clone without an
 editable install, use `python -m aiwatcher_cli <command>` instead.
@@ -292,6 +297,32 @@ After the PyPI release:
 pipx upgrade aiwatcher-cli
 ```
 
+## What You Should See
+
+After `aiwatcher start --open-ui`, AIWatcher opens two local surfaces:
+
+- **Console:** the deeper browser UI with Home, Plan, Watch, Control, Prove,
+  Improve, and Settings.
+- **Companion:** the small always-available control for the next action:
+  Review Gate, Fresh Start, Proof pending, Plan, Control, or Console.
+
+The first useful signals for an early user are:
+
+- a top-bar update badge that says `Up to date`, `N updates available`, or why
+  applying is blocked for this checkout
+- a source-location label in Settings so the user knows exactly which checkout
+  or package installation served this UI
+- a Setup page with copyable install and verification commands
+- an AI Assist page that is optional and starts in local-rules mode
+- a Trust page that states which tools are automatic, unverified, companion
+  only, or not detected
+- a Watch/Prove loop that shows sessions, receipts, outcomes, and evidence
+  without exposing prompt text or source files
+
+The mockups in this README use synthetic data. They are product previews, not
+captures from a developer's machine, because real screenshots can expose local
+paths, project names, session ids, and AI usage history.
+
 ## How AIWatcher Helps While You Code
 
 AIWatcher Local adds a private control loop around your AI coding tools: review
@@ -430,9 +461,8 @@ The Console tabs are:
 - **Settings:** General, AI Assist, Trust, and Setup subpages for updates,
   optional model configuration, coverage, hooks, and Companion behavior.
 
-The mockups below use synthetic data. This README does not embed real dashboard
-screenshots, since those can expose private local paths, project names, and AI
-usage history.
+The additional mockups below show the current workflow areas rather than every
+Console subpage.
 
 ![Work tab: a session list next to a review drawer showing Expensive asks with the costliest step highlighted, outcome buttons, outcome evidence, and a Fresh Start action.](docs/dashboard-sessions.svg)
 
