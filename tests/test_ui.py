@@ -2183,10 +2183,16 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("codex-cli", inventory["top"]["activity_summary"])
         self.assertIn("~780.0k context", inventory["top"]["activity_summary"])
         self.assertIn("why_inactive", inventory["top"])
-        self.assertIn("Copy", inventory["top"]["action_label"])
+        self.assertEqual(inventory["top"]["action_label"], "Copy cleanup prompt")
+        self.assertIn("AIWatcher Optimize cleanup prompt", inventory["top"]["checklist"])
         self.assertIn("Full path: /repo/app", inventory["top"]["checklist"])
         self.assertIn("Signal: 3 sessions", inventory["top"]["checklist"])
-        self.assertIn("Do not delete", inventory["top"]["checklist"])
+        self.assertIn("Safe to archive or clean up", inventory["top"]["checklist"])
+        self.assertIn("Keep active", inventory["top"]["checklist"])
+        self.assertIn("Unknown", inventory["top"]["checklist"])
+        self.assertIn("Do not delete files", inventory["top"]["checklist"])
+        self.assertIn("Do not stop any running process", inventory["top"]["checklist"])
+        self.assertIn("latest branch, PR, commit, or handoff receipt", inventory["top"]["checklist"])
         self.assertIn("/repo/app", inventory["top"]["checklist"])
 
     def test_optimize_inventory_surfaces_stale_runtime_review_plan(self) -> None:
@@ -2212,7 +2218,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Run: aiwatcher processes --stale-only", inventory["top"]["safe_review_steps"])
         self.assertIn("before-minus-after local memory signal", " ".join(inventory["top"]["safe_review_steps"]))
         self.assertIn("Reward: Potential local reward", inventory["top"]["checklist"])
-        self.assertIn("Leave unknown processes alone", inventory["top"]["checklist"])
+        self.assertIn("aiwatcher processes --stale-only", inventory["top"]["checklist"])
+        self.assertIn("Unknown", inventory["top"]["checklist"])
 
     def test_optimize_inventory_surfaces_old_agent_scratch_workspace(self) -> None:
         now = datetime.now(timezone.utc)
@@ -2237,7 +2244,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("last signal", inventory["top"]["activity_summary"])
         self.assertIn("4+ hours", inventory["top"]["why_inactive"])
         self.assertIn("local temp/scratch path shape", inventory["top"]["evidence"])
-        self.assertIn("not a real project", inventory["top"]["checklist"])
+        self.assertEqual(inventory["top"]["action_label"], "Copy cleanup prompt")
+        self.assertIn("disposable scratch space", inventory["top"]["checklist"])
+        self.assertIn("moving anything useful", inventory["top"]["checklist"])
 
     def test_optimize_inventory_skips_recent_agent_scratch_workspace(self) -> None:
         now = datetime.now(timezone.utc)

@@ -832,62 +832,78 @@ def _optimize_candidate_checklist(item: dict[str, object]) -> str:
     project_full = str(item.get("project_full") or "")
     signal = str(item.get("activity_summary") or item.get("summary") or reason)
     kind = str(item.get("kind") or "")
+    subject = {
+        "session_cluster": "stale chats/sessions",
+        "fresh_start_pending": "pending Fresh Start receipts",
+        "worktree": "AI-created git worktree",
+        "agent_workspace": "AI-created scratch workspace",
+        "stale_processes": "stale local AI runtimes",
+    }.get(kind, "local AI cleanup candidate")
     lines = [
-        f"AIWatcher Optimize review: {project}",
+        "AIWatcher Optimize cleanup prompt",
         "",
-        f"Goal: {title}.",
-        f"Full path: {project_full}" if project_full else "Full path: Local machine or unattributed",
-        f"Signal: {signal}",
-        f"Why AIWatcher surfaced this: {reason}",
-        f"Evidence: {evidence}",
-        f"Impact signal: {impact}",
+        "AIWatcher surfaced this as a cleanup candidate.",
         "",
-        "Safe review steps:",
+        "Candidate:",
+        f"- Type: {subject}",
+        f"- Goal: {title}",
+        f"- Project: {project}",
+        f"- Full path: {project_full}" if project_full else "- Full path: Local machine or unattributed",
+        f"- Signal: {signal}",
+        f"- Impact signal: {impact}",
+        "",
+        "Observed evidence:",
+        f"- Why surfaced: {reason}",
+        f"- Evidence: {evidence}",
+        "",
+        "Task:",
+        "Review this candidate and tell me what is safe to archive, clean up, keep active, or leave unknown.",
+        "",
+        "Rules:",
+        "- Do not delete files, branches, worktrees, commits, source code, or notes.",
+        "- Do not stop any running process.",
+        "- Do not archive chats or sessions unless the work appears completed, superseded, or no longer needed.",
+        "- If anything may contain unfinished work, mark it keep active.",
+        "- If evidence is weak or the owner is unclear, mark it unknown.",
+        "- Preserve handoffs, PRs, commits, receipts, useful notes, unresolved tasks, and final source-of-truth files.",
     ]
     if kind == "session_cluster":
         lines.extend([
-            "1. Open the matching AI app and find this project/workspace.",
-            "2. Confirm the work is finished, handed off, or no longer needed.",
-            "3. Archive or mark only those chats done inside the AI app.",
-            "4. Keep final source-of-truth files, commits, receipts, and notes.",
-            "5. Do not delete code, worktrees, chats, or processes from this checklist.",
+            "- Action boundary: archive or mark done only inside the owning AI app after review.",
         ])
     elif kind == "fresh_start_pending":
         lines.extend([
-            "1. If you already started the fresh session, paste or keep the Fresh Start brief there.",
-            "2. If you stayed in the old session, mark the receipt as skipped/continue so AIWatcher stops nudging.",
-            "3. After the new session produces useful work, refresh AIWatcher so it can link proof.",
-            "4. Do not claim saved tokens until AIWatcher observes the follow-up.",
+            "- Action boundary: link the follow-up session or mark the old receipt skipped/continued; do not claim saved tokens without proof.",
         ])
     elif kind == "worktree":
         lines.extend([
-            f"1. Run: git -C {project_full or '<worktree>'} status --short",
-            "2. Confirm the branch is merged, abandoned, or intentionally disposable.",
-            "3. Remove the worktree only through git/worktree-safe commands after confirmation.",
-            "4. Do not delete the folder directly from this checklist.",
+            f"- Inspect first: git -C {project_full or '<worktree>'} status --short",
+            "- Action boundary: remove only with git worktree-safe commands after confirmation.",
         ])
     elif kind == "agent_workspace":
         lines.extend([
-            f"1. Inspect: {project_full or '<workspace>'}",
-            "2. Confirm it is AI-created scratch space and not a real project.",
-            "3. Keep or move any files you still need.",
-            "4. Delete only after that review; AIWatcher will not delete it from this checklist.",
+            f"- Inspect first: {project_full or '<workspace>'}",
+            "- Action boundary: delete only after confirming it is disposable scratch space and moving anything useful.",
         ])
     elif kind == "stale_processes":
         lines.extend([
-            "1. Run: aiwatcher processes --stale-only",
-            "2. Use PID, runtime, session id, and working directory to match each row to an AI app/window.",
-            "3. Confirm each process is not attached to live AI work.",
-            "4. Stop only stale/orphaned runtimes you recognize.",
-            "5. Run the command again; reclaimed RSS is the before-minus-after local memory signal.",
-            "6. Leave unknown processes alone.",
+            "- Inspect first: aiwatcher processes --stale-only",
+            "- Action boundary: stop only runtimes you recognize and have confirmed are detached from live AI work.",
         ])
     else:
         lines.extend([
-            "1. Review the local evidence in AIWatcher.",
-            "2. Confirm the work is finished before taking action.",
-            "3. Prefer archive/mark-done actions over deletion.",
+            "- Action boundary: prefer archive/mark-done recommendations over deletion.",
         ])
+    lines.extend([
+        "",
+        "Please return:",
+        "1. Safe to archive or clean up: item ids/names/paths if visible, with one short reason each.",
+        "2. Keep active: anything that might still matter, with one short reason each.",
+        "3. Unknown: anything that needs owner confirmation or stronger evidence.",
+        "4. Project status: latest branch, PR, commit, or handoff receipt if visible.",
+        "5. Cleanup reward: estimate context, RAM, or disk relief only when supported by the evidence above.",
+        "6. Next action: the exact action I should take in the owning app or local tool.",
+    ])
     if kind == "stale_processes":
         lines.extend([
             "",
@@ -1035,7 +1051,7 @@ def build_optimize_inventory(
             "session_count": len(inactive),
             "completed_count": completed,
             "updated_label": latest_label,
-            "action_label": "Copy project steps",
+            "action_label": "Copy cleanup prompt",
         })
 
     for decision in handoff_decisions:
@@ -1119,7 +1135,7 @@ def build_optimize_inventory(
             "tokens_at_risk": 0,
             "session_count": len(related_sessions),
             "updated_label": _elapsed_label(latest, now=now) if latest else _elapsed_label(mtime, now=now) if isinstance(mtime, datetime) else "no recent session",
-            "action_label": "Copy cleanup checklist",
+            "action_label": "Copy cleanup prompt",
         })
 
     try:

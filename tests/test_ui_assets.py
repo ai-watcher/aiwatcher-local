@@ -1387,6 +1387,8 @@ class PlanControlTest(unittest.TestCase):
         self.assertIn("optimize-activity-line", self.js)
         self.assertIn("optimize-full-path", self.js)
         self.assertIn("<span class=\"label\">Full path</span>", self.js)
+        self.assertIn("Copy cleanup prompt", self.js)
+        self.assertIn("Cleanup prompt copied", self.js)
         self.assertIn(".optimize-full-path code", self.css)
 
     def test_context_review_continue_quiets_only_that_project(self):
