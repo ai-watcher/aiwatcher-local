@@ -847,6 +847,7 @@ function runtimeReturnPanel(runtime, sourcePath) {
   </section>`;
 }
 let watcherCommand = 'aiwatcher watch --notify --overlay --interval 60';
+let currentData = null;
 // The dropdown defaulted to whichever option came first in the markup, which
 // was Codex, while every observed session on this machine is claude-code. Set
 // it from the most recent session instead, and only before the user has touched
@@ -1607,16 +1608,9 @@ function renderFreshStartAiAssist(capsule) {
       <button class="btn-quiet" onclick="showView('setup'); showSettingsPanel('ai'); closeDrawer()">Settings</button>
     </div>`;
   }
-  return `<div class="ai-assist-run-card ready">
-    <div>
-      <strong>AI Assist available</strong>
-      <p>Optional: spend one small provider call to compose a cleaner handoff with work done, context to preserve, next ask, and acceptance check. Nothing runs until you confirm.</p>
-    </div>
-    <button class="btn-quiet" onclick="improveFreshStartWithAiAssist('${esc(capsule.session_id)}','${esc(capsule.target || 'generic')}', ${capsule.include_prompt_excerpt ? 'true' : 'false'})">Compose handoff</button>
-  </div>`;
+  return '';
 }
 function renderHandoff(capsule) {
-  const usage = capsule.usage || {};
   const evidence = capsule.evidence || {};
   const changedFiles = evidence.changed_files || [];
   const runtime = capsule.runtime_attachment || {};
@@ -1624,6 +1618,10 @@ function renderHandoff(capsule) {
   const includePrompt = !!capsule.include_prompt_excerpt;
   const isDemo = !!capsule.demo;
   const canOpenRuntime = !!runtime.available;
+  const aiAssist = capsule.ai_assist || {};
+  const aiResult = capsule.ai_assist_result || {};
+  const aiReady = !isDemo && aiAssist.ready && (aiAssist.mode || 'off') !== 'off' && aiResult.status !== 'used';
+  const assisted = aiResult.status === 'used';
   const enrichment = capsule.basic
     ? '<div class="loading">Basic brief is ready. Loading timeline, git evidence, and prompt enrichment...</div>'
     : '';
@@ -1631,28 +1629,42 @@ function renderHandoff(capsule) {
   const primaryHelp = canOpenRuntime
     ? 'AIWatcher will copy the brief, open the safest available workspace or app target, and save a local Fresh Start receipt.'
     : 'AIWatcher will copy the brief and save a local Fresh Start receipt. Open the correct AI chat or workspace yourself before pasting.';
+  const actionHelp = aiReady
+    ? 'AI Assist is ready. Compose the handoff first to get a compact brief with work done, context to preserve, next ask, and acceptance checks. It runs only after your confirmation.'
+    : primaryHelp;
+  const primaryAction = aiReady
+    ? `<button class="btn-primary" onclick="improveFreshStartWithAiAssist('${esc(capsule.session_id)}','${esc(target)}', ${includePrompt ? 'true' : 'false'})">Compose AI handoff</button>`
+    : `<button class="btn-primary" data-runtime="${canOpenRuntime ? '1' : '0'}" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', this.dataset.runtime === '1', ${isDemo ? 'true' : 'false'})">${esc(isDemo ? 'Copy demo brief' : primaryLabel)}</button>`;
+  const secondaryCopy = aiReady
+    ? `<button class="btn-quiet" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', false, ${isDemo ? 'true' : 'false'})">Copy local fallback</button>`
+    : '';
   return `<section class="detail-section">
     <h2>Fresh Start</h2>
-    <p>AIWatcher prepared a restart brief for the next ${esc(capsule.target_label || 'AI tool')} session. Copy it into a fresh chat only after the identity below matches the work you intend to continue.</p>
+    <p>Review the handoff, then copy it into a fresh ${esc(capsule.target_label || 'AI tool')} session after the identity matches the work you intend to continue.</p>
     ${renderIdentityStrip(capsule, runtime, capsule.source_path)}
-    <div class="mini-grid">
-      <div class="mini"><span class="label">Previous usage</span><strong>${esc(usage.tokens_label || '—')}</strong></div>
-      <div class="mini"><span class="label">API value</span><strong>${esc(usage.api_value_label || '—')}</strong></div>
-      <div class="mini"><span class="label">Model calls</span><strong>${esc(usage.model_calls ?? '—')}</strong></div>
-      <div class="mini"><span class="label">Evidence</span><strong>${esc((evidence.commits || []).length)} commits</strong></div>
-    </div>
     <div id="handoffStatus" class="verdict-card useful" style="margin-top:14px">
-      <h3>Best next action: start fresh in the same workspace</h3>
-      <p>${esc(primaryHelp)} AIWatcher will watch for a later same-project session as proof.</p>
+      <h3>${aiReady ? 'Best next action: compose AI handoff' : assisted ? 'Best next action: copy AI handoff' : 'Best next action: start fresh in the same workspace'}</h3>
+      <p>${esc(actionHelp)} AIWatcher will watch for a later same-project session as proof.</p>
       <div class="copy-row" style="margin-top:12px">
-        <button class="btn-primary" data-runtime="${canOpenRuntime ? '1' : '0'}" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', this.dataset.runtime === '1', ${isDemo ? 'true' : 'false'})">${esc(isDemo ? 'Copy demo brief' : primaryLabel)}</button>
+        ${primaryAction}
+        ${secondaryCopy}
         ${isDemo ? `<button class="btn-quiet" onclick="showView('sessions'); closeDrawer()">Find real sessions</button>` : `<button class="btn-quiet" onclick="selectSession('${esc(capsule.session_id)}')">Inspect source session</button>`}
       </div>
     </div>
     ${renderFreshStartAiAssist(capsule)}
-    <!-- Refinement first but folded away, then the brief. The output used to
-         sit above the five empty fields that shape it, which reads as "this is
-         waiting for you" when in fact it is ready to copy. -->
+    <div class="brief-focus">
+      <div class="brief-focus-head">
+        <div>
+          <h3>${assisted ? 'AI-assisted prompt to paste' : 'Prompt to paste'}</h3>
+          <p>${assisted ? 'This is the composed handoff. Review once, copy, then paste into the fresh session.' : 'This local brief is ready now. Compose with AI Assist first if you want a tighter handoff.'}</p>
+        </div>
+        <span class="confidence-chip observed">${assisted ? 'AI assisted' : 'local rules'}</span>
+      </div>
+      <textarea id="handoffBrief" class="brief-box">${esc(capsule.next_brief || '')}</textarea>
+      <div class="copy-row"><button class="btn-primary" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', ${canOpenRuntime ? 'true' : 'false'}, ${isDemo ? 'true' : 'false'})">${esc(canOpenRuntime && !isDemo ? 'Copy brief + open workspace' : 'Copy brief')}</button></div>
+    </div>
+    <!-- The brief is the focal object. Optional shaping fields stay below it
+         so a first-time reader sees the paste-ready handoff before the knobs. -->
     <details class="handoff-refine">
       <summary>Refine this brief (optional)</summary>
       ${renderHandoffForm(capsule)}
@@ -1674,11 +1686,7 @@ function renderHandoff(capsule) {
   <section class="detail-section"><h3>Why start fresh now</h3>
     <ul class="insight-list">${(capsule.warnings || []).map(item => `<li>${esc(item)}</li>`).join('')}</ul>
   </section>
-  <section class="detail-section"><h3>Brief that will be copied</h3>
-    <textarea id="handoffBrief" class="brief-box">${esc(capsule.next_brief || '')}</textarea>
-    <div class="copy-row"><button class="btn-quiet" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', false, ${isDemo ? 'true' : 'false'})">Copy brief</button></div>
-    ${changedFiles.length ? `<details class="aiw-details"><summary>${esc(changedFiles.length)} changed file${changedFiles.length === 1 ? '' : 's'} to inspect</summary><div class="details-body"><div class="pill-row">${changedFiles.slice(0, 12).map(file => `<span class="pill">${esc(file)}</span>`).join('')}</div></div></details>` : ''}
-  </section>`;
+  ${changedFiles.length ? `<section class="detail-section"><details class="aiw-details"><summary>${esc(changedFiles.length)} changed file${changedFiles.length === 1 ? '' : 's'} to inspect</summary><div class="details-body"><div class="pill-row">${changedFiles.slice(0, 12).map(file => `<span class="pill">${esc(file)}</span>`).join('')}</div></div></details></section>` : ''}`;
 }
 async function copyFreshStartFromDrawer(sessionId, openRuntime = false, isDemo = false) {
   const brief = document.getElementById('handoffBrief') ? document.getElementById('handoffBrief').value : '';
@@ -1732,7 +1740,7 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
   const config = status && status.config ? status.config : {};
   const label = (status && status.active_label) || 'AI Assist';
   if (config.require_confirmation !== false) {
-    const ok = window.confirm(`${label} will make one small model call using your configured provider to refine this Fresh Start brief. Continue?`);
+    const ok = window.confirm(`${label} will make one small model call using your configured provider to compose this Fresh Start handoff. Continue?`);
     if (!ok) return;
   }
   const options = handoffOptionsFromForm();
@@ -3188,7 +3196,7 @@ function renderAiAssistSettings(status) {
 
     <input id="aiAssistMode" type="hidden" value="${esc(mode)}">
 
-    <div class="ai-assist-fields">
+    <form class="ai-assist-fields" id="aiAssistSettingsForm" onsubmit="event.preventDefault(); saveAiAssistSettings();">
       <div class="ai-assist-provider-row" id="aiAssistProviderRow" ${showProvider ? '' : 'hidden'}>
         <label><span class="label">Provider</span><select id="aiAssistProvider" data-ai-assist-provider>${providerSelectOptions}</select></label>
         <p id="aiAssistProviderHint" class="receipt-note">${esc(currentProvider.detail || '')}</p>
@@ -3224,9 +3232,9 @@ function renderAiAssistSettings(status) {
         </div>
       </details>
 
-      <div class="copy-row"><button class="btn-primary" onclick="saveAiAssistSettings()">Save AI Assist settings</button></div>
+      <div class="copy-row"><button class="btn-primary" type="submit">Save AI Assist settings</button></div>
       <p class="receipt-note">Used first for ${esc(workflowSummary || 'Fresh Start and Prompt Plan')}. Settings only saves configuration; workflows ask before using a model.</p>
-    </div>
+    </form>
 
   </div>`;
 }
@@ -5267,6 +5275,7 @@ async function loadOnce(resetDetail, forceRefresh) {
   try {
     const summaryRes = await fetch(`/api/summary?days=${days}${forceRefresh ? '&refresh=1' : ''}`);
     data = await summaryRes.json();
+    currentData = data;
   } catch (error) {
     // Keep trying on the normal cadence: a dashboard that gives up after one
     // failed poll looks identical to one showing current data.

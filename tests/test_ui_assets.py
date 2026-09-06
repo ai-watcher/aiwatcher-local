@@ -2381,18 +2381,22 @@ class InformationArchitectureTest(unittest.TestCase):
         self.assertIn("const settled = s.outcome === 'useful'", actions)
         self.assertIn(".recommended-action.settled", self.css)
 
-    def test_the_brief_comes_after_the_form_that_shapes_it(self):
-        # The generated output sat above five empty fields, so a first-time
-        # reader could not tell whether it was ready or waiting on them.
-        body = self.js[self.js.index("handoff-refine"):]
+    def test_the_copied_brief_is_the_fresh_start_focus(self):
+        # The drawer should lead with the handoff the user will paste. The
+        # shaping form stays available, but it is no longer the thing a first
+        # time reader has to decode before finding the prompt.
         self.assertIn("Refine this brief (optional)", self.js)
-        self.assertIn("Ready to copy", self.js)
+        self.assertIn("Prompt to paste", self.js)
+        self.assertIn("brief-focus", self.js)
+        self.assertIn("Copy local fallback", self.js)
+        focus_at = self.js.index("brief-focus")
         refine_at = self.js.index("handoff-refine")
         preview_at = self.js.index("${renderFreshStartPreview(capsule)}")
+        self.assertLess(focus_at, refine_at)
         self.assertLess(refine_at, preview_at)
 
     def test_ai_assist_reads_as_handoff_composition(self):
-        self.assertIn("Compose handoff", self.js)
+        self.assertIn("Compose AI handoff", self.js)
         self.assertIn("AI handoff ready", self.js)
         self.assertIn("Next ask", self.js)
         self.assertIn(".fresh-preview-next", self.css)
