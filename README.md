@@ -46,7 +46,8 @@ work is done.
 - Private by default
 - Read-only
 - No LLM calls unless you explicitly configure an optional reviewer or enhancer
-- No prompt or source-code upload
+- No prompt or source-code upload by default; optional AI Assist cloud mode sends
+  only the bounded prompt/source context you explicitly allow
 - No cloud account required
 - Works on macOS, Linux, and Windows
 
@@ -59,21 +60,31 @@ reads and why, it should not read it.
 
 Python 3.9+ on macOS, Linux, or Windows:
 
-Until the first `aiwatcher-cli` release lands on PyPI, the easiest install is
-directly from GitHub:
-
-```sh
-python -m pip install --upgrade git+https://github.com/ai-watcher/aiwatcher-local.git
-```
-
-If you prefer an isolated command-line app and already use `pipx`:
+Until the first `aiwatcher-cli` release lands on PyPI, the recommended install
+for early users is a no-clone GitHub install through `pipx`:
 
 ```sh
 pipx install git+https://github.com/ai-watcher/aiwatcher-local.git
 ```
 
-For contributors, or early users who want to inspect and update the source with
-Git:
+If you do not have `pipx` yet:
+
+```sh
+python -m pip install --user pipx
+python -m pipx ensurepath
+pipx install git+https://github.com/ai-watcher/aiwatcher-local.git
+```
+
+Other install paths:
+
+| Path | Use when | Command |
+| --- | --- | --- |
+| `pipx` from GitHub | You want the easiest isolated CLI install today | `pipx install git+https://github.com/ai-watcher/aiwatcher-local.git` |
+| `uv` tool install | You already use `uv` for Python tools | `uv tool install git+https://github.com/ai-watcher/aiwatcher-local.git` |
+| `pip` from GitHub | You want to install into the current Python environment | `python -m pip install --upgrade git+https://github.com/ai-watcher/aiwatcher-local.git` |
+| editable clone | You want to inspect code, contribute, or use one-click source updates | `git clone https://github.com/ai-watcher/aiwatcher-local.git` |
+
+For the editable clone path:
 
 ```sh
 git clone https://github.com/ai-watcher/aiwatcher-local.git
@@ -90,13 +101,13 @@ Once the PyPI package is published, the shortest install path will be:
 pipx install aiwatcher-cli
 ```
 
-Examples below use `python -m aiwatcher_cli`, which works from a clone with no
-install at all. Once installed, `aiwatcher <command>` is equivalent everywhere.
+Examples below use the installed `aiwatcher` command. From a clone without an
+editable install, use `python -m aiwatcher_cli <command>` instead.
 
 ### 2. Run setup
 
 ```sh
-python -m aiwatcher_cli setup
+aiwatcher setup
 ```
 
 `setup` detects which AI coding tools AIWatcher can read on this machine,
@@ -106,7 +117,7 @@ to your tools.
 ### 3. Start AIWatcher Local
 
 ```sh
-python -m aiwatcher_cli start --open-ui
+aiwatcher start --open-ui
 ```
 
 This is the default startup command. It starts:
@@ -125,17 +136,26 @@ evidence, settings, and history.
 Useful startup variants:
 
 ```sh
-python -m aiwatcher_cli start
-python -m aiwatcher_cli start --no-ui
-python -m aiwatcher_cli start --no-presence
-python -m aiwatcher_cli start --presence-visibility ai-apps
-python -m aiwatcher_cli start --presence-visibility nudges-only
+aiwatcher start
+aiwatcher start --no-ui
+aiwatcher start --no-presence
+aiwatcher start --presence-visibility ai-apps
+aiwatcher start --presence-visibility nudges-only
 ```
 
 `--presence-visibility always` is the default. `ai-apps` shows the Companion
 only while a known AI coding app, terminal, editor, or AI site is active.
 `nudges-only` keeps it out of sight unless something needs action. Urgent local
 nudges can still appear in any mode.
+
+To see value before installing any hooks, try a manual preflight:
+
+```sh
+aiwatcher preflight "Refactor the checkout flow and delete old auth secrets" --tool codex --cwd "$(pwd)"
+```
+
+That uses the same local scoring engine as Prompt Gate, without editing any
+tool settings.
 
 ### 4. Install hooks so work is reviewed before it runs
 
@@ -153,9 +173,9 @@ install either, or both:
 Install the one matching your tool:
 
 ```sh
-python -m aiwatcher_cli install-claude-hook --write --scope user --gate
-python -m aiwatcher_cli install-codex-hook --write --scope user --gate
-python -m aiwatcher_cli install-cursor-hook --write --scope user --gate
+aiwatcher install-claude-hook --write --scope user --gate
+aiwatcher install-codex-hook --write --scope user --gate
+aiwatcher install-cursor-hook --write --scope user --gate
 ```
 
 With `--gate`, medium- or high-risk prompts pause in a local Prompt Gate before
@@ -175,7 +195,7 @@ invoke `UserPromptSubmit`. Run `hook-status` after a test prompt to check. If no
 event appears, add the shell wrapper too:
 
 ```sh
-python -m aiwatcher_cli install-codex-wrapper --write
+aiwatcher install-codex-wrapper --write
 ```
 
 This defines a `codex` shell function that preflights before handing off to the
@@ -189,7 +209,7 @@ A separate hook on a separate event. It reviews shell commands the agent is
 about to run, independently of how the prompt that produced them was handled:
 
 ```sh
-python -m aiwatcher_cli install-claude-command-gate --write --scope user
+aiwatcher install-claude-command-gate --write --scope user
 ```
 
 **Verified today for Claude Code CLI.** Unlike prompt preflight, command gating
@@ -220,9 +240,9 @@ so you can inspect first by dropping that flag. After a test prompt, confirm the
 hook actually fired — and back any of them out at any time:
 
 ```sh
-python -m aiwatcher_cli hook-status
-python -m aiwatcher_cli uninstall-claude-hook --scope user
-python -m aiwatcher_cli uninstall-claude-command-gate --scope user
+aiwatcher hook-status
+aiwatcher uninstall-claude-hook --scope user
+aiwatcher uninstall-claude-command-gate --scope user
 ```
 
 See [Hook coverage by tool](#hook-coverage-by-tool) for per-tool
@@ -230,17 +250,27 @@ setup notes and which surfaces do and do not support hooks.
 
 ## Keep AIWatcher Updated
 
-For a clone-based install, check whether your checkout is behind GitHub:
+How you update depends on how you installed:
+
+| Install type | Update command |
+| --- | --- |
+| `pipx` from GitHub | `pipx upgrade aiwatcher-cli` |
+| `uv` tool install | `uv tool upgrade aiwatcher-cli` |
+| `pip` from GitHub | `python -m pip install --upgrade git+https://github.com/ai-watcher/aiwatcher-local.git` |
+| editable clone | `aiwatcher update --apply`, then `aiwatcher start --open-ui` |
+
+For a clone-based install, check whether your checkout is behind GitHub without
+changing files:
 
 ```sh
-python -m aiwatcher_cli update
+aiwatcher update
 ```
 
 If updates are available and your working tree is clean, apply them with:
 
 ```sh
-python -m aiwatcher_cli update --apply
-python -m aiwatcher_cli start --open-ui
+aiwatcher update --apply
+aiwatcher start --open-ui
 ```
 
 `update` fetches GitHub only when you run it. It reports how many updates are
@@ -253,7 +283,10 @@ low-frequency cadence and when you click it, shows `Up to date` or
 successful dashboard update, AIWatcher restarts so the dashboard and Companion
 use the new code.
 
-For package installs after release:
+For package installs, the dashboard cannot fast-forward source files it does
+not own. It shows copyable package-upgrade commands instead.
+
+After the PyPI release:
 
 ```sh
 pipx upgrade aiwatcher-cli
