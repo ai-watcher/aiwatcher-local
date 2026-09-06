@@ -725,12 +725,6 @@ Example:
 aiwatcher processes --stale-only
 ```
 
-Use this when the Optimize workspace card surfaces stale AI runtimes. Match rows
-by PID, runtime, session id, and working directory; stop only runtimes you
-recognize as detached from live work. Re-run the command after cleanup: the
-before-minus-after RSS is the local memory relief signal. RSS is not a dollar
-or API-spend claim without provider billing or session-token evidence.
-
 | Option | Accepts | Default | Description |
 | --- | --- | --- | --- |
 | `--stale-only` | flag |  | Only show processes with stale or orphaned signals |
