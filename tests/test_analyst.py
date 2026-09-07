@@ -733,13 +733,22 @@ class PrivacyClaimTest(unittest.TestCase):
         from aiwatcher_cli import ui
         claims = " ".join(ui.PRIVACY_CLAIMS)
         self.assertNotIn("No LLM calls", claims)
-        self.assertIn("No AIWatcher cloud call unless you connect or configure one", claims)
-        self.assertIn("your configured tools and keys", claims)
+        # Each claim says what a feature sees and when it runs, in words a
+        # reader can act on. "Workflow-scoped" and "connected workflow" were
+        # the wording that did not.
+        for jargon in ("workflow-scoped", "connected workflow", "configured tools"):
+            self.assertNotIn(jargon, claims)
+        self.assertIn("Nothing leaves this machine unless you set that up", claims)
+        # The update check is a network call the user can trigger; it is named.
+        self.assertIn("reach GitHub only when you click Check or turn them on", claims)
+        self.assertIn("with your key, and only when you turn them on", claims)
         # The contents claim has to carry its own exception now that there is
         # one. "Never file contents" full stop stopped being true the moment a
         # switch could turn it on.
-        self.assertIn("file contents require opt-in", claims)
-        self.assertIn("Source stays local unless", claims)
+        self.assertIn("sees your prompt and file paths", claims)
+        self.assertIn("AI Assist sees metadata", claims)
+        self.assertIn("File contents only if you turn that on for a project", claims)
+        self.assertIn("No upload to AIWatcher Cloud unless you connect it", claims)
 
 
 class CacheKeyTest(unittest.TestCase):

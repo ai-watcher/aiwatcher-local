@@ -49,6 +49,15 @@ class LocalStateTests(unittest.TestCase):
             "_locked_state(); use `with _locked_state():` in any new function instead.",
         )
 
+    def test_automatic_update_checks_are_off_until_turned_on(self) -> None:
+        # Off by default is the point: a fetch on dashboard load is a GitHub
+        # call the user did not make.
+        self.assertFalse(local_state.update_auto_check_enabled())
+        self.assertTrue(local_state.record_update_auto_check(True))
+        self.assertTrue(local_state.update_auto_check_enabled())
+        self.assertFalse(local_state.record_update_auto_check(False))
+        self.assertFalse(local_state.update_auto_check_enabled())
+
     def test_concurrent_decisions_do_not_clobber_each_other(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")

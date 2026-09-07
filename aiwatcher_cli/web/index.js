@@ -1352,6 +1352,9 @@ async function postJson(path, payload) {
 function classifyUpdateStatus(data) {
   if (!data) return 'unknown';
   if (data.install_kind && data.install_kind !== 'source') return 'package';
+  // A contributor on a feature branch is not blocked; they are somewhere the
+  // updater does not apply. Quiet, like the package state, not a warning.
+  if (data.ok && data.update_available && data.on_branch === false) return 'branch';
   if (data.update_available && !data.can_apply) return 'blocked';
   if (!data.ok) return 'error';
   if (data.update_available && data.can_apply) return 'available';
@@ -1362,6 +1365,7 @@ function updateBannerLabel(status, data) {
   if (status === 'checking') return 'Checking...';
   if (status === 'available') return `${count || ''} update${count === 1 ? '' : 's'} available`.trim();
   if (status === 'blocked') return `${count || ''} update${count === 1 ? '' : 's'} blocked`.trim();
+  if (status === 'branch') return `Not on ${(data && data.branch) || 'main'}`;
   if (status === 'current') return 'Up to date';
   if (status === 'package') return 'Package install';
   if (status === 'error') return 'Update check failed';
@@ -1372,9 +1376,10 @@ function updateBannerTitle(status, data) {
   const launched = data && data.process_cwd ? `Launched from: ${data.process_cwd}` : '';
   const location = launched ? `\n${source}\n${launched}` : `\n${source}`;
   if (status === 'available') {
-    return `Click to apply latest changes from ${data.remote_ref || 'origin/main'} and restart AIWatcher${location}`;
+    return `Click to review and apply the latest changes from ${data.remote_ref || 'origin/main'}${location}`;
   }
   if (status === 'blocked') return `${(data && data.message) || 'Resolve local changes before applying updates'}${location}`;
+  if (status === 'branch') return `${(data && data.message) || 'Updates apply on main only'} Click to check again.${location}`;
   if (status === 'current') return `AIWatcher is current. Click to check GitHub again.${location}`;
   if (status === 'package') return `Click to show package upgrade commands${location}`;
   if (status === 'error') return `${(data && data.message) || 'Click to retry the GitHub update check'}${location}`;
@@ -1395,6 +1400,9 @@ function setUpdateState(status, data, checkedAt = Date.now()) {
   if (banner) {
     banner.className = `update-banner ${status}`;
     banner.disabled = status === 'checking';
+    // A pip or pipx install cannot be applied from here, so a permanent
+    // "Package install" chip in the header would be a label with no action.
+    banner.hidden = status === 'package';
     banner.title = updateBannerTitle(status, data || null);
     banner.setAttribute('aria-label', banner.title);
   }
@@ -1406,10 +1414,27 @@ function setUpdateState(status, data, checkedAt = Date.now()) {
     } catch (error) {}
   }
 }
-function restoreCachedUpdateState() {
+function clearCachedUpdateState() {
+  try {
+    localStorage.removeItem(UPDATE_CACHE_KEY);
+  } catch (error) {}
+}
+function restoreCachedUpdateState(context = {}) {
+  const installKind = context.installKind || null;
+  const sourceRoot = context.sourceRoot || '';
+  if (installKind && installKind !== 'source') {
+    clearCachedUpdateState();
+    setUpdateState('package', { install_kind: installKind }, 0);
+    return null;
+  }
   try {
     const cached = JSON.parse(localStorage.getItem(UPDATE_CACHE_KEY) || 'null');
     if (cached && cached.data) {
+      if (sourceRoot && cached.data.repo && cached.data.repo !== sourceRoot) {
+        clearCachedUpdateState();
+        setUpdateState('unknown', null, 0);
+        return null;
+      }
       setUpdateState(classifyUpdateStatus(cached.data), cached.data, Number(cached.checkedAt || 0) || Date.now());
       return cached;
     }
@@ -1418,8 +1443,11 @@ function restoreCachedUpdateState() {
   return null;
 }
 async function refreshHeaderUpdate(options = {}) {
+  // `quiet`: no toast, because the caller reports the result itself (the
+  // Settings button did, and the toast showed twice). `background`: the
+  // pill does not flip to "Checking..." either, for the load-time check.
   const fetchRemote = options.fetch !== false;
-  if (!options.quiet) setUpdateState('checking', updateState.data, updateState.checkedAt || Date.now());
+  if (!options.background) setUpdateState('checking', updateState.data, updateState.checkedAt || Date.now());
   try {
     const response = await fetch(`/api/update-status?fetch=${fetchRemote ? '1' : '0'}`);
     const data = await response.json();
@@ -1454,10 +1482,12 @@ function renderUpdateStatus(update) {
       </div>`
     : '';
   const action = data.can_apply
-    ? '<p>Apply will fast-forward this clean checkout. The dashboard update action restarts AIWatcher after a successful apply.</p>'
-    : data.update_available
-      ? '<p>Resolve local changes or branch divergence before applying from the UI.</p>'
-      : '';
+    ? '<p>Apply will fast-forward this clean checkout and restart the dashboard. A running Companion keeps the old code until <code>aiwatcher companion stop</code>, then <code>aiwatcher companion start</code>.</p>'
+    : data.update_available && data.on_branch === false
+      ? `<p>Updates apply on <code>${esc(data.branch || 'main')}</code>. Check it out to apply from here; your branch is left alone.</p>`
+      : data.update_available
+        ? '<p>Resolve local changes or branch divergence before applying from the UI.</p>'
+        : '';
   return `<div class="update-status ${data.ok ? '' : 'warning'}">
     <strong>${esc(data.message || 'Update status unavailable.')}</strong>
     ${location}
@@ -1475,7 +1505,7 @@ async function checkForUpdates(button, options = {}) {
     button.textContent = 'Checking...';
   }
   try {
-    const data = await refreshHeaderUpdate({ fetch: options.fetch !== false, quiet: !button });
+    const data = await refreshHeaderUpdate({ fetch: options.fetch !== false, quiet: true });
     target.innerHTML = renderUpdateStatus(data);
     if (button) {
       button.textContent = data.update_available
@@ -1533,31 +1563,66 @@ async function applyUpdates(button, options = {}) {
     if (button) button.disabled = false;
   }
 }
+function openUpdatePanel(data) {
+  const target = document.getElementById('updateStatus');
+  if (target) target.innerHTML = renderUpdateStatus(data);
+  showView('setup');
+  showSettingsPanel('general');
+  const panel = document.getElementById('updatePanel');
+  if (panel) window.setTimeout(() => panel.scrollIntoView({ block: 'center' }), 50);
+}
 async function handleUpdateBannerClick(button) {
+  // The header pill never applies. Pulling code and restarting the server is
+  // a decision, and a header chip is a place for misclicks, so the pill opens
+  // the Updates card and the Apply button there takes the second step.
   if (updateState.status === 'available' && updateState.data && updateState.data.can_apply) {
-    if (button) button.disabled = true;
-    const data = await applyUpdates(null, { restart: true });
-    if (button) button.disabled = false;
+    openUpdatePanel(updateState.data);
+    return;
+  }
+  const data = await refreshHeaderUpdate({ fetch: true, quiet: false });
+  const status = classifyUpdateStatus(data);
+  if (status === 'current') {
     const target = document.getElementById('updateStatus');
     if (target) target.innerHTML = renderUpdateStatus(data);
     return;
   }
-  const data = await refreshHeaderUpdate({ fetch: true, quiet: false });
-  const target = document.getElementById('updateStatus');
-  if (target) target.innerHTML = renderUpdateStatus(data);
-  const status = classifyUpdateStatus(data);
-  if (status === 'blocked' || status === 'package' || status === 'error') {
-    showView('setup');
-    showSettingsPanel('general');
-    const panel = document.getElementById('updatePanel');
-    if (panel) window.setTimeout(() => panel.scrollIntoView({ block: 'center' }), 50);
-  }
+  openUpdatePanel(data);
 }
 function scheduleHeaderUpdateCheck() {
-  const cached = restoreCachedUpdateState();
+  const cached = restoreCachedUpdateState({
+    installKind: currentData && currentData.update_install_kind,
+    sourceRoot: currentData && currentData.update_source_root,
+  });
+  // Off by default. A fetch on page load is a GitHub call the user did not
+  // make. The switch is in Settings > General and lives server-side, so a
+  // fresh browser profile cannot re-enable it by having no cache.
+  if (!(currentData && currentData.update_auto_check)) return;
   const last = cached ? Number(cached.checkedAt || 0) : 0;
   if (Date.now() - last < UPDATE_AUTO_CHECK_MS) return;
-  window.setTimeout(() => refreshHeaderUpdate({ fetch: true, quiet: true }), 1200);
+  window.setTimeout(() => refreshHeaderUpdate({ fetch: true, quiet: true, background: true }), 1200);
+}
+function renderUpdateAutoCheck(enabled) {
+  const box = document.getElementById('updateAutoCheck');
+  if (box) box.checked = !!enabled;
+}
+function renderUpdateBannerForInstall(kind) {
+  // Known from the summary, before any GitHub check, so a package install
+  // never shows the pill at all.
+  const banner = document.getElementById('updateBanner');
+  if (banner && kind === 'package') banner.hidden = true;
+}
+async function setUpdateAutoCheck(enabled) {
+  const box = document.getElementById('updateAutoCheck');
+  try {
+    const result = await postJson('/api/update-auto-check', { enabled: !!enabled });
+    if (currentData) currentData.update_auto_check = !!result.enabled;
+    renderUpdateAutoCheck(result.enabled);
+    showToast(result.enabled ? 'Automatic update checks on.' : 'Automatic update checks off.', 'success');
+    if (result.enabled) scheduleHeaderUpdateCheck();
+  } catch (error) {
+    renderUpdateAutoCheck(!enabled);
+    showToast('Could not save the update-check setting.', 'error');
+  }
 }
 function renderHandoffForm(capsule) {
   const selected = capsule.handoff_type || 'coding';
@@ -1570,7 +1635,7 @@ function renderHandoffForm(capsule) {
         <h3>Shape the next session</h3>
         <p>Keep this brief specific enough that the new chat can continue from evidence, not from hidden memory.</p>
       </div>
-      <span class="pill">${esc(capsule.demo ? 'sample data' : 'private')}</span>
+      <span class="pill">private</span>
     </div>
     <div class="handoff-form-grid">
       <label><span class="label">Work type</span><select id="handoffType">${HANDOFF_TYPES.map(item => `<option value="${esc(item.id)}" ${item.id === selected ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}</select></label>
@@ -1579,7 +1644,7 @@ function renderHandoffForm(capsule) {
       <label><span class="label">Constraints</span><textarea id="handoffConstraints" placeholder="Scope, privacy, files not to touch, decisions already made">${esc(constraints)}</textarea></label>
       <label><span class="label">Acceptance checks</span><textarea id="handoffAcceptance" placeholder="How should the next chat know it is done?">${esc(acceptance)}</textarea></label>
     </div>
-    <div class="copy-row"><button class="btn-quiet" onclick="regenerateHandoff('${esc(capsule.session_id)}','${esc(capsule.target || 'generic')}', ${capsule.include_prompt_excerpt ? 'true' : 'false'}, ${capsule.demo ? 'true' : 'false'})">Regenerate brief</button></div>
+    <div class="copy-row"><button class="btn-quiet" onclick="regenerateHandoff('${esc(capsule.session_id)}','${esc(capsule.target || 'generic')}', ${capsule.include_prompt_excerpt ? 'true' : 'false'})">Regenerate brief</button></div>
   </div>`;
 }
 // Everything rendered into the brief preview has to be a string first.
@@ -1675,7 +1740,7 @@ function freshStartReceiptWidget({ reason = '', expected = '', copy = '', contro
   </div>`;
 }
 function renderFreshStartAiAssist(capsule) {
-  if (!capsule || capsule.demo) return '';
+  if (!capsule) return '';
   const status = capsule.ai_assist || {};
   const config = status.config || {};
   const result = capsule.ai_assist_result || null;
@@ -1725,12 +1790,11 @@ function renderHandoff(capsule) {
   const runtime = capsule.runtime_attachment || {};
   const target = capsule.target || 'generic';
   const includePrompt = !!capsule.include_prompt_excerpt;
-  const isDemo = !!capsule.demo;
   const canOpenRuntime = !!runtime.available;
   const aiAssist = capsule.ai_assist || {};
   const aiResult = capsule.ai_assist_result || {};
   const assisted = aiResult.status === 'used' || aiResult.status === 'cached';
-  const aiReady = !isDemo && aiAssist.ready && (aiAssist.mode || 'off') !== 'off' && !assisted;
+  const aiReady = aiAssist.ready && (aiAssist.mode || 'off') !== 'off' && !assisted;
   const sourceAccess = ((aiAssist.config || {}).source_access || aiResult.source_access || 'metadata_only');
   setDrawerSubtitle(assisted ? `AI-assisted handoff · ${sourceAccess}` : aiReady ? `AI Assist available · ${sourceAccess}` : 'Local metadata only');
   const enrichment = capsule.basic
@@ -1745,9 +1809,9 @@ function renderHandoff(capsule) {
     : primaryHelp;
   const primaryAction = aiReady
     ? `<button class="btn-primary" onclick="improveFreshStartWithAiAssist('${esc(capsule.session_id)}','${esc(target)}', ${includePrompt ? 'true' : 'false'})">Compose AI handoff</button>`
-    : `<button class="btn-primary" data-runtime="${canOpenRuntime ? '1' : '0'}" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', this.dataset.runtime === '1', ${isDemo ? 'true' : 'false'})">${esc(isDemo ? 'Copy demo brief' : primaryLabel)}</button>`;
+    : `<button class="btn-primary" data-runtime="${canOpenRuntime ? '1' : '0'}" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', this.dataset.runtime === '1')">${esc(primaryLabel)}</button>`;
   const secondaryCopy = aiReady
-    ? `<button class="btn-quiet" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', false, ${isDemo ? 'true' : 'false'})">Copy local fallback</button>`
+    ? `<button class="btn-quiet" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', false)">Copy local fallback</button>`
     : '';
   return `<section class="detail-section">
     <h2>Fresh Start</h2>
@@ -1759,7 +1823,7 @@ function renderHandoff(capsule) {
       <div class="copy-row" style="margin-top:12px">
         ${primaryAction}
         ${secondaryCopy}
-        ${isDemo ? `<button class="btn-quiet" onclick="showView('sessions'); closeDrawer()">Find real sessions</button>` : `<button class="btn-quiet" onclick="selectSession('${esc(capsule.session_id)}')">Inspect source session</button>`}
+        <button class="btn-quiet" onclick="selectSession('${esc(capsule.session_id)}')">Inspect source session</button>
       </div>
     </div>
     ${renderFreshStartAiAssist(capsule)}
@@ -1772,7 +1836,7 @@ function renderHandoff(capsule) {
         <span class="confidence-chip observed">${assisted ? 'AI assisted' : 'local rules'}</span>
       </div>
       <textarea id="handoffBrief" class="brief-box">${esc(capsule.next_brief || '')}</textarea>
-      <div class="copy-row"><button class="btn-primary" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', ${canOpenRuntime ? 'true' : 'false'}, ${isDemo ? 'true' : 'false'})">${esc(canOpenRuntime && !isDemo ? 'Copy brief + open workspace' : 'Copy brief')}</button></div>
+      <div class="copy-row"><button class="btn-primary" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', ${canOpenRuntime ? 'true' : 'false'})">${esc(canOpenRuntime ? 'Copy brief + open workspace' : 'Copy brief')}</button></div>
     </div>
     <!-- The brief is the focal object. Optional shaping fields stay below it
          so a first-time reader sees the paste-ready handoff before the knobs. -->
@@ -1783,12 +1847,12 @@ function renderHandoff(capsule) {
     ${renderFreshStartPreview(capsule)}
     <div class="copy-row">
       <span class="label" style="align-self:center">Format for</span>
-      ${Object.entries(HANDOFF_TARGET_LABELS).map(([item, label]) => `<button class="btn-quiet" aria-pressed="${item === target ? 'true' : 'false'}" onclick="regenerateHandoff('${esc(capsule.session_id)}','${item}', ${includePrompt}, ${isDemo ? 'true' : 'false'})">${esc(label)}</button>`).join('')}
+      ${Object.entries(HANDOFF_TARGET_LABELS).map(([item, label]) => `<button class="btn-quiet" aria-pressed="${item === target ? 'true' : 'false'}" onclick="regenerateHandoff('${esc(capsule.session_id)}','${item}', ${includePrompt})">${esc(label)}</button>`).join('')}
     </div>
     <p class="tool-link-note">${esc(runtime.reason || 'Use the Fresh Start brief when the exact running chat cannot be reopened.')}</p>
     ${enrichment}
     <label class="prompt-opt-in">
-      <input type="checkbox" ${includePrompt ? 'checked' : ''} onchange="regenerateHandoff('${esc(capsule.session_id)}','${target}', this.checked, ${isDemo ? 'true' : 'false'})">
+      <input type="checkbox" ${includePrompt ? 'checked' : ''} onchange="regenerateHandoff('${esc(capsule.session_id)}','${target}', this.checked)">
       <span class="prompt-opt-in-label">Include prompt excerpt <span class="pill">Privacy opt-in</span></span>
       <span class="hint">Off by default: everything else in this brief is metadata (counts, hashes, file paths). This adds your actual prompt text from the costliest turn, so review it before pasting into another tool.</span>
     </label>
@@ -1799,25 +1863,21 @@ function renderHandoff(capsule) {
   </section>
   ${changedFiles.length ? `<section class="detail-section"><details class="aiw-details"><summary>${esc(changedFiles.length)} changed file${changedFiles.length === 1 ? '' : 's'} to inspect</summary><div class="details-body"><div class="pill-row">${changedFiles.slice(0, 12).map(file => `<span class="pill">${esc(file)}</span>`).join('')}</div></div></details></section>` : ''}`;
 }
-async function copyFreshStartFromDrawer(sessionId, openRuntime = false, isDemo = false) {
+async function copyFreshStartFromDrawer(sessionId, openRuntime = false) {
   const brief = document.getElementById('handoffBrief') ? document.getElementById('handoffBrief').value : '';
   const copied = await copyText(brief, 'Fresh Start brief copied');
   if (!copied) return;
-  if (!isDemo) {
-    await fetch('/api/handoff-decision', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        session_id: sessionId,
-        decision: 'copy_handoff',
-        reason: 'Fresh Start brief copied from the session drawer.',
-        action_channel: 'dashboard_session',
-      })
-    }).catch(() => {});
-  }
-  let message = isDemo
-    ? 'Demo brief copied. In a live session AIWatcher would save a local Fresh Start receipt and watch for follow-up proof.'
-    : 'Fresh Start receipt saved. Open a fresh chat in the same workspace and paste the brief.';
+  await fetch('/api/handoff-decision', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      session_id: sessionId,
+      decision: 'copy_handoff',
+      reason: 'Fresh Start brief copied from the session drawer.',
+      action_channel: 'dashboard_session',
+    })
+  }).catch(() => {});
+  let message = 'Fresh Start receipt saved. Open a fresh chat in the same workspace and paste the brief.';
   if (openRuntime) {
     try {
       const returnRes = await requestRuntimeReturn(sessionId);
@@ -1827,24 +1887,17 @@ async function copyFreshStartFromDrawer(sessionId, openRuntime = false, isDemo =
   }
   const status = document.getElementById('handoffStatus');
   if (status) {
-    const controls = isDemo
-      ? '<button class="btn-primary" onclick="showView(\'sessions\'); closeDrawer()">Find real sessions</button><button class="btn-quiet" onclick="closeDrawer()">Done</button>'
-      : '<button class="btn-primary" onclick="showView(\'receipts\'); closeDrawer()">View receipt</button><button class="btn-quiet" onclick="closeDrawer()">Done</button>';
+    const controls = '<button class="btn-primary" onclick="showView(\'receipts\'); closeDrawer()">View receipt</button><button class="btn-quiet" onclick="closeDrawer()">Done</button>';
     status.outerHTML = `<div id="handoffStatus">${freshStartReceiptWidget({
-      reason: isDemo ? 'Demo Fresh Start brief copied.' : 'Fresh Start brief copied from the session drawer.',
-      expected: isDemo ? 'sample context at risk' : 'proof pending',
+      reason: 'Fresh Start brief copied from the session drawer.',
+      expected: 'proof pending',
       copy: message,
       controls,
     })}</div>`;
   }
 }
-async function regenerateHandoff(sessionId, target = 'generic', includePrompt = false, isDemo = false) {
-  const options = handoffOptionsFromForm(isDemo ? 'product' : 'coding');
-  if (isDemo) {
-    await openDemoHandoff(target, includePrompt, options);
-  } else {
-    await openHandoff(sessionId, target, includePrompt, options);
-  }
+async function regenerateHandoff(sessionId, target = 'generic', includePrompt = false) {
+  await openHandoff(sessionId, target, includePrompt, handoffOptionsFromForm('coding'));
 }
 async function improveFreshStartWithAiAssist(sessionId, target = 'generic', includePrompt = false) {
   const status = (typeof currentData !== 'undefined' && currentData && currentData.ai_assist) ? currentData.ai_assist : null;
@@ -1890,25 +1943,6 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
     if (working) working.remove();
     showToast('AI Assist could not improve this brief.', 'error');
   }
-}
-async function openDemoHandoff(target = 'generic', includePrompt = false, options = null) {
-  openDrawer('Fresh Start');
-  const node = document.getElementById('detailContent');
-  setDrawerContent('<div class="loading">Building Fresh Start demo from sample context pressure...</div>');
-  const demoOptions = options || {
-    type: 'product',
-    objective: 'Continue the work in a fresh session without losing decisions, constraints, or acceptance criteria.',
-    sources: ['Current repo state', 'Strategy or spec document', 'Relevant PR or issue'],
-    constraints: ['Do not assume access to the previous chat.', 'Do not broaden scope beyond the next checkpoint.', 'Preserve unrelated local changes and privacy boundaries.'],
-    acceptance: ['First reply states what appears done, what remains uncertain, and the smallest next checkpoint.', 'The next session loads source-of-truth files before editing.', 'The result reports verification and remaining uncertainty.'],
-  };
-  const payload = handoffPayload('', target, includePrompt, demoOptions);
-  const capsule = await postJson('/api/handoff-demo', payload);
-  if (capsule.error) {
-    setDrawerContent(`<div class="empty">${esc(capsule.error)}</div>`);
-    return;
-  }
-  setDrawerContent(renderHandoff(capsule));
 }
 async function openHandoff(sessionId, target = 'generic', includePrompt = false, options = null) {
   openDrawer('Fresh Start');
@@ -4139,7 +4173,7 @@ function renderFirstRun(card) {
       reporting on it afterwards.
     </div>
     <div class="actions">
-      <button class="btn-primary" onclick="showView('setup'); dismissFirstRun()">Show me how</button>
+      <button class="btn-primary" onclick="showView('setup'); showSettingsPanel('setup'); dismissFirstRun()">Show me how</button>
       <button class="btn-quiet" onclick="dismissFirstRun(true)">Skip to the dashboard</button>
     </div>`;
 }
@@ -5424,6 +5458,8 @@ async function loadOnce(resetDetail, forceRefresh) {
     return null;
   }
   renderWatcher(data.watcher || null);
+  renderUpdateAutoCheck(data.update_auto_check);
+  renderUpdateBannerForInstall(data.update_install_kind);
   setDefaultPromptTool(data);
   renderCacheStatus(data.cache || null);
   renderPresence(data.presence || null);

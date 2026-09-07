@@ -12,6 +12,15 @@ def installed_source_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def install_kind() -> str:
+    """source" for a Git checkout, "package" for a pip or pipx install.
+
+    A path check, not a git call, so the dashboard summary can carry it on
+    every poll without touching git or the network.
+    """
+    return "source" if (installed_source_root() / ".git").exists() else "package"
+
+
 def package_upgrade_guidance() -> list[dict[str, str]]:
     return [
         {"label": "pipx", "command": "pipx upgrade aiwatcher-cli"},
@@ -106,18 +115,31 @@ def check_for_updates(
 
     status = git_capture(root, ["status", "--porcelain"])
     dirty = bool(status.stdout.strip()) if status.returncode == 0 else True
+    # `git pull` fast-forwards whatever is checked out. A contributor on an
+    # already-merged feature branch, or a detached HEAD, would have that ref
+    # moved onto origin/main, so applying is only offered on the tracked
+    # branch itself. Detached HEAD reports no name and is treated as "not on
+    # the branch".
+    checked = git_capture(root, ["symbolic-ref", "--short", "-q", "HEAD"])
+    checked_out = checked.stdout.strip() if checked.returncode == 0 else None
+    on_branch = checked_out == branch
     payload.update({
         "ok": True,
         "install_kind": "source",
         "current": head.stdout.strip() or "unknown",
+        "checked_out": checked_out,
+        "on_branch": on_branch,
         "behind": behind,
         "ahead": ahead,
         "dirty": dirty,
         "update_available": behind > 0,
-        "can_apply": behind > 0 and ahead == 0 and not dirty,
+        "can_apply": behind > 0 and on_branch and ahead == 0 and not dirty,
     })
     if behind == 0:
         payload["message"] = "Already up to date."
+    elif not on_branch:
+        where = f"on {checked_out}" if checked_out else "on a detached HEAD"
+        payload["message"] = f"{behind} update(s) available for {branch}, but this checkout is {where}."
     elif ahead:
         payload["message"] = f"{behind} update(s) available, but this checkout has {ahead} local commit(s)."
     elif dirty:
@@ -159,6 +181,6 @@ def apply_updates(
         "applied": True,
         "restart_required": True,
         "output": pulled.stdout.strip() or "Fast-forwarded to the latest version.",
-        "message": "Updated. Restart AIWatcher so the dashboard and Companion use the new code.",
+        "message": "Updated. AIWatcher processes already running keep the old code until restarted.",
     })
     return refreshed

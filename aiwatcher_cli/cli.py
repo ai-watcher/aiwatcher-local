@@ -3630,7 +3630,9 @@ def command_update(args: argparse.Namespace) -> int:
     print(f"Remote:   {result.get('remote_ref')}")
     print(str(result.get("message") or ""))
     if not result.get("ok"):
-        if result.get("ahead"):
+        if result.get("on_branch") is False:
+            _print_not_on_branch(result)
+        elif result.get("ahead"):
             print("Refusing to auto-update a diverged branch.")
             print("Create a branch or resolve the divergence manually, then rerun `aiwatcher update`.")
         elif result.get("dirty"):
@@ -3643,6 +3645,9 @@ def command_update(args: argparse.Namespace) -> int:
         if result.get("ahead"):
             print(f"Local checkout is {result.get('ahead')} commit(s) ahead of {result.get('remote_ref')}; nothing to pull.")
         return 0
+    if result.get("on_branch") is False:
+        _print_not_on_branch(result)
+        return 2
     if result.get("ahead"):
         print("Refusing to auto-update a diverged branch.")
         print("Create a branch or resolve the divergence manually, then rerun `aiwatcher update`.")
@@ -3661,8 +3666,39 @@ def command_update(args: argparse.Namespace) -> int:
 
     if result.get("output"):
         print(str(result.get("output")))
-    print("Restart AIWatcher with `aiwatcher start --open-ui` so the dashboard and Companion use the new code.")
+    _print_post_update_restart_advice()
     return 0
+
+
+def _print_not_on_branch(result: dict[str, object]) -> None:
+    """A pull would fast-forward whatever is checked out, so it is refused
+    off the tracked branch. Say which branch, and both ways out."""
+    branch = result.get("branch") or "main"
+    checked_out = result.get("checked_out")
+    where = f"on `{checked_out}`" if checked_out else "on a detached HEAD"
+    print(f"Refusing to update: this checkout is {where}, and `aiwatcher update` tracks `{branch}`.")
+    print(f"Check out `{branch}` and rerun, or pass `--branch {checked_out}` to compare that branch instead." if checked_out
+          else f"Check out `{branch}` and rerun. No files were changed.")
+
+
+def _print_post_update_restart_advice() -> None:
+    """Say which running processes still hold the old code, and how to restart each.
+
+    The earlier advice was `aiwatcher start --open-ui`, which reuses a running
+    dashboard and a running Companion, so it restarted nothing.
+    """
+    dashboard = local_action_server_available()
+    companion = bool(get_watcher_status().get("running"))
+    if not dashboard and not companion:
+        print("Start AIWatcher with `aiwatcher start --open-ui` to run the new code.")
+        return
+    print("Processes already running keep the old code until restarted; `aiwatcher start` reuses them.")
+    if companion:
+        print("- Companion: `aiwatcher companion stop`, then `aiwatcher companion start`")
+    if dashboard:
+        url = _watch_ui_base_url()
+        port = urlparse(url).port or DEFAULT_UI_PORT
+        print(f"- Dashboard: `aiwatcher ui --restart --port {port}` replaces the one at {url}")
 
 
 def _ensure_dashboard_server(
@@ -3830,7 +3866,7 @@ def command_status(_args: argparse.Namespace) -> int:
         marker = _surface_marker(row.status)
         print(f"{marker} {row.label:26} {row.status_label:28} {row.session_count:>5} sessions")
     print("\nMode: private by default")
-    print("Network: disabled unless you run an update command or configure a connected workflow")
+    print("Network: disabled unless you run an update command, turn on automatic update checks in the dashboard, or configure a connected workflow")
     return 0
 
 
