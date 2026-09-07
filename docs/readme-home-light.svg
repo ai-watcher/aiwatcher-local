@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="820" viewBox="0 0 1440 820" role="img" aria-labelledby="title desc">
+  <title id="title">AIWatcher Local home dashboard</title>
+  <desc id="desc">Light theme AIWatcher Local home dashboard showing context pressure, running sessions, cleanup work, and the floating Companion control.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f4f8ff"/>
+      <stop offset="0.6" stop-color="#edf5fb"/>
+      <stop offset="1" stop-color="#f6fbff"/>
+    </linearGradient>
+    <linearGradient id="active" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#eef4ff"/>
+      <stop offset="1" stop-color="#d8e8ff"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="18" stdDeviation="24" flood-color="#4d6684" flood-opacity="0.14"/>
+    </filter>
+    <style>
+      .ink{fill:#19253a}
+      .muted{fill:#66728a}
+      .soft{fill:#edf4fb}
+      .line{stroke:#d7e1ef;stroke-width:1.2}
+      .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+      .sans{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+      .card{fill:#f8fbff;stroke:#d5e0ee;stroke-width:1.3}
+      .pill{fill:#e3f5ef;stroke:#76bea9;stroke-width:1}
+      .button{fill:#2f6df6}
+    </style>
+  </defs>
+
+  <rect width="1440" height="820" rx="0" fill="url(#bg)"/>
+
+  <g transform="translate(34 34)">
+    <rect x="0" y="0" width="29" height="29" rx="7" fill="none" stroke="#075cf4" stroke-width="4"/>
+    <rect x="18" y="18" width="29" height="29" rx="7" fill="none" stroke="#141b2a" stroke-width="4"/>
+    <text x="72" y="29" class="sans ink" font-size="27" font-weight="800">AIWatcher</text>
+    <text x="218" y="29" class="sans muted" font-size="27" font-weight="800">Local</text>
+    <rect x="302" y="5" width="124" height="24" rx="12" class="pill"/>
+    <circle cx="318" cy="17" r="4" fill="#05795c"/>
+    <text x="330" y="22" class="sans" font-size="12" font-weight="700" fill="#1b725d">Private and local</text>
+    <text x="72" y="57" class="sans muted" font-size="15">Your AI coding work, outcomes, and improvement signals.</text>
+  </g>
+
+  <g transform="translate(738 42)" class="sans">
+    <rect x="0" y="0" width="156" height="46" rx="10" fill="#f7fbff" stroke="#cfdaea"/>
+    <text x="22" y="29" class="ink" font-size="16" font-weight="700">Last 7 days</text>
+    <path d="M132 18l7 7 7-7" fill="none" stroke="#50617a" stroke-width="2" stroke-linecap="round"/>
+    <rect x="174" y="0" width="82" height="46" rx="10" fill="#edf4fb"/>
+    <text x="209" y="29" class="ink" font-size="16" font-weight="700" text-anchor="middle">Light</text>
+    <rect x="268" y="0" width="126" height="46" rx="10" fill="#edf4fb"/>
+    <text x="331" y="29" class="ink" font-size="16" font-weight="700" text-anchor="middle">Refresh data</text>
+    <rect x="412" y="-2" width="146" height="50" rx="24" fill="#dff2eb" stroke="#7fb9aa"/>
+    <circle cx="435" cy="23" r="5" fill="#00735a"/>
+    <text x="500" y="29" fill="#10735d" font-size="17" font-weight="800" text-anchor="middle">Up to date</text>
+    <rect x="578" y="-2" width="112" height="50" rx="10" fill="#dce9ff" stroke="#8bb7ff"/>
+    <text x="634" y="29" fill="#1f4bb7" font-size="18" font-weight="800" text-anchor="middle">Enterprise</text>
+  </g>
+
+  <line x1="34" y1="104" x2="1406" y2="104" class="line"/>
+
+  <g transform="translate(34 142)" class="sans">
+    <rect x="0" y="0" width="126" height="26" rx="13" class="pill"/>
+    <text x="13" y="18" fill="#176f5e" font-size="13" font-weight="800">Watcher running</text>
+    <circle cx="148" cy="13" r="3" fill="#7a8798"/>
+    <text x="162" y="18" class="mono muted" font-size="14">13 live · Codex 13 quiet · on this machine · updated just now</text>
+    <text x="1080" y="18" class="sans muted" font-size="14" font-weight="700">Run this in a terminal to start it:</text>
+    <rect x="1284" y="-5" width="58" height="36" rx="9" fill="#edf4fb"/>
+    <text x="1313" y="19" class="mono ink" font-size="14" font-weight="700" text-anchor="middle">Copy</text>
+  </g>
+
+  <g transform="translate(34 220)" filter="url(#shadow)">
+    <rect width="190" height="486" rx="8" fill="#f7fbff" stroke="#d4dfec"/>
+    <rect x="14" y="14" width="162" height="44" rx="8" fill="url(#active)" stroke="#2f6df6" stroke-width="2"/>
+    <text x="34" y="42" class="sans ink" font-size="18" font-weight="800">Home</text>
+    <text x="34" y="96" class="sans muted" font-size="17" font-weight="700">Plan</text>
+    <text x="34" y="148" class="sans muted" font-size="17" font-weight="700">Watch</text>
+    <text x="34" y="200" class="sans muted" font-size="17" font-weight="700">Control</text>
+    <text x="34" y="252" class="sans muted" font-size="17" font-weight="700">Prove</text>
+    <line x1="42" y1="274" x2="42" y2="320" class="line"/>
+    <text x="58" y="302" class="sans muted" font-size="14" font-weight="700">Changes ledger</text>
+    <text x="34" y="356" class="sans muted" font-size="17" font-weight="700">Improve</text>
+    <text x="34" y="408" class="sans muted" font-size="17" font-weight="700">Projects</text>
+    <text x="34" y="460" class="sans muted" font-size="17" font-weight="700">Settings</text>
+  </g>
+
+  <g transform="translate(248 220)" class="sans">
+    <rect width="1158" height="318" rx="9" fill="#f9fcff" stroke="#ed9b9c" stroke-width="1.4"/>
+    <text x="28" y="40" class="mono muted" font-size="15" font-weight="700">/Users/dev/work/aiwatcher-local · codex-cli · 1 of 13 live</text>
+    <text x="1116" y="40" class="mono muted" font-size="14" font-weight="700" text-anchor="end">updated just now</text>
+    <text x="28" y="113" class="sans ink" font-size="54" font-weight="800">148.7k</text>
+    <text x="190" y="113" class="sans muted" font-size="18" font-weight="800">tokens / turn</text>
+    <rect x="28" y="145" width="708" height="14" rx="7" fill="#cf181f"/>
+    <line x1="745" y1="137" x2="745" y2="173" stroke="#c4550d" stroke-width="3"/>
+    <line x1="970" y1="137" x2="970" y2="173" stroke="#b8232a" stroke-width="3"/>
+    <rect x="970" y="145" width="250" height="14" rx="7" fill="#e9eff7"/>
+    <circle cx="1145" cy="152" r="6" fill="#cf181f"/>
+    <text x="28" y="196" class="sans muted" font-size="18">About <tspan font-weight="800" fill="#19253a">8 turns</tspan> of headroom at the current rate.</text>
+    <rect x="28" y="235" width="148" height="46" rx="8" class="button"/>
+    <text x="102" y="264" fill="#fff" font-size="16" font-weight="800" text-anchor="middle">Review Fresh Start</text>
+    <rect x="186" y="235" width="124" height="46" rx="8" fill="#f5f9ff" stroke="#d8e1ee"/>
+    <text x="248" y="264" class="ink" font-size="16" font-weight="800" text-anchor="middle">Inspect session</text>
+    <line x1="28" y1="295" x2="1130" y2="295" class="line"/>
+  </g>
+
+  <g transform="translate(248 556)" class="sans">
+    <rect width="356" height="126" rx="9" class="card"/>
+    <rect x="0" y="0" width="4" height="126" rx="2" fill="#2f6df6"/>
+    <text x="28" y="32" class="mono muted" font-size="13" font-weight="800" letter-spacing="2">RUNNING NOW</text>
+    <text x="28" y="82" class="ink" font-size="40" font-weight="800">13</text>
+    <text x="28" y="107" class="muted" font-size="15">13 quiet</text>
+
+    <rect x="374" width="356" height="126" rx="9" class="card"/>
+    <text x="402" y="32" class="mono muted" font-size="13" font-weight="800" letter-spacing="2">SINCE LAST COMMIT</text>
+    <text x="402" y="82" class="ink" font-size="40" font-weight="800">--</text>
+    <text x="402" y="107" class="muted" font-size="15">No checkpoint to measure from yet.</text>
+
+    <rect x="748" width="410" height="126" rx="9" class="card"/>
+    <rect x="748" y="0" width="4" height="126" rx="2" fill="#d0630b"/>
+    <text x="776" y="32" class="mono muted" font-size="13" font-weight="800" letter-spacing="2">WORTH CLEANING UP</text>
+    <text x="776" y="82" class="ink" font-size="40" font-weight="800">8</text>
+    <text x="776" y="107" class="muted" font-size="15">Context at risk · review on Control</text>
+  </g>
+
+  <g transform="translate(1340 712)" filter="url(#shadow)">
+    <circle cx="32" cy="32" r="31" fill="#ffffff" stroke="#d7e1ef"/>
+    <rect x="21" y="21" width="21" height="21" rx="5" fill="none" stroke="#31cfa4" stroke-width="3"/>
+    <rect x="33" y="33" width="21" height="21" rx="5" fill="none" stroke="#151d2c" stroke-width="3"/>
+    <circle cx="53" cy="9" r="11" fill="#2874ff"/>
+    <text x="53" y="14" fill="#fff" class="sans" font-size="12" font-weight="800" text-anchor="middle">6</text>
+  </g>
+</svg>

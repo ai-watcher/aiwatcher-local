@@ -11,7 +11,7 @@ It works with local history from tools such as Claude Code, Codex, and Cursor.
 No account is required. No cloud upload happens by default. No LLM call happens
 unless you explicitly configure optional AI Assist.
 
-![AIWatcher Local Console overview](docs/dashboard.svg)
+![AIWatcher Local home dashboard](docs/readme-home-light.svg)
 
 ## What You Get
 
@@ -29,17 +29,11 @@ No signup is required, and the default install keeps data on your machine.
 
 ## First Look
 
-Prompt Gate helps narrow risky work before it starts:
+The Home view shows active AI work, context pressure, update status, and the
+small Companion control. Plan helps narrow risky prompts before an agent spends
+context:
 
-![AIWatcher Prompt Gate](docs/dashboard-prompt-gate.svg)
-
-Sessions show what AI tools are doing locally and what needs attention:
-
-![AIWatcher sessions view](docs/dashboard-sessions.svg)
-
-Receipts and changes help prove which AI work became useful code:
-
-![AIWatcher receipts view](docs/dashboard-receipts.svg)
+![AIWatcher Plan prompt gate](docs/readme-plan-light.svg)
 
 ## Why Developers Use It
 
