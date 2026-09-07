@@ -22,6 +22,7 @@ work is done.
   - [1. Install](#1-install)
   - [2. Run setup](#2-run-setup)
   - [3. Start AIWatcher Local](#3-start-aiwatcher-local)
+  - [If an install command fails](#if-an-install-command-fails)
   - [4. Install hooks so work is reviewed before it runs](#4-install-hooks-so-work-is-reviewed-before-it-runs)
     - [Prompt preflight hook](#prompt-preflight-hook)
     - [Dangerous-command gate](#dangerous-command-gate)
@@ -59,55 +60,78 @@ reads and why, it should not read it.
 
 ### 1. Install
 
-Python 3.9+ on macOS, Linux, or Windows:
+**Recommended for early users:** install the GitHub package with `pipx`. This
+does not require cloning the repo, and it keeps AIWatcher in its own isolated
+Python environment.
 
-Until the first `aiwatcher-cli` release lands on PyPI, the recommended install
-for early users is a no-clone GitHub install through `pipx`:
+On macOS:
 
 ```sh
+python3 --version
+brew install pipx
+pipx ensurepath
 pipx install git+https://github.com/ai-watcher/aiwatcher-local.git
 ```
 
-If you do not have `pipx` yet:
+Open a new terminal if `pipx ensurepath` asks you to, then continue with setup:
 
 ```sh
-python -m pip install --user pipx
-python -m pipx ensurepath
-pipx install git+https://github.com/ai-watcher/aiwatcher-local.git
+aiwatcher setup
+aiwatcher start --open-ui
 ```
 
-Other install paths:
+`aiwatcher start --open-ui` starts the local Console dashboard and the
+Companion together.
+
+On Linux:
+
+```sh
+python3 --version
+python3 -m pip install --user pipx
+python3 -m pipx ensurepath
+python3 -m pipx install git+https://github.com/ai-watcher/aiwatcher-local.git
+aiwatcher setup
+aiwatcher start --open-ui
+```
+
+On Windows PowerShell:
+
+```powershell
+py --version
+py -m pip install --user pipx
+py -m pipx ensurepath
+pipx install git+https://github.com/ai-watcher/aiwatcher-local.git
+aiwatcher setup
+aiwatcher start --open-ui
+```
+
+Once the PyPI package is published, the recommended install command becomes:
+
+```sh
+pipx install aiwatcher-cli
+```
+
+Alternative paths:
 
 | Path | Use when | Command |
 | --- | --- | --- |
-| `pipx` from GitHub | You want the easiest isolated CLI install today | `pipx install git+https://github.com/ai-watcher/aiwatcher-local.git` |
+| Recommended no-clone install | You want the easiest isolated CLI install today | `pipx install git+https://github.com/ai-watcher/aiwatcher-local.git` |
 | `uv` tool install | You already use `uv` for Python tools | `uv tool install git+https://github.com/ai-watcher/aiwatcher-local.git` |
-| `pip` from GitHub | You want to install into the current Python environment | `python -m pip install --upgrade git+https://github.com/ai-watcher/aiwatcher-local.git` |
-| editable clone | You want to inspect code, contribute, or use one-click source updates | `git clone https://github.com/ai-watcher/aiwatcher-local.git` |
+| `pip` from GitHub | You want to install into the current Python environment | `python3 -m pip install --upgrade git+https://github.com/ai-watcher/aiwatcher-local.git` |
+| editable clone | You want to inspect code, contribute, or use one-click source updates | See below |
 
 For the editable clone path:
 
 ```sh
 git clone https://github.com/ai-watcher/aiwatcher-local.git
 cd aiwatcher-local
-python -m pip install -e .
+python3 -m pip install -e .
+python3 -m aiwatcher_cli setup
+python3 -m aiwatcher_cli start --open-ui
 ```
 
-On Windows PowerShell the same commands work. If `python` is not on PATH, use
-the Python launcher (`py -m pip install -e .`).
-
-Once the PyPI package is published, the shortest install path will be:
-
-```sh
-pipx install aiwatcher-cli
-```
-
-Maintainers preparing a public registry release should use
-[docs/RELEASE.md](docs/RELEASE.md) for the scan, artifact inspection, and
-PyPI/npm publishing boundary.
-
-Examples below use the installed `aiwatcher` command. From a clone without an
-editable install, use `python -m aiwatcher_cli <command>` instead.
+On Windows PowerShell, use `py -m pip install -e .` and
+`py -m aiwatcher_cli start --open-ui` if `python3` is not available.
 
 ### 2. Run setup
 
@@ -118,6 +142,12 @@ aiwatcher setup
 `setup` detects which AI coding tools AIWatcher can read on this machine,
 reports which hooks are installed, and prints the exact next steps that apply
 to your tools.
+
+From a clone without an editable install, use:
+
+```sh
+python3 -m aiwatcher_cli setup
+```
 
 ### 3. Start AIWatcher Local
 
@@ -131,6 +161,23 @@ This is the default startup command. It starts:
   loopback port
 - the background Companion that watches local AI sessions
 - the small floating Companion control on macOS and Windows
+
+From a clone without an editable install, use:
+
+```sh
+python3 -m aiwatcher_cli start --open-ui
+```
+
+### If an install command fails
+
+| What you see | What to do |
+| --- | --- |
+| `zsh: command not found: pipx` | On macOS run `brew install pipx`, then `pipx ensurepath`, then open a new terminal. |
+| `zsh: command not found: python` | Use `python3` on macOS/Linux. On Windows use `py`. |
+| `zsh: command not found: python3` | On macOS run `brew install python`, or install Python 3.9+ from <https://www.python.org/downloads/>. |
+| `No module named pip3` | Use `python3 -m pip ...`, not `python3 -m pip3 ...`. `pip3` is a shell command, not a Python module. |
+| `zsh: command not found: aiwatcher` after cloning | Run `cd aiwatcher-local` and `python3 -m pip install -e .`, or use `python3 -m aiwatcher_cli start --open-ui`. |
+| `brew: command not found` | Install Homebrew from <https://brew.sh>, or use the editable clone path with a Python 3.9+ install from <https://www.python.org/downloads/>. |
 
 The Companion is the live mode: it sits near the edge of the screen, stays
 quiet during normal work, and lights up when AIWatcher sees a prompt gate,
@@ -761,7 +808,9 @@ Enterprise features are additive. AIWatcher Local is never gated behind signup.
 ## Contributing
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) and our
-[Code of Conduct](CODE_OF_CONDUCT.md). To report a security issue, see
+[Code of Conduct](CODE_OF_CONDUCT.md). Maintainers preparing a public registry
+release should use [docs/RELEASE.md](docs/RELEASE.md) for the scan, artifact
+inspection, and PyPI/npm publishing boundary. To report a security issue, see
 [SECURITY.md](SECURITY.md).
 
 ## License
