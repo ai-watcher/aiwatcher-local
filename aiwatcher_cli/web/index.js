@@ -1365,7 +1365,7 @@ function updateBannerLabel(status, data) {
   if (status === 'checking') return 'Checking...';
   if (status === 'available') return `${count || ''} update${count === 1 ? '' : 's'} available`.trim();
   if (status === 'blocked') return `${count || ''} update${count === 1 ? '' : 's'} blocked`.trim();
-  if (status === 'branch') return `Not on ${(data && data.branch) || 'main'}`;
+  if (status === 'branch') return 'Source checkout';
   if (status === 'current') return 'Up to date';
   if (status === 'package') return 'Package install';
   if (status === 'error') return 'Update check failed';
@@ -1373,8 +1373,10 @@ function updateBannerLabel(status, data) {
 }
 function updateBannerTitle(status, data) {
   const source = data && data.repo ? `Source checkout: ${data.repo}` : 'Source checkout unknown';
+  const branch = data && data.checked_out ? `Branch: ${data.checked_out}` : data && data.on_branch === false ? 'Branch: detached HEAD' : '';
   const launched = data && data.process_cwd ? `Launched from: ${data.process_cwd}` : '';
-  const location = launched ? `\n${source}\n${launched}` : `\n${source}`;
+  const details = [source, branch, launched].filter(Boolean).join('\n');
+  const location = details ? `\n${details}` : '';
   if (status === 'available') {
     return `Click to review and apply the latest changes from ${data.remote_ref || 'origin/main'}${location}`;
   }
@@ -1388,9 +1390,10 @@ function updateBannerTitle(status, data) {
 }
 function updateLocationLabel(data) {
   if (!data) return 'Source unknown';
+  if (data.install_kind && data.install_kind !== 'source') return 'Installed package';
   const source = data.repo || data.process_cwd || '';
   if (!source) return 'Source unknown';
-  return `Running from ${projectName({ project_full: source })}`;
+  return `Path: ${projectName({ project_full: source })}`;
 }
 function setUpdateState(status, data, checkedAt = Date.now()) {
   updateState = { status, data: data || null, checkedAt };
