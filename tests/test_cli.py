@@ -376,6 +376,8 @@ class UpdateCommandCliTests(unittest.TestCase):
                     return self._git_result(args, stdout="2\n")
                 if args == ["rev-list", "--count", "origin/main..HEAD"]:
                     return self._git_result(args, stdout="0\n")
+                if args == ["symbolic-ref", "--short", "-q", "HEAD"]:
+                    return self._git_result(args, stdout="main\n")
                 if args == ["status", "--porcelain"]:
                     return self._git_result(args, stdout="")
                 raise AssertionError(f"unexpected git call: {args}")
@@ -416,6 +418,8 @@ class UpdateCommandCliTests(unittest.TestCase):
                     return self._git_result(args, stdout="1\n")
                 if args == ["rev-list", "--count", "origin/main..HEAD"]:
                     return self._git_result(args, stdout="0\n")
+                if args == ["symbolic-ref", "--short", "-q", "HEAD"]:
+                    return self._git_result(args, stdout="main\n")
                 if args == ["status", "--porcelain"]:
                     return self._git_result(args, stdout=" M README.md\n")
                 raise AssertionError(f"unexpected git call: {args}")
@@ -451,6 +455,107 @@ class UpdateCommandCliTests(unittest.TestCase):
         output = stdout.getvalue()
         self.assertIn("is not a Git checkout", output)
         self.assertIn("pipx upgrade aiwatcher-cli", output)
+
+
+    def _fake_git_with_updates(self, calls: list[list[str]], checked_out: str | None = "main"):
+        def fake_git(_repo: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+            calls.append(args)
+            if args == ["symbolic-ref", "--short", "-q", "HEAD"]:
+                if checked_out is None:
+                    return self._git_result(args, returncode=1)
+                return self._git_result(args, stdout=f"{checked_out}\n")
+            if args == ["rev-parse", "--is-inside-work-tree"]:
+                return self._git_result(args, stdout="true\n")
+            if args[:2] == ["fetch", "--quiet"]:
+                return self._git_result(args)
+            if args == ["rev-parse", "--short", "HEAD"]:
+                return self._git_result(args, stdout="abc123\n")
+            if args[:3] == ["rev-parse", "--verify", "--quiet"]:
+                return self._git_result(args, stdout="origin/main\n")
+            if args == ["rev-list", "--count", "HEAD..origin/main"]:
+                return self._git_result(args, stdout="2\n")
+            if args == ["rev-list", "--count", "origin/main..HEAD"]:
+                return self._git_result(args, stdout="0\n")
+            if args == ["status", "--porcelain"]:
+                return self._git_result(args, stdout="")
+            if args == ["pull", "--ff-only", "origin", "main"]:
+                return self._git_result(args, stdout="Fast-forward\n")
+            raise AssertionError(f"unexpected git call: {args}")
+        return fake_git
+
+    def _apply_update(self, *, dashboard: bool, companion: bool) -> tuple[int, str, list[list[str]]]:
+        calls: list[list[str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, ".git").mkdir()
+            with (
+                patch.object(updater, "git_capture", side_effect=self._fake_git_with_updates(calls)),
+                patch.object(cli, "local_action_server_available", return_value=dashboard),
+                patch.object(cli, "get_watcher_status", return_value={"running": companion}),
+                patch.object(cli, "_watch_ui_base_url", return_value="http://127.0.0.1:8799"),
+                patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                result = cli.command_update(SimpleNamespace(
+                    repo=tmp, remote="origin", branch="main", apply=True, no_fetch=False,
+                ))
+        return result, stdout.getvalue(), calls
+
+    def test_update_apply_refuses_to_fast_forward_a_feature_branch(self) -> None:
+        # `git pull` moves whatever is checked out. On an already-merged
+        # feature branch that would silently drag the branch onto main.
+        calls: list[list[str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, ".git").mkdir()
+            with (
+                patch.object(updater, "git_capture", side_effect=self._fake_git_with_updates(calls, "feat/x")),
+                patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                result = cli.command_update(SimpleNamespace(
+                    repo=tmp, remote="origin", branch="main", apply=True, no_fetch=False,
+                ))
+        self.assertEqual(result, 2)
+        self.assertNotIn(["pull", "--ff-only", "origin", "main"], calls)
+        self.assertIn("this checkout is on `feat/x`", stdout.getvalue())
+        self.assertIn("--branch feat/x", stdout.getvalue())
+
+    def test_update_refuses_a_detached_head(self) -> None:
+        calls: list[list[str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, ".git").mkdir()
+            with (
+                patch.object(updater, "git_capture", side_effect=self._fake_git_with_updates(calls, None)),
+                patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                result = cli.command_update(SimpleNamespace(
+                    repo=tmp, remote="origin", branch="main", apply=True, no_fetch=False,
+                ))
+        self.assertEqual(result, 2)
+        self.assertNotIn(["pull", "--ff-only", "origin", "main"], calls)
+        self.assertIn("detached HEAD", stdout.getvalue())
+
+    def test_install_kind_is_a_path_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(updater, "installed_source_root", return_value=Path(tmp)):
+                self.assertEqual(updater.install_kind(), "package")
+                Path(tmp, ".git").write_text("gitdir: elsewhere\n")  # worktrees keep a file, not a dir
+                self.assertEqual(updater.install_kind(), "source")
+
+    def test_update_apply_names_each_running_process_that_still_holds_old_code(self) -> None:
+        # `aiwatcher start` reuses a running dashboard and Companion, so the
+        # old advice to rerun it restarted nothing.
+        result, output, calls = self._apply_update(dashboard=True, companion=True)
+        self.assertEqual(result, 0)
+        self.assertIn(["pull", "--ff-only", "origin", "main"], calls)
+        self.assertNotIn("aiwatcher start --open-ui", output)
+        self.assertIn("`aiwatcher companion stop`, then `aiwatcher companion start`", output)
+        self.assertIn("aiwatcher ui --restart --port 8799", output)
+        self.assertIn("http://127.0.0.1:8799", output)
+
+    def test_update_apply_points_at_start_when_nothing_is_running(self) -> None:
+        result, output, _calls = self._apply_update(dashboard=False, companion=False)
+        self.assertEqual(result, 0)
+        self.assertIn("aiwatcher start --open-ui", output)
+        self.assertNotIn("companion stop", output)
+        self.assertNotIn("ui --restart", output)
 
 
 class ProjectAttributionCliTests(unittest.TestCase):

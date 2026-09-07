@@ -17,7 +17,7 @@ from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePath
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
@@ -146,7 +146,8 @@ from .scanner import (
     segment_session_by_prompt,
     surface_coverage,
 )
-from .updater import apply_updates, check_for_updates
+from .local_state import record_update_auto_check, update_auto_check_enabled
+from .updater import apply_updates, check_for_updates, install_kind
 
 
 MAX_REQUEST_BYTES = 64 * 1024
@@ -175,14 +176,52 @@ SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
 SUMMARY_CACHE_SCHEMA_VERSION = 8
 
 
+def restart_command(
+    argv: Sequence[str] | None = None,
+    executable: str | None = None,
+    orig_argv: Sequence[str] | None = None,
+) -> list[str]:
+    """The command line that brings this dashboard back after an update.
+
+    `aiwatcher start` launches the dashboard as `python -m aiwatcher_cli ui`.
+    Under -m, sys.argv[0] is the path to the package's __main__.py, and
+    running that file as a script fails on its relative import -- so
+    re-execing sys.argv verbatim killed the server instead of restarting it,
+    and the browser reloaded into a dead page. sys.orig_argv (3.10+) is the
+    real command line; on 3.9 the -m form is rebuilt from the path.
+    """
+    exe = executable or sys.executable
+    if orig_argv is None:
+        orig_argv = getattr(sys, "orig_argv", None)
+    if orig_argv:
+        return [exe, *orig_argv[1:]]
+    args = list(sys.argv if argv is None else argv)
+    if args and Path(args[0]).name == "__main__.py":
+        return [exe, "-m", Path(args[0]).resolve().parent.name, *args[1:]]
+    return [exe, *args]
+
+
 def _restart_current_process() -> None:
-    os.execv(sys.executable, [sys.executable, *sys.argv])
+    command = restart_command()
+    os.execv(command[0], command)
 
 
 def schedule_dashboard_restart(delay_seconds: float = 0.8) -> None:
     timer = threading.Timer(delay_seconds, _restart_current_process)
     timer.daemon = True
     timer.start()
+
+# Routes that change the machine rather than report on it: they fetch or pull
+# code, restart the server, or store a setting. The loopback CORS policy below
+# trusts any http://localhost or http://127.0.0.1 origin on any port, which is
+# tolerable for reads but would let a page served by any other local dev
+# server drive these. They answer only the dashboard's own origin, or a
+# non-browser client such as curl or the CLI, which sends no Origin.
+SAME_ORIGIN_ONLY_ROUTES = frozenset({
+    "/api/update-status",
+    "/api/update-apply",
+    "/api/update-auto-check",
+})
 
 # POST endpoints whose only fact is that they happened, so they carry no JSON
 # body and are exempt from the content-type check. Named rather than written
@@ -2632,78 +2671,6 @@ def build_ai_assisted_optimize_cleanup_prompt(candidate_id: str, days: int = 7) 
     return response
 
 
-def build_demo_handoff_detail(
-    target: str = "generic",
-    handoff_type: str = "product",
-    objective: str | None = None,
-    source_refs: list[str] | None = None,
-    constraints: list[str] | None = None,
-    acceptance_criteria: list[str] | None = None,
-) -> dict[str, object]:
-    target = target if target in TARGET_LABELS else "generic"
-    handoff_type = handoff_type if handoff_type in HANDOFF_TYPE_LABELS else "product"
-    now = datetime.now(timezone.utc)
-    project_path = os.getcwd()
-    session = LocalSession(
-        session_id="demo-fresh-start",
-        tool="codex-desktop",
-        project_path=project_path,
-        source_path="AIWatcher demo data",
-        started_at=now - timedelta(hours=3),
-        updated_at=now - timedelta(minutes=8),
-        model="gpt-5.5",
-        tokens_in=176_000,
-        tokens_out=14_000,
-        cost_usd=3.84,
-        agent_calls=96,
-        tool_calls=43,
-    )
-    capsule = build_handoff_capsule(
-        session,
-        [],
-        outcome=None,
-        target=target,
-        handoff_type=handoff_type,
-        objective=objective or "Continue the work in a fresh session without losing decisions, constraints, or acceptance criteria.",
-        source_refs=source_refs or ["Current repo state", "Strategy or spec document", "Relevant PR or issue"],
-        constraints=constraints or [
-            "Do not assume access to the previous chat.",
-            "Do not broaden scope beyond the next checkpoint.",
-            "Preserve unrelated local changes and privacy boundaries.",
-        ],
-        acceptance_criteria=acceptance_criteria or [
-            "First reply states what appears done, what remains uncertain, and the smallest next checkpoint.",
-            "The next session loads source-of-truth files before editing.",
-            "The result reports verification and remaining uncertainty.",
-        ],
-        extra_warnings=[
-            "Demo context pressure: previous session had 190.0k tokens and several exploratory turns.",
-            "Use this sample to verify the brief shape, copy action, and receipt flow before testing real local history.",
-        ],
-    )
-    capsule["runtime_attachment"] = RuntimeAttachment(
-        session_id=session.session_id,
-        level="none",
-        mode="demo",
-        label="Demo data",
-        action_label="Copy brief",
-        available=False,
-        confidence="demo",
-        reason="This is seeded demo data. Copy the brief to inspect the Fresh Start flow; no live AI app will be opened.",
-        tool=session.tool,
-        surface="dashboard-demo",
-        project_path=project_path,
-        identity_level="demo",
-        identity_label="Demo sample",
-        identity_reason="Seeded sample for testing Fresh Start without real bloated local history.",
-    ).to_json()
-    capsule["demo"] = True
-    capsule["basic"] = False
-    capsule["enrichment_status"] = "complete"
-    capsule["ai_assist"] = build_ai_assist_status(ai_assist_config())
-    return capsule
-
-
 def _query_items(params: dict[str, list[str]], name: str) -> list[str]:
     values: list[str] = []
     for raw in params.get(name, []):
@@ -3393,12 +3360,20 @@ def build_prompt_preflight(prompt: str, *, tool: str = "agent", cwd: str | None 
 
 # Measured, not guessed: real runs on the small tier came in at $0.037 and
 # $0.028. Stated as a range so it does not read as a quote.
+# One plain sentence per fact, each checkable against the code that makes it
+# true: the updater (GitHub only on a click or the Settings switch), analyst.py
+# (prompt plus file paths, contents per-project opt-in), ai_assist.py
+# (metadata by default, prompt and source as separate opt-ins). "Workflow-
+# scoped" and "connected workflow" were replaced because a reader cannot act
+# on them; a claim here has to say what a feature sees and when it runs.
 PRIVACY_CLAIMS = [
-    "Read-only local scan",
-    "No AIWatcher cloud call unless you connect or configure one.",
-    "Second opinion and AI Assist use your configured tools and keys.",
-    "Prompt and file-path access is workflow-scoped; file contents require opt-in.",
-    "Source stays local unless a connected workflow is explicitly enabled.",
+    "Read-only local scan.",
+    "No calls of ours. Nothing leaves this machine unless you set that up.",
+    "Update checks reach GitHub only when you click Check or turn them on.",
+    "Second opinion and AI Assist run your own tool, with your key, and only when you turn them on.",
+    "Second opinion sees your prompt and file paths. AI Assist sees metadata. "
+    "File contents only if you turn that on for a project.",
+    "No upload to AIWatcher Cloud unless you connect it.",
 ]
 
 # Measured across both hosts, and the spread is real: the same prompt has
@@ -5555,6 +5530,8 @@ def build_summary(
         "coverage": [row.to_json() for row in surface_coverage(all_rows)],
         "setup": setup_checklist(),
         "watcher": get_watcher_status(),
+        "update_auto_check": update_auto_check_enabled(),
+        "update_install_kind": install_kind(),
         "ai_assist": build_ai_assist_status(ai_assist_config()),
         "ai_assist_runs": recent_ai_assist_runs(limit=10),
         "context_health": context_health,
@@ -5665,6 +5642,14 @@ def _mark_summary_cache(summary: dict[str, object], *, status: str, source: str,
     # must reflect the current local config. Otherwise saving AI Assist briefly
     # renders the new mode before the next poll repaints an older cached mode.
     copy["ai_assist"] = build_ai_assist_status(ai_assist_config())
+    # Same rule for the rest of what Settings shows from config rather than
+    # from history. The Trust tab's claims are code, not data, and a cached
+    # payload served after an upgrade showed the previous release's promises
+    # for up to six hours. The update switch is a toggle the user just set,
+    # and the install kind is a path check; neither belongs to the snapshot.
+    copy["privacy"] = PRIVACY_CLAIMS
+    copy["update_auto_check"] = update_auto_check_enabled()
+    copy["update_install_kind"] = install_kind()
     generated_at = copy.get("generated_at") if isinstance(copy.get("generated_at"), str) else None
     copy["cache_schema_version"] = SUMMARY_CACHE_SCHEMA_VERSION
     copy["cache"] = {
@@ -5875,6 +5860,8 @@ def _build_summary_shell(
         "coverage": [row.to_json() for row in surface_coverage(all_rows)],
         "setup": setup_checklist(),
         "watcher": get_watcher_status(),
+        "update_auto_check": update_auto_check_enabled(),
+        "update_install_kind": install_kind(),
         "ai_assist": build_ai_assist_status(ai_assist_config()),
         "ai_assist_runs": recent_ai_assist_runs(limit=10),
         "context_health": [],
@@ -6150,7 +6137,7 @@ def answer_local_question(question: str, days: int = 7) -> dict[str, object]:
             "Coverage tells you where AIWatcher can gate automatically, where it only has history, and where Companion/Plan is the manual bridge.",
             confidence="Observed local setup and runtime detection",
             bullets=bullets or ["No coverage rows are available yet. Open Settings after the local scan finishes."],
-            actions=[_ask_action("Open Settings", "/?view=setup")],
+            actions=[_ask_action("Open Settings", "/?view=setup&settings=trust")],
         )
 
     return _ask_answer(
@@ -7263,6 +7250,22 @@ class UIHandler(BaseHTTPRequestHandler):
             return origin
         return None
 
+    def _is_cross_origin(self) -> bool:
+        """True when a browser page other than this dashboard made the request.
+
+        Origin is sent on every cross-origin request and on same-origin POSTs,
+        so comparing it with Host catches another local dev server's page.
+        Sec-Fetch-Site covers what Origin misses, such as an <img> tag on
+        another site firing a GET. A client that sends neither (curl, the CLI)
+        is not a browser page and is allowed through.
+        """
+        own = f"http://{self.headers.get('Host', '').strip().lower()}"
+        origin = self.headers.get("Origin", "").strip().lower()
+        if origin and origin != own:
+            return True
+        site = self.headers.get("Sec-Fetch-Site", "").strip().lower()
+        return site not in {"", "same-origin", "none"}
+
     def _send(self, status: int, body: str, content_type: str) -> None:
         encoded = body.encode("utf-8")
         try:
@@ -7282,7 +7285,9 @@ class UIHandler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self) -> None:
         trusted = self._trusted_origin()
-        if not trusted:
+        # A preflight only ever comes from another origin, so for these routes
+        # the answer does not depend on which origin it is.
+        if not trusted or urlparse(self.path).path in SAME_ORIGIN_ONLY_ROUTES:
             self._send(405, "Cross-origin requests are not allowed", "text/plain; charset=utf-8")
             return
         self.send_response(204)
@@ -7309,6 +7314,9 @@ class UIHandler(BaseHTTPRequestHandler):
             }), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/update-status":
+            if self._is_cross_origin():
+                self._send(403, json.dumps({"error": "Update routes answer only the dashboard's own origin"}), "application/json; charset=utf-8")
+                return
             params = parse_qs(parsed.query)
             fetch = params.get("fetch", ["1"])[0] != "0"
             try:
@@ -7467,16 +7475,6 @@ class UIHandler(BaseHTTPRequestHandler):
                 "application/json; charset=utf-8",
             )
             return
-        if parsed.path == "/api/handoff-demo":
-            params = parse_qs(parsed.query)
-            target = params.get("target", ["generic"])[0]
-            handoff_options = _handoff_options_from_query(params, default_type="product")
-            self._send(
-                200,
-                json.dumps(build_demo_handoff_detail(target=target, **handoff_options)),
-                "application/json; charset=utf-8",
-            )
-            return
         if parsed.path == "/api/report":
             params = parse_qs(parsed.query)
             try:
@@ -7552,7 +7550,6 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/handoff-basic",
             "/api/handoff-ai-assist",
             "/api/handoff",
-            "/api/handoff-demo",
             "/api/handoff-decision",
             "/api/handoff-receipts-viewed",
             "/api/first-run-dismissed",
@@ -7563,8 +7560,12 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/runtime-return",
             "/api/session-resume",
             "/api/update-apply",
+            "/api/update-auto-check",
         }:
             self._send(404, "Not found", "text/plain; charset=utf-8")
+            return
+        if parsed.path in SAME_ORIGIN_ONLY_ROUTES and self._is_cross_origin():
+            self._send(403, json.dumps({"error": "Update routes answer only the dashboard's own origin"}), "application/json; charset=utf-8")
             return
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         if content_type != "application/json" and parsed.path not in _POST_WITHOUT_BODY:
@@ -7600,11 +7601,34 @@ class UIHandler(BaseHTTPRequestHandler):
                     "process_cwd": str(Path.cwd().resolve()),
                 }
             if result.get("ok") and result.get("applied") and restart:
+                # Only this process restarts. The Companion is a detached
+                # process the dashboard does not supervise (the heartbeat is a
+                # heartbeat, not a supervisor, and it does not record the
+                # presence flags a relaunch would need), so the message says
+                # what it needs rather than claiming it was covered.
                 result["restart_requested"] = True
-                result["message"] = "Updated. Restarting AIWatcher so the dashboard and Companion use the new code."
+                result["companion_running"] = bool(get_watcher_status().get("running"))
+                result["message"] = "Updated. Restarting the dashboard so it uses the new code."
+                if result["companion_running"]:
+                    result["message"] += (
+                        " The Companion keeps the old code until you run"
+                        " `aiwatcher companion stop`, then `aiwatcher companion start`."
+                    )
                 schedule_dashboard_restart()
             status = 200 if result.get("ok") else 409
             self._send(status, json.dumps(result), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/update-auto-check":
+            try:
+                enabled = record_update_auto_check(bool(payload.get("enabled")))
+            except OSError as exc:
+                self._send(
+                    500,
+                    json.dumps({"error": f"Could not save the update-check setting: {exc}"}),
+                    "application/json; charset=utf-8",
+                )
+                return
+            self._send(200, json.dumps({"ok": True, "enabled": enabled}), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/second-opinion":
             # Stage 2, on its own request. Stage 1 has already rendered by
@@ -7668,16 +7692,8 @@ class UIHandler(BaseHTTPRequestHandler):
             response = answer_local_question(question, days=days)
             self._send(200, json.dumps(response), "application/json; charset=utf-8")
             return
-        if parsed.path in {"/api/handoff-basic", "/api/handoff-ai-assist", "/api/handoff", "/api/handoff-demo"}:
+        if parsed.path in {"/api/handoff-basic", "/api/handoff-ai-assist", "/api/handoff"}:
             target = str(payload.get("target", "generic")).strip() or "generic"
-            if parsed.path == "/api/handoff-demo":
-                handoff_options = _handoff_options_from_payload(payload, default_type="product")
-                self._send(
-                    200,
-                    json.dumps(build_demo_handoff_detail(target=target, **handoff_options)),
-                    "application/json; charset=utf-8",
-                )
-                return
             session_id = str(payload.get("session_id", payload.get("id", ""))).strip()
             if not session_id:
                 self._send(400, json.dumps({"error": "session_id is required"}), "application/json; charset=utf-8")

@@ -109,6 +109,62 @@ console.log(nodeFor('bubble').innerHTML);
 """
 
 
+class DashboardRestartCommandTests(unittest.TestCase):
+    """The post-update restart has to relaunch the way the dashboard was
+    launched. `aiwatcher start` uses `python -m aiwatcher_cli ui`, and under
+    -m sys.argv[0] is the package's __main__.py -- re-execing that verbatim
+    ran the file as a script, hit its relative import, and left the port
+    dead. Pinned here because nothing else exercises the restart path."""
+
+    def test_module_launch_is_rebuilt_as_dash_m(self) -> None:
+        argv = ["/x/aiwatcher_cli/__main__.py", "ui", "--host", "127.0.0.1", "--port", "8799", "--no-watch"]
+        self.assertEqual(
+            ui.restart_command(argv=argv, executable="/py", orig_argv=()),
+            ["/py", "-m", "aiwatcher_cli", "ui", "--host", "127.0.0.1", "--port", "8799", "--no-watch"],
+        )
+
+    def test_console_script_launch_is_kept_verbatim(self) -> None:
+        argv = ["/x/bin/aiwatcher", "ui", "--port", "8799"]
+        self.assertEqual(
+            ui.restart_command(argv=argv, executable="/py", orig_argv=()),
+            ["/py", "/x/bin/aiwatcher", "ui", "--port", "8799"],
+        )
+
+    def test_orig_argv_wins_when_the_interpreter_provides_it(self) -> None:
+        # Python 3.10+ keeps the real command line; prefer it over guessing.
+        self.assertEqual(
+            ui.restart_command(
+                argv=["/x/aiwatcher_cli/__main__.py", "ui"],
+                executable="/py",
+                orig_argv=["python3", "-m", "aiwatcher_cli", "ui", "--port", "8799"],
+            ),
+            ["/py", "-m", "aiwatcher_cli", "ui", "--port", "8799"],
+        )
+
+    def test_restart_execs_the_rebuilt_command(self) -> None:
+        with (
+            patch.object(ui.sys, "argv", ["/x/aiwatcher_cli/__main__.py", "ui"]),
+            patch.object(ui.os, "execv") as execv,
+        ):
+            if hasattr(ui.sys, "orig_argv"):
+                with patch.object(ui.sys, "orig_argv", []):
+                    ui._restart_current_process()
+            else:
+                ui._restart_current_process()
+        execv.assert_called_once_with(
+            ui.sys.executable, [ui.sys.executable, "-m", "aiwatcher_cli", "ui"],
+        )
+
+    def test_the_rebuilt_command_actually_starts(self) -> None:
+        # The bug was only visible by running the command. --help exits 0
+        # after argparse, which is enough to prove the package imports.
+        main_py = Path(ui.__file__).resolve().with_name("__main__.py")
+        command = ui.restart_command(argv=[str(main_py), "ui", "--help"], orig_argv=())
+        run = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("--no-watch", run.stdout)
+
+
 class DashboardServeTests(unittest.TestCase):
     def _serve_one(self):
         server = ui.ThreadingHTTPServer(("127.0.0.1", 0), ui.UIHandler)
@@ -270,6 +326,7 @@ class DashboardServeTests(unittest.TestCase):
         with (
             patch.object(ui, "apply_updates", return_value=result) as apply,
             patch.object(ui, "schedule_dashboard_restart") as restart,
+            patch.object(ui, "get_watcher_status", return_value={"running": True}),
         ):
             try:
                 with request.urlopen(http_request, timeout=5) as response:
@@ -279,9 +336,134 @@ class DashboardServeTests(unittest.TestCase):
                 server.server_close()
 
         self.assertTrue(body["restart_requested"])
-        self.assertIn("Restarting AIWatcher", body["message"])
+        # Only the dashboard restarts. The Companion is a detached process the
+        # dashboard does not supervise, so the message must not claim it.
+        self.assertIn("Restarting the dashboard", body["message"])
+        self.assertNotIn("and Companion", body["message"])
+        self.assertTrue(body["companion_running"])
+        self.assertIn("aiwatcher companion stop", body["message"])
         apply.assert_called_once_with(fetch=True)
         restart.assert_called_once_with()
+
+    def test_update_apply_restart_message_skips_the_companion_when_it_is_not_running(self) -> None:
+        server, thread, base = self._serve_one()
+        http_request = request.Request(
+            f"{base}/api/update-apply",
+            data=json.dumps({"restart": True}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        result = {"ok": True, "install_kind": "source", "message": "Updated.", "applied": True}
+        with (
+            patch.object(ui, "apply_updates", return_value=result),
+            patch.object(ui, "schedule_dashboard_restart"),
+            patch.object(ui, "get_watcher_status", return_value={"running": False}),
+        ):
+            try:
+                with request.urlopen(http_request, timeout=5) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
+        self.assertFalse(body["companion_running"])
+        self.assertNotIn("companion", body["message"].lower())
+
+    def test_update_auto_check_endpoint_stores_the_switch(self) -> None:
+        server, thread, base = self._serve_one()
+        http_request = request.Request(
+            f"{base}/api/update-auto-check",
+            data=json.dumps({"enabled": True}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with patch.object(ui, "record_update_auto_check", return_value=True) as record:
+            try:
+                with request.urlopen(http_request, timeout=5) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
+        self.assertTrue(body["enabled"])
+        record.assert_called_once_with(True)
+
+    def _post_update_apply(self, headers):
+        # `headers` is a dict, or a callable given the server's base URL so a
+        # test can send the server's own origin.
+        server, thread, base = self._serve_one()
+        extra = headers(base) if callable(headers) else headers
+        http_request = request.Request(
+            f"{base}/api/update-apply",
+            data=json.dumps({}).encode("utf-8"),
+            headers={"Content-Type": "application/json", **extra},
+            method="POST",
+        )
+        ok = {"ok": True, "install_kind": "source", "message": "Already up to date.", "applied": False}
+        with patch.object(ui, "apply_updates", return_value=ok) as apply:
+            try:
+                try:
+                    with request.urlopen(http_request, timeout=5) as response:
+                        return response.status, apply
+                except error.HTTPError as raised:
+                    return raised.code, apply
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_update_apply_refuses_pages_from_other_localhost_origins(self) -> None:
+        # The loopback CORS policy trusts any localhost port for reads. A route
+        # that pulls code and restarts the server must not inherit that.
+        status, apply = self._post_update_apply({"Origin": "http://localhost:3000"})
+        self.assertEqual(status, 403)
+        apply.assert_not_called()
+
+    def test_update_apply_accepts_its_own_origin(self) -> None:
+        status, apply = self._post_update_apply(lambda base: {"Origin": base})
+        self.assertEqual(status, 200)
+        apply.assert_called_once()
+
+    def test_update_apply_accepts_non_browser_clients(self) -> None:
+        # curl and the CLI send no Origin; they are not a page on another site.
+        status, apply = self._post_update_apply({})
+        self.assertEqual(status, 200)
+        apply.assert_called_once()
+
+    def test_update_apply_preflight_is_refused_even_for_localhost(self) -> None:
+        server, thread, base = self._serve_one()
+        http_request = request.Request(
+            f"{base}/api/update-apply",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "Content-Type",
+            },
+            method="OPTIONS",
+        )
+        try:
+            with self.assertRaises(error.HTTPError) as raised:
+                request.urlopen(http_request, timeout=5)
+        finally:
+            thread.join(timeout=5)
+            server.server_close()
+        self.assertEqual(raised.exception.code, 405)
+
+    def test_update_status_refuses_a_cross_site_image_tag(self) -> None:
+        # No Origin on an <img> GET, but browsers send Sec-Fetch-Site.
+        server, thread, base = self._serve_one()
+        http_request = request.Request(
+            f"{base}/api/update-status?fetch=1",
+            headers={"Sec-Fetch-Site": "cross-site"},
+        )
+        with patch.object(ui, "check_for_updates") as check:
+            try:
+                with self.assertRaises(error.HTTPError) as raised:
+                    request.urlopen(http_request, timeout=5)
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+        self.assertEqual(raised.exception.code, 403)
+        check.assert_not_called()
 
     def test_serve_records_the_actually_bound_port(self) -> None:
         """Issue #31 (S-32): `watch --notify`'s dashboard deep link has to
@@ -509,8 +691,6 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Loading session details for", ui.HTML)
         self.assertIn("/api/session-summary", ui.HTML)
         self.assertIn("/api/handoff-basic", ui.HTML)
-        self.assertIn("/api/handoff-demo", ui.HTML)
-        self.assertIn("openDemoHandoff", ui.HTML)
         # One verb opens the drawer. "Open Fresh Start", "Start fresh" and
         # "Try Fresh Start demo" were three names for the same action.
         self.assertNotIn("Test Fresh Start with sample data", ui.HTML)
@@ -523,7 +703,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Regenerate brief", ui.HTML)
         self.assertIn("handoffPayload", ui.HTML)
         self.assertIn("postJson('/api/handoff'", ui.HTML)
-        self.assertIn("if (!isDemo)", ui.HTML)
+        # The copy handler always records the decision now; the sample-data
+        # demo, which used to skip it, is gone.
+        self.assertNotIn("isDemo", ui.HTML)
         # The dashboard-side copy of this explanation sat in a render function
         # nothing called, so no user ever saw it. The live one is server-built
         # and reaches the Prove view as a receipt's proof_reason.
@@ -3370,6 +3552,32 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertTrue(marked["ai_assist"]["config"]["stored_keys"]["openai"])
         self.assertNotIn("sk-local-test", json.dumps(marked))
 
+    def test_marked_cached_summary_uses_current_claims_switch_and_install_kind(self) -> None:
+        # The Trust tab's claims are code, the update switch is a toggle the
+        # user just set, and the install kind is a path check. None belongs
+        # to the snapshot; a cached payload must not show the previous
+        # release's promises or a switch position the user already changed.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}, clear=True):
+                ui.record_update_auto_check(True)
+                with patch.object(ui, "install_kind", return_value="package"):
+                    marked = ui._mark_summary_cache(
+                        {
+                            "summary_complete": True,
+                            "privacy": ["An old promise."],
+                            "update_auto_check": False,
+                            "update_install_kind": "source",
+                        },
+                        status="stale",
+                        source="disk",
+                        refreshing=False,
+                    )
+
+        self.assertEqual(marked["privacy"], ui.PRIVACY_CLAIMS)
+        self.assertTrue(marked["update_auto_check"])
+        self.assertEqual(marked["update_install_kind"], "package")
+
     def test_shared_refresh_scans_once_and_materializes_all_windows(self) -> None:
         now = datetime.now(timezone.utc)
         rows = [LocalSession(
@@ -4071,57 +4279,10 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(runs[1]["usage"]["prompt_tokens"], 300)
         self.assertNotIn("sk-secret", json.dumps(runs))
 
-    def test_demo_handoff_is_seeded_privacy_safe_and_not_live(self) -> None:
-        capsule = ui.build_demo_handoff_detail(
-            target="codex",
-            handoff_type="product",
-            objective="Validate Fresh Start before testing real sessions.",
-        )
-
-        self.assertTrue(capsule["demo"])
-        self.assertEqual(capsule["session_id"], "demo-fresh-start")
-        self.assertEqual(capsule["handoff_type"], "product")
-        self.assertIn("Validate Fresh Start", capsule["next_brief"])
-        self.assertTrue(any("Demo context pressure" in item for item in capsule["warnings"]))
-        runtime = capsule["runtime_attachment"]
-        self.assertFalse(runtime["available"])
-        self.assertEqual(runtime["identity_level"], "demo")
-        self.assertEqual(runtime["identity_label"], "Demo sample")
-
-    def test_invalid_demo_handoff_type_falls_back_to_demo_default(self) -> None:
+    def test_invalid_handoff_type_falls_back_to_the_default(self) -> None:
         options = ui._handoff_options_from_query({"type": ["bad"]}, default_type="product")
 
         self.assertEqual(options["handoff_type"], "product")
-
-    def test_handoff_demo_endpoint_accepts_posted_structured_fields(self) -> None:
-        server, thread, base = DashboardServeTests()._serve_one()
-        payload = json.dumps({
-            "target": "cursor",
-            "type": "review",
-            "objective": "Review the handoff flow.",
-            "source_refs": ["strategy.md"],
-            "constraints": ["Findings first."],
-            "acceptance_criteria": ["No overclaims."],
-        }).encode("utf-8")
-        http_request = request.Request(
-            f"{base}/api/handoff-demo",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with request.urlopen(http_request, timeout=5) as response:
-                body = json.loads(response.read().decode("utf-8"))
-        finally:
-            thread.join(timeout=5)
-            server.server_close()
-
-        self.assertTrue(body["demo"])
-        self.assertEqual(body["target"], "cursor")
-        self.assertEqual(body["handoff_type"], "review")
-        self.assertEqual(body["source_refs"], ["strategy.md"])
-        self.assertEqual(body["constraints"], ["Findings first."])
-        self.assertEqual(body["acceptance_criteria"], ["No overclaims."])
 
     def test_session_summary_uses_cached_index_without_event_scan(self) -> None:
         now = datetime.now(timezone.utc)

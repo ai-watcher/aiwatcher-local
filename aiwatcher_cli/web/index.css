@@ -611,7 +611,7 @@
       font-size: var(--fs-1); font-weight: var(--fw-med);
       color: currentColor; opacity: .78;
     }
-    .update-banner.unknown, .update-banner.checking, .update-banner.package {
+    .update-banner.unknown, .update-banner.checking, .update-banner.package, .update-banner.branch {
       color: var(--on-brand);
       border-color: rgba(var(--blue-rgb), .40);
       background: var(--blue-soft);
@@ -1671,6 +1671,8 @@
       background: rgba(var(--ink-mid-rgb), .62);
     }
     .settings-card h3 { margin-bottom: 8px; }
+    .settings-card .check-row { display: flex; align-items: center; gap: var(--sp-2); color: var(--text-quiet); margin: 8px 0; }
+    .settings-card .check-row input { width: 16px; height: 16px; accent-color: var(--blue); flex: none; }
     .privacy-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-2); }
     .privacy-item { display: flex; align-items: center; gap: var(--sp-2); color: var(--text-quiet); padding: 10px 0; }
     .privacy-check { color: var(--green); font-weight: var(--fw-bold); }

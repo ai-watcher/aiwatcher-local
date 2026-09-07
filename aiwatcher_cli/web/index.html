@@ -494,9 +494,10 @@
         <div class="settings-card" id="updatePanel">
           <h3>Updates</h3>
           <p id="updateStatus">Check GitHub when you want to see whether this source checkout has newer AIWatcher changes.</p>
+          <label class="check-row"><input id="updateAutoCheck" type="checkbox" onchange="setUpdateAutoCheck(this.checked)"> Check GitHub automatically when the dashboard loads, at most once every 6 hours. Off by default: nothing is fetched until you click Check or turn this on.</label>
           <div class="actions">
             <button class="btn-quiet" id="updateCheckButton" onclick="checkForUpdates(this)">Check for updates</button>
-            <button class="btn-primary" id="updateApplyButton" onclick="applyUpdates(this, {restart: true})" hidden>Apply update</button>
+            <button class="btn-primary" id="updateApplyButton" onclick="applyUpdates(this, {restart: true})" hidden>Apply update and restart dashboard</button>
           </div>
         </div>
       </section>

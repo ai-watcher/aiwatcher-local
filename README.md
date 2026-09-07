@@ -279,14 +279,19 @@ aiwatcher start --open-ui
 ```
 
 `update` fetches GitHub only when you run it. It reports how many updates are
-available, refuses diverged or locally modified checkouts, and never changes
+available, refuses diverged or locally modified checkouts or a checkout that is
+not on `main`, and never changes
 files unless `--apply` is present.
 
-The dashboard also shows an update badge in the top bar. It checks GitHub on a
-low-frequency cadence and when you click it, shows `Up to date` or
-`N updates available`, and applies a clean fast-forward in one click. After a
-successful dashboard update, AIWatcher restarts so the dashboard and Companion
-use the new code.
+The dashboard also shows an update badge in the top bar for clone-based
+installs. It checks GitHub when you click it and shows `Up to date` or
+`N updates available`. Applying is a second, explicit step: the badge opens the
+Updates card in Settings, and the Apply button there fast-forwards a clean
+checkout and restarts the dashboard. Automatic checks (when the dashboard loads, at most
+once every six hours) are off by default; the switch is in Settings. After a
+successful dashboard update, the dashboard restarts itself. A running Companion
+keeps the old code until you run `aiwatcher companion stop`, then
+`aiwatcher companion start`.
 
 For package installs, the dashboard cannot fast-forward source files it does
 not own. It shows copyable package-upgrade commands instead.

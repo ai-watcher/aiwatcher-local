@@ -3030,3 +3030,133 @@ class WaitingTabTests(unittest.TestCase):
         source = js_function_source(self.js, "renderTabState")
         self.assertIn("latest_turn_tokens", source)
         self.assertIn("api_value_label", source)
+
+
+class UpdateAutoCheckIsOptInTest(unittest.TestCase):
+    """The header badge must not fetch GitHub on page load unless the user
+    turned that on. Pinned against the markup and the payload, since the
+    behaviour is a network call the privacy copy promises not to make."""
+
+    def setUp(self):
+        from pathlib import Path
+        from aiwatcher_cli import ui
+        web = Path(ui.__file__).resolve().parent / "web"
+        self.html = (web / "index.html").read_text(encoding="utf-8")
+        self.js = (web / "index.js").read_text(encoding="utf-8")
+        self.ui_source = inspect.getsource(ui)
+
+    def test_the_scheduler_is_gated_on_the_server_side_switch(self):
+        scheduler = self.js.split("function scheduleHeaderUpdateCheck()", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("currentData.update_auto_check", scheduler)
+        # The gate comes before the fetch, not after it.
+        self.assertLess(scheduler.index("update_auto_check"), scheduler.index("refreshHeaderUpdate"))
+
+    def test_the_switch_is_in_settings_and_stored_on_the_server(self):
+        self.assertIn('id="updateAutoCheck"', self.html)
+        self.assertIn("Off by default", self.html)
+        self.assertIn("/api/update-auto-check", self.js)
+        self.assertIn('"update_auto_check": update_auto_check_enabled()', self.ui_source)
+
+
+class SettingsDeepLinksNameTheirPanelTest(unittest.TestCase):
+    """Settings is four panels now, and showView('setup') alone keeps whichever
+    panel was last active. Anything that promises a specific panel has to
+    name it, or it lands wherever the user last was."""
+
+    def setUp(self):
+        from pathlib import Path
+        from aiwatcher_cli import ui
+        self.js = (Path(ui.__file__).resolve().parent / "web" / "index.js").read_text(encoding="utf-8")
+        self.ui_source = inspect.getsource(ui)
+
+    def test_first_run_show_me_how_opens_the_setup_panel(self):
+        # The card says it will show how to turn on the gate; the hook install
+        # steps are on the Setup panel, not General.
+        button = self.js.split(">Show me how<", 1)[0].rsplit("<button", 1)[1]
+        self.assertIn("showView('setup')", button)
+        self.assertIn("showSettingsPanel('setup')", button)
+
+    def test_the_coverage_answer_links_to_the_trust_panel(self):
+        self.assertIn('_ask_action("Open Settings", "/?view=setup&settings=trust")', self.ui_source)
+        # And the page honours that parameter.
+        self.assertIn("get('settings')", self.js)
+
+
+class NotOnMainIsAQuietBadgeTest(unittest.TestCase):
+    """A contributor on a feature branch used to see "N updates blocked" in
+    the header on every load. They are not blocked; the updater does not
+    apply where they are. That is a quiet state, styled like the package
+    state, not a warning."""
+
+    def setUp(self):
+        from pathlib import Path
+        from aiwatcher_cli import ui
+        web = Path(ui.__file__).resolve().parent / "web"
+        self.js = (web / "index.js").read_text(encoding="utf-8")
+        self.css = (web / "index.css").read_text(encoding="utf-8")
+
+    def test_the_branch_state_is_classified_before_blocked(self):
+        body = self.js.split("function classifyUpdateStatus(data)", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("return 'branch'", body)
+        self.assertLess(body.index("return 'branch'"), body.index("return 'blocked'"))
+
+    def test_the_branch_state_shares_the_quiet_style(self):
+        rule = [line for line in self.css.splitlines() if ".update-banner.branch" in line]
+        self.assertEqual(len(rule), 1)
+        self.assertIn(".update-banner.package", rule[0])
+        self.assertIn("Not on ${", self.js)
+
+
+class ApplyIsASecondStepTest(unittest.TestCase):
+    """The header pill used to pull code and restart the server on one click,
+    with no confirmation. Pulling code is a decision; a header chip is where
+    misclicks happen. The pill opens the Updates card and the Apply button
+    there, which names its consequence, takes the step."""
+
+    def setUp(self):
+        from pathlib import Path
+        from aiwatcher_cli import ui
+        web = Path(ui.__file__).resolve().parent / "web"
+        self.html = (web / "index.html").read_text(encoding="utf-8")
+        self.js = (web / "index.js").read_text(encoding="utf-8")
+        self.ui_source = inspect.getsource(ui)
+
+    def test_the_pill_click_never_applies(self):
+        handler = self.js.split("async function handleUpdateBannerClick", 1)[1].split("\n}\n", 1)[0]
+        self.assertNotIn("applyUpdates(", handler)
+        self.assertIn("openUpdatePanel(", handler)
+
+    def test_the_apply_button_names_the_restart(self):
+        self.assertIn(">Apply update and restart dashboard<", self.html)
+
+    def test_package_installs_do_not_get_a_header_pill(self):
+        self.assertIn("banner.hidden = status === 'package'", self.js)
+        self.assertIn('"update_install_kind": install_kind()', self.ui_source)
+        self.assertIn("renderUpdateBannerForInstall(data.update_install_kind)", self.js)
+
+
+class OneToastPerUpdateCheckTest(unittest.TestCase):
+    """Settings > Check for updates showed the same toast twice: once from the
+    header refresh it delegates to, once from its own handler. The delegate
+    is told to stay quiet; the caller that shows the result is the one that
+    speaks."""
+
+    def setUp(self):
+        from pathlib import Path
+        from aiwatcher_cli import ui
+        self.js = (Path(ui.__file__).resolve().parent / "web" / "index.js").read_text(encoding="utf-8")
+
+    def _function(self, name):
+        return self.js.split(f"function {name}(", 1)[1].split("\n}\n", 1)[0]
+
+    def test_the_settings_button_delegates_quietly_and_toasts_once(self):
+        body = self._function("checkForUpdates")
+        self.assertIn("refreshHeaderUpdate({ fetch: options.fetch !== false, quiet: true })", body)
+        # One success toast and one failure toast, on separate paths.
+        self.assertEqual(body.count("showToast("), 2)
+
+    def test_the_load_time_check_is_silent_and_does_not_flip_the_pill(self):
+        body = self._function("scheduleHeaderUpdateCheck")
+        self.assertIn("quiet: true, background: true", body)
+        refresh = self._function("refreshHeaderUpdate")
+        self.assertIn("if (!options.background) setUpdateState('checking'", refresh)

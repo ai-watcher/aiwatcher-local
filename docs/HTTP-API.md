@@ -27,7 +27,12 @@ Specifics worth knowing before you build against it:
   origins and for `http://` origins whose hostname is exactly `127.0.0.1` or
   `localhost`. The check compares the parsed hostname exactly, so lookalike
   hosts such as `http://127.0.0.1.evil.com` are rejected. The server never
-  answers with `Access-Control-Allow-Origin: *`.
+  answers with `Access-Control-Allow-Origin: *`. The update routes
+  (`/api/update-status`, `/api/update-apply`, `/api/update-auto-check`) go
+  further: they fetch or pull code, restart the server, or store a setting, so
+  they answer only the dashboard's own origin or a non-browser client that
+  sends no `Origin`. A page on any other origin, including another localhost
+  port, gets `403`, and its preflight gets `405`.
 - **Methods.** `POST` is accepted only on `/api/preflight`, `/api/outcome`, and
   the internal dashboard/companion routes listed below. Any other path returns
   `404` before the request body is read.
@@ -119,7 +124,7 @@ change without a deprecation period.
 `GET` — `/api/health`, `/api/summary`, `/api/companion-state`,
 `/api/companion-scan`, `/api/sessions`, `/api/session`,
 `/api/session-summary`, `/api/project`, `/api/report`, `/api/journal`,
-`/api/handoff-basic`, `/api/handoff`, `/api/handoff-demo`,
+`/api/handoff-basic`, `/api/handoff`,
 `/api/context-health`, `/api/ambient-intervention`, `/api/update-status`,
 `/api/ai-assist-status`
 
@@ -131,11 +136,11 @@ not expose prompt or source text. `/api/companion-scan` forces the companion to
 refresh local watch evidence without waiting for the next polling interval.
 `/api/handoff-basic` returns a copyable Fresh Start brief without waiting for
 timeline, git, or prompt enrichment; `/api/handoff` returns the enriched drawer
-payload; `/api/handoff-demo` returns seeded demo data for the in-dashboard Fresh
-Start test flow. `/api/update-status` checks the installed source checkout
+payload. `/api/update-status` checks the installed source checkout
 against GitHub when the dashboard asks for it and reports whether a clean
-fast-forward is available. The top-bar update badge uses this route for
-low-frequency status checks and user-triggered refreshes.
+fast-forward is available. The top-bar update badge uses this route when the
+user clicks it, and on page load (at most once every six hours) only if
+automatic checks are turned on in Settings (off by default).
 `/api/ai-assist-status` returns the optional AI Assist mode, detected local
 providers, cloud-key presence by environment-variable name, privacy posture, and
 candidate workflows. Cloud keys report whether they are untested, verified, or
@@ -161,9 +166,8 @@ question. `/api/second-opinion-contents` records whether the analyst may open
 files in that project rather than only being given their paths. Off unless set,
 and deliberately separate from consent: agreeing to pay for a second opinion is
 not agreeing to let it read your source. `/api/ask-aiwatcher` answers
-dashboard-only local questions from indexed metadata. `/api/handoff-basic`,
-`/api/handoff`, and `/api/handoff-demo` accept the same dashboard-only Fresh
-Start options as their `GET` forms. `/api/handoff-ai-assist` runs the optional
+dashboard-only local questions from indexed metadata. `/api/handoff-basic` and
+`/api/handoff` accept the same dashboard-only Fresh Start options as their `GET` forms. `/api/handoff-ai-assist` runs the optional
 Fresh Start handoff composition workflow after the user explicitly asks for it;
 it makes one bounded model call, returns a compact paste-ready brief composed
 from local handoff evidence, and records a privacy-safe run receipt. It does
@@ -183,6 +187,8 @@ cleanup.
 companion, `/api/handoff-receipts-viewed` marks proof-pending receipts as seen,
 `/api/first-run-dismissed` records that the once-only first-run screen has been
 seen so it does not return (no body; the timestamp is the server's),
+`/api/update-auto-check` stores the Settings switch for automatic GitHub update
+checks (`{"enabled": bool}`, off by default),
 `/api/optimize-decision` records an Improve action, `/api/companion-skip`
 snoozes a non-blocking companion reminder, and
 `/api/ambient-intervention-action` records the native companion lifecycle
@@ -211,8 +217,9 @@ false` with the reason.
 `/api/update-apply` applies the same conservative source-checkout update as the
 CLI: it fast-forwards only a clean, non-diverged Git checkout and reports
 package-installer guidance otherwise. When the dashboard posts
-`{"restart": true}` after a successful apply, the local server restarts so the
-dashboard and Companion use the new code.
+`{"restart": true}` after a successful apply, the local server restarts itself.
+The Companion is a separate process and is not restarted; the response carries
+`companion_running` and the message says what it needs.
 These endpoints are called by the dashboard or native companion only.
 
 If you need one of these programmatically, prefer the equivalent CLI command

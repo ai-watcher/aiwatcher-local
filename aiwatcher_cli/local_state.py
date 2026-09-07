@@ -2459,6 +2459,34 @@ def first_run_dismissed_at() -> str | None:
         return datetime.now(timezone.utc).isoformat()
 
 
+def update_auto_check_enabled() -> bool:
+    """Whether the dashboard may check GitHub for updates on its own.
+
+    Off by default. The trust boundary is the product, and a fetch on page
+    load is a network call the user did not make. Unreadable state reads as
+    off for the same reason: the safe failure is the quiet one.
+    """
+    try:
+        block = _load().get("update_auto_check")
+    except StateReadError:
+        return False
+    return bool(isinstance(block, dict) and block.get("enabled"))
+
+
+def record_update_auto_check(enabled: bool) -> bool:
+    """Store the automatic update-check switch. Server-side, not in the
+    browser, so a fresh browser profile cannot re-enable it by having no
+    cache."""
+    with _locked_state():
+        data = _load()
+        data["update_auto_check"] = {
+            "enabled": bool(enabled),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _save(data)
+    return bool(enabled)
+
+
 def dismiss_first_run() -> str:
     """Record that the first-run screen has been seen, so it does not return."""
     now = datetime.now(timezone.utc).isoformat()

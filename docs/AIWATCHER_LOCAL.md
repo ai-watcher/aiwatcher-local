@@ -301,13 +301,16 @@ The source-checkout update path is deliberately conservative:
 
 - `aiwatcher update` fetches GitHub only when the user runs it.
 - It reports the number of updates available.
-- It refuses dirty or diverged checkouts.
+- It refuses dirty or diverged checkouts, and any checkout not on `main`, so a
+  feature branch is never fast-forwarded onto `main` by accident.
 - It changes nothing unless `--apply` is passed.
-- After CLI applying, the user restarts with `aiwatcher start --open-ui`.
+- After a CLI apply, it lists which running processes still hold the old code
+  and how to restart each; `aiwatcher start` reuses running processes.
 
-The dashboard top bar calls the same check, shows `Up to date` or an
-updates-available badge, and applies a clean fast-forward in one click when the
-checkout is safe. The dashboard sends an explicit restart request only after a
+The dashboard top bar calls the same check and shows `Up to date` or an
+updates-available badge. Applying is a separate click on the Updates card in
+Settings, never from the badge itself, and only when the checkout is safe.
+Package installs do not show the badge. The dashboard sends an explicit restart request only after a
 successful apply. Package installs get copyable `pipx`, `pip`, or GitHub package
 upgrade commands instead of pretending a source fast-forward is possible.
 
