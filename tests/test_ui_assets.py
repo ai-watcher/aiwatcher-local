@@ -3132,7 +3132,15 @@ class ApplyIsASecondStepTest(unittest.TestCase):
     def test_package_installs_do_not_get_a_header_pill(self):
         self.assertIn("banner.hidden = status === 'package'", self.js)
         self.assertIn('"update_install_kind": install_kind()', self.ui_source)
+        self.assertIn('"update_source_root": str(installed_source_root())', self.ui_source)
         self.assertIn("renderUpdateBannerForInstall(data.update_install_kind)", self.js)
+        scheduler = self.js.split("function scheduleHeaderUpdateCheck()", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("installKind: currentData && currentData.update_install_kind", scheduler)
+        self.assertIn("sourceRoot: currentData && currentData.update_source_root", scheduler)
+        restore = self.js.split("function restoreCachedUpdateState", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("installKind && installKind !== 'source'", restore)
+        self.assertIn("clearCachedUpdateState()", restore)
+        self.assertIn("cached.data.repo !== sourceRoot", restore)
 
 
 class OneToastPerUpdateCheckTest(unittest.TestCase):

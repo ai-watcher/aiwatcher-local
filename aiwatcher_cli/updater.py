@@ -13,7 +13,7 @@ def installed_source_root() -> Path:
 
 
 def install_kind() -> str:
-    """"source" for a Git checkout, "package" for a pip or pipx install.
+    """source" for a Git checkout, "package" for a pip or pipx install.
 
     A path check, not a git call, so the dashboard summary can carry it on
     every poll without touching git or the network.

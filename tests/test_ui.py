@@ -3561,13 +3561,17 @@ class DashboardWindowTests(unittest.TestCase):
             state_file = os.path.join(temp_dir, "state.json")
             with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}, clear=True):
                 ui.record_update_auto_check(True)
-                with patch.object(ui, "install_kind", return_value="package"):
+                with (
+                    patch.object(ui, "install_kind", return_value="package"),
+                    patch.object(ui, "installed_source_root", return_value=Path("/site-packages/aiwatcher")),
+                ):
                     marked = ui._mark_summary_cache(
                         {
                             "summary_complete": True,
                             "privacy": ["An old promise."],
                             "update_auto_check": False,
                             "update_install_kind": "source",
+                            "update_source_root": "/old/source",
                         },
                         status="stale",
                         source="disk",
@@ -3577,6 +3581,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(marked["privacy"], ui.PRIVACY_CLAIMS)
         self.assertTrue(marked["update_auto_check"])
         self.assertEqual(marked["update_install_kind"], "package")
+        self.assertEqual(marked["update_source_root"], "/site-packages/aiwatcher")
 
     def test_shared_refresh_scans_once_and_materializes_all_windows(self) -> None:
         now = datetime.now(timezone.utc)

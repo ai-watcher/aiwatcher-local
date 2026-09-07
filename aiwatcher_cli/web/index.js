@@ -1414,10 +1414,27 @@ function setUpdateState(status, data, checkedAt = Date.now()) {
     } catch (error) {}
   }
 }
-function restoreCachedUpdateState() {
+function clearCachedUpdateState() {
+  try {
+    localStorage.removeItem(UPDATE_CACHE_KEY);
+  } catch (error) {}
+}
+function restoreCachedUpdateState(context = {}) {
+  const installKind = context.installKind || null;
+  const sourceRoot = context.sourceRoot || '';
+  if (installKind && installKind !== 'source') {
+    clearCachedUpdateState();
+    setUpdateState('package', { install_kind: installKind }, 0);
+    return null;
+  }
   try {
     const cached = JSON.parse(localStorage.getItem(UPDATE_CACHE_KEY) || 'null');
     if (cached && cached.data) {
+      if (sourceRoot && cached.data.repo && cached.data.repo !== sourceRoot) {
+        clearCachedUpdateState();
+        setUpdateState('unknown', null, 0);
+        return null;
+      }
       setUpdateState(classifyUpdateStatus(cached.data), cached.data, Number(cached.checkedAt || 0) || Date.now());
       return cached;
     }
@@ -1572,7 +1589,10 @@ async function handleUpdateBannerClick(button) {
   openUpdatePanel(data);
 }
 function scheduleHeaderUpdateCheck() {
-  const cached = restoreCachedUpdateState();
+  const cached = restoreCachedUpdateState({
+    installKind: currentData && currentData.update_install_kind,
+    sourceRoot: currentData && currentData.update_source_root,
+  });
   // Off by default. A fetch on page load is a GitHub call the user did not
   // make. The switch is in Settings > General and lives server-side, so a
   // fresh browser profile cannot re-enable it by having no cache.

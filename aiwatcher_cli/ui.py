@@ -147,7 +147,7 @@ from .scanner import (
     surface_coverage,
 )
 from .local_state import record_update_auto_check, update_auto_check_enabled
-from .updater import apply_updates, check_for_updates, install_kind
+from .updater import apply_updates, check_for_updates, install_kind, installed_source_root
 
 
 MAX_REQUEST_BYTES = 64 * 1024
@@ -5532,6 +5532,7 @@ def build_summary(
         "watcher": get_watcher_status(),
         "update_auto_check": update_auto_check_enabled(),
         "update_install_kind": install_kind(),
+        "update_source_root": str(installed_source_root()),
         "ai_assist": build_ai_assist_status(ai_assist_config()),
         "ai_assist_runs": recent_ai_assist_runs(limit=10),
         "context_health": context_health,
@@ -5650,6 +5651,7 @@ def _mark_summary_cache(summary: dict[str, object], *, status: str, source: str,
     copy["privacy"] = PRIVACY_CLAIMS
     copy["update_auto_check"] = update_auto_check_enabled()
     copy["update_install_kind"] = install_kind()
+    copy["update_source_root"] = str(installed_source_root())
     generated_at = copy.get("generated_at") if isinstance(copy.get("generated_at"), str) else None
     copy["cache_schema_version"] = SUMMARY_CACHE_SCHEMA_VERSION
     copy["cache"] = {
@@ -5862,6 +5864,7 @@ def _build_summary_shell(
         "watcher": get_watcher_status(),
         "update_auto_check": update_auto_check_enabled(),
         "update_install_kind": install_kind(),
+        "update_source_root": str(installed_source_root()),
         "ai_assist": build_ai_assist_status(ai_assist_config()),
         "ai_assist_runs": recent_ai_assist_runs(limit=10),
         "context_health": [],
