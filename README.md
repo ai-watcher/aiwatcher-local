@@ -64,7 +64,10 @@ reads and why, it should not read it.
 does not require cloning the repo, and it keeps AIWatcher in its own isolated
 Python environment.
 
-On macOS:
+Pick the block for your OS. Each path ends by starting both the Console and the
+Companion.
+
+macOS:
 
 ```sh
 python3 --version
@@ -83,7 +86,7 @@ aiwatcher start --open-ui
 `aiwatcher start --open-ui` starts the local Console dashboard and the
 Companion together.
 
-On Linux:
+Linux:
 
 ```sh
 python3 --version
@@ -94,7 +97,7 @@ aiwatcher setup
 aiwatcher start --open-ui
 ```
 
-On Windows PowerShell:
+Windows PowerShell:
 
 ```powershell
 py --version
