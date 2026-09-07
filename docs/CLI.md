@@ -62,10 +62,12 @@ aiwatcher start [--interval INTERVAL] [--no-ui] [--open-ui]
 Show first-run setup, hook, coverage, and ambient watch steps
 
 ```sh
-aiwatcher setup
+aiwatcher setup [--all]
 ```
 
-Takes no arguments.
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--all` | flag |  | Show every optional setup and hook command |
 
 ### `aiwatcher update`
 

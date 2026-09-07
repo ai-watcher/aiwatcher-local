@@ -3841,7 +3841,30 @@ def setup_checklist() -> list[dict[str, str]]:
     ]
 
 
-def command_setup(_args: argparse.Namespace) -> int:
+def _first_run_setup_steps() -> list[dict[str, str]]:
+    first_run_titles = {
+        "Start AIWatcher Local",
+        "Verify local history coverage",
+        "Try one safe test prompt",
+    }
+    return [step for step in setup_checklist() if step["title"] in first_run_titles]
+
+
+def _setup_command_for_first_run(step: dict[str, str]) -> str:
+    if step["command"] == "aiwatcher start":
+        return "aiwatcher start --open-ui"
+    return step["command"]
+
+
+def _print_setup_steps(steps: list[dict[str, str]], *, first_run: bool) -> None:
+    for step in steps:
+        command = _setup_command_for_first_run(step) if first_run else step["command"]
+        print(f"- {step['title']} ({step['status']})")
+        print(f"  {step['why']}")
+        print(f"  $ {command}")
+
+
+def command_setup(args: argparse.Namespace) -> int:
     sessions = scan_all()
     print("AIWatcher Local setup")
     print("Private, local-first control loop. No prompt, source, or telemetry upload by default.\n")
@@ -3849,13 +3872,20 @@ def command_setup(_args: argparse.Namespace) -> int:
     for row in surface_coverage(sessions):
         marker = _surface_marker(row.status)
         print(f"  {marker} {row.label:26} {row.status_label}")
-    print("\nFirst-value checklist")
-    for index, step in enumerate(setup_checklist(), 1):
-        print(f"{index}. {step['title']} ({step['status']})")
-        print(f"   {step['why']}")
-        print(f"   $ {step['command']}")
+    show_all = bool(getattr(args, "all", False))
+    if show_all:
+        print("\nAll setup commands")
+        print("No input is expected here. These are copy/paste commands, not a numbered menu.\n")
+        _print_setup_steps(setup_checklist(), first_run=False)
+    else:
+        print("\nRecommended next steps")
+        print("No input is expected here. These are copy/paste commands, not a numbered menu.")
+        print("If your install command already includes `aiwatcher start --open-ui`, just let it continue.\n")
+        _print_setup_steps(_first_run_setup_steps(), first_run=True)
+        print("\nOptional hook, autostart, and update commands are hidden on first run.")
+        print("Run `aiwatcher setup --all` or open Settings -> Setup when you are ready for those.")
     print("\nAfter installing hooks, run `aiwatcher hook-status` from the same AI surface you tested.")
-    print("For Desktop/chat surfaces without hooks, use the dashboard Prompt tab or MCP/companion fallback.")
+    print("For Desktop/chat surfaces without hooks, use the dashboard Plan tab or Companion fallback.")
     return 0
 
 
@@ -9178,7 +9208,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="When the Companion is visible: always, only during AI app work, or only for nudges",
     )
     start.set_defaults(func=command_start)
-    sub.add_parser("setup", help="Show first-run setup, hook, coverage, and ambient watch steps").set_defaults(func=command_setup)
+    setup = sub.add_parser("setup", help="Show first-run setup, hook, coverage, and ambient watch steps")
+    setup.add_argument("--all", action="store_true", help="Show every optional setup and hook command")
+    setup.set_defaults(func=command_setup)
     update = sub.add_parser("update", help="Check for GitHub updates, and optionally fast-forward a source checkout")
     update.add_argument("--apply", action="store_true", help="Fast-forward the checkout when updates are available")
     update.add_argument("--no-fetch", action="store_true", help="Compare against the last fetched remote state")

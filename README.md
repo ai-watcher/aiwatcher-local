@@ -63,14 +63,17 @@ Use this when Python 3.10+, Git, and pipx are already installed.
 macOS or Linux:
 
 ```sh
-pipx install git+https://github.com/ai-watcher/aiwatcher-local.git && pipx ensurepath && ~/.local/bin/aiwatcher setup && ~/.local/bin/aiwatcher start --open-ui
+pipx install git+https://github.com/ai-watcher/aiwatcher-local.git && ~/.local/bin/aiwatcher setup && ~/.local/bin/aiwatcher start --open-ui
 ```
 
 Windows PowerShell:
 
 ```powershell
-pipx install git+https://github.com/ai-watcher/aiwatcher-local.git; pipx ensurepath; & "$env:USERPROFILE\.local\bin\aiwatcher.exe" setup; & "$env:USERPROFILE\.local\bin\aiwatcher.exe" start --open-ui
+pipx install git+https://github.com/ai-watcher/aiwatcher-local.git; & "$env:USERPROFILE\.local\bin\aiwatcher.exe" setup; & "$env:USERPROFILE\.local\bin\aiwatcher.exe" start --open-ui
 ```
+
+Run `pipx ensurepath` later if you want to type `aiwatcher` without the full
+path in a new terminal.
 
 ### Missing Prerequisites
 
@@ -89,7 +92,6 @@ if [ -x ~/.local/bin/aiwatcher ]; then
 else
   pipx install git+https://github.com/ai-watcher/aiwatcher-local.git
 fi
-pipx ensurepath
 ~/.local/bin/aiwatcher setup
 ~/.local/bin/aiwatcher start --open-ui
 ```
@@ -108,7 +110,6 @@ if [ -x ~/.local/bin/aiwatcher ]; then
 else
   pipx install git+https://github.com/ai-watcher/aiwatcher-local.git
 fi
-pipx ensurepath
 ~/.local/bin/aiwatcher setup
 ~/.local/bin/aiwatcher start --open-ui
 ```
@@ -138,19 +139,25 @@ if (Test-Path $aiwatcher) {
 } else {
   py -3 -m pipx install git+https://github.com/ai-watcher/aiwatcher-local.git
 }
-py -3 -m pipx ensurepath
 & $aiwatcher setup
 & $aiwatcher start --open-ui
 ```
 
-After opening a new terminal, the shorter command should work:
+To make the shorter command work in future terminals, run:
+
+```sh
+pipx ensurepath
+```
+
+Then open a new terminal and use:
 
 ```sh
 aiwatcher setup
 aiwatcher start --open-ui
 ```
 
-`setup` detects local AI tools and prints the next steps for your machine.
+`setup` detects local AI tools and prints copy/paste next steps. It is not an
+interactive menu, so you do not need to type a number.
 `start --open-ui` starts the browser Console, the background Companion, and the
 small floating control on macOS and Windows.
 
