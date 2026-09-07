@@ -557,6 +557,13 @@
       <p>Ask about archive safety, context pressure, prompt outcomes, spend, or tool coverage. I only answer from local AIWatcher evidence.</p>
     </div>
   </div>
+  <label class="ask-ai-toggle" id="askAiAssistRow" hidden>
+    <input id="askUseAiAssist" type="checkbox">
+    <span>
+      <strong>Use AI Assist for this answer</strong>
+      <small id="askAiAssistHint">One small optional model call; cached when local evidence is unchanged.</small>
+    </span>
+  </label>
   <div class="ask-form">
     <textarea id="askInput" placeholder="Ask: can I archive this chat, what is my context health, are my prompts driving outcomes..." onkeydown="handleAskKey(event)"></textarea>
     <button class="btn-primary" id="askSendButton" onclick="askAIWatcher()">Ask</button>

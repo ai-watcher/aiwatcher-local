@@ -199,6 +199,12 @@ class LocalStateTests(unittest.TestCase):
                     "enabled_workflows": ["fresh_start", "ask_aiwatcher", "prompt_plan", "optimize_cleanup"],
                 })
                 reread = local_state.ai_assist_config()
+                migrated = local_state.record_ai_assist_config({
+                    "enabled_workflows": ["fresh_start", "prompt_plan", "optimize_cleanup"],
+                })
+                custom_workflows = local_state.record_ai_assist_config({
+                    "enabled_workflows": ["fresh_start"],
+                })
                 custom = local_state.record_ai_assist_config({
                     "mode": "cloud",
                     "provider": "openai_compatible",
@@ -234,8 +240,10 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(saved["max_daily_usd"], 0.5)
         self.assertEqual(saved["source_access"], "source_opt_in")
         self.assertFalse(saved["require_confirmation"])
-        self.assertEqual(saved["enabled_workflows"], ["fresh_start", "prompt_plan", "optimize_cleanup"])
+        self.assertEqual(saved["enabled_workflows"], ["fresh_start", "ask_aiwatcher", "prompt_plan", "optimize_cleanup"])
         self.assertEqual(reread, saved)
+        self.assertEqual(migrated["enabled_workflows"], ["fresh_start", "prompt_plan", "optimize_cleanup", "ask_aiwatcher"])
+        self.assertEqual(custom_workflows["enabled_workflows"], ["fresh_start"])
         self.assertEqual(custom["mode"], "cloud")
         self.assertEqual(custom["provider"], "openai_compatible")
         self.assertEqual(custom["base_url"], "https://llm.example.com/v1")

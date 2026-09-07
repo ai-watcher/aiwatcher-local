@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import unittest
 from unittest.mock import patch
 import urllib.error
@@ -383,6 +384,46 @@ class AiAssistTests(unittest.TestCase):
         self.assertEqual(result["structured"]["next_action"], ["Open the owning app and verify the chat is done"])
         self.assertNotIn("sk-secret", payload)
         self.assertLess(len(payload), 8_000)
+
+    def test_ask_aiwatcher_answer_composes_bounded_local_evidence(self) -> None:
+        with (
+            patch.object(ai_assist, "build_ai_assist_status", return_value={
+                "ready": True,
+                "mode": "cloud",
+                "setup_hint": "Ready",
+            }),
+            patch.object(ai_assist, "_call_configured_chat", return_value={
+                "mode": "cloud",
+                "provider": "openai",
+                "model": "gpt-test",
+                "text": (
+                    '{"answer":"This session is under context pressure; start with the Watch rows.",'
+                    '"bullets":["Top session is /repo/app","Fresh Start is safer than broad cleanup"],'
+                    '"confidence":"AI-assisted local evidence"}'
+                ),
+                "usage": {"prompt_tokens": 90, "completion_tokens": 40},
+            }) as call,
+        ):
+            result = ai_assist.compose_ask_aiwatcher_answer(
+                {
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "source_access": "metadata_only",
+                    "enabled_workflows": ["ask_aiwatcher"],
+                    "api_keys": {"openai": "sk-secret"},
+                },
+                question="What should I do next?",
+                local_answer={"answer": "Local fallback", "bullets": ["Use Watch"]},
+                local_evidence=json.dumps({"context_health": [{"project_full": "/repo/app"}], "secret": "redacted"}) + ("x" * 10_000),
+            )
+
+        payload = call.call_args.args[1][1]["content"]
+        self.assertLessEqual(result["input_chars"], ai_assist.MAX_ASK_INPUT_CHARS + len("What should I do next?"))
+        self.assertEqual(result["workflow"], "ask_aiwatcher")
+        self.assertEqual(result["answer"], "This session is under context pressure; start with the Watch rows.")
+        self.assertEqual(result["bullets"], ["Top session is /repo/app", "Fresh Start is safer than broad cleanup"])
+        self.assertNotIn("sk-secret", payload)
+        self.assertLess(len(payload), ai_assist.MAX_ASK_INPUT_CHARS + 1_000)
 
 
 if __name__ == "__main__":
