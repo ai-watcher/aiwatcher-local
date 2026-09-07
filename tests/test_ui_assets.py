@@ -3104,7 +3104,9 @@ class NotOnMainIsAQuietBadgeTest(unittest.TestCase):
         rule = [line for line in self.css.splitlines() if ".update-banner.branch" in line]
         self.assertEqual(len(rule), 1)
         self.assertIn(".update-banner.package", rule[0])
-        self.assertIn("Not on ${", self.js)
+        self.assertIn("return 'Source checkout'", self.js)
+        self.assertIn("Branch: ${data.checked_out}", self.js)
+        self.assertIn("return `Path: ${projectName", self.js)
 
 
 class ApplyIsASecondStepTest(unittest.TestCase):
