@@ -593,7 +593,7 @@
     .btn-quiet { background: transparent; border-color: var(--line); color: var(--text-bright); }
     .update-banner {
       display: inline-flex; align-items: center; justify-content: center; gap: var(--sp-2);
-      min-width: 176px; border-radius: var(--r-pill);
+      min-width: 176px; max-width: min(360px, 30vw); border-radius: var(--r-pill);
       font-size: var(--fs-2); font-weight: var(--fw-bold);
       font-variant-numeric: tabular-nums; white-space: nowrap;
       padding-top: 7px; padding-bottom: 7px;
@@ -606,7 +606,7 @@
       display: grid; gap: 0; justify-items: start; min-width: 0;
     }
     .update-banner-location {
-      max-width: 210px;
+      max-width: 285px;
       overflow: hidden; text-overflow: ellipsis;
       font-size: var(--fs-1); font-weight: var(--fw-med);
       color: currentColor; opacity: .78;
@@ -2091,6 +2091,7 @@
       .nav-tab { white-space: nowrap; }
       .actions { width: 100%; }
       .actions select { flex: 1; }
+      .update-banner { max-width: 100%; }
       .kpis { grid-template-columns: 1fr 1fr; }
       .two { grid-template-columns: 1fr; }
       .prompt-shell { grid-template-columns: 1fr; }

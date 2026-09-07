@@ -595,6 +595,8 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var skipState = ""
     var skipSessionID = ""
     var skipProject = ""
+    var skipProjects: [String] = []
+    var skipSessionIDs: [String] = []
     var collapsed = false
     var stateName = "watching"
     var pulseOn = false
@@ -611,6 +613,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var waitingCount = 0
     var workingCount = 0
     var finishedCount = 0
+    var reviewCount = 0
     var detailText = ""
     var pressureAvailable = false
     var pressurePct = 0
@@ -666,15 +669,104 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         return (mark, blueRing, inkRing)
     }
 
-    // One row per waiting session, a single one included: the row is where
-    // the wants tag and the per-row Return live, and a lone blocked session
-    // deserves both as much as a queue does. The away digest reuses the same
-    // rows for its history entries.
+    // One row per actionable item. Waiting, context review, finished batches,
+    // and away digests all reuse this row surface so the badge can explain
+    // itself instead of dropping the user into an unlabeled count.
     var visibleWaitingRows: Int {
-        if !["session_waiting", "away_digest"].contains(stateName) || waitingRowTexts.isEmpty {
+        if !["session_waiting", "session_finished", "away_digest", "control_review", "context_review"].contains(stateName) || waitingRowTexts.isEmpty {
             return 0
         }
         return min(waitingRowTexts.count, maxWaitingRows)
+    }
+
+    func reviewTitle() -> String {
+        if ["control_review", "context_review"].contains(stateName) {
+            return "\(reviewCount) context review\(reviewCount == 1 ? "" : "s")"
+        }
+        if stateName == "session_finished" && visibleWaitingRows > 0 {
+            return "\(finishedCount) completed run\(finishedCount == 1 ? "" : "s")"
+        }
+        return String((titleLabel.stringValue.isEmpty ? "AIWatcher" : titleLabel.stringValue).prefix(18))
+    }
+
+    func reviewSubtitle() -> String {
+        if ["control_review", "context_review", "session_finished"].contains(stateName), visibleWaitingRows > 0 {
+            let count = stateName == "session_finished" ? finishedCount : reviewCount
+            let total = max(count, visibleWaitingRows)
+            let hidden = max(total - visibleWaitingRows, 0)
+            return hidden > 0 ? "\(visibleWaitingRows) shown of \(total). UI has full list." : "Pick a row or open UI."
+        }
+        return String((subtitleLabel.stringValue.isEmpty ? "Watching quietly" : subtitleLabel.stringValue).prefix(46))
+    }
+
+    func rowDisplayText(_ row: [String: Any]) -> String {
+        let kind = row["kind"] as? String ?? ""
+        let tool = row["tool"] as? String ?? "AI tool"
+        let project = row["project"] as? String ?? ""
+        let waited = row["waited_label"] as? String ?? ""
+        let prefix: String
+        if kind == "finished" {
+            prefix = "Completed"
+        } else if kind == "context_review" {
+            prefix = "Context"
+        } else if kind.isEmpty {
+            prefix = tool
+        } else {
+            prefix = "Signal"
+        }
+        if kind.isEmpty {
+            return [tool, project, waited].filter { !$0.isEmpty }.joined(separator: " · ")
+        }
+        let detail = [project, tool, waited].filter { !$0.isEmpty }.joined(separator: " · ")
+        return detail.isEmpty ? prefix : "\(prefix): \(detail)"
+    }
+
+    func rowActionLabel(index: Int) -> String {
+        let kind = index < waitingRowKinds.count ? waitingRowKinds[index] : ""
+        let canReturn = index < waitingReturnAvailable.count && waitingReturnAvailable[index]
+        if canReturn { return "Return" }
+        if ["context_review", "control_review"].contains(kind) { return "Open" }
+        return kind.isEmpty ? "Open" : "Review"
+    }
+
+    func splitLines(_ value: String) -> [String] {
+        return value.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    func shortSkipFailureMessage() -> String {
+        if ["control_recommended_group", "control_recommended_project"].contains(skipState) {
+            return "Could not save Later. Open UI."
+        }
+        if skipState == "session_finished_group" {
+            return "Could not clear notices. Open UI."
+        }
+        return "Could not save Skip. Open UI."
+    }
+
+    func applyOfflineState() {
+        self.stateName = "offline"
+        self.waitingRowTexts = []
+        self.waitingURLs = []
+        self.waitingSessionIDs = []
+        self.waitingReturnAvailable = []
+        self.waitingWants = []
+        self.waitingRowKinds = []
+        self.waitingCount = 0
+        self.finishedCount = 0
+        self.reviewCount = 0
+        self.skipState = ""
+        self.skipSessionID = ""
+        self.skipProject = ""
+        self.skipProjects = []
+        self.skipSessionIDs = []
+        self.titleLabel.stringValue = "UI offline"
+        self.subtitleLabel.stringValue = "Restart AIWatcher"
+        self.primaryButton.title = "Open"
+        self.primaryAction = "open_url"
+        self.primaryURL = dashboardURL
+        self.updateAppearance()
     }
 
     var expandedHeight: CGFloat {
@@ -780,7 +872,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         rootView.addSubview(continueButton)
 
         skipButton = NSButton(title: "Skip", target: self, action: #selector(skipCurrent))
-        skipButton.frame = NSRect(x: 434, y: 15, width: 48, height: 28)
+        skipButton.frame = NSRect(x: 434, y: 15, width: 64, height: 28)
         skipButton.bezelStyle = .rounded
         skipButton.controlSize = .small
         skipButton.toolTip = "Quiet this Companion nudge without deleting the evidence"
@@ -1013,7 +1105,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
     @objc func scanNow() {
         titleLabel.stringValue = "Scanning"
-        subtitleLabel.stringValue = "Checking local AI sessions..."
+        subtitleLabel.stringValue = "Checking local AI work..."
         guard let url = URL(string: dashboardBaseURL + "/api/companion-scan") else {
             return
         }
@@ -1257,7 +1349,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         var payload: [String: Any] = [
             "state": skipState,
             "session_id": skipSessionID,
-            "project": skipProject
+            "project": skipProject,
+            "projects": skipProjects.isEmpty ? splitLines(skipProject) : skipProjects,
+            "session_ids": skipSessionIDs.isEmpty ? splitLines(skipSessionID) : skipSessionIDs
         ]
         guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
             return
@@ -1271,6 +1365,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                 let ok = error == nil && ((response as? HTTPURLResponse)?.statusCode ?? 500) >= 200 && ((response as? HTTPURLResponse)?.statusCode ?? 500) < 300
                 if ok {
                     self.skipState = ""
+                    self.skipSessionID = ""
+                    self.skipProject = ""
+                    self.skipProjects = []
+                    self.skipSessionIDs = []
                     self.continueSessionID = ""
                     self.stateName = "watching"
                     self.titleLabel.stringValue = "Watching quietly"
@@ -1278,7 +1376,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                     self.primaryURL = dashboardURL
                 } else {
                     self.titleLabel.stringValue = "Still pending"
-                    self.subtitleLabel.stringValue = "Could not save Skip"
+                    self.subtitleLabel.stringValue = self.shortSkipFailureMessage()
                 }
                 self.updateAppearance()
                 if ok { self.scheduleAutoCollapse(after: 1.2) }
@@ -1372,7 +1470,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             statsLabel.isHidden = true
             signalButton.isHidden = true
             collapsedMarkView.isHidden = false
-            collapsedBadge.isHidden = waitingCount <= 0 && finishedCount <= 0
+            collapsedBadge.isHidden = waitingCount <= 0 && reviewCount <= 0
             expandButton.isHidden = false
             return
         }
@@ -1416,19 +1514,19 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             signalButton.isHidden = true
             titleLabel.frame = NSRect(x: 66, y: 31 + yOff, width: 170, height: 17)
             subtitleLabel.frame = NSRect(x: 66, y: 12 + yOff, width: 170, height: 16)
-            primaryButton.frame = NSRect(x: 250, y: 15 + yOff, width: 112, height: 28)
+            primaryButton.frame = NSRect(x: 240, y: 15 + yOff, width: 100, height: 28)
             if showContinue {
-                continueButton.frame = NSRect(x: 368, y: 15 + yOff, width: 70, height: 28)
+                continueButton.frame = NSRect(x: 346, y: 15 + yOff, width: 70, height: 28)
                 if showSkip {
-                    skipButton.frame = NSRect(x: 444, y: 15 + yOff, width: 48, height: 28)
+                    skipButton.frame = NSRect(x: 424, y: 15 + yOff, width: 68, height: 28)
                     consoleButton.frame = NSRect(x: 498, y: 15 + yOff, width: 38, height: 28)
                 } else {
-                    consoleButton.frame = NSRect(x: 444, y: 15 + yOff, width: 38, height: 28)
+                    consoleButton.frame = NSRect(x: 422, y: 15 + yOff, width: 38, height: 28)
                 }
             } else {
                 if showSkip {
-                    skipButton.frame = NSRect(x: 368, y: 15 + yOff, width: 48, height: 28)
-                    consoleButton.frame = NSRect(x: 422, y: 15 + yOff, width: 38, height: 28)
+                    skipButton.frame = NSRect(x: 368, y: 15 + yOff, width: 68, height: 28)
+                    consoleButton.frame = NSRect(x: 442, y: 15 + yOff, width: 38, height: 28)
                 } else {
                     consoleButton.frame = NSRect(x: 368, y: 15 + yOff, width: 38, height: 28)
                 }
@@ -1505,7 +1603,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             rowTags[index].frame = NSRect(x: 334, y: rowY + 10, width: 112, height: 14)
             rowTags[index].stringValue = wants.isEmpty ? "" : "wants: \(wants)"
             let canReturn = index < waitingReturnAvailable.count && waitingReturnAvailable[index]
-            rowButtons[index].title = canReturn ? "Return" : (kind.isEmpty ? "Open" : "Review")
+            rowButtons[index].title = rowActionLabel(index: index)
             rowButtons[index].toolTip = canReturn
                 ? "Focus the blocked tool directly"
                 : (kind.isEmpty
@@ -1562,18 +1660,15 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         brandBlueRing.borderColor = ringColor.cgColor
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         orbitLayer.isHidden = !collapsed || workingCount <= 0 || needsAttention || reduceMotion
-        // The bubble is what is on screen all day; a count is the one number
-        // worth carrying there. It rides as a small badge on the white ground
-        // -- the ground itself never floods, per the brand rule that attention
-        // is carried by the mark's blue ring turning orange. Orange badge for
-        // sessions blocked on you; brand blue for finished work awaiting
-        // review, which is a calmer claim.
+        // The collapsed bubble reserves numbers for things needing attention.
+        // Completed work is reward/status text after expansion, not a mystery
+        // count sitting on screen all day.
         collapsedBadge.stringValue = waitingCount > 0
             ? String(waitingCount)
-            : (finishedCount > 0 ? String(finishedCount) : "")
-        collapsedBadge.layer?.backgroundColor = (waitingCount > 0 ? orangeColor : brandBlue).cgColor
+            : (reviewCount > 0 ? String(reviewCount) : "")
+        collapsedBadge.layer?.backgroundColor = ((waitingCount > 0 || needsAttention) ? orangeColor : brandBlue).cgColor
         if collapsed {
-            collapsedBadge.isHidden = waitingCount <= 0 && finishedCount <= 0
+            collapsedBadge.isHidden = waitingCount <= 0 && reviewCount <= 0
         }
         applyWindowVisibility()
     }
@@ -1594,7 +1689,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         URLSession.shared.dataTask(with: url) { data, _, _ in
             guard let data = data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                self.scheduleRefresh()
+                DispatchQueue.main.async {
+                    self.applyOfflineState()
+                    self.scheduleRefresh(after: 3.0)
+                }
                 return
             }
             DispatchQueue.main.async {
@@ -1646,6 +1744,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         self.waitingRowKinds = waiting.prefix(maxWaitingRows).map { row in
             (row["kind"] as? String) ?? ""
         }
+        let reviewKinds = ["control_review", "context_review", "session_finished"]
+        self.waitingRowTexts = waiting.prefix(maxWaitingRows).map { row in
+            rowDisplayText(row)
+        }
         let presence = json["presence"] as? [String: Any]
         self.workingCount = presence?["working"] as? Int ?? 0
         let finishedList = json["finished_sessions"] as? [[String: Any]] ?? []
@@ -1654,15 +1756,24 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             if let badge = json["badge"] as? [String: Any] {
                 let count = badge["count"] as? Int ?? 0
                 let tone = badge["tone"] as? String ?? "info"
-                self.waitingCount = tone == "attention" ? count : 0
-                self.finishedCount = tone == "attention" ? 0 : count
+                if ["control_review", "context_review"].contains(incomingState) {
+                    self.waitingCount = 0
+                    self.finishedCount = 0
+                    self.reviewCount = count
+                } else {
+                    self.waitingCount = tone == "attention" ? count : 0
+                    self.finishedCount = tone == "attention" ? 0 : count
+                    self.reviewCount = 0
+                }
             } else {
                 self.waitingCount = 0
                 self.finishedCount = 0
+                self.reviewCount = 0
             }
         } else {
             self.waitingCount = presence?["waiting"] as? Int ?? self.waitingRowTexts.count
             self.finishedCount = finishedList.isEmpty ? digestList.count : finishedList.count
+            self.reviewCount = 0
         }
         let pressure = json["pressure"] as? [String: Any]
         self.pressureAvailable = pressure?["available"] as? Bool ?? false
@@ -1684,6 +1795,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             subtitleText += " · \(remaining)s"
         }
         self.subtitleLabel.stringValue = subtitleText
+        if reviewKinds.contains(incomingState), visibleWaitingRows > 0 {
+            self.titleLabel.stringValue = reviewTitle()
+            self.subtitleLabel.stringValue = reviewSubtitle()
+        }
         // The payload has always shipped a second explanatory sentence; the
         // bar never drew it. A tooltip costs no pixels.
         let tip = self.detailText.isEmpty ? nil : self.detailText
@@ -1700,10 +1815,12 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         self.continueSessionID = json["continue_session_id"] as? String ?? ""
         self.continueReason = json["continue_reason"] as? String ?? ""
         self.continueExpectedTokens = json["continue_expected_saved_context_tokens"] as? Int ?? 0
-        self.skipButton.title = String((json["skip_label"] as? String ?? "Skip").prefix(8))
+        self.skipButton.title = String((json["skip_label"] as? String ?? "Skip").prefix(10))
         self.skipState = json["skip_state"] as? String ?? ""
         self.skipSessionID = json["skip_session_id"] as? String ?? ""
         self.skipProject = json["skip_project"] as? String ?? ""
+        self.skipProjects = (json["skip_projects"] as? [String]) ?? []
+        self.skipSessionIDs = (json["skip_session_ids"] as? [String]) ?? []
         self.updateAppearance()
     }
 
@@ -2306,6 +2423,8 @@ def run_native_presence(
     skip_state_var = tk.StringVar(value="")
     skip_session_id_var = tk.StringVar(value="")
     skip_project_var = tk.StringVar(value="")
+    skip_projects_var = tk.StringVar(value="")
+    skip_session_ids_var = tk.StringVar(value="")
     state_var = tk.StringVar(value="watching")
     pulse_var = tk.BooleanVar(value=False)
     suppress_passive_refresh_until = tk.DoubleVar(value=0.0)
@@ -2319,6 +2438,7 @@ def run_native_presence(
     waiting_count_var = tk.IntVar(value=0)
     working_count_var = tk.IntVar(value=0)
     finished_count_var = tk.IntVar(value=0)
+    review_count_var = tk.IntVar(value=0)
     orbit_angle_var = tk.IntVar(value=0)
     pressure_available_var = tk.BooleanVar(value=False)
     pressure_pct_var = tk.IntVar(value=0)
@@ -2371,6 +2491,84 @@ def run_native_presence(
         webbrowser.open(f"{url.rstrip('/')}/?ask=1")
         schedule_auto_collapse(1500)
 
+    def split_lines(value: str) -> list[str]:
+        return [part.strip() for part in value.splitlines() if part.strip()]
+
+    def row_display_text(row: dict[str, object]) -> str:
+        kind = str(row.get("kind") or "")
+        tool = str(row.get("tool") or "AI tool")
+        project = str(row.get("project") or "")
+        waited = str(row.get("waited_label") or "")
+        if kind == "finished":
+            parts = ["Completed", project, tool, waited]
+        elif kind == "context_review":
+            parts = ["Context", project, tool, waited]
+        elif kind:
+            parts = ["Signal", project, tool, waited]
+        else:
+            parts = [tool, project, waited]
+        return " · ".join(part for part in parts if part)
+
+    def review_title() -> str:
+        if state_var.get() in {"control_review", "context_review"}:
+            count = int(review_count_var.get() or 0)
+            return f"{count} context review{'' if count == 1 else 's'}"
+        if state_var.get() == "session_finished" and visible_waiting_rows() > 0:
+            count = int(finished_count_var.get() or 0)
+            return f"{count} completed run{'' if count == 1 else 's'}"
+        return title_var.get()[:18]
+
+    def review_subtitle() -> str:
+        if state_var.get() in {"control_review", "context_review", "session_finished"} and visible_waiting_rows() > 0:
+            base_count = int(finished_count_var.get() or 0) if state_var.get() == "session_finished" else int(review_count_var.get() or 0)
+            count = max(base_count, visible_waiting_rows())
+            hidden = max(count - visible_waiting_rows(), 0)
+            return (
+                f"{visible_waiting_rows()} shown of {count}. UI has full list."
+                if hidden > 0 else "Pick a row or open UI."
+            )
+        return subtitle_var.get()[:46]
+
+    def row_action_label(index: int) -> str:
+        can_return = index < len(waiting_row_return) and waiting_row_return[index]
+        if can_return:
+            return "Return"
+        kind = waiting_row_kinds[index] if index < len(waiting_row_kinds) else ""
+        if kind in {"context_review", "control_review"}:
+            return "Open"
+        return "Review" if kind else "Open"
+
+    def short_skip_failure_message() -> str:
+        state = skip_state_var.get()
+        if state in {"control_recommended_group", "control_recommended_project"}:
+            return "Could not save Later. Open UI."
+        if state == "session_finished_group":
+            return "Could not clear notices. Open UI."
+        return "Could not save Skip. Open UI."
+
+    def apply_offline_state() -> None:
+        waiting_row_texts.clear()
+        waiting_row_urls.clear()
+        waiting_row_session_ids.clear()
+        waiting_row_return.clear()
+        waiting_row_wants.clear()
+        waiting_row_kinds.clear()
+        waiting_count_var.set(0)
+        finished_count_var.set(0)
+        review_count_var.set(0)
+        skip_state_var.set("")
+        skip_session_id_var.set("")
+        skip_project_var.set("")
+        skip_projects_var.set("")
+        skip_session_ids_var.set("")
+        state_var.set("offline")
+        title_var.set("UI offline")
+        subtitle_var.set("Restart AIWatcher")
+        primary_label_var.set("Open")
+        primary_action_var.set("open_url")
+        primary_url_var.set(url)
+        update_attention_style()
+
     def apply_state(payload: dict[str, object]) -> None:
         incoming_state = str(payload.get("state") or "watching")
         if (
@@ -2397,12 +2595,7 @@ def run_native_presence(
             for row in waiting_sessions[:max_waiting_rows]:
                 if not isinstance(row, dict):
                     continue
-                parts = [
-                    str(row.get("tool") or "AI tool"),
-                    str(row.get("project") or ""),
-                    str(row.get("waited_label") or ""),
-                ]
-                waiting_row_texts.append(" · ".join(part for part in parts if part))
+                waiting_row_texts.append(row_display_text(row))
                 path = str(row.get("url") or "/")
                 waiting_row_urls.append(path if path.startswith("http") else f"{url.rstrip('/')}{path}")
                 waiting_row_session_ids.append(str(row.get("session_id") or ""))
@@ -2426,15 +2619,22 @@ def run_native_presence(
                 badge_count = int(badge.get("count") or 0)
             except (TypeError, ValueError):
                 badge_count = 0
-            if badge.get("tone") == "attention":
+            if incoming_state in {"control_review", "context_review"}:
+                waiting_count_var.set(0)
+                finished_count_var.set(0)
+                review_count_var.set(badge_count)
+            elif badge.get("tone") == "attention":
                 waiting_count_var.set(badge_count)
                 finished_count_var.set(0)
+                review_count_var.set(0)
             else:
                 waiting_count_var.set(0)
                 finished_count_var.set(badge_count)
+                review_count_var.set(0)
         elif "badge" in payload:
             waiting_count_var.set(0)
             finished_count_var.set(0)
+            review_count_var.set(0)
         else:
             waiting_count_var.set(presence_waiting_count or len(waiting_row_texts))
             if isinstance(finished_sessions, list) and finished_sessions:
@@ -2443,6 +2643,7 @@ def run_native_presence(
                 finished_count_var.set(len(digest_rows))
             else:
                 finished_count_var.set(0)
+            review_count_var.set(0)
         pressure = payload.get("pressure")
         if isinstance(pressure, dict) and pressure.get("available"):
             pressure_available_var.set(True)
@@ -2472,6 +2673,9 @@ def run_native_presence(
         if incoming_state in {"prompt_gate", "command_gate"} and isinstance(remaining, int) and remaining >= 0:
             subtitle_text += f" · {remaining}s"
         subtitle_var.set(subtitle_text)
+        if incoming_state in {"control_review", "context_review", "session_finished"} and visible_waiting_rows() > 0:
+            title_var.set(review_title())
+            subtitle_var.set(review_subtitle())
         primary_label_var.set(str(payload.get("primary_label") or "Watch")[:12])
         primary_action_var.set(str(payload.get("primary_action") or "open_url"))
         primary_session_id_var.set(str(payload.get("primary_session_id") or ""))
@@ -2488,10 +2692,14 @@ def run_native_presence(
         )
         continue_session_id_var.set(str(payload.get("continue_session_id") or ""))
         continue_reason_var.set(str(payload.get("continue_reason") or ""))
-        skip_label_var.set(str(payload.get("skip_label") or "Skip")[:8])
+        skip_label_var.set(str(payload.get("skip_label") or "Skip")[:10])
         skip_state_var.set(str(payload.get("skip_state") or ""))
         skip_session_id_var.set(str(payload.get("skip_session_id") or ""))
         skip_project_var.set(str(payload.get("skip_project") or ""))
+        projects = payload.get("skip_projects")
+        skip_projects_var.set("\n".join(str(item).strip() for item in projects if str(item).strip()) if isinstance(projects, list) else "")
+        session_ids = payload.get("skip_session_ids")
+        skip_session_ids_var.set("\n".join(str(item).strip() for item in session_ids if str(item).strip()) if isinstance(session_ids, list) else "")
         try:
             continue_expected_tokens_var.set(int(payload.get("continue_expected_saved_context_tokens") or 0))
         except (TypeError, ValueError, tk.TclError):
@@ -2499,7 +2707,7 @@ def run_native_presence(
 
     def scan_now() -> None:
         title_var.set("Scanning")
-        subtitle_var.set("Checking local AI sessions...")
+        subtitle_var.set("Checking local AI work...")
         try:
             with urllib.request.urlopen(f"{url.rstrip('/')}/api/companion-scan", timeout=12.0) as response:
                 payload = json.loads(response.read().decode("utf-8"))
@@ -2703,6 +2911,8 @@ def run_native_presence(
             "state": state,
             "session_id": skip_session_id_var.get().strip(),
             "project": skip_project_var.get().strip(),
+            "projects": split_lines(skip_projects_var.get()) or split_lines(skip_project_var.get()),
+            "session_ids": split_lines(skip_session_ids_var.get()) or split_lines(skip_session_id_var.get()),
         }
         request = urllib.request.Request(
             f"{url.rstrip('/')}/api/companion-skip",
@@ -2718,10 +2928,14 @@ def run_native_presence(
             pass
         if not saved:
             title_var.set("Still pending")
-            subtitle_var.set("Could not save Skip")
+            subtitle_var.set(short_skip_failure_message())
             update_attention_style()
             return
         skip_state_var.set("")
+        skip_session_id_var.set("")
+        skip_project_var.set("")
+        skip_projects_var.set("")
+        skip_session_ids_var.set("")
         continue_session_id_var.set("")
         state_var.set("watching")
         title_var.set("Watching quietly")
@@ -2771,16 +2985,15 @@ def run_native_presence(
         # update_attention_style's needs_attention set deliberately excludes
         # it, so "review when ready" never wears the orange treatment.
         return state_var.get() in {
-            "prompt_gate", "command_gate", "control_recommended", "context_review", "optimize_available", "clipboard_confirm",
+            "prompt_gate", "command_gate", "control_recommended", "control_review", "context_review", "optimize_available", "clipboard_confirm",
             "session_waiting", "session_finished", "away_digest",
         }
 
     def visible_waiting_rows() -> int:
-        # One row per waiting session, a single one included: the row is where
-        # the wants tag and the per-row Return live, and a lone blocked
-        # session deserves both as much as a queue does. The away digest
-        # reuses the same rows for its history entries.
-        if state_var.get() not in {"session_waiting", "away_digest"} or not waiting_row_texts:
+        # One row per actionable item. Waiting, context review, finished
+        # batches, and away digests all reuse this row surface so the badge can
+        # explain itself instead of dropping the user into an unlabeled count.
+        if state_var.get() not in {"session_waiting", "session_finished", "away_digest", "control_review", "context_review"} or not waiting_row_texts:
             return 0
         return min(len(waiting_row_texts), max_waiting_rows)
 
@@ -2836,10 +3049,8 @@ def run_native_presence(
         rows = 0 if collapsed.get() else visible_waiting_rows()
         for index in range(min(rows, len(waiting_row_texts))):
             row_widgets[index][1].configure(text=waiting_row_texts[index])
-            can_return = index < len(waiting_row_return) and waiting_row_return[index]
-            kind = waiting_row_kinds[index] if index < len(waiting_row_kinds) else ""
             row_widgets[index][2].configure(
-                text="Return" if can_return else ("Review" if kind else "Open"),
+                text=row_action_label(index),
             )
             wants = waiting_row_wants[index] if index < len(waiting_row_wants) else ""
             row_widgets[index][3].configure(text=f"wants: {wants}" if wants else "")
@@ -2956,19 +3167,19 @@ def run_native_presence(
                 2, 4, 34, 36, start=orbit_angle_var.get(), extent=62,
                 style="arc", outline="#43d9a3", width=2,
             )
-        # The bubble is what is on screen all day; a count is the one number
-        # worth carrying there. It rides as a small badge on the white ground
-        # -- the ground itself never floods. Orange for sessions blocked on
-        # you; brand blue for finished work awaiting review, a calmer claim.
+        # The collapsed bubble reserves numbers for things needing attention.
+        # Completed work is reward/status text after expansion, not a mystery
+        # count sitting on screen all day.
         waiting_count = int(waiting_count_var.get() or 0)
         finished_count = int(finished_count_var.get() or 0)
-        badge_count = waiting_count or finished_count
+        review_count = int(review_count_var.get() or 0)
+        badge_count = waiting_count or review_count
         if badge_count > 0:
             # Fully inside the 36-wide canvas -- the old (26..42) oval ran
             # past the canvas edge and rendered cropped.
             collapsed_canvas.create_oval(
                 19, 2, 35, 18,
-                fill=attention_bg if waiting_count > 0 else "#0052F5", outline="",
+                fill=attention_bg if waiting_count > 0 or needs_attention else "#0052F5", outline="",
             )
             collapsed_canvas.create_text(
                 27, 10, text=str(badge_count), fill="#ffffff", font=("Helvetica", 8, "bold"),
@@ -3075,30 +3286,7 @@ def run_native_presence(
                 payload = json.loads(response.read().decode("utf-8"))
             apply_state(payload)
         except (OSError, urllib.error.URLError, json.JSONDecodeError, tk.TclError):
-            state_var.set("watching")
-            title_var.set("AIWatcher")
-            subtitle_var.set("Watching quietly")
-            primary_label_var.set("Watch")
-            primary_action_var.set("open_url")
-            primary_session_id_var.set("")
-            primary_runtime_available_var.set(False)
-            primary_url_var.set(url)
-            continue_session_id_var.set("")
-            skip_state_var.set("")
-            skip_project_var.set("")
-            waiting_row_texts.clear()
-            waiting_row_urls.clear()
-            waiting_row_session_ids.clear()
-            waiting_row_return.clear()
-            waiting_row_wants.clear()
-            waiting_row_kinds.clear()
-            waiting_count_var.set(0)
-            working_count_var.set(0)
-            finished_count_var.set(0)
-            pressure_available_var.set(False)
-            pressure_stats_var.set("")
-            signal_chip_var.set("")
-            signal_url_var.set("")
+            apply_offline_state()
         finally:
             update_attention_style()
             schedule_auto_collapse(10000 if has_primary_action() else 4000)
@@ -3116,7 +3304,7 @@ def run_native_presence(
     primary_button = ttk.Button(frame, textvariable=primary_label_var, width=11, style="Presence.TButton", command=open_primary)
     primary_button.pack(side="left", padx=(0, 4))
     continue_button = ttk.Button(frame, textvariable=continue_label_var, width=9, style="Presence.TButton", command=continue_here)
-    skip_button = ttk.Button(frame, textvariable=skip_label_var, width=6, style="Presence.TButton", command=skip_current)
+    skip_button = ttk.Button(frame, textvariable=skip_label_var, width=9, style="Presence.TButton", command=skip_current)
     console_button = ttk.Button(frame, text="UI", width=4, style="Presence.TButton", command=open_dashboard)
     console_button.pack(side="left")
     ttk.Button(frame, text="-", width=2, style="PresenceMini.TButton", command=toggle_collapsed).pack(side="left", padx=(4, 0))

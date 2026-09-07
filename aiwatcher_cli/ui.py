@@ -63,6 +63,7 @@ from .local_state import (
     analyst_consent,
     analyst_contents_allowed,
     analyst_month_spend,
+    companion_preferences,
     companion_skip_active,
     evidence_snapshots_for_sessions,
     get_outcome,
@@ -88,6 +89,7 @@ from .local_state import (
     record_analyst_consent,
     record_analyst_contents,
     record_analyst_run,
+    record_companion_preferences,
     record_handoff_decision,
     record_optimize_decision,
     record_evidence_snapshot,
@@ -221,6 +223,8 @@ SAME_ORIGIN_ONLY_ROUTES = frozenset({
     "/api/update-status",
     "/api/update-apply",
     "/api/update-auto-check",
+    "/api/companion-preferences",
+    "/api/companion-skip",
 })
 
 # POST endpoints whose only fact is that they happened, so they carry no JSON
@@ -433,6 +437,28 @@ def _fresh_start_context_candidates(summary: dict[str, object]) -> list[dict[str
         seen_projects.add(project_key_value)
         candidates.append(row)
     return candidates
+
+
+def _context_review_companion_rows(candidates: list[dict[str, object]]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for row in candidates[:3]:
+        project = str(row.get("project_full") or "")
+        impact = str(row.get("estimated_replayed_context_label") or row.get("impact_label") or "").strip()
+        if not impact:
+            try:
+                latest_turn_tokens = int(row.get("latest_turn_tokens") or 0)
+            except (TypeError, ValueError):
+                latest_turn_tokens = 0
+            impact = compact_int(latest_turn_tokens) if latest_turn_tokens > 0 else ""
+        rows.append({
+            "session_id": str(row.get("session_id") or ""),
+            "tool": tool_label(str(row.get("tool") or "")),
+            "project": _project_basename(project) or str(row.get("project") or "this project"),
+            "waited_label": impact,
+            "url": "/?view=watch#contextHealth",
+            "kind": "context_review",
+        })
+    return rows
 
 
 def project_label(path: str | None, max_len: int = 54) -> str:
@@ -5534,6 +5560,7 @@ def build_summary(
         "update_install_kind": install_kind(),
         "update_source_root": str(installed_source_root()),
         "ai_assist": build_ai_assist_status(ai_assist_config()),
+        "companion_preferences": companion_preferences(),
         "ai_assist_runs": recent_ai_assist_runs(limit=10),
         "context_health": context_health,
         "context_health_status": "ready",
@@ -5652,6 +5679,7 @@ def _mark_summary_cache(summary: dict[str, object], *, status: str, source: str,
     copy["update_auto_check"] = update_auto_check_enabled()
     copy["update_install_kind"] = install_kind()
     copy["update_source_root"] = str(installed_source_root())
+    copy["companion_preferences"] = companion_preferences()
     generated_at = copy.get("generated_at") if isinstance(copy.get("generated_at"), str) else None
     copy["cache_schema_version"] = SUMMARY_CACHE_SCHEMA_VERSION
     copy["cache"] = {
@@ -5866,6 +5894,7 @@ def _build_summary_shell(
         "update_install_kind": install_kind(),
         "update_source_root": str(installed_source_root()),
         "ai_assist": build_ai_assist_status(ai_assist_config()),
+        "companion_preferences": companion_preferences(),
         "ai_assist_runs": recent_ai_assist_runs(limit=10),
         "context_health": [],
         "context_health_status": "pending",
@@ -6175,7 +6204,7 @@ def _waited_fragment(label: object) -> str:
 def _presence_block(rows: list[SessionPresence]) -> dict[str, object]:
     """Live now-counts for the Companion's resting state.
 
-    The label these counts answer is "what is happening right now": sessions on
+    The label these counts answer is "what is happening right now": runs on
     this machine classified this second, never the cached 7-day summary. Two
     honesty rules shape the block. An AIWatcher Second Opinion spawn is left out
     of the counts -- "1 working" must not be AIWatcher's own feature passing as
@@ -6191,7 +6220,7 @@ def _presence_block(rows: list[SessionPresence]) -> dict[str, object]:
             **counts,
             "measurable": False,
             "reason": "no local session snapshot yet",
-            "line": "Waiting for the first session scan",
+            "line": "Waiting for the first run scan",
         }
     if not measured:
         reason = next((row.reason for row in own if row.reason), None)
@@ -6199,7 +6228,7 @@ def _presence_block(rows: list[SessionPresence]) -> dict[str, object]:
             **counts,
             "measurable": False,
             "reason": reason or "sessions not measurable here",
-            "line": "Live sessions not measurable here",
+            "line": "Live runs not measurable here",
         }
     for row in measured:
         if row.state in counts:
@@ -6216,9 +6245,9 @@ def _presence_block(rows: list[SessionPresence]) -> dict[str, object]:
             if frag:
                 line += f" {frag}"
     elif quiet:
-        line = f"{quiet} quiet session{'s' if quiet != 1 else ''}"
+        line = f"{quiet} quiet run{'s' if quiet != 1 else ''}"
     else:
-        line = "No live sessions"
+        line = "No live runs"
     return {**counts, "measurable": True, "reason": None, "line": line}
 
 
@@ -6363,6 +6392,31 @@ def _finished_rows(rows: list[SessionPresence]) -> list[tuple[float, SessionPres
         notices.append((finished_at, row))
     notices.sort(key=lambda item: item[0], reverse=True)
     return notices
+
+
+def _finished_companion_rows(finished_notices: list[tuple[float, SessionPresence]]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for finished_at, row in finished_notices[:3]:
+        rows.append({
+            "kind": "finished",
+            "session_id": row.session_id,
+            "tool": tool_label(row.tool),
+            "project": _project_basename(row.project_path) or "this machine",
+            "waited_label": (
+                f"completed {int((time.time() - finished_at) // 60)}m"
+                if finished_at <= time.time() - 60
+                else "completed now"
+            ),
+            "url": f"/?session={quote(row.session_id, safe='')}",
+        })
+    return rows
+
+
+def _completed_work_block(finished_notices: list[tuple[float, SessionPresence]]) -> dict[str, object]:
+    """Recently observed completions for the Companion's reward/status line."""
+    recent = len(finished_notices)
+    label = f"{recent} completed recently" if recent else ""
+    return {"recent": recent, "label": label}
 
 
 def _freshened_for_presence(rows: list[LocalSession]) -> list[LocalSession]:
@@ -6592,6 +6646,7 @@ def _recent_signal_block() -> dict[str, object] | None:
 def build_companion_state() -> dict[str, object]:
     """Small, fast state contract for the always-available Companion surface."""
     summary = build_summary_cached(7)
+    prefs = companion_preferences()
     # Presence is computed here, not read from `summary`. The summary is an
     # aggregate about a seven-day window and is cached accordingly -- 45s in
     # memory, six hours on disk -- which is correct for spend totals and wrong
@@ -6610,18 +6665,10 @@ def build_companion_state() -> dict[str, object]:
     presence_rows = presence_for_sessions(session_rows, waiting=waiting_signals)
     _update_finished_notices(presence_rows)
     finished_notices = _finished_rows(presence_rows)
-    finished_payload = [
-        {
-            "session_id": row.session_id,
-            "tool": tool_label(row.tool),
-            "project": _project_basename(row.project_path) or "this machine",
-            "finished_label": (
-                f"{int((time.time() - at) // 60)}m" if at <= time.time() - 60 else "now"
-            ),
-            "url": f"/?session={quote(row.session_id, safe='')}",
-        }
-        for at, row in finished_notices[:3]
-    ]
+    finished_payload = _finished_companion_rows(finished_notices)
+    completed_work = _completed_work_block(finished_notices)
+    finished_notice_mode = str(prefs.get("finished_sessions") or "badge_only")
+    fresh_start_context_enabled = bool(prefs.get("fresh_start_context", True))
     _update_away_digest(session_rows, presence_rows)
     base = {
         "state": "watching",
@@ -6646,6 +6693,8 @@ def build_companion_state() -> dict[str, object]:
         # session vanishes from the glanceable surface the moment anything
         # else has the headline.
         "finished_sessions": finished_payload,
+        "completed_work": completed_work,
+        "companion_preferences": prefs,
         "pressure": _pressure_block(presence_rows, session_rows),
         "recent_signal": _recent_signal_block(),
     }
@@ -6739,7 +6788,7 @@ def build_companion_state() -> dict[str, object]:
     # most justified action the product has, and until this branch existed it
     # was the one case the Companion sat quiet through.
     waiting_rows = [row.to_json() for row in presence_rows if row.state == "waiting"]
-    if waiting_rows:
+    if bool(prefs.get("blocked_sessions", True)) and waiting_rows:
         # Longest wait first: how long you have been the bottleneck is the part
         # worth reading, and with several waiting the count goes in the sentence
         # rather than replacing the duration.
@@ -6758,7 +6807,7 @@ def build_companion_state() -> dict[str, object]:
         if len(waiting_rows) == 1:
             subtitle = f"{tool} · {project}" + (f" · {waited}" if waited else "")
         else:
-            subtitle = f"{len(waiting_rows)} sessions · longest {waited or project}"
+            subtitle = f"{len(waiting_rows)} runs · longest {waited or project}"
         # One pre-worded row per blocked session so the widgets can draw a
         # queue instead of a headline. Worded here, once, because three
         # clients (Swift, Tk, browser overlay) would otherwise each respell
@@ -6804,11 +6853,11 @@ def build_companion_state() -> dict[str, object]:
             "badge": {
                 "count": len(waiting_rows),
                 "tone": "attention",
-                "label": f"{len(waiting_rows)} waiting session{'s' if len(waiting_rows) != 1 else ''}",
+                "label": f"{len(waiting_rows)} waiting run{'s' if len(waiting_rows) != 1 else ''}",
             },
-            "detail": "This session asked for permission and has done nothing since."
+            "detail": "This run asked for permission and has done nothing since."
             if len(waiting_rows) == 1
-            else "These sessions asked for permission and have done nothing since.",
+            else "These runs asked for permission and have done nothing since.",
         }
 
     # The away digest sits between a blocked session (which still outranks
@@ -6852,42 +6901,57 @@ def build_companion_state() -> dict[str, object]:
     # one session running and another freshly finished, the finished headline
     # owned the bar for its whole 15 minutes and hid the running session's
     # meter and totals -- old news masking live information. While anything
-    # works, the resting layout wins and the finished count rides its
-    # subtitle and the bubble's blue badge instead. Still above every
-    # fresh-start advisory, and calm on purpose: the widgets render this
-    # without the orange treatment, because "review when ready" is a
-    # different claim than "blocked on you".
+    # works, the resting layout wins and the completed count becomes expanded
+    # status text. The collapsed bubble keeps numbers for attention/review
+    # work only, because "review when ready" is a different claim than
+    # "blocked on you".
     presence_block = base["presence"] if isinstance(base["presence"], dict) else {}
-    if finished_notices and int(presence_block.get("working") or 0) == 0:
+    if (
+        finished_notice_mode == "expanded"
+        and finished_notices
+        and int(presence_block.get("working") or 0) == 0
+    ):
         finished_at, finished_row = finished_notices[0]
         minutes = int((time.time() - finished_at) // 60)
         ago = f"{minutes}m ago" if minutes else "just now"
         finished_project = _project_basename(finished_row.project_path) or "this machine"
         finished_tool = tool_label(finished_row.tool)
         finished_id = finished_row.session_id
+        finished_count = len(finished_notices)
+        many_finished = finished_count > 1 and bool(prefs.get("batch_finished_sessions", True))
         return {
             **base,
             "state": "session_finished",
-            "label": "Finished working",
-            "title": "Finished working",
-            "subtitle": f"{finished_tool} · {finished_project} · {ago}",
+            "label": f"{finished_count} completed runs" if many_finished else "Run completed",
+            "title": f"{finished_count} completed runs" if many_finished else "Run completed",
+            "subtitle": (
+                "Nice progress. Pick one to review or clear the notice."
+                if many_finished
+                else f"{finished_tool} · {finished_project} · {ago}"
+            ),
             "primary_label": "Review",
             "primary_action": "open_url",
             "primary_session_id": finished_id,
-            "primary_url": f"/?session={quote(finished_id, safe='')}",
-            "skip_label": "Skip",
-            "skip_state": "session_finished",
-            "skip_session_id": finished_id,
+            "primary_url": "/?view=sessions" if many_finished else f"/?session={quote(finished_id, safe='')}",
+            "skip_label": "Clear all" if many_finished else "Skip",
+            "skip_state": "session_finished_group" if many_finished else "session_finished",
+            "skip_session_id": "" if many_finished else finished_id,
+            "skip_session_ids": [row.session_id for _at, row in finished_notices if row.session_id],
+            "waiting_sessions": finished_payload if many_finished else [],
             "badge": {
-                "count": len(finished_payload),
+                "count": finished_count,
                 "tone": "info",
-                "label": f"{len(finished_payload)} finished session{'s' if len(finished_payload) != 1 else ''}",
+                "label": f"{finished_count} completed run{'s' if finished_count != 1 else ''}",
             },
-            "detail": "This session was working a moment ago and has gone quiet -- likely a completed turn awaiting review.",
+            "detail": (
+                "Completed runs are visible in Sessions. Clear all only dismisses Companion notices."
+                if many_finished
+                else "This run was active a moment ago and has gone quiet -- likely completed work awaiting review."
+            ),
         }
 
     fresh_start_candidates = _fresh_start_context_candidates(summary)
-    if len(fresh_start_candidates) > 1:
+    if fresh_start_context_enabled and len(fresh_start_candidates) > 1:
         foreground_candidate = next(
             (row for row in fresh_start_candidates if _foreground_matches_fresh_start_bubble(row)),
             None,
@@ -6910,9 +6974,11 @@ def build_companion_state() -> dict[str, object]:
                 "primary_label": "Review list",
                 "primary_action": "open_url",
                 "primary_url": "/?view=watch#contextHealth",
-                "skip_label": "Snooze",
+                "skip_label": "Later",
                 "skip_state": "control_recommended_group",
                 "skip_project": "\n".join(project_lines),
+                "skip_projects": project_lines,
+                "waiting_sessions": _context_review_companion_rows(fresh_start_candidates),
                 "fresh_start_project_count": project_count,
                 "fresh_start_context_label": context_label,
                 "badge": {
@@ -6933,9 +6999,11 @@ def build_companion_state() -> dict[str, object]:
             "primary_label": "Review",
             "primary_action": "open_url",
             "primary_url": "/?view=watch#contextHealth",
-            "skip_label": "Snooze",
+            "skip_label": "Later",
             "skip_state": "control_recommended_group",
             "skip_project": "\n".join(project_lines),
+            "skip_projects": project_lines,
+            "waiting_sessions": _context_review_companion_rows(fresh_start_candidates),
             "fresh_start_project_count": project_count,
             "fresh_start_context_label": context_label,
             "badge": {
@@ -6948,7 +7016,7 @@ def build_companion_state() -> dict[str, object]:
             "detail": "Choose which projects to Fresh Start, continue, or snooze in one batch.",
         }
     bubble = summary.get("handoff_bubble")
-    if isinstance(bubble, dict) and bubble.get("session_id"):
+    if fresh_start_context_enabled and isinstance(bubble, dict) and bubble.get("session_id"):
         session_id = str(bubble.get("session_id"))
         bubble_project = str(bubble.get("project_full") or "")
         if _fresh_start_project_quiet(bubble_project):
@@ -7037,7 +7105,7 @@ def build_companion_state() -> dict[str, object]:
                 "primary_label": "Console",
                 "primary_action": "open_url",
                 "primary_url": "/?view=watch#contextHealth",
-                "skip_label": "Snooze",
+                "skip_label": "Later",
                 "skip_state": "control_recommended_group",
                 "skip_project": bubble_project,
                 "detail": "Fresh Start nudges only blink when the matching AI tool or terminal is foreground.",
@@ -7132,14 +7200,14 @@ def build_companion_state() -> dict[str, object]:
         sessions = totals.get("sessions")
         value = totals.get("api_value_label")
         tokens = totals.get("tokens_label")
-        parts = [f"{sessions} session{'s' if sessions != 1 else ''}"] if sessions is not None else []
+        parts = [f"{sessions} run{'s' if sessions != 1 else ''}"] if sessions is not None else []
         if value:
             parts.append(str(value))
         if tokens:
             parts.append(f"{tokens} tokens")
         if parts:
             rollup = f"{window}: " + " · ".join(parts)
-    quiet_detail = "AIWatcher will interrupt only when a matching active session has a justified action."
+    quiet_detail = "AIWatcher will interrupt only when a matching active run has a justified action."
     if rollup:
         quiet_detail = f"{rollup}. {quiet_detail}"
     presence = base["presence"]
@@ -7147,14 +7215,14 @@ def build_companion_state() -> dict[str, object]:
     # Finished work that live work outranked still gets its line fragment,
     # subject to the widgets' 46-character subtitle.
     if finished_notices:
-        appended = f"{quiet_subtitle} · {len(finished_notices)} finished"
+        base["badge"] = {
+            "count": len(finished_notices),
+            "tone": "info",
+            "label": f"{len(finished_notices)} completed run{'s' if len(finished_notices) != 1 else ''}",
+        }
+        appended = f"{quiet_subtitle} · {len(finished_notices)} completed"
         if len(appended) <= 46:
             quiet_subtitle = appended
-            base["badge"] = {
-                "count": len(finished_notices),
-                "tone": "info",
-                "label": f"{len(finished_notices)} finished session{'s' if len(finished_notices) != 1 else ''}",
-            }
     return {
         **base,
         "state": "watching" if running else "offline",
@@ -7371,6 +7439,9 @@ class UIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/companion-state":
             self._send(200, json.dumps(build_companion_state()), "application/json; charset=utf-8")
             return
+        if parsed.path == "/api/companion-preferences":
+            self._send(200, json.dumps(companion_preferences()), "application/json; charset=utf-8")
+            return
         if parsed.path == "/api/ai-assist-status":
             self._send(
                 200,
@@ -7559,6 +7630,7 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/optimize-ai-assist",
             "/api/optimize-decision",
             "/api/companion-skip",
+            "/api/companion-preferences",
             "/api/ambient-intervention-action",
             "/api/runtime-return",
             "/api/session-resume",
@@ -7684,6 +7756,21 @@ class UIHandler(BaseHTTPRequestHandler):
                 json.dumps(build_ai_assist_status(config)),
                 "application/json; charset=utf-8",
             )
+            return
+        if parsed.path == "/api/companion-preferences":
+            try:
+                prefs = record_companion_preferences(payload)
+            except ValueError as exc:
+                self._send(400, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")
+                return
+            except OSError as exc:
+                self._send(
+                    500,
+                    json.dumps({"error": f"Could not save Companion settings: {exc}"}),
+                    "application/json; charset=utf-8",
+                )
+                return
+            self._send(200, json.dumps(prefs), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/ask-aiwatcher":
             question = str(payload.get("question", "")).strip()
@@ -7996,6 +8083,34 @@ class UIHandler(BaseHTTPRequestHandler):
                     # the pending summary; the evidence it pointed at stays.
                     _dismiss_away_digest()
                     self._send(200, json.dumps({"ok": True}), "application/json; charset=utf-8")
+                    return
+                if state == "session_finished_group":
+                    raw_session_ids = payload.get("session_ids")
+                    session_ids = [
+                        str(item).strip()
+                        for item in raw_session_ids
+                        if str(item).strip()
+                    ] if isinstance(raw_session_ids, list) else []
+                    if session_id:
+                        session_ids.extend(part.strip() for part in session_id.splitlines() if part.strip())
+                    saved = []
+                    for current_session_id in session_ids:
+                        key = f"session_finished:{current_session_id}"
+                        if key in saved:
+                            continue
+                        record_companion_skip(
+                            key=key,
+                            reason="User cleared finished-session Companion notices.",
+                        )
+                        saved.append(key)
+                    if not saved:
+                        self._send(
+                            400,
+                            json.dumps({"error": "No session id was supplied for finished-session dismissal."}),
+                            "application/json; charset=utf-8",
+                        )
+                        return
+                    self._send(200, json.dumps({"ok": True, "sessions": len(saved)}), "application/json; charset=utf-8")
                     return
                 if state == "session_finished" and session_id:
                     # The default hour outlives the notice's own 15-minute TTL,

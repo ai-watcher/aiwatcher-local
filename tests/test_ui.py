@@ -528,6 +528,90 @@ class DashboardServeTests(unittest.TestCase):
         self.assertTrue(body["config"]["stored_keys"]["openai"])
         self.assertNotIn("sk-local-test", json.dumps(body))
 
+    def test_companion_preferences_get_and_post_are_routable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                server, thread, base = self._serve_one()
+                post_payload = json.dumps({
+                    "fresh_start_context": False,
+                    "finished_sessions": "expanded",
+                }).encode("utf-8")
+                post_request = request.Request(
+                    f"{base}/api/companion-preferences",
+                    data=post_payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                try:
+                    with request.urlopen(post_request, timeout=5) as response:
+                        posted = json.loads(response.read().decode("utf-8"))
+                finally:
+                    thread.join(timeout=5)
+                    server.server_close()
+                server, thread, base = self._serve_one()
+                get_request = request.Request(f"{base}/api/companion-preferences")
+                try:
+                    with request.urlopen(get_request, timeout=5) as response:
+                        fetched = json.loads(response.read().decode("utf-8"))
+                finally:
+                    thread.join(timeout=5)
+                    server.server_close()
+
+        self.assertEqual(posted["finished_sessions"], "expanded")
+        self.assertFalse(posted["fresh_start_context"])
+        self.assertEqual(fetched, posted)
+
+    def test_companion_preferences_refuses_pages_from_other_localhost_origins(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                server, thread, base = self._serve_one()
+                payload = json.dumps({"finished_sessions": "expanded"}).encode("utf-8")
+                http_request = request.Request(
+                    f"{base}/api/companion-preferences",
+                    data=payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Origin": "http://localhost:3000",
+                    },
+                    method="POST",
+                )
+                try:
+                    with self.assertRaises(error.HTTPError) as raised:
+                        request.urlopen(http_request, timeout=5)
+                finally:
+                    thread.join(timeout=5)
+                    server.server_close()
+                prefs = ui.companion_preferences()
+
+        self.assertEqual(raised.exception.code, 403)
+        self.assertEqual(prefs["finished_sessions"], "badge_only")
+
+    def test_companion_preferences_accepts_its_own_origin(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                server, thread, base = self._serve_one()
+                payload = json.dumps({"finished_sessions": "expanded"}).encode("utf-8")
+                http_request = request.Request(
+                    f"{base}/api/companion-preferences",
+                    data=payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Origin": base,
+                    },
+                    method="POST",
+                )
+                try:
+                    with request.urlopen(http_request, timeout=5) as response:
+                        posted = json.loads(response.read().decode("utf-8"))
+                finally:
+                    thread.join(timeout=5)
+                    server.server_close()
+
+        self.assertEqual(posted["finished_sessions"], "expanded")
+
     def test_companion_group_snooze_records_project_cooldowns(self) -> None:
         server, thread, base = self._serve_one()
         payload = json.dumps({
@@ -560,19 +644,75 @@ class DashboardServeTests(unittest.TestCase):
             for call in record_skip.call_args_list
         ))
 
+    def test_companion_skip_refuses_pages_from_other_localhost_origins(self) -> None:
         server, thread, base = self._serve_one()
+        payload = json.dumps({"state": "needs_review"}).encode("utf-8")
         http_request = request.Request(
-            f"{base}/api/handoff-receipts-viewed",
-            data=b"",
+            f"{base}/api/companion-skip",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Origin": "http://localhost:3000",
+            },
             method="POST",
         )
-        with patch.object(ui, "mark_recent_handoff_receipts_viewed", return_value=1):
+        with patch.object(ui, "record_companion_skip", return_value={}) as record_skip:
+            try:
+                with self.assertRaises(error.HTTPError) as raised:
+                    request.urlopen(http_request, timeout=5)
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
+        self.assertEqual(raised.exception.code, 403)
+        record_skip.assert_not_called()
+
+    def test_companion_skip_accepts_its_own_origin(self) -> None:
+        server, thread, base = self._serve_one()
+        payload = json.dumps({"state": "needs_review"}).encode("utf-8")
+        http_request = request.Request(
+            f"{base}/api/companion-skip",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Origin": base,
+            },
+            method="POST",
+        )
+        with patch.object(ui, "record_companion_skip", return_value={}) as record_skip:
             try:
                 with request.urlopen(http_request, timeout=5) as response:
                     self.assertEqual(response.status, 200)
             finally:
                 thread.join(timeout=5)
                 server.server_close()
+
+        record_skip.assert_called_once()
+
+    def test_companion_finished_group_skip_records_each_session(self) -> None:
+        server, thread, base = self._serve_one()
+        payload = json.dumps({
+            "state": "session_finished_group",
+            "session_ids": ["done-1", "done-2"],
+        }).encode("utf-8")
+        http_request = request.Request(
+            f"{base}/api/companion-skip",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with patch.object(ui, "record_companion_skip", return_value={}) as record_skip:
+            try:
+                with request.urlopen(http_request, timeout=5) as response:
+                    self.assertEqual(response.status, 200)
+                    body = json.loads(response.read().decode("utf-8"))
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
+        self.assertEqual(body["sessions"], 2)
+        keys = [call.kwargs["key"] for call in record_skip.call_args_list]
+        self.assertEqual(keys, ["session_finished:done-1", "session_finished:done-2"])
 
     def test_handoff_decision_accepts_project_full_alias_for_cooldown(self) -> None:
         server, thread, base = self._serve_one()
@@ -1979,7 +2119,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["label"], "Watching quietly")
         self.assertEqual(state["primary_label"], "Console")
         self.assertEqual(state["subtitle"], state["presence"]["line"])
-        self.assertIn("7 days: 3 sessions · $1.25 · 42.0k tokens", state["detail"])
+        self.assertIn("7 days: 3 runs · $1.25 · 42.0k tokens", state["detail"])
 
     def test_companion_state_surfaces_active_prompt_gate(self) -> None:
         with (

@@ -47,6 +47,47 @@ AI_ASSIST_WORKFLOWS = {
 AI_ASSIST_KEY_PROVIDERS = {"openai", "anthropic", "openai_compatible"}
 AI_ASSIST_PROVIDER_CHECK_STATUSES = {"untested", "verified", "failed"}
 
+FINISHED_SESSION_NOTICE_MODES = {"badge_only", "expanded"}
+
+
+def default_companion_preferences() -> dict[str, Any]:
+    return {
+        "blocked_sessions": True,
+        "fresh_start_context": True,
+        "finished_sessions": "badge_only",
+        "batch_finished_sessions": True,
+    }
+
+
+def _safe_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        return default
+    return bool(value)
+
+
+def _normalize_companion_preferences(value: Any) -> dict[str, Any]:
+    prefs = default_companion_preferences()
+    if not isinstance(value, dict):
+        return prefs
+    if "blocked_sessions" in value:
+        prefs["blocked_sessions"] = _safe_bool(value.get("blocked_sessions"), prefs["blocked_sessions"])
+    if "fresh_start_context" in value:
+        prefs["fresh_start_context"] = _safe_bool(value.get("fresh_start_context"), prefs["fresh_start_context"])
+    mode = str(value.get("finished_sessions") or prefs["finished_sessions"]).strip().lower()
+    prefs["finished_sessions"] = mode if mode in FINISHED_SESSION_NOTICE_MODES else "badge_only"
+    if "batch_finished_sessions" in value:
+        prefs["batch_finished_sessions"] = _safe_bool(value.get("batch_finished_sessions"), prefs["batch_finished_sessions"])
+    return prefs
+
 
 def default_ai_assist_config() -> dict[str, Any]:
     return {
@@ -301,6 +342,7 @@ def _empty_state() -> dict[str, Any]:
         # still be true, and a per-session log would grow without ever being
         # read past its head.
         "session_waiting": {},
+        "companion_preferences": default_companion_preferences(),
         "ai_assist": default_ai_assist_config(),
         "ai_assist_runs": [],
         "ai_assist_cache": {},
@@ -376,6 +418,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("ui_server", None)
     data.setdefault("watcher_heartbeat", None)
     data.setdefault("session_waiting", {})
+    data["companion_preferences"] = _normalize_companion_preferences(data.get("companion_preferences"))
     data["ai_assist"] = _normalize_ai_assist_config(data.get("ai_assist"))
     data.setdefault("ai_assist_runs", [])
     data.setdefault("ai_assist_cache", {})
@@ -1241,6 +1284,29 @@ def recent_optimize_decisions(limit: int = 10) -> list[dict[str, Any]]:
         return []
     rows = [row for row in data["optimize_decisions"] if isinstance(row, dict)]
     return list(reversed(rows[-max(1, limit):]))
+
+
+def companion_preferences() -> dict[str, Any]:
+    """Return local Companion notification preferences."""
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return default_companion_preferences()
+    return _normalize_companion_preferences(data.get("companion_preferences"))
+
+
+def record_companion_preferences(settings: dict[str, Any]) -> dict[str, Any]:
+    """Persist local Companion notification preferences."""
+    if not isinstance(settings, dict):
+        raise ValueError("settings must be an object")
+    with _locked_state():
+        data = _load()
+        existing = _normalize_companion_preferences(data.get("companion_preferences"))
+        config = _normalize_companion_preferences({**existing, **settings})
+        data["companion_preferences"] = config
+        _save(data)
+    return config
 
 
 def ai_assist_config() -> dict[str, Any]:

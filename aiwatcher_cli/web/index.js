@@ -1371,11 +1371,25 @@ function updateBannerLabel(status, data) {
   if (status === 'error') return 'Update check failed';
   return 'Check updates';
 }
+function updateSourcePath(data) {
+  return String((data && (data.repo || data.process_cwd)) || '');
+}
+function updateSourceName(data) {
+  const source = updateSourcePath(data);
+  if (!source) return 'Source unknown';
+  const parts = source.split(/[\\/]+/).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : source;
+}
+function updateBranchLabel(data) {
+  const checked = String((data && data.checked_out) || '').trim();
+  return checked || 'detached HEAD';
+}
 function updateBannerTitle(status, data) {
   const source = data && data.repo ? `Source checkout: ${data.repo}` : 'Source checkout unknown';
-  const branch = data && data.checked_out ? `Branch: ${data.checked_out}` : data && data.on_branch === false ? 'Branch: detached HEAD' : '';
   const launched = data && data.process_cwd ? `Launched from: ${data.process_cwd}` : '';
-  const details = [source, branch, launched].filter(Boolean).join('\n');
+  const branch = data ? `GitHub branch: ${updateBranchLabel(data)}` : '';
+  const target = data && data.remote_ref ? `Update target: ${data.remote_ref}` : '';
+  const details = [source, branch, target, launched].filter(Boolean).join('\n');
   const location = details ? `\n${details}` : '';
   if (status === 'available') {
     return `Click to review and apply the latest changes from ${data.remote_ref || 'origin/main'}${location}`;
@@ -1391,9 +1405,8 @@ function updateBannerTitle(status, data) {
 function updateLocationLabel(data) {
   if (!data) return 'Source unknown';
   if (data.install_kind && data.install_kind !== 'source') return 'Installed package';
-  const source = data.repo || data.process_cwd || '';
-  if (!source) return 'Source unknown';
-  return `Path: ${projectName({ project_full: source })}`;
+  const name = updateSourceName(data);
+  return name === 'Source unknown' ? name : `Path: ${name}`;
 }
 function setUpdateState(status, data, checkedAt = Date.now()) {
   updateState = { status, data: data || null, checkedAt };
@@ -1410,7 +1423,11 @@ function setUpdateState(status, data, checkedAt = Date.now()) {
     banner.setAttribute('aria-label', banner.title);
   }
   if (label) label.textContent = updateBannerLabel(status, data || null);
-  if (location) location.textContent = updateLocationLabel(data || null);
+  if (location) {
+    const source = updateSourcePath(data || null);
+    location.textContent = updateLocationLabel(data || null);
+    location.title = source ? `Source checkout: ${source}` : '';
+  }
   if (data && status !== 'checking') {
     try {
       localStorage.setItem(UPDATE_CACHE_KEY, JSON.stringify({ checkedAt, data }));
@@ -1482,6 +1499,8 @@ function renderUpdateStatus(update) {
     ? `<div class="update-location">
         ${data.repo ? `<span><b>Source checkout</b> <code>${esc(data.repo)}</code></span>` : ''}
         ${data.process_cwd ? `<span><b>Launched from</b> <code>${esc(data.process_cwd)}</code></span>` : ''}
+        ${data.checked_out !== undefined ? `<span><b>GitHub branch</b> <code>${esc(updateBranchLabel(data))}</code></span>` : ''}
+        ${data.remote_ref ? `<span><b>Update target</b> <code>${esc(data.remote_ref)}</code></span>` : ''}
       </div>`
     : '';
   const action = data.can_apply
@@ -1582,13 +1601,13 @@ async function handleUpdateBannerClick(button) {
     openUpdatePanel(updateState.data);
     return;
   }
-  const data = await refreshHeaderUpdate({ fetch: true, quiet: false });
+  const data = await refreshHeaderUpdate({ fetch: true, quiet: true });
   const status = classifyUpdateStatus(data);
   if (status === 'current') {
-    const target = document.getElementById('updateStatus');
-    if (target) target.innerHTML = renderUpdateStatus(data);
+    openUpdatePanel(data);
     return;
   }
+  if (!data.ok) showToast(data.message || 'Could not check for updates.', 'error');
   openUpdatePanel(data);
 }
 function scheduleHeaderUpdateCheck() {
@@ -3547,6 +3566,45 @@ async function saveAiAssistSettings() {
     showToast('AI Assist settings saved');
   } catch (error) {
     showToast(`Could not save AI Assist settings: ${error.message || 'unknown error'}`, 'error');
+  }
+}
+
+function renderCompanionSettings(prefs) {
+  const settings = prefs || {};
+  const blockedSessions = settings.blocked_sessions !== false;
+  const finishedExpanded = settings.finished_sessions === 'expanded';
+  const freshStartContext = settings.fresh_start_context !== false;
+  const batchFinished = settings.batch_finished_sessions !== false;
+  return `<form class="ai-assist-fields" id="companionSettingsForm" onsubmit="event.preventDefault(); saveCompanionSettings();">
+    <label class="check-row"><input id="companionBlockedSessions" type="checkbox" ${blockedSessions ? 'checked' : ''}> Waiting-on-you work alerts in Companion</label>
+    <label class="check-row"><input id="companionFreshStartContext" type="checkbox" ${freshStartContext ? 'checked' : ''}> Fresh Start context reviews in Companion</label>
+    <label class="check-row"><input id="companionFinishedExpanded" type="checkbox" ${finishedExpanded ? 'checked' : ''}> Open Companion when a run completes</label>
+    <label class="check-row"><input id="companionBatchFinished" type="checkbox" ${batchFinished ? 'checked' : ''}> Batch completed runs</label>
+    <div class="copy-row"><button class="btn-primary" type="submit">Save Companion settings</button></div>
+  </form>`;
+}
+
+async function saveCompanionSettings() {
+  const payload = {
+    blocked_sessions: document.getElementById('companionBlockedSessions').checked,
+    fresh_start_context: document.getElementById('companionFreshStartContext').checked,
+    finished_sessions: document.getElementById('companionFinishedExpanded').checked ? 'expanded' : 'badge_only',
+    batch_finished_sessions: document.getElementById('companionBatchFinished').checked,
+  };
+  try {
+    const res = await fetch('/api/companion-preferences', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const prefs = await res.json();
+    if (!res.ok) throw new Error(prefs.error || 'save failed');
+    if (currentData) currentData.companion_preferences = prefs;
+    const mount = document.getElementById('companionSettingsMount');
+    if (mount) mount.innerHTML = renderCompanionSettings(prefs);
+    showToast('Companion settings saved');
+  } catch (error) {
+    showToast(`Could not save Companion settings: ${error.message || 'unknown error'}`, 'error');
   }
 }
 function renderSetup(rows) {
@@ -5574,6 +5632,10 @@ async function loadOnce(resetDetail, forceRefresh) {
   if (aiAssistNode && !(aiAssistFormDirty && activeSettingsPanel === 'ai')) {
     aiAssistNode.innerHTML = renderAiAssistSettings(data.ai_assist || {});
     updateAiAssistFormVisibility();
+  }
+  const companionNode = document.getElementById('companionSettingsMount');
+  if (companionNode) {
+    companionNode.innerHTML = renderCompanionSettings(data.companion_preferences || {});
   }
   const settingsVisible = !document.getElementById('view-setup').hidden;
   if (settingsVisible) showSettingsPanel(activeSettingsPanel);

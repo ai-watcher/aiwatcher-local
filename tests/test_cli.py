@@ -237,6 +237,88 @@ class StartCommandCliTests(unittest.TestCase):
         self.assertIn("already running", detail)
         popen.assert_not_called()
 
+    def test_presence_refresh_relaunches_existing_process_with_new_url(self) -> None:
+        with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=123),
+            patch.object(cli, "cleanup_orphan_companion_processes", return_value=[]) as cleanup_orphans,
+            patch.object(cli, "_stop_native_companion_presence") as stop_presence,
+            patch.object(
+                cli,
+                "_open_native_companion_presence",
+                return_value=(True, "native companion presence PID 456"),
+            ) as open_presence,
+        ):
+            ok, detail = cli._refresh_existing_native_companion_presence(
+                "http://127.0.0.1:8896",
+                visibility="ai-apps",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "native companion presence PID 456")
+        cleanup_orphans.assert_called_once_with(exclude_pid=None)
+        stop_presence.assert_called_once_with()
+        open_presence.assert_called_once_with(
+            "http://127.0.0.1:8896",
+            position="bottom-right",
+            visibility="ai-apps",
+        )
+
+    def test_presence_refresh_cleans_orphan_bubbles_before_relaunch(self) -> None:
+        with (
+            patch.object(cli, "_existing_companion_presence_pid", return_value=None),
+            patch.object(cli, "cleanup_orphan_companion_processes", return_value=[111, 222]) as cleanup_orphans,
+            patch.object(cli, "_stop_native_companion_presence") as stop_presence,
+            patch.object(
+                cli,
+                "_open_native_companion_presence",
+                return_value=(True, "native companion presence PID 456"),
+            ) as open_presence,
+        ):
+            ok, detail = cli._refresh_existing_native_companion_presence(
+                "http://127.0.0.1:8896",
+                exclude_pid=999,
+            )
+
+        self.assertTrue(ok)
+        self.assertIn("cleaned 2 old companion process", detail)
+        cleanup_orphans.assert_called_once_with(exclude_pid=999)
+        stop_presence.assert_called_once_with()
+        open_presence.assert_called_once_with(
+            "http://127.0.0.1:8896",
+            position="bottom-right",
+            visibility="always",
+        )
+
+    def test_companion_start_refreshes_presence_when_daemon_already_runs(self) -> None:
+        with (
+            patch.object(cli, "start_companion", return_value={"ok": True, "already_running": True, "pid": 999}),
+            patch.object(
+                cli,
+                "_refresh_existing_native_companion_presence",
+                return_value=(True, "native companion presence PID 456"),
+            ) as refresh_presence,
+            patch.object(cli, "_open_native_companion_presence") as open_presence,
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_companion(SimpleNamespace(
+                companion_action="start",
+                interval=30,
+                no_presence=False,
+                presence_position="bottom-right",
+                presence_visibility="always",
+            ))
+
+        self.assertEqual(result, 0)
+        refresh_presence.assert_called_once_with(
+            cli._watch_ui_base_url(),
+            exclude_pid=999,
+            position="bottom-right",
+            visibility="always",
+        )
+        open_presence.assert_not_called()
+        self.assertIn("AIWatcher companion is already running (PID 999).", stdout.getvalue())
+        self.assertIn("AIWatcher companion presence started", stdout.getvalue())
+
     def test_pid_probe_treats_permission_error_as_running(self) -> None:
         with (
             patch.object(cli.sys, "platform", "linux"),
@@ -1086,6 +1168,104 @@ class PromptSavingsBaselineTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIsNone(started["resource"])
         start_companion.assert_called_once_with(interval_seconds=15)
+
+    def test_ui_startup_refreshes_existing_presence_to_bound_port(self) -> None:
+        started: dict[str, object] = {}
+
+        def fake_serve(*_: object, **kwargs: object) -> None:
+            on_started = kwargs["on_started"]
+            started["resource"] = on_started("127.0.0.1", 8896)  # type: ignore[operator]
+
+        with (
+            patch.object(cli, "get_or_refresh_baselines", return_value={}),
+            patch.object(cli, "get_or_refresh_survival", return_value={}),
+            patch.object(cli, "get_or_refresh_receipt_baseline", return_value={}),
+            patch.object(cli, "recheck_evidence_survival"),
+            patch.object(cli, "get_watcher_status", return_value={"running": True, "mode": "companion", "pid": 999}),
+            patch.object(cli, "start_companion") as start_companion,
+            patch.object(
+                cli,
+                "_refresh_existing_native_companion_presence",
+                return_value=(True, "native companion presence PID 456"),
+            ) as refresh_presence,
+            patch("aiwatcher_cli.ui.serve", side_effect=fake_serve),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_ui(SimpleNamespace(
+                host="127.0.0.1",
+                port=8895,
+                no_port_fallback=False,
+                port_attempts=50,
+                restart=False,
+                no_watch=False,
+                watch_interval=60,
+            ))
+
+        self.assertEqual(result, 0)
+        self.assertIsNone(started["resource"])
+        start_companion.assert_not_called()
+        refresh_presence.assert_called_once_with("http://127.0.0.1:8896", exclude_pid=999)
+        self.assertIn("Companion presence refreshed for http://127.0.0.1:8896", stdout.getvalue())
+
+    def test_ui_startup_can_open_the_bound_dashboard_url(self) -> None:
+        def fake_serve(*_: object, **kwargs: object) -> None:
+            on_started = kwargs["on_started"]
+            on_started("127.0.0.1", 8896)  # type: ignore[operator]
+
+        with (
+            patch.object(cli, "get_or_refresh_baselines", return_value={}),
+            patch.object(cli, "get_or_refresh_survival", return_value={}),
+            patch.object(cli, "get_or_refresh_receipt_baseline", return_value={}),
+            patch.object(cli, "recheck_evidence_survival"),
+            patch.object(cli, "get_watcher_status", return_value={"running": True, "mode": "companion", "pid": 999}),
+            patch.object(cli, "_refresh_existing_native_companion_presence", return_value=(True, "native companion presence PID 456")),
+            patch.object(cli.webbrowser, "open", return_value=True) as browser_open,
+            patch("aiwatcher_cli.ui.serve", side_effect=fake_serve),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_ui(SimpleNamespace(
+                host="127.0.0.1",
+                port=8895,
+                no_port_fallback=False,
+                port_attempts=50,
+                restart=True,
+                open_ui=True,
+                no_watch=False,
+                watch_interval=60,
+            ))
+
+        self.assertEqual(result, 0)
+        browser_open.assert_called_once_with("http://127.0.0.1:8896")
+        self.assertIn("Opened the dashboard in your browser.", stdout.getvalue())
+
+    def test_ui_open_still_runs_when_ambient_watch_is_skipped(self) -> None:
+        def fake_serve(*_: object, **kwargs: object) -> None:
+            on_started = kwargs["on_started"]
+            on_started("127.0.0.1", 8895)  # type: ignore[operator]
+
+        with (
+            patch.object(cli, "get_or_refresh_baselines", return_value={}),
+            patch.object(cli, "get_or_refresh_survival", return_value={}),
+            patch.object(cli, "get_or_refresh_receipt_baseline", return_value={}),
+            patch.object(cli, "recheck_evidence_survival"),
+            patch.object(cli.webbrowser, "open", return_value=True) as browser_open,
+            patch("aiwatcher_cli.ui.serve", side_effect=fake_serve),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_ui(SimpleNamespace(
+                host="127.0.0.1",
+                port=8895,
+                no_port_fallback=True,
+                port_attempts=1,
+                restart=True,
+                open_ui=True,
+                no_watch=True,
+                watch_interval=60,
+            ))
+
+        self.assertEqual(result, 0)
+        browser_open.assert_called_once_with("http://127.0.0.1:8895")
+        self.assertIn("Ambient Watch not started (--no-watch).", stdout.getvalue())
 
     def test_ui_startup_can_skip_ambient_watch(self) -> None:
         def fake_serve(*_: object, **kwargs: object) -> None:

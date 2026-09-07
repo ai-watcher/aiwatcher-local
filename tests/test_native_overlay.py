@@ -181,6 +181,10 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('json["presence"]', mac)
         self.assertIn("@objc func openWaitingRow", mac)
         self.assertIn("visibleWaitingRows", mac)
+        self.assertIn("rowDisplayText", mac)
+        self.assertIn("reviewTitle", mac)
+        self.assertIn("applyOfflineState", mac)
+        self.assertIn("skipProjects", mac)
         # Height follows the queue, and the resize keeps the parked corner
         # fixed the same way setCollapsed does.
         self.assertIn("func applyWindowSize()", mac)
@@ -204,6 +208,10 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("create_text(\n                27, 10, text=str(badge_count)", tk_source)
         self.assertIn('"badge" in payload', tk_source)
         self.assertIn("visible_waiting_rows() == 0", tk_source)
+        self.assertIn("def row_display_text", tk_source)
+        self.assertIn("def review_title", tk_source)
+        self.assertIn("def apply_offline_state", tk_source)
+        self.assertIn("skip_projects_var", tk_source)
 
     def test_presence_bars_draw_the_meter_and_missed_signal_chip(self) -> None:
         # The meter draws only when the payload says the number is measurable
@@ -240,7 +248,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('"return_available"', mac)
         self.assertIn("func requestRuntimeReturn(sessionID:", mac)
         self.assertIn('primaryAction == "runtime_return"', mac)
-        self.assertIn('canReturn ? "Return" : (kind.isEmpty ? "Open" : "Review")', mac)
+        self.assertIn("func rowActionLabel(index: Int)", mac)
         self.assertIn('"No live return. Opened in AIWatcher."', mac)
         # The result is awaited, with a bounded timeout, off the main thread.
         self.assertIn("request.timeoutInterval = 4", mac)
@@ -250,8 +258,22 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("def request_runtime_return", tk_source)
         self.assertIn('"runtime_return"', tk_source)
         self.assertIn("return_available", tk_source)
-        self.assertIn('"Return" if can_return else ("Review" if kind else "Open")', tk_source)
+        self.assertIn("def row_action_label", tk_source)
         self.assertIn("No live return. Opened in AIWatcher.", tk_source)
+
+    def test_presence_bars_send_group_skip_payloads(self) -> None:
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn('"projects": skipProjects.isEmpty ? splitLines(skipProject) : skipProjects', mac)
+        self.assertIn('"session_ids": skipSessionIDs.isEmpty ? splitLines(skipSessionID) : skipSessionIDs', mac)
+        self.assertIn('"Could not save Later. Open UI."', mac)
+        self.assertIn('"Could not clear notices. Open UI."', mac)
+        self.assertIn('prefix(10)', mac)
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn('"projects": split_lines(skip_projects_var.get()) or split_lines(skip_project_var.get())', tk_source)
+        self.assertIn('"session_ids": split_lines(skip_session_ids_var.get()) or split_lines(skip_session_id_var.get())', tk_source)
+        self.assertIn("short_skip_failure_message", tk_source)
+        self.assertIn("width=9", tk_source)
 
     def test_presence_rows_say_what_the_session_wants(self) -> None:
         # The "wants" tag is the hook's closed-vocabulary phrase; the row only
@@ -265,18 +287,21 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("waiting_row_wants", tk_source)
         self.assertIn('f"wants: {wants}" if wants else ""', tk_source)
 
-    def test_finished_earns_the_primary_but_never_the_orange(self) -> None:
+    def test_finished_earns_the_primary_but_never_the_collapsed_badge(self) -> None:
         # session_finished sits in hasPrimaryAction (Review, compact layout)
         # and deliberately not in needsAttentionState: "review when ready"
-        # must not wear the "blocked on you" treatment. The bubble badge goes
-        # brand blue for the same reason, and the window still shows in
-        # nudges-only mode via the soft-attention check.
+        # must not wear the "blocked on you" treatment. Completed work is
+        # reward/status text after expansion, not a mystery number on the
+        # collapsed bubble, and the window still shows in nudges-only mode via
+        # the soft-attention check.
         mac = native_overlay.MACOS_SWIFT_PRESENCE
         self.assertIn("session_finished", mac.split("func hasPrimaryAction")[1][:400])
         self.assertNotIn("session_finished", mac.split("func needsAttentionState")[1][:400])
         self.assertIn('["session_finished", "away_digest"].contains(stateName)', mac)
         self.assertIn('json["finished_sessions"]', mac)
-        self.assertIn("finishedCount > 0 ? String(finishedCount)", mac)
+        self.assertIn("waitingCount <= 0 && reviewCount <= 0", mac)
+        self.assertNotIn("finishedCount > 0 ? String(finishedCount)", mac)
+        self.assertIn("completed run", mac)
 
         tk_source = inspect.getsource(native_overlay.run_native_presence)
         self.assertIn("session_finished", tk_source.split("def has_primary_action()")[1][:600])
@@ -284,7 +309,8 @@ class NativeOverlayConfigTests(unittest.TestCase):
             "session_finished",
             tk_source.split("needs_attention = state_var.get() in")[1][:200],
         )
-        self.assertIn('fill=attention_bg if waiting_count > 0 else "#0052F5"', tk_source)
+        self.assertIn("badge_count = waiting_count or review_count", tk_source)
+        self.assertIn('fill=attention_bg if waiting_count > 0 or needs_attention else "#0052F5"', tk_source)
 
     def test_the_away_digest_rides_the_queue_rows(self) -> None:
         # History entries reuse the waiting-row machinery: mint/amber dots by
