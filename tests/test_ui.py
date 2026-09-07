@@ -3581,7 +3581,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(marked["privacy"], ui.PRIVACY_CLAIMS)
         self.assertTrue(marked["update_auto_check"])
         self.assertEqual(marked["update_install_kind"], "package")
-        self.assertEqual(marked["update_source_root"], "/site-packages/aiwatcher")
+        self.assertEqual(marked["update_source_root"], str(Path("/site-packages/aiwatcher")))
 
     def test_shared_refresh_scans_once_and_materializes_all_windows(self) -> None:
         now = datetime.now(timezone.utc)
