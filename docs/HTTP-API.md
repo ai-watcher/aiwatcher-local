@@ -126,7 +126,7 @@ change without a deprecation period.
 `/api/session-summary`, `/api/project`, `/api/report`, `/api/journal`,
 `/api/handoff-basic`, `/api/handoff`,
 `/api/context-health`, `/api/ambient-intervention`, `/api/update-status`,
-`/api/ai-assist-status`
+`/api/ai-assist-status`, `/api/companion-preferences`
 
 `/api/ambient-intervention` returns the content-free local signal metadata
 needed to keep the browser fallback consistent with the native companion.
@@ -146,6 +146,9 @@ providers, cloud-key presence by environment-variable name, privacy posture, and
 candidate workflows. Cloud keys report whether they are untested, verified, or
 rejected; a key is verified only after an explicit workflow call succeeds. It
 never returns secret values and never calls a model.
+`/api/companion-preferences` returns local Companion notification preferences
+for Settings, including whether advisory Fresh Start context reviews appear in
+the Companion and whether completed runs stay quiet or expand the bar.
 
 `POST` — `/api/second-opinion` runs the Plan screen's Stage 2 analysis: it
 spawns the user's own agent CLI as a throwaway sibling process in
@@ -202,6 +205,9 @@ local AIWatcher state. Responses never return the raw key; they expose
 removes the saved key for the selected provider. Environment keys
 (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `AIWATCHER_AI_API_KEY`) are still
 supported.
+`/api/companion-preferences` saves the dashboard/native Companion notification
+preferences. The saved values stay in local AIWatcher state and affect only the
+local Companion surface; prompt and command gates remain blocking review flows.
 `/api/runtime-return` asks AIWatcher to open the safest available return target
 for a local session: exact process attachment when a host exposes enough
 metadata, otherwise app/workspace return, otherwise a Fresh Start fallback.

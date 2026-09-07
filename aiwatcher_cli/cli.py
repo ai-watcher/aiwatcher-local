@@ -34,6 +34,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from .correlate import link_recent_fresh_start_receipts_to_sessions, link_recent_interventions_to_sessions
 from .companion import (
     companion_log_path,
+    cleanup_orphan_companion_processes,
     install_login_autostart,
     local_action_server_available,
     login_autostart_status,
@@ -3575,11 +3576,29 @@ def command_start(args: argparse.Namespace) -> int:
             else:
                 print(f"Companion started (PID {result.get('pid')}).")
             if presence_requested:
-                ok, detail = _open_native_companion_presence(
-                    _watch_ui_base_url(),
-                    position=str(getattr(args, "presence_position", "bottom-right")),
-                    visibility=str(getattr(args, "presence_visibility", "always")),
-                )
+                position = str(getattr(args, "presence_position", "bottom-right"))
+                visibility = str(getattr(args, "presence_visibility", "always"))
+                base_url = _watch_ui_base_url()
+                companion_pid = result.get("pid") if isinstance(result.get("pid"), int) else None
+                if result.get("already_running"):
+                    ok, detail = _refresh_existing_native_companion_presence(
+                        base_url,
+                        exclude_pid=companion_pid,
+                        position=position,
+                        visibility=visibility,
+                    )
+                    if not ok and "not running" in detail:
+                        ok, detail = _open_native_companion_presence(
+                            base_url,
+                            position=position,
+                            visibility=visibility,
+                        )
+                else:
+                    ok, detail = _open_native_companion_presence(
+                        base_url,
+                        position=position,
+                        visibility=visibility,
+                    )
                 if ok:
                     print(f"Companion entry point opened ({detail}).")
                 else:
@@ -3965,11 +3984,18 @@ def command_companion(args: argparse.Namespace) -> int:
                 time_module.sleep(0.1)
         if presence_requested:
             base_url = _watch_ui_base_url()
-            ok, detail = _open_native_companion_presence(
+            ok, detail = _refresh_existing_native_companion_presence(
                 base_url,
+                exclude_pid=os.getpid(),
                 position=str(getattr(args, "presence_position", "bottom-right")),
                 visibility=str(getattr(args, "presence_visibility", "always")),
             )
+            if not ok and "not running" in detail:
+                ok, detail = _open_native_companion_presence(
+                    base_url,
+                    position=str(getattr(args, "presence_position", "bottom-right")),
+                    visibility=str(getattr(args, "presence_visibility", "always")),
+                )
             if ok:
                 print(f"AIWatcher companion presence started ({detail}).")
             else:
@@ -4002,11 +4028,21 @@ def command_companion(args: argparse.Namespace) -> int:
         if result.get("already_running"):
             print(f"AIWatcher companion is already running (PID {result.get('pid')}).")
             if presence_requested:
-                ok, detail = _open_native_companion_presence(
+                position = str(getattr(args, "presence_position", "bottom-right"))
+                visibility = str(getattr(args, "presence_visibility", "always"))
+                companion_pid = result.get("pid") if isinstance(result.get("pid"), int) else None
+                ok, detail = _refresh_existing_native_companion_presence(
                     _watch_ui_base_url(),
-                    position=str(getattr(args, "presence_position", "bottom-right")),
-                    visibility=str(getattr(args, "presence_visibility", "always")),
+                    exclude_pid=companion_pid,
+                    position=position,
+                    visibility=visibility,
                 )
+                if not ok and "not running" in detail:
+                    ok, detail = _open_native_companion_presence(
+                        _watch_ui_base_url(),
+                        position=position,
+                        visibility=visibility,
+                    )
                 if ok:
                     presence_available = True
                     print(f"AIWatcher companion presence started ({detail}).")
@@ -5418,6 +5454,27 @@ def _open_native_companion_presence(
             return True, f"native companion presence PID {process.pid}"
         time_module.sleep(0.1)
     return False, "native companion presence did not stay reachable"
+
+
+def _refresh_existing_native_companion_presence(
+    base_url: str,
+    *,
+    exclude_pid: int | None = None,
+    position: str = "bottom-right",
+    visibility: str = "always",
+) -> tuple[bool, str]:
+    """Restart an already-running presence widget so it follows a new dashboard port."""
+    existing_pid = _existing_companion_presence_pid()
+    stopped_orphans = cleanup_orphan_companion_processes(exclude_pid=exclude_pid)
+    if existing_pid is None and not stopped_orphans:
+        return False, "native companion presence not running"
+    _stop_native_companion_presence()
+    ok, detail = _open_native_companion_presence(base_url, position=position, visibility=visibility)
+    if ok:
+        if stopped_orphans:
+            return True, f"{detail}; cleaned {len(stopped_orphans)} old companion process(es)"
+        return True, detail
+    return False, f"native companion presence stopped but could not restart: {detail}"
 
 
 def _open_native_companion_tray(base_url: str) -> tuple[bool, str]:
@@ -9119,13 +9176,38 @@ def command_ui(args: argparse.Namespace) -> int:
 
     threading.Thread(target=refresh_ui_caches, name="aiwatcher-ui-cache-refresh", daemon=True).start()
 
-    def start_ambient_watch(_: str, __: int) -> subprocess.Popen[bytes] | None:
+    def start_ambient_watch(bound_host: str, bound_port: int) -> subprocess.Popen[bytes] | None:
+        ui_url = f"http://{bound_host}:{bound_port}"
+        if getattr(args, "open_ui", False):
+            try:
+                opened = webbrowser.open(ui_url)
+            except Exception:
+                opened = False
+            if opened:
+                print("Opened the dashboard in your browser.")
+            else:
+                print(f"Could not open the browser automatically. Open this URL manually: {ui_url}", file=sys.stderr)
         if getattr(args, "no_watch", False):
             print("Ambient Watch not started (--no-watch).")
             return None
         watcher = get_watcher_status()
+        companion_url = ui_url
         if watcher.get("running"):
             print("Ambient Watch already running.")
+            if watcher.get("mode") == "companion":
+                watcher_pid = watcher.get("pid") if isinstance(watcher.get("pid"), int) else None
+                ok, detail = _refresh_existing_native_companion_presence(
+                    companion_url,
+                    exclude_pid=watcher_pid,
+                )
+                if ok:
+                    print(f"Companion presence refreshed for {companion_url} ({detail}).")
+                elif "not running" in detail:
+                    ok, detail = _open_native_companion_presence(companion_url)
+                    if ok:
+                        print(f"Companion presence opened for {companion_url} ({detail}).")
+                elif "not running" not in detail:
+                    print(f"Companion presence could not refresh: {detail}", file=sys.stderr)
             return None
         interval = max(15, int(getattr(args, "watch_interval", 60)))
         result = start_companion(interval_seconds=interval)
@@ -9715,6 +9797,7 @@ def build_parser() -> argparse.ArgumentParser:
     ui.add_argument("--port-attempts", type=int, default=20, help="How many sequential ports to try when the requested port is busy")
     ui.add_argument("--no-port-fallback", action="store_true", help="Fail instead of trying the next available port")
     ui.add_argument("--restart", action="store_true", help="Stop an existing local process on the requested port before starting")
+    ui.add_argument("--open", "--open-ui", dest="open_ui", action="store_true", help="Open the dashboard in a browser after binding the final port")
     ui.add_argument("--no-watch", action="store_true", help="Do not start Ambient Watch alongside the dashboard")
     ui.add_argument("--watch-interval", type=int, default=60, help="Seconds between Ambient Watch scans when started with the UI")
     ui.set_defaults(func=command_ui)

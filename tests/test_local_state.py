@@ -314,6 +314,43 @@ class LocalStateTests(unittest.TestCase):
         self.assertTrue(active)
         self.assertFalse(inactive)
 
+    def test_companion_preferences_default_and_normalize(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                default = local_state.companion_preferences()
+                saved = local_state.record_companion_preferences({
+                    "fresh_start_context": False,
+                    "finished_sessions": "expanded",
+                    "batch_finished_sessions": False,
+                    "blocked_sessions": False,
+                })
+                reread = local_state.companion_preferences()
+                normalized = local_state.record_companion_preferences({
+                    "finished_sessions": "loud",
+                    "fresh_start_context": True,
+                })
+                string_values = local_state.record_companion_preferences({
+                    "blocked_sessions": "false",
+                    "fresh_start_context": "0",
+                    "batch_finished_sessions": "off",
+                    "finished_sessions": "expanded",
+                })
+
+        self.assertEqual(default["finished_sessions"], "badge_only")
+        self.assertTrue(default["fresh_start_context"])
+        self.assertEqual(saved["finished_sessions"], "expanded")
+        self.assertFalse(saved["fresh_start_context"])
+        self.assertFalse(saved["batch_finished_sessions"])
+        self.assertEqual(reread, saved)
+        self.assertEqual(normalized["finished_sessions"], "badge_only")
+        self.assertFalse(string_values["blocked_sessions"])
+        self.assertFalse(string_values["fresh_start_context"])
+        self.assertFalse(string_values["batch_finished_sessions"])
+        self.assertEqual(string_values["finished_sessions"], "expanded")
+        self.assertTrue(normalized["fresh_start_context"])
+        self.assertFalse(normalized["batch_finished_sessions"])
+
     def test_intervention_stores_hashes_not_prompt_text(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")

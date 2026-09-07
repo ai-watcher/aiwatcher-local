@@ -313,9 +313,17 @@ class WaitingSessionCompanionTests(unittest.TestCase):
             "kind": "permission",
         }}
 
-    def _state(self, summary, *, sessions=(), signals=None, gate=None, return_available=False):
+    def _state(self, summary, *, sessions=(), signals=None, gate=None, return_available=False, prefs=None):
+        companion_prefs = {
+            "blocked_sessions": True,
+            "fresh_start_context": True,
+            "finished_sessions": "badge_only",
+            "batch_finished_sessions": True,
+            **(prefs or {}),
+        }
         with (
             patch.object(ui, "build_summary_cached", return_value=summary),
+            patch.object(ui, "companion_preferences", return_value=companion_prefs),
             patch.object(ui, "active_prompt_gate", return_value=gate),
             patch.object(ui, "_cached_session_rows", return_value=list(sessions)),
             patch.object(ui, "session_waiting_signals", return_value=signals or {}),
@@ -397,12 +405,23 @@ class WaitingSessionCompanionTests(unittest.TestCase):
             sessions=[self._session("a", idle_minutes=17.0), self._session("b", idle_minutes=3.0)],
             signals={**self._signal("a", minutes_ago=15.0), **self._signal("b", minutes_ago=2.0)},
         )
-        self.assertIn("2 sessions", state["subtitle"])
+        self.assertIn("2 runs", state["subtitle"])
         self.assertIn("15m", state["subtitle"])
 
     def test_nothing_waiting_leaves_the_companion_alone(self):
         state = self._state(self._summary(), sessions=[self._session("busy", idle_minutes=0.1)], signals={})
         self.assertNotEqual(state["state"], "session_waiting")
+
+    def test_waiting_session_alerts_can_be_disabled_for_companion(self):
+        state = self._state(
+            self._summary(),
+            sessions=[self._session()],
+            signals=self._signal(),
+            prefs={"blocked_sessions": False},
+        )
+
+        self.assertEqual(state["state"], "watching")
+        self.assertEqual(state["presence"]["waiting"], 1)
 
     def test_an_unreadable_signal_store_does_not_break_it(self):
         with (
@@ -475,7 +494,7 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
         queue = state["waiting_sessions"]
         # Capped at three rows -- the count lives in the subtitle instead.
         self.assertEqual(len(queue), 3)
-        self.assertIn("4 sessions", state["subtitle"])
+        self.assertIn("4 runs", state["subtitle"])
         self.assertEqual([row["session_id"] for row in queue], ["s-long", "s-mid", "s-short"])
         first = queue[0]
         self.assertEqual(first["tool"], ui.tool_label("claude-code"))
@@ -504,6 +523,54 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
         self.assertIn("5 projects", state["subtitle"])
         self.assertEqual(state["badge"]["count"], 5)
         self.assertEqual(state["badge"]["tone"], "info")
+        self.assertEqual(len(state["waiting_sessions"]), 3)
+        self.assertEqual(state["waiting_sessions"][0]["kind"], "context_review")
+        self.assertEqual(state["waiting_sessions"][0]["project"], "project-0")
+        self.assertEqual(state["skip_label"], "Later")
+        self.assertEqual(len(state["skip_projects"]), 5)
+
+    def test_context_review_rows_hide_unknown_zero_impact(self):
+        rows = ui._context_review_companion_rows([{
+            "session_id": "s0",
+            "project_full": "/repo/project-0",
+            "project": "project-0",
+            "tool": "codex-cli",
+            "severity": "critical",
+            "can_handoff": True,
+            "latest_turn_tokens": 0,
+        }])
+
+        self.assertEqual(rows[0]["waited_label"], "")
+
+    def test_context_review_can_be_disabled_for_companion(self):
+        health = [
+            {
+                "session_id": "s0",
+                "project_full": "/repo/project-0",
+                "project": "project-0",
+                "tool": "codex-cli",
+                "severity": "critical",
+                "can_handoff": True,
+                "estimated_replayed_context_tokens": 1000,
+            },
+            {
+                "session_id": "s1",
+                "project_full": "/repo/project-1",
+                "project": "project-1",
+                "tool": "codex-cli",
+                "severity": "warning",
+                "can_handoff": True,
+                "estimated_replayed_context_tokens": 1000,
+            },
+        ]
+        with patch.object(ui, "_foreground_matches_fresh_start_bubble", return_value=True):
+            state = self._state(
+                self._summary(context_health=health),
+                sessions=[],
+                prefs={"fresh_start_context": False},
+            )
+
+        self.assertEqual(state["state"], "watching")
 
     def test_resting_state_with_no_badge_contract_shows_no_badge(self):
         state = self._state(self._summary(), sessions=[])
@@ -553,7 +620,7 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
 
     def test_all_quiet_reads_as_quiet_not_as_nothing(self):
         state = self._state(self._summary(), sessions=[self._session("q", idle_minutes=12.0)])
-        self.assertEqual(state["subtitle"], "1 quiet session")
+        self.assertEqual(state["subtitle"], "1 quiet run")
 
     def test_the_prompt_gate_carries_its_countdown(self):
         expires = datetime.now(timezone.utc) + timedelta(seconds=90)
@@ -603,16 +670,53 @@ class CompanionFinishedTests(WaitingSessionCompanionTests):
             )
             self.assertIs(ui._freshened_for_presence([db_row])[0], db_row)
 
-    def test_a_working_to_quiet_transition_becomes_finished(self):
+    def test_a_working_to_quiet_transition_becomes_badged_by_default(self):
         state = self._state(self._summary(), sessions=[self._session("done-1", idle_minutes=0.5)])
         self.assertEqual(state["state"], "watching")
         state = self._state(self._summary(), sessions=[self._session("done-1", idle_minutes=3.0)])
-        self.assertEqual(state["state"], "session_finished")
-        self.assertEqual(state["label"], "Finished working")
-        self.assertEqual(state["primary_label"], "Review")
-        self.assertIn("done-1", state["primary_url"])
-        self.assertIn("just now", state["subtitle"])
+        self.assertEqual(state["state"], "watching")
+        self.assertEqual(state["badge"]["count"], 1)
+        self.assertEqual(state["badge"]["tone"], "info")
         self.assertEqual(len(state["finished_sessions"]), 1)
+
+    def test_expanded_finished_preference_opens_a_grouped_review(self):
+        self._state(
+            self._summary(),
+            sessions=[
+                self._session("done-1", idle_minutes=0.5),
+                self._session("done-2", idle_minutes=0.5),
+            ],
+        )
+        state = self._state(
+            self._summary(),
+            sessions=[
+                self._session("done-1", idle_minutes=3.0),
+                self._session("done-2", idle_minutes=3.5),
+            ],
+            prefs={"finished_sessions": "expanded"},
+        )
+
+        self.assertEqual(state["state"], "session_finished")
+        self.assertEqual(state["label"], "2 completed runs")
+        self.assertEqual(state["primary_label"], "Review")
+        self.assertEqual(state["primary_url"], "/?view=sessions")
+        self.assertEqual(len(state["waiting_sessions"]), 2)
+        self.assertEqual([row["kind"] for row in state["waiting_sessions"]], ["finished", "finished"])
+        self.assertEqual(state["skip_label"], "Clear all")
+        self.assertEqual(state["skip_state"], "session_finished_group")
+        self.assertEqual(state["skip_session_ids"], ["done-1", "done-2"])
+
+    def test_expanded_single_finished_session_keeps_direct_review(self):
+        self._state(self._summary(), sessions=[self._session("done-1", idle_minutes=0.5)])
+        state = self._state(
+            self._summary(),
+            sessions=[self._session("done-1", idle_minutes=3.0)],
+            prefs={"finished_sessions": "expanded"},
+        )
+
+        self.assertEqual(state["state"], "session_finished")
+        self.assertEqual(state["label"], "Run completed")
+        self.assertIn("done-1", state["primary_url"])
         self.assertEqual(state["skip_state"], "session_finished")
 
     def test_a_snapshot_alone_is_not_finished(self):
@@ -624,8 +728,8 @@ class CompanionFinishedTests(WaitingSessionCompanionTests):
     def test_live_work_outranks_the_finished_notice(self):
         # Field report: a finished headline owned the bar for its whole 15
         # minutes and hid the running session's meter and totals. While
-        # anything is working, the resting layout wins and the finish rides
-        # the subtitle fragment and the bubble's badge instead.
+        # anything is working, the resting layout wins and the completion
+        # becomes a reward/status fragment instead of a collapsed badge.
         self._state(self._summary(), sessions=[self._session("done-1", idle_minutes=0.25)])
         sessions = [
             self._session("done-1", idle_minutes=3.0),
@@ -633,7 +737,7 @@ class CompanionFinishedTests(WaitingSessionCompanionTests):
         ]
         state = self._state(self._summary(), sessions=sessions)
         self.assertEqual(state["state"], "watching")
-        self.assertIn("1 finished", state["subtitle"])
+        self.assertIn("1 completed", state["subtitle"])
         self.assertEqual(len(state["finished_sessions"]), 1)
 
     def test_blocked_outranks_finished(self):

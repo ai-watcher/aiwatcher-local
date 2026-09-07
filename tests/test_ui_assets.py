@@ -522,6 +522,8 @@ class TrimmedHomeTest(unittest.TestCase):
             "aiAssistProviderHint", "aiAssistProviderRow", "aiAssistSettings",
             "aiAssistSetupBox", "aiAssistSetupCopy",
             "aiAssistSetupTitle", "aiAssistSourceAccess", "aiAssistWorking",
+            "companionBatchFinished", "companionBlockedSessions", "companionFinishedExpanded",
+            "companionFreshStartContext",
             "evidencePanel", "handoffAcceptance", "handoffBrief", "handoffConstraints",
             "handoffObjective", "handoffSources", "handoffStatus", "handoffType",
             "optimizeCleanupPrompt", "optimizeReward", "outcomePanel",
@@ -3082,11 +3084,12 @@ class SettingsDeepLinksNameTheirPanelTest(unittest.TestCase):
         self.assertIn("get('settings')", self.js)
 
 
-class NotOnMainIsAQuietBadgeTest(unittest.TestCase):
+class FeatureBranchUpdateBadgeTest(unittest.TestCase):
     """A contributor on a feature branch used to see "N updates blocked" in
     the header on every load. They are not blocked; the updater does not
-    apply where they are. That is a quiet state, styled like the package
-    state, not a warning."""
+    apply where they are. The badge should be quiet, and it should name the
+    running checkout clearly enough that a truncated header does not make the
+    user wonder which copy of AIWatcher they launched."""
 
     def setUp(self):
         from pathlib import Path
@@ -3105,8 +3108,23 @@ class NotOnMainIsAQuietBadgeTest(unittest.TestCase):
         self.assertEqual(len(rule), 1)
         self.assertIn(".update-banner.package", rule[0])
         self.assertIn("return 'Source checkout'", self.js)
-        self.assertIn("Branch: ${data.checked_out}", self.js)
-        self.assertIn("return `Path: ${projectName", self.js)
+
+    def test_the_header_badge_shows_the_source_folder_and_keeps_the_full_path(self):
+        self.assertIn("function updateSourceName(data)", self.js)
+        self.assertIn("return parts.length ? parts[parts.length - 1] : source", self.js)
+        self.assertIn("`Path: ${name}`", self.js)
+        self.assertIn("location.title = source ? `Source checkout: ${source}` : ''", self.js)
+        self.assertIn("GitHub branch: ${updateBranchLabel(data)}", self.js)
+        self.assertIn("Update target: ${data.remote_ref}", self.js)
+        self.assertIn("<b>GitHub branch</b>", self.js)
+        self.assertIn("<b>Update target</b>", self.js)
+        self.assertIn("max-width: min(360px, 30vw)", self.css)
+
+    def test_clicking_the_badge_opens_full_details_without_a_success_toast(self):
+        handler = js_function_source(self.js, "handleUpdateBannerClick")
+        self.assertIn("refreshHeaderUpdate({ fetch: true, quiet: true })", handler)
+        self.assertIn("openUpdatePanel(data)", handler)
+        self.assertIn("if (!data.ok) showToast(", handler)
 
 
 class ApplyIsASecondStepTest(unittest.TestCase):
