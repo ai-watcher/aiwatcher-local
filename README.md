@@ -1,7 +1,7 @@
 # AIWatcher Local
 
 [![CI](https://github.com/ai-watcher/aiwatcher-local/actions/workflows/ci.yml/badge.svg)](https://github.com/ai-watcher/aiwatcher-local/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 Private guardrails for AI coding work. AIWatcher helps you review risky
 prompts before they run, notice expensive or stuck sessions while they are
@@ -12,6 +12,34 @@ No account is required. No cloud upload happens by default. No LLM call happens
 unless you explicitly configure optional AI Assist.
 
 ![AIWatcher Local Console overview](docs/dashboard.svg)
+
+## What You Get
+
+In the first few minutes, AIWatcher gives one developer a local control loop for
+AI coding work:
+
+- **Before the run:** review risky or over-broad prompts before an agent spends
+  context.
+- **During the run:** notice loops, context pressure, idle sessions, and work
+  waiting on you.
+- **After the run:** connect AI sessions to commits, outcomes, receipts, and
+  improvement signals.
+
+No signup is required, and the default install keeps data on your machine.
+
+## First Look
+
+Prompt Gate helps narrow risky work before it starts:
+
+![AIWatcher Prompt Gate](docs/dashboard-prompt-gate.svg)
+
+Sessions show what AI tools are doing locally and what needs attention:
+
+![AIWatcher sessions view](docs/dashboard-sessions.svg)
+
+Receipts and changes help prove which AI work became useful code:
+
+![AIWatcher receipts view](docs/dashboard-receipts.svg)
 
 ## Why Developers Use It
 
@@ -300,11 +328,16 @@ Useful next reads:
 ## AIWatcher Local and Enterprise
 
 AIWatcher Local is the open-source, developer-controlled loop for one machine.
-It should be useful without signup.
+It should be useful without signup, a cloud account, or a team admin.
 
 AIWatcher Enterprise adds team policy, budgets, approvals, audit evidence,
-SSO/RBAC, and production-agent governance. Enterprise features are additive;
-Local is not a locked demo. Learn more at <https://www.getaiwatcher.com>.
+SSO/RBAC, managed deployment, central retention, org dashboards, and
+production-agent governance. Enterprise features are additive; Local is not a
+locked demo.
+
+The Apache-2.0 license covers this code. It does not grant rights to the
+AIWatcher name, logo, hosted service, or Enterprise control plane. Learn more at
+<https://www.getaiwatcher.com>.
 
 ## Contributing
 
@@ -315,4 +348,4 @@ For security reports, use [SECURITY.md](SECURITY.md). Please follow the
 
 ## License
 
-[MIT](LICENSE)
+[Apache License 2.0](LICENSE)

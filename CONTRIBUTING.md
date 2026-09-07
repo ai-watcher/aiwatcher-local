@@ -65,4 +65,4 @@ approach.
 - Keep user-facing output honest and free of private paths or personal data.
 
 By contributing, you agree that your contributions are licensed under the
-[MIT License](LICENSE).
+[Apache License 2.0](LICENSE).
