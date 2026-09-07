@@ -14,16 +14,23 @@ AIWatcher currently has two Python package lanes:
 Keep those separate. Do not publish this repository as `ai-watcher`, or it will
 collide with the SDK lane and confuse users.
 
+For the current OSS Local product, PyPI is the primary public package registry.
+It matches the implementation language, the `pipx` install path, and the
+cross-platform CLI entry point.
+
 The current repository is not ready to publish as an npm package from the root.
-The only JavaScript package manifests are:
+Treat npm as a later distribution lane for JavaScript-facing work: a browser or
+editor integration, a JS SDK, or a deliberate installer wrapper that fetches or
+delegates to the Python CLI. The only JavaScript package manifests today are:
 
 - `browser-extension/package.json`, marked `private: true`.
 - `vscode-extension/package.json`, a VS Code extension manifest with no npm
   dependencies.
 
-For npm distribution, create a deliberate package first, such as a thin
-`aiwatcher-cli` or `@ai-watcher/local` installer wrapper. Do not publish the
-repo root to npm until that package boundary exists.
+For npm distribution, create a deliberate package first, such as a browser
+extension package, VS Code extension package, JavaScript SDK package, or thin
+`aiwatcher-cli` / `@ai-watcher/local` installer wrapper. Do not publish the repo
+root to npm until that package boundary exists.
 
 ## Preflight
 
