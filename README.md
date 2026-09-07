@@ -29,28 +29,96 @@ unless you explicitly configure optional AI Assist.
 ## Install
 
 Recommended for early users: install from GitHub without cloning the repo.
-Requires Python 3.9+ and Git. Python 2 is not supported.
+Use Python 3.10+ for this `pipx` install path. AIWatcher itself supports
+Python 3.9+ when installed from source. Python 2 is not supported.
 
-### macOS or Linux
+Pick one path and ignore the rest.
+
+### One-Line Install
+
+Use this when Python 3.10+, Git, and pipx are already installed.
+
+macOS or Linux:
 
 ```sh
-python3 --version
-python3 -m pip install --user pipx
-python3 -m pipx install git+https://github.com/ai-watcher/aiwatcher-local.git
-python3 -m pipx ensurepath
+pipx install git+https://github.com/ai-watcher/aiwatcher-local.git && pipx ensurepath && ~/.local/bin/aiwatcher setup && ~/.local/bin/aiwatcher start --open-ui
+```
+
+Windows PowerShell:
+
+```powershell
+pipx install git+https://github.com/ai-watcher/aiwatcher-local.git; pipx ensurepath; & "$env:USERPROFILE\.local\bin\aiwatcher.exe" setup; & "$env:USERPROFILE\.local\bin\aiwatcher.exe" start --open-ui
+```
+
+### Missing Prerequisites
+
+Use this if you are not sure what is already installed. These commands check
+first and only install missing prerequisites.
+
+macOS:
+
+```sh
+command -v brew >/dev/null || { echo "Install Homebrew first: https://brew.sh"; exit 1; }
+command -v python3 >/dev/null || brew install python
+command -v git >/dev/null || brew install git
+command -v pipx >/dev/null || brew install pipx
+if [ -x ~/.local/bin/aiwatcher ]; then
+  pipx upgrade aiwatcher-cli
+else
+  pipx install git+https://github.com/ai-watcher/aiwatcher-local.git
+fi
+pipx ensurepath
 ~/.local/bin/aiwatcher setup
 ~/.local/bin/aiwatcher start --open-ui
 ```
 
-### Windows PowerShell
+Ubuntu or Debian:
+
+```sh
+if ! command -v python3 >/dev/null || ! command -v git >/dev/null || ! command -v pipx >/dev/null; then
+  sudo apt update
+fi
+command -v python3 >/dev/null || sudo apt install -y python3 python3-pip
+command -v git >/dev/null || sudo apt install -y git
+command -v pipx >/dev/null || sudo apt install -y pipx
+if [ -x ~/.local/bin/aiwatcher ]; then
+  pipx upgrade aiwatcher-cli
+else
+  pipx install git+https://github.com/ai-watcher/aiwatcher-local.git
+fi
+pipx ensurepath
+~/.local/bin/aiwatcher setup
+~/.local/bin/aiwatcher start --open-ui
+```
+
+For other Linux distributions, install Python 3.10+, Git, and pipx with your
+package manager, then use the one-line install.
+
+Windows PowerShell:
 
 ```powershell
+if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
+  winget install Python.Python.3.12
+  Write-Host "Open a new PowerShell after Python installs, then rerun these commands."
+  exit
+}
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+  winget install Git.Git
+  Write-Host "Open a new PowerShell after Git installs, then rerun these commands."
+  exit
+}
 py -3 --version
-py -3 -m pip install --user pipx
-py -3 -m pipx install git+https://github.com/ai-watcher/aiwatcher-local.git
+py -3 -m pipx --version *> $null
+if ($LASTEXITCODE -ne 0) { py -3 -m pip install --user pipx }
+$aiwatcher = "$env:USERPROFILE\.local\bin\aiwatcher.exe"
+if (Test-Path $aiwatcher) {
+  py -3 -m pipx upgrade aiwatcher-cli
+} else {
+  py -3 -m pipx install git+https://github.com/ai-watcher/aiwatcher-local.git
+}
 py -3 -m pipx ensurepath
-& "$env:USERPROFILE\.local\bin\aiwatcher.exe" setup
-& "$env:USERPROFILE\.local\bin\aiwatcher.exe" start --open-ui
+& $aiwatcher setup
+& $aiwatcher start --open-ui
 ```
 
 After opening a new terminal, the shorter command should work:
@@ -70,10 +138,12 @@ Use the row matching the error you saw.
 
 | Error | Fix |
 | --- | --- |
-| Python reports `2.x` or below `3.9` | Install Python 3.9+. AIWatcher does not support Python 2. |
-| `pipx: command not found` | Use `python3 -m pipx ...` on macOS/Linux or `py -3 -m pipx ...` on Windows. |
+| Python reports `2.x` or below `3.10` | Install Python 3.10+ for the recommended `pipx` path. AIWatcher does not support Python 2. |
+| `externally-managed-environment` | On macOS Homebrew Python, run `brew install pipx`, then use `pipx install ...`. Do not add `--break-system-packages`. |
+| `brew: command not found` | Install Homebrew from [brew.sh](https://brew.sh), then rerun the macOS commands. |
+| `pipx: command not found` | macOS: `brew install pipx`. Ubuntu/Debian: `sudo apt install pipx`. Windows: use `py -3 -m pipx ...` after installing pipx. |
 | `python: command not found` | Use `python3` on macOS/Linux or `py -3` on Windows. |
-| `python3: command not found` | Install Python 3.9+. macOS: `brew install python` or use python.org. Windows: use python.org or `winget install Python.Python.3.12`. |
+| `python3: command not found` | Install Python 3.10+. macOS: `brew install python` or use python.org. Windows: use python.org or `winget install Python.Python.3.12`. |
 | `py: command not found` | Install Python 3 from python.org or run `winget install Python.Python.3.12`, then open a new PowerShell. |
 | `git: command not found` | Install Git. macOS: `xcode-select --install` or `brew install git`. Windows: install Git for Windows or run `winget install Git.Git`. |
 | `No module named pip` | Run `python3 -m ensurepip --upgrade` on macOS/Linux or `py -3 -m ensurepip --upgrade` on Windows. |
@@ -120,19 +190,24 @@ If a surface does not invoke hooks, use the Console or Companion **Plan** flow
 to preflight prompts manually. AIWatcher does not claim silent protection on
 tool surfaces that do not expose a verified lifecycle hook.
 
-## Source Clone Path
+## Clone The Codebase
 
 Clone only if you want to contribute, inspect code locally, or use the
-dashboard's source-update flow.
+dashboard's source-update flow. Most users should use the `pipx` path above.
+
+The source clone path creates a project-local virtual environment, so it does
+not modify your Homebrew, system, or Windows Python packages.
 
 macOS or Linux:
 
 ```sh
 git clone https://github.com/ai-watcher/aiwatcher-local.git
 cd aiwatcher-local
-python3 -m pip install -e .
-python3 -m aiwatcher_cli setup
-python3 -m aiwatcher_cli start --open-ui
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+python -m aiwatcher_cli setup
+python -m aiwatcher_cli start --open-ui
 ```
 
 Windows PowerShell:
@@ -140,19 +215,21 @@ Windows PowerShell:
 ```powershell
 git clone https://github.com/ai-watcher/aiwatcher-local.git
 cd aiwatcher-local
-py -3 -m pip install -e .
-py -3 -m aiwatcher_cli setup
-py -3 -m aiwatcher_cli start --open-ui
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e .
+python -m aiwatcher_cli setup
+python -m aiwatcher_cli start --open-ui
 ```
 
-The key detail is `python3 -m pip` or `py -3 -m pip`. Do not use
-`python3 -m pip3`.
+The key detail is `python -m pip` inside the virtual environment. Do not use
+`python -m pip3`.
 
 ## Keep AIWatcher Updated
 
 | Install type | Update command |
 | --- | --- |
-| GitHub `pipx` install | macOS/Linux: `python3 -m pipx upgrade aiwatcher-cli`; Windows: `py -3 -m pipx upgrade aiwatcher-cli` |
+| GitHub `pipx` install | macOS/Linux: `pipx upgrade aiwatcher-cli`; Windows: `py -3 -m pipx upgrade aiwatcher-cli` |
 | GitHub `pip` install | macOS/Linux: `python3 -m pip install --upgrade git+https://github.com/ai-watcher/aiwatcher-local.git`; Windows: `py -3 -m pip install --upgrade git+https://github.com/ai-watcher/aiwatcher-local.git` |
 | Source clone | `aiwatcher update --apply`, then `aiwatcher start --open-ui` |
 | `uv` tool install | `uv tool upgrade aiwatcher-cli` |
@@ -164,8 +241,8 @@ explicit step from Settings.
 After the first PyPI release, the recommended install/update path becomes:
 
 ```sh
-python3 -m pipx install aiwatcher-cli
-python3 -m pipx upgrade aiwatcher-cli
+pipx install aiwatcher-cli
+pipx upgrade aiwatcher-cli
 ```
 
 Maintainers should use [docs/RELEASE.md](docs/RELEASE.md) before publishing.
