@@ -85,6 +85,126 @@ class AiAssistTests(unittest.TestCase):
         self.assertNotIn("sk-secret-value", message)
         self.assertNotIn("Incorrect API key provided", message)
 
+    def test_provider_error_type_is_used_when_code_is_absent(self) -> None:
+        # Anthropic reports {"error": {"type": ...}}; OpenAI reports "code".
+        message, code = ai_assist._safe_provider_error(
+            404, '{"type":"error","error":{"type":"not_found_error","message":"model: nope"}}'
+        )
+        self.assertEqual(code, "not_found_error")
+        self.assertIn("HTTP 404 (not_found_error)", message)
+
+    def test_default_claude_model_is_a_current_model(self) -> None:
+        # claude-3-5-haiku-latest was retired on 2026-02-19; a blank model field
+        # with Claude selected must not fail on every run.
+        self.assertEqual(ai_assist.DEFAULT_MODELS["anthropic"], "claude-haiku-4-5")
+
+    def test_post_json_converts_every_failure_to_ai_assist_unavailable(self) -> None:
+        messages = [{"role": "user", "content": "hello"}]
+        # A base URL urllib cannot parse used to raise ValueError at Request
+        # construction, outside the try, and escape the HTTP handler.
+        with self.assertRaises(ai_assist.AiAssistUnavailable):
+            ai_assist._openai_compatible_chat(base_url="myhost/v1", model="m", messages=messages)
+
+        class _Body:
+            def __init__(self, raw: bytes) -> None:
+                self._raw = raw
+            def read(self) -> bytes:
+                return self._raw
+            def __enter__(self):
+                return self
+            def __exit__(self, *args) -> None:
+                return None
+
+        # A body that decodes to a list, and one that is not UTF-8.
+        for raw in (b"[1, 2]", b"\xff\xfe"):
+            with self.subTest(raw=raw):
+                with patch.object(ai_assist.urllib.request, "urlopen", return_value=_Body(raw)):
+                    with self.assertRaises(ai_assist.AiAssistUnavailable):
+                        ai_assist._openai_compatible_chat(
+                            base_url="http://127.0.0.1:1234/v1", model="m", messages=messages,
+                        )
+
+    def test_cloud_failure_names_the_provider_that_answered(self) -> None:
+        # Under provider "auto" the config does not say which key was tried;
+        # the exception must, so the rejection is recorded against that key.
+        error = urllib.error.HTTPError(
+            "https://api.openai.com/v1/chat/completions", 401, "Unauthorized", {},
+            io.BytesIO(b'{"error":{"code":"invalid_api_key","message":"bad"}}'),
+        )
+        with patch.object(ai_assist.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaises(ai_assist.AiAssistUnavailable) as raised:
+                ai_assist._call_configured_chat(
+                    {"mode": "cloud", "provider": "auto", "api_keys": {"openai": "sk-secret"}},
+                    [{"role": "user", "content": "hello"}],
+                )
+        self.assertEqual(raised.exception.provider, "openai")
+        self.assertEqual(raised.exception.status_code, 401)
+
+    def test_auto_provider_status_shows_a_rejected_key(self) -> None:
+        with (
+            patch.object(ai_assist, "detect_local_providers", return_value=[]),
+            patch.dict(ai_assist.os.environ, {}, clear=True),
+        ):
+            status = ai_assist.build_ai_assist_status({
+                "mode": "cloud",
+                "provider": "auto",
+                "api_keys": {"openai": "sk-secret"},
+                "provider_checks": {"openai": {"status": "failed", "message": "rejected", "code": "invalid_api_key"}},
+            })
+        self.assertEqual(status["status_label"], "Key rejected")
+        self.assertFalse(status["ready"])
+
+    def test_local_call_uses_the_typed_base_url_when_nothing_is_detected(self) -> None:
+        # Settings said Ready for this config; the call used to refuse it
+        # because it only consulted the detected runtimes.
+        with (
+            patch.object(ai_assist, "detect_local_providers", return_value=[]),
+            patch.object(ai_assist, "_openai_compatible_chat", return_value={"text": "ok", "usage": {}}) as chat,
+        ):
+            for provider in ("auto", "openai_compatible"):
+                with self.subTest(provider=provider):
+                    response = ai_assist._call_configured_chat(
+                        {"mode": "local", "provider": provider, "base_url": "http://127.0.0.1:5000/v1"},
+                        [{"role": "user", "content": "hello"}],
+                    )
+                    self.assertEqual(chat.call_args.kwargs["base_url"], "http://127.0.0.1:5000/v1")
+                    self.assertEqual(response["provider"], "openai_compatible")
+
+    def test_local_auto_prefers_a_running_runtime_over_an_installed_one(self) -> None:
+        rows = [
+            {"id": "ollama", "label": "Ollama", "available": False, "running": False, "installed": True, "base_url": "http://127.0.0.1:11434/v1"},
+            {"id": "llama_cpp", "label": "llama.cpp", "available": True, "running": True, "installed": False, "base_url": "http://127.0.0.1:8080/v1"},
+        ]
+        with patch.object(ai_assist, "detect_local_providers", return_value=rows):
+            chosen = ai_assist._selected_local_endpoint({"mode": "local", "provider": "auto"})
+            stopped = ai_assist._selected_local_endpoint({"mode": "local", "provider": "ollama"})
+        self.assertEqual(chosen["id"], "llama_cpp")
+        self.assertIsNone(stopped)
+
+    def test_installed_but_stopped_runtime_is_not_available(self) -> None:
+        with (
+            patch.object(ai_assist.shutil, "which", return_value="/usr/local/bin/ollama"),
+            patch.object(ai_assist, "_port_open", return_value=False),
+            patch.dict(ai_assist.os.environ, {}, clear=True),
+        ):
+            rows = ai_assist.detect_local_providers(max_age_seconds=0)
+        ollama = next(row for row in rows if row["id"] == "ollama")
+        self.assertTrue(ollama["installed"])
+        self.assertFalse(ollama["available"])
+        self.assertEqual(ollama["detail"], "installed, not running")
+
+    def test_detection_is_memoised_between_polls(self) -> None:
+        with (
+            patch.object(ai_assist, "_port_open", return_value=False) as probe,
+            patch.dict(ai_assist.os.environ, {"PATH": "/nonexistent"}, clear=True),
+        ):
+            ai_assist.detect_local_providers(max_age_seconds=0)
+            ai_assist.detect_local_providers()
+            ai_assist.detect_local_providers()
+            self.assertEqual(probe.call_count, 3)  # one probe per port, once
+            ai_assist.detect_local_providers(max_age_seconds=0)
+            self.assertEqual(probe.call_count, 6)
+
     def test_status_keeps_off_mode_ready_without_any_provider(self) -> None:
         with (
             patch.object(ai_assist, "detect_local_providers", return_value=[]),

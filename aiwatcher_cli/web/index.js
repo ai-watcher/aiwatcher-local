@@ -307,10 +307,11 @@ function renderOptimizeCleanupPrompt(result) {
 async function composeOptimizeCleanupPrompt(candidateId, button = null) {
   const status = currentData && currentData.ai_assist ? currentData.ai_assist : {};
   const config = status.config || {};
+  let confirmed = false;
   if (config.require_confirmation !== false) {
     const label = status.active_label || 'AI Assist';
-    const ok = window.confirm(`${label} will make one small model call to compose a safe Optimize cleanup review prompt. Continue?`);
-    if (!ok) return;
+    confirmed = window.confirm(`${label} will make one small model call to compose a safe Optimize cleanup review prompt. Continue?`);
+    if (!confirmed) return;
   }
   if (button) {
     button.dataset.copyRestore = button.textContent;
@@ -322,6 +323,7 @@ async function composeOptimizeCleanupPrompt(candidateId, button = null) {
     const result = await postJson('/api/optimize-ai-assist', {
       candidate_id: candidateId,
       days: Number(daysEl ? daysEl.value : 7) || 7,
+      confirmed,
     });
     if (button) {
       button.disabled = false;
@@ -1832,6 +1834,9 @@ function renderHandoff(capsule) {
   const primaryAction = aiReady
     ? `<button class="btn-primary" onclick="improveFreshStartWithAiAssist('${esc(capsule.session_id)}','${esc(target)}', ${includePrompt ? 'true' : 'false'})">Compose AI handoff</button>`
     : `<button class="btn-primary" data-runtime="${canOpenRuntime ? '1' : '0'}" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', this.dataset.runtime === '1')">${esc(primaryLabel)}</button>`;
+  // With a runtime attached the primary also focuses or launches it. That is
+  // the wrong move when the user is leaving that tool for another one, so the
+  // "Copy brief" button under the textarea below only ever copies.
   const secondaryCopy = aiReady
     ? `<button class="btn-quiet" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', false)">Copy local fallback</button>`
     : '';
@@ -1858,7 +1863,7 @@ function renderHandoff(capsule) {
         <span class="confidence-chip observed">${assisted ? 'AI assisted' : 'local rules'}</span>
       </div>
       <textarea id="handoffBrief" class="brief-box">${esc(capsule.next_brief || '')}</textarea>
-      <div class="copy-row"><button class="btn-primary" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', ${canOpenRuntime ? 'true' : 'false'})">${esc(canOpenRuntime ? 'Copy brief + open workspace' : 'Copy brief')}</button></div>
+      <div class="copy-row"><button class="btn-primary" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', false)">Copy brief</button></div>
     </div>
     <!-- The brief is the focal object. Optional shaping fields stay below it
          so a first-time reader sees the paste-ready handoff before the knobs. -->
@@ -1925,9 +1930,10 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
   const status = (typeof currentData !== 'undefined' && currentData && currentData.ai_assist) ? currentData.ai_assist : null;
   const config = status && status.config ? status.config : {};
   const label = (status && status.active_label) || 'AI Assist';
+  let confirmed = false;
   if (config.require_confirmation !== false) {
-    const ok = window.confirm(`${label} will make one small model call using your configured provider to compose this Fresh Start handoff. Continue?`);
-    if (!ok) return;
+    confirmed = window.confirm(`${label} will make one small model call using your configured provider to compose this Fresh Start handoff. Continue?`);
+    if (!confirmed) return;
   }
   const options = handoffOptionsFromForm();
   const briefNode = document.getElementById('handoffBrief');
@@ -1937,6 +1943,7 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
     options.localBrief = currentBrief;
   }
   const payload = handoffPayload(sessionId, target, includePrompt, options);
+  payload.confirmed = confirmed;
   const statusNode = document.getElementById('handoffStatus');
   if (statusNode) {
     statusNode.insertAdjacentHTML('afterend', `<div id="aiAssistWorking" class="ai-loading-panel">
@@ -1959,6 +1966,7 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
     setDrawerContent(renderHandoff(capsule));
     const result = capsule.ai_assist_result || {};
     if (result.status === 'used') showToast('AI handoff ready');
+    else if (result.status === 'cached') showToast('Cached AI handoff ready');
     else showToast(result.reason || 'AI Assist was not used', 'error');
   } catch (error) {
     const working = document.getElementById('aiAssistWorking');
@@ -1991,19 +1999,10 @@ async function openHandoff(sessionId, target = 'generic', includePrompt = false,
   const capsule = await handoffPromise;
   if (capsule.error) {
     setDrawerContent(`<div class="empty">${esc(capsule.error)}</div>`);
-    return;
+    return capsule;
   }
   setDrawerContent(renderHandoff(capsule));
-}
-function handoffDecisionBubble(sessionId) {
-  const current = window.currentHandoffBubble || {};
-  if (current.session_id === sessionId) return current;
-  return {
-    session_id: sessionId,
-    reason: 'Fresh Start brief copied from the session review.',
-    body: 'Fresh Start brief copied from the session review.',
-    expected_saved_context_tokens: null,
-  };
+  return capsule;
 }
 async function recordHandoffDecision(bubble, decision) {
   if (!bubble || !bubble.session_id) return false;
@@ -2027,7 +2026,17 @@ async function recordHandoffDecision(bubble, decision) {
   }
 }
 async function startFreshFromBubble(sessionId) {
-  await openHandoff(sessionId, 'generic', false);
+  let capsule = null;
+  try {
+    capsule = await openHandoff(sessionId, 'generic', false);
+  } catch (error) {
+    showToast('Could not open the Fresh Start brief.', 'error');
+    return;
+  }
+  if (!capsule || capsule.error) {
+    showToast((capsule && capsule.error) || 'Could not open the Fresh Start brief.', 'error');
+    return;
+  }
   showToast('Fresh Start brief opened. Review it, compose with AI Assist if useful, then copy.');
 }
 async function continueFromSession(sessionId) {
@@ -2040,21 +2049,6 @@ async function continueFromSession(sessionId) {
   showToast('Fresh Start decision saved: continue here');
   closeDrawer();
   await load(false, true);
-}
-function renderHandoffCopied(bubble, sessionId) {
-  const node = document.getElementById('handoffBubble');
-  if (!node || !bubble) return;
-  node.hidden = false;
-  node.innerHTML = freshStartReceiptWidget({
-    reason: bubble.reason || bubble.body || 'Fresh Start brief copied from local evidence.',
-    expected: bubble.expected_saved_context_label ? '~' + bubble.expected_saved_context_label + ' expected context at risk' : 'proof pending',
-    copy: 'Paste the copied brief into a fresh AI chat for the matching workspace.',
-    controls: `
-      <button class="btn-primary" onclick="showView('receipts')">View receipt</button>
-      <button class="btn-quiet" data-session="${esc(sessionId)}" onclick="openHandoff(this.dataset.session)">Review brief</button>
-      <button class="btn-quiet" onclick="document.getElementById('handoffBubble').hidden = true">Dismiss</button>
-    `,
-  });
 }
 function dateLabel(value) {
   if (!value) return 'unknown';
@@ -2187,11 +2181,10 @@ function renderOptimizeWorkspace(optimize) {
     </div>
     <p class="receipt-note" style="margin-bottom:12px">AIWatcher cannot archive or delete anything for you. Review one item, act only in the owning app, then mark it reviewed to quiet the nudge for 24 hours.</p>
     <div class="action-queue">${candidates.map(item => {
-      const itemChecklist = item.checklist || checklist;
-      const cleanupPrompt = item.cleanup_prompt || itemChecklist;
+      const cleanupPrompt = item.cleanup_prompt || checklist;
       const aiCleanup = optimizeAiButton(item.id || '');
       if (item.kind === 'stale_processes') {
-        return renderRuntimeOptimizeCard(item, itemChecklist);
+        return renderRuntimeOptimizeCard(item, cleanupPrompt);
       }
       const fullPath = item.project_full || item.project || '';
       const pathLine = fullPath ? `<div class="optimize-full-path"><span class="label">Full path</span><code>${esc(fullPath)}</code></div>` : '';
@@ -2217,12 +2210,11 @@ function renderOptimizeWorkspace(optimize) {
       <button class="btn-quiet" onclick="copyText(${jsArg(checklist)}, 'Global review queue copied')">Copy all review items</button>
     </div>`;
 }
-function renderRuntimeOptimizeCard(item, itemChecklist) {
+function renderRuntimeOptimizeCard(item, cleanupPrompt) {
   const steps = Array.isArray(item.safe_review_steps) && item.safe_review_steps.length
     ? item.safe_review_steps
     : ['Run: aiwatcher processes --stale-only', 'Use PID, runtime, session id, and working directory to match each row to an AI app/window.', 'Confirm each process is not attached to live AI work.', 'Stop only stale/orphaned runtimes you recognize.', 'Run the command again; reclaimed RSS is the before-minus-after local memory signal.', 'Leave unknown processes alone.'];
   const command = item.review_command || 'aiwatcher processes --stale-only';
-  const cleanupPrompt = item.cleanup_prompt || itemChecklist;
   const aiCleanup = optimizeAiButton(item.id || '');
   return `<div class="action-row low runtime-review-card">
     <div>
@@ -2246,8 +2238,7 @@ function renderRuntimeOptimizeCard(item, itemChecklist) {
     </div>
     <div class="actions">
       <button class="btn-primary" onclick="copyOptimizeRuntimeCommand(${jsArg(command)}, this)">Copy command</button>
-      <button class="btn-quiet" onclick="copyText(${jsArg(itemChecklist)}, 'Safe review steps copied')">${esc(item.action_label || 'Copy safe review steps')}</button>
-      <button class="btn-quiet" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">Copy cleanup prompt</button>
+      <button class="btn-quiet" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">${esc(item.action_label || 'Copy cleanup prompt')}</button>
       ${aiCleanup}
       <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('marked_done', this.dataset.project, this.dataset.impact, this)">Reviewed</button>
       <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('skipped', this.dataset.project, this.dataset.impact, this)">Skip</button>

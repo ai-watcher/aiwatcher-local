@@ -1355,19 +1355,6 @@
     .health-evidence .label { font-size: var(--fs-1); }
     .health-evidence p { margin: 3px 0 0; color: var(--muted); }
     .health-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: 12px; }
-    .handoff-bubble {
-      border-color: rgba(var(--blue-rgb), .5);
-      background: var(--invert-tint);
-      color: var(--invert-text);
-      box-shadow: 0 10px 26px rgba(var(--ink-mid-rgb), .18);
-    }
-    .handoff-bubble h2 { color: var(--invert-head); }
-    .handoff-bubble p, .handoff-bubble .sub { color: var(--invert-muted); }
-    .handoff-bubble .pill { background: rgba(var(--sheen-rgb), .72); border-color: var(--invert-line-soft); color: var(--invert-ink); }
-    .handoff-bubble .btn-primary { background: var(--invert-bg); border-color: var(--invert-line); color: var(--invert-text); }
-    .handoff-bubble .btn-primary:hover { background: var(--invert-hover); border-color: var(--invert-line-hover); }
-    .handoff-bubble .btn-quiet { background: transparent; border-color: transparent; color: var(--invert-muted); }
-    .handoff-bubble .btn-quiet:hover { background: rgba(var(--sheen-rgb), .6); border-color: var(--invert-line); color: var(--invert-text); }
     .outcome-pill.useful { color: var(--on-success); border-color: rgba(var(--green-rgb), .38); background: var(--green-soft); }
     .outcome-pill.rework { color: var(--on-warning); border-color: rgba(var(--amber-rgb), .38); background: var(--amber-soft); }
     .outcome-pill.abandoned { color: var(--on-danger); border-color: rgba(var(--red-rgb), .38); background: var(--red-soft); }

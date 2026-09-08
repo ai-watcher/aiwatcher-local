@@ -11,9 +11,11 @@ import json
 import os
 import shutil
 import socket
+import time
 import urllib.error
 import urllib.request
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Callable
 
 
 LOCAL_PROVIDER_PORTS = {
@@ -24,7 +26,7 @@ LOCAL_PROVIDER_PORTS = {
 
 DEFAULT_MODELS = {
     "openai": "gpt-4o-mini",
-    "anthropic": "claude-3-5-haiku-latest",
+    "anthropic": "claude-haiku-4-5",
     "openai_compatible": "gpt-oss:20b",
     "ollama": "llama3.2",
     "lmstudio": "local-model",
@@ -42,10 +44,21 @@ MAX_OPTIMIZE_CLEANUP_PROMPT_CHARS = 7000
 class AiAssistUnavailable(RuntimeError):
     """Raised when a workflow asks for AI Assist before it is ready."""
 
-    def __init__(self, message: str, *, status_code: int | None = None, provider_code: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        provider_code: str | None = None,
+        provider: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.provider_code = provider_code
+        # The concrete provider that answered (or refused). Set by
+        # _call_configured_chat so an "auto" config can still record which
+        # key was rejected.
+        self.provider = provider
 
 
 def _port_open(host: str, port: int, *, timeout: float = 0.06) -> bool:
@@ -56,32 +69,65 @@ def _port_open(host: str, port: int, *, timeout: float = 0.06) -> bool:
         return False
 
 
-def detect_local_providers() -> list[dict[str, object]]:
+LOCAL_PROVIDER_ENV = {
+    "lmstudio": "LMSTUDIO_BASE_URL",
+    "llama_cpp": "LLAMA_CPP_BASE_URL",
+    "ollama": "OLLAMA_HOST",
+}
+
+# Detection opens three loopback sockets and walks PATH. The dashboard asks
+# for it on every poll, so the answer is kept for a short while; a runtime that
+# starts or stops shows up within this window.
+LOCAL_PROVIDER_CACHE_SECONDS = 20.0
+_LOCAL_PROVIDER_CACHE: tuple[float, tuple[str, ...], list[dict[str, object]]] | None = None
+
+
+def _local_provider_env_signature() -> tuple[str, ...]:
+    return tuple(os.environ.get(name, "") for name in (*LOCAL_PROVIDER_ENV.values(), "PATH"))
+
+
+def _probe_local_providers() -> list[dict[str, object]]:
     providers: list[dict[str, object]] = []
     for key, (label, host, port, base_url) in LOCAL_PROVIDER_PORTS.items():
         installed = bool(shutil.which("ollama")) if key == "ollama" else False
         running = _port_open(host, port)
-        env_url = os.environ.get({
-            "lmstudio": "LMSTUDIO_BASE_URL",
-            "llama_cpp": "LLAMA_CPP_BASE_URL",
-            "ollama": "OLLAMA_HOST",
-        }[key])
+        env_url = os.environ.get(LOCAL_PROVIDER_ENV[key])
         providers.append({
             "id": key,
             "label": label,
-            "available": bool(running or installed or env_url),
+            # "available" means a call can be made now: the port answers, or
+            # the user pointed at it by environment. Installed-but-stopped is
+            # reported separately; counting it as available made Settings say
+            # Ready and then the call was refused.
+            "available": bool(running or env_url),
             "running": running,
             "installed": installed,
             "base_url": env_url or base_url,
             "detail": (
                 "running locally" if running else
-                "installed, not running" if installed else
                 "configured by environment" if env_url else
+                "installed, not running" if installed else
                 "not detected"
             ),
         })
-    providers.sort(key=lambda row: (not bool(row["available"]), str(row["label"])))
+    providers.sort(key=lambda row: (not bool(row["running"]), not bool(row["available"]), str(row["label"])))
     return providers
+
+
+def detect_local_providers(*, max_age_seconds: float = LOCAL_PROVIDER_CACHE_SECONDS) -> list[dict[str, object]]:
+    """Return the local runtimes AIWatcher can see, memoised briefly.
+
+    Pass max_age_seconds=0 to force a fresh probe.
+    """
+    global _LOCAL_PROVIDER_CACHE
+    now = time.monotonic()
+    signature = _local_provider_env_signature()
+    cached = _LOCAL_PROVIDER_CACHE
+    if cached and max_age_seconds > 0 and cached[1] == signature and now - cached[0] <= max_age_seconds:
+        return [dict(row) for row in cached[2]]
+    rows = _probe_local_providers()
+    _LOCAL_PROVIDER_CACHE = (now, signature, rows)
+    return [dict(row) for row in rows]
 
 
 def _provider_check(provider: str, checks: dict[str, object] | None) -> dict[str, str]:
@@ -174,7 +220,14 @@ def build_ai_assist_status(config: dict[str, Any]) -> dict[str, object]:
     mode = str(config.get("mode") or "off")
     provider = str(config.get("provider") or "none")
     configured_base_url = str(config.get("base_url") or "").strip()
-    saved_key_values = config.get("api_keys") if isinstance(config.get("api_keys"), dict) else {}
+    if isinstance(config.get("api_keys"), dict):
+        saved_key_values = config["api_keys"]
+    elif isinstance(config.get("stored_keys"), dict):
+        # The redacted view from local_state.ai_assist_config() carries only
+        # the booleans; raw keys never need to reach this function.
+        saved_key_values = config["stored_keys"]
+    else:
+        saved_key_values = {}
     stored_keys = {
         "openai": bool(saved_key_values.get("openai")),
         "anthropic": bool(saved_key_values.get("anthropic")),
@@ -206,6 +259,11 @@ def build_ai_assist_status(config: dict[str, Any]) -> dict[str, object]:
     )
     cloud_ready = custom_cloud_ready or selected_available(cloud, {"openai", "anthropic"})
     selected_cloud = next((row for row in cloud if row.get("id") == provider), None)
+    if provider == "auto":
+        # Mirror _call_configured_chat, which tries providers in this order and
+        # uses the first one with a key; otherwise a rejected key under "auto"
+        # could never surface as "Key rejected".
+        selected_cloud = next((row for row in cloud if row.get("configured")), None)
     selected_check_status = str((selected_cloud or {}).get("check_status") or "")
     active_label = "Local rules only"
     if mode == "local":
@@ -295,12 +353,28 @@ def build_ai_assist_status(config: dict[str, Any]) -> dict[str, object]:
     }
 
 
-def _selected_local_provider(config: dict[str, Any]) -> dict[str, object] | None:
+def _selected_local_endpoint(config: dict[str, Any]) -> dict[str, object] | None:
+    """Return the local runtime a call should go to, or None.
+
+    Mirrors the readiness rule in build_ai_assist_status: a typed base URL
+    wins for "auto" and the custom provider, otherwise a running runtime is
+    preferred over one that is merely configured, and an installed-but-stopped
+    one is never chosen.
+    """
     provider = str(config.get("provider") or "auto")
+    configured_base_url = str(config.get("base_url") or "").strip()
+    if configured_base_url and provider in {"auto", "openai_compatible"}:
+        return {"id": "openai_compatible", "label": "Local endpoint", "base_url": configured_base_url}
     rows = detect_local_providers()
     if provider == "auto":
-        return next((row for row in rows if row.get("running") or row.get("available")), None)
-    return next((row for row in rows if row.get("id") == provider), None)
+        running = next((row for row in rows if row.get("running")), None)
+        return running or next((row for row in rows if row.get("available")), None)
+    row = next((row for row in rows if row.get("id") == provider), None)
+    if row is None or not row.get("available"):
+        return None
+    if configured_base_url:
+        return {**row, "base_url": configured_base_url}
+    return row
 
 
 def _secret_for_provider(config: dict[str, Any], provider: str) -> str:
@@ -326,22 +400,35 @@ def _join_url(base_url: str, suffix: str) -> str:
 
 
 def _post_json(url: str, payload: dict[str, object], headers: dict[str, str], *, timeout: float) -> dict[str, object]:
+    """POST JSON and return the decoded object.
+
+    Every failure surfaces as AiAssistUnavailable so the HTTP handler above
+    can record a receipt and answer the browser. That includes a base URL
+    urllib cannot parse (ValueError at Request construction), a body that is
+    not UTF-8 (UnicodeDecodeError is a ValueError, not a JSONDecodeError),
+    and a body that decodes to something other than an object.
+    """
     body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        url,
-        data=body,
-        headers={**headers, "Content-Type": "application/json"},
-        method="POST",
-    )
     try:
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers={**headers, "Content-Type": "application/json"},
+            method="POST",
+        )
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+            data = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:1500]
         message, provider_code = _safe_provider_error(exc.code, detail)
         raise AiAssistUnavailable(message, status_code=exc.code, provider_code=provider_code) from exc
-    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         raise AiAssistUnavailable(f"AI Assist provider call failed: {exc}") from exc
+    if not isinstance(data, dict):
+        raise AiAssistUnavailable(
+            f"AI Assist provider returned {type(data).__name__} instead of a JSON object."
+        )
+    return data
 
 
 def _safe_provider_error(status_code: int, detail: str) -> tuple[str, str | None]:
@@ -354,7 +441,7 @@ def _safe_provider_error(status_code: int, detail: str) -> tuple[str, str | None
     if isinstance(parsed, dict):
         error = parsed.get("error")
         if isinstance(error, dict):
-            provider_code = str(error.get("code") or "").strip() or None
+            provider_code = str(error.get("code") or error.get("type") or "").strip() or None
             message = str(error.get("message") or "").strip()
     if status_code in {401, 403}:
         return (
@@ -446,11 +533,14 @@ def _call_configured_chat(
     if mode == "off":
         raise AiAssistUnavailable("AI Assist is set to Local rules only.")
     if mode == "local":
-        local = _selected_local_provider(config)
+        local = _selected_local_endpoint(config)
         if not local:
-            raise AiAssistUnavailable("No local AI runtime is detected.")
+            raise AiAssistUnavailable(
+                "No local AI runtime is running. Start Ollama, LM Studio, or llama.cpp, "
+                "or enter a local OpenAI-compatible base URL in Settings -> AI Assist."
+            )
         provider = str(local.get("id") or "openai_compatible")
-        base_url = str(config.get("base_url") or local.get("base_url") or "").strip()
+        base_url = str(local.get("base_url") or "").strip()
         if not base_url:
             raise AiAssistUnavailable("Local AI Assist needs a local OpenAI-compatible endpoint.")
         model = _configured_model(config, provider)
@@ -469,6 +559,23 @@ def _call_configured_chat(
             if _secret_for_provider(config, candidate):
                 provider = candidate
                 break
+    try:
+        return _cloud_chat(config, provider, messages, max_tokens=max_tokens, timeout=timeout)
+    except AiAssistUnavailable as exc:
+        if exc.provider is None and provider in {"openai", "anthropic", "openai_compatible"}:
+            exc.provider = provider
+        raise
+
+
+def _cloud_chat(
+    config: dict[str, Any],
+    provider: str,
+    messages: list[dict[str, str]],
+    *,
+    max_tokens: int,
+    timeout: float,
+) -> dict[str, object]:
+    mode = "cloud"
     if provider == "openai":
         key = _secret_for_provider(config, "openai")
         if not key:
@@ -623,6 +730,140 @@ def _structured_optimize_cleanup_text(parsed: dict[str, object], *, local_prompt
     return "\n".join(lines).strip()
 
 
+@dataclass(frozen=True)
+class _WorkflowSpec:
+    """Everything that differs between the model-backed workflows.
+
+    The call itself, the readiness gate, the JSON parse, and the bounded
+    result dict are shared; a third workflow is a new entry here rather than
+    a third copy of that pipeline.
+    """
+
+    id: str
+    label: str
+    max_input_chars: int
+    max_output_tokens: int
+    max_result_chars: int
+    system_prompt: str
+    instructions: str
+    evidence_heading: str
+    # Turns the parsed JSON (or the raw text under fallback_key) into the
+    # paste-ready result; receives the trimmed local text for workflows that
+    # quote it back.
+    structure: Callable[[dict[str, object], str], str]
+    fallback_key: str
+
+
+_FRESH_START_SPEC = _WorkflowSpec(
+    id="fresh_start",
+    label="Fresh Start",
+    max_input_chars=MAX_FRESH_START_INPUT_CHARS,
+    max_output_tokens=MAX_FRESH_START_OUTPUT_TOKENS,
+    max_result_chars=MAX_FRESH_START_BRIEF_CHARS,
+    system_prompt=(
+        "You are AIWatcher's Fresh Start handoff composer. Your job is to turn local handoff "
+        "evidence into a useful continuation prompt for a new AI work session. Be concrete, "
+        "specific, and operational: extract the likely work done, user intent when it is actually "
+        "present in the evidence, context worth preserving, files or commands to inspect first, "
+        "what the next agent should avoid redoing, and the smallest next ask. "
+        "Preserve deterministic evidence boundaries: do not invent saved tokens, commits, tests, "
+        "files, outcomes, exact chat links, secrets, or prior conversation content. If prompt text "
+        "or transcript content is not present, say the task must be reconstructed from repo state "
+        "and local evidence. Prefer specific evidence from the handoff over generic advice. Every "
+        "useful bullet should carry a concrete path, file, session id, count, decision, command, "
+        "or explicit uncertainty from the evidence when one exists."
+    ),
+    instructions=(
+        "Return JSON only with these keys:\n"
+        "goal: string\n"
+        "what_is_done: string[]\n"
+        "context_to_preserve: string[]\n"
+        "inspect_first: string[]\n"
+        "do_not_redo: string[]\n"
+        "next_ask: string\n"
+        "acceptance_check: string[]\n"
+        "uncertainties: string[]\n\n"
+        "Make the result useful for a fresh chat, forked chat, or subagent. The next_ask should "
+        "tell the new AI session exactly what to do first. Avoid echoing the section names and "
+        "boilerplate from the local handoff unless the evidence is genuinely missing. Keep it short "
+        "enough to paste without carrying the whole old conversation. Do not use vague goals like "
+        "\"reconstruct the current work\" unless no stronger objective is present; tie the goal to "
+        "the observed workspace/tool/path/evidence instead."
+    ),
+    evidence_heading="Local AIWatcher handoff evidence:",
+    structure=lambda parsed, _trimmed: _structured_handoff_text(parsed),
+    fallback_key="next_ask",
+)
+
+_OPTIMIZE_CLEANUP_SPEC = _WorkflowSpec(
+    id="optimize_cleanup",
+    label="Optimize cleanup",
+    max_input_chars=MAX_OPTIMIZE_CLEANUP_INPUT_CHARS,
+    max_output_tokens=MAX_OPTIMIZE_CLEANUP_OUTPUT_TOKENS,
+    max_result_chars=MAX_OPTIMIZE_CLEANUP_PROMPT_CHARS,
+    system_prompt=(
+        "You are AIWatcher's Optimize cleanup prompt composer. Create a compact, paste-ready "
+        "review prompt for stale AI chats, worktrees, or runtimes. Preserve deterministic evidence "
+        "boundaries: do not invent paths, sessions, costs, outcomes, or source text. Never authorize "
+        "deleting files, killing processes, archiving chats, force pushing, or other destructive cleanup."
+    ),
+    instructions=(
+        "Return JSON only with these keys:\n"
+        "safe_to_archive_or_review: string[]\n"
+        "keep_active: string[]\n"
+        "unknown: string[]\n"
+        "next_action: string[]\n"
+        "guardrails: string[]\n\n"
+        "The final prompt must help another AI session classify the candidate into those buckets, "
+        "but the AI session must only recommend; the user performs any action later in the owning app/tool. "
+        "Keep this short and concrete."
+    ),
+    evidence_heading="Local AIWatcher cleanup evidence:",
+    structure=lambda parsed, trimmed: _structured_optimize_cleanup_text(parsed, local_prompt=trimmed),
+    fallback_key="next_action",
+)
+
+
+def _compose(
+    config: dict[str, Any],
+    spec: _WorkflowSpec,
+    local_text: str,
+    *,
+    timeout: float,
+) -> dict[str, object]:
+    normalized = str(local_text or "").strip()
+    if not normalized:
+        raise AiAssistUnavailable(f"{spec.label} evidence is empty.")
+    workflows = config.get("enabled_workflows")
+    if isinstance(workflows, list) and spec.id not in workflows:
+        raise AiAssistUnavailable(f"{spec.label} AI Assist is disabled in settings.")
+    status = build_ai_assist_status(config)
+    if not status.get("ready") or status.get("mode") == "off":
+        raise AiAssistUnavailable(str(status.get("setup_hint") or "AI Assist is not ready."))
+    trimmed = normalized[:spec.max_input_chars]
+    messages = [
+        {"role": "system", "content": spec.system_prompt},
+        {"role": "user", "content": f"{spec.instructions}\n\n{spec.evidence_heading}\n{trimmed}"},
+    ]
+    response = _call_configured_chat(config, messages, max_tokens=spec.max_output_tokens, timeout=timeout)
+    text = str(response.get("text") or "").strip()
+    parsed = _json_object_from_text(text)
+    final_text = spec.structure(parsed if parsed else {spec.fallback_key: text}, trimmed)
+    return {
+        "workflow": spec.id,
+        "status": "used",
+        "mode": response.get("mode"),
+        "provider": response.get("provider"),
+        "model": response.get("model"),
+        "input_chars": len(trimmed),
+        "output_chars": len(final_text),
+        "source_access": config.get("source_access") or "metadata_only",
+        "text": final_text[:spec.max_result_chars],
+        "structured": parsed or {},
+        "usage": response.get("usage") if isinstance(response.get("usage"), dict) else {},
+    }
+
+
 def improve_fresh_start_brief(
     config: dict[str, Any],
     *,
@@ -635,78 +876,7 @@ def improve_fresh_start_brief(
     already-generated handoff and composes a clearer paste-ready continuation
     brief after an explicit user action.
     """
-    normalized_brief = str(local_brief or "").strip()
-    if not normalized_brief:
-        raise AiAssistUnavailable("Fresh Start brief is empty.")
-    workflows = config.get("enabled_workflows")
-    if isinstance(workflows, list) and "fresh_start" not in workflows:
-        raise AiAssistUnavailable("Fresh Start AI Assist is disabled in settings.")
-    status = build_ai_assist_status(config)
-    if not status.get("ready") or status.get("mode") == "off":
-        raise AiAssistUnavailable(str(status.get("setup_hint") or "AI Assist is not ready."))
-    trimmed = normalized_brief[:MAX_FRESH_START_INPUT_CHARS]
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are AIWatcher's Fresh Start handoff composer. Your job is to turn local handoff "
-                "evidence into a useful continuation prompt for a new AI work session. Be concrete, "
-                "specific, and operational: extract the likely work done, user intent when it is actually "
-                "present in the evidence, context worth preserving, files or commands to inspect first, "
-                "what the next agent should avoid redoing, and the smallest next ask. "
-                "Preserve deterministic evidence boundaries: do not invent saved tokens, commits, tests, "
-                "files, outcomes, exact chat links, secrets, or prior conversation content. If prompt text "
-                "or transcript content is not present, say the task must be reconstructed from repo state "
-                "and local evidence. Prefer specific evidence from the handoff over generic advice. Every "
-                "useful bullet should carry a concrete path, file, session id, count, decision, command, "
-                "or explicit uncertainty from the evidence when one exists."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                "Return JSON only with these keys:\n"
-                "goal: string\n"
-                "what_is_done: string[]\n"
-                "context_to_preserve: string[]\n"
-                "inspect_first: string[]\n"
-                "do_not_redo: string[]\n"
-                "next_ask: string\n"
-                "acceptance_check: string[]\n"
-                "uncertainties: string[]\n\n"
-                "Make the result useful for a fresh chat, forked chat, or subagent. The next_ask should "
-                "tell the new AI session exactly what to do first. Avoid echoing the section names and "
-                "boilerplate from the local handoff unless the evidence is genuinely missing. Keep it short "
-                "enough to paste without carrying the whole old conversation. Do not use vague goals like "
-                "\"reconstruct the current work\" unless no stronger objective is present; tie the goal to "
-                "the observed workspace/tool/path/evidence instead.\n\n"
-                "Local AIWatcher handoff evidence:\n"
-                f"{trimmed}"
-            ),
-        },
-    ]
-    response = _call_configured_chat(
-        config,
-        messages,
-        max_tokens=MAX_FRESH_START_OUTPUT_TOKENS,
-        timeout=timeout,
-    )
-    text = str(response.get("text") or "").strip()
-    parsed = _json_object_from_text(text)
-    text = _structured_handoff_text(parsed) if parsed else _structured_handoff_text({"next_ask": text})
-    return {
-        "workflow": "fresh_start",
-        "status": "used",
-        "mode": response.get("mode"),
-        "provider": response.get("provider"),
-        "model": response.get("model"),
-        "input_chars": len(trimmed),
-        "output_chars": len(text),
-        "source_access": config.get("source_access") or "metadata_only",
-        "text": text[:MAX_FRESH_START_BRIEF_CHARS],
-        "structured": parsed or {},
-        "usage": response.get("usage") if isinstance(response.get("usage"), dict) else {},
-    }
+    return _compose(config, _FRESH_START_SPEC, local_brief, timeout=timeout)
 
 
 def compose_optimize_cleanup_prompt(
@@ -720,66 +890,4 @@ def compose_optimize_cleanup_prompt(
     The deterministic local prompt remains the evidence boundary. The model is
     only allowed to make the review more useful; it cannot authorize cleanup.
     """
-    normalized_prompt = str(local_prompt or "").strip()
-    if not normalized_prompt:
-        raise AiAssistUnavailable("Optimize cleanup prompt is empty.")
-    workflows = config.get("enabled_workflows")
-    if isinstance(workflows, list) and "optimize_cleanup" not in workflows:
-        raise AiAssistUnavailable("Optimize cleanup AI Assist is disabled in settings.")
-    status = build_ai_assist_status(config)
-    if not status.get("ready") or status.get("mode") == "off":
-        raise AiAssistUnavailable(str(status.get("setup_hint") or "AI Assist is not ready."))
-    trimmed = normalized_prompt[:MAX_OPTIMIZE_CLEANUP_INPUT_CHARS]
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are AIWatcher's Optimize cleanup prompt composer. Create a compact, paste-ready "
-                "review prompt for stale AI chats, worktrees, or runtimes. Preserve deterministic evidence "
-                "boundaries: do not invent paths, sessions, costs, outcomes, or source text. Never authorize "
-                "deleting files, killing processes, archiving chats, force pushing, or other destructive cleanup."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                "Return JSON only with these keys:\n"
-                "safe_to_archive_or_review: string[]\n"
-                "keep_active: string[]\n"
-                "unknown: string[]\n"
-                "next_action: string[]\n"
-                "guardrails: string[]\n\n"
-                "The final prompt must help another AI session classify the candidate into those buckets, "
-                "but the AI session must only recommend; the user performs any action later in the owning app/tool. "
-                "Keep this short and concrete.\n\n"
-                "Local AIWatcher cleanup evidence:\n"
-                f"{trimmed}"
-            ),
-        },
-    ]
-    response = _call_configured_chat(
-        config,
-        messages,
-        max_tokens=MAX_OPTIMIZE_CLEANUP_OUTPUT_TOKENS,
-        timeout=timeout,
-    )
-    text = str(response.get("text") or "").strip()
-    parsed = _json_object_from_text(text)
-    final_text = (
-        _structured_optimize_cleanup_text(parsed, local_prompt=trimmed)
-        if parsed
-        else _structured_optimize_cleanup_text({"next_action": text}, local_prompt=trimmed)
-    )
-    return {
-        "workflow": "optimize_cleanup",
-        "status": "used",
-        "mode": response.get("mode"),
-        "provider": response.get("provider"),
-        "model": response.get("model"),
-        "input_chars": len(trimmed),
-        "output_chars": len(final_text),
-        "source_access": config.get("source_access") or "metadata_only",
-        "text": final_text[:MAX_OPTIMIZE_CLEANUP_PROMPT_CHARS],
-        "structured": parsed or {},
-        "usage": response.get("usage") if isinstance(response.get("usage"), dict) else {},
-    }
+    return _compose(config, _OPTIMIZE_CLEANUP_SPEC, local_prompt, timeout=timeout)

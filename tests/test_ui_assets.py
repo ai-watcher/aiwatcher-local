@@ -481,12 +481,11 @@ class TrimmedHomeTest(unittest.TestCase):
 
     def test_home_is_the_ambient_surface(self):
         self.assertIn('id="ambient"', self.home)
-        # The bubble is a receipt slot now: hidden until a Fresh Start is copied,
-        # never an alert. The alert it used to carry is what the ambient surface
-        # says once instead of five times.
-        self.assertIn('id="handoffBubble"', self.home)
-        self.assertIn("hidden", self.home)
+        # The receipt bubble is gone with the silent-copy path it served; the
+        # drawer shows the receipt after a copy, and Home carries no alert.
+        self.assertNotIn('id="handoffBubble"', self.home)
         self.assertNotIn("renderHandoffBubble", self.js)
+        self.assertNotIn("renderHandoffCopied", self.js)
 
     def test_the_cut_sections_stay_cut(self):
         for heading in ("What needs attention", "Latest AI work",
@@ -2854,6 +2853,61 @@ class CorrectnessSweepTest(unittest.TestCase):
         self.assertIn('aria-pressed="false"', self.html)
         handler = js_function_source(self.js, "quietFreshStartReminders")
         self.assertIn("aria-pressed", handler)
+
+
+class AiAssistDrawerTest(unittest.TestCase):
+    """Guards two drawer regressions from the AI Assist review."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+
+    def _fn(self, name: str) -> str:
+        start = self.js.index(f"async function {name}(")
+        end = self.js.index("\nasync function ", start + 1)
+        return self.js[start:end]
+
+    def test_a_cached_ai_handoff_is_reported_as_success(self):
+        # The server answers status "cached" on an evidence-hash hit. The
+        # drawer used to treat anything but "used" as a failure and show a red
+        # "AI Assist was not used" toast over a perfectly good brief.
+        fn = self._fn("improveFreshStartWithAiAssist")
+        self.assertIn("result.status === 'cached'", fn)
+        self.assertLess(fn.index("result.status === 'cached'"), fn.index("AI Assist was not used"))
+
+    def test_compose_actions_send_the_users_confirmation_to_the_server(self):
+        # The server refuses a model call without `confirmed: true` while "Ask
+        # before every AI Assist run" is on; the confirm() result is what it
+        # gets, not a hard-coded true.
+        for name in ("improveFreshStartWithAiAssist", "composeOptimizeCleanupPrompt"):
+            with self.subTest(fn=name):
+                fn = self._fn(name)
+                self.assertIn("confirmed = window.confirm(", fn)
+                self.assertNotIn("confirmed: true", fn)
+                self.assertTrue("payload.confirmed = confirmed" in fn or "confirmed,\n" in fn)
+
+    def test_an_attached_runtime_still_leaves_a_copy_that_only_copies(self):
+        # The primary copies and opens the old workspace. Leaving that tool
+        # for another one needs a copy that does nothing else.
+        fn = self.js[self.js.index("function renderHandoff(capsule)"):]
+        fn = fn[:fn.index("\nfunction ", 1)]
+        # The brief-focus button under the textarea never launches anything,
+        # whatever is attached; the primary in the status card is the one that
+        # may open the workspace.
+        self.assertIn("copyFreshStartFromDrawer('${esc(capsule.session_id)}', false)\">Copy brief</button>", fn)
+        self.assertNotIn("${canOpenRuntime ? 'true' : 'false'}", fn)
+
+    def test_optimize_cards_carry_one_cleanup_prompt(self):
+        self.assertNotIn("item.checklist", self.js)
+        self.assertNotIn("Safe review steps copied", self.js)
+
+    def test_home_tile_does_not_toast_success_over_an_error_drawer(self):
+        # openHandoff renders "session not found" into the drawer and returns
+        # normally; the caller must look at the capsule before celebrating.
+        self.assertIn("return capsule;", self._fn("openHandoff"))
+        fn = self._fn("startFreshFromBubble")
+        self.assertIn("capsule.error", fn)
+        self.assertLess(fn.index("capsule.error"), fn.index("Fresh Start brief opened"))
 
 
 if __name__ == "__main__":

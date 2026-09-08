@@ -227,35 +227,100 @@ class DashboardServeTests(unittest.TestCase):
                 thread.join(timeout=5)
                 server.server_close()
 
+    def _post_ai_assist(self, path: str, body: dict, headers: dict | None = None):
+        """POST to an AI Assist route with the builders stubbed; return (status, body, builder)."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                server, thread, base = self._serve_one()
+                extra = headers(base) if callable(headers) else (headers or {})
+                http_request = request.Request(
+                    f"{base}{path}",
+                    data=json.dumps(body).encode("utf-8"),
+                    headers={"Content-Type": "application/json", **extra},
+                    method="POST",
+                )
+                stub = {"session_id": "sess-1", "candidate": {}, "ok": True}
+                with (
+                    patch.object(ui, "build_ai_assisted_handoff_detail", return_value=stub) as handoff,
+                    patch.object(ui, "build_ai_assisted_optimize_cleanup_prompt", return_value=stub) as optimize,
+                ):
+                    try:
+                        try:
+                            with request.urlopen(http_request, timeout=5) as response:
+                                return response.status, json.loads(response.read().decode("utf-8")), (handoff, optimize)
+                        except error.HTTPError as raised:
+                            return raised.code, json.loads(raised.read().decode("utf-8")), (handoff, optimize)
+                    finally:
+                        thread.join(timeout=5)
+                        server.server_close()
+
     def test_handoff_ai_assist_post_reaches_builder_with_prompt_opt_in(self) -> None:
-        server, thread, base = self._serve_one()
-        payload = json.dumps({
+        status, body, (builder, _) = self._post_ai_assist("/api/handoff-ai-assist", {
             "session_id": "sess-1",
             "target": "codex",
             "prompt": True,
             "type": "coding",
             "objective": "Continue the AI Assist handoff.",
-        }).encode("utf-8")
-        http_request = request.Request(
-            f"{base}/api/handoff-ai-assist",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with patch.object(ui, "build_ai_assisted_handoff_detail", return_value={"session_id": "sess-1", "ok": True}) as builder:
-            try:
-                with request.urlopen(http_request, timeout=5) as response:
-                    body = json.loads(response.read().decode("utf-8"))
-            finally:
-                thread.join(timeout=5)
-                server.server_close()
+            "confirmed": True,
+        })
 
+        self.assertEqual(status, 200)
         self.assertTrue(body["ok"])
         builder.assert_called_once()
         args, kwargs = builder.call_args
         self.assertEqual(args[:4], ("sess-1", 30, "codex", True))
         self.assertEqual(kwargs["handoff_type"], "coding")
         self.assertEqual(kwargs["objective"], "Continue the AI Assist handoff.")
+
+    def test_ai_assist_routes_refuse_a_model_call_without_confirmation(self) -> None:
+        # "Ask before every AI Assist run" is on by default. A browser confirm()
+        # dialog is not a server-side check, so a POST that skips it is refused.
+        status, body, (handoff, optimize) = self._post_ai_assist(
+            "/api/handoff-ai-assist", {"session_id": "sess-1"},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("confirmation", body["error"])
+        handoff.assert_not_called()
+
+        status, body, (handoff, optimize) = self._post_ai_assist(
+            "/api/optimize-ai-assist", {"candidate_id": "sessions:/repo/app"},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("confirmation", body["error"])
+        optimize.assert_not_called()
+
+    def test_ai_assist_routes_skip_confirmation_when_the_setting_is_off(self) -> None:
+        with patch.object(ui, "ai_assist_config", return_value={"require_confirmation": False}):
+            status, body, (_, optimize) = self._post_ai_assist(
+                "/api/optimize-ai-assist", {"candidate_id": "sessions:/repo/app"},
+            )
+        self.assertEqual(status, 200)
+        optimize.assert_called_once()
+
+    def test_ai_assist_routes_refuse_pages_from_other_localhost_origins(self) -> None:
+        # Together these routes can point the provider at any URL and then send
+        # a brief there with the stored bearer key. The loopback CORS policy
+        # that trusts every localhost port for reads must not extend to them.
+        for path, body in (
+            ("/api/ai-assist-config", {"mode": "cloud", "provider": "openai_compatible", "base_url": "https://evil.example/v1"}),
+            ("/api/handoff-ai-assist", {"session_id": "sess-1", "confirmed": True}),
+            ("/api/optimize-ai-assist", {"candidate_id": "sessions:/repo/app", "confirmed": True}),
+        ):
+            with self.subTest(path=path):
+                status, _, (handoff, optimize) = self._post_ai_assist(path, body, {"Origin": "http://localhost:3000"})
+                self.assertEqual(status, 403)
+                handoff.assert_not_called()
+                optimize.assert_not_called()
+
+    def test_ai_assist_routes_accept_their_own_origin(self) -> None:
+        status, _, (_, optimize) = self._post_ai_assist(
+            "/api/optimize-ai-assist",
+            {"candidate_id": "sessions:/repo/app", "confirmed": True},
+            lambda base: {"Origin": base},
+        )
+        self.assertEqual(status, 200)
+        optimize.assert_called_once()
 
     def test_update_status_endpoint_reports_source_updates(self) -> None:
         server, thread, base = self._serve_one()
@@ -789,7 +854,6 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn('data-view="setup"', ui.HTML)
         self.assertIn("Needs action", ui.HTML)
         self.assertIn("Every row says what AIWatcher knows", ui.HTML)
-        self.assertIn('id="handoffBubble"', ui.HTML)
         self.assertIn('id="handoffDecisionRows"', ui.HTML)
         # The standalone coverage view is gone; Settings holds the one copy.
         self.assertIn('id="coverageRowsSettings"', ui.HTML)
@@ -883,9 +947,11 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("/api/companion-skip", ui.HTML)
         self.assertIn("markFreshStartReceiptsViewed", ui.HTML)
         self.assertIn("quietFreshStartReminders", ui.HTML)
-        self.assertIn("handoffDecisionBubble", ui.HTML)
-        self.assertIn("Fresh Start brief copied from the session review.", ui.HTML)
-        self.assertIn("renderHandoffCopied", ui.HTML)
+        # The Home tile opens the drawer now; the copy-then-bubble helpers that
+        # served the old silent-copy path are gone rather than orphaned.
+        self.assertNotIn("handoffDecisionBubble", ui.HTML)
+        self.assertNotIn("renderHandoffCopied", ui.HTML)
+        self.assertNotIn('id="handoffBubble"', ui.HTML)
         self.assertIn("Fresh Start ready", ui.HTML)
         self.assertIn("Fresh Start receipt saved", ui.HTML)
         self.assertIn("Snooze all 48h", ui.HTML)
@@ -2565,20 +2631,21 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("~780.0k context", inventory["top"]["activity_summary"])
         self.assertIn("why_inactive", inventory["top"])
         self.assertEqual(inventory["top"]["action_label"], "Copy cleanup prompt")
-        self.assertIn("AIWatcher Optimize cleanup prompt", inventory["top"]["checklist"])
-        self.assertIn("Full path: /repo/app", inventory["top"]["checklist"])
-        self.assertIn("Signal: 3 sessions", inventory["top"]["checklist"])
-        self.assertIn("Safe to archive or clean up", inventory["top"]["checklist"])
-        self.assertIn("Keep active", inventory["top"]["checklist"])
-        self.assertIn("Unknown", inventory["top"]["checklist"])
-        self.assertIn("Do not delete files", inventory["top"]["checklist"])
-        self.assertIn("Do not stop any running process", inventory["top"]["checklist"])
-        self.assertIn("latest branch, PR, commit, or handoff receipt", inventory["top"]["checklist"])
-        self.assertIn("/repo/app", inventory["top"]["checklist"])
-        self.assertIn("cleanup_prompt", inventory["top"])
-        self.assertIn("Full path: /repo/app", inventory["top"]["cleanup_prompt"])
-        self.assertIn("Tool: codex-cli", inventory["top"]["cleanup_prompt"])
-        self.assertIn("Return these buckets", inventory["top"]["cleanup_prompt"])
+        prompt = inventory["top"]["cleanup_prompt"]
+        # One prompt per candidate; the separate "checklist" copy that drifted
+        # from it is gone.
+        self.assertNotIn("checklist", inventory["top"])
+        self.assertIn("AIWatcher Optimize cleanup prompt", prompt)
+        self.assertIn("Full path: /repo/app", prompt)
+        self.assertIn("Signal: 3 sessions", prompt)
+        self.assertIn("Safe to archive or clean up", prompt)
+        self.assertIn("Keep active", prompt)
+        self.assertIn("Unknown", prompt)
+        self.assertIn("Do not delete files", prompt)
+        self.assertIn("Do not stop or kill any running process", prompt)
+        self.assertIn("latest branch, PR, commit, or handoff receipt", prompt)
+        self.assertIn("Tool: codex-cli", prompt)
+        self.assertIn("Return these buckets", prompt)
         self.assertIn("evidence_hash", inventory["top"])
 
     def test_optimize_inventory_surfaces_stale_runtime_review_plan(self) -> None:
@@ -2603,11 +2670,11 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("prompt/source content", inventory["top"]["privacy_note"])
         self.assertIn("Run: aiwatcher processes --stale-only", inventory["top"]["safe_review_steps"])
         self.assertIn("before-minus-after local memory signal", " ".join(inventory["top"]["safe_review_steps"]))
-        self.assertIn("Reward: Potential local reward", inventory["top"]["checklist"])
-        self.assertIn("aiwatcher processes --stale-only", inventory["top"]["checklist"])
-        self.assertIn("Unknown", inventory["top"]["checklist"])
+        self.assertIn("Reward: Potential local reward", inventory["top"]["cleanup_prompt"])
+        self.assertIn("aiwatcher processes --stale-only", inventory["top"]["cleanup_prompt"])
+        self.assertIn("Unknown", inventory["top"]["cleanup_prompt"])
         self.assertIn("Copy safe review steps", inventory["top"]["action_label"])
-        self.assertIn("Do not kill processes", inventory["top"]["cleanup_prompt"])
+        self.assertIn("Do not stop or kill any running process", inventory["top"]["cleanup_prompt"])
 
     def test_optimize_inventory_surfaces_old_agent_scratch_workspace(self) -> None:
         now = datetime.now(timezone.utc)
@@ -2633,8 +2700,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("4+ hours", inventory["top"]["why_inactive"])
         self.assertIn("local temp/scratch path shape", inventory["top"]["evidence"])
         self.assertEqual(inventory["top"]["action_label"], "Copy cleanup prompt")
-        self.assertIn("disposable scratch space", inventory["top"]["checklist"])
-        self.assertIn("moving anything useful", inventory["top"]["checklist"])
+        self.assertIn("disposable scratch space", inventory["top"]["cleanup_prompt"])
+        self.assertIn("moving anything useful", inventory["top"]["cleanup_prompt"])
 
     def test_optimize_inventory_skips_recent_agent_scratch_workspace(self) -> None:
         now = datetime.now(timezone.utc)
@@ -2786,6 +2853,225 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("provider rejected the API key", result["ai_assist_result"]["reason"])
         self.assertNotIn("sk-secret-value", json.dumps(result))
         self.assertNotIn("sk-secret-value", json.dumps(runs))
+
+    def _cleanup_candidate(self) -> dict:
+        candidate = {
+            "id": "sessions:/repo/app",
+            "kind": "session_cluster",
+            "title": "Archive completed or stale chats",
+            "project": "repo/app",
+            "project_full": "/repo/app",
+            "summary": "Three inactive sessions are carrying context.",
+            "evidence_label": "Observed",
+            "evidence": "Observed from local session timestamps.",
+            "impact_label": "~780.0k context at risk",
+            "session_count": 3,
+            "tool": "codex-cli",
+            "last_activity": "2026-09-05T12:00:00+00:00",
+        }
+        candidate["cleanup_prompt"] = ui._optimize_candidate_prompt(candidate)
+        candidate["evidence_hash"] = ui._optimize_candidate_evidence_hash(candidate)
+        return candidate
+
+    def test_ai_assist_transient_failure_keeps_a_verified_key_verified(self) -> None:
+        # A timeout says nothing about the key. Before, any failure that was not
+        # a 401/403 rewrote the check as "untested", so a Wi-Fi drop demoted a
+        # verified key to "Configured, not tested".
+        candidate = self._cleanup_candidate()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}, clear=True),
+                patch.object(ui, "build_summary_cached", return_value={"optimize": {"candidates": [candidate]}}),
+                patch.object(
+                    ui,
+                    "compose_optimize_cleanup_prompt",
+                    side_effect=ui.AiAssistUnavailable("AI Assist provider call failed: timed out"),
+                ),
+            ):
+                ui.record_ai_assist_config({"mode": "cloud", "provider": "openai", "api_key": "sk-secret-value"})
+                ui.record_ai_assist_provider_check("openai", "verified", message="Last AI Assist call succeeded.")
+                result = ui.build_ai_assisted_optimize_cleanup_prompt("sessions:/repo/app", days=7)
+                config = ui.ai_assist_config()
+
+        self.assertEqual(result["ai_assist_result"]["status"], "failed")
+        self.assertIn("timed out", result["ai_assist_result"]["reason"])
+        self.assertEqual(config["provider_checks"]["openai"]["status"], "verified")
+        self.assertEqual(result["ai_assist"]["status_label"], "Ready")
+
+    def test_ai_assist_auto_provider_records_the_rejected_key_it_resolved_to(self) -> None:
+        # The dashboard's cloud default is provider "auto". The exception now
+        # carries the provider that actually answered, so the rejection lands
+        # on that key and Settings can show "Key rejected".
+        candidate = self._cleanup_candidate()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}, clear=True),
+                patch.object(ui, "build_summary_cached", return_value={"optimize": {"candidates": [candidate]}}),
+                patch.object(
+                    ui,
+                    "compose_optimize_cleanup_prompt",
+                    side_effect=ui.AiAssistUnavailable(
+                        "AI Assist provider rejected the API key or credentials (HTTP 401).",
+                        status_code=401,
+                        provider_code="invalid_api_key",
+                        provider="openai",
+                    ),
+                ),
+            ):
+                ui.record_ai_assist_config({"mode": "cloud", "provider": "openai", "api_key": "sk-secret-value"})
+                ui.record_ai_assist_config({"mode": "cloud", "provider": "auto"})
+                result = ui.build_ai_assisted_optimize_cleanup_prompt("sessions:/repo/app", days=7)
+                config = ui.ai_assist_config()
+
+        self.assertEqual(config["provider"], "auto")
+        self.assertEqual(config["provider_checks"]["openai"]["status"], "failed")
+        self.assertEqual(result["ai_assist"]["status_label"], "Key rejected")
+        self.assertFalse(result["ai_assist"]["ready"])
+
+    def test_ai_assist_unexpected_exception_becomes_a_failed_receipt(self) -> None:
+        # A surprise from a local model server used to escape do_POST and drop
+        # the connection with no response and no receipt.
+        candidate = self._cleanup_candidate()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}, clear=True),
+                patch.object(ui, "build_summary_cached", return_value={"optimize": {"candidates": [candidate]}}),
+                patch.object(ui, "compose_optimize_cleanup_prompt", side_effect=AttributeError("'list' object has no attribute 'get'")),
+            ):
+                ui.record_ai_assist_config({"mode": "cloud", "provider": "openai", "api_key": "sk-secret-value"})
+                result = ui.build_ai_assisted_optimize_cleanup_prompt("sessions:/repo/app", days=7)
+                runs = recent_ai_assist_runs(limit=1)
+
+        self.assertEqual(result["ai_assist_result"]["status"], "failed")
+        self.assertIn("AI Assist failed unexpectedly (AttributeError)", result["ai_assist_result"]["reason"])
+        self.assertEqual(runs[0]["status"], "failed")
+        self.assertEqual(runs[0]["evidence_hash"], candidate["evidence_hash"])
+        self.assertIn("Do not stop or kill any running process", result["prompt"])
+
+    def test_ai_assist_daily_cap_stops_cloud_calls_once_reached(self) -> None:
+        # The cap is a budget, not a switch: priced cloud runs from today are
+        # summed from receipts and the next call is refused at the cap.
+        candidate = self._cleanup_candidate()
+        composed = {
+            "status": "used", "mode": "cloud", "provider": "openai", "model": "gpt-4o-mini",
+            "input_chars": 700, "output_chars": 320, "source_access": "metadata_only",
+            "text": "AIWatcher AI-assisted Optimize cleanup prompt\n\nNext action\n- Review only.",
+            "structured": {}, "usage": {"prompt_tokens": 1_000_000, "completion_tokens": 0},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}, clear=True),
+                patch.object(ui, "build_summary_cached", return_value={"optimize": {"candidates": [candidate]}}),
+                patch.object(ui, "compose_optimize_cleanup_prompt", return_value=composed) as compose,
+            ):
+                ui.record_ai_assist_config({
+                    "mode": "cloud", "provider": "openai", "api_key": "sk-secret", "max_daily_usd": 0.10,
+                })
+                first = ui.build_ai_assisted_optimize_cleanup_prompt("sessions:/repo/app", days=7)
+                spend = ui.ai_assist_day_spend()
+                # Different evidence so the second click is not a cache hit.
+                candidate["evidence_hash"] = "other"
+                second = ui.build_ai_assisted_optimize_cleanup_prompt("sessions:/repo/app", days=7)
+                runs = recent_ai_assist_runs(limit=3)
+
+        self.assertEqual(first["ai_assist_result"]["status"], "used")
+        self.assertAlmostEqual(spend["spent_usd"], 0.15, places=4)  # 1M gpt-4o-mini input tokens
+        self.assertEqual(second["ai_assist_result"]["status"], "skipped")
+        self.assertIn("daily cap reached: $0.15 of $0.10", second["ai_assist_result"]["reason"])
+        self.assertEqual(compose.call_count, 1)
+        self.assertEqual(runs[0]["status"], "skipped")
+        self.assertAlmostEqual(runs[1]["cost_usd"], 0.15, places=4)
+        self.assertTrue(runs[1]["priced"])
+
+    def test_ai_assist_daily_cap_names_runs_it_could_not_price(self) -> None:
+        candidate = self._cleanup_candidate()
+        composed = {
+            "status": "used", "mode": "cloud", "provider": "openai_compatible", "model": "mystery-9b",
+            "input_chars": 700, "output_chars": 320, "source_access": "metadata_only",
+            "text": "AIWatcher AI-assisted Optimize cleanup prompt", "structured": {},
+            "usage": {"prompt_tokens": 500, "completion_tokens": 50},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}, clear=True),
+                patch.object(ui, "build_summary_cached", return_value={"optimize": {"candidates": [candidate]}}),
+                patch.object(ui, "compose_optimize_cleanup_prompt", return_value=composed),
+            ):
+                ui.record_ai_assist_config({
+                    "mode": "cloud", "provider": "openai_compatible", "base_url": "https://llm.example/v1",
+                    "api_key": "sk-secret", "max_daily_usd": 0.10,
+                })
+                result = ui.build_ai_assisted_optimize_cleanup_prompt("sessions:/repo/app", days=7)
+                spend = ui.ai_assist_day_spend()
+                runs = recent_ai_assist_runs(limit=1)
+
+        self.assertEqual(result["ai_assist_result"]["status"], "used")
+        self.assertIsNone(runs[0]["cost_usd"])
+        self.assertFalse(runs[0]["priced"])
+        self.assertEqual(spend["unpriced_runs"], 1)
+        self.assertEqual(spend["spent_usd"], 0.0)
+
+    def test_ai_assist_config_default_view_carries_no_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}, clear=True):
+                saved = ui.record_ai_assist_config({"mode": "cloud", "provider": "openai", "api_key": "sk-secret-value"})
+                public = ui.ai_assist_config()
+                private = ui.ai_assist_config(with_secrets=True)
+                status = ui.build_ai_assist_status(public)
+                settings = ui.dashboard_settings()
+
+        for view in (saved, public, settings["ai_assist"], status):
+            self.assertNotIn("sk-secret-value", json.dumps(view))
+        self.assertNotIn("api_keys", public)
+        self.assertTrue(public["stored_keys"]["openai"])
+        self.assertEqual(private["api_keys"], {"openai": "sk-secret-value"})
+        self.assertTrue(status["config"]["stored_keys"]["openai"])
+        self.assertTrue(status["cloud_providers"][0]["stored"])
+
+    def test_ai_assist_cache_does_not_replay_another_provider(self) -> None:
+        # Same candidate, same evidence, but the user switched from a local
+        # model to a cloud key in between. The second compose must call the
+        # new provider rather than serve the local model's text as a hit.
+        candidate = self._cleanup_candidate()
+        local_config = {
+            "mode": "local", "provider": "auto", "max_daily_usd": 0.25,
+            "source_access": "metadata_only", "enabled_workflows": ["optimize_cleanup"],
+        }
+        cloud_config = {
+            "mode": "cloud", "provider": "openai", "max_daily_usd": 0.25,
+            "source_access": "metadata_only", "enabled_workflows": ["optimize_cleanup"],
+            "api_keys": {"openai": "sk-secret"},
+        }
+        composed = {
+            "status": "used", "mode": "local", "provider": "ollama", "model": "llama3.2",
+            "input_chars": 700, "output_chars": 320, "source_access": "metadata_only",
+            "text": "AIWatcher AI-assisted Optimize cleanup prompt\n\nNext action\n- Review only.",
+            "structured": {}, "usage": {},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "build_summary_cached", return_value={"optimize": {"candidates": [candidate]}}),
+                patch.object(ui, "build_ai_assist_status", return_value={"ready": True, "mode": "cloud", "config": {}}),
+                patch.object(ui, "compose_optimize_cleanup_prompt", return_value=composed) as compose,
+            ):
+                with patch.object(ui, "ai_assist_config", return_value=local_config):
+                    first = ui.build_ai_assisted_optimize_cleanup_prompt("sessions:/repo/app", days=7)
+                    again = ui.build_ai_assisted_optimize_cleanup_prompt("sessions:/repo/app", days=7)
+                with patch.object(ui, "ai_assist_config", return_value=cloud_config):
+                    switched = ui.build_ai_assisted_optimize_cleanup_prompt("sessions:/repo/app", days=7)
+
+        self.assertEqual(first["ai_assist_result"]["status"], "used")
+        self.assertEqual(again["ai_assist_result"]["status"], "cached")
+        self.assertEqual(switched["ai_assist_result"]["status"], "used")
+        self.assertEqual(compose.call_count, 2)
 
     def test_detected_tools_are_listed_without_measured_spend(self) -> None:
         rows = [{
