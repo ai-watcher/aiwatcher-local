@@ -492,6 +492,7 @@ class DashboardServeTests(unittest.TestCase):
         know where the dashboard actually landed after auto-port fallback,
         not just assume the requested default -- regression found by
         manually testing this feature against a real fallback port."""
+        cwd_path = Path("/repo/work")
         with (
             patch.object(ui, "find_available_port", return_value=8799),
             patch.object(ui, "ThreadingHTTPServer") as server_cls,
@@ -503,7 +504,7 @@ class DashboardServeTests(unittest.TestCase):
                 "process_cwd": "/repo/work",
             }),
             patch.object(ui.os, "getpid", return_value=321),
-            patch.object(ui.Path, "cwd", return_value=Path("/repo/work")),
+            patch.object(ui.Path, "cwd", return_value=cwd_path),
             patch.object(ui, "record_ui_server") as record_mock,
         ):
             server_cls.return_value.serve_forever.side_effect = KeyboardInterrupt
@@ -516,7 +517,7 @@ class DashboardServeTests(unittest.TestCase):
             source_root="/repo/aiwatcher",
             version="0.1.0",
             pid=321,
-            cwd="/repo/work",
+            cwd=str(cwd_path.resolve()),
         )
 
     def test_companion_skip_and_receipt_view_posts_are_routable(self) -> None:
