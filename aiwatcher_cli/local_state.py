@@ -1035,21 +1035,43 @@ def record_watch_notification(
         _save(data)
 
 
-def record_ui_server(host: str, port: int) -> None:
+def record_ui_server(
+    host: str,
+    port: int,
+    *,
+    install_kind: str | None = None,
+    source_root: str | None = None,
+    version: str | None = None,
+    pid: int | None = None,
+    cwd: str | None = None,
+) -> None:
     """Remember where the local dashboard last actually bound.
 
     `aiwatcher ui` falls back to the next free port when its default is
     taken, so a notification built in a separate `watch` process can't just
-    assume the default port -- it has to look this up instead.
+    assume the default port -- it has to look this up instead. The optional
+    identity fields let `aiwatcher start` avoid reusing an older dashboard
+    launched from a different install path.
     """
     try:
         with _locked_state():
             data = _load()
-            data["ui_server"] = {
+            server = {
                 "host": host,
                 "port": port,
                 "started_at": datetime.now(timezone.utc).isoformat(),
             }
+            if install_kind:
+                server["install_kind"] = install_kind
+            if source_root:
+                server["source_root"] = source_root
+            if version:
+                server["version"] = version
+            if isinstance(pid, int) and pid > 0:
+                server["pid"] = pid
+            if cwd:
+                server["cwd"] = cwd
+            data["ui_server"] = server
             _save(data)
     except OSError:
         pass

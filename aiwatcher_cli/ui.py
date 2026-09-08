@@ -149,7 +149,7 @@ from .scanner import (
     surface_coverage,
 )
 from .local_state import record_update_auto_check, update_auto_check_enabled
-from .updater import apply_updates, check_for_updates, install_kind, installed_source_root
+from .updater import apply_updates, check_for_updates, install_identity, install_kind, installed_source_root
 
 
 MAX_REQUEST_BYTES = 64 * 1024
@@ -7378,10 +7378,12 @@ class UIHandler(BaseHTTPRequestHandler):
             self._send(200, OVERLAY_HTML, "text/html; charset=utf-8")
             return
         if parsed.path == "/api/health":
+            identity = install_identity()
             self._send(200, json.dumps({
                 "service": "aiwatcher-local",
                 "version": __version__,
                 "capabilities": ["preflight", "source-update"],
+                **identity,
             }), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/update-status":
@@ -8257,7 +8259,16 @@ def serve(
             print(f"Port {port} is busy. Using {selected_port} instead.")
 
     server = ThreadingHTTPServer((host, selected_port), UIHandler)
-    record_ui_server(host, selected_port)
+    identity = install_identity()
+    record_ui_server(
+        host,
+        selected_port,
+        install_kind=str(identity.get("install_kind") or ""),
+        source_root=str(identity.get("source_root") or ""),
+        version=str(identity.get("version") or ""),
+        pid=os.getpid(),
+        cwd=str(Path.cwd().resolve()),
+    )
     print(f"AIWatcher Local UI running at http://{host}:{selected_port}")
     print("Private by default. No data leaves this machine unless you configure it. Press Ctrl+C to stop.")
     started_resource = None

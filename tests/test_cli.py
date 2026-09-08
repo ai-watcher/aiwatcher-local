@@ -226,6 +226,81 @@ class StartCommandCliTests(unittest.TestCase):
         ensure_ui.assert_not_called()
         self.assertNotIn("Dashboard UI:", stdout.getvalue())
 
+    def test_existing_dashboard_from_same_install_is_reused(self) -> None:
+        identity = {
+            "install_kind": "package",
+            "source_root": "/venv/site-packages",
+            "version": "0.1.0",
+        }
+        with (
+            patch.object(cli, "local_action_server_available", return_value=True),
+            patch.object(cli, "install_identity", return_value=identity),
+            patch.object(cli, "_running_dashboard_identity", return_value=identity),
+            patch.object(cli, "_watch_ui_base_url", return_value="http://127.0.0.1:8896"),
+            patch.object(cli, "_start_dashboard_server") as start_dashboard,
+        ):
+            url = cli._ensure_dashboard_server(host="127.0.0.1", port=8765, port_attempts=20)
+
+        self.assertEqual(url, "http://127.0.0.1:8896/")
+        start_dashboard.assert_not_called()
+
+    def test_existing_dashboard_from_different_install_is_replaced(self) -> None:
+        running = {
+            "install_kind": "source",
+            "source_root": "/tmp/aiwatcher-feature-branch",
+            "base_url": "http://127.0.0.1:8896",
+        }
+        current = {
+            "install_kind": "package",
+            "source_root": "/Users/test/.local/pipx/venvs/aiwatcher-cli/site-packages",
+            "version": "0.1.0",
+        }
+        with (
+            patch.object(cli, "local_action_server_available", return_value=True),
+            patch.object(cli, "install_identity", return_value=current),
+            patch.object(cli, "_running_dashboard_identity", return_value=running),
+            patch.object(cli, "get_ui_server", return_value={"host": "127.0.0.1", "port": 8896}),
+            patch.object(cli, "_start_dashboard_server", return_value="http://127.0.0.1:8896/") as start_dashboard,
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            url = cli._ensure_dashboard_server(host="127.0.0.1", port=8765, port_attempts=20)
+
+        self.assertEqual(url, "http://127.0.0.1:8896/")
+        start_dashboard.assert_called_once_with(
+            host="127.0.0.1",
+            port=8896,
+            port_attempts=20,
+            restart=True,
+        )
+        self.assertIn("different install", stdout.getvalue())
+        self.assertIn("/tmp/aiwatcher-feature-branch", stdout.getvalue())
+        self.assertIn("site-packages", stdout.getvalue())
+
+    def test_unidentified_recorded_dashboard_port_is_not_restarted_in_place(self) -> None:
+        current = {
+            "install_kind": "package",
+            "source_root": "/Users/test/.local/pipx/venvs/aiwatcher-cli/site-packages",
+            "version": "0.1.0",
+        }
+        with (
+            patch.object(cli, "local_action_server_available", return_value=True),
+            patch.object(cli, "install_identity", return_value=current),
+            patch.object(cli, "_running_dashboard_identity", return_value=None),
+            patch.object(cli, "get_ui_server", return_value={"host": "127.0.0.1", "port": 8896}),
+            patch.object(cli, "_start_dashboard_server", return_value="http://127.0.0.1:8765/") as start_dashboard,
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            url = cli._ensure_dashboard_server(host="127.0.0.1", port=8765, port_attempts=20)
+
+        self.assertEqual(url, "http://127.0.0.1:8765/")
+        start_dashboard.assert_called_once_with(
+            host="127.0.0.1",
+            port=8765,
+            port_attempts=20,
+            restart=False,
+        )
+        self.assertIn("no longer identifies as AIWatcher", stdout.getvalue())
+
     def test_presence_launcher_reuses_existing_process(self) -> None:
         with (
             patch.object(cli, "_existing_companion_presence_pid", return_value=123),

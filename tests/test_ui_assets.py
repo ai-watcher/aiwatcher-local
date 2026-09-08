@@ -3120,6 +3120,14 @@ class FeatureBranchUpdateBadgeTest(unittest.TestCase):
         self.assertIn("<b>Update target</b>", self.js)
         self.assertIn("max-width: min(360px, 30vw)", self.css)
 
+    def test_update_badge_starts_hidden_until_install_kind_is_known(self):
+        from pathlib import Path
+        from aiwatcher_cli import ui
+        html = (Path(ui.__file__).resolve().parent / "web" / "index.html").read_text(encoding="utf-8")
+        button = html.split('id="updateBanner"', 1)[1].split("</button>", 1)[0]
+        self.assertIn("hidden", button)
+        self.assertIn("banner.hidden = status === 'package'", self.js)
+
     def test_clicking_the_badge_opens_full_details_without_a_success_toast(self):
         handler = js_function_source(self.js, "handleUpdateBannerClick")
         self.assertIn("refreshHeaderUpdate({ fetch: true, quiet: true })", handler)

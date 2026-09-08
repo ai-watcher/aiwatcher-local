@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import Sequence
+
+from . import __version__
 
 
 def installed_source_root() -> Path:
@@ -19,6 +22,17 @@ def install_kind() -> str:
     every poll without touching git or the network.
     """
     return "source" if (installed_source_root() / ".git").exists() else "package"
+
+
+def install_identity() -> dict[str, object]:
+    """Describe the running AIWatcher install without touching git or GitHub."""
+    return {
+        "install_kind": install_kind(),
+        "source_root": str(installed_source_root()),
+        "version": __version__,
+        "pid": os.getpid(),
+        "process_cwd": str(Path.cwd().resolve()),
+    }
 
 
 def package_upgrade_guidance() -> list[dict[str, str]]:

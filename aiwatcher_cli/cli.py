@@ -29,6 +29,8 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
+from urllib import error as urlerror
+from urllib import request as urlrequest
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from .correlate import link_recent_fresh_start_receipts_to_sessions, link_recent_interventions_to_sessions
@@ -149,7 +151,7 @@ from .scanner import (
 )
 from .session_health import analyze_session_health
 from .session_presence import presence_for_session
-from .updater import apply_updates, check_for_updates
+from .updater import apply_updates, check_for_updates, install_identity
 
 
 CLOUD_URL = "https://www.getaiwatcher.com"
@@ -3720,6 +3722,70 @@ def _print_post_update_restart_advice() -> None:
         print(f"- Dashboard: `aiwatcher ui --restart --port {port}` replaces the one at {url}")
 
 
+def _ui_server_base_url(server: dict[str, Any]) -> str:
+    host = str(server.get("host") or "127.0.0.1")
+    if host in ("0.0.0.0", "::", ""):
+        host = "127.0.0.1"
+    port = int(server.get("port") or DEFAULT_UI_PORT)
+    return f"http://{host}:{port}"
+
+
+def _read_dashboard_json(path: str, *, timeout: float = 0.6) -> dict[str, object] | None:
+    try:
+        with urlrequest.urlopen(path, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError, urlerror.URLError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _running_dashboard_identity() -> dict[str, object] | None:
+    server = get_ui_server()
+    if not server:
+        return None
+    base_url = _ui_server_base_url(server)
+    health = _read_dashboard_json(f"{base_url}/api/health")
+    if health and health.get("service") != "aiwatcher-local":
+        return None
+    identity: dict[str, object] = dict(server)
+    verified = bool(health)
+    if health:
+        identity.update({
+            key: value
+            for key, value in health.items()
+            if key in {"install_kind", "source_root", "version", "pid", "process_cwd"}
+        })
+    if not identity.get("install_kind") or not identity.get("source_root"):
+        update = _read_dashboard_json(f"{base_url}/api/update-status?fetch=0")
+        if update and isinstance(update.get("install_kind"), str):
+            verified = True
+            identity["install_kind"] = update.get("install_kind")
+            identity["source_root"] = update.get("repo") or identity.get("source_root")
+            identity["process_cwd"] = update.get("process_cwd") or identity.get("process_cwd")
+    if not verified and not (identity.get("install_kind") and identity.get("source_root")):
+        return None
+    identity["base_url"] = base_url
+    return identity
+
+
+def _same_install_identity(running: dict[str, object] | None, current: dict[str, object]) -> bool:
+    if not running:
+        return False
+    running_kind = str(running.get("install_kind") or "")
+    current_kind = str(current.get("install_kind") or "")
+    running_root = str(running.get("source_root") or "")
+    current_root = str(current.get("source_root") or "")
+    return bool(running_kind and current_kind and running_kind == current_kind and running_root and running_root == current_root)
+
+
+def _dashboard_identity_label(identity: dict[str, object] | None) -> str:
+    if not identity:
+        return "unknown install"
+    kind = str(identity.get("install_kind") or "unknown")
+    root = str(identity.get("source_root") or identity.get("repo") or "unknown path")
+    return f"{kind} at {root}"
+
+
 def _ensure_dashboard_server(
     *,
     host: str = "127.0.0.1",
@@ -3733,7 +3799,37 @@ def _ensure_dashboard_server(
     managing two terminals.
     """
     if local_action_server_available():
-        return f"{_watch_ui_base_url()}/"
+        current_identity = install_identity()
+        running_identity = _running_dashboard_identity()
+        if _same_install_identity(running_identity, current_identity):
+            return f"{_watch_ui_base_url()}/"
+        if running_identity is None:
+            print("Found a recorded dashboard port, but it no longer identifies as AIWatcher. Starting a fresh dashboard.")
+            return _start_dashboard_server(host=host, port=port, port_attempts=port_attempts, restart=False)
+        server = get_ui_server() or {}
+        restart_port = int(server.get("port") or port)
+        print(
+            "Replacing an existing AIWatcher dashboard from a different install: "
+            f"{_dashboard_identity_label(running_identity)} -> {_dashboard_identity_label(current_identity)}."
+        )
+        return _start_dashboard_server(
+            host=str(server.get("host") or host),
+            port=restart_port,
+            port_attempts=port_attempts,
+            restart=True,
+        )
+
+    return _start_dashboard_server(host=host, port=port, port_attempts=port_attempts, restart=False)
+
+
+def _start_dashboard_server(
+    *,
+    host: str,
+    port: int,
+    port_attempts: int,
+    restart: bool,
+) -> str | None:
+    current_identity = install_identity()
 
     log_path = Path(tempfile.gettempdir()) / "aiwatcher-ui.log"
     command = [
@@ -3749,6 +3845,8 @@ def _ensure_dashboard_server(
         str(max(1, port_attempts)),
         "--no-watch",
     ]
+    if restart:
+        command.append("--restart")
     env = os.environ.copy()
     package_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
     env["PYTHONPATH"] = package_root + os.pathsep + env.get("PYTHONPATH", "")
@@ -3769,7 +3867,7 @@ def _ensure_dashboard_server(
         return None
 
     for _ in range(30):
-        if local_action_server_available():
+        if local_action_server_available() and _same_install_identity(_running_dashboard_identity(), current_identity):
             return f"{_watch_ui_base_url()}/"
         time_module.sleep(0.1)
 
