@@ -289,6 +289,31 @@ workflow that uses it.
 See [docs/AIWATCHER_LOCAL.md](docs/AIWATCHER_LOCAL.md) for the full privacy and
 coverage boundary.
 
+## Laptop Footprint
+
+AIWatcher is a Python package with static dashboard assets, not a native
+background daemon. It does nothing in the background until you run
+`aiwatcher start`, `aiwatcher companion start`, or install login autostart.
+
+Measured from this repo on macOS with Python 3.14:
+
+| Area | Observed footprint |
+| --- | --- |
+| Wheel artifact | 530 KB |
+| Installed AIWatcher package | 3.9 MB, excluding the Python/pipx environment |
+| Python dependencies | None declared by AIWatcher |
+| Idle dashboard process | Usually tens of MB RSS, near 0% CPU when idle |
+| Dashboard + Companion | Near 0% CPU between scans; short scan spikes depend on local history size |
+
+On the measured machine, a Companion startup scan over recent local AI history
+briefly used more CPU and memory, then settled back near idle. Larger local
+Claude/Codex/Cursor histories can make that scan peak higher. The default
+Companion interval is 30 seconds, and you can stop it any time:
+
+```sh
+aiwatcher companion stop
+```
+
 ## Common Commands
 
 | Command | Purpose |
