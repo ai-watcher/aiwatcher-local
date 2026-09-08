@@ -1354,7 +1354,7 @@ function classifyUpdateStatus(data) {
   if (data.install_kind && data.install_kind !== 'source') return 'package';
   // A contributor on a feature branch is not blocked; they are somewhere the
   // updater does not apply. Quiet, like the package state, not a warning.
-  if (data.ok && data.update_available && data.on_branch === false) return 'branch';
+  if (data.ok && data.on_branch === false) return 'branch';
   if (data.update_available && !data.can_apply) return 'blocked';
   if (!data.ok) return 'error';
   if (data.update_available && data.can_apply) return 'available';
@@ -1505,7 +1505,7 @@ function renderUpdateStatus(update) {
     : '';
   const action = data.can_apply
     ? '<p>Apply will fast-forward this clean checkout and restart the dashboard. A running Companion keeps the old code until <code>aiwatcher companion stop</code>, then <code>aiwatcher companion start</code>.</p>'
-    : data.update_available && data.on_branch === false
+    : data.on_branch === false
       ? `<p>Updates apply on <code>${esc(data.branch || 'main')}</code>. Check it out to apply from here; your branch is left alone.</p>`
       : data.update_available
         ? '<p>Resolve local changes or branch divergence before applying from the UI.</p>'
@@ -5729,7 +5729,8 @@ async function load(resetDetail = true, forceRefresh = false) {
     // A render fault must not read as fresh data. Say the screen is stale, and
     // put the reason somewhere a developer can find it.
     console.error('AIWatcher: could not render the dashboard', error);
-    showToast('Refresh failed. Showing the data already on screen.', 'error');
+    const detail = error && error.message ? ` ${String(error.message).slice(0, 160)}` : '';
+    showToast(`Refresh failed.${detail} Showing the data already on screen.`, 'error');
   } finally {
     if (refreshButton) {
       refreshButton.disabled = false;

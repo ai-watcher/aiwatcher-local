@@ -149,11 +149,17 @@ def check_for_updates(
         "update_available": behind > 0,
         "can_apply": behind > 0 and on_branch and ahead == 0 and not dirty,
     })
-    if behind == 0:
-        payload["message"] = "Already up to date."
-    elif not on_branch:
+    if not on_branch:
         where = f"on {checked_out}" if checked_out else "on a detached HEAD"
-        payload["message"] = f"{behind} update(s) available for {branch}, but this checkout is {where}."
+        if behind == 0:
+            payload["message"] = (
+                f"origin/{branch} is up to date, but this source checkout is {where}. "
+                f"UI updates apply only while checked out on {branch}."
+            )
+        else:
+            payload["message"] = f"{behind} update(s) available for {branch}, but this checkout is {where}."
+    elif behind == 0:
+        payload["message"] = "Already up to date."
     elif ahead:
         payload["message"] = f"{behind} update(s) available, but this checkout has {ahead} local commit(s)."
     elif dirty:
