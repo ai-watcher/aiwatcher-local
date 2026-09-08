@@ -1365,7 +1365,10 @@ function updateBannerLabel(status, data) {
   if (status === 'checking') return 'Checking...';
   if (status === 'available') return `${count || ''} update${count === 1 ? '' : 's'} available`.trim();
   if (status === 'blocked') return `${count || ''} update${count === 1 ? '' : 's'} blocked`.trim();
-  if (status === 'branch') return 'Source checkout';
+  if (status === 'branch') {
+    if (data && data.update_available) return `${count || ''} update${count === 1 ? '' : 's'} available`.trim();
+    return 'Up to date';
+  }
   if (status === 'current') return 'Up to date';
   if (status === 'package') return 'Package install';
   if (status === 'error') return 'Update check failed';
@@ -1405,6 +1408,7 @@ function updateBannerTitle(status, data) {
 function updateLocationLabel(data) {
   if (!data) return 'Source unknown';
   if (data.install_kind && data.install_kind !== 'source') return 'Installed package';
+  if (data.ok && data.on_branch === false) return `On ${updateBranchLabel(data)}`;
   const name = updateSourceName(data);
   return name === 'Source unknown' ? name : `Path: ${name}`;
 }
