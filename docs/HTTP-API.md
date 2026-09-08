@@ -134,6 +134,9 @@ needed to keep the browser fallback consistent with the native companion.
 floating Companion presence control; it is intentionally content-free and does
 not expose prompt or source text. `/api/companion-scan` forces the companion to
 refresh local watch evidence without waiting for the next polling interval.
+`/api/health` reports the running dashboard's install kind, source root,
+process id, version, and launch directory so `aiwatcher start` can avoid
+reusing a dashboard from another checkout or package install.
 `/api/handoff-basic` returns a copyable Fresh Start brief without waiting for
 timeline, git, or prompt enrichment; `/api/handoff` returns the enriched drawer
 payload. `/api/update-status` checks the installed source checkout

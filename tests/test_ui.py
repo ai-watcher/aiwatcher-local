@@ -279,6 +279,28 @@ class DashboardServeTests(unittest.TestCase):
         self.assertEqual(body["process_cwd"], str(Path.cwd().resolve()))
         check.assert_called_once_with(fetch=True)
 
+    def test_health_endpoint_reports_running_install_identity(self) -> None:
+        server, thread, base = self._serve_one()
+        identity = {
+            "install_kind": "package",
+            "source_root": "/venv/site-packages",
+            "version": "0.1.0",
+            "pid": 123,
+            "process_cwd": "/repo/app",
+        }
+        with patch.object(ui, "install_identity", return_value=identity):
+            try:
+                with request.urlopen(f"{base}/api/health", timeout=5) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
+        self.assertEqual(body["service"], "aiwatcher-local")
+        self.assertEqual(body["install_kind"], "package")
+        self.assertEqual(body["source_root"], "/venv/site-packages")
+        self.assertEqual(body["process_cwd"], "/repo/app")
+
     def test_update_apply_endpoint_returns_conflict_when_update_is_not_safe(self) -> None:
         server, thread, base = self._serve_one()
         payload = json.dumps({}).encode("utf-8")
@@ -473,12 +495,29 @@ class DashboardServeTests(unittest.TestCase):
         with (
             patch.object(ui, "find_available_port", return_value=8799),
             patch.object(ui, "ThreadingHTTPServer") as server_cls,
+            patch.object(ui, "install_identity", return_value={
+                "install_kind": "source",
+                "source_root": "/repo/aiwatcher",
+                "version": "0.1.0",
+                "pid": 321,
+                "process_cwd": "/repo/work",
+            }),
+            patch.object(ui.os, "getpid", return_value=321),
+            patch.object(ui.Path, "cwd", return_value=Path("/repo/work")),
             patch.object(ui, "record_ui_server") as record_mock,
         ):
             server_cls.return_value.serve_forever.side_effect = KeyboardInterrupt
             ui.serve(host="127.0.0.1", port=8765, auto_port=True)
 
-        record_mock.assert_called_once_with("127.0.0.1", 8799)
+        record_mock.assert_called_once_with(
+            "127.0.0.1",
+            8799,
+            install_kind="source",
+            source_root="/repo/aiwatcher",
+            version="0.1.0",
+            pid=321,
+            cwd="/repo/work",
+        )
 
     def test_companion_skip_and_receipt_view_posts_are_routable(self) -> None:
         server, thread, base = self._serve_one()

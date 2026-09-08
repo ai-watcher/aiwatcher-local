@@ -472,11 +472,24 @@ class LocalStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")
             with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
-                local_state.record_ui_server("127.0.0.1", 8799)
+                local_state.record_ui_server(
+                    "127.0.0.1",
+                    8799,
+                    install_kind="package",
+                    source_root="/venv/site-packages",
+                    version="0.1.0",
+                    pid=123,
+                    cwd="/repo/app",
+                )
                 server = local_state.get_ui_server()
 
         self.assertEqual(server["host"], "127.0.0.1")
         self.assertEqual(server["port"], 8799)
+        self.assertEqual(server["install_kind"], "package")
+        self.assertEqual(server["source_root"], "/venv/site-packages")
+        self.assertEqual(server["version"], "0.1.0")
+        self.assertEqual(server["pid"], 123)
+        self.assertEqual(server["cwd"], "/repo/app")
 
     def test_record_ui_server_overwrites_previous_port(self) -> None:
         """`aiwatcher ui` falls back to the next free port on each run --
