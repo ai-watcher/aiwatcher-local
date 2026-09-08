@@ -322,6 +322,26 @@ class TimeoutActuallyBoundsTest(unittest.TestCase):
         self.assertLess(elapsed, 5.0 + analyst.KILL_GRACE_SECONDS + 10.0,
                         f"the timeout leaked: returned after {elapsed:.1f}s")
 
+    def test_windows_spawn_hides_the_agent_console(self):
+        """The dashboard can be hosted by the Companion daemon, which has no
+        console. An unflagged agent CLI spawned from it sits in a blank
+        terminal window for the whole run."""
+        from pathlib import Path
+        from unittest.mock import Mock, patch
+        proc = Mock(returncode=0)
+        proc.communicate.return_value = ("", "")
+        cwd = Path.cwd()  # before os.name is "nt": pathlib refuses WindowsPath here
+        with (
+            patch.object(analyst.os, "name", "nt"),
+            patch.object(analyst.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, create=True),
+            patch.object(analyst.subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True),
+            patch.object(analyst.subprocess, "Popen", return_value=proc) as popen,
+        ):
+            analyst._spawn(["agent"], "x", cwd, {}, 5.0)
+        kwargs = popen.call_args.kwargs
+        self.assertEqual(kwargs["creationflags"], 0x08000200)
+        self.assertNotIn("start_new_session", kwargs)
+
 
 class CodexHostTest(unittest.TestCase):
     """Codex as a second analyst host.

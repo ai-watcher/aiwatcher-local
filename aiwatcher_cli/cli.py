@@ -35,6 +35,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from .correlate import link_recent_fresh_start_receipts_to_sessions, link_recent_interventions_to_sessions
 from .companion import (
+    background_process_kwargs,
     companion_log_path,
     cleanup_orphan_companion_processes,
     install_login_autostart,
@@ -1848,6 +1849,9 @@ def _run_external_risk_reviewer(
             text=True,
             timeout=max(0.2, timeout),
             check=False,
+            # The Companion has no console of its own, so an unflagged child
+            # would flash a real terminal window on Windows.
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
@@ -5044,6 +5048,7 @@ def _send_local_notification(title: str, body: str, *, url: str | None = None) -
                 timeout=3,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             return True, "msg.exe"
         if sys.platform == "win32" and shutil.which("powershell"):
@@ -5085,6 +5090,9 @@ def _send_local_notification(title: str, body: str, *, url: str | None = None) -
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                # -WindowStyle Hidden only hides the console after PowerShell
+                # is up; the flag stops it appearing in the first place.
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             return True, "powershell-messagebox"
     except subprocess.CalledProcessError:
@@ -5236,14 +5244,8 @@ def command_return_session(args: argparse.Namespace) -> int:
 
 
 def _detached_process_kwargs() -> dict[str, Any]:
-    kwargs: dict[str, Any] = {"start_new_session": sys.platform != "win32"}
-    if sys.platform == "win32":
-        kwargs["creationflags"] = (
-            getattr(subprocess, "DETACHED_PROCESS", 0)
-            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        )
-    return kwargs
+    # See background_process_kwargs for why this is not DETACHED_PROCESS.
+    return background_process_kwargs()
 
 
 def _open_native_handoff_overlay(
