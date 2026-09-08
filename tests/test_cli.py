@@ -613,6 +613,39 @@ class UpdateCommandCliTests(unittest.TestCase):
         self.assertIn("is not a Git checkout", output)
         self.assertIn("pipx upgrade aiwatcher-cli", output)
 
+    def test_update_check_explains_feature_branch_even_when_main_is_current(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, ".git").mkdir()
+
+            def fake_git(_repo: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+                if args == ["rev-parse", "--is-inside-work-tree"]:
+                    return self._git_result(args, stdout="true\n")
+                if args[:2] == ["fetch", "--quiet"]:
+                    return self._git_result(args)
+                if args == ["rev-parse", "--short", "HEAD"]:
+                    return self._git_result(args, stdout="abc123\n")
+                if args[:3] == ["rev-parse", "--verify", "--quiet"]:
+                    return self._git_result(args, stdout="origin/main\n")
+                if args == ["rev-list", "--count", "HEAD..origin/main"]:
+                    return self._git_result(args, stdout="0\n")
+                if args == ["rev-list", "--count", "origin/main..HEAD"]:
+                    return self._git_result(args, stdout="1\n")
+                if args == ["status", "--porcelain"]:
+                    return self._git_result(args, stdout="")
+                if args == ["symbolic-ref", "--short", "-q", "HEAD"]:
+                    return self._git_result(args, stdout="codex/update-ui\n")
+                raise AssertionError(f"unexpected git call: {args}")
+
+            with patch.object(updater, "git_capture", side_effect=fake_git):
+                result = updater.check_for_updates(repo=tmp, remote="origin", branch="main", fetch=True)
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["on_branch"])
+        self.assertFalse(result["update_available"])
+        self.assertFalse(result["can_apply"])
+        self.assertIn("origin/main is up to date", str(result["message"]))
+        self.assertIn("codex/update-ui", str(result["message"]))
+
 
     def _fake_git_with_updates(self, calls: list[list[str]], checked_out: str | None = "main"):
         def fake_git(_repo: Path, args: list[str]) -> subprocess.CompletedProcess[str]:

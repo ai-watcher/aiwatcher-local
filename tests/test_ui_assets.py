@@ -3101,6 +3101,7 @@ class FeatureBranchUpdateBadgeTest(unittest.TestCase):
     def test_the_branch_state_is_classified_before_blocked(self):
         body = self.js.split("function classifyUpdateStatus(data)", 1)[1].split("\n}\n", 1)[0]
         self.assertIn("return 'branch'", body)
+        self.assertIn("data.ok && data.on_branch === false", body)
         self.assertLess(body.index("return 'branch'"), body.index("return 'blocked'"))
 
     def test_the_branch_state_shares_the_quiet_style(self):
@@ -3133,6 +3134,12 @@ class FeatureBranchUpdateBadgeTest(unittest.TestCase):
         self.assertIn("refreshHeaderUpdate({ fetch: true, quiet: true })", handler)
         self.assertIn("openUpdatePanel(data)", handler)
         self.assertIn("if (!data.ok) showToast(", handler)
+
+    def test_source_checkout_panel_explains_branch_state_without_updates(self):
+        renderer = js_function_source(self.js, "renderUpdateStatus")
+        self.assertIn("data.on_branch === false", renderer)
+        self.assertIn("Updates apply on <code>${esc(data.branch || 'main')}</code>", renderer)
+        self.assertIn("your branch is left alone", renderer)
 
 
 class ApplyIsASecondStepTest(unittest.TestCase):
