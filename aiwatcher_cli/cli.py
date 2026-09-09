@@ -8884,6 +8884,12 @@ def _hook_surface_verification_rows(events: list[dict[str, object]]) -> list[tup
     claude_status = age_label(latest_claude) if installed.get("claude") else "hook not installed"
     codex_status = age_label(latest_codex) if installed.get("codex") else "hook not installed"
     cursor_status = age_label(latest_cursor) if installed.get("cursor") else "hook not installed"
+    if not installed.get("codex"):
+        codex_desktop_status = "hook not installed"
+    elif latest_codex:
+        codex_desktop_status = codex_status
+    else:
+        codex_desktop_status = "configured, not recently invoked"
     return [
         (
             "Claude Code CLI",
@@ -8902,7 +8908,7 @@ def _hook_surface_verification_rows(events: list[dict[str, object]]) -> list[tup
         ),
         (
             "Codex Desktop",
-            codex_status if latest_codex else "configured, not recently invoked",
+            codex_desktop_status,
             "Some Desktop builds show hook config but do not invoke UserPromptSubmit; verify every build/session.",
         ),
         (

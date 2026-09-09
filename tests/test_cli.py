@@ -6196,6 +6196,33 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertIn("Command protection", output)
         self.assertIn("Codex CLI/Desktop: warn + observe", output)
 
+    def test_hook_status_codex_desktop_row_does_not_claim_configured_when_not_installed(self) -> None:
+        # Regression guard: this row used to say "configured, not recently
+        # invoked" whenever there was no recorded invocation, even with no
+        # codex hook installed at all -- misleading a user into thinking
+        # Codex Desktop already had AIWatcher wired up when it never did.
+        with (
+            patch.object(cli, "recent_hook_events", return_value=[]),
+            patch.object(cli, "recent_interventions", return_value=[]),
+            patch.object(cli, "_configured_hook_tools", return_value={
+                "claude": False,
+                "codex": False,
+                "cursor": False,
+            }),
+            patch.object(cli, "recent_command_decisions", return_value=[]),
+            patch.object(cli, "recent_watch_notifications", return_value=[]),
+            patch.object(cli, "recent_handoff_decisions", return_value=[]),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_hook_status(SimpleNamespace())
+
+        self.assertEqual(result, 0)
+        output = stdout.getvalue()
+        self.assertIn("Codex Desktop", output)
+        self.assertNotIn("configured, not recently invoked", output)
+        desktop_line = next(line for line in output.splitlines() if "Codex Desktop" in line)
+        self.assertIn("hook not installed", desktop_line)
+
     def test_hook_status_warns_when_hook_points_at_different_aiwatcher_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             codex_hooks = os.path.join(temp_dir, "hooks.json")
