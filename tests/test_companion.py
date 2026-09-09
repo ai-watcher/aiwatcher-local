@@ -986,6 +986,20 @@ class CompanionPressureAndSignalTests(WaitingSessionCompanionTests):
                 )
         self.assertFalse(ui._waiting_row_return_available("missing", [session]))
 
+    def test_a_blocked_prompt_reaches_the_bar_as_a_chip(self):
+        # A blocked prompt is never shown by AIWatcher itself -- only inline
+        # in the tool's own chat -- so this chip is the only place the
+        # companion bar can surface it at all.
+        with patch.object(
+            ui, "recent_ambient_interventions",
+            return_value=[self._signal_record("prompt_blocked", severity="critical")],
+        ):
+            state = self._state(self._summary(), sessions=[])
+        chip = state["recent_signal"]
+        self.assertEqual(chip["kind"], "prompt_blocked")
+        self.assertEqual(chip["label"], "Prompt blocked")
+        self.assertEqual(chip["severity"], "critical")
+
     def test_stale_and_bar_native_signals_produce_no_chip(self):
         # Older than the live window: the session is presumed gone, and a chip
         # would be an alarm about nothing actionable. Bar-native kinds already
