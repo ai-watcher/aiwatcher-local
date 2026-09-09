@@ -7167,12 +7167,6 @@ def _log_hook_payload_keys(payload: dict[str, object]) -> None:
         print(f"AIWatcher debug: hook payload keys = {sorted(payload.keys())}", file=sys.stderr)
 
 
-# Decisions where the prompt did not proceed and nothing else tells the user
-# it happened: no brief was added, nothing ran. Without a companion chip these
-# are invisible outside the tool's own chat transcript.
-_BLOCKED_PROMPT_DECISIONS = {"blocked", "cancelled", "auto_block_headless"}
-
-
 def _record_hook_intervention(
     *,
     tool: str,
@@ -7183,25 +7177,6 @@ def _record_hook_intervention(
     selected_prompt: str | None = None,
     session_id: str | None = None,
 ) -> None:
-    if decision in _BLOCKED_PROMPT_DECISIONS and session_id:
-        try:
-            risk = str(result.get("risk") or "medium")
-            findings = result.get("findings")
-            top_finding = str(findings[0]) if isinstance(findings, list) and findings else None
-            reason = (
-                f"AIWatcher blocked a {risk}-risk {tool} prompt"
-                + (f": {top_finding}" if top_finding else ".")
-            )
-            upsert_ambient_intervention(
-                session_id=session_id,
-                signal_kind="prompt_blocked",
-                action="review_block",
-                severity="critical" if risk == "high" else "warning",
-                session_stamp=datetime.now(timezone.utc).isoformat(),
-                reason=reason,
-            )
-        except (OSError, ValueError):
-            pass
     try:
         effective_prompt = (
             selected_prompt or str(result["suggested_prompt"])
