@@ -6257,12 +6257,13 @@ def _presence_block(rows: list[SessionPresence]) -> dict[str, object]:
 # writing moves updated_at, so a hit means the 13ms parse can be skipped.
 _PRESSURE_TRANSCRIPT_CACHE: dict[str, tuple[str, int]] = {}
 
-_TRANSIENT_SIGNAL_KINDS = {"loop", "velocity", "runway", "usage_pressure"}
+_TRANSIENT_SIGNAL_KINDS = {"loop", "velocity", "runway", "usage_pressure", "prompt_blocked"}
 _TRANSIENT_SIGNAL_LABELS = {
     "loop": "Possible loop",
     "velocity": "Velocity spike",
     "runway": "Runway low",
     "usage_pressure": "Usage pressure",
+    "prompt_blocked": "Prompt blocked",
 }
 # A signal older than the live window belongs to a session presumed gone;
 # a chip for it would be an alarm about nothing the user can still act on.
@@ -6607,14 +6608,16 @@ def _waiting_row_return_available(session_id: str, sessions: list[LocalSession])
 
 
 def _recent_signal_block() -> dict[str, object] | None:
-    """The most recent overlay-only signal, so the bar can catch a missed one.
+    """The most recent overlay-only or tool-native signal, so the bar shows it too.
 
     Loop, velocity, runway and usage-pressure nudges live in a 20-second
-    transient overlay; step away and the signal is gone. Every such nudge
-    already persists an ambient-intervention record, so the bar carries the
-    newest one inside the live window as a passive chip. Recency, not truth:
-    the chip says "this fired Nm ago", which stays true after the fact, rather
-    than re-asserting a condition nobody has re-measured.
+    transient overlay; step away and the signal is gone. A blocked prompt is
+    never shown by AIWatcher itself at all -- it only appears inline in the
+    tool's own chat. Every such event already persists an ambient-intervention
+    record, so the bar carries the newest one inside the live window as a
+    passive chip. Recency, not truth: the chip says "this fired Nm ago", which
+    stays true after the fact, rather than re-asserting a condition nobody has
+    re-measured.
     """
     now = datetime.now(timezone.utc)
     for record in recent_ambient_interventions(limit=20):
