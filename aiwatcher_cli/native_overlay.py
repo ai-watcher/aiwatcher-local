@@ -306,13 +306,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // ground never floods.
         window.isOpaque = false
         window.backgroundColor = .clear
-        // The ground is fixed white regardless of system theme, but without
-        // this the window inherits Dark Mode from the OS and native buttons
-        // draw their titles in the dark-mode label color -- near-white text
-        // on this near-white ground, unreadable. Pin the appearance so
-        // buttons render with the light-mode ink this ground was designed
-        // for.
-        window.appearance = NSAppearance(named: .aqua)
         let view = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor(calibratedRed: 1.00, green: 1.00, blue: 1.00, alpha: 0.98).cgColor
@@ -804,12 +797,6 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         // behind the rounded root view -- a square drawn behind the bubble.
         window.isOpaque = false
         window.backgroundColor = .clear
-        // The ground here is a fixed dark navy regardless of system theme --
-        // the same reasoning as the notification window's .aqua pin above,
-        // mirrored. Left unpinned, a Light Mode system draws native button
-        // titles in the light-mode label color, near-black text on this
-        // near-black ground.
-        window.appearance = NSAppearance(named: .darkAqua)
 
         rootView = DragView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         rootView.wantsLayer = true
