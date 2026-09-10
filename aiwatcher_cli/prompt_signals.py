@@ -253,6 +253,7 @@ def repo_paths(cwd: str | None) -> tuple[str, ...]:
         listed = subprocess.run(
             ["git", "-C", cwd, "ls-files"],
             capture_output=True, text=True, timeout=5, check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if getattr(listed, "returncode", 1) != 0:
             _TREE_CACHE[cwd] = ("", ())

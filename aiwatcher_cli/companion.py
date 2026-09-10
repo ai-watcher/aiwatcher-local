@@ -23,6 +23,31 @@ def companion_log_path() -> Path:
     return state_path().parent / "companion.log"
 
 
+def background_process_kwargs() -> dict[str, Any]:
+    """Popen kwargs for a long-lived helper that must not show a terminal.
+
+    On Windows this is deliberately CREATE_NO_WINDOW without DETACHED_PROCESS.
+    Inside a venv or pipx install, sys.executable is the venv redirector
+    (venvlauncher.exe), which starts the real python.exe as a child with
+    creation flags of zero. A child inherits its parent's console, so the
+    redirector needs one to hand down: CREATE_NO_WINDOW gives it a headless
+    console the interpreter quietly inherits. DETACHED_PROCESS gives it none,
+    Windows then allocates a fresh console for the interpreter, and the
+    default terminal host renders that as a blank terminal window -- one per
+    helper, so `aiwatcher start` opened two. CREATE_NO_WINDOW is also
+    ignored whenever DETACHED_PROCESS is set, so combining them did not help.
+    CREATE_NEW_PROCESS_GROUP keeps the parent's Ctrl+C from reaching the
+    helper. The flags are read via getattr so this is a no-op elsewhere.
+    """
+    kwargs: dict[str, Any] = {"start_new_session": sys.platform != "win32"}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
+    return kwargs
+
+
 def companion_autostart_path() -> Path:
     if sys.platform == "darwin":
         return Path.home() / "Library" / "LaunchAgents" / f"{AUTOSTART_LABEL}.plist"
@@ -303,16 +328,7 @@ def start_companion(
         presence_position=presence_position,
         presence_visibility=presence_visibility,
     )
-    kwargs: dict[str, Any] = {
-        "stdin": subprocess.DEVNULL,
-        "start_new_session": sys.platform != "win32",
-    }
-    if sys.platform == "win32":
-        kwargs["creationflags"] = (
-            getattr(subprocess, "DETACHED_PROCESS", 0)
-            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        )
+    kwargs: dict[str, Any] = {"stdin": subprocess.DEVNULL, **background_process_kwargs()}
     try:
         with log_path.open("ab") as log:
             process = subprocess.Popen(command, stdout=log, stderr=log, **kwargs)

@@ -238,6 +238,7 @@ def _probe(host: Host, *, verify: bool = False) -> dict[str, Any]:
         proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
             [executable, "--version"],
             capture_output=True, text=True, timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return {"available": False, "cli": host.key,
@@ -665,7 +666,13 @@ def _spawn(argv: list[str], text: str, cwd: Path, env: dict[str, str],
     """
     creation: dict[str, Any] = {}
     if os.name == "nt":
-        creation["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        # CREATE_NO_WINDOW: the dashboard can be hosted by the Companion,
+        # which has no console, and an unflagged agent CLI would then sit in
+        # a blank terminal window for the whole run.
+        creation["creationflags"] = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
     else:
         creation["start_new_session"] = True
     proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
@@ -699,6 +706,7 @@ def _kill_tree(proc: "subprocess.Popen[str]") -> None:
             subprocess.run(  # noqa: S603 - fixed argv, no shell
                 ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                 capture_output=True, timeout=KILL_GRACE_SECONDS, check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except (OSError, subprocess.SubprocessError):
             pass

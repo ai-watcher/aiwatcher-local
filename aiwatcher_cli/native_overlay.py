@@ -2303,6 +2303,8 @@ def _windows_foreground_text() -> str:
                     text=True,
                     stderr=subprocess.DEVNULL,
                     timeout=0.6,
+                    # The presence widget has no console; see runtime_nudge.
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
                 process = output.split(",", 1)[0].strip().strip('"')
             except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):

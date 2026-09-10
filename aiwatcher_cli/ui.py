@@ -8192,6 +8192,7 @@ def _pids_for_port(port: int) -> list[str]:
                 check=False,
                 capture_output=True,
                 text=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except OSError:
             return []
@@ -8229,7 +8230,13 @@ def restart_local_server(port: int) -> bool:
     for pid in pids:
         try:
             if os.name == "nt":
-                subprocess.run(["taskkill", "/PID", pid, "/F"], check=False, capture_output=True, text=True)
+                subprocess.run(
+                    ["taskkill", "/PID", pid, "/F"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
             else:
                 subprocess.run(["kill", pid], check=False, capture_output=True, text=True)
             stopped = True

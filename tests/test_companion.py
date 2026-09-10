@@ -205,6 +205,53 @@ class CompanionLifecycleTests(unittest.TestCase):
         self.assertIn("bottom-left", launched)
         self.assertIn("ai-apps", launched)
 
+    def test_windows_helpers_get_a_headless_console_not_no_console(self) -> None:
+        """Inside a venv or pipx install sys.executable is the venv redirector,
+        which relaunches the real python.exe with creation flags of zero. A
+        DETACHED_PROCESS redirector has no console to hand down, so Windows
+        allocated a visible one for the interpreter: `aiwatcher start` opened
+        one blank terminal for the daemon and one for the presence widget."""
+        with (
+            patch.object(companion.sys, "platform", "win32"),
+            patch.object(companion.subprocess, "DETACHED_PROCESS", 0x8, create=True),
+            patch.object(companion.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, create=True),
+            patch.object(companion.subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True),
+        ):
+            kwargs = companion.background_process_kwargs()
+
+        self.assertFalse(kwargs["start_new_session"])
+        self.assertEqual(kwargs["creationflags"], 0x08000200)
+        self.assertFalse(kwargs["creationflags"] & 0x8, "DETACHED_PROCESS starves the venv redirector of a console")
+
+    def test_start_launches_the_daemon_with_the_headless_console_flags(self) -> None:
+        process = Mock(pid=323)
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.object(companion.sys, "platform", "win32"),
+                patch.object(companion.subprocess, "DETACHED_PROCESS", 0x8, create=True),
+                patch.object(companion.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, create=True),
+                patch.object(companion.subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True),
+                patch.object(companion, "companion_log_path", return_value=Path(temp_dir) / "companion.log"),
+                patch.object(
+                    companion,
+                    "get_watcher_status",
+                    side_effect=[
+                        {"running": False},
+                        {"running": True, "mode": "companion", "pid": 323},
+                    ],
+                ),
+                patch.object(companion.subprocess, "Popen", return_value=process) as popen,
+                patch.object(companion, "cleanup_orphan_companion_processes", return_value=[]),
+                patch.object(companion.time, "sleep"),
+            ):
+                result = companion.start_companion(interval_seconds=30)
+
+        self.assertTrue(result["ok"])
+        kwargs = popen.call_args.kwargs
+        self.assertFalse(kwargs["start_new_session"])
+        self.assertEqual(kwargs["creationflags"], 0x08000200)
+
     def test_stop_does_not_kill_a_foreground_watch(self) -> None:
         with (
             patch.object(

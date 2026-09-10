@@ -453,7 +453,7 @@ class StartCommandCliTests(unittest.TestCase):
         )
         kill.assert_not_called()
 
-    def test_presence_launcher_uses_windows_detached_flags(self) -> None:
+    def test_presence_launcher_uses_windows_headless_console_flags(self) -> None:
         original_import = __import__
 
         def fake_import(name, *args, **kwargs):
@@ -465,6 +465,9 @@ class StartCommandCliTests(unittest.TestCase):
             patch("builtins.__import__", side_effect=fake_import),
             patch.object(cli, "_existing_companion_presence_pid", return_value=None),
             patch.object(cli.sys, "platform", "win32"),
+            patch.object(cli.subprocess, "DETACHED_PROCESS", 0x8, create=True),
+            patch.object(cli.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, create=True),
+            patch.object(cli.subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True),
             patch.object(cli, "_companion_presence_pid_path") as pid_path,
             patch.object(cli, "_pid_is_running", return_value=True),
             patch.object(cli.subprocess, "Popen") as popen,
@@ -483,7 +486,10 @@ class StartCommandCliTests(unittest.TestCase):
         self.assertEqual(launched[launched.index("--visibility") + 1], "ai-apps")
         kwargs = popen.call_args.kwargs
         self.assertFalse(kwargs["start_new_session"])
-        self.assertIn("creationflags", kwargs)
+        # Not DETACHED_PROCESS: under pipx sys.executable is the venv
+        # redirector, and a detached redirector's real python.exe child gets a
+        # visible console. See companion.background_process_kwargs.
+        self.assertEqual(kwargs["creationflags"], 0x08000200)
         pid_path.return_value.write_text.assert_called_with("456", encoding="utf-8")
 
     def test_persistent_presence_owns_the_signals_it_can_actually_draw(self) -> None:
