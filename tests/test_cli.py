@@ -5548,6 +5548,47 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertIsNone(record.call_args.kwargs["session_id"])
         self.assertIsNone(hook_event.call_args.kwargs["session_id"])
 
+    def test_blocked_prompt_reaches_the_companion_as_an_ambient_signal(self) -> None:
+        # A block is otherwise invisible outside the tool's own chat transcript
+        # -- this is the only place the companion bar can pick it up at all.
+        result = {"risk": "high", "score": 25, "findings": ["Scope looks broad."], "suggested_prompt": "x"}
+        with (
+            patch.object(cli, "record_intervention"),
+            patch.object(cli, "upsert_ambient_intervention") as upsert,
+        ):
+            cli._record_hook_intervention(
+                tool="codex", cwd="/repo", prompt="do everything", result=result,
+                decision="blocked", session_id="sess-1",
+            )
+        self.assertEqual(upsert.call_args.kwargs["signal_kind"], "prompt_blocked")
+        self.assertEqual(upsert.call_args.kwargs["session_id"], "sess-1")
+        self.assertEqual(upsert.call_args.kwargs["severity"], "critical")
+        self.assertIn("Scope looks broad.", upsert.call_args.kwargs["reason"])
+
+    def test_allowed_prompt_does_not_reach_the_companion_as_a_block_signal(self) -> None:
+        result = {"risk": "medium", "score": 10, "findings": [], "suggested_prompt": "x"}
+        with (
+            patch.object(cli, "record_intervention"),
+            patch.object(cli, "upsert_ambient_intervention") as upsert,
+        ):
+            cli._record_hook_intervention(
+                tool="claude", cwd="/repo", prompt="do a thing", result=result,
+                decision="allowed_original", session_id="sess-1",
+            )
+        upsert.assert_not_called()
+
+    def test_blocked_prompt_without_session_id_does_not_reach_the_companion(self) -> None:
+        result = {"risk": "high", "score": 25, "findings": [], "suggested_prompt": "x"}
+        with (
+            patch.object(cli, "record_intervention"),
+            patch.object(cli, "upsert_ambient_intervention") as upsert,
+        ):
+            cli._record_hook_intervention(
+                tool="codex", cwd="/repo", prompt="do everything", result=result,
+                decision="blocked", session_id=None,
+            )
+        upsert.assert_not_called()
+
     def test_debug_hook_keys_env_var_logs_keys_not_values(self) -> None:
         payload = json.dumps({"prompt": "delete the secret file", "session_id": "sess-secret"})
         args = SimpleNamespace(text=None, gate=False)
@@ -5556,6 +5597,7 @@ class IntegrationConfigTests(unittest.TestCase):
             patch.object(cli, "sessions_since", return_value=[]),
             patch.object(cli, "record_intervention"),
             patch.object(cli, "record_hook_event"),
+            patch.object(cli, "upsert_ambient_intervention"),
             patch.dict(os.environ, {"AIWATCHER_DEBUG_HOOK_KEYS": "1"}),
             patch("sys.stdout", new_callable=io.StringIO),
             patch("sys.stderr", new_callable=io.StringIO) as stderr,
@@ -6159,6 +6201,33 @@ class IntegrationConfigTests(unittest.TestCase):
         self.assertIn("Companion -> Plan / Prompt", output)
         self.assertIn("Command protection", output)
         self.assertIn("Codex CLI/Desktop: warn + observe", output)
+
+    def test_hook_status_codex_desktop_row_does_not_claim_configured_when_not_installed(self) -> None:
+        # Regression guard: this row used to say "configured, not recently
+        # invoked" whenever there was no recorded invocation, even with no
+        # codex hook installed at all -- misleading a user into thinking
+        # Codex Desktop already had AIWatcher wired up when it never did.
+        with (
+            patch.object(cli, "recent_hook_events", return_value=[]),
+            patch.object(cli, "recent_interventions", return_value=[]),
+            patch.object(cli, "_configured_hook_tools", return_value={
+                "claude": False,
+                "codex": False,
+                "cursor": False,
+            }),
+            patch.object(cli, "recent_command_decisions", return_value=[]),
+            patch.object(cli, "recent_watch_notifications", return_value=[]),
+            patch.object(cli, "recent_handoff_decisions", return_value=[]),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            result = cli.command_hook_status(SimpleNamespace())
+
+        self.assertEqual(result, 0)
+        output = stdout.getvalue()
+        self.assertIn("Codex Desktop", output)
+        self.assertNotIn("configured, not recently invoked", output)
+        desktop_line = next(line for line in output.splitlines() if "Codex Desktop" in line)
+        self.assertIn("hook not installed", desktop_line)
 
     def test_hook_status_warns_when_hook_points_at_different_aiwatcher_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
