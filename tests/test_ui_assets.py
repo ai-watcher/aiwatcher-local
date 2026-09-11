@@ -3108,12 +3108,17 @@ class FeatureBranchUpdateBadgeTest(unittest.TestCase):
         rule = [line for line in self.css.splitlines() if ".update-banner.branch" in line]
         self.assertEqual(len(rule), 1)
         self.assertIn(".update-banner.package", rule[0])
-        self.assertIn("return 'Source checkout'", self.js)
+        label = js_function_source(self.js, "updateBannerLabel")
+        self.assertIn("if (status === 'branch')", label)
+        self.assertIn("data && data.update_available", label)
+        self.assertIn("} available`.trim()", label)
+        self.assertIn("return 'Up to date'", label)
 
     def test_the_header_badge_shows_the_source_folder_and_keeps_the_full_path(self):
         self.assertIn("function updateSourceName(data)", self.js)
         self.assertIn("return parts.length ? parts[parts.length - 1] : source", self.js)
         self.assertIn("`Path: ${name}`", self.js)
+        self.assertIn("return `On ${updateBranchLabel(data)}`", self.js)
         self.assertIn("location.title = source ? `Source checkout: ${source}` : ''", self.js)
         self.assertIn("GitHub branch: ${updateBranchLabel(data)}", self.js)
         self.assertIn("Update target: ${data.remote_ref}", self.js)
