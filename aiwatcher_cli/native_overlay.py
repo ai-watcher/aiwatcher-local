@@ -656,7 +656,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     let expandedWidth: CGFloat = 626
     let headerHeight: CGFloat = 58
     let rowHeight: CGFloat = 34
-    let maxWaitingRows = 3
+    let maxWaitingRows = 5
     // 52, not 44: the count badge sits at the circle's 45-degree corner, and
     // on a 44px bubble that corner has already curved away -- the badge was
     // half over transparent window and rendered cropped.
@@ -715,7 +715,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             let count = stateName == "session_finished" ? finishedCount : reviewCount
             let total = max(count, visibleWaitingRows)
             let hidden = max(total - visibleWaitingRows, 0)
-            return hidden > 0 ? "\(visibleWaitingRows) shown of \(total). UI has full list." : "Pick a row or open UI."
+            return hidden > 0 ? "\(visibleWaitingRows) shown of \(total). Open UI for all." : "Pick a row or open UI."
         }
         return String((subtitleLabel.stringValue.isEmpty ? "Watching quietly" : subtitleLabel.stringValue).prefix(46))
     }
@@ -728,6 +728,8 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         let tool = row["tool"] as? String ?? "AI tool"
         let project = row["project"] as? String ?? ""
         let waited = row["waited_label"] as? String ?? ""
+        let severity = row["severity_label"] as? String ?? ""
+        let activity = row["activity_label"] as? String ?? ""
         let prefix: String
         if kind == "finished" {
             prefix = "Completed"
@@ -741,7 +743,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         if kind.isEmpty {
             return [tool, project, waited].filter { !$0.isEmpty }.joined(separator: " · ")
         }
-        let detail = [project, tool, waited].filter { !$0.isEmpty }.joined(separator: " · ")
+        let details = kind == "context_review"
+            ? [project, tool, severity, activity, waited]
+            : [project, tool, waited]
+        let detail = details.filter { !$0.isEmpty }.joined(separator: " · ")
         return detail.isEmpty ? prefix : "\(prefix): \(detail)"
     }
 
@@ -2579,7 +2584,7 @@ def run_native_presence(
     collapsed_width = 52
     collapsed_height = 52
     row_height = 30
-    max_waiting_rows = 3
+    max_waiting_rows = 5
     screen_width = int(root.winfo_screenwidth())
     screen_height = int(root.winfo_screenheight())
     x = 24 if "left" in position else max(16, screen_width - expanded_width - 24)
@@ -2707,10 +2712,12 @@ def run_native_presence(
         tool = str(row.get("tool") or "AI tool")
         project = str(row.get("project") or "")
         waited = str(row.get("waited_label") or "")
+        severity = str(row.get("severity_label") or "")
+        activity = str(row.get("activity_label") or "")
         if kind == "finished":
             parts = ["Completed", project, tool, waited]
         elif kind == "context_review":
-            parts = ["Context", project, tool, waited]
+            parts = ["Context", project, tool, severity, activity, waited]
         elif kind:
             parts = ["Signal", project, tool, waited]
         else:
@@ -2732,7 +2739,7 @@ def run_native_presence(
             count = max(base_count, visible_waiting_rows())
             hidden = max(count - visible_waiting_rows(), 0)
             return (
-                f"{visible_waiting_rows()} shown of {count}. UI has full list."
+                f"{visible_waiting_rows()} shown of {count}. Open UI for all."
                 if hidden > 0 else "Pick a row or open UI."
             )
         return subtitle_var.get()[:46]
