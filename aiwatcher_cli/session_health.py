@@ -22,16 +22,18 @@ import math
 import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Sequence
 
-from .pricing import cache_read_cost
+from .pricing import cache_read_cost, context_window
 from .scanner import LocalEvent, LocalSession
 
 
-# Thresholds — adjustable via config later
-PRESSURE_TOKENS_PER_TURN: int = 150_000   # yellow: worth watching
-CRITICAL_TOKENS_PER_TURN: int = 200_000   # red: action needed
+# There is deliberately no per-turn token threshold here. The ceiling a turn is
+# judged against is the model's own context window (pricing.context_window),
+# resolved per session in `_context_ceiling`; the 150K/200K constants that used
+# to live here were Claude's 200K window written down once and then applied to
+# every model, including the 1M ones. Nothing below the ceiling is a verdict --
+# a session at 60% of its window is at 60%, not "elevated".
 STALE_WARN_HOURS: float       = 24.0      # yellow: session older than 1 day
 CRITICAL_STALE_DAYS: float    = 7.0       # red: session older than 1 week
 # Tuned against the observed spread of replayed-context cost share (16-83%,
@@ -53,6 +55,12 @@ ACTIVE_SESSION_DAYS: int = 30             # only surface sessions active in last
 class ContextHealth:
     session_id: str
     tool: str
+    model: str | None
+    # The per-call input limit every per-turn figure here is judged against.
+    # None when the model is unknown, or when the session has already made a
+    # call bigger than the table says is possible -- a stale table is the same
+    # defect as a wrong constant, and "unknown" is the only honest reading of it.
+    context_window: int | None
     project_path: str | None
     age_hours: float
     age_days: float
@@ -80,8 +88,7 @@ class ContextHealth:
     # Flags
     is_stale: bool
     is_critical_stale: bool
-    is_context_pressure: bool     # latest/peak > PRESSURE threshold
-    is_context_critical: bool     # latest/peak > CRITICAL threshold
+    is_context_critical: bool     # latest turn is at the model's context window
     is_high_bloat: bool
     is_extreme_bloat: bool
 
@@ -94,8 +101,9 @@ class ContextHealth:
     context_resets: int = 0            # how many times this session shed its context
     turns_since_reset: int = 0         # turns since the last one (all turns if none)
     segment_growth_rate: float = 0.0   # Δtokens_in per turn in the current segment
-    # Turns until this segment reaches CRITICAL_TOKENS_PER_TURN. None when already
-    # past it, or flat/shrinking — "not on this trajectory" beats a huge number.
+    # Turns until this segment reaches context_window. None when the window is
+    # unknown, already reached, or the segment is flat/shrinking -- "not on this
+    # trajectory" beats a huge number.
     turns_to_critical: int | None = None
 
     recommendations: list[str] = field(default_factory=list)
@@ -117,6 +125,20 @@ def _context_reset_indices(relevant: Sequence[LocalEvent]) -> set[int]:
         if current < previous * (1.0 - CONTEXT_RESET_DROP_RATIO):
             resets.add(index)
     return resets
+
+
+def _context_ceiling(model: str | None, peak_turn_tokens: int) -> int | None:
+    """The window a session's turns are judged against, or None if unknowable.
+
+    A turn the provider accepted is proof the window is at least that big, so a
+    table entry smaller than the observed peak is wrong, not the session. It is
+    reported as unknown rather than raised to the peak: the peak is a floor, and
+    a floor drawn as a ceiling would put every session at 100% on its biggest turn.
+    """
+    window = context_window(model)
+    if window is None or peak_turn_tokens > window:
+        return None
+    return window
 
 
 def _age_hours(session: LocalSession) -> float:
@@ -188,15 +210,15 @@ def analyze_session_health(
     segment_growth_rate = statistics.mean(segment_deltas) if segment_deltas else growth_rate
     turns_since_reset = len(relevant) - 1 - segment_start
 
-    # Turns of headroom before this segment reaches the action threshold. None when
-    # the question does not apply -- already past it, or flat/shrinking, where the
-    # honest answer is "not on this trajectory" rather than a very large number.
-    if latest >= CRITICAL_TOKENS_PER_TURN or segment_growth_rate <= 0:
+    # Turns of headroom before this segment reaches the model's window. None when
+    # the question does not apply -- no known window, already at it, or
+    # flat/shrinking, where the honest answer is "not on this trajectory" rather
+    # than a very large number.
+    ceiling = _context_ceiling(session.model, peak)
+    if ceiling is None or latest >= ceiling or segment_growth_rate <= 0:
         turns_to_critical = None
     else:
-        turns_to_critical = max(
-            1, math.ceil((CRITICAL_TOKENS_PER_TURN - latest) / segment_growth_rate)
-        )
+        turns_to_critical = max(1, math.ceil((ceiling - latest) / segment_growth_rate))
 
     # Bloat ratio: what share of this session's bill was re-sent history.
     # cache_read_tokens is the replayed portion as the provider counted it, and
@@ -223,15 +245,17 @@ def analyze_session_health(
 
     is_stale           = age_hours > STALE_WARN_HOURS
     is_critical_stale  = age_days  > CRITICAL_STALE_DAYS
-    is_pressure        = latest > PRESSURE_TOKENS_PER_TURN or peak > PRESSURE_TOKENS_PER_TURN
-    is_critical        = latest > CRITICAL_TOKENS_PER_TURN or peak > CRITICAL_TOKENS_PER_TURN
+    # At the window is a fact about the next call, not a heuristic, and it is the
+    # only thing the context size alone can make critical. Tools compact before
+    # they get here, so in practice this is rare; that is correct, not a gap.
+    is_critical        = ceiling is not None and latest >= ceiling
     is_high_bloat      = measurable and bloat_ratio > HIGH_BLOAT_RATIO
     is_extreme_bloat   = measurable and bloat_ratio > EXTREME_BLOAT_RATIO
 
-    # Severity — stale alone is a warning, not critical; context pressure or extreme bloat = critical
-    if is_critical or is_extreme_bloat or (is_critical_stale and (is_pressure or is_high_bloat)):
+    # Severity — stale alone is a warning, not critical; at the window or extreme bloat = critical
+    if is_critical or is_extreme_bloat or (is_critical_stale and is_high_bloat):
         severity = "critical"
-    elif is_pressure or is_stale or is_high_bloat or is_critical_stale:
+    elif is_stale or is_high_bloat or is_critical_stale:
         severity = "warning"
     else:
         severity = "healthy"
@@ -247,10 +271,9 @@ def analyze_session_health(
         recs.append(
             f"Session is {age_hours:.0f}h old. Consider restarting for a fresh context."
         )
-    if is_critical or is_pressure:
+    if is_critical:
         recs.append(
-            f"Context is {latest:,} tokens/turn "
-            f"({'critical' if is_critical else 'elevated'}). "
+            f"Context is {latest:,} tokens/turn, at this model's {ceiling:,} window. "
             "Run /compact (Codex/Claude) to compress history, or start a new session."
         )
     if is_extreme_bloat:
@@ -271,6 +294,8 @@ def analyze_session_health(
     return ContextHealth(
         session_id=session.session_id,
         tool=session.tool,
+        model=session.model,
+        context_window=ceiling,
         project_path=session.project_path,
         age_hours=age_hours,
         age_days=age_days,
@@ -293,7 +318,6 @@ def analyze_session_health(
         latest_turn_replayed_tokens=relevant[-1].cache_read_tokens,
         is_stale=is_stale,
         is_critical_stale=is_critical_stale,
-        is_context_pressure=is_pressure,
         is_context_critical=is_critical,
         is_high_bloat=is_high_bloat,
         is_extreme_bloat=is_extreme_bloat,
@@ -332,81 +356,6 @@ def _compact_tokens(n: int) -> str:
     return str(n)
 
 
-def _short_project(path: str | None) -> str:
-    if not path:
-        return "(unknown)"
-    try:
-        parts = Path(path).parts
-        return "/".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
-    except Exception:
-        return path
-
-
-def format_health_row(h: ContextHealth) -> str:
-    """One-line summary for the health leaderboard."""
-    icon = {"critical": "[CRIT]", "warning": "[WARN]", "healthy": "[OK]  "}[h.severity]
-    project = _short_project(h.project_path)
-    age = f"{h.age_days:.0f}d" if h.age_days >= 1 else f"{h.age_hours:.0f}h"
-    ctx = f"{_compact_tokens(h.latest_turn_tokens)}/turn"
-    eff = f"{h.efficiency_pct:.0f}% new work" if h.bloat_measurable else "replay n/a"
-    return f"{icon} {project:<32} {h.tool:<12} age={age:<5} ctx={ctx:<10} {eff}"
-
-
-def format_health_block(h: ContextHealth) -> str:
-    """Multi-line detail for a single session."""
-    lines: list[str] = []
-    project = _short_project(h.project_path)
-    age_str = (
-        f"{h.age_days:.1f} days"
-        if h.age_days >= 1
-        else f"{h.age_hours:.1f} hours"
-    )
-
-    lines.append(f"Context health: {h.severity.upper()}")
-    lines.append(f"  Project : {project}  ({h.tool})")
-    lines.append(f"  Age     : {age_str}")
-    lines.append(f"  Context : {_compact_tokens(h.latest_turn_tokens)} tokens/turn  "
-                 f"(peak {_compact_tokens(h.peak_turn_tokens)},  "
-                 f"healthy: <{_compact_tokens(PRESSURE_TOKENS_PER_TURN)})")
-    lines.append(f"  Total   : {_compact_tokens(h.total_input_tokens)} input  /  "
-                 f"{_compact_tokens(h.total_output_tokens)} output")
-    if h.bloat_measurable:
-        lines.append(f"  Replay  : ${h.replayed_cost_usd:.2f} of ${h.analyzed_cost_usd:.2f}  "
-                     f"({h.bloat_ratio * 100:.0f}% of spend re-sent history,  "
-                     f"healthy: <{HIGH_BLOAT_RATIO * 100:.0f}%)")
-    else:
-        lines.append("  Replay  : not measurable (source reports no cache buckets)")
-    if h.growth_rate > 1000:
-        lines.append(f"  Growth  : +{_compact_tokens(int(h.growth_rate))}/turn  (context accumulating)")
-    lines.append(f"  Events  : {h.event_count} model calls analyzed")
-    lines.append("")
-    for rec in h.recommendations:
-        lines.append(f"  → {rec}")
-    return "\n".join(lines)
-
-
-def format_health_section(healths: list[ContextHealth]) -> str:
-    """
-    Full context health section for `aiwatcher today`.
-    Shows the leaderboard and expands critical/warning sessions.
-    """
-    if not healths:
-        return ""
-    lines: list[str] = ["", "Context health"]
-    lines.append("-" * 64)
-    for h in healths:
-        lines.append(format_health_row(h))
-    critical = [h for h in healths if h.severity == "critical"]
-    warnings = [h for h in healths if h.severity == "warning"]
-    if critical or warnings:
-        lines.append("")
-        for h in (critical + warnings)[:3]:  # cap at 3 expanded details
-            lines.append("")
-            for line in format_health_block(h).splitlines():
-                lines.append("  " + line)
-    return "\n".join(lines)
-
-
 def gate_health_warning(
     sessions: Sequence[LocalSession],
     events: Sequence[LocalEvent],
@@ -442,15 +391,10 @@ def gate_health_warning(
     lines: list[str] = []
     if h.is_context_critical:
         lines.append(
-            f"⚠ Context pressure: active {tool} session has "
+            f"⚠ Context at the window: active {tool} session has "
             f"{_compact_tokens(h.latest_turn_tokens)} tokens/turn context"
             + (f" ({h.efficiency_pct:.0f}% of spend on new work)."
                if h.bloat_measurable else ".")
-        )
-    elif h.is_context_pressure:
-        lines.append(
-            f"⚠ Context elevated: active {tool} session at "
-            f"{_compact_tokens(h.latest_turn_tokens)} tokens/turn."
         )
     if h.is_critical_stale:
         lines.append(

@@ -716,7 +716,7 @@ class PerRequestUsageTests(unittest.TestCase):
             with patch.object(scanner, "CLAUDE_PROJECTS_DIRS", [projects]):
                 return scanner.scan_claude_code()[0], scanner.scan_claude_code_events()
 
-    def _line(self, *, request_id=None, message_id=None, block="text"):
+    def _line(self, *, request_id=None, message_id=None, block="text", uuid=None):
         message = {"model": "claude-sonnet-5", "usage": self.USAGE,
                    "content": [{"type": block, "text": "x"}]}
         if message_id is not None:
@@ -724,7 +724,22 @@ class PerRequestUsageTests(unittest.TestCase):
         line = {"type": "assistant", "timestamp": "2026-06-24T10:00:00Z", "message": message}
         if request_id is not None:
             line["requestId"] = request_id
+        if uuid is not None:
+            line["uuid"] = uuid
         return line
+
+    def test_rows_the_tool_writes_again_at_compaction_are_scanned_once(self) -> None:
+        # Claude Code appends copies of earlier rows when it compacts (1,333 of
+        # them at one compaction on 2026-09-09), same uuid and timestamp as
+        # the originals. The bill was already safe behind the request key;
+        # the call counts and the event list were not.
+        first = self._line(request_id="req_1", message_id="msg_1", uuid="row-a")
+        second = self._line(request_id="req_2", message_id="msg_2", uuid="row-b")
+        session, events = self._scan([first, second, first, second])
+
+        self.assertEqual(session.tokens_in, 2 * (10 + 1_000 + 100_000))
+        self.assertEqual(session.agent_calls, 2)
+        self.assertEqual(len(events), 2)
 
     def test_one_request_across_four_lines_is_billed_once(self) -> None:
         four = [self._line(request_id="req_1", message_id="msg_1") for _ in range(4)]

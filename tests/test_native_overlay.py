@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 import inspect
+import re
 
 from aiwatcher_cli import native_overlay
 from aiwatcher_cli.native_overlay import overlay_config
@@ -213,6 +214,56 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("def apply_offline_state", tk_source)
         self.assertIn("skip_projects_var", tk_source)
 
+    def test_the_subtitle_gets_the_width_its_46_character_cap_needs(self) -> None:
+        # The bar caps its subtitle at 46 characters (`prefix(46)`, and the
+        # payload side trims to the same number), and 46 characters of 9pt
+        # system text measure ~205-210pt: "claude-code · aiwatcher-local ·
+        # waited 12m 30s" is 208. Until 2026-09-10 the label was 150pt wide
+        # beside the meter and 170 beside the Copy button, so every compact
+        # stage clipped its session name to "...calibrat". Every layout must
+        # give the label the width the cap needs, and overflow must end in
+        # an ellipsis rather than a hard cut.
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn("prefix(46)", mac)
+        self.assertIn("subtitleLabel.lineBreakMode = .byTruncatingTail", mac)
+        widths = []
+        for line in mac.splitlines():
+            if "subtitleLabel.frame = NSRect(" not in line:
+                continue
+            width_expr = line.split("width:", 1)[1].split(", height", 1)[0]
+            widths.extend(int(n) for n in re.findall(r"\d+", width_expr))
+        self.assertGreaterEqual(len(widths), 3)
+        self.assertGreaterEqual(min(widths), 216, widths)
+        # The width came out of the bar's own budget: the collapse button
+        # sits 22pt in from the right edge, so the two move together.
+        self.assertIn("let expandedWidth: CGFloat = 626", mac)
+        self.assertIn("collapseButton.frame = NSRect(x: 604,", mac)
+
+    def test_the_title_fits_every_workflow_label(self) -> None:
+        # The bar's title carries the preflight planner's workflow label on a
+        # prompt gate. The 18-character cap the bar launched with cut
+        # "Continue only after confirmation" to "Continue only afte" while the
+        # frame had room for it. The Swift bar now truncates by pixel with an
+        # ellipsis under a loose sanity bound; the Tk bar, with no ellipsis,
+        # keeps a character cap wide enough for the longest label.
+        from aiwatcher_cli import cli
+
+        planner = inspect.getsource(cli._prompt_workflow_recommendation)
+        labels = re.findall(r'"label": "([^"]+)"', planner)
+        self.assertIn("Continue only after confirmation", labels)
+        longest = max(len(label) for label in labels)
+
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn("titleLabel.lineBreakMode = .byTruncatingTail", mac)
+        self.assertNotIn("prefix(18)", mac)
+        self.assertEqual(mac.count("prefix(40)"), 2)
+        self.assertLessEqual(longest, 40)
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertNotIn("[:18]", tk_source)
+        self.assertEqual(tk_source.count("[:34]"), 2)
+        self.assertLessEqual(longest, 34)
+
     def test_presence_bars_draw_the_meter_and_missed_signal_chip(self) -> None:
         # The meter draws only when the payload says the number is measurable
         # -- unmeasurable must not render as an empty bar -- and the chip
@@ -274,6 +325,39 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('"session_ids": split_lines(skip_session_ids_var.get()) or split_lines(skip_session_id_var.get())', tk_source)
         self.assertIn("short_skip_failure_message", tk_source)
         self.assertIn("width=9", tk_source)
+
+    def test_compaction_rows_ride_the_queue_with_their_own_copy(self) -> None:
+        # Several windows can qualify after one commit. Each gets a row with
+        # its own command and stage tag; a row past the nudge stage is a fact
+        # and draws no button. Only the nudge step carries the single
+        # primary, so the later steps fall back to the calm layout.
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn('json["compact_rows"]', mac)
+        self.assertIn('"compact_recommended"].contains(stateName) || waitingRowTexts.isEmpty', mac)
+        self.assertIn('if kind == "compact" { return "Copy" }', mac)
+        self.assertIn('rowButtons[index].isHidden = !visible || (kind == "compact" && action.isEmpty)', mac)
+        self.assertIn('kind == "compact" ? tag :', mac)
+        self.assertIn("func copyCompactRow(index: Int)", mac)
+        self.assertIn('waitingRowActions[index] == "copy_compact"', mac)
+        self.assertIn('stateName == "compact_recommended" && primaryAction == "none"', mac)
+        # Collapsed, the bubble carries the nudge as the calm blue count the
+        # review states use -- otherwise a nudge is invisible until the bar
+        # happens to be open.
+        self.assertIn('["control_review", "context_review", "compact_recommended"].contains(incomingState)', mac)
+        # The click is a note on the receipt for the row's own session.
+        self.assertIn('recordCompactDecision("copied", sessionID: sessionID, sha: sha)', mac)
+        self.assertIn('self.titleLabel.stringValue = "Copied"', mac)
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn('waiting_sessions = payload.get("compact_rows")', tk_source)
+        self.assertIn('"compact_recommended"} or not waiting_row_texts', tk_source)
+        self.assertIn('{"control_review", "context_review", "compact_recommended"}', tk_source)
+        self.assertIn('if kind == "compact":\n            return "Copy"', tk_source)
+        self.assertIn("def copy_compact_row(index: int)", tk_source)
+        self.assertIn('waiting_row_actions[index] == "copy_compact"', tk_source)
+        self.assertIn('primary_action_var.get() == "none"', tk_source)
+        self.assertIn('record_compact_decision(session_id, sha, "copied")', tk_source)
+        self.assertIn('title_var.set("Copied")', tk_source)
 
     def test_presence_rows_say_what_the_session_wants(self) -> None:
         # The "wants" tag is the hook's closed-vocabulary phrase; the row only
@@ -408,7 +492,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         # formatting reasons rather than behavioural ones.
         primary_states = source[source.index("def has_primary_action()"):][:600]
         for state in ("prompt_gate", "control_recommended", "optimize_available",
-                      "clipboard_confirm", "session_waiting"):
+                      "clipboard_confirm", "session_waiting", "compact_recommended"):
             with self.subTest(state=state):
                 self.assertIn(state, primary_states)
         self.assertIn("visibility: str = \"always\"", source)

@@ -2015,6 +2015,8 @@ class PromptPreflightTests(unittest.TestCase):
 
     def test_watch_critical_context_prints_handoff_capsule_inline(self) -> None:
         row = session(1, project="/repo/orcha")
+        # Critical means at the model's own window: 200K fills Haiku's.
+        row.model = "claude-haiku-4-5"
         events = [
             LocalEvent(
                 event_id=f"evt-{i}",
@@ -2022,7 +2024,7 @@ class PromptPreflightTests(unittest.TestCase):
                 tool=row.tool,
                 event_type="assistant",
                 timestamp=row.started_at,
-                tokens_in=210_000,
+                tokens_in=200_000,
                 tokens_out=500,
             )
             for i in range(3)
@@ -2049,6 +2051,8 @@ class PromptPreflightTests(unittest.TestCase):
 
     def test_watch_critical_context_copies_to_clipboard_and_dedupes_across_polls(self) -> None:
         row = session(1, project="/repo/orcha")
+        # Critical means at the model's own window: 200K fills Haiku's.
+        row.model = "claude-haiku-4-5"
         events = [
             LocalEvent(
                 event_id=f"evt-{i}",
@@ -2056,7 +2060,7 @@ class PromptPreflightTests(unittest.TestCase):
                 tool=row.tool,
                 event_type="assistant",
                 timestamp=row.started_at,
-                tokens_in=210_000,
+                tokens_in=200_000,
                 tokens_out=500,
             )
             for i in range(3)
@@ -2960,6 +2964,7 @@ class PromptPreflightTests(unittest.TestCase):
         quiet_but_unhealthy = session(2, project="/repo/quiet", now=now)
         quiet_but_unhealthy.updated_at = latest.updated_at - timedelta(minutes=1)
         quiet_but_unhealthy.started_at = quiet_but_unhealthy.updated_at - timedelta(minutes=15)
+        quiet_but_unhealthy.model = "claude-haiku-4-5"
         events = [
             LocalEvent(
                 event_id=f"evt-{i}",
@@ -2967,7 +2972,7 @@ class PromptPreflightTests(unittest.TestCase):
                 tool=quiet_but_unhealthy.tool,
                 event_type="assistant",
                 timestamp=quiet_but_unhealthy.started_at,
-                tokens_in=210_000,
+                tokens_in=200_000,
                 tokens_out=500,
             )
             for i in range(3)
@@ -3580,7 +3585,7 @@ class RunwayPressureTests(unittest.TestCase):
         self.assertIsNone(runway)
 
 
-def _event(session_id, *, content_hash="h1", tokens_in=1000, tokens_out=200, timestamp=None, event_type="assistant_tool_use"):
+def _event(session_id, *, content_hash="h1", tokens_in=1000, tokens_out=200, timestamp=None, event_type="assistant_tool_use", cache_read_tokens=0):
     return LocalEvent(
         event_id=f"evt-{content_hash}-{timestamp}",
         session_id=session_id,
@@ -3589,6 +3594,7 @@ def _event(session_id, *, content_hash="h1", tokens_in=1000, tokens_out=200, tim
         timestamp=timestamp,
         tokens_in=tokens_in,
         tokens_out=tokens_out,
+        cache_read_tokens=cache_read_tokens,
         content_hash=content_hash,
     )
 
@@ -3666,6 +3672,77 @@ class VelocitySignalTests(unittest.TestCase):
         with patch.object(cli, "get_baselines", return_value=baselines):
             self.assertIsNone(cli._velocity_signal("claude-code", events))
 
+    def test_a_big_context_sent_again_and_again_is_not_velocity(self) -> None:
+        # The real popup of 2026-09-09: seven calls in five minutes, 2.2M
+        # tokens, 99.6% of them cache reads of one ~318k context. That is
+        # context size, which the Compact nudge already covers -- not pace.
+        now = datetime.now(timezone.utc)
+        rows = [session(index, tool="claude-code", age_days=index * 2, now=now) for index in range(10)]
+        baselines = _baselines_from_sessions(rows)
+        events = [
+            _event("s1", content_hash=f"replay-{i}", tokens_in=318_000, cache_read_tokens=317_000,
+                   tokens_out=400, timestamp=now - timedelta(seconds=55 * i))
+            for i in range(7)
+        ]
+        # Enough calls over a long enough span that only the token rule can say no.
+        self.assertGreaterEqual(len(events), cli.VELOCITY_MIN_RECENT_EVENTS)
+        self.assertGreaterEqual(55 * 6 / 60.0, cli.VELOCITY_MIN_SPAN_MINUTES)
+        with patch.object(cli, "get_baselines", return_value=baselines):
+            self.assertIsNone(cli._velocity_signal("claude-code", events))
+
+    def test_only_model_calls_anchor_the_window(self) -> None:
+        # Five calls over 4.5 minutes are under the span minimum. A row with
+        # no tokens a minute later -- the user's own `/compact`, the way it
+        # happened -- must not stretch the span and raise the alarm.
+        now = datetime.now(timezone.utc)
+        rows = [session(index, tool="claude-code", age_days=index * 2, now=now) for index in range(10)]
+        baselines = _baselines_from_sessions(rows)
+        calls = [
+            _event("s1", content_hash=f"c{i}", tokens_in=20_000, tokens_out=1_000,
+                   timestamp=now - timedelta(minutes=1, seconds=67 * i))
+            for i in range(5)
+        ]
+        typed = _event("s1", content_hash="typed", tokens_in=0, tokens_out=0, timestamp=now, event_type="user")
+        with patch.object(cli, "get_baselines", return_value=baselines):
+            self.assertIsNone(cli._velocity_signal("claude-code", calls + [typed]))
+            # The same five calls with a sixth real one spanning the minimum do fire.
+            sixth = _event("s1", content_hash="c6", tokens_in=20_000, tokens_out=1_000, timestamp=now)
+            self.assertIsNotNone(cli._velocity_signal("claude-code", calls + [sixth]))
+
+    def test_the_baseline_pace_leaves_cache_reads_out_too(self) -> None:
+        now = datetime.now(timezone.utc)
+        rows = [session(index, tool="claude-code", age_days=index * 2, now=now) for index in range(10)]
+        for row in rows:
+            row.cache_read_tokens = 9_000
+        baselines = _baselines_from_sessions(rows)
+        self.assertEqual(baselines["per_tool"]["claude-code"]["p75_tokens_per_minute"], (15014.0 - 9_000) / 15.0)
+
+    def test_the_verdict_stands_down_while_the_compact_nudge_covers_the_session(self) -> None:
+        # Same cause, one surface: while the session's log has it anywhere in
+        # the compaction lifecycle, the bar is already saying Compact.
+        session_row = LocalSession(
+            session_id="s1", tool="claude-code", project_path="/repo",
+            updated_at=datetime.now(timezone.utc) - timedelta(minutes=6),
+        )
+        fast = {"tool": "claude-code", "tokens_per_minute": 400_000.0, "baseline_tokens_per_minute": 80_000.0, "ratio": 5.0}
+
+        def status(stage: str | None):
+            assessment = None if stage is None else SimpleNamespace(stage=stage)
+            with patch.object(cli, "_velocity_signal", return_value=fast), \
+                    patch.object(cli.compaction, "assess", return_value=assessment):
+                return cli._watch_status(
+                    session_row, [], [session_row],
+                    cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000, waiting={},
+                )
+
+        self.assertEqual(status(None)["signal_kind"], "velocity")
+        self.assertEqual(status("none")["signal_kind"], "velocity")
+        for stage in ("nudge", "compacting", "compacted", "confirmed"):
+            deferred = status(stage)
+            self.assertNotEqual(deferred["signal_kind"], "velocity", stage)
+            self.assertEqual(deferred["velocity"], fast)
+            self.assertIn(stage, str(deferred["velocity_deferred"]))
+
     def test_none_without_enough_baseline_history(self) -> None:
         baselines = _baselines_from_sessions([session(1, tool="claude-code")])
         events = [_event("s1", tokens_in=50000, timestamp=datetime.now(timezone.utc))]
@@ -3712,6 +3789,8 @@ class VelocitySignalTests(unittest.TestCase):
 class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
     def test_watch_loop_seeded_capsule_leads_with_loop_diagnosis(self) -> None:
         row = session(1, project="/repo/orcha")
+        # Critical means at the model's own window: 200K fills Haiku's.
+        row.model = "claude-haiku-4-5"
         events = [_event(row.session_id, content_hash="dup", timestamp=row.started_at) for _ in range(cli.LOOP_CAPSULE_REPEAT)]
         args = SimpleNamespace(days=1, interval=15, once=True, cost_threshold=5.0, calls_threshold=250, tokens_threshold=500_000, target="generic")
         output = io.StringIO()

@@ -47,7 +47,7 @@ from .companion import (
     uninstall_login_autostart,
 )
 from .evidence_capture import record_missing_evidence_snapshots
-from . import prompt_signals
+from . import compaction, prompt_signals
 from .local_state import (
     COMMAND_GATE_BLOCKED_DECISIONS,
     VALID_OUTCOMES,
@@ -1159,12 +1159,16 @@ BASELINE_TOOLS = ("claude-code", "codex-cli")
 #       month here. This one also has to be bumped by hand whenever a rate is
 #       added to pricing.INTRO_PRICING: the stored figure changes even though no
 #       code path did.
+#   v4: p75_tokens_per_minute counts fresh tokens only (input the model had
+#       not seen before, plus output), not cache reads. The velocity signal
+#       compares against it the same way; under v3 both sides were mostly
+#       replayed context, so the ratio measured context size, not pace.
 # The 24h staleness window would eventually wash a change like this out on its
 # own, but "eventually" is not good enough here: the hook hot path reads the
 # cache without refreshing it, so a stale baseline keeps producing confident,
 # order-of-magnitude-wrong savings estimates until something else happens to
 # trigger a recompute.
-BASELINE_ACCOUNTING_VERSION = 3
+BASELINE_ACCOUNTING_VERSION = 4
 
 
 SURVIVAL_ACCOUNTING_VERSION = 1
@@ -1342,11 +1346,14 @@ def _compute_baselines() -> dict[str, object]:
         call_values = [float(row.agent_calls) for row in relevant if row.agent_calls > 0]
         tool_values = [float(row.tool_calls) for row in relevant if row.tool_calls > 0]
         cost_values = [float(row.cost_usd) for row in relevant if row.cost_usd > 0]
-        # Real per-session tokens/minute (not an assumed session length) --
-        # only from sessions with both token usage and a measured duration,
-        # so this is grounded in what actually happened, not a guess.
+        # Real per-session fresh tokens/minute (not an assumed session length)
+        # -- only from sessions with both token usage and a measured duration,
+        # so this is grounded in what actually happened, not a guess. Cache
+        # reads are left out: they are the same context sent again, and a
+        # pace that counted them grew with the context rather than the work.
+        # _velocity_signal measures its window the same way.
         velocity_values = [
-            (row.tokens_in + row.tokens_out) / (row.duration_seconds / 60.0)
+            (max(0, row.tokens_in - row.cache_read_tokens) + row.tokens_out) / (row.duration_seconds / 60.0)
             for row in relevant
             if row.tokens_in + row.tokens_out > 0 and row.duration_seconds >= 60
         ]
@@ -5906,8 +5913,27 @@ def _loop_signal(events: Sequence[LocalEvent]) -> dict[str, object] | None:
     }
 
 
+def _fresh_tokens(event: LocalEvent) -> int:
+    """Tokens the model read for the first time or wrote: everything but cache reads."""
+    return max(0, event.tokens_in - event.cache_read_tokens) + event.tokens_out
+
+
+def _velocity_deferred_to_compact(session: LocalSession) -> str | None:
+    """Why a velocity verdict should stay quiet: the session's own log puts it
+    somewhere in the compaction lifecycle, so the Compact nudge (or its
+    follow-through) is already on the bar for the same cause. Reads only this
+    session's transcript and repo, the same per-session inputs the nudge uses."""
+    try:
+        assessment = compaction.assess(session)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if assessment is None or assessment.stage == "none":
+        return None
+    return f"the Compact nudge already covers this session (stage: {assessment.stage})"
+
+
 def _velocity_signal(tool: str, events: Sequence[LocalEvent]) -> dict[str, object] | None:
-    """Runaway velocity: tokens/minute in this session's recent events vs. the tool's own baseline.
+    """Runaway velocity: fresh tokens/minute across this session's recent model calls vs. the tool's own baseline.
 
     Distinct from the runway estimate (which looks across sessions over 5h):
     this looks *within* the current session's most recent activity, so it can
@@ -5934,15 +5960,23 @@ def _velocity_signal(tool: str, events: Sequence[LocalEvent]) -> dict[str, objec
     if baseline_tokens_per_minute <= 0:
         return None
 
-    timestamped = [e for e in events if e.timestamp]
-    if not timestamped:
+    # Only billed model calls anchor, fill and count the window, and only
+    # their fresh tokens count. Both learned on 2026-09-09 from one popup:
+    # the window used to be anchored on the newest row of any kind, so the
+    # user's own `/compact` row stretched a 4.7-minute span past the 5-minute
+    # minimum and raised "unusually fast run" about the thing they were
+    # fixing. And the 2.2M tokens inside it were 99.6% cache reads of one
+    # ~318k context sent seven times -- context size, which is the Compact
+    # nudge's job, not pace.
+    calls = [e for e in events if e.timestamp and e.tokens_in + e.tokens_out > 0]
+    if not calls:
         return None
-    latest = max(e.timestamp for e in timestamped)
+    latest = max(e.timestamp for e in calls)
     window_start = latest - timedelta(minutes=VELOCITY_WINDOW_MINUTES)
-    window_events = [e for e in timestamped if e.timestamp >= window_start]
+    window_events = [e for e in calls if e.timestamp >= window_start]
     if len(window_events) < VELOCITY_MIN_RECENT_EVENTS:
         return None
-    window_tokens = sum(e.tokens_in + e.tokens_out for e in window_events)
+    window_tokens = sum(_fresh_tokens(e) for e in window_events)
     observed_span_minutes = (latest - min(e.timestamp for e in window_events)).total_seconds() / 60.0
     if observed_span_minutes < VELOCITY_MIN_SPAN_MINUTES or window_tokens < VELOCITY_MIN_WINDOW_TOKENS:
         return None
@@ -5977,6 +6011,11 @@ def _watch_status(
     health = analyze_session_health(session, events)
     loop = _loop_signal(events)
     velocity = _velocity_signal(session.tool, events)
+    # A big context re-sent every call is what velocity mostly caught, and
+    # the Compact nudge is the surface for that. While the session is in the
+    # compaction lifecycle the velocity verdict stands down instead of saying
+    # the same thing in a second vocabulary; the figure still rides along.
+    velocity_deferred = _velocity_deferred_to_compact(session) if velocity is not None else None
     runway = _runway_pressure(session.tool, all_rows)
     insights = session_insights(
         session,
@@ -6018,7 +6057,7 @@ def _watch_status(
         action = "create handoff capsule now"
         signal_kind = "loop"
         reason = str(loop["diagnosis"])
-    elif velocity is not None:
+    elif velocity is not None and velocity_deferred is None:
         action = "narrow scope"
         signal_kind = "velocity"
         reason = (
@@ -6054,6 +6093,7 @@ def _watch_status(
         "health": health,
         "loop": loop,
         "velocity": velocity,
+        "velocity_deferred": velocity_deferred,
         "runway": runway,
         "insights": insights,
         "action": action,
@@ -6160,8 +6200,10 @@ def _print_watch_status_card(
     if velocity is not None:
         print(
             f"  Velocity   : {velocity['ratio']:.1f}x typical {velocity['tool']} pace "
-            f"({compact_int(int(velocity['tokens_per_minute']))} tokens/min) -- local estimate, not live"
+            f"({compact_int(int(velocity['tokens_per_minute']))} fresh tokens/min) -- local estimate, not live"
         )
+        if status.get("velocity_deferred"):
+            print(f"               not raised: {status['velocity_deferred']}")
     if runway is not None:
         print(
             f"  Usage pressure ({runway['window_hours']:.0f}h est.): "
