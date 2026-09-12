@@ -21,7 +21,7 @@ from typing import Any, Callable, Sequence
 from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
-from . import analyst, prompt_signals, statusline
+from . import analyst, compaction, prompt_signals, statusline
 from .ai_assist import (
     AiAssistUnavailable,
     build_ai_assist_status,
@@ -100,6 +100,7 @@ from .local_state import (
 )
 from .outcome_evidence import VALID_EVIDENCE_OUTCOMES, build_outcome_evidence, evidence_for_sessions
 from .local_state import dismiss_first_run, first_run_dismissed_at
+from .local_state import compact_nudge, record_compact_nudge, update_compact_nudge
 from .ledger import (
     UNBANKED_OUTSIDE_REPO,
     Ledger,
@@ -107,7 +108,7 @@ from .ledger import (
     checkpoint_distance,
     unbanked_summary,
 )
-from .pricing import cache_read_cost, estimate_cost, is_subscription_model
+from .pricing import cache_read_cost, context_window, estimate_cost, is_subscription_model
 from .runtime_attachment import (
     RuntimeAttachment,
     format_resume_command,
@@ -128,8 +129,6 @@ from .session_presence import (
     tool_label,
 )
 from .session_health import (
-    CRITICAL_TOKENS_PER_TURN,
-    PRESSURE_TOKENS_PER_TURN,
     ContextHealth,
     analyze_all_sessions,
     analyze_session_health,
@@ -1965,8 +1964,10 @@ def _session_verdict_inputs(row: LocalSession, events: list[LocalEvent]) -> dict
             "latest_turn_label": compact_int(health.latest_turn_tokens),
             "peak_turn_tokens": health.peak_turn_tokens,
             "peak_turn_label": compact_int(health.peak_turn_tokens),
-            "pressure_tokens": PRESSURE_TOKENS_PER_TURN,
-            "critical_tokens": CRITICAL_TOKENS_PER_TURN,
+            # This model's window, or null when nobody knows it. Null is
+            # rendered as "no limit to project towards", never as some other
+            # model's number.
+            "context_window": health.context_window,
             "turns_to_critical": health.turns_to_critical,
             "turns_since_reset": health.turns_since_reset,
             "severity": health.severity,
@@ -3050,9 +3051,9 @@ def _context_action(health: ContextHealth) -> dict[str, str]:
     if health.severity == "critical":
         primary, secondary = _ACTION_FRESH, _ACTION_REVIEW
         reason = "Critical context pressure is likely to waste turns or miss details."
-    elif health.is_context_pressure or health.is_high_bloat:
+    elif health.is_high_bloat:
         primary, secondary = _ACTION_FRESH, _ACTION_REVIEW
-        reason = "Context is growing; compact before it compounds further."
+        reason = "Most of this session's spend is replayed history; compact before it compounds further."
     elif health.is_stale:
         primary, secondary = _ACTION_REVIEW, _ACTION_FRESH
         reason = "The session is old enough that a focused restart may be cleaner."
@@ -3075,6 +3076,7 @@ def _context_health_card(
     group: list[ContextHealth],
     turn_series: list[int] | None = None,
     charted_because_live: bool = False,
+    compact_payload: dict[str, object] | None = None,
 ) -> dict[str, object]:
     action = _context_action(health)
     critical_count = sum(1 for item in group if item.severity == "critical")
@@ -3162,8 +3164,9 @@ def _context_health_card(
             "turns_to_critical": health.turns_to_critical,
             "turns_since_reset": health.turns_since_reset,
             "context_resets": health.context_resets,
-            "pressure_tokens_n": PRESSURE_TOKENS_PER_TURN,
-            "critical_tokens_n": CRITICAL_TOKENS_PER_TURN,
+            # The model's window, null when unknown. The chart draws no limit
+            # line and projects nothing rather than borrowing another model's.
+            "context_window_n": health.context_window,
         },
         "estimated_replayed_context_tokens": replayed_tokens,
         "estimated_replayed_context_label": compact_int(replayed_tokens),
@@ -3187,6 +3190,7 @@ def _context_health_card(
         ),
         "source_path": session.source_path if session else None,
         "can_handoff": bool(session),
+        "compact": compact_payload,
         "compact_prompt": _build_compact_prompt(health),
         "group_note": (
             f"{len(group)} sessions need attention in this project."
@@ -3194,6 +3198,44 @@ def _context_health_card(
             else "One session needs attention in this project."
         ),
     }
+
+
+def _group_compact_payload(
+    group: list[ContextHealth],
+    sessions_by_id: dict[str, LocalSession],
+    still_reachable: Callable[[ContextHealth], bool],
+) -> dict[str, object] | None:
+    """The compact nudge for a project card, if any session in it has one.
+
+    Assessed on the sessions still being worked in, not on the card's
+    representative: the card charts the worst session in the project, while
+    a compaction is an instruction for the one being typed into, and the two
+    are usually different. Several may qualify; the one with the most to shed
+    leads. Deferred means the owner said Later for that commit -- the numbers
+    stay on the card, the buttons do not.
+    """
+    best: dict[str, object] | None = None
+    for item in group:
+        session = sessions_by_id.get(item.session_id)
+        if session is None or not session.source_path or has_cumulative_totals(session):
+            continue
+        if not still_reachable(item):
+            continue
+        assessment = compaction.assess(session)
+        if assessment is None:
+            continue
+        payload = _compact_payload(assessment)
+        if assessment.recommend:
+            try:
+                payload["deferred"] = companion_skip_active(str(payload["skip_key"]))
+            except OSError:
+                pass
+        if best is None or (
+            (bool(payload["recommend"]), int(payload["dead_tokens"]))
+            > (bool(best["recommend"]), int(best["dead_tokens"]))
+        ):
+            best = payload
+    return best
 
 
 def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) -> list[dict[str, object]]:
@@ -3249,6 +3291,7 @@ def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) ->
             group=group,
             turn_series=turns_by_session.get(representative.session_id, []) if plottable else None,
             charted_because_live=_still_reachable(representative),
+            compact_payload=_group_compact_payload(group, sessions_by_id, _still_reachable),
         )
         quiet = (
             representative.severity in {"critical", "warning"}
@@ -6273,17 +6316,17 @@ RECENT_SIGNAL_WINDOW_MINUTES = LIVE_WINDOW_MINUTES
 def _pressure_block(rows: list[SessionPresence], sessions: list[LocalSession]) -> dict[str, object]:
     """Context pressure of the session being worked in, for the resting bar.
 
-    The label asks: "how close is this session's latest turn to the per-turn
-    limit where a Fresh Start gets recommended?" Unit and scope: billed input
-    tokens on the latest single turn of the most recently active *working*
-    session -- per-turn, never a cumulative session total under a per-turn
-    label. Compared against CRITICAL_TOKENS_PER_TURN, the same constant the
+    The label asks: "how much of this model's context window is the latest
+    turn using?" Unit and scope: billed input tokens on the latest single turn
+    of the most recently active *working* session -- per-turn, never a
+    cumulative session total under a per-turn label. Compared against the
+    session model's own window (pricing.context_window), the same figure that the
     runway chart and statusline read, so the surfaces cannot disagree.
     Freshness comes from statusline.read_transcript (one file, ~13ms), cached
     on the session's updated_at rather than served from the 6-hour summary
     cache. When the input is missing -- no working session, a cumulative-total
-    source, an unreadable transcript -- the block says so and the widgets draw
-    no meter, never a zero.
+    source, an unreadable transcript, a model whose window is not known -- the
+    block says so and the widgets draw no meter, never a zero.
     """
     working = [
         row for row in rows
@@ -6306,21 +6349,34 @@ def _pressure_block(rows: list[SessionPresence], sessions: list[LocalSession]) -
     stamp = session.updated_at.isoformat() if session.updated_at else ""
     cached = _PRESSURE_TRANSCRIPT_CACHE.get(session.source_path)
     if cached is not None and cached[0] == stamp:
-        latest = cached[1]
+        latest, peak, model = cached[1], cached[2], cached[3]
     else:
-        stats = statusline.read_transcript(session.source_path)
-        latest = int(stats.get("latest_context") or 0) if stats.get("available") else 0
+        # Codex rollouts carry per-call context in a different shape; the
+        # compaction module's reader yields the same fields.
+        if "codex" in session.tool.lower():
+            stats = compaction.codex_boundary_stats(session.source_path)
+        else:
+            stats = statusline.read_transcript(session.source_path)
+        available = bool(stats.get("available"))
+        latest = int(stats.get("latest_context") or 0) if available else 0
+        peak = int(stats.get("peak_context") or latest) if available else 0
+        model = stats.get("model") if available else None
         if len(_PRESSURE_TRANSCRIPT_CACHE) > 32:
             _PRESSURE_TRANSCRIPT_CACHE.clear()
-        _PRESSURE_TRANSCRIPT_CACHE[session.source_path] = (stamp, latest)
+        _PRESSURE_TRANSCRIPT_CACHE[session.source_path] = (stamp, latest, peak, model)
     if latest <= 0:
         return {"available": False, "reason": "no per-turn usage recorded in this session yet"}
-    severity = (
-        "critical" if latest >= CRITICAL_TOKENS_PER_TURN
-        else "warning" if latest >= PRESSURE_TOKENS_PER_TURN
-        else "ok"
-    )
-    pct = round(100 * latest / CRITICAL_TOKENS_PER_TURN)
+    # Same rule as session_health._context_ceiling: a table figure the session
+    # has already exceeded is stale, and the honest percent of a stale figure
+    # is no percent at all.
+    window = context_window(model or session.model)
+    if window is None or peak > window:
+        return {
+            "available": False,
+            "reason": f"context window unknown for {model or session.model or 'this model'}",
+        }
+    severity = "critical" if latest >= window else "ok"
+    pct = round(100 * latest / window)
     # Absolute anchors for the percent: what this session has spent so far,
     # straight off the session row -- no new reads. Raw totals, so the
     # widgets draw them as plain muted text with no status colour (a total is
@@ -6340,7 +6396,8 @@ def _pressure_block(rows: list[SessionPresence], sessions: list[LocalSession]) -
         "latest_turn_tokens": latest,
         "pct_of_turn_limit": pct,
         "severity": severity,
-        "label": f"{compact_int(latest)} · {pct}% of turn limit",
+        "context_window": window,
+        "label": f"{compact_int(latest)} · {pct}% of {compact_int(window)} window",
         "stats_label": " · ".join(stats_parts),
         "stats_detail": "This session so far, API-equivalent cost and total tokens.",
     }
@@ -6646,6 +6703,331 @@ def _recent_signal_block() -> dict[str, object] | None:
     return None
 
 
+# Later hides one commit's nudge; a new commit is a new key, so the cap only
+# matters if nothing is committed for a day.
+COMPACT_LATER_MINUTES = 24 * 60
+_COMPACT_CACHE: dict[str, tuple[str, str, compaction.Assessment | None]] = {}
+
+
+def _compact_payload(assessment: compaction.Assessment) -> dict[str, object]:
+    data = assessment.to_json()
+    data.update({
+        "sha_short": assessment.sha[:7],
+        "session_short": short_session_id(assessment.session_id),
+        "latest_label": compact_int(assessment.latest_turn_tokens),
+        "dead_label": compact_int(assessment.dead_tokens),
+        "context_at_commit_label": compact_int(assessment.context_at_commit),
+        "after_label": compact_int(assessment.after_estimate),
+        "first_turn_label": compact_int(assessment.first_turn_tokens),
+        "before_shed_label": compact_int(assessment.context_before_shed) if assessment.context_before_shed else None,
+        # The size right after the shed. `latest_label` keeps growing while
+        # `confirmed` is on the bar, so it is not the compaction's number.
+        "after_shed_label": compact_int(assessment.context_after_shed) if assessment.context_after_shed else None,
+        "dead_usd_label": money(assessment.dead_usd_per_turn) if assessment.dead_usd_per_turn else None,
+        "skip_key": f"compact:{assessment.session_id}:{assessment.sha}",
+        "deferred": False,
+        # The buttons belong to the nudge alone. Once the log shows the
+        # compaction under way, offering the command again would be asking
+        # for a thing already done.
+        "actionable": assessment.recommend and assessment.stage == "nudge",
+    })
+    return data
+
+
+def _assess_cached(session: LocalSession) -> compaction.Assessment | None:
+    """One transcript pass per change: cached on the session's updated_at and
+    HEAD sha, because this runs on the Companion's poll."""
+    boundary = compaction.head_commit(session.project_path)
+    if boundary is None or not session.source_path:
+        return None
+    stamp = session.updated_at.isoformat() if session.updated_at else ""
+    cached = _COMPACT_CACHE.get(session.source_path)
+    if cached is not None and cached[0] == stamp and cached[1] == boundary.sha:
+        return cached[2]
+    assessment = compaction.assess(session)
+    if len(_COMPACT_CACHE) > 32:
+        _COMPACT_CACHE.clear()
+    _COMPACT_CACHE[session.source_path] = (stamp, boundary.sha, assessment)
+    return assessment
+
+
+def _compact_session_payload(session: LocalSession, row: SessionPresence) -> dict[str, object] | None:
+    """One session's place in the compaction lifecycle, with its receipt kept
+    in step.
+
+    The stage comes from the session's own log (compaction.assess); the
+    receipt adds the one thing the log cannot know, that Copy was clicked,
+    and records each step as it is observed. Attribution is by log, never by
+    click: a command pasted into a different window from the one the bar
+    named moves that window's row, and the clicked one keeps waiting.
+    """
+    assessment = _assess_cached(session)
+    if assessment is None:
+        return None
+    stage = assessment.stage
+    sid, sha = session.session_id, assessment.sha
+    if stage == "none":
+        # The shed was observed some replies ago: close the receipt if it is
+        # still open, and say nothing.
+        if assessment.reason.startswith("The context already shed"):
+            try:
+                record = compact_nudge(sid, sha)
+                if record and record.get("after_actual") is None:
+                    update_compact_nudge(sid, sha, after_actual=assessment.latest_turn_tokens)
+            except OSError:
+                pass
+        return None
+    # A nudge is an instruction for the session being typed into, and that
+    # session is a quiet one: /compact is typed once the model has stopped.
+    # The first rule showed it only while the session was working, which is
+    # the sixty seconds the user cannot act and not the minutes after, when
+    # they can -- this was observed in a live replay where the nudge disappeared
+    # before the user had a chance to act on it.
+    # It stays while the session is live (working, waiting, or quiet, up to
+    # LIVE_WINDOW_MINUTES) and drops with the session once it is gone; the
+    # later stages are facts about a compaction under way and stay anyway.
+    if stage == "nudge" and not row.live:
+        return None
+    payload = _compact_payload(assessment)
+    record: dict[str, object] | None = None
+    try:
+        record = compact_nudge(sid, sha)
+        if stage == "nudge":
+            if companion_skip_active(str(payload["skip_key"])):
+                return None
+            if record is None:
+                record = record_compact_nudge(
+                    session_id=sid, sha=sha,
+                    dead_tokens=assessment.dead_tokens,
+                    latest_turn_tokens=assessment.latest_turn_tokens,
+                    after_estimate=assessment.after_estimate,
+                    project_path=session.project_path,
+                )
+            elif record.get("decision") == "copied":
+                stage = "copied"
+        elif stage == "compacting":
+            if record is not None and record.get("command_seen_at") is None:
+                record = update_compact_nudge(
+                    sid, sha, command_seen_at=assessment.command_seen_at,
+                    decision=None if record.get("decision") else "typed",
+                    action_channel=None if record.get("decision") else "transcript",
+                )
+        elif stage == "compacted":
+            if record is not None and record.get("boundary_seen_at") is None:
+                record = update_compact_nudge(sid, sha, boundary_seen_at=assessment.boundary_seen_at)
+        elif stage == "confirmed":
+            # A compaction nobody asked for -- the tool's own auto-compact --
+            # is not this feature's to announce.
+            if record is None and not assessment.command_seen_at:
+                return None
+            if record is not None and record.get("after_actual") is None:
+                record = update_compact_nudge(
+                    sid, sha, after_actual=assessment.context_after_shed or assessment.latest_turn_tokens,
+                )
+    except OSError:
+        pass
+    payload["stage"] = stage
+    payload["nudge_id"] = record.get("id") if record else None
+    payload["after_estimate_nudged"] = int(record.get("after_estimate") or 0) if record else 0
+    payload["project"] = _project_basename(session.project_path) or ""
+    payload["tool_name"] = tool_label(session.tool)
+    payload["name"] = assessment.title or f"{payload['tool_name']} · {payload['project']}".strip(" ·")
+    return payload
+
+
+def _compact_block(rows: list[SessionPresence], sessions: list[LocalSession]) -> dict[str, object] | None:
+    """Every live session with something to say about compacting, most to
+    shed first.
+
+    More than one window can qualify at once -- two sessions open on the same
+    project after one commit -- and showing them one after the other made
+    the second read as the first asking again. The block lists them; the
+    lead's figures are also flattened onto it for surfaces that show one.
+    """
+    by_id = {row.session_id: row for row in sessions}
+    items: list[dict[str, object]] = []
+    for row in rows:
+        if not row.measurable or row.analyst_run or not row.live:
+            continue
+        session = by_id.get(row.session_id)
+        if session is None or not session.source_path or has_cumulative_totals(session):
+            continue
+        payload = _compact_session_payload(session, row)
+        if payload is not None:
+            items.append(payload)
+    if not items:
+        return None
+    items.sort(key=lambda item: -int(item.get("dead_tokens") or 0))
+    block = dict(items[0])
+    block["sessions"] = items
+    block["count"] = len(items)
+    return block
+
+
+_COMPACT_STAGE_WORD = {
+    "nudge": "to compact", "copied": "copied", "compacting": "compacting",
+    "compacted": "compacted", "confirmed": "done",
+}
+
+
+def _hhmm(stamp: object) -> str:
+    if not isinstance(stamp, str) or not stamp:
+        return "?"
+    try:
+        return datetime.fromisoformat(stamp).astimezone().strftime("%H:%M")
+    except ValueError:
+        return "?"
+
+
+def _fit_name(name: str, rest: str, limit: int = 46) -> str:
+    """`name · rest` inside the bar's subtitle cap, trimming the name first;
+    the figures are the part that must survive."""
+    room = limit - len(rest) - 3
+    if room < 6:
+        return rest
+    if len(name) > room:
+        name = name[:room - 1].rstrip() + "…"
+    return f"{name} · {rest}"
+
+
+def _compact_row(item: dict[str, object]) -> dict[str, object]:
+    stage = str(item.get("stage") or "nudge")
+    tag = {
+        "nudge": f"→ ~{item.get('after_label')}",
+        "copied": "copied",
+        "compacting": "compacting…",
+        "compacted": "compacted",
+        "confirmed": f"→ {item.get('after_shed_label') or item.get('latest_label')}",
+    }.get(stage, "")
+    session_id = str(item.get("session_id") or "")
+    return {
+        "kind": "compact",
+        "stage": stage,
+        "session_id": session_id,
+        "sha": str(item.get("sha") or ""),
+        "text": f"{item.get('name')} · {item.get('dead_label')} of {item.get('latest_label')}",
+        "tag": tag,
+        "action": "copy_compact" if stage in {"nudge", "copied"} else "",
+        "command": str(item.get("command") or "") if stage in {"nudge", "copied"} else "",
+        "url": f"/?session={quote(session_id, safe='')}",
+    }
+
+
+def _compact_companion_state(base: dict[str, object], compact: dict[str, object]) -> dict[str, object]:
+    """The bar's words for each step of a compaction.
+
+    Title fits 18 characters and subtitle 46 -- the bar's own caps, which
+    truncated the first version mid-word. Every step changes on a line the
+    tool wrote to the session log; nothing here waits on a timer.
+    """
+    items = [item for item in compact.get("sessions") or [] if isinstance(item, dict)]
+    lead = items[0] if items else compact
+    session_id = str(lead.get("session_id") or "")
+    stage = str(lead.get("stage") or "nudge")
+    name = str(lead.get("name") or "")
+    # The bar spends most of its life collapsed to the bubble, and the bubble
+    # shows nothing but a count. Without one, a nudge waited invisibly until
+    # the bar happened to be expanded (2026-09-09: "not getting the compact
+    # now message" while the state said exactly that). Every step carries the
+    # calm blue count the review states use, the ones after the click too:
+    # the first version gave those none, and "Compacted · 254.6k → 72.1k"
+    # sat behind a blank bubble until it was gone.
+    count = len(items) if items else 1
+    common = {
+        **base,
+        "state": "compact_recommended",
+        "compact_stage": stage,
+        "primary_action": "none",
+        "primary_label": "",
+        "primary_session_id": session_id,
+        "primary_url": f"/?session={quote(session_id, safe='')}",
+        "compact_command": "",
+        "compact_sha": str(lead.get("sha") or ""),
+        "skip_label": "Later",
+        "skip_state": "",
+        "skip_session_id": "",
+        "skip_session_ids": [],
+        "control_url": "/?view=watch#contextHealth",
+        "badge": {"count": count, "tone": "info"},
+        "compact_rows": [],
+    }
+    if len(items) > 1:
+        counts: dict[str, int] = {}
+        for item in items:
+            key = str(item.get("stage") or "nudge")
+            counts[key] = counts.get(key, 0) + 1
+        nudged = [str(item.get("session_id") or "") for item in items if item.get("stage") == "nudge"]
+        return {
+            **common,
+            "label": f"Compact {len(items)} sessions",
+            "subtitle": " · ".join(f"{n} {_COMPACT_STAGE_WORD[k]}" for k, n in counts.items() if k in _COMPACT_STAGE_WORD),
+            "skip_state": "compact_recommended" if nudged else "",
+            "skip_session_id": nudged[0] if nudged else "",
+            "skip_session_ids": nudged,
+            "compact_rows": [_compact_row(item) for item in items],
+            "detail": (
+                f"{len(items)} sessions replay work from before commit {lead.get('sha_short')}. "
+                "Each row is one window; Copy puts that window's /compact on the clipboard."
+            ),
+        }
+    if stage == "copied":
+        return {
+            **common,
+            "label": "Copied",
+            "subtitle": f"Paste into {name}"[:46] if name else "Paste it into the tool's prompt",
+            "detail": (
+                "Watching this session's log for the compaction to land. Claude Code records it "
+                "when it finishes, about a minute after enter."
+            ),
+        }
+    if stage == "compacting":
+        return {
+            **common,
+            "label": "Compacting…",
+            "subtitle": _fit_name(name, f"/compact seen {_hhmm(lead.get('command_seen_at'))}"),
+            "detail": str(lead.get("reason") or ""),
+        }
+    if stage == "compacted":
+        return {
+            **common,
+            "label": "Compacted",
+            "subtitle": "Confirming the size on the next reply",
+            "detail": str(lead.get("reason") or ""),
+        }
+    if stage == "confirmed":
+        before = lead.get("before_shed_label")
+        after = lead.get("after_shed_label") or lead.get("latest_label")
+        estimate = int(lead.get("after_estimate_nudged") or 0)
+        figures = f"{before} → {after} per reply" if before else f"{after} per reply now"
+        if estimate:
+            figures += f" · estimate was {compact_int(estimate)}"
+        return {
+            **common,
+            "label": "Compacted",
+            "subtitle": figures[:46],
+            "detail": f"The receipt closed with the real number. {name}".strip(),
+        }
+    prompts_since = int(lead.get("prompts_since_commit") or 0)
+    when = f"Committed {prompts_since} turn{'s' if prompts_since != 1 else ''} ago" if prompts_since else "Committed this turn"
+    figures = f"{lead.get('dead_label')} of {lead.get('latest_label')}"
+    return {
+        **common,
+        "label": "Compact now",
+        "subtitle": _fit_name(name, figures) if name else f"{when} · {figures} is finished work",
+        "primary_label": "Copy",
+        "primary_action": "copy_compact",
+        "compact_command": str(lead.get("command") or ""),
+        "skip_state": "compact_recommended",
+        "skip_session_id": session_id,
+        "skip_session_ids": [session_id],
+        "detail": (
+            f"{when}. {figures} this turn replays is finished work"
+            f"{f' in {name}' if name else ''}. Compacting now drops the next reply to about "
+            f"{lead.get('after_label')}. Nudged once per commit; Later hides it until the next one."
+        ),
+    }
+
+
 def build_companion_state() -> dict[str, object]:
     """Small, fast state contract for the always-available Companion surface."""
     summary = build_summary_cached(7)
@@ -6700,6 +7082,7 @@ def build_companion_state() -> dict[str, object]:
         "companion_preferences": prefs,
         "pressure": _pressure_block(presence_rows, session_rows),
         "recent_signal": _recent_signal_block(),
+        "compact": _compact_block(presence_rows, session_rows),
     }
     try:
         gate = active_prompt_gate()
@@ -6952,6 +7335,14 @@ def build_companion_state() -> dict[str, object]:
                 else "This run was active a moment ago and has gone quiet -- likely completed work awaiting review."
             ),
         }
+
+    # After a commit, with most of the replay predating it. Calm, like a
+    # finished run: "a good moment", not "blocked on you". Below waiting and
+    # finished because those are about sessions that need a look; this is about
+    # the one being typed into, and it keeps until the context sheds.
+    compact = base.get("compact")
+    if isinstance(compact, dict) and compact.get("sessions"):
+        return _compact_companion_state(base, compact)
 
     fresh_start_candidates = _fresh_start_context_candidates(summary)
     if fresh_start_context_enabled and len(fresh_start_candidates) > 1:
@@ -7599,7 +7990,7 @@ class UIHandler(BaseHTTPRequestHandler):
                         "analyzed_cost_usd": round(match.analyzed_cost_usd, 6),
                         "growth_rate": match.growth_rate,
                         "is_context_critical": match.is_context_critical,
-                        "is_context_pressure": match.is_context_pressure,
+                        "context_window": match.context_window,
                         "is_extreme_bloat": match.is_extreme_bloat,
                         "is_high_bloat": match.is_high_bloat,
                         "is_stale": match.is_stale,
@@ -7636,6 +8027,7 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/optimize-decision",
             "/api/companion-skip",
             "/api/companion-preferences",
+            "/api/compact-decision",
             "/api/ambient-intervention-action",
             "/api/runtime-return",
             "/api/session-resume",
@@ -7903,6 +8295,27 @@ class UIHandler(BaseHTTPRequestHandler):
                 "application/json; charset=utf-8",
             )
             return
+        if parsed.path == "/api/compact-decision":
+            session_id = str(payload.get("session_id", "")).strip()
+            sha = str(payload.get("sha", "")).strip() or None
+            decision = str(payload.get("decision", "")).strip()
+            action_channel = str(payload.get("action_channel", "dashboard")).strip() or "dashboard"
+            if not session_id or decision not in {"copied", "later"}:
+                self._send(400, json.dumps({"error": "session_id and a decision of copied or later are required"}), "application/json; charset=utf-8")
+                return
+            try:
+                record = update_compact_nudge(session_id, sha, decision=decision, action_channel=action_channel)
+                if decision == "later":
+                    record_companion_skip(
+                        key=f"compact:{session_id}:{(record or {}).get('sha') or sha or ''}",
+                        reason="User deferred the compact nudge until the next commit.",
+                        minutes=COMPACT_LATER_MINUTES,
+                    )
+            except OSError as exc:
+                self._send(500, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")
+                return
+            self._send(200, json.dumps({"ok": True, "record": record}), "application/json; charset=utf-8")
+            return
         if parsed.path == "/api/handoff-decision":
             session_id = str(payload.get("session_id", "")).strip()
             decision = str(payload.get("decision", "")).strip()
@@ -8052,6 +8465,22 @@ class UIHandler(BaseHTTPRequestHandler):
                         )
                         return
                     self._send(200, json.dumps({"ok": True, "projects": len(saved)}), "application/json; charset=utf-8")
+                    return
+                if state == "compact_recommended" and session_id:
+                    # The bar's skip carries no sha; the session's newest nudge
+                    # is the one on screen. With several windows listed, Later
+                    # covers every row still at the nudge stage.
+                    listed = payload.get("session_ids")
+                    targets = [str(s) for s in listed if str(s).strip()] if isinstance(listed, list) else []
+                    for target_id in targets or [session_id]:
+                        record = update_compact_nudge(target_id, None, decision="later", action_channel="companion_skip")
+                        sha = str((record or {}).get("sha") or payload.get("sha") or "")
+                        record_companion_skip(
+                            key=f"compact:{target_id}:{sha}",
+                            reason="User deferred the compact nudge until the next commit.",
+                            minutes=COMPACT_LATER_MINUTES,
+                        )
+                    self._send(200, json.dumps({"ok": True}), "application/json; charset=utf-8")
                     return
                 if state == "control_recommended" and session_id:
                     source_row = _find_session_row(session_id)

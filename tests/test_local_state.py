@@ -77,6 +77,33 @@ class LocalStateTests(unittest.TestCase):
 
         self.assertEqual(len(stored), 20)
 
+    def test_one_compact_receipt_per_session_and_commit_under_concurrent_polls(self) -> None:
+        # 2026-09-09: the dashboard page and the Companion polled a
+        # millisecond apart, each found no receipt, each opened one; the
+        # twin stayed open forever. The check has to happen under the lock.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                import threading as threading_module
+
+                def record() -> None:
+                    local_state.record_compact_nudge(
+                        session_id="s1", sha="a" * 40,
+                        dead_tokens=100, latest_turn_tokens=200, after_estimate=50,
+                    )
+
+                threads = [threading_module.Thread(target=record) for _ in range(12)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+                local_state.record_compact_nudge(
+                    session_id="s1", sha="b" * 40, dead_tokens=1, latest_turn_tokens=2, after_estimate=1,
+                )
+                stored = local_state.recent_compact_nudges(limit=20)
+
+        self.assertEqual([row["sha"][0] for row in stored], ["b", "a"])
+
     def test_handoff_decisions_store_metadata_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")

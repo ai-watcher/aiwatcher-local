@@ -317,6 +317,7 @@ def _empty_state() -> dict[str, Any]:
         "handoff_decisions": [],
         "optimize_decisions": [],
         "companion_skips": [],
+        "compact_nudges": [],
         "ambient_interventions": [],
         "sent_notification_keys": [],
         "active_prompt_gate": None,
@@ -410,6 +411,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("handoff_decisions", [])
     data.setdefault("optimize_decisions", [])
     data.setdefault("companion_skips", [])
+    data.setdefault("compact_nudges", [])
     data.setdefault("ambient_interventions", [])
     data.setdefault("sent_notification_keys", [])
     data.setdefault("active_prompt_gate", None)
@@ -935,6 +937,125 @@ def companion_skip_active(key: str) -> bool:
             return active
     except OSError:
         return False
+
+
+MAX_COMPACT_NUDGES_STORED = 100
+
+
+def record_compact_nudge(
+    *,
+    session_id: str,
+    sha: str,
+    dead_tokens: int,
+    latest_turn_tokens: int,
+    after_estimate: int,
+    project_path: str | None = None,
+) -> dict[str, Any]:
+    """The receipt for a compact-at-boundary nudge, opened when it is first shown.
+
+    Closed later by `update_compact_nudge` with what happened: the user's
+    decision (copied, later) and, once the session's context sheds, the
+    per-turn figure it actually landed at -- which is the estimate's report
+    card. Metadata only: no prompt or source text.
+    """
+    session_id = session_id.strip()
+    sha = sha.strip()
+    if not session_id or not sha:
+        raise ValueError("session_id and sha are required")
+    record = {
+        "id": str(uuid.uuid4()),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "session_id": session_id,
+        "sha": sha,
+        "project_path": project_path.strip()[:1000] if isinstance(project_path, str) else None,
+        "dead_tokens": int(dead_tokens),
+        "latest_turn_tokens": int(latest_turn_tokens),
+        "after_estimate": int(after_estimate),
+        "decision": None,
+        "decided_at": None,
+        "action_channel": None,
+        # The compaction's own trail in the session log, in the order it is
+        # written: the /compact typed, the boundary the tool wrote, then the
+        # reply that shows the new size. The click is a note; these are the
+        # facts, and they belong to whichever session's log carries them.
+        "command_seen_at": None,
+        "boundary_seen_at": None,
+        "reset_seen_at": None,
+        "after_actual": None,
+    }
+    with _locked_state():
+        data = _load()
+        # One receipt per session and commit, decided under the lock: the
+        # dashboard page and the Companion both poll, and on 2026-09-09 two
+        # polls a millisecond apart each found no receipt and each wrote
+        # one, leaving an open twin that never closed.
+        for row in reversed(data["compact_nudges"]):
+            if isinstance(row, dict) and row.get("session_id") == session_id and row.get("sha") == sha:
+                return dict(row)
+        data["compact_nudges"].append(record)
+        data["compact_nudges"] = data["compact_nudges"][-MAX_COMPACT_NUDGES_STORED:]
+        _save(data)
+    return record
+
+
+def compact_nudge(session_id: str, sha: str | None = None) -> dict[str, Any] | None:
+    """The nudge record for this session and commit; the session's newest when sha is None."""
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return None
+    for row in reversed(data.get("compact_nudges", [])):
+        if not isinstance(row, dict) or row.get("session_id") != session_id:
+            continue
+        if sha is None or row.get("sha") == sha:
+            return row
+    return None
+
+
+def update_compact_nudge(
+    session_id: str,
+    sha: str | None = None,
+    *,
+    decision: str | None = None,
+    action_channel: str | None = None,
+    after_actual: int | None = None,
+    command_seen_at: str | None = None,
+    boundary_seen_at: str | None = None,
+) -> dict[str, Any] | None:
+    with _locked_state():
+        data = _load()
+        target = None
+        for row in reversed(data.get("compact_nudges", [])):
+            if isinstance(row, dict) and row.get("session_id") == session_id and (sha is None or row.get("sha") == sha):
+                target = row
+                break
+        if target is None:
+            return None
+        now = datetime.now(timezone.utc).isoformat()
+        if decision is not None:
+            target["decision"] = decision
+            target["decided_at"] = now
+            target["action_channel"] = (action_channel or "dashboard").strip()[:80]
+        if command_seen_at is not None:
+            target["command_seen_at"] = command_seen_at
+        if boundary_seen_at is not None:
+            target["boundary_seen_at"] = boundary_seen_at
+        if after_actual is not None:
+            target["after_actual"] = int(after_actual)
+            target["reset_seen_at"] = now
+        _save(data)
+    return dict(target)
+
+
+def recent_compact_nudges(limit: int = 20) -> list[dict[str, Any]]:
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return []
+    rows = [row for row in data.get("compact_nudges", []) if isinstance(row, dict)]
+    return list(reversed(rows[-max(1, limit):]))
 
 
 def _prune_brief_tokens(data: dict[str, Any]) -> None:

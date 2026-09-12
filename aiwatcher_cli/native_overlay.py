@@ -593,6 +593,8 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var primaryURL = dashboardURL
     var primaryAction = "open_url"
     var primarySessionID = ""
+    var compactCommand = ""
+    var compactSha = ""
     var primaryRuntimeAvailable = false
     var continueAction = ""
     var continueURL = ""
@@ -617,6 +619,12 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var waitingReturnAvailable: [Bool] = []
     var waitingWants: [String] = []
     var waitingRowKinds: [String] = []
+    // Compaction rows: one window each, with its own command. A row whose
+    // action is empty is a fact (compacting, compacted) and draws no button.
+    var waitingRowTags: [String] = []
+    var waitingRowActions: [String] = []
+    var waitingRowCommands: [String] = []
+    var waitingRowShas: [String] = []
     var waitingCount = 0
     var workingCount = 0
     var finishedCount = 0
@@ -639,7 +647,12 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var meterLabel: NSTextField!
     var statsLabel: NSTextField!
     var signalButton: NSButton!
-    let expandedWidth: CGFloat = 560
+    // 46 characters of 9pt subtitle measure ~210pt ("claude-code ·
+    // aiwatcher-local · waited 12m 30s" is 208), and at 560 the subtitle
+    // had 150 beside the meter, so every compact stage read "...calibrat".
+    // The extra 66 goes to the subtitle in every layout; everything to its
+    // right shifts by the same 66.
+    let expandedWidth: CGFloat = 626
     let headerHeight: CGFloat = 58
     let rowHeight: CGFloat = 34
     let maxWaitingRows = 3
@@ -680,7 +693,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     // and away digests all reuse this row surface so the badge can explain
     // itself instead of dropping the user into an unlabeled count.
     var visibleWaitingRows: Int {
-        if !["session_waiting", "session_finished", "away_digest", "control_review", "context_review"].contains(stateName) || waitingRowTexts.isEmpty {
+        if !["session_waiting", "session_finished", "away_digest", "control_review", "context_review", "compact_recommended"].contains(stateName) || waitingRowTexts.isEmpty {
             return 0
         }
         return min(waitingRowTexts.count, maxWaitingRows)
@@ -693,7 +706,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         if stateName == "session_finished" && visibleWaitingRows > 0 {
             return "\(finishedCount) completed run\(finishedCount == 1 ? "" : "s")"
         }
-        return String((titleLabel.stringValue.isEmpty ? "AIWatcher" : titleLabel.stringValue).prefix(18))
+        return String((titleLabel.stringValue.isEmpty ? "AIWatcher" : titleLabel.stringValue).prefix(40))
     }
 
     func reviewSubtitle() -> String {
@@ -708,6 +721,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
     func rowDisplayText(_ row: [String: Any]) -> String {
         let kind = row["kind"] as? String ?? ""
+        if kind == "compact" {
+            return row["text"] as? String ?? ""
+        }
         let tool = row["tool"] as? String ?? "AI tool"
         let project = row["project"] as? String ?? ""
         let waited = row["waited_label"] as? String ?? ""
@@ -730,6 +746,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
     func rowActionLabel(index: Int) -> String {
         let kind = index < waitingRowKinds.count ? waitingRowKinds[index] : ""
+        if kind == "compact" { return "Copy" }
         let canReturn = index < waitingReturnAvailable.count && waitingReturnAvailable[index]
         if canReturn { return "Return" }
         if ["context_review", "control_review"].contains(kind) { return "Open" }
@@ -760,6 +777,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         self.waitingReturnAvailable = []
         self.waitingWants = []
         self.waitingRowKinds = []
+        self.waitingRowTags = []
+        self.waitingRowActions = []
+        self.waitingRowCommands = []
+        self.waitingRowShas = []
         self.waitingCount = 0
         self.finishedCount = 0
         self.reviewCount = 0
@@ -838,12 +859,19 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         titleLabel = NSTextField(labelWithString: "AIWatcher")
         titleLabel.frame = NSRect(x: 66, y: 31, width: 220, height: 17)
         titleLabel.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        // Truncate by pixel, not by character: the 18-character cap the bar
+        // launched with cut "Continue only after confirmation" -- the label
+        // every destructive prompt's gate wears -- to "Continue only afte"
+        // while the frame still had room. The frame is the limit now, and
+        // the title grows into it when a layout widens it.
+        titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.textColor = NSColor.white
         rootView.addSubview(titleLabel)
 
         subtitleLabel = NSTextField(labelWithString: "Watching quietly")
-        subtitleLabel.frame = NSRect(x: 66, y: 12, width: 250, height: 16)
+        subtitleLabel.frame = NSRect(x: 66, y: 12, width: 304, height: 16)
         subtitleLabel.font = NSFont.systemFont(ofSize: 9)
+        subtitleLabel.lineBreakMode = .byTruncatingTail
         subtitleLabel.textColor = NSColor(calibratedRed: 0.67, green: 0.74, blue: 0.84, alpha: 1)
         rootView.addSubview(subtitleLabel)
 
@@ -900,7 +928,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         rootView.addSubview(consoleButton)
 
         collapseButton = NSButton(title: "-", target: self, action: #selector(toggleCollapsed))
-        collapseButton.frame = NSRect(x: 538, y: 37, width: 18, height: 18)
+        collapseButton.frame = NSRect(x: 604, y: 37, width: 18, height: 18)
         collapseButton.bezelStyle = .rounded
         collapseButton.controlSize = .mini
         collapseButton.toolTip = "Minimize AIWatcher"
@@ -1057,6 +1085,11 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     @objc func openWaitingRow(_ sender: NSButton) {
         let index = sender.tag
         guard index >= 0, index < waitingURLs.count else { return }
+        if index < waitingRowActions.count, waitingRowActions[index] == "copy_compact",
+           index < waitingRowCommands.count, !waitingRowCommands[index].isEmpty {
+            copyCompactRow(index: index)
+            return
+        }
         if index < waitingReturnAvailable.count, waitingReturnAvailable[index],
            index < waitingSessionIDs.count, !waitingSessionIDs[index].isEmpty {
             requestRuntimeReturn(sessionID: waitingSessionIDs[index], fallbackURL: waitingURLs[index])
@@ -1148,6 +1181,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             copyFreshStartFromCompanion()
             return
         }
+        if primaryAction == "copy_compact" && !compactCommand.isEmpty {
+            copyCompactFromCompanion()
+            return
+        }
         if primaryAction == "runtime_return" && !primarySessionID.isEmpty {
             requestRuntimeReturn(sessionID: primarySessionID, fallbackURL: primaryURL)
             return
@@ -1156,6 +1193,59 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             scheduleAutoCollapse(after: 1.5)
         }
         openURL(primaryURL)
+    }
+
+    // The command travels in the state payload, so this is a pasteboard write
+    // and a receipt -- no fetch, unlike the Fresh Start brief. The bar says
+    // "Copied" at once; the dashboard takes over from the next poll, having
+    // read the click from the receipt, and moves on only when the session's
+    // own log shows the /compact.
+    func copyCompactFromCompanion() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(compactCommand, forType: .string)
+        recordCompactDecision("copied", sessionID: primarySessionID, sha: compactSha)
+        self.stateName = "compact_copied"
+        self.skipState = ""
+        self.primaryURL = dashboardURL
+        self.suppressPassiveRefreshUntil = Date().addingTimeInterval(3.0)
+        self.titleLabel.stringValue = "Copied"
+        self.subtitleLabel.stringValue = "Paste it into that session's prompt"
+        self.updateAppearance()
+        self.scheduleAutoCollapse(after: 12.0)
+        self.scheduleRefresh(after: 3.0)
+    }
+
+    // One row's Copy, when several windows qualify. Only that row changes:
+    // the receipt notes the click against the session the row names, and the
+    // others keep their buttons.
+    func copyCompactRow(index: Int) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(waitingRowCommands[index], forType: .string)
+        let sessionID = index < waitingSessionIDs.count ? waitingSessionIDs[index] : ""
+        let sha = index < waitingRowShas.count ? waitingRowShas[index] : ""
+        recordCompactDecision("copied", sessionID: sessionID, sha: sha)
+        if index < waitingRowTags.count { waitingRowTags[index] = "copied" }
+        self.suppressPassiveRefreshUntil = Date().addingTimeInterval(3.0)
+        self.updateAppearance()
+        self.scheduleAutoCollapse(after: 12.0)
+        self.scheduleRefresh(after: 3.0)
+    }
+
+    func recordCompactDecision(_ decision: String, sessionID: String, sha: String) {
+        guard let url = URL(string: dashboardBaseURL + "/api/compact-decision") else {
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let payload: [String: Any] = [
+            "session_id": sessionID,
+            "sha": sha,
+            "decision": decision,
+            "action_channel": "companion"
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+        URLSession.shared.dataTask(with: request).resume()
     }
 
     func clipboardNeedsConfirmation(for brief: String) -> Bool {
@@ -1434,7 +1524,12 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     // not the second: they earn the primary and the compact layout, but
     // "review when ready" must not wear the orange "blocked on you" treatment.
     func hasPrimaryAction() -> Bool {
-        return ["prompt_gate", "command_gate", "control_recommended", "control_review", "context_review", "optimize_available", "clipboard_confirm", "session_waiting", "session_finished", "away_digest"].contains(stateName)
+        let states = ["prompt_gate", "command_gate", "control_recommended", "control_review", "context_review", "optimize_available", "clipboard_confirm", "session_waiting", "session_finished", "away_digest", "compact_recommended"]
+        // Only the nudge step of a compaction carries a button. The later
+        // steps -- copied, compacting, compacted -- are facts about a thing
+        // already done, and a button would ask for it again.
+        let compactWithoutButton = stateName == "compact_recommended" && primaryAction == "none"
+        return states.contains(stateName) && !compactWithoutButton
     }
 
     func needsAttentionState() -> Bool {
@@ -1448,6 +1543,11 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         // Soft attention: finished work and the away digest force the window
         // visible even in nudges-only mode, without the orange treatment.
         if ["session_finished", "away_digest"].contains(stateName) {
+            return true
+        }
+        // A commit just landed in the session being typed into: same soft
+        // attention as finished work, and the same calm treatment.
+        if stateName == "compact_recommended" {
             return true
         }
         if visibilityMode == "nudges-only" {
@@ -1500,7 +1600,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         subtitleLabel.isHidden = false
         dragHandle.frame = NSRect(x: 10, y: 21 + yOff, width: 18, height: 16)
         brandMarkView.frame = NSRect(x: 30, y: 16 + yOff, width: 32, height: 26)
-        collapseButton.frame = NSRect(x: 538, y: 37 + yOff, width: 18, height: 18)
+        collapseButton.frame = NSRect(x: 604, y: 37 + yOff, width: 18, height: 18)
         let attention = needsAttentionState()
         // With a queue on screen each row carries its own Open button, so the
         // single primary would only duplicate the first row's.
@@ -1525,23 +1625,23 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             meterLabel.isHidden = true
             statsLabel.isHidden = true
             signalButton.isHidden = true
-            titleLabel.frame = NSRect(x: 66, y: 31 + yOff, width: 170, height: 17)
-            subtitleLabel.frame = NSRect(x: 66, y: 12 + yOff, width: 170, height: 16)
-            primaryButton.frame = NSRect(x: 240, y: 15 + yOff, width: 100, height: 28)
+            titleLabel.frame = NSRect(x: 66, y: 31 + yOff, width: 236, height: 17)
+            subtitleLabel.frame = NSRect(x: 66, y: 12 + yOff, width: 236, height: 16)
+            primaryButton.frame = NSRect(x: 306, y: 15 + yOff, width: 100, height: 28)
             if showContinue {
-                continueButton.frame = NSRect(x: 346, y: 15 + yOff, width: 70, height: 28)
+                continueButton.frame = NSRect(x: 412, y: 15 + yOff, width: 70, height: 28)
                 if showSkip {
-                    skipButton.frame = NSRect(x: 424, y: 15 + yOff, width: 68, height: 28)
-                    consoleButton.frame = NSRect(x: 498, y: 15 + yOff, width: 38, height: 28)
+                    skipButton.frame = NSRect(x: 490, y: 15 + yOff, width: 68, height: 28)
+                    consoleButton.frame = NSRect(x: 564, y: 15 + yOff, width: 38, height: 28)
                 } else {
-                    consoleButton.frame = NSRect(x: 422, y: 15 + yOff, width: 38, height: 28)
+                    consoleButton.frame = NSRect(x: 488, y: 15 + yOff, width: 38, height: 28)
                 }
             } else {
                 if showSkip {
-                    skipButton.frame = NSRect(x: 368, y: 15 + yOff, width: 68, height: 28)
-                    consoleButton.frame = NSRect(x: 442, y: 15 + yOff, width: 38, height: 28)
+                    skipButton.frame = NSRect(x: 434, y: 15 + yOff, width: 68, height: 28)
+                    consoleButton.frame = NSRect(x: 508, y: 15 + yOff, width: 38, height: 28)
                 } else {
-                    consoleButton.frame = NSRect(x: 368, y: 15 + yOff, width: 38, height: 28)
+                    consoleButton.frame = NSRect(x: 434, y: 15 + yOff, width: 38, height: 28)
                 }
             }
         } else {
@@ -1551,18 +1651,18 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             if showStats {
                 // Right-aligned on the title line's tail; the title is capped
                 // at 18 characters, so the two never meet.
-                statsLabel.frame = NSRect(x: 204, y: 33 + yOff, width: 112, height: 13)
+                statsLabel.frame = NSRect(x: 270, y: 33 + yOff, width: 112, height: 13)
                 statsLabel.stringValue = pressureStats
                 statsLabel.toolTip = pressureStatsDetail.isEmpty ? nil : pressureStatsDetail
             }
-            titleLabel.frame = NSRect(x: 66, y: 31 + yOff, width: 220, height: 17)
-            subtitleLabel.frame = NSRect(x: 66, y: 12 + yOff, width: showMeter ? 150 : 238, height: 16)
+            titleLabel.frame = NSRect(x: 66, y: 31 + yOff, width: 286, height: 17)
+            subtitleLabel.frame = NSRect(x: 66, y: 12 + yOff, width: showMeter ? 216 : 304, height: 16)
             meterTrack.isHidden = !showMeter
             meterLabel.isHidden = !showMeter
             if showMeter {
                 // Fill clamps at 100%; the percent label does not. A 250K turn
                 // is past the limit, and the number should say so.
-                meterTrack.frame = NSRect(x: 222, y: 17 + yOff, width: 62, height: 5)
+                meterTrack.frame = NSRect(x: 288, y: 17 + yOff, width: 62, height: 5)
                 let clamped = min(max(pressurePct, 0), 100)
                 meterFill.frame = NSRect(x: 0, y: 0, width: 62.0 * CGFloat(clamped) / 100.0, height: 5)
                 let meterColor = pressureSeverity == "critical"
@@ -1571,7 +1671,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                         ? NSColor(calibratedRed: 0.94, green: 0.62, blue: 0.15, alpha: 1)
                         : NSColor(calibratedRed: 0.35, green: 0.55, blue: 0.98, alpha: 1))
                 meterFill.layer?.backgroundColor = meterColor.cgColor
-                meterLabel.frame = NSRect(x: 288, y: 12 + yOff, width: 28, height: 14)
+                meterLabel.frame = NSRect(x: 354, y: 12 + yOff, width: 28, height: 14)
                 meterLabel.stringValue = "\(pressurePct)%"
                 meterLabel.textColor = meterColor
                 meterTrack.toolTip = pressureLabel
@@ -1580,28 +1680,33 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             signalButton.isHidden = !showChip
             if showChip {
                 signalButton.title = signalChipText
-                signalButton.frame = NSRect(x: 318, y: 15 + yOff, width: 100, height: 28)
+                signalButton.frame = NSRect(x: 384, y: 15 + yOff, width: 100, height: 28)
             }
-            planButton.frame = NSRect(x: 318, y: 15 + yOff, width: 48, height: 28)
-            askButton.frame = NSRect(x: 370, y: 15 + yOff, width: 46, height: 28)
-            scanButton.frame = NSRect(x: 420, y: 15 + yOff, width: 52, height: 28)
-            consoleButton.frame = NSRect(x: 476, y: 15 + yOff, width: 38, height: 28)
+            planButton.frame = NSRect(x: 384, y: 15 + yOff, width: 48, height: 28)
+            askButton.frame = NSRect(x: 436, y: 15 + yOff, width: 46, height: 28)
+            scanButton.frame = NSRect(x: 486, y: 15 + yOff, width: 52, height: 28)
+            consoleButton.frame = NSRect(x: 542, y: 15 + yOff, width: 38, height: 28)
         }
         for index in 0..<maxWaitingRows {
             let visible = index < rowsShown
+            let kind = index < waitingRowKinds.count ? waitingRowKinds[index] : ""
+            let action = index < waitingRowActions.count ? waitingRowActions[index] : ""
             rowDots[index].isHidden = !visible
             rowLabels[index].isHidden = !visible
-            rowButtons[index].isHidden = !visible
-            let wants = index < waitingWants.count ? waitingWants[index] : ""
-            rowTags[index].isHidden = !visible || wants.isEmpty
+            rowButtons[index].isHidden = !visible || (kind == "compact" && action.isEmpty)
+            // Compaction rows carry their stage where waiting rows carry
+            // what the session wants.
+            let tag = kind == "compact" && index < waitingRowTags.count ? waitingRowTags[index] : ""
+            let wants = kind == "compact" ? "" : (index < waitingWants.count ? waitingWants[index] : "")
+            rowTags[index].isHidden = !visible || (wants.isEmpty && tag.isEmpty)
             if !visible { continue }
             let rowY = yOff - rowHeight * CGFloat(index + 1)
             rowDots[index].frame = NSRect(x: 30, y: rowY + 14, width: 7, height: 7)
-            // Digest rows color by kind -- mint for finished work, amber for
-            // signals; waiting rows keep hottest-first by position.
-            let kind = index < waitingRowKinds.count ? waitingRowKinds[index] : ""
+            // Digest rows color by kind -- mint for finished work and for a
+            // compaction (a good moment, not an alarm), amber for signals;
+            // waiting rows keep hottest-first by position.
             let dotColor: NSColor
-            if kind == "finished" {
+            if kind == "finished" || kind == "compact" {
                 dotColor = NSColor(calibratedRed: 0.36, green: 0.79, blue: 0.65, alpha: 1)
             } else if !kind.isEmpty {
                 dotColor = NSColor(calibratedRed: 0.94, green: 0.62, blue: 0.15, alpha: 1)
@@ -1611,18 +1716,20 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                     : NSColor(calibratedRed: 0.94, green: 0.62, blue: 0.15, alpha: 1)
             }
             rowDots[index].layer?.backgroundColor = dotColor.cgColor
-            rowLabels[index].frame = NSRect(x: 46, y: rowY + 9, width: wants.isEmpty ? 396 : 284, height: 17)
+            rowLabels[index].frame = NSRect(x: 46, y: rowY + 9, width: wants.isEmpty ? 462 : 350, height: 17)
             rowLabels[index].stringValue = index < waitingRowTexts.count ? waitingRowTexts[index] : ""
-            rowTags[index].frame = NSRect(x: 334, y: rowY + 10, width: 112, height: 14)
-            rowTags[index].stringValue = wants.isEmpty ? "" : "wants: \(wants)"
+            rowTags[index].frame = NSRect(x: 400, y: rowY + 10, width: 112, height: 14)
+            rowTags[index].stringValue = kind == "compact" ? tag : (wants.isEmpty ? "" : "wants: \(wants)")
             let canReturn = index < waitingReturnAvailable.count && waitingReturnAvailable[index]
             rowButtons[index].title = rowActionLabel(index: index)
-            rowButtons[index].toolTip = canReturn
-                ? "Focus the blocked tool directly"
-                : (kind.isEmpty
-                    ? "Tool window not reachable from here -- opens the session in AIWatcher"
-                    : "Open this in AIWatcher")
-            rowButtons[index].frame = NSRect(x: 452, y: rowY + 4, width: 64, height: 26)
+            rowButtons[index].toolTip = kind == "compact"
+                ? (index < waitingRowCommands.count ? waitingRowCommands[index] : "")
+                : (canReturn
+                    ? "Focus the blocked tool directly"
+                    : (kind.isEmpty
+                        ? "Tool window not reachable from here -- opens the session in AIWatcher"
+                        : "Open this in AIWatcher"))
+            rowButtons[index].frame = NSRect(x: 518, y: rowY + 4, width: 64, height: 26)
         }
     }
 
@@ -1721,7 +1828,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         if let hold = suppressPassiveRefreshUntil,
            hold > Date(),
            !["prompt_gate", "command_gate"].contains(incomingState),
-           ["fresh_start_copied", "clipboard_confirm"].contains(self.stateName) {
+           ["fresh_start_copied", "clipboard_confirm", "compact_copied"].contains(self.stateName) {
             self.updateAppearance()
             return
         }
@@ -1736,11 +1843,20 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         if waiting.isEmpty {
             waiting = json["digest_rows"] as? [[String: Any]] ?? []
         }
-        self.waitingRowTexts = waiting.prefix(maxWaitingRows).map { row in
-            let tool = row["tool"] as? String ?? "AI tool"
-            let project = row["project"] as? String ?? ""
-            let waited = row["waited_label"] as? String ?? ""
-            return [tool, project, waited].filter { !$0.isEmpty }.joined(separator: " · ")
+        if incomingState == "compact_recommended" {
+            waiting = json["compact_rows"] as? [[String: Any]] ?? []
+        }
+        self.waitingRowTags = waiting.prefix(maxWaitingRows).map { row in
+            String(((row["tag"] as? String) ?? "").prefix(16))
+        }
+        self.waitingRowActions = waiting.prefix(maxWaitingRows).map { row in
+            (row["action"] as? String) ?? ""
+        }
+        self.waitingRowCommands = waiting.prefix(maxWaitingRows).map { row in
+            (row["command"] as? String) ?? ""
+        }
+        self.waitingRowShas = waiting.prefix(maxWaitingRows).map { row in
+            (row["sha"] as? String) ?? ""
         }
         self.waitingURLs = waiting.prefix(maxWaitingRows).map { row in
             absoluteURL((row["url"] as? String) ?? "/")
@@ -1769,7 +1885,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             if let badge = json["badge"] as? [String: Any] {
                 let count = badge["count"] as? Int ?? 0
                 let tone = badge["tone"] as? String ?? "info"
-                if ["control_review", "context_review"].contains(incomingState) {
+                // A compact nudge is something to do, so it earns the calm
+                // blue count on the collapsed bubble the review states get;
+                // finished work never does.
+                if ["control_review", "context_review", "compact_recommended"].contains(incomingState) {
                     self.waitingCount = 0
                     self.finishedCount = 0
                     self.reviewCount = count
@@ -1802,7 +1921,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             self.signalChipText = ""
             self.signalURL = ""
         }
-        self.titleLabel.stringValue = String((json["label"] as? String ?? "AIWatcher").prefix(18))
+        // 40 is a sanity bound, not the fit; the frame and the ellipsis are.
+        // The longest label the preflight planner emits is 32.
+        self.titleLabel.stringValue = String((json["label"] as? String ?? "AIWatcher").prefix(40))
         var subtitleText = String((json["subtitle"] as? String ?? "Watching quietly").prefix(46))
         if ["prompt_gate", "command_gate"].contains(incomingState), let remaining = json["expires_in_seconds"] as? Int, remaining >= 0 {
             subtitleText += " · \(remaining)s"
@@ -1820,6 +1941,8 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         self.primaryButton.title = String((json["primary_label"] as? String ?? "Watch").prefix(12))
         self.primaryAction = json["primary_action"] as? String ?? "open_url"
         self.primarySessionID = json["primary_session_id"] as? String ?? ""
+        self.compactCommand = json["compact_command"] as? String ?? ""
+        self.compactSha = json["compact_sha"] as? String ?? ""
         self.primaryRuntimeAvailable = json["primary_runtime_available"] as? Bool ?? false
         self.primaryURL = absoluteURL(json["primary_url"] as? String ?? "/")
         self.continueButton.title = String((json["continue_label"] as? String ?? "Continue").prefix(10))
@@ -2426,6 +2549,8 @@ def run_native_presence(
     primary_label_var = tk.StringVar(value="Watch")
     primary_action_var = tk.StringVar(value="open_url")
     primary_session_id_var = tk.StringVar(value="")
+    compact_command_var = tk.StringVar(value="")
+    compact_sha_var = tk.StringVar(value="")
     primary_runtime_available_var = tk.BooleanVar(value=False)
     primary_url_var = tk.StringVar(value=url)
     continue_label_var = tk.StringVar(value="Continue")
@@ -2450,6 +2575,12 @@ def run_native_presence(
     waiting_row_return: list[bool] = []
     waiting_row_wants: list[str] = []
     waiting_row_kinds: list[str] = []
+    # Compaction rows: one window each, with its own command; an empty action
+    # is a fact (compacting, compacted) and draws no button.
+    waiting_row_tags: list[str] = []
+    waiting_row_actions: list[str] = []
+    waiting_row_commands: list[str] = []
+    waiting_row_shas: list[str] = []
     waiting_count_var = tk.IntVar(value=0)
     working_count_var = tk.IntVar(value=0)
     finished_count_var = tk.IntVar(value=0)
@@ -2511,6 +2642,8 @@ def run_native_presence(
 
     def row_display_text(row: dict[str, object]) -> str:
         kind = str(row.get("kind") or "")
+        if kind == "compact":
+            return str(row.get("text") or "")
         tool = str(row.get("tool") or "AI tool")
         project = str(row.get("project") or "")
         waited = str(row.get("waited_label") or "")
@@ -2531,7 +2664,7 @@ def run_native_presence(
         if state_var.get() == "session_finished" and visible_waiting_rows() > 0:
             count = int(finished_count_var.get() or 0)
             return f"{count} completed run{'' if count == 1 else 's'}"
-        return title_var.get()[:18]
+        return title_var.get()[:34]
 
     def review_subtitle() -> str:
         if state_var.get() in {"control_review", "context_review", "session_finished"} and visible_waiting_rows() > 0:
@@ -2545,10 +2678,12 @@ def run_native_presence(
         return subtitle_var.get()[:46]
 
     def row_action_label(index: int) -> str:
+        kind = waiting_row_kinds[index] if index < len(waiting_row_kinds) else ""
+        if kind == "compact":
+            return "Copy"
         can_return = index < len(waiting_row_return) and waiting_row_return[index]
         if can_return:
             return "Return"
-        kind = waiting_row_kinds[index] if index < len(waiting_row_kinds) else ""
         if kind in {"context_review", "control_review"}:
             return "Open"
         return "Review" if kind else "Open"
@@ -2568,6 +2703,10 @@ def run_native_presence(
         waiting_row_return.clear()
         waiting_row_wants.clear()
         waiting_row_kinds.clear()
+        waiting_row_tags.clear()
+        waiting_row_actions.clear()
+        waiting_row_commands.clear()
+        waiting_row_shas.clear()
         waiting_count_var.set(0)
         finished_count_var.set(0)
         review_count_var.set(0)
@@ -2588,7 +2727,7 @@ def run_native_presence(
         incoming_state = str(payload.get("state") or "watching")
         if (
             suppress_passive_refresh_until.get() > time.time()
-            and state_var.get() in {"fresh_start_copied", "clipboard_confirm"}
+            and state_var.get() in {"fresh_start_copied", "clipboard_confirm", "compact_copied"}
             and incoming_state not in {"prompt_gate", "command_gate"}
         ):
             return
@@ -2601,11 +2740,18 @@ def run_native_presence(
         waiting_row_return.clear()
         waiting_row_wants.clear()
         waiting_row_kinds.clear()
+        waiting_row_tags.clear()
+        waiting_row_actions.clear()
+        waiting_row_commands.clear()
+        waiting_row_shas.clear()
         # The away digest's history entries ride the same row machinery as
-        # the waiting queue; a payload carries one list or the other.
+        # the waiting queue; a payload carries one list or the other. A
+        # compaction with several windows brings its own rows.
         waiting_sessions = payload.get("waiting_sessions")
         if not isinstance(waiting_sessions, list) or not waiting_sessions:
             waiting_sessions = payload.get("digest_rows")
+        if incoming_state == "compact_recommended":
+            waiting_sessions = payload.get("compact_rows")
         if isinstance(waiting_sessions, list):
             for row in waiting_sessions[:max_waiting_rows]:
                 if not isinstance(row, dict):
@@ -2617,6 +2763,10 @@ def run_native_presence(
                 waiting_row_return.append(bool(row.get("return_available")))
                 waiting_row_wants.append(str(row.get("wants") or "")[:16])
                 waiting_row_kinds.append(str(row.get("kind") or ""))
+                waiting_row_tags.append(str(row.get("tag") or "")[:16])
+                waiting_row_actions.append(str(row.get("action") or ""))
+                waiting_row_commands.append(str(row.get("command") or ""))
+                waiting_row_shas.append(str(row.get("sha") or ""))
         presence = payload.get("presence")
         try:
             presence_waiting_count = int(presence.get("waiting") or 0) if isinstance(presence, dict) else 0
@@ -2634,7 +2784,7 @@ def run_native_presence(
                 badge_count = int(badge.get("count") or 0)
             except (TypeError, ValueError):
                 badge_count = 0
-            if incoming_state in {"control_review", "context_review"}:
+            if incoming_state in {"control_review", "context_review", "compact_recommended"}:
                 waiting_count_var.set(0)
                 finished_count_var.set(0)
                 review_count_var.set(badge_count)
@@ -2682,7 +2832,10 @@ def run_native_presence(
         else:
             signal_chip_var.set("")
             signal_url_var.set("")
-        title_var.set(str(payload.get("label") or "AIWatcher")[:18])
+        # Tk has no tail ellipsis, so a character cap stands in for the
+        # frame: 34 holds the planner's longest label (32) on the 560-wide
+        # bar, where 18 cut it to "Continue only afte".
+        title_var.set(str(payload.get("label") or "AIWatcher")[:34])
         subtitle_text = str(payload.get("subtitle") or "Watching quietly")[:46]
         remaining = payload.get("expires_in_seconds")
         if incoming_state in {"prompt_gate", "command_gate"} and isinstance(remaining, int) and remaining >= 0:
@@ -2694,6 +2847,8 @@ def run_native_presence(
         primary_label_var.set(str(payload.get("primary_label") or "Watch")[:12])
         primary_action_var.set(str(payload.get("primary_action") or "open_url"))
         primary_session_id_var.set(str(payload.get("primary_session_id") or ""))
+        compact_command_var.set(str(payload.get("compact_command") or ""))
+        compact_sha_var.set(str(payload.get("compact_sha") or ""))
         primary_runtime_available_var.set(bool(payload.get("primary_runtime_available")))
         primary_path = str(payload.get("primary_url") or "/")
         primary_url_var.set(primary_path if primary_path.startswith("http") else f"{url.rstrip('/')}{primary_path}")
@@ -2761,6 +2916,9 @@ def run_native_presence(
             return
         if primary_action_var.get() == "copy_fresh_start" and primary_session_id_var.get().strip():
             copy_fresh_start_from_companion()
+            return
+        if primary_action_var.get() == "copy_compact" and compact_command_var.get().strip():
+            copy_compact_from_companion()
             return
         if primary_action_var.get() == "runtime_return" and primary_session_id_var.get().strip():
             request_runtime_return(primary_session_id_var.get().strip(), primary_url_var.get() or url)
@@ -2847,6 +3005,68 @@ def run_native_presence(
             subtitle_var.set("Open UI to copy the brief")
             update_attention_style()
             webbrowser.open(primary_url_var.get() or url)
+
+    def record_compact_decision(session_id: str, sha: str, decision: str) -> None:
+        request = urllib.request.Request(
+            f"{url.rstrip('/')}/api/compact-decision",
+            data=json.dumps({
+                "session_id": session_id,
+                "sha": sha,
+                "decision": decision,
+                "action_channel": "companion",
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=1.5):
+                pass
+        except (OSError, urllib.error.URLError):
+            pass
+
+    # The bar says "Copied" at once; the dashboard takes over from the next
+    # poll, having read the click from the receipt, and moves on only when
+    # the session's own log shows the /compact.
+    def copy_compact_from_companion() -> None:
+        command = compact_command_var.get().strip()
+        session_id = primary_session_id_var.get().strip()
+        try:
+            root.clipboard_clear()
+            root.clipboard_append(command)
+        except tk.TclError:
+            title_var.set("Compact")
+            subtitle_var.set("Open UI to copy the command")
+            update_attention_style()
+            webbrowser.open(primary_url_var.get() or url)
+            return
+        record_compact_decision(session_id, compact_sha_var.get(), "copied")
+        skip_state_var.set("")
+        state_var.set("compact_copied")
+        suppress_passive_refresh_until.set(time.time() + 3.0)
+        title_var.set("Copied")
+        subtitle_var.set("Paste it into that session's prompt")
+        primary_url_var.set(url)
+        update_attention_style()
+        schedule_auto_collapse(12000)
+
+    # One row's Copy, when several windows qualify. Only that row changes:
+    # the receipt notes the click against the session the row names.
+    def copy_compact_row(index: int) -> None:
+        command = waiting_row_commands[index] if index < len(waiting_row_commands) else ""
+        try:
+            root.clipboard_clear()
+            root.clipboard_append(command)
+        except tk.TclError:
+            webbrowser.open(waiting_row_urls[index] if index < len(waiting_row_urls) else url)
+            return
+        session_id = waiting_row_session_ids[index] if index < len(waiting_row_session_ids) else ""
+        sha = waiting_row_shas[index] if index < len(waiting_row_shas) else ""
+        record_compact_decision(session_id, sha, "copied")
+        if index < len(waiting_row_tags):
+            waiting_row_tags[index] = "copied"
+        suppress_passive_refresh_until.set(time.time() + 3.0)
+        apply_waiting_rows()
+        schedule_auto_collapse(12000)
 
     def continue_here() -> None:
         if (
@@ -2999,16 +3219,20 @@ def run_native_presence(
         # session_finished earns the primary (Review) and the compact layout;
         # update_attention_style's needs_attention set deliberately excludes
         # it, so "review when ready" never wears the orange treatment.
-        return state_var.get() in {
+        states = {
             "prompt_gate", "command_gate", "control_recommended", "control_review", "context_review", "optimize_available", "clipboard_confirm",
-            "session_waiting", "session_finished", "away_digest",
+            "session_waiting", "session_finished", "away_digest", "compact_recommended",
         }
+        # Only the nudge step of a compaction carries a button; the later
+        # steps are facts about a thing already done.
+        compact_without_button = state_var.get() == "compact_recommended" and primary_action_var.get() == "none"
+        return state_var.get() in states and not compact_without_button
 
     def visible_waiting_rows() -> int:
         # One row per actionable item. Waiting, context review, finished
         # batches, and away digests all reuse this row surface so the badge can
         # explain itself instead of dropping the user into an unlabeled count.
-        if state_var.get() not in {"session_waiting", "session_finished", "away_digest", "control_review", "context_review"} or not waiting_row_texts:
+        if state_var.get() not in {"session_waiting", "session_finished", "away_digest", "control_review", "context_review", "compact_recommended"} or not waiting_row_texts:
             return 0
         return min(len(waiting_row_texts), max_waiting_rows)
 
@@ -3044,6 +3268,14 @@ def run_native_presence(
         if not 0 <= index < len(waiting_row_urls):
             return
         if (
+            index < len(waiting_row_actions)
+            and waiting_row_actions[index] == "copy_compact"
+            and index < len(waiting_row_commands)
+            and waiting_row_commands[index]
+        ):
+            copy_compact_row(index)
+            return
+        if (
             index < len(waiting_row_return)
             and waiting_row_return[index]
             and index < len(waiting_row_session_ids)
@@ -3067,8 +3299,21 @@ def run_native_presence(
             row_widgets[index][2].configure(
                 text=row_action_label(index),
             )
-            wants = waiting_row_wants[index] if index < len(waiting_row_wants) else ""
-            row_widgets[index][3].configure(text=f"wants: {wants}" if wants else "")
+            kind = waiting_row_kinds[index] if index < len(waiting_row_kinds) else ""
+            if kind == "compact":
+                # The stage where a waiting row shows what the session wants;
+                # no button once the compaction is under way.
+                tag = waiting_row_tags[index] if index < len(waiting_row_tags) else ""
+                row_widgets[index][3].configure(text=tag)
+                action = waiting_row_actions[index] if index < len(waiting_row_actions) else ""
+                if action:
+                    row_widgets[index][2].pack(side="right")
+                else:
+                    row_widgets[index][2].pack_forget()
+            else:
+                row_widgets[index][2].pack(side="right")
+                wants = waiting_row_wants[index] if index < len(waiting_row_wants) else ""
+                row_widgets[index][3].configure(text=f"wants: {wants}" if wants else "")
         if rows == rows_shown.get():
             return
         for row_frame, _row_label, _row_button, _row_wants in row_widgets:
@@ -3091,7 +3336,7 @@ def run_native_presence(
             "clipboard_confirm", "session_waiting",
         }:
             return True
-        if state_var.get() in {"session_finished", "away_digest"}:
+        if state_var.get() in {"session_finished", "away_digest", "compact_recommended"}:
             return True
         if visibility == "nudges-only":
             return False

@@ -1181,13 +1181,16 @@ function verdictLines(s) {
 
   const p = v.pressure || {};
   if (p.measurable) {
-    const critical = compactTokens(p.critical_tokens);
-    const pressure = compactTokens(p.pressure_tokens);
+    // context_window is null when the model's window is not known. That is
+    // shown as "no limit to project towards", never as another model's number.
+    const limit = p.context_window;
     let body;
     if (p.turns_to_critical === null || p.turns_to_critical === undefined) {
-      body = p.latest_turn_tokens >= p.critical_tokens
-        ? `${p.latest_turn_label} per turn, past the ${critical} mark. No headroom left to project.`
-        : `${p.latest_turn_label} per turn. Not enough turns yet to project a trend.`;
+      body = !limit
+        ? `${p.latest_turn_label} per turn. This model's context window is not known, so there is no limit to project towards.`
+        : p.latest_turn_tokens >= limit
+          ? `${p.latest_turn_label} per turn, at this model's ${compactTokens(limit)} window. No headroom left to project.`
+          : `${p.latest_turn_label} per turn of a ${compactTokens(limit)} window. Not enough turns yet to project a trend.`;
     } else {
       body = p.turns_to_critical > RUNWAY_MAX_PROJECTED_TURNS
         ? `${p.latest_turn_label} per turn. More than ${RUNWAY_MAX_PROJECTED_TURNS} turns of headroom at this rate.`
@@ -2349,22 +2352,24 @@ function chartLine(parent, points, token, opts) {
    own scale, where the slope is legible. */
 function drawMeter(node, chart) {
   if (!node || !chart) return;
-  const critical = chart.critical_tokens_n || 0;
-  const pressure = chart.pressure_tokens_n || 0;
+  // One line on the track: the model's own context window. There is no amber
+  // "pressure" mark any more -- it was 75% of Claude's 200k window applied to
+  // every model, and nothing happens at 75% of a window. Below the window the
+  // position is a fact, not a verdict; at it, red.
+  const limit = chart.context_window_n || 0;
   const latest = chart.latest_turn_tokens_n || 0;
-  if (!critical) return;
-  const W = 1000, H = 20, track = critical * 1.25;
+  if (!limit) return;
+  const W = 1000, H = 20, track = limit * 1.25;
   const at = value => Math.min(1, value / track) * W;
-  const tone = latest >= critical ? 'var(--red)' : latest >= pressure ? 'var(--amber)' : 'var(--green)';
+  const tone = latest >= limit ? 'var(--red)' : 'var(--green)';
   const parts = [
     `<rect x="0" y="6" width="${W}" height="9" rx="4.5" fill="var(--surface)"/>`,
-    `<rect x="0" y="6" width="${at(Math.min(latest, critical)).toFixed(1)}" height="9" rx="4.5" fill="${tone}"/>`,
-    `<line x1="${at(pressure).toFixed(1)}" x2="${at(pressure).toFixed(1)}" y1="1" y2="19" stroke="var(--amber)" stroke-width="2"/>`,
-    `<line x1="${at(critical).toFixed(1)}" x2="${at(critical).toFixed(1)}" y1="1" y2="19" stroke="var(--red)" stroke-width="2"/>`,
+    `<rect x="0" y="6" width="${at(Math.min(latest, limit)).toFixed(1)}" height="9" rx="4.5" fill="${tone}"/>`,
+    `<line x1="${at(limit).toFixed(1)}" x2="${at(limit).toFixed(1)}" y1="1" y2="19" stroke="var(--red)" stroke-width="2"/>`,
   ];
   node.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="meter-svg" role="img"
-    aria-label="${esc(compactTokens(latest))} per turn against a ${esc(compactTokens(critical))} limit">${parts.join('')}</svg>`;
-  node.setAttribute('data-over', latest > critical ? (latest / critical).toFixed(1) : '');
+    aria-label="${esc(compactTokens(latest))} per turn of a ${esc(compactTokens(limit))} window">${parts.join('')}</svg>`;
+  node.setAttribute('data-over', latest > limit ? (latest / limit).toFixed(1) : '');
 }
 
 /* Context per turn against the thresholds that decide what it means.
@@ -2423,8 +2428,7 @@ function drawTrend(node, chart) {
   const W = Math.max(160, measured || 640);
   const H = compact ? TREND_COMPACT_HEIGHT : TREND_HEIGHT;
 
-  const pressure = Number(chart.pressure_tokens_n) || 0;
-  const critical = Number(chart.critical_tokens_n) || 0;
+  const limit = Number(chart.context_window_n) || 0;
 
   // The scale stays the data's own, because shape is this chart's whole job --
   // the meter above it already carries position against the limit, on a scale
@@ -2451,8 +2455,7 @@ function drawTrend(node, chart) {
   const y = v => padT + (1 - (Math.min(Math.max(v, base), top) - base) / span) * plotH;
 
   const latest = Number(chart.latest_turn_tokens_n) || series[series.length - 1];
-  const tone = critical && latest >= critical ? 'var(--red)'
-    : pressure && latest >= pressure ? 'var(--amber)' : 'var(--green)';
+  const tone = limit && latest >= limit ? 'var(--red)' : 'var(--green)';
 
   const points = series.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
   const area = `${padL},${(padT + plotH).toFixed(1)} ${points} ${(padL + plotW).toFixed(1)},${(padT + plotH).toFixed(1)}`;
@@ -2462,8 +2465,7 @@ function drawTrend(node, chart) {
   // words at the edge it fell off, because silently omitting it is how a reader
   // concludes the axis starts at zero and that they are comfortably under.
   const thresholds = [
-    { value: pressure, colour: 'var(--amber)', name: 'pressure' },
-    { value: critical, colour: 'var(--red)', name: 'act now' },
+    { value: limit, colour: 'var(--red)', name: 'window' },
   ].filter(m => m.value > 0);
   const marks = compact ? [] : thresholds.filter(m => m.value >= base && m.value <= top);
   const below = compact ? [] : thresholds.filter(m => m.value < base);
@@ -2475,7 +2477,7 @@ function drawTrend(node, chart) {
       class="trend-tick" fill="${m.colour}">${esc(compactTokens(m.value))}</text>`;
 
   node.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" class="trend-svg" role="img"
-    aria-label="Context per turn across ${series.length} turns, ${delta >= 0 ? 'rising' : 'falling'} ${esc(compactTokens(Math.abs(delta)))}, latest ${esc(compactTokens(latest))} against a ${esc(compactTokens(critical))} limit">
+    aria-label="Context per turn across ${series.length} turns, ${delta >= 0 ? 'rising' : 'falling'} ${esc(compactTokens(Math.abs(delta)))}, latest ${esc(compactTokens(latest))}${limit ? ` of a ${esc(compactTokens(limit))} window` : ', window unknown'}">
     ${compact ? '' : `<line x1="${padL}" y1="${(padT + plotH).toFixed(1)}" x2="${(padL + plotW).toFixed(1)}" y2="${(padT + plotH).toFixed(1)}" stroke="var(--line)" stroke-width="1"/>`}
     ${marks.map(gridline).join('')}
     <polygon points="${area}" fill="${tone}" opacity=".10"/>
@@ -2549,11 +2551,21 @@ function runwayVerdict(chart) {
   // sentence: a session already past the threshold is the worst case on the page,
   // and describing it as "not on a path to" the threshold reads as reassurance.
   if (chart.turns_to_critical === null || chart.turns_to_critical === undefined) {
-    if (chart.latest_turn_tokens_n >= chart.critical_tokens_n) {
+    const limit = chart.context_window_n;
+    // No known window is a third reason for null, and it is neither of the
+    // other two: not a wall, not a plateau. Unmeasured, said as unmeasured.
+    if (!limit) {
+      return {
+        severity: 'unknown',
+        headline: 'Context window unknown',
+        detail: `${compactTokens(chart.latest_turn_tokens_n)} per turn. This model's window is not on file, so there is no limit to project towards.`,
+      };
+    }
+    if (chart.latest_turn_tokens_n >= limit) {
       return {
         severity: 'critical',
-        headline: 'Already past the action threshold',
-        detail: `${compactTokens(chart.latest_turn_tokens_n)} per turn against a ${compactTokens(chart.critical_tokens_n)} limit. There is no headroom left to project.`,
+        headline: 'At the context window',
+        detail: `${compactTokens(chart.latest_turn_tokens_n)} per turn of a ${compactTokens(limit)} window. There is no headroom left to project.`,
       };
     }
     return {
@@ -3100,9 +3112,9 @@ function healthRank(row, waiting) {
   // Then the old order, unchanged: past the limit outranks below it, and within
   // each group the bigger per-turn number leads.
   const chart = row.chart || {};
-  const critical = chart.critical_tokens_n || Infinity;
+  const limit = chart.context_window_n || Infinity;
   const latest = chart.latest_turn_tokens_n || 0;
-  return [waiting && waiting.has(row.session_id) ? 1 : 0, latest >= critical ? 1 : 0, latest];
+  return [waiting && waiting.has(row.session_id) ? 1 : 0, latest >= limit ? 1 : 0, latest];
 }
 /* Why this row sits where it does.
  *
@@ -3116,6 +3128,34 @@ function healthReason(row, waitingById) {
   if (entry) {
     const mins = Math.round((entry.idle_seconds || 0) / 60);
     return mins >= 1 ? `Waiting on you for ${mins}m.` : 'Waiting on you.';
+  }
+  // A commit landed and most of the replay predates it: the one moment context
+  // size has an action attached, and it outranks the runway reading because the
+  // runway is a projection and this is a fact about the last few turns.
+  const compact = row.compact;
+  // The card charts the project's worst session; the nudge is for the one
+  // being typed into. When they differ the sentence names which -- by the
+  // title the user gave it where the tool records one.
+  const compactName = compact ? (compact.title || compact.session_short || compact.session_id) : '';
+  const whose = compact && compact.session_id && compact.session_id !== row.session_id
+    ? ` In the live session ${esc(compactName)}:` : '';
+  // A compaction under way is a fact about the log, and it outranks the
+  // nudge: the command has been typed, or the boundary written, and the
+  // sentence says which, so the card never asks for a thing already done.
+  if (compact && compact.stage === 'compacting') {
+    return `<b>Compacting${compact.session_id !== row.session_id ? ` ${esc(compactName)}` : ''}.</b> ${esc(compact.reason)}`;
+  }
+  if (compact && compact.stage === 'compacted') {
+    return `<b>Compacted${compact.session_id !== row.session_id ? ` ${esc(compactName)}` : ''}.</b> ${esc(compact.reason)}`;
+  }
+  if (compact && compact.stage === 'confirmed') {
+    const before = compact.before_shed_label ? `${esc(compact.before_shed_label)} → ` : '';
+    const after = compact.after_shed_label || compact.latest_label;
+    return `<b>Compacted: ${before}${esc(after)} per turn.</b>${whose} The receipt closed with the real number.`;
+  }
+  if (compact && compact.actionable && !compact.deferred) {
+    return `<b>${esc(compact.dead_label)} of this turn's ${esc(compact.latest_label)} predates commit ${esc(compact.sha_short)}.</b>${whose}`
+      + ` Compacting now drops the next turn to about ${esc(compact.after_label)}.`;
   }
   // Everything below waiting is a pressure verdict, and runwayVerdict is where
   // that is computed. Restating it here would be a second place the deadline
@@ -3163,7 +3203,13 @@ function healthFacts(row) {
 function headroomLabel(chart) {
   const turns = chart && chart.turns_to_critical;
   if (turns === null || turns === undefined) {
-    return { big: 'No headroom', sub: 'already past the limit' };
+    // Null for three reasons, and only one of them is "no headroom". Reading
+    // all three as the wall put "already past the limit" on flat sessions.
+    const limit = chart && chart.context_window_n;
+    const latest = (chart && chart.latest_turn_tokens_n) || 0;
+    if (!limit) return { big: compactTokens(latest), sub: 'per turn, window unknown' };
+    if (latest >= limit) return { big: 'No headroom', sub: 'at the context window' };
+    return { big: 'Not growing', sub: 'nothing to project' };
   }
   // Capped where runwayVerdict caps. Uncapped this printed "110 turns" beside a
   // reason reading "40+ turns of headroom" -- two numbers for one quantity,
@@ -3181,7 +3227,20 @@ function healthRow(row, waitingById, index) {
   const quieted = row.fresh_start_quiet || row.actionable === false;
   // Fresh Start is a different action from opening the session, so it stops the
   // click reaching the row underneath it.
-  const action = quieted
+  // A compaction outranks the Fresh Start quiet: the quiet is about Fresh
+  // Start for this project, and this is a different action on a live session.
+  // actionable is recommend at the nudge stage only: once the log shows the
+  // compaction typed or written, the buttons go and the reason says why.
+  const compact = row.compact && row.compact.actionable && !row.compact.deferred ? row.compact : null;
+  // The command carries the commit subject, which can hold any character --
+  // a double quote in it ends an inline onclick attribute mid-expression. So
+  // it is never inlined: the button's title holds it (attribute-escaped) and
+  // the handler reads it back from there.
+  const action = compact
+    ? `<button class="btn-primary" title="${esc(compact.command)}" onclick="event.stopPropagation(); copyCompactCommand(${esc(jsArg(compact.session_id))}, ${esc(jsArg(compact.sha))}, this.title, this)">Copy /compact</button>
+        <button class="btn-quiet" onclick="event.stopPropagation(); selectSession('${esc(compact.session_id)}')">Review</button>
+        <button class="btn-quiet" onclick="event.stopPropagation(); deferCompact(${esc(jsArg(compact.session_id))}, ${esc(jsArg(compact.sha))})">Later</button>`
+    : quieted
     ? '<button class="btn-quiet" disabled title="Quieted for this project; evidence remains visible here.">Quieted 48h</button>'
     : row.can_handoff
       ? `<button class="btn-primary" onclick="event.stopPropagation(); startFreshFromBubble(${jsArg(row.session_id)})">Fresh Start</button>
@@ -4913,6 +4972,66 @@ async function snoozeFreshStartProject(project, button) {
     }
   }
 }
+// The compact nudge's two verbs. Copy is the action -- the command carries the
+// keep/drop focus built from the files touched since the commit -- and the
+// receipt records that it happened. Later hides this commit's nudge; the next
+// commit is a new one.
+function copyTextFallback(text) {
+  // The async clipboard API needs a secure context and a fresh user gesture;
+  // a hidden textarea plus execCommand still works where it does not.
+  const area = document.createElement('textarea');
+  area.value = text;
+  area.setAttribute('readonly', '');
+  area.style.position = 'fixed';
+  area.style.opacity = '0';
+  document.body.appendChild(area);
+  area.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (error) { ok = false; }
+  area.remove();
+  return ok;
+}
+async function copyCompactCommand(sessionId, sha, command, button) {
+  let copied = false;
+  try {
+    await navigator.clipboard.writeText(command);
+    copied = true;
+  } catch (error) {
+    copied = copyTextFallback(command);
+  }
+  if (!copied) {
+    showToast('Could not reach the clipboard. The command is in the button\'s tooltip.', 'error');
+    return;
+  }
+  showToast('Copied. Paste /compact into the tool.');
+  if (button) {
+    button.textContent = 'Copied';
+    button.disabled = true;
+  }
+  try {
+    await fetch('/api/compact-decision', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, sha, decision: 'copied', action_channel: 'dashboard' }),
+    });
+  } catch (error) {
+    // The clipboard write is the outcome; a lost receipt is not worth a toast.
+  }
+}
+async function deferCompact(sessionId, sha) {
+  try {
+    const response = await fetch('/api/compact-decision', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, sha, decision: 'later', action_channel: 'dashboard' }),
+    });
+    if (!response.ok) throw new Error('later failed');
+    showToast('Compact nudge hidden until the next commit.');
+    await load(true, true);
+  } catch (error) {
+    showToast('Could not save Later yet.', 'error');
+  }
+}
 function visibleFreshStartProjects() {
   // Any element carrying a project, not only .health-card. This screen shows
   // one lead card and the rest as compact rows, so matching on the card class
@@ -5109,9 +5228,10 @@ async function loadReport() {
 // every time you started or stopped coding would catch your eye every time, and
 // catching your eye is the one thing an always-open tool must not do.
 //
-// Every number here is server-computed. The thresholds in particular come from
-// chart.pressure_tokens_n / chart.critical_tokens_n rather than being repeated
-// as constants, so this surface cannot disagree with the runway chart below it.
+// Every number here is server-computed. The limit in particular comes from
+// chart.context_window_n -- the session model's own window, null when unknown --
+// rather than being repeated as a constant, so this surface cannot disagree
+// with the runway chart below it.
 // ---------------------------------------------------------------------------
 let ambientMarkup = null;
 
@@ -5161,33 +5281,38 @@ function ambientRunning(card, presence) {
   const liveCount = Number(presence && presence.live) || 0;
   const latest = chart.latest_turn_tokens_n || 0;
   const peak = chart.peak_turn_tokens_n || latest;
-  const pressure = chart.pressure_tokens_n || 0;
-  const critical = chart.critical_tokens_n || 0;
-  const trackMax = Math.max(critical, peak, latest) * 1.08 || 1;
-  const severity = card.severity === 'critical' ? 'critical'
-    : (latest >= pressure ? 'warning' : 'healthy');
-  const tone = { critical: 'var(--red)', warning: 'var(--amber)', healthy: 'var(--green)' }[severity];
+  const limit = chart.context_window_n || 0;
+  const trackMax = Math.max(limit, peak, latest) * 1.08 || 1;
+  const severity = card.severity === 'critical' ? 'critical' : 'healthy';
+  const tone = { critical: 'var(--red)', healthy: 'var(--green)' }[severity];
 
   const marks = [];
-  if (pressure) marks.push({ value: pressure, colour: 'var(--amber)' });
-  if (critical) marks.push({ value: critical, colour: 'var(--red)' });
+  if (limit) marks.push({ value: limit, colour: 'var(--red)' });
   if (peak > latest) marks.push({ value: peak, colour: 'var(--red)', dot: true });
 
   // compactTokens returns "200K"; the server's turn labels are "350.2k". Match the
   // hero rather than the other chart, so this component is internally consistent.
   const scaleLabel = value => compactTokens(value);
   const scale = [];
-  if (pressure) scale.push({ label: scaleLabel(pressure) + ' pressure', tone: 'amber' });
-  if (critical) scale.push({ label: scaleLabel(critical) + ' act now', tone: 'red' });
+  if (limit) scale.push({ label: scaleLabel(limit) + ' window', tone: 'red' });
+  else scale.push({ label: 'window unknown', tone: 'muted' });
   if (peak > latest) scale.push({ label: 'peaked ' + card.peak_turn_tokens, tone: 'muted' });
 
   // Runway wording follows the data: turns_to_critical is null once a session is
-  // already past the threshold, and claiming headroom there would be a lie.
+  // at its window, or when no window is known, and claiming headroom in either
+  // case would be a lie.
   const runway = chart.turns_to_critical === null || chart.turns_to_critical === undefined
-    ? (latest >= critical && critical
-        ? 'It is already past the ' + compactTokens(critical) + ' threshold, so there is no headroom left to project.'
-        : '')
-    : 'About <b>' + chart.turns_to_critical + ' turns</b> of headroom at the current rate.';
+    ? (!limit
+        ? 'This model\'s context window is not on file, so there is nothing to project towards.'
+        : latest >= limit
+          ? 'It is at this model\'s ' + compactTokens(limit) + ' window, so there is no headroom left to project.'
+          : '')
+    // Capped where runwayVerdict caps. Against a 1M window most sessions project
+    // hundreds of turns, and "841 turns" beside a card reading "40+" is two
+    // numbers for one quantity -- past the cap the honest reading is "plenty".
+    : chart.turns_to_critical > RUNWAY_MAX_PROJECTED_TURNS
+      ? 'More than <b>' + RUNWAY_MAX_PROJECTED_TURNS + ' turns</b> of headroom at the current rate.'
+      : 'About <b>' + chart.turns_to_critical + ' turns</b> of headroom at the current rate.';
   // Scope. These two figures are not the same scope and the old wording put
   // them under one unscoped "it": bloat_label is ONE session's ratio -- ui.py
   // builds it from health.bloat_ratio, the representative session -- while

@@ -18,7 +18,7 @@ from aiwatcher_cli.session_health import (
 MODEL = "claude-sonnet-5"
 
 
-def _session(session_id: str = "s1", *, tool: str = "claude-code") -> LocalSession:
+def _session(session_id: str = "s1", *, tool: str = "claude-code", model: str | None = MODEL) -> LocalSession:
     now = datetime.now(timezone.utc)
     return LocalSession(
         session_id=session_id,
@@ -26,7 +26,7 @@ def _session(session_id: str = "s1", *, tool: str = "claude-code") -> LocalSessi
         project_path="/repo",
         started_at=now - timedelta(hours=1),
         updated_at=now,
-        model=MODEL,
+        model=model,
     )
 
 
@@ -214,9 +214,9 @@ class ContextResetTests(unittest.TestCase):
     the session is shrinking, and any projection built on it would never fire.
     """
 
-    def _health(self, values: list[int]):
+    def _health(self, values: list[int], model: str | None = MODEL):
         events = [_event(i, tokens_in=v) for i, v in enumerate(values)]
-        return analyze_session_health(_session(), events)
+        return analyze_session_health(_session(model=model), events)
 
     def test_reset_delta_is_excluded_from_growth_rate(self) -> None:
         # +8K a turn throughout, with one reset from 74K down to 20K.
@@ -233,8 +233,9 @@ class ContextResetTests(unittest.TestCase):
         assert health is not None
         self.assertEqual(health.turns_since_reset, 2)
         self.assertAlmostEqual(health.segment_growth_rate, 8_000.0)
-        # From 36K at +8K/turn, CRITICAL_TOKENS_PER_TURN (200K) is 20.5 turns out.
-        self.assertEqual(health.turns_to_critical, 21)
+        # From 36K at +8K/turn, Sonnet 5's 1M window is 120.5 turns out.
+        self.assertEqual(health.context_window, 1_000_000)
+        self.assertEqual(health.turns_to_critical, 121)
 
     def test_no_projection_when_the_session_is_not_on_that_trajectory(self) -> None:
         flat = self._health([100_000, 100_000, 100_000, 100_000])
@@ -242,9 +243,10 @@ class ContextResetTests(unittest.TestCase):
         self.assertEqual(flat.context_resets, 0)
         self.assertIsNone(flat.turns_to_critical)
 
-        already_past = self._health([205_000, 210_000, 215_000, 220_000])
-        assert already_past is not None
-        self.assertIsNone(already_past.turns_to_critical)
+        at_window = self._health([185_000, 190_000, 195_000, 200_000], model="claude-haiku-4-5")
+        assert at_window is not None
+        self.assertEqual(at_window.context_window, 200_000)
+        self.assertIsNone(at_window.turns_to_critical)
 
     def test_small_session_jitter_is_not_a_reset(self) -> None:
         """Below the floor, a halving is noise — every session would show resets."""
@@ -259,6 +261,71 @@ class ContextResetTests(unittest.TestCase):
         self.assertEqual(health.context_resets, 0)
         self.assertEqual(health.turns_since_reset, 3)
         self.assertAlmostEqual(health.segment_growth_rate, health.growth_rate)
+
+
+class ContextWindowIsTheModelsOwnTests(unittest.TestCase):
+    """The ceiling a turn is judged against is the model's window, not a constant.
+
+    The old 150K/200K thresholds were Claude's 200K window applied to every
+    model. A Codex session could read "211K against a 200K limit, no headroom
+    left" at just over half of its real 400K window, and 1M-window sessions could
+    be marked past the limit the same way.
+    """
+
+    def _health(self, values: list[int], model: str | None):
+        events = [_event(i, tokens_in=v, model=model) for i, v in enumerate(values)]
+        return analyze_session_health(_session(model=model), events)
+
+    def test_the_same_turn_is_judged_against_each_models_own_window(self) -> None:
+        turns = [150_000, 170_000, 190_000, 211_000]
+        codex = self._health(turns, "gpt-5-codex")
+        sonnet = self._health(turns, "claude-sonnet-5")
+        assert codex is not None and sonnet is not None
+        self.assertEqual(codex.context_window, 400_000)
+        self.assertEqual(sonnet.context_window, 1_000_000)
+        for health in (codex, sonnet):
+            self.assertFalse(health.is_context_critical)
+            self.assertEqual(health.severity, "healthy")
+            self.assertIsNotNone(health.turns_to_critical)
+        # Nearer its window, so fewer turns of headroom.
+        self.assertLess(codex.turns_to_critical, sonnet.turns_to_critical)
+
+    def test_at_the_window_is_the_one_thing_size_alone_makes_critical(self) -> None:
+        health = self._health([150_000, 170_000, 190_000, 200_000], "claude-haiku-4-5")
+        assert health is not None
+        self.assertTrue(health.is_context_critical)
+        self.assertEqual(health.severity, "critical")
+        self.assertIn("200,000 window", " ".join(health.recommendations))
+
+    def test_nothing_below_the_window_is_a_verdict(self) -> None:
+        # 95% of the window, no bloat, not stale: healthy. There is no amber tier.
+        health = self._health([180_000, 185_000, 190_000, 190_000], "claude-haiku-4-5")
+        assert health is not None
+        self.assertEqual(health.severity, "healthy")
+        self.assertEqual(health.recommendations, ["Context is healthy."])
+
+    def test_an_unknown_model_has_no_ceiling(self) -> None:
+        health = self._health([500_000, 600_000, 700_000, 800_000], "model-nobody-knows")
+        assert health is not None
+        self.assertIsNone(health.context_window)
+        self.assertIsNone(health.turns_to_critical)
+        self.assertFalse(health.is_context_critical)
+        self.assertEqual(health.severity, "healthy")
+
+    def test_a_turn_bigger_than_the_table_allows_means_the_table_is_stale(self) -> None:
+        # The provider accepted a 250K turn, so the window is not 200K whatever
+        # the table says. Reporting "past the limit" here would be the original
+        # defect wearing a lookup.
+        health = self._health([150_000, 200_000, 225_000, 250_000], "claude-haiku-4-5")
+        assert health is not None
+        self.assertIsNone(health.context_window)
+        self.assertIsNone(health.turns_to_critical)
+        self.assertFalse(health.is_context_critical)
+
+    def test_claude_codes_1m_suffix_names_the_bigger_window(self) -> None:
+        health = self._health([150_000, 200_000, 225_000, 250_000], "claude-sonnet-4-5[1m]")
+        assert health is not None
+        self.assertEqual(health.context_window, 1_000_000)
 
 
 if __name__ == "__main__":

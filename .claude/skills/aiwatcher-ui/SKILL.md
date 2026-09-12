@@ -151,10 +151,20 @@ implementation:
 
 A fixed constant is acceptable only when it is externally imposed (a model's
 context limit) or explicitly marked as a stopgap with the reason in a comment.
-`PRESSURE_TOKENS_PER_TURN` / `CRITICAL_TOKENS_PER_TURN` are the legitimate kind:
-they come from a real per-turn limit, and the ambient meter reads its thresholds
-from the same `chart.pressure_tokens_n` / `critical_tokens_n` the runway chart
-uses so the two cannot disagree.
+The per-turn context limit is the reference case, and also the eighth instance
+of the defect above: `PRESSURE_TOKENS_PER_TURN = 150_000` /
+`CRITICAL_TOKENS_PER_TURN = 200_000` were Claude's 200K window written down once
+in July 2026 and then applied to every model. Real usage later included
+1M-window models that were marked "past the limit, no headroom left"; a 211K
+Codex turn read the same way at half its 400K window.
+The limit now comes from `pricing.context_window(model)` per session
+(`session_health._context_ceiling`), and it is **null** when the model is not
+in the table or the session has already made a call bigger than the table
+says is possible — a stale table is the same bug in a new place. Null renders
+as "window unknown" with the number and no colour. There is no amber tier: 75%
+of a window is not where anything happens, it was 150/200. The ambient meter,
+runway chart, verdict line, statusline and Companion meter all read the same
+`context_window` / `chart.context_window_n`, so they cannot disagree.
 
 ### Colour is a claim
 

@@ -339,10 +339,16 @@ def _user_prompt_text(content: Any) -> str | None:
         return None
     if not text:
         return None
-    # Skip slash-command wrappers and injected reminders; they are not the user's real ask.
-    if text.startswith(("<command", "<local-command", "<system-reminder>", "Caveat:")):
+    if text.startswith(INJECTED_ROW_PREFIXES):
         return None
     return text
+
+
+# User-role rows the tool writes itself: slash-command wrappers and their
+# output, injected reminders, and background-task notifications. None of them
+# is a thing the person typed, so none counts as a prompt -- here and in
+# statusline.read_transcript, which reads the same log.
+INJECTED_ROW_PREFIXES = ("<command", "<local-command", "<system-reminder>", "<task-notification>", "Caveat:")
 
 
 def segment_session_by_prompt(source_path: str | None, *, max_chars: int = 2000) -> list[dict[str, object]]:
@@ -944,6 +950,27 @@ def _anthropic_usage(usage: Any) -> dict[str, int]:
     }
 
 
+def _repeated_row(obj: Any, seen: set[str]) -> bool:
+    """A transcript row the tool has written before.
+
+    Claude Code appends copies of earlier rows when it compacts -- observed
+    2026-09-09: 149 rows at one compaction, 1,333 at the next, the same
+    uuids and timestamps as the originals, placed after the live tail and
+    just before the compact_boundary row. A reader that walks the file in
+    order and trusts the last row it meets then takes a morning-old context
+    size for the current one, right at the moment that number matters. So a
+    row counts once, on its first appearance. Rows without a uuid (the
+    tool's own bookkeeping lines) are never repeats.
+    """
+    row_uuid = obj.get("uuid") if isinstance(obj, dict) else None
+    if not isinstance(row_uuid, str) or not row_uuid:
+        return False
+    if row_uuid in seen:
+        return True
+    seen.add(row_uuid)
+    return False
+
+
 def _usage_receipt_key(obj: Any, message: Any) -> str | None:
     """Identify the API request a transcript line's usage block belongs to.
 
@@ -1296,6 +1323,7 @@ def scan_claude_code() -> list[LocalSession]:
                 # One usage block per API request, however many transcript
                 # lines that request produced. See _usage_receipt_key.
                 counted_requests: set[str] = set()
+                seen_rows: set[str] = set()
                 events_seen = 0
                 agent_calls = 0
                 tool_calls = 0
@@ -1325,6 +1353,8 @@ def scan_claude_code() -> list[LocalSession]:
                             try:
                                 obj = json.loads(line)
                             except json.JSONDecodeError:
+                                continue
+                            if _repeated_row(obj, seen_rows):
                                 continue
                             ts = _parse_ts(obj.get("timestamp") or obj.get("createdAt"))
                             started_at = _min_dt(started_at, ts)
@@ -1470,6 +1500,7 @@ def scan_claude_code_events(since: datetime | None = None) -> list[LocalEvent]:
                 # One usage block per API request, however many transcript
                 # lines that request produced. See _usage_receipt_key.
                 counted_requests: set[str] = set()
+                seen_rows: set[str] = set()
                 hinted_project_path: str | None = None
                 intentional_project_path: str | None = None
                 try:
@@ -1480,6 +1511,8 @@ def scan_claude_code_events(since: datetime | None = None) -> list[LocalEvent]:
                             try:
                                 obj = json.loads(line)
                             except json.JSONDecodeError:
+                                continue
+                            if _repeated_row(obj, seen_rows):
                                 continue
 
                             ts = _parse_ts(obj.get("timestamp") or obj.get("createdAt"))

@@ -9,7 +9,8 @@ from unittest.mock import Mock, patch
 
 from datetime import datetime, timedelta, timezone
 
-from aiwatcher_cli import companion, ui
+from aiwatcher_cli import companion, compaction, ui
+from aiwatcher_cli.local_state import compact_nudge, record_companion_skip, update_compact_nudge
 from aiwatcher_cli.scanner import LocalSession
 
 
@@ -914,15 +915,305 @@ class CompanionPressureAndSignalTests(WaitingSessionCompanionTests):
     def test_pressure_reads_the_working_sessions_latest_turn(self):
         ui._PRESSURE_TRANSCRIPT_CACHE.clear()
         with patch.object(ui.statusline, "read_transcript", return_value={
-            "available": True, "latest_context": 158_000,
+            "available": True, "latest_context": 158_000, "peak_context": 158_000,
+            "model": "claude-sonnet-5",
         }) as read:
             state = self._state(self._summary(), sessions=[self._working_session()])
         pressure = state["pressure"]
         self.assertTrue(pressure["available"])
         self.assertEqual(pressure["latest_turn_tokens"], 158_000)
-        self.assertEqual(pressure["severity"], "warning")
-        self.assertEqual(pressure["pct_of_turn_limit"], 79)
+        # 158K of Sonnet 5's 1M window. Under the old fixed 200K limit this
+        # same turn read 79% and amber; a percent of the wrong model's window
+        # was the defect, so the number and the colour both change here.
+        self.assertEqual(pressure["severity"], "ok")
+        self.assertEqual(pressure["pct_of_turn_limit"], 16)
+        self.assertEqual(pressure["context_window"], 1_000_000)
         read.assert_called_once()
+
+    def test_a_codex_session_gets_a_meter_against_its_400k_window(self):
+        # The Slack-thread case: 211K on Codex read "past a 200K limit". Read
+        # through the rollout reader against the real window it is 53%, ok.
+        ui._PRESSURE_TRANSCRIPT_CACHE.clear()
+        codex = self._working_session()
+        codex.tool = "codex-cli"
+        codex.model = "gpt-5-codex"
+        with patch.object(ui.compaction, "codex_boundary_stats", return_value={
+            "available": True, "latest_context": 211_400, "peak_context": 211_400, "model": "gpt-5-codex",
+        }) as read:
+            state = self._state(self._summary(), sessions=[codex])
+        pressure = state["pressure"]
+        self.assertTrue(pressure["available"])
+        self.assertEqual(pressure["context_window"], 400_000)
+        self.assertEqual(pressure["pct_of_turn_limit"], 53)
+        self.assertEqual(pressure["severity"], "ok")
+        read.assert_called_once()
+
+    def test_the_meter_is_the_models_own_window_not_a_constant(self):
+        ui._PRESSURE_TRANSCRIPT_CACHE.clear()
+        with patch.object(ui.statusline, "read_transcript", return_value={
+            "available": True, "latest_context": 158_000, "peak_context": 158_000,
+            "model": "claude-haiku-4-5",
+        }):
+            state = self._state(self._summary(), sessions=[self._working_session()])
+        pressure = state["pressure"]
+        self.assertEqual(pressure["pct_of_turn_limit"], 79)
+        self.assertEqual(pressure["severity"], "ok")
+
+    def test_no_meter_when_the_window_is_unknown(self):
+        # An unrecognised model, or a turn bigger than the table says the
+        # model accepts: either way nobody knows the window, and a percent of
+        # an unknown is not drawn as a meter.
+        for stats in (
+            {"available": True, "latest_context": 158_000, "peak_context": 158_000, "model": "model-nobody-knows"},
+            {"available": True, "latest_context": 250_000, "peak_context": 250_000, "model": "claude-haiku-4-5"},
+        ):
+            with self.subTest(model=stats["model"]):
+                ui._PRESSURE_TRANSCRIPT_CACHE.clear()
+                with patch.object(ui.statusline, "read_transcript", return_value=stats):
+                    state = self._state(self._summary(), sessions=[self._working_session()])
+                pressure = state["pressure"]
+                self.assertFalse(pressure["available"])
+                self.assertIn("window unknown", pressure["reason"])
+
+    # --- compact at the boundary -------------------------------------------
+
+    SHA = "c" * 40
+
+    def _assessment(self, **overrides):
+        base = dict(
+            session_id="w1", tool="claude-code", model="claude-sonnet-5", sha=self.SHA,
+            subject="fix: thing", committed_at="2026-09-09T10:00:00+00:00",
+            turns_since_commit=9, prompts_since_commit=3, latest_turn_tokens=431_000,
+            context_at_commit=412_000, first_turn_tokens=58_000, dead_tokens=354_000,
+            since_tokens=19_000, after_estimate=77_000, files_since=["a.py"],
+            command="/compact Keep everything since commit ccccccc", priced=False,
+            dead_usd_per_turn=None, recommend=True, reason="",
+        )
+        base.update(overrides)
+        return compaction.Assessment(**base)
+
+    def _compact_state(self, assessment, session=None):
+        # Local state is shared across this module's tests, and a nudge is
+        # keyed on (session, sha): each test uses its own sha so one test's
+        # receipt or Later cannot leak into the next.
+        ui._COMPACT_CACHE.clear()
+        boundary = compaction.Boundary(sha=assessment.sha, subject="fix: thing", committed_at=datetime.now(timezone.utc))
+        with (
+            patch.object(ui.compaction, "head_commit", return_value=boundary),
+            patch.object(ui.compaction, "assess", return_value=assessment),
+        ):
+            return self._state(self._summary(), sessions=[session or self._working_session()])
+
+    def test_the_nudge_stays_while_the_session_is_quiet_and_goes_with_it(self):
+        # /compact is typed once the model has stopped. The first rule hid
+        # the nudge sixty seconds after the session's last write, so it was
+        # on the bar while the user could not act and gone once they could.
+        # Quiet keeps it; gone drops it.
+        quiet = self._working_session()
+        quiet.updated_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        state = self._compact_state(self._assessment(sha="q" * 40), session=quiet)
+        self.assertEqual(state["state"], "compact_recommended")
+        self.assertEqual(state["label"], "Compact now")
+        self.assertEqual(state["badge"], {"count": 1, "tone": "info"})
+        gone = self._working_session()
+        gone.updated_at = datetime.now(timezone.utc) - timedelta(minutes=40)
+        state = self._compact_state(self._assessment(sha="g" * 40), session=gone)
+        self.assertNotEqual(state["state"], "compact_recommended")
+        self.assertIsNone(state["compact"])
+        self.assertIsNone(compact_nudge("w1", "g" * 40))
+
+    def test_a_commit_with_dead_history_puts_compact_on_the_bar(self):
+        state = self._compact_state(self._assessment())
+        self.assertEqual(state["state"], "compact_recommended")
+        self.assertEqual(state["primary_action"], "copy_compact")
+        # Two words for the title and one for the button: the bar caps them
+        # at 18 and 12 characters, and the first version came out as
+        # "Compact before the" and "Copy /compac".
+        self.assertEqual(state["primary_label"], "Copy")
+        self.assertEqual(state["label"], "Compact now")
+        self.assertLessEqual(len(state["label"]), 18)
+        self.assertLessEqual(len(state["subtitle"]), 46)
+        self.assertTrue(state["compact_command"].startswith("/compact"))
+        self.assertEqual(state["compact_sha"], self.SHA)
+        # The subtitle names the window first -- with two open on one
+        # project a hash does not say where to paste -- then the figures.
+        # No session title here, so the name is tool and project. The
+        # boundary fact moves to the tooltip.
+        self.assertIn("Claude · aiwatcher-local · 354.0k of 431.0k", state["subtitle"])
+        self.assertIn("Committed 3 turns ago", state["detail"])
+        self.assertIn("is finished work", state["detail"])
+        self.assertEqual(state["compact_stage"], "nudge")
+        self.assertEqual(state["skip_state"], "compact_recommended")
+        self.assertEqual(state["skip_session_ids"], ["w1"])
+        # The collapsed bubble shows nothing but a count, so a nudge with
+        # no badge waited invisibly until the bar happened to be open.
+        self.assertEqual(state["badge"], {"count": 1, "tone": "info"})
+        # The receipt is opened the first time the nudge shows.
+        record = compact_nudge("w1", self.SHA)
+        assert record is not None
+        self.assertEqual(record["dead_tokens"], 354_000)
+        self.assertIsNone(record["decision"])
+
+    def test_a_commit_with_nothing_to_shed_leaves_the_bar_quiet(self):
+        sha = "d" * 40
+        state = self._compact_state(self._assessment(sha=sha, recommend=False, reason="Nothing has happened since the commit yet."))
+        self.assertEqual(state["state"], "watching")
+        self.assertIsNone(state["compact"])
+        self.assertIsNone(compact_nudge("w1", sha))
+
+    def test_later_hides_this_commits_nudge(self):
+        sha = "e" * 40
+        record_companion_skip(key=f"compact:w1:{sha}", reason="deferred", minutes=60)
+        state = self._compact_state(self._assessment(sha=sha))
+        self.assertEqual(state["state"], "watching")
+        self.assertIsNone(state["compact"])
+
+    def test_the_bar_says_this_turn_when_the_commit_just_landed(self):
+        state = self._compact_state(self._assessment(sha="f" * 40, prompts_since_commit=0))
+        self.assertIn("Committed this turn", state["detail"])
+
+    # --- after the nudge: each step on a line the tool wrote ----------------
+
+    def test_a_named_session_is_named_on_the_bar(self):
+        state = self._compact_state(self._assessment(sha="1" * 40, title="Context health calibration"))
+        self.assertEqual(state["subtitle"], "Context health calibration · 354.0k of 431.0k")
+        self.assertIn("in Context health calibration", state["detail"])
+
+    def test_copy_holds_the_bar_on_that_session_until_the_log_moves(self):
+        sha = "2" * 40
+        self._compact_state(self._assessment(sha=sha, title="Context health calibration"))
+        update_compact_nudge("w1", sha, decision="copied", action_channel="companion")
+        state = self._compact_state(self._assessment(sha=sha, title="Context health calibration"))
+        self.assertEqual(state["state"], "compact_recommended")
+        self.assertEqual(state["compact_stage"], "copied")
+        self.assertEqual(state["label"], "Copied")
+        self.assertEqual(state["subtitle"], "Paste into Context health calibration")
+        # No button and no Later: the click is made, the log has not moved.
+        self.assertEqual(state["primary_action"], "none")
+        self.assertEqual(state["skip_state"], "")
+        # Still something to do (paste it), so the bubble keeps its count.
+        self.assertEqual(state["badge"], {"count": 1, "tone": "info"})
+
+    def test_the_typed_command_moves_the_bar_to_compacting(self):
+        sha = "3" * 40
+        self._compact_state(self._assessment(sha=sha))
+        state = self._compact_state(self._assessment(
+            sha=sha, stage="compacting", command_seen_at="2026-09-09T12:14:31+00:00",
+            reason="/compact was typed at 12:14; the tool has not finished yet.",
+        ))
+        self.assertEqual(state["compact_stage"], "compacting")
+        self.assertEqual(state["label"], "Compacting…")
+        self.assertIn("/compact seen", state["subtitle"])
+        self.assertEqual(state["primary_action"], "none")
+        # The receipt records the step, and a typed command with no click is
+        # a decision of its own.
+        record = compact_nudge("w1", sha)
+        assert record is not None
+        self.assertEqual(record["command_seen_at"], "2026-09-09T12:14:31+00:00")
+        self.assertEqual(record["decision"], "typed")
+
+    def test_the_boundary_row_moves_the_bar_to_compacted(self):
+        sha = "4" * 40
+        self._compact_state(self._assessment(sha=sha))
+        state = self._compact_state(self._assessment(
+            sha=sha, stage="compacted", boundary_seen_at="2026-09-09T12:15:31+00:00",
+            reason="Compacted at 12:15; the next reply will show the new size.",
+        ))
+        self.assertEqual(state["label"], "Compacted")
+        self.assertEqual(state["subtitle"], "Confirming the size on the next reply")
+        self.assertEqual(compact_nudge("w1", sha)["boundary_seen_at"], "2026-09-09T12:15:31+00:00")
+        # Nothing left to do, but the bar is collapsed most of the time and
+        # a step with no count is a blank bubble: the count stays on.
+        self.assertEqual(state["badge"], {"count": 1, "tone": "info"})
+
+    def test_the_first_small_reply_confirms_with_the_real_number(self):
+        sha = "5" * 40
+        self._compact_state(self._assessment(sha=sha))
+        # The step holds while the tool carries on working, so by the time a
+        # person looks the latest reply is bigger than the shed: the bar
+        # shows the shed's number and the receipt closes on it.
+        state = self._compact_state(self._assessment(
+            sha=sha, stage="confirmed", recommend=False, latest_turn_tokens=85_000,
+            context_before_shed=592_810, context_after_shed=80_384,
+            reason="The context already shed since that commit.",
+        ))
+        self.assertEqual(state["state"], "compact_recommended")
+        self.assertEqual(state["compact_stage"], "confirmed")
+        self.assertEqual(state["label"], "Compacted")
+        self.assertIn("592.8k → 80.4k per reply", state["subtitle"])
+        self.assertIn("estimate was 77.0k", state["subtitle"])
+        self.assertEqual(state["badge"], {"count": 1, "tone": "info"})
+        self.assertEqual(compact_nudge("w1", sha)["after_actual"], 80_384)
+
+    def test_a_compaction_nobody_asked_for_is_not_announced(self):
+        # The tool's own auto-compact writes the same boundary; with no
+        # receipt and no typed command it is not this feature's to claim.
+        state = self._compact_state(self._assessment(
+            sha="6" * 40, stage="confirmed", recommend=False, latest_turn_tokens=58_000,
+            context_before_shed=998_000, reason="The context already shed since that commit.",
+        ))
+        self.assertEqual(state["state"], "watching")
+        self.assertIsNone(state["compact"])
+
+    def test_two_windows_get_a_row_each(self):
+        sha = "7" * 40
+        ui._COMPACT_CACHE.clear()
+        first = self._assessment(sha=sha, session_id="w1", title="AIWatcher efficacy feature scope", dead_tokens=594_926, latest_turn_tokens=646_536, after_estimate=51_610)
+        second = self._assessment(sha=sha, session_id="w2", title="Context health calibration", dead_tokens=448_621, latest_turn_tokens=592_810, after_estimate=71_428)
+        boundary = compaction.Boundary(sha=sha, subject="fix: thing", committed_at=datetime.now(timezone.utc))
+        by_id = {"w1": first, "w2": second}
+        with (
+            patch.object(ui.compaction, "head_commit", return_value=boundary),
+            patch.object(ui.compaction, "assess", side_effect=lambda session: by_id[session.session_id]),
+        ):
+            state = self._state(self._summary(), sessions=[
+                self._working_session("w1", source_path="/tmp/w1.jsonl"),
+                self._working_session("w2", source_path="/tmp/w2.jsonl"),
+            ])
+        self.assertEqual(state["state"], "compact_recommended")
+        self.assertEqual(state["label"], "Compact 2 sessions")
+        self.assertLessEqual(len(state["label"]), 18)
+        self.assertEqual(state["subtitle"], "2 to compact")
+        # No single button: each row carries its own, with its own command.
+        self.assertEqual(state["primary_action"], "none")
+        rows = state["compact_rows"]
+        self.assertEqual([row["session_id"] for row in rows], ["w1", "w2"])   # most to shed first
+        self.assertEqual(rows[0]["text"], "AIWatcher efficacy feature scope · 594.9k of 646.5k")
+        self.assertEqual(rows[0]["tag"], "→ ~51.6k")
+        self.assertEqual(rows[0]["action"], "copy_compact")
+        self.assertTrue(rows[1]["command"].startswith("/compact"))
+        self.assertEqual(state["skip_session_ids"], ["w1", "w2"])
+
+    def test_only_the_clicked_row_changes(self):
+        # Today's case: Copy on one window, paste into the other. The clicked
+        # row is marked copied; the pasted-into row moves on the log alone.
+        sha = "8" * 40
+        ui._COMPACT_CACHE.clear()
+        boundary = compaction.Boundary(sha=sha, subject="fix: thing", committed_at=datetime.now(timezone.utc))
+        by_id = {
+            "w1": self._assessment(sha=sha, session_id="w1", title="AIWatcher efficacy feature scope", dead_tokens=594_926, latest_turn_tokens=646_536),
+            "w2": self._assessment(sha=sha, session_id="w2", title="Context health calibration"),
+        }
+        sessions = [self._working_session("w1", source_path="/tmp/w1.jsonl"), self._working_session("w2", source_path="/tmp/w2.jsonl")]
+        with (
+            patch.object(ui.compaction, "head_commit", return_value=boundary),
+            patch.object(ui.compaction, "assess", side_effect=lambda session: by_id[session.session_id]),
+        ):
+            self._state(self._summary(), sessions=sessions)
+            update_compact_nudge("w1", sha, decision="copied", action_channel="companion")
+            by_id["w2"] = self._assessment(
+                sha=sha, session_id="w2", title="Context health calibration", stage="compacting",
+                command_seen_at="2026-09-09T12:14:31+00:00", reason="/compact was typed at 12:14; the tool has not finished yet.",
+            )
+            ui._COMPACT_CACHE.clear()
+            state = self._state(self._summary(), sessions=sessions)
+        rows = {row["session_id"]: row for row in state["compact_rows"]}
+        self.assertEqual(rows["w1"]["tag"], "copied")
+        self.assertEqual(rows["w1"]["action"], "copy_compact")
+        self.assertEqual(rows["w2"]["tag"], "compacting…")
+        self.assertEqual(rows["w2"]["action"], "")
+        self.assertEqual(state["subtitle"], "1 copied · 1 compacting")
+        self.assertEqual(state["skip_state"], "")
 
     def test_the_meter_carries_the_sessions_running_totals(self):
         # Absolute anchors for the percent: API-equivalent cost and total
@@ -941,7 +1232,8 @@ class CompanionPressureAndSignalTests(WaitingSessionCompanionTests):
             tokens_out=1_000_000,
         )
         with patch.object(ui.statusline, "read_transcript", return_value={
-            "available": True, "latest_context": 42_000,
+            "available": True, "latest_context": 42_000, "peak_context": 42_000,
+            "model": "claude-sonnet-5",
         }):
             state = self._state(self._summary(), sessions=[session])
         pressure = state["pressure"]

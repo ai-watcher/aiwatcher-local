@@ -199,6 +199,12 @@ checks (`{"enabled": bool}`, off by default),
 snoozes a non-blocking companion reminder, and
 `/api/ambient-intervention-action` records the native companion lifecycle
 (`displayed`, `acted`, `snoozed`, `dismissed`, or `failed`).
+`/api/compact-decision` closes a compact-at-boundary nudge with what you did
+(`{"session_id": ..., "sha": ..., "decision": "copied" | "later"}`); `later`
+also hides that commit's nudge until the next commit. The nudge itself rides
+`/api/companion-state` as the `compact_recommended` state, with the ready
+`/compact` command in `compact_command`, and appears on the Watch context
+health card as `compact`.
 `/api/ai-assist-config` saves the optional AI Assist mode. Supported modes are
 `off`, `local`, and `cloud`; source access is `metadata_only`, `prompt_opt_in`,
 or `source_opt_in`. For cloud mode, `api_key` may be supplied for the selected

@@ -260,12 +260,12 @@ class AmbientSurfaceTest(unittest.TestCase):
         self.assertNotIn("replayed_cost_label", sentence)
 
     def test_thresholds_are_not_hardcoded(self):
-        # They come from the same payload the runway chart uses, so the two
-        # surfaces cannot disagree about where "act now" sits.
+        # The limit comes from the same payload the runway chart uses -- the
+        # session model's own window -- so the two surfaces cannot disagree
+        # about where it sits, and no model's number is written in here.
         source = self._ambient_source()
-        self.assertIn("chart.pressure_tokens_n", source)
-        self.assertIn("chart.critical_tokens_n", source)
-        for literal in ("150000", "200000"):
+        self.assertIn("chart.context_window_n", source)
+        for literal in ("150000", "200000", "1000000"):
             with self.subTest(literal=literal):
                 self.assertNotIn(literal, source)
 
@@ -935,12 +935,12 @@ class WatchRanksByWhoNeedsYouTest(unittest.TestCase):
         self.assertIn("waiting.has(row.session_id) ? 1 : 0", self.rank)
         # And it comes before the pressure keys, not after them.
         self.assertLess(
-            self.rank.index("waiting.has"), self.rank.index("latest >= critical"))
+            self.rank.index("waiting.has"), self.rank.index("latest >= limit"))
 
     def test_the_pressure_order_is_unchanged_beneath_it(self):
         # Adding a key on top should not disturb the ranking that was already
-        # reasoned about: past the limit, then bigger per turn.
-        self.assertIn("latest >= critical ? 1 : 0", self.rank)
+        # reasoned about: at the window, then bigger per turn.
+        self.assertIn("latest >= limit ? 1 : 0", self.rank)
         self.assertIn("latest", self.rank)
 
     def test_every_row_says_why_it_sits_where_it_does(self):
@@ -956,18 +956,23 @@ class WatchRanksByWhoNeedsYouTest(unittest.TestCase):
         self.assertIn("runwayVerdict(row.chart)", self.reason)
         self.assertIn("Highest per-turn here", self.reason)
         verdict = js_function_source(self.js, "runwayVerdict")
-        self.assertIn("past the action threshold", verdict)
+        self.assertIn("At the context window", verdict)
 
     def test_the_reason_follows_the_same_precedence_as_the_sort(self):
         # Or the explanation drifts from the ordering it explains.
         waiting = self.reason.index("Waiting on you")
+        under_way = self.reason.index("compact.stage === 'compacting'")
+        compact = self.reason.index("compact.actionable")
         past = self.reason.index("runwayVerdict(row.chart)")
         highest = self.reason.index("Highest per-turn here")
-        self.assertLess(waiting, past)
+        self.assertLess(waiting, under_way)
+        self.assertLess(under_way, compact)
+        self.assertLess(compact, past)
         self.assertLess(past, highest)
-        # And each of the three rungs returns, so a lower one cannot outrank a
-        # higher one by falling through to it.
-        self.assertEqual(self.reason.count("return"), 3)
+        # And each rung returns -- waiting, the three compaction steps under
+        # way, the nudge, the runway verdict, the fallback -- so a lower one
+        # cannot outrank a higher one by falling through to it.
+        self.assertEqual(self.reason.count("return"), 7)
 
     def test_the_rank_and_the_reason_read_one_source(self):
         # A second list of waiting sessions would be a second thing to keep in
@@ -1591,7 +1596,7 @@ class WatchTest(unittest.TestCase):
         meter = js_function_source(self.js, "drawMeter")
         # the meter's track is the limit, not this project's peak, or it would
         # not be comparable with the card above it
-        self.assertIn("critical * 1.25", meter)
+        self.assertIn("limit * 1.25", meter)
         trend = js_function_source(self.js, "drawTrend")
         self.assertIn("Math.min(...series)", trend)
 
@@ -1602,7 +1607,7 @@ class WatchTest(unittest.TestCase):
         numbered, worst first. The rule the split existed to serve is unchanged
         and still tested: the worst thing is the first thing you read."""
         rank = js_function_source(self.js, "healthRank")
-        self.assertIn("latest >= critical", rank)
+        self.assertIn("latest >= limit", rank)
         self.assertNotIn("healthLeadCard", self.js)
         self.assertNotIn("healthQuietRow", self.js)
         render = js_function_source(self.js, "renderContextHealth")
@@ -2015,9 +2020,8 @@ class HealthCardActionTest(unittest.TestCase):
     them fired, they just went somewhere else."""
 
     class _Health:
-        def __init__(self, severity="healthy", pressure=False, bloat=False, stale=False):
+        def __init__(self, severity="healthy", bloat=False, stale=False):
             self.severity = severity
-            self.is_context_pressure = pressure
             self.is_high_bloat = bloat
             self.is_stale = stale
 
@@ -2028,7 +2032,6 @@ class HealthCardActionTest(unittest.TestCase):
     def _states(self):
         return {
             "critical": self._Health(severity="critical"),
-            "pressure": self._Health(pressure=True),
             "bloat": self._Health(bloat=True),
             "stale": self._Health(stale=True),
             "healthy": self._Health(),
@@ -2045,7 +2048,7 @@ class HealthCardActionTest(unittest.TestCase):
                 self.assertNotEqual(action["kind"], action["secondary_kind"])
 
     def test_pressure_leads_with_the_fresh_start(self):
-        for name in ("critical", "pressure", "bloat"):
+        for name in ("critical", "bloat"):
             with self.subTest(state=name):
                 self.assertEqual(ui._context_action(self._states()[name])["kind"], "handoff")
         for name in ("stale", "healthy"):
@@ -3058,6 +3061,57 @@ class UpdateAutoCheckIsOptInTest(unittest.TestCase):
         self.assertIn("Off by default", self.html)
         self.assertIn("/api/update-auto-check", self.js)
         self.assertIn('"update_auto_check": update_auto_check_enabled()', self.ui_source)
+
+
+class CompactAtTheBoundaryTest(unittest.TestCase):
+    """The Watch row's compact nudge: the command is the action, and Later is
+    scoped to the commit, not the project."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+
+    def test_the_row_offers_the_command_when_recommended(self):
+        row = js_function_source(self.js, "healthRow")
+        # actionable, not recommend: the numbers can still recommend while
+        # the log already shows the /compact typed, and offering the command
+        # again then would ask for a thing already done.
+        self.assertIn("row.compact.actionable", row)
+        self.assertNotIn("row.compact.recommend", row)
+        self.assertIn("Copy /compact", row)
+        self.assertIn("copyCompactCommand(", row)
+        self.assertIn("deferCompact(", row)
+        # Deferred keeps the numbers and drops the buttons.
+        self.assertIn("!row.compact.deferred", row)
+        # The command holds the commit subject, and a double quote in a
+        # subject ended the inline handler mid-expression on real data. It
+        # travels in the title attribute and is read back from there.
+        self.assertNotIn("jsArg(compact.command)", row)
+        self.assertIn("this.title, this)", row)
+
+    def test_copy_writes_the_clipboard_and_records_a_receipt(self):
+        copy = js_function_source(self.js, "copyCompactCommand")
+        self.assertIn("navigator.clipboard.writeText(command)", copy)
+        self.assertIn("/api/compact-decision", copy)
+        self.assertIn("decision: 'copied'", copy)
+        later = js_function_source(self.js, "deferCompact")
+        self.assertIn("decision: 'later'", later)
+
+    def test_the_reason_leads_with_the_boundary(self):
+        reason = js_function_source(self.js, "healthReason")
+        self.assertIn("predates commit", reason)
+        self.assertIn("drops the next turn to about", reason)
+
+    def test_the_reason_follows_the_compaction_through_the_log(self):
+        # Each later step has its own sentence, checked before the nudge so a
+        # session mid-compaction is never asked to compact. The session is
+        # named by its title where the tool records one.
+        reason = js_function_source(self.js, "healthReason")
+        for stage in ("compacting", "compacted", "confirmed"):
+            self.assertIn(f"compact.stage === '{stage}'", reason)
+        self.assertLess(reason.index("compact.stage === 'compacting'"), reason.index("compact.actionable"))
+        self.assertIn("compact.title || compact.session_short", reason)
+        self.assertIn("The receipt closed with the real number", reason)
 
 
 class SettingsDeepLinksNameTheirPanelTest(unittest.TestCase):

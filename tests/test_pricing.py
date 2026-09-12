@@ -227,8 +227,14 @@ class CodexFamilyResolvesToPlanBasedTests(unittest.TestCase):
 
     def test_catch_alls_do_not_shadow_a_specifically_priced_model(self) -> None:
         """A prefix must never win over an exact key, or rates go silently to zero."""
-        self.assertEqual(lookup("gpt-4o-mini"), {"in": 0.15, "out": 0.60, "subscription": False})
-        self.assertEqual(lookup("gpt-4o-2024-08-06"), {"in": 2.50, "out": 10.00, "subscription": False})
+        self.assertEqual(
+            lookup("gpt-4o-mini"),
+            {"in": 0.15, "out": 0.60, "subscription": False, "context_window": 128_000},
+        )
+        self.assertEqual(
+            lookup("gpt-4o-2024-08-06"),
+            {"in": 2.50, "out": 10.00, "subscription": False, "context_window": 128_000},
+        )
         self.assertFalse(is_subscription_model("claude-opus-5"))
         self.assertGreater(estimate_cost("claude-opus-5", 1_000_000, 0), 0.0)
 

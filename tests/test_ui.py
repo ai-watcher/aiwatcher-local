@@ -1653,20 +1653,27 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertLessEqual(chart["band_low"][-1], chart["band_mid"][-1])
         self.assertLessEqual(chart["band_mid"][-1], chart["band_high"][-1])
 
-    def _pressure_session(self, session_id: str, *, minutes_idle: float, turn_tokens: int):
-        """A session over the critical line, last touched `minutes_idle` ago."""
+    def _pressure_session(
+        self, session_id: str, *, minutes_idle: float, turn_tokens: int, model: str | None = None,
+    ):
+        """A heavy session, last touched `minutes_idle` ago.
+
+        With no model there is no known window, so size alone makes nothing
+        critical; pass a model and a turn at its window for a critical one.
+        """
         now = datetime.now(timezone.utc)
         updated = now - timedelta(minutes=minutes_idle)
         session = LocalSession(
             session_id=session_id, tool="claude-code", project_path="/repo",
             started_at=updated - timedelta(hours=6), updated_at=updated,
-            tokens_in=turn_tokens * 3, tokens_out=1000, cost_usd=5.0,
+            tokens_in=turn_tokens * 3, tokens_out=1000, cost_usd=5.0, model=model,
         )
         events = [
             LocalEvent(
                 event_id=f"{session_id}-{index}", session_id=session_id, tool="claude-code",
                 event_type="assistant", timestamp=updated - timedelta(minutes=index),
                 tokens_in=turn_tokens, tokens_out=200, cost_usd=1.0, project_path="/repo",
+                model=model,
             )
             for index in range(4)
         ]
@@ -1711,7 +1718,7 @@ class DashboardWindowTests(unittest.TestCase):
     def test_health_card_does_not_let_a_live_session_outrank_a_worse_severity(self) -> None:
         """Being reachable breaks ties inside a severity, it does not jump them."""
         critical, critical_events = self._pressure_session(
-            "critical-gone", minutes_idle=6 * 60, turn_tokens=824_000,
+            "critical-gone", minutes_idle=6 * 60, turn_tokens=200_000, model="claude-haiku-4-5",
         )
         healthy, healthy_events = self._pressure_session(
             "healthy-live", minutes_idle=1, turn_tokens=2_000,
@@ -1885,8 +1892,10 @@ class DashboardWindowTests(unittest.TestCase):
         """
         self.assertIn("function runwayVerdict(chart)", ui.HTML)
         self.assertIn("runwayVerdict(row.chart)", ui.HTML)
-        self.assertIn("Already past the action threshold", ui.HTML)
+        self.assertIn("At the context window", ui.HTML)
         self.assertIn("Not growing right now", ui.HTML)
+        # And the third reason: no window on file for this model.
+        self.assertIn("Context window unknown", ui.HTML)
 
     def test_api_equivalent_value_tile_carries_no_status_colour(self) -> None:
         """The figure is counterfactual, so no rail may imply a loss.
@@ -3243,12 +3252,12 @@ class DashboardWindowTests(unittest.TestCase):
 
         self.assertEqual(chart["turn_series"], [40_000 + 8_000 * i for i in range(8)])
         self.assertEqual(chart["latest_turn_tokens_n"], 96_000)
-        self.assertEqual(chart["pressure_tokens_n"], ui.PRESSURE_TOKENS_PER_TURN)
-        self.assertEqual(chart["critical_tokens_n"], ui.CRITICAL_TOKENS_PER_TURN)
+        # The session model's own window, not a constant.
+        self.assertEqual(chart["context_window_n"], 1_000_000)
         self.assertEqual(chart["context_resets"], 0)
         self.assertAlmostEqual(chart["growth_per_turn_n"], 8_000, delta=1)
-        # (200_000 - 96_000) / 8_000 = 13
-        self.assertEqual(chart["turns_to_critical"], 13)
+        # (1_000_000 - 96_000) / 8_000 = 113
+        self.assertEqual(chart["turns_to_critical"], 113)
         # The display strings the existing card renders must be untouched.
         self.assertEqual(cards[0]["latest_turn_tokens"], "96.0k")
 
@@ -3376,8 +3385,9 @@ class DashboardWindowTests(unittest.TestCase):
             latest_turn_replayed_tokens=220_000,
             is_stale=False,
             is_critical_stale=False,
-            is_context_pressure=True,
-            is_context_critical=True,
+            model="claude-sonnet-5",
+            context_window=1_000_000,
+            is_context_critical=False,
             is_high_bloat=True,
             is_extreme_bloat=True,
             severity="critical",
@@ -3475,8 +3485,9 @@ class DashboardWindowTests(unittest.TestCase):
             latest_turn_replayed_tokens=220_000,
             is_stale=False,
             is_critical_stale=False,
-            is_context_pressure=True,
-            is_context_critical=True,
+            model="claude-sonnet-5",
+            context_window=1_000_000,
+            is_context_critical=False,
             is_high_bloat=True,
             is_extreme_bloat=True,
             severity="critical",
@@ -4578,8 +4589,9 @@ class DashboardWindowTests(unittest.TestCase):
                 latest_turn_replayed_tokens=int(latest_tokens * 0.98),
                 is_stale=False,
                 is_critical_stale=False,
-                is_context_pressure=True,
-                is_context_critical=True,
+                model="gpt-5-codex",
+                context_window=400_000,
+                is_context_critical=False,
                 is_high_bloat=True,
                 is_extreme_bloat=True,
                 severity=severity,
@@ -4647,8 +4659,9 @@ class DashboardWindowTests(unittest.TestCase):
                 latest_turn_replayed_tokens=196_000,
                 is_stale=False,
                 is_critical_stale=False,
-                is_context_pressure=True,
-                is_context_critical=True,
+                model="gpt-5-codex",
+                context_window=400_000,
+                is_context_critical=False,
                 is_high_bloat=True,
                 is_extreme_bloat=True,
                 severity="critical",

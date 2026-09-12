@@ -9,28 +9,36 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 
+_1M = 1_000_000
+_200K = 200_000
+
+# `context_window` is the input the model accepts on one call. It is what every
+# per-turn context figure is judged against, so it has to be per model: the
+# Claude 5 family runs at 1M while Haiku and the 4.x snapshots stop at 200K, and
+# a single number for all of them is how a 211K Codex turn came to be reported
+# as "past the limit".
 MODEL_PRICING: dict[str, dict[str, float | bool]] = {
     # Standard rate. Sonnet 5's introductory rate is in INTRO_PRICING below and
     # applies to spend dated before it lapses.
-    "claude-sonnet-5": {"in": 3.00, "out": 15.00, "subscription": False},
-    "claude-sonnet-4-20250514": {"in": 3.00, "out": 15.00, "subscription": False},
-    "claude-sonnet-4-5-20250514": {"in": 3.00, "out": 15.00, "subscription": False},
-    "claude-sonnet-4-6": {"in": 3.00, "out": 15.00, "subscription": False},
-    "claude-sonnet-4-5": {"in": 3.00, "out": 15.00, "subscription": False},
-    "claude-fable-5-1": {"in": 10.00, "out": 50.00, "subscription": False},
-    "claude-fable-5": {"in": 10.00, "out": 50.00, "subscription": False},
-    "claude-opus-4-8": {"in": 5.00, "out": 25.00, "subscription": False},
-    "claude-opus-4-20250514": {"in": 5.00, "out": 25.00, "subscription": False},
-    "claude-opus-4-7": {"in": 5.00, "out": 25.00, "subscription": False},
-    "claude-opus-4-6": {"in": 5.00, "out": 25.00, "subscription": False},
-    "claude-opus-4": {"in": 5.00, "out": 25.00, "subscription": False},
-    "claude-haiku-4-5-20251001": {"in": 1.00, "out": 5.00, "subscription": False},
-    "claude-haiku-4-5": {"in": 1.00, "out": 5.00, "subscription": False},
-    "claude-opus-5": {"in": 5.00, "out": 25.00, "subscription": False},
-    "claude-mythos-5-1": {"in": 10.00, "out": 50.00, "subscription": False},
-    "claude-mythos-5": {"in": 10.00, "out": 50.00, "subscription": False},
-    "gpt-4o": {"in": 2.50, "out": 10.00, "subscription": False},
-    "gpt-4o-mini": {"in": 0.15, "out": 0.60, "subscription": False},
+    "claude-sonnet-5": {"in": 3.00, "out": 15.00, "subscription": False, "context_window": _1M},
+    "claude-sonnet-4-20250514": {"in": 3.00, "out": 15.00, "subscription": False, "context_window": _200K},
+    "claude-sonnet-4-5-20250514": {"in": 3.00, "out": 15.00, "subscription": False, "context_window": _200K},
+    "claude-sonnet-4-6": {"in": 3.00, "out": 15.00, "subscription": False, "context_window": _1M},
+    "claude-sonnet-4-5": {"in": 3.00, "out": 15.00, "subscription": False, "context_window": _200K},
+    "claude-fable-5-1": {"in": 10.00, "out": 50.00, "subscription": False, "context_window": _1M},
+    "claude-fable-5": {"in": 10.00, "out": 50.00, "subscription": False, "context_window": _1M},
+    "claude-opus-4-8": {"in": 5.00, "out": 25.00, "subscription": False, "context_window": _1M},
+    "claude-opus-4-20250514": {"in": 5.00, "out": 25.00, "subscription": False, "context_window": _200K},
+    "claude-opus-4-7": {"in": 5.00, "out": 25.00, "subscription": False, "context_window": _1M},
+    "claude-opus-4-6": {"in": 5.00, "out": 25.00, "subscription": False, "context_window": _1M},
+    "claude-opus-4": {"in": 5.00, "out": 25.00, "subscription": False, "context_window": _200K},
+    "claude-haiku-4-5-20251001": {"in": 1.00, "out": 5.00, "subscription": False, "context_window": _200K},
+    "claude-haiku-4-5": {"in": 1.00, "out": 5.00, "subscription": False, "context_window": _200K},
+    "claude-opus-5": {"in": 5.00, "out": 25.00, "subscription": False, "context_window": _1M},
+    "claude-mythos-5-1": {"in": 10.00, "out": 50.00, "subscription": False, "context_window": _1M},
+    "claude-mythos-5": {"in": 10.00, "out": 50.00, "subscription": False, "context_window": _1M},
+    "gpt-4o": {"in": 2.50, "out": 10.00, "subscription": False, "context_window": 128_000},
+    "gpt-4o-mini": {"in": 0.15, "out": 0.60, "subscription": False, "context_window": 128_000},
     # Family catch-alls, so an unrecognised GPT-5/Codex build resolves to
     # "known, plan-based" rather than to None.
     #
@@ -42,8 +50,14 @@ MODEL_PRICING: dict[str, dict[str, float | bool]] = {
     # means "known, deliberately unpriced", and only the second is a claim the
     # dashboard can honestly render. Every GPT-5 entry here is subscription, so a
     # prefix hit cannot pick up a rate that ought to have been billed.
-    "codex": {"in": 0.0, "out": 0.0, "subscription": True},
-    "gpt-5": {"in": 0.0, "out": 0.0, "subscription": True},
+    #
+    # 400K is the Codex CLI's cap (272K input + 128K reserved output), which is
+    # the only place AIWatcher ever meets a GPT-5 model. The API window for the
+    # newer builds is larger, and Codex can be configured to use it; a session
+    # that does will exceed this figure and `session_health` reports its ceiling
+    # as unknown rather than as breached.
+    "codex": {"in": 0.0, "out": 0.0, "subscription": True, "context_window": 400_000},
+    "gpt-5": {"in": 0.0, "out": 0.0, "subscription": True, "context_window": 400_000},
 }
 
 # Prompt-cache rates, as multiples of a model's base input price. Cached reads
@@ -170,3 +184,22 @@ def cache_read_cost(model: str | None, cache_read: int, when: datetime | None = 
 
 def is_subscription_model(model: str | None) -> bool:
     return bool(lookup(model) and lookup(model).get("subscription"))
+
+
+def context_window(model: str | None) -> int | None:
+    """Input tokens `model` accepts on one call, or None when nobody knows.
+
+    None is a real answer: a caller judging a per-turn figure against it must
+    show the figure with no limit, not fall back to some other model's window.
+    Claude Code names the 1M-context variant of a 200K model with a `[1m]`
+    suffix, which the prefix scan would otherwise resolve to the 200K entry.
+    """
+    if not model:
+        return None
+    if "[1m]" in model.lower():
+        return _1M
+    pricing = lookup(model)
+    if not pricing:
+        return None
+    window = pricing.get("context_window")
+    return int(window) if window else None
