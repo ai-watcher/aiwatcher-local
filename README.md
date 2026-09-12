@@ -13,6 +13,24 @@ unless you explicitly configure optional AI Assist.
 
 ![AIWatcher Local home dashboard](docs/readme-home-light.svg)
 
+## Contents
+
+- [What You Get](#what-you-get)
+- [First Look](#first-look)
+- [Why Developers Use It](#why-developers-use-it)
+- [Install](#install)
+- [If Install Fails](#if-install-fails)
+- [First Useful Checks](#first-useful-checks)
+- [Optional Hooks](#optional-hooks)
+- [Clone The Codebase](#clone-the-codebase)
+- [Keep AIWatcher Updated](#keep-aiwatcher-updated)
+- [What It Reads](#what-it-reads)
+- [Common Commands](#common-commands)
+- [Project Status](#project-status)
+- [AIWatcher Local and Enterprise](#aiwatcher-local-and-enterprise)
+- [Contributing](#contributing)
+- [License](#license)
+
 ## What You Get
 
 In the first few minutes, AIWatcher gives one developer a local control loop for
