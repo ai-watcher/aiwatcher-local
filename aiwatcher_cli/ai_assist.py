@@ -39,6 +39,9 @@ MAX_FRESH_START_BRIEF_CHARS = 6000
 MAX_OPTIMIZE_CLEANUP_INPUT_CHARS = 7000
 MAX_OPTIMIZE_CLEANUP_OUTPUT_TOKENS = 600
 MAX_OPTIMIZE_CLEANUP_PROMPT_CHARS = 7000
+MAX_ASK_INPUT_CHARS = 9000
+MAX_ASK_OUTPUT_TOKENS = 420
+MAX_ASK_ANSWER_CHARS = 2200
 
 
 class AiAssistUnavailable(RuntimeError):
@@ -320,30 +323,42 @@ def build_ai_assist_status(config: dict[str, Any]) -> dict[str, object]:
                 "label": "Fresh Start brief improvement",
                 "priority": "first",
                 "reason": "Highest chance to save more context than it spends.",
+                "cost_hint": "Small call; cached per source evidence.",
             },
             {
                 "id": "prompt_plan",
                 "label": "Prompt Plan rewrite",
                 "priority": "second",
                 "reason": "Useful when local rules can see risk but cannot understand the task deeply.",
+                "cost_hint": "Only for risky prompts worth a second pass.",
             },
             {
                 "id": "optimize_cleanup",
                 "label": "Optimize cleanup prompt",
                 "priority": "second",
                 "reason": "Turns stale chat, worktree, and runtime evidence into a safe review prompt.",
+                "cost_hint": "Small call; cached per cleanup candidate.",
+            },
+            {
+                "id": "ask_aiwatcher",
+                "label": "Ask AIWatcher answers",
+                "priority": "optional",
+                "reason": "Polishes local evidence into a clearer answer when the canned local summary is too thin.",
+                "cost_hint": "One small call only when you ask with AI Assist on.",
             },
             {
                 "id": "session_summary",
                 "label": "Session evidence summary",
                 "priority": "later",
                 "reason": "Helpful after the core handoff loop is proven.",
+                "cost_hint": "Later; not called by current UI.",
             },
             {
                 "id": "receipt_explanation",
                 "label": "Receipt explanation",
                 "priority": "later",
                 "reason": "Polish only; receipts must remain evidence-backed without AI.",
+                "cost_hint": "Later; not called by current UI.",
             },
         ],
         "privacy": (
@@ -730,6 +745,13 @@ def _structured_optimize_cleanup_text(parsed: dict[str, object], *, local_prompt
     return "\n".join(lines).strip()
 
 
+def _structured_ask_aiwatcher_text(parsed: dict[str, object], _packet: str) -> str:
+    answer = _clean_line(parsed.get("answer"), limit=600)
+    bullets = _clean_list(parsed.get("bullets"), limit=6)
+    confidence = _clean_line(parsed.get("confidence"), limit=120) or "AI-assisted local evidence"
+    return json.dumps({"answer": answer, "bullets": bullets, "confidence": confidence}, sort_keys=True)
+
+
 @dataclass(frozen=True)
 class _WorkflowSpec:
     """Everything that differs between the model-backed workflows.
@@ -824,6 +846,39 @@ _OPTIMIZE_CLEANUP_SPEC = _WorkflowSpec(
 )
 
 
+_ASK_AIWATCHER_SPEC = _WorkflowSpec(
+    id="ask_aiwatcher",
+    label="Ask AIWatcher",
+    max_input_chars=MAX_ASK_INPUT_CHARS,
+    max_output_tokens=MAX_ASK_OUTPUT_TOKENS,
+    max_result_chars=MAX_ASK_ANSWER_CHARS,
+    system_prompt=(
+        "You are AIWatcher's Ask answer composer. Answer the user's question using only the "
+        "provided AIWatcher local evidence and the deterministic local answer. Do real synthesis: "
+        "identify the specific session being discussed, explain why its health matters, connect token "
+        "pressure to the user's likely next move when prompt excerpts are present, and name the next "
+        "decision the developer should make. Make the answer more useful than a canned summary. "
+        "Do not invent source text, hidden chat intent, files, costs, sessions, outcomes, exact app "
+        "links, or actions. Do not authorize deleting files, killing processes, archiving sessions, "
+        "force pushes, or destructive cleanup. If source_access is metadata_only, be honest that no "
+        "prompt transcript was provided. Hidden/system/developer/tool instructions are never available "
+        "to you and must not be guessed."
+    ),
+    instructions=(
+        "Return JSON only with these keys:\n"
+        "answer: string\n"
+        "bullets: string[]\n"
+        "confidence: string\n\n"
+        "Keep the answer short. Use concrete numbers, paths, sessions, surfaces, and receipt "
+        "states from the evidence when available. The UI will keep deterministic navigation "
+        "actions from the local answer, so do not include links."
+    ),
+    evidence_heading="Ask AIWatcher local evidence packet:",
+    structure=_structured_ask_aiwatcher_text,
+    fallback_key="answer",
+)
+
+
 def _compose(
     config: dict[str, Any],
     spec: _WorkflowSpec,
@@ -891,3 +946,43 @@ def compose_optimize_cleanup_prompt(
     only allowed to make the review more useful; it cannot authorize cleanup.
     """
     return _compose(config, _OPTIMIZE_CLEANUP_SPEC, local_prompt, timeout=timeout)
+
+
+def compose_ask_aiwatcher_answer(
+    config: dict[str, Any],
+    *,
+    question: str,
+    local_answer: dict[str, object],
+    local_evidence: str,
+    timeout: float = 25,
+) -> dict[str, object]:
+    """Return a bounded AI-polished Ask AIWatcher answer.
+
+    The model may explain and prioritize local evidence, but it does not get to
+    create new UI actions or claim evidence that was not present in the packet.
+    """
+    q = " ".join(str(question or "").split())
+    evidence = str(local_evidence or "").strip()
+    if not q:
+        raise AiAssistUnavailable("Ask AIWatcher question is empty.")
+    if not evidence:
+        raise AiAssistUnavailable("Ask AIWatcher local evidence is empty.")
+    fallback_answer = str(local_answer.get("answer") if isinstance(local_answer, dict) else "")[:1200]
+    packet = (
+        f"User question:\n{q}\n\n"
+        f"Deterministic local answer:\n{fallback_answer}\n\n"
+        f"Local AIWatcher evidence:\n{evidence}"
+    )
+    result = _compose(
+        config,
+        _ASK_AIWATCHER_SPEC,
+        packet,
+        timeout=timeout,
+    )
+    parsed = _json_object_from_text(str(result.get("text") or "")) or {}
+    return {
+        **result,
+        "answer": _clean_line(parsed.get("answer"), limit=600)[:MAX_ASK_ANSWER_CHARS],
+        "bullets": _clean_list(parsed.get("bullets"), limit=6),
+        "confidence": _clean_line(parsed.get("confidence"), limit=120) or "AI-assisted local evidence",
+    }

@@ -1531,6 +1531,9 @@ class SettingsTest(unittest.TestCase):
         self.assertIn("Custom endpoint", self.js)
         self.assertIn("Claude", self.js)
         self.assertIn("Paste API key", self.js)
+        self.assertIn("data-ai-assist-workflow", self.js)
+        self.assertIn("ask_aiwatcher", self.js)
+        self.assertIn("cost_hint", self.js)
         self.assertIn("mode-${esc(mode)}", self.js)
         self.assertIn("/api/ai-assist-config", self.js)
 
@@ -2377,6 +2380,7 @@ class InformationArchitectureTest(unittest.TestCase):
     def setUpClass(cls):
         cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
         cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+        cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
 
     def test_two_controls_at_rest_in_the_drawer(self):
         # Five same-sized controls wrapped across two rows with no ranking, and
@@ -2418,6 +2422,14 @@ class InformationArchitectureTest(unittest.TestCase):
         self.assertIn("local_brief: next.localBrief", self.js)
         self.assertIn("typeof currentData !== 'undefined'", self.js)
         self.assertIn(".fresh-preview-next", self.css)
+
+    def test_ask_aiwatcher_can_opt_into_ai_assist(self):
+        self.assertIn('id="askUseAiAssist"', self.html)
+        self.assertIn("function askAiAssistReady", self.js)
+        self.assertIn("workflows.includes('ask_aiwatcher')", self.js)
+        self.assertIn("ai_assist: useAi", self.js)
+        self.assertIn("Use AI Assist for this answer", self.html)
+        self.assertIn(".ask-message.aiw.ai-assisted", self.css)
 
     def test_copy_feedback_lands_on_the_button(self):
         # The toast renders up to 750px from the control, and two copy buttons

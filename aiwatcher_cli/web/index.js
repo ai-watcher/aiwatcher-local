@@ -640,10 +640,36 @@ function showToast(message, kind = 'success') {
   window.clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => { toast.className = 'toast'; }, 3200);
 }
+function askAiAssistReady(status = null) {
+  const current = status || (currentData && currentData.ai_assist ? currentData.ai_assist : {});
+  const config = current.config || {};
+  const workflows = Array.isArray(config.enabled_workflows) ? config.enabled_workflows : [];
+  return !!(current.ready && current.mode !== 'off' && workflows.includes('ask_aiwatcher'));
+}
+function updateAskAiAssistControl(status = null) {
+  const row = document.getElementById('askAiAssistRow');
+  if (!row) return;
+  const current = status || (currentData && currentData.ai_assist ? currentData.ai_assist : {});
+  const config = current.config || {};
+  const ready = askAiAssistReady(current);
+  row.hidden = !ready;
+  const hint = document.getElementById('askAiAssistHint');
+  if (hint) {
+    const label = current.active_label || 'AI Assist';
+    const sourceAccess = config.source_access || 'metadata_only';
+    const evidenceScope = sourceAccess === 'metadata_only'
+      ? 'metadata only'
+      : 'prompt excerpts allowed by Settings';
+    hint.textContent = `${label}: ${evidenceScope}; one small optional model call cached when evidence is unchanged.`;
+  }
+  const checkbox = document.getElementById('askUseAiAssist');
+  if (checkbox && !ready) checkbox.checked = false;
+}
 function openAskPanel(question = '') {
   document.getElementById('askBackdrop').classList.add('open');
   document.getElementById('askPanel').classList.add('open');
   document.getElementById('askPanel').setAttribute('aria-hidden', 'false');
+  updateAskAiAssistControl();
   const input = document.getElementById('askInput');
   if (question) input.value = question;
   window.setTimeout(() => input.focus(), 50);
@@ -668,13 +694,26 @@ function appendAskMessage(kind, html) {
   node.scrollTop = node.scrollHeight;
 }
 function renderAskResponse(data) {
+  const ai = data.ai_assist_result || {};
+  const assisted = ['used', 'cached'].includes(ai.status);
+  const failed = ai.status === 'failed' || ai.status === 'skipped';
+  const prefix = assisted ? (ai.status === 'cached' ? 'Cached AI Assist' : 'AI Assist') : (failed ? 'Local fallback' : 'Local summary');
+  const provider = assisted && (ai.provider || ai.model)
+    ? `<p class="receipt-note">${esc(ai.provider || 'provider')} / ${esc(ai.model || 'model')} · ${esc(ai.source_access || 'metadata_only')}</p>`
+    : '';
+  const failure = failed && ai.reason
+    ? `<p class="receipt-note">${esc(ai.reason)}</p>`
+    : '';
   const bullets = (data.bullets || []).length
     ? `<ul>${data.bullets.map(item => `<li>${esc(item)}</li>`).join('')}</ul>`
     : '';
   const actions = (data.actions || []).length
     ? `<div class="ask-actions">${data.actions.map(action => `<a href="${esc(action.url || '/')}" onclick="closeAskPanel()">${esc(action.label || 'Open')}</a>`).join('')}</div>`
     : '';
-  appendAskMessage('aiw', `<strong>${esc(data.confidence || 'Local answer')}</strong><p>${esc(data.answer || 'No answer available.')}</p>${bullets}${actions}<p class="receipt-note">${esc(data.privacy || 'Local metadata only.')}</p>`);
+  appendAskMessage(
+    assisted ? 'aiw ai-assisted' : 'aiw',
+    `<strong>${esc(prefix)} · ${esc(data.confidence || 'Local answer')}</strong><p>${esc(data.answer || 'No answer available.')}</p>${bullets}${actions}${provider}${failure}<p class="receipt-note">${esc(data.privacy || 'Local metadata only.')}</p>`
+  );
 }
 function askTemplate(question) {
   openAskPanel(question);
@@ -690,19 +729,26 @@ async function askAIWatcher() {
   const input = document.getElementById('askInput');
   const button = document.getElementById('askSendButton');
   const question = input.value.trim();
+  const checkbox = document.getElementById('askUseAiAssist');
+  const useAi = !!(checkbox && checkbox.checked && askAiAssistReady());
   if (!question) {
     showToast('Ask a question first.', 'error');
     return;
   }
+  const config = ((currentData || {}).ai_assist || {}).config || {};
+  if (useAi && config.require_confirmation !== false) {
+    const ok = window.confirm('Use AI Assist for this Ask answer? This makes one small configured model call unless cached.');
+    if (!ok) return;
+  }
   appendAskMessage('user', `<p>${esc(question)}</p>`);
   input.value = '';
   button.disabled = true;
-  button.textContent = 'Checking...';
+  button.textContent = useAi ? 'Asking AI...' : 'Checking...';
   try {
     const res = await fetch('/api/ask-aiwatcher', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, days: Number(document.getElementById('days').value || 7) }),
+      body: JSON.stringify({ question, days: Number(document.getElementById('days').value || 7), ai_assist: useAi }),
     });
     const data = await res.json();
     if (!res.ok || data.error) {
@@ -3374,6 +3420,7 @@ function renderAiAssistSettings(status) {
   const localProviders = s.local_providers || [];
   const cloudProviders = s.cloud_providers || [];
   const storedKeys = c.stored_keys || s.stored_keys || {};
+  const enabledWorkflows = Array.isArray(c.enabled_workflows) ? c.enabled_workflows : [];
   const firstLocal = localProviders.find(row => row.available);
   const cloudById = id => cloudProviders.find(row => row.id === id) || {};
   const providerDetail = id => {
@@ -3401,9 +3448,19 @@ function renderAiAssistSettings(status) {
   const showEndpoint = mode !== 'off' && provider === 'openai_compatible';
   const keyPlaceholder = keySaved ? 'Saved locally. Paste a new key to replace it.' : 'Paste API key';
   const workflowSummary = (s.workflows || [])
-    .filter(row => ['first', 'second'].includes(row.priority))
+    .filter(row => enabledWorkflows.includes(row.id) && row.priority !== 'later')
     .map(row => esc(row.label))
     .join(' and ');
+  const workflowRows = (s.workflows || []).filter(row => row.priority !== 'later');
+  const workflowChecks = workflowRows.length
+    ? `<div class="ai-assist-workflows" role="group" aria-label="AI Assist workflows">
+        <strong>Use AI Assist for</strong>
+        ${workflowRows.map(row => `<label class="workflow-check-row">
+          <input type="checkbox" value="${esc(row.id)}" data-ai-assist-workflow ${enabledWorkflows.includes(row.id) ? 'checked' : ''}>
+          <span><b>${esc(row.label)}</b><small>${esc(row.reason || '')} ${esc(row.cost_hint || '')}</small></span>
+        </label>`).join('')}
+      </div>`
+    : '';
   return `<div class="ai-assist-simple mode-${esc(mode)}">
     <div class="ai-assist-status ${s.ready ? 'ready' : 'needs-setup'}">
       <div>
@@ -3459,6 +3516,7 @@ function renderAiAssistSettings(status) {
           <option value="prompt_opt_in" ${c.source_access === 'prompt_opt_in' ? 'selected' : ''}>Prompt text only after confirmation</option>
           <option value="source_opt_in" ${c.source_access === 'source_opt_in' ? 'selected' : ''}>Source files only after confirmation</option>
         </select></label>
+        ${workflowChecks}
         <label class="check-row"><input id="aiAssistConfirm" type="checkbox" ${c.require_confirmation !== false ? 'checked' : ''}> Ask before every AI Assist run</label>
         <div class="ai-assist-provider-strip">
           ${localProviders.map(row => `<span class="provider-chip ${row.available ? 'ready' : ''}">${esc(row.label)}: ${esc(row.detail)}</span>`).join('')}
@@ -3603,6 +3661,7 @@ async function saveAiAssistSettings() {
     max_daily_usd: Number(document.getElementById('aiAssistCap').value || 0),
     source_access: document.getElementById('aiAssistSourceAccess').value,
     require_confirmation: document.getElementById('aiAssistConfirm').checked,
+    enabled_workflows: Array.from(document.querySelectorAll('[data-ai-assist-workflow]:checked')).map(node => node.value),
   };
   try {
     const res = await fetch('/api/ai-assist-config', {
@@ -5757,6 +5816,7 @@ async function loadOnce(resetDetail, forceRefresh) {
   if (companionNode) {
     companionNode.innerHTML = renderCompanionSettings(data.companion_preferences || {});
   }
+  updateAskAiAssistControl(data.ai_assist || {});
   const settingsVisible = !document.getElementById('view-setup').hidden;
   if (settingsVisible) showSettingsPanel(activeSettingsPanel);
   // Counts on both headings. Setup steps is still folded, and a folded section

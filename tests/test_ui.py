@@ -2577,6 +2577,238 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("203.0k", " ".join(answer["bullets"]))
         self.assertEqual(answer["actions"][0]["label"], "Build Fresh Start")
 
+    def test_ask_aiwatcher_can_use_ai_assist_with_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            config = {
+                "mode": "cloud",
+                "provider": "openai",
+                "source_access": "metadata_only",
+                "max_daily_usd": 0.25,
+                "enabled_workflows": ["ask_aiwatcher"],
+                "api_keys": {"openai": "sk-secret"},
+            }
+            status = {
+                "ready": True,
+                "mode": "cloud",
+                "provider": "openai",
+                "active_label": "Cloud AI Assist",
+                "status_label": "Ready",
+                "config": {
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "source_access": "metadata_only",
+                    "require_confirmation": True,
+                    "enabled_workflows": ["ask_aiwatcher"],
+                },
+            }
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "build_summary_cached", return_value={
+                    "totals": {"window_label": "Last 7 days", "sessions": 2, "tokens_label": "120.0k"},
+                    "context_health": [{
+                        "session_id": "sess-1",
+                        "project_full": "/repo/app",
+                        "tool": "codex-cli",
+                        "severity": "warning",
+                        "latest_turn_tokens_label": "80.0k",
+                    }],
+                }),
+                patch.object(ui, "ai_assist_config", return_value=config),
+                patch.object(ui, "build_ai_assist_status", return_value=status),
+                patch.object(ui, "compose_ask_aiwatcher_answer", return_value={
+                    "workflow": "ask_aiwatcher",
+                    "status": "used",
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "model": "gpt-test",
+                    "source_access": "metadata_only",
+                    "answer": "AI says this session should watch context pressure first.",
+                    "bullets": ["Top session: /repo/app"],
+                    "confidence": "AI-assisted local evidence",
+                    "input_chars": 320,
+                    "output_chars": 100,
+                    "usage": {"prompt_tokens": 70, "completion_tokens": 20},
+                    "structured": {"answer": "AI says this session should watch context pressure first."},
+                }) as composer,
+            ):
+                first = ui.answer_ai_assisted_question("What should I do next?", days=7)
+                second = ui.answer_ai_assisted_question("What should I do next?", days=7)
+                runs = recent_ai_assist_runs(limit=5)
+
+        self.assertEqual(first["ai_assist_result"]["status"], "used")
+        self.assertEqual(second["ai_assist_result"]["status"], "cached")
+        self.assertEqual(composer.call_count, 1)
+        self.assertIn("AI says", first["answer"])
+        self.assertEqual(first["actions"], second["actions"])
+        self.assertEqual(runs[0]["workflow"], "ask_aiwatcher")
+        self.assertTrue(runs[0]["cache_hit"])
+
+    def test_ask_aiwatcher_cache_does_not_replay_another_provider(self) -> None:
+        current_config = {
+            "value": {
+                "mode": "cloud",
+                "provider": "openai",
+                "source_access": "metadata_only",
+                "max_daily_usd": 0.25,
+                "enabled_workflows": ["ask_aiwatcher"],
+                "api_keys": {"openai": "sk-secret"},
+            },
+        }
+
+        def config(*, with_secrets: bool = False):
+            return dict(current_config["value"])
+
+        def status(config_value):
+            return {
+                "ready": True,
+                "mode": config_value.get("mode"),
+                "provider": config_value.get("provider"),
+                "active_label": "Cloud AI Assist",
+                "status_label": "Ready",
+                "config": {
+                    "mode": config_value.get("mode"),
+                    "provider": config_value.get("provider"),
+                    "source_access": "metadata_only",
+                    "require_confirmation": True,
+                    "enabled_workflows": ["ask_aiwatcher"],
+                },
+            }
+
+        openai_answer = {
+            "workflow": "ask_aiwatcher", "status": "used", "mode": "cloud",
+            "provider": "openai", "model": "gpt-test", "source_access": "metadata_only",
+            "answer": "OpenAI answer.", "bullets": ["OpenAI"], "confidence": "AI-assisted local evidence",
+            "input_chars": 320, "output_chars": 80, "usage": {"prompt_tokens": 70, "completion_tokens": 20},
+            "structured": {"answer": "OpenAI answer."},
+            "text": json.dumps({"answer": "OpenAI answer.", "bullets": ["OpenAI"], "confidence": "AI-assisted local evidence"}),
+        }
+        anthropic_answer = {
+            **openai_answer,
+            "provider": "anthropic",
+            "model": "claude-test",
+            "answer": "Claude answer.",
+            "bullets": ["Claude"],
+            "text": json.dumps({"answer": "Claude answer.", "bullets": ["Claude"], "confidence": "AI-assisted local evidence"}),
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "build_summary_cached", return_value={
+                    "totals": {"window_label": "Last 7 days", "sessions": 2, "tokens_label": "120.0k"},
+                }),
+                patch.object(ui, "ai_assist_config", side_effect=config),
+                patch.object(ui, "build_ai_assist_status", side_effect=status),
+                patch.object(ui, "compose_ask_aiwatcher_answer", side_effect=[openai_answer, anthropic_answer]) as composer,
+            ):
+                first = ui.answer_ai_assisted_question("What should I do next?", days=7)
+                again = ui.answer_ai_assisted_question("What should I do next?", days=7)
+                current_config["value"] = {
+                    **current_config["value"],
+                    "provider": "anthropic",
+                    "api_keys": {"anthropic": "sk-ant-secret"},
+                }
+                switched = ui.answer_ai_assisted_question("What should I do next?", days=7)
+
+        self.assertEqual(first["ai_assist_result"]["status"], "used")
+        self.assertEqual(again["ai_assist_result"]["status"], "cached")
+        self.assertEqual(switched["ai_assist_result"]["status"], "used")
+        self.assertIn("Claude", switched["answer"])
+        self.assertEqual(composer.call_count, 2)
+
+    def test_ask_aiwatcher_daily_cap_stops_cloud_calls_once_reached(self) -> None:
+        first_answer = {
+            "workflow": "ask_aiwatcher", "status": "used", "mode": "cloud",
+            "provider": "openai", "model": "gpt-4o-mini", "source_access": "metadata_only",
+            "answer": "AI answer.", "bullets": ["Review context"], "confidence": "AI-assisted local evidence",
+            "input_chars": 320, "output_chars": 80, "usage": {"prompt_tokens": 1_000_000, "completion_tokens": 0},
+            "structured": {"answer": "AI answer."},
+            "text": json.dumps({"answer": "AI answer.", "bullets": ["Review context"], "confidence": "AI-assisted local evidence"}),
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}, clear=True),
+                patch.object(ui, "build_summary_cached", return_value={
+                    "totals": {"window_label": "Last 7 days", "sessions": 2, "tokens_label": "120.0k"},
+                }),
+                patch.object(ui, "compose_ask_aiwatcher_answer", return_value=first_answer) as composer,
+            ):
+                ui.record_ai_assist_config({
+                    "mode": "cloud", "provider": "openai", "api_key": "sk-secret", "max_daily_usd": 0.10,
+                })
+                first = ui.answer_ai_assisted_question("What should I do next?", days=7)
+                spend = ui.ai_assist_day_spend()
+                second = ui.answer_ai_assisted_question("What should I inspect now?", days=7)
+                runs = recent_ai_assist_runs(limit=3)
+
+        self.assertEqual(first["ai_assist_result"]["status"], "used")
+        self.assertAlmostEqual(spend["spent_usd"], 0.15, places=4)
+        self.assertEqual(second["ai_assist_result"]["status"], "skipped")
+        self.assertIn("daily cap reached: $0.15 of $0.10", second["ai_assist_result"]["reason"])
+        self.assertEqual(composer.call_count, 1)
+        self.assertEqual(runs[0]["status"], "skipped")
+        self.assertTrue(runs[1]["priced"])
+
+    def test_ask_aiwatcher_prompt_opt_in_adds_session_prompt_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = os.path.join(temp_dir, "session.jsonl")
+            with open(source_path, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps({
+                    "type": "user",
+                    "message": {"content": "Fix the checkout flow and preserve the Stripe webhook guardrails."},
+                }) + "\n")
+                handle.write(json.dumps({
+                    "type": "assistant",
+                    "message": {"model": "claude-sonnet-5", "usage": {"input_tokens": 1200, "output_tokens": 300}},
+                }) + "\n")
+            row = LocalSession(
+                session_id="sess-prompt",
+                tool="claude-code",
+                project_path=temp_dir,
+                source_path=source_path,
+                updated_at=datetime.now(timezone.utc),
+                tokens_in=1200,
+                tokens_out=300,
+                agent_calls=1,
+            )
+            summary = {
+                "context_health": [{
+                    "session_id": "sess-prompt",
+                    "project_full": temp_dir,
+                    "tool": "claude-code",
+                    "severity": "warning",
+                }],
+            }
+            local = {
+                "answer": "Context health needs attention.",
+                "confidence": "Observed local context signal",
+                "actions": [{"label": "Inspect Session", "url": "/?session=sess-prompt"}],
+            }
+            with patch.object(ui, "_find_session_row", return_value=row):
+                metadata_only = ui._ask_ai_evidence_packet(
+                    "tell me context health",
+                    local,
+                    summary,
+                    days=7,
+                    source_access="metadata_only",
+                )
+                prompt_opt_in = ui._ask_ai_evidence_packet(
+                    "tell me context health",
+                    local,
+                    summary,
+                    days=7,
+                    source_access="prompt_opt_in",
+                )
+
+        self.assertNotIn("Stripe webhook", json.dumps(metadata_only))
+        self.assertIn("Prompt text not included", json.dumps(metadata_only))
+        self.assertIn("Stripe webhook", json.dumps(prompt_opt_in))
+        self.assertIn("recent_prompt_turns", json.dumps(prompt_opt_in))
+        self.assertIn("Hidden/system/developer/tool instructions are not forwarded", json.dumps(prompt_opt_in))
+
     def test_fresh_start_receipt_rows_show_observed_next_session_proof(self) -> None:
         now = datetime.now(timezone.utc)
         source = LocalSession(

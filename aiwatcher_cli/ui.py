@@ -25,6 +25,7 @@ from . import analyst, compaction, prompt_signals, statusline
 from .ai_assist import (
     AiAssistUnavailable,
     build_ai_assist_status,
+    compose_ask_aiwatcher_answer,
     compose_optimize_cleanup_prompt,
     improve_fresh_start_brief,
 )
@@ -6110,7 +6111,7 @@ def answer_local_question(question: str, days: int = 7) -> dict[str, object]:
             actions=[_ask_action("Open Improve", "/?view=insights")],
         )
 
-    if any(word in lower for word in ("context", "bloat", "health", "fresh", "handoff", "compact")):
+    if any(word in lower for word in ("context", "bloat", "health", "healht", "fresh", "handoff", "compact")):
         health_rows = summary.get("context_health") if isinstance(summary.get("context_health"), list) else []
         if health_rows and isinstance(health_rows[0], dict):
             row = health_rows[0]
@@ -6219,6 +6220,319 @@ def answer_local_question(question: str, days: int = 7) -> dict[str, object]:
             _ask_action("Open Prove", "/?view=receipts"),
         ],
     )
+
+
+def _session_ids_from_ask_context(local_answer: dict[str, object], summary: dict[str, object]) -> list[str]:
+    ids: list[str] = []
+
+    def add(value: object) -> None:
+        session_id = str(value or "").strip()
+        if session_id and session_id not in ids:
+            ids.append(session_id)
+
+    actions = local_answer.get("actions") if isinstance(local_answer.get("actions"), list) else []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        query = parse_qs(urlparse(str(action.get("url") or "")).query)
+        for value in query.get("session", []):
+            add(value)
+    health_rows = summary.get("context_health") if isinstance(summary.get("context_health"), list) else []
+    for row in health_rows[:3]:
+        if isinstance(row, dict):
+            add(row.get("session_id"))
+    return ids[:3]
+
+
+def _ask_session_evidence(
+    session_ids: list[str],
+    *,
+    days: int,
+    source_access: str,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    include_prompt_text = source_access in {"prompt_opt_in", "source_opt_in"}
+    for session_id in session_ids[:3]:
+        row = _find_session_row(session_id, days=days)
+        if not row:
+            continue
+        cached_events = _cached_events_for_session(session_id) or []
+        health = analyze_session_health(row, cached_events)
+        session_block: dict[str, object] = {
+            "session_id": row.session_id,
+            "tool": row.tool,
+            "surface": row.surface,
+            "model": display_model_name(row.model),
+            "project_path": row.project_path if is_reliable_project_path(row.project_path) else "unknown",
+            "raw_cwd": row.raw_cwd,
+            "source_path": row.source_path,
+            "started_at": row.started_at.isoformat() if row.started_at else None,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            "tokens_in": row.tokens_in,
+            "tokens_out": row.tokens_out,
+            "tokens_total_label": compact_int(row.tokens_in + row.tokens_out),
+            "api_value": money(row.cost_usd),
+            "model_calls": row.agent_calls,
+            "tool_calls": row.tool_calls,
+            "notes": row.notes[:4],
+            "context_health": {
+                "severity": health.severity,
+                "latest_turn_tokens": health.latest_turn_tokens,
+                "peak_turn_tokens": health.peak_turn_tokens,
+                "turns_to_critical": health.turns_to_critical,
+                "turns_since_reset": health.turns_since_reset,
+                "replayed_cost_usd": round(health.replayed_cost_usd, 6),
+            } if health else {"measurable": False},
+            "timeline": timeline_analysis(cached_events) if cached_events else {"events": 0, "status": "not indexed"},
+            "prompt_text_policy": (
+                "User prompt excerpts included by explicit source_access opt-in."
+                if include_prompt_text
+                else "Prompt text not included because source_access is metadata_only."
+            ),
+            "system_prompt_policy": "Hidden/system/developer/tool instructions are not forwarded to AI Assist.",
+        }
+        if include_prompt_text:
+            segments = segment_session_by_prompt(row.source_path, max_chars=900)
+            by_cost = sorted(segments, key=lambda item: (float(item.get("cost_usd") or 0), int(item.get("tokens") or 0)), reverse=True)
+            recent = list(reversed(segments[-3:]))
+            session_block["prompt_turns"] = [
+                {
+                    "turn": item.get("turn"),
+                    "prompt_excerpt": str(item.get("prompt") or "")[:900],
+                    "tokens": item.get("tokens"),
+                    "tool_calls": item.get("tool_calls"),
+                    "api_value": money(float(item.get("cost_usd") or 0.0)),
+                }
+                for item in by_cost[:3]
+                if item.get("prompt")
+            ]
+            session_block["recent_prompt_turns"] = [
+                {
+                    "turn": item.get("turn"),
+                    "prompt_excerpt": str(item.get("prompt") or "")[:700],
+                    "tokens": item.get("tokens"),
+                    "tool_calls": item.get("tool_calls"),
+                }
+                for item in recent
+                if item.get("prompt")
+            ]
+            opening = segments[0] if segments else {}
+            if opening.get("prompt"):
+                session_block["opening_prompt_excerpt"] = str(opening.get("prompt") or "")[:900]
+        rows.append(session_block)
+    return rows
+
+
+def _ask_ai_evidence_packet(
+    question: str,
+    local_answer: dict[str, object],
+    summary: dict[str, object],
+    *,
+    days: int,
+    source_access: str,
+) -> dict[str, object]:
+    """Build bounded metadata for Ask AI Assist.
+
+    Ask AIWatcher is meant to explain local evidence, not read hidden chat
+    source. Prompt text is included only when the user explicitly enabled it.
+    """
+    totals = summary.get("totals") if isinstance(summary.get("totals"), dict) else {}
+    optimize = summary.get("optimize") if isinstance(summary.get("optimize"), dict) else {}
+    optimize_candidates = optimize.get("candidates") if isinstance(optimize.get("candidates"), list) else []
+    health_rows = summary.get("context_health") if isinstance(summary.get("context_health"), list) else []
+    coverage_rows = summary.get("coverage") if isinstance(summary.get("coverage"), list) else []
+    handoffs = summary.get("handoff_decisions") if isinstance(summary.get("handoff_decisions"), list) else []
+    receipts = summary.get("intervention_receipts") if isinstance(summary.get("intervention_receipts"), list) else []
+
+    def compact(rows: object, keys: tuple[str, ...], *, limit: int) -> list[dict[str, object]]:
+        if not isinstance(rows, list):
+            return []
+        compacted: list[dict[str, object]] = []
+        for row in rows[:limit]:
+            if not isinstance(row, dict):
+                continue
+            item = {key: row.get(key) for key in keys if row.get(key) not in (None, "", [])}
+            if item:
+                compacted.append(item)
+        return compacted
+
+    session_ids = _session_ids_from_ask_context(local_answer, summary)
+    return {
+        "question": " ".join(str(question or "").split())[:600],
+        "local_answer": {
+            "answer": str(local_answer.get("answer") or "")[:900],
+            "confidence": str(local_answer.get("confidence") or "")[:160],
+            "bullets": [str(item)[:240] for item in local_answer.get("bullets", []) if item][:8]
+            if isinstance(local_answer.get("bullets"), list)
+            else [],
+            "actions": local_answer.get("actions") if isinstance(local_answer.get("actions"), list) else [],
+        },
+        "totals": {
+            "window_label": totals.get("window_label"),
+            "sessions": totals.get("sessions"),
+            "tokens_label": totals.get("tokens_label"),
+            "api_value_label": totals.get("api_value_label"),
+            "useful_outcomes": totals.get("useful_outcomes"),
+            "needs_review_outcomes": totals.get("needs_review_outcomes"),
+            "preflight_decisions": totals.get("preflight_decisions"),
+        },
+        "selected_sessions": _ask_session_evidence(session_ids, days=days, source_access=source_access),
+        "source_access": source_access,
+        "privacy_boundary": (
+            "metadata_only sends counts, paths, hashes, and labels only. prompt/source opt-in may include user "
+            "prompt excerpts from local logs. Hidden/system/developer/tool instructions are never forwarded."
+        ),
+        "context_health": compact(
+            health_rows,
+            (
+                "session_id",
+                "project",
+                "project_full",
+                "tool",
+                "severity",
+                "latest_turn_tokens",
+                "latest_turn_tokens_label",
+                "recommendation",
+                "confidence_label",
+                "evidence_label",
+                "can_handoff",
+            ),
+            limit=4,
+        ),
+        "optimize_candidates": compact(
+            optimize_candidates,
+            (
+                "id",
+                "title",
+                "project",
+                "project_full",
+                "summary",
+                "impact_label",
+                "context_at_risk_label",
+                "session_count",
+                "evidence",
+                "evidence_label",
+                "last_activity",
+                "tool",
+            ),
+            limit=4,
+        ),
+        "fresh_start_receipts": compact(
+            handoffs,
+            (
+                "created_at",
+                "decision",
+                "decision_label",
+                "proof_status",
+                "source_session_id",
+                "next_session_id",
+                "expected_saved_context_label",
+            ),
+            limit=4,
+        ),
+        "prompt_gate_receipts": compact(
+            receipts,
+            (
+                "created_at",
+                "tool",
+                "action",
+                "decision",
+                "decision_label",
+                "risk",
+                "risk_score",
+                "session_id",
+            ),
+            limit=4,
+        ),
+        "coverage": compact(coverage_rows, ("label", "surface", "status", "status_label", "detail"), limit=8),
+    }
+
+
+def _ask_ai_evidence_hash(
+    question: str,
+    local_answer: dict[str, object],
+    packet: dict[str, object],
+    *,
+    source_access: str,
+) -> str:
+    payload = {
+        "question": " ".join(str(question or "").split()),
+        "local_answer": local_answer,
+        "packet": packet,
+        "source_access": source_access,
+        "workflow": "ask_aiwatcher:v1",
+    }
+    return hash_prompt(json.dumps(payload, sort_keys=True, default=str))
+
+
+def answer_ai_assisted_question(question: str, days: int = 7) -> dict[str, object]:
+    """Answer Ask AIWatcher with optional, user-requested AI Assist."""
+    local = answer_local_question(question, days=days)
+    try:
+        summary = build_summary_cached(days)
+    except Exception:
+        summary = {}
+    public_config = ai_assist_config()
+    config = ai_assist_config(with_secrets=True)
+    status = build_ai_assist_status(public_config)
+    local["ai_assist"] = status
+    source_access = str(public_config.get("source_access") or "metadata_only")
+    packet = _ask_ai_evidence_packet(
+        question,
+        local,
+        summary if isinstance(summary, dict) else {},
+        days=days,
+        source_access=source_access,
+    )
+    evidence_hash = _ask_ai_evidence_hash(question, local, packet, source_access=source_access)
+    local_text = json.dumps(packet, sort_keys=True, default=str)
+
+    outcome = _run_ai_assist_workflow(
+        workflow="ask_aiwatcher",
+        config=config,
+        evidence_hash=evidence_hash,
+        local_text=local_text,
+        compose=lambda: compose_ask_aiwatcher_answer(
+            config,
+            question=question,
+            local_answer=local,
+            local_evidence=local_text,
+            timeout=20,
+        ),
+        session_id="",
+        reason_used="User asked AIWatcher with AI Assist enabled.",
+        reason_cached="User asked AIWatcher with AI Assist; cached answer reused.",
+        finalize=lambda text, result: text or json.dumps({
+            "answer": result.get("answer"),
+            "bullets": result.get("bullets") if isinstance(result.get("bullets"), list) else [],
+            "confidence": result.get("confidence"),
+        }, sort_keys=True),
+    )
+    result_status = outcome["result"].get("status") if isinstance(outcome.get("result"), dict) else None
+    if not outcome.get("text"):
+        local["ai_assist"] = build_ai_assist_status(ai_assist_config())
+        local["ai_assist_result"] = outcome["result"]
+        return local
+
+    try:
+        payload = json.loads(str(outcome.get("text") or "{}"))
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    local.update({
+        "answer": str(payload.get("answer") or local.get("answer") or ""),
+        "bullets": payload.get("bullets") if isinstance(payload.get("bullets"), list) else local.get("bullets", []),
+        "confidence": str(payload.get("confidence") or "AI-assisted local evidence"),
+        "ai_assist": build_ai_assist_status(ai_assist_config()),
+        "ai_assist_result": outcome["result"],
+        "privacy": (
+            "AI Assist answered from local AIWatcher evidence and your question; cached output avoided another model call."
+            if result_status == "cached"
+            else "AI Assist answered from local AIWatcher evidence and your question after your request. Source/prompt text remains governed by Settings."
+        ),
+    })
+    return local
 
 
 def _project_basename(path: object) -> str:
@@ -8166,7 +8480,11 @@ class UIHandler(BaseHTTPRequestHandler):
                 days = max(1, min(90, int(raw_days)))
             except (TypeError, ValueError):
                 days = 7
-            response = answer_local_question(question, days=days)
+            response = (
+                answer_ai_assisted_question(question, days=days)
+                if bool(payload.get("ai_assist"))
+                else answer_local_question(question, days=days)
+            )
             self._send(200, json.dumps(response), "application/json; charset=utf-8")
             return
         if parsed.path in {"/api/handoff-basic", "/api/handoff-ai-assist", "/api/handoff"}:

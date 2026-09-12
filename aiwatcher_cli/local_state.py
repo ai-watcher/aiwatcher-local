@@ -42,11 +42,14 @@ AI_ASSIST_WORKFLOWS = {
     "fresh_start",
     "prompt_plan",
     "optimize_cleanup",
+    "ask_aiwatcher",
     "session_summary",
     "receipt_explanation",
 }
 AI_ASSIST_KEY_PROVIDERS = {"openai", "anthropic", "openai_compatible"}
 AI_ASSIST_PROVIDER_CHECK_STATUSES = {"untested", "verified", "failed"}
+DEFAULT_AI_ASSIST_WORKFLOWS = ["fresh_start", "prompt_plan", "optimize_cleanup", "ask_aiwatcher"]
+LEGACY_DEFAULT_AI_ASSIST_WORKFLOWS = ["fresh_start", "prompt_plan", "optimize_cleanup"]
 
 FINISHED_SESSION_NOTICE_MODES = {"badge_only", "expanded"}
 
@@ -99,7 +102,7 @@ def default_ai_assist_config() -> dict[str, Any]:
         "max_daily_usd": 0.25,
         "source_access": "metadata_only",
         "require_confirmation": True,
-        "enabled_workflows": ["fresh_start", "prompt_plan", "optimize_cleanup"],
+        "enabled_workflows": list(DEFAULT_AI_ASSIST_WORKFLOWS),
         "api_keys": {},
         "provider_checks": {},
     }
@@ -170,9 +173,10 @@ def _normalize_ai_assist_config(value: Any) -> dict[str, Any]:
     workflows = value.get("enabled_workflows")
     if isinstance(workflows, list):
         normalized = [str(item).strip().lower() for item in workflows]
-        config["enabled_workflows"] = [item for item in normalized if item in AI_ASSIST_WORKFLOWS]
-        if "optimize_cleanup" not in config["enabled_workflows"]:
-            config["enabled_workflows"].append("optimize_cleanup")
+        valid_workflows = [item for item in normalized if item in AI_ASSIST_WORKFLOWS]
+        if valid_workflows == LEGACY_DEFAULT_AI_ASSIST_WORKFLOWS:
+            valid_workflows = list(DEFAULT_AI_ASSIST_WORKFLOWS)
+        config["enabled_workflows"] = valid_workflows
     return config
 
 # How long an issued brief/capsule token remains redeemable. Short enough to
