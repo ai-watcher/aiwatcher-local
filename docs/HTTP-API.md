@@ -184,7 +184,20 @@ source-access setting allow them.
 workflow after the user explicitly asks for it. The request supplies only an
 Optimize candidate id and day window; the server rebuilds the candidate from
 local metadata, computes the evidence hash, and either returns a cached
-AI-composed prompt or makes one bounded model call. The prompt is for safe
+AI-composed prompt or makes one bounded model call. Both AI Assist workflow
+routes, and `/api/ai-assist-config`, answer only the dashboard's own origin
+(a cross-origin browser request gets `403`). While "Ask before every AI Assist
+run" is on, both workflow routes also require `confirmed: true` in the body,
+sent by the dashboard after the user agrees, and refuse with `400` without it.
+The AI output cache is keyed by evidence plus the configured mode, provider,
+model, and endpoint, and is cleared when any of those or a saved key changes.
+The daily cap (`max_daily_usd`) is a budget: each cloud run receipt carries an
+estimated `cost_usd` from the provider's token usage at list price, today's
+priced cloud runs (UTC day) are summed before every call, and a call is
+refused with a `skipped` result once they reach the cap. Cache hits are free
+and never count. A run on a model the pricing table does not know records
+`cost_usd: null` and `priced: false`; the refusal reason says how many such
+runs there were rather than counting them as $0. The prompt is for safe
 review only: it classifies stale chats, worktrees, and runtimes into
 safe-to-review, keep-active, unknown, and next-action buckets. It does not
 delete files, kill processes, archive sessions, or authorize destructive

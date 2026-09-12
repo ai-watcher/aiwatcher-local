@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import uuid
+import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -109,7 +110,9 @@ def _safe_float(value: Any, default: float) -> float:
         number = float(value)
     except (TypeError, ValueError):
         return default
-    if number < 0:
+    # json.loads accepts a bare NaN, which passes "< 0", survives min(), and
+    # then breaks the browser's JSON.parse of every summary that carries it.
+    if not math.isfinite(number) or number < 0:
         return default
     return round(min(number, 100.0), 4)
 
@@ -1452,20 +1455,39 @@ def record_companion_preferences(settings: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
-def ai_assist_config() -> dict[str, Any]:
+def _redact_ai_assist_config(config: dict[str, Any]) -> dict[str, Any]:
+    """The config with raw keys replaced by per-provider booleans.
+
+    This is what every reader gets unless it asks for secrets, so a config
+    dict that reaches a JSON response, a log line, or a capsule field carries
+    nothing worth leaking.
+    """
+    public = dict(config)
+    keys = public.pop("api_keys", None)
+    keys = keys if isinstance(keys, dict) else {}
+    public["stored_keys"] = {provider: bool(keys.get(provider)) for provider in sorted(AI_ASSIST_KEY_PROVIDERS)}
+    return public
+
+
+def ai_assist_config(*, with_secrets: bool = False) -> dict[str, Any]:
     """Return the optional AI Assist settings.
 
     Off by default. This config is intentionally separate from Second Opinion:
     Second Opinion asks the user's own CLI for a narrow prompt analysis, while
     AI Assist is the future provider switch for improving AIWatcher workflows
     such as Fresh Start and Plan.
+
+    Raw provider keys are returned only when with_secrets=True, which the
+    transport layer in ai_assist.py needs and nothing else does.
     """
     try:
         with _locked_state():
             data = _load()
     except OSError:
-        return default_ai_assist_config()
-    return _normalize_ai_assist_config(data.get("ai_assist"))
+        config = default_ai_assist_config()
+    else:
+        config = _normalize_ai_assist_config(data.get("ai_assist"))
+    return config if with_secrets else _redact_ai_assist_config(config)
 
 
 def record_ai_assist_config(settings: dict[str, Any]) -> dict[str, Any]:
@@ -1483,13 +1505,16 @@ def record_ai_assist_config(settings: dict[str, Any]) -> dict[str, Any]:
         merged = {**existing, **settings}
         merged["api_keys"] = dict(existing.get("api_keys") or {})
         provider = str(settings.get("provider") or existing.get("provider") or "").strip().lower()
+        key_changed = False
         if provider in AI_ASSIST_KEY_PROVIDERS:
             if settings.get("clear_api_key"):
+                key_changed = provider in merged["api_keys"]
                 merged["api_keys"].pop(provider, None)
                 merged.setdefault("provider_checks", {}).pop(provider, None)
             else:
                 new_key = settings.get("api_key")
                 if isinstance(new_key, str) and new_key.strip():
+                    key_changed = True
                     merged["api_keys"][provider] = new_key.strip()
                     merged.setdefault("provider_checks", {})[provider] = {
                         "status": "untested",
@@ -1498,9 +1523,36 @@ def record_ai_assist_config(settings: dict[str, Any]) -> dict[str, Any]:
                         "code": "",
                     }
         config = _normalize_ai_assist_config(merged)
+        # Cached AI output belongs to the provider that produced it. When the
+        # provider, model, endpoint, or key changes, a later compose must call
+        # the new provider rather than replay the old one's text as a hit.
+        if key_changed or any(
+            config.get(field) != existing.get(field)
+            for field in ("mode", "provider", "model", "base_url")
+        ):
+            data["ai_assist_cache"] = {}
         data["ai_assist"] = config
         _save(data)
-    return config
+    return _redact_ai_assist_config(config)
+
+
+def dashboard_settings() -> dict[str, Any]:
+    """Every config block Settings shows, from one read of the state file.
+
+    The summary marker used to read the file once per block on every poll;
+    the values are the same file, so they come from the same load.
+    """
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        data = {}
+    update_block = data.get("update_auto_check")
+    return {
+        "ai_assist": _redact_ai_assist_config(_normalize_ai_assist_config(data.get("ai_assist"))),
+        "update_auto_check": bool(isinstance(update_block, dict) and update_block.get("enabled")),
+        "companion_preferences": _normalize_companion_preferences(data.get("companion_preferences")),
+    }
 
 
 def record_ai_assist_provider_check(
@@ -1638,12 +1690,23 @@ def record_ai_assist_run(
             value = usage.get(key)
             if isinstance(value, int) and value >= 0:
                 safe_usage[key] = value
+    cost_usd, priced = _ai_assist_run_cost(
+        model,
+        safe_usage,
+        billable=(status_value == "used" and not cache_hit and (mode or "").strip().lower() == "cloud"),
+    )
     record = {
         "id": str(uuid.uuid4()),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "phase": "control",
         "workflow": workflow_value,
         "status": status_value,
+        # Estimated from the provider's token usage at list price. None means
+        # a cloud call was made to a model the pricing table does not know, so
+        # the daily ledger cannot count it; the receipt says so rather than
+        # pretending it was free.
+        "cost_usd": cost_usd,
+        "priced": priced,
         "provider": provider.strip()[:80] if isinstance(provider, str) and provider.strip() else None,
         "model": model.strip()[:120] if isinstance(model, str) and model.strip() else None,
         "mode": mode.strip()[:40] if isinstance(mode, str) and mode.strip() else None,
@@ -1662,6 +1725,70 @@ def record_ai_assist_run(
         data["ai_assist_runs"] = data["ai_assist_runs"][-MAX_AI_ASSIST_RUNS_STORED:]
         _save(data)
     return record
+
+
+def _ai_assist_run_cost(model: str | None, usage: dict[str, Any], *, billable: bool) -> tuple[float | None, bool]:
+    """(cost_usd, priced) for one run.
+
+    Not billable (local model, cache hit, skipped, failed) is a known $0.
+    Billable with a model the pricing table knows is priced from usage.
+    Billable with an unknown model is None: unknown, not zero.
+    """
+    if not billable:
+        return 0.0, True
+    from .pricing import lookup, estimate_cost  # local import: pricing has no state dependency
+
+    if not model or lookup(model) is None:
+        return None, False
+    tokens_in = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+    tokens_out = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+    return round(estimate_cost(model, tokens_in, tokens_out), 6), True
+
+
+def ai_assist_day_spend(now: datetime | None = None) -> dict[str, Any]:
+    """Today's cloud AI Assist spend, UTC calendar day, from run receipts.
+
+    The daily cap in Settings is checked against this before every model
+    call. Runs whose model has no known price cannot be summed, so they are
+    counted separately and the caller can say so.
+    """
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    start = moment.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    try:
+        with _locked_state():
+            runs = list(_load().get("ai_assist_runs") or [])
+    except OSError:
+        runs = []
+    spent = 0.0
+    count = 0
+    unpriced = 0
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        if run.get("status") != "used" or run.get("cache_hit") or run.get("mode") != "cloud":
+            continue
+        try:
+            ran_at = datetime.fromisoformat(str(run.get("created_at")))
+        except (TypeError, ValueError):
+            continue
+        if ran_at.tzinfo is None:
+            ran_at = ran_at.replace(tzinfo=timezone.utc)
+        if ran_at < start:
+            continue
+        count += 1
+        cost = run.get("cost_usd")
+        if isinstance(cost, (int, float)) and math.isfinite(float(cost)):
+            spent += float(cost)
+        else:
+            unpriced += 1
+    return {
+        "day": start.date().isoformat(),
+        "runs": count,
+        "spent_usd": round(spent, 6),
+        "unpriced_runs": unpriced,
+    }
 
 
 def recent_ai_assist_runs(limit: int = 10) -> list[dict[str, Any]]:

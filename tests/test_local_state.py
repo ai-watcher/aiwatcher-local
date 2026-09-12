@@ -239,13 +239,17 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(custom["mode"], "cloud")
         self.assertEqual(custom["provider"], "openai_compatible")
         self.assertEqual(custom["base_url"], "https://llm.example.com/v1")
-        self.assertEqual(keyed["api_keys"], {"openai": "sk-local-test"})
+        # What record_ai_assist_config hands back is the same redacted view every
+        # other reader gets: booleans, never the key.
+        self.assertNotIn("api_keys", keyed)
+        self.assertTrue(keyed["stored_keys"]["openai"])
+        self.assertNotIn("sk-local-test", json.dumps(keyed))
         self.assertEqual(keyed["provider_checks"]["openai"]["status"], "untested")
         self.assertEqual(checked["status"], "failed")
         self.assertEqual(failed["provider_checks"]["openai"]["code"], "invalid_api_key")
-        self.assertEqual(retained["api_keys"], {"openai": "sk-local-test"})
+        self.assertTrue(retained["stored_keys"]["openai"])
         self.assertEqual(retained["provider_checks"]["openai"]["status"], "failed")
-        self.assertEqual(cleared["api_keys"], {})
+        self.assertFalse(cleared["stored_keys"]["openai"])
         self.assertEqual(cleared["provider_checks"], {})
 
     def test_ai_assist_cache_stores_bounded_output_without_secret(self) -> None:
@@ -284,6 +288,95 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(recent[0]["evidence_hash"], "abc123")
         self.assertNotIn("sk-secret", json.dumps(cached))
         self.assertNotIn("raw", json.dumps(recent))
+
+    def test_ai_assist_cap_rejects_nan_and_keeps_the_default(self) -> None:
+        config = local_state._normalize_ai_assist_config(json.loads('{"mode": "cloud", "max_daily_usd": NaN}'))
+        self.assertEqual(config["max_daily_usd"], 0.25)
+        self.assertEqual(local_state._normalize_ai_assist_config({"max_daily_usd": float("inf")})["max_daily_usd"], 0.25)
+
+    def test_ai_assist_day_spend_sums_only_todays_priced_cloud_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                priced = local_state.record_ai_assist_run(
+                    workflow="fresh_start", status="used", mode="cloud", provider="anthropic",
+                    model="claude-haiku-4-5", usage={"input_tokens": 1_000_000, "output_tokens": 0},
+                )
+                local_state.record_ai_assist_run(
+                    workflow="fresh_start", status="used", mode="cloud", provider="anthropic",
+                    model="claude-haiku-4-5", usage={"input_tokens": 1_000_000}, cache_hit=True,
+                )
+                local_state.record_ai_assist_run(
+                    workflow="fresh_start", status="used", mode="local", provider="ollama",
+                    model="llama3.2", usage={"prompt_tokens": 1_000_000},
+                )
+                local_state.record_ai_assist_run(
+                    workflow="fresh_start", status="failed", mode="cloud", provider="anthropic",
+                )
+                unknown = local_state.record_ai_assist_run(
+                    workflow="fresh_start", status="used", mode="cloud", provider="openai_compatible",
+                    model="mystery-9b", usage={"prompt_tokens": 10},
+                )
+                spend = local_state.ai_assist_day_spend()
+                yesterday = local_state.ai_assist_day_spend(
+                    now=datetime.now(timezone.utc) - timedelta(days=1),
+                )
+
+        self.assertEqual(priced["cost_usd"], 1.0)  # $1/MTok input for claude-haiku-4-5
+        self.assertTrue(priced["priced"])
+        self.assertIsNone(unknown["cost_usd"])
+        self.assertFalse(unknown["priced"])
+        self.assertEqual(spend["runs"], 2)
+        self.assertEqual(spend["spent_usd"], 1.0)
+        self.assertEqual(spend["unpriced_runs"], 1)
+        # The ledger is "this UTC day"; asking as of yesterday sees none of it.
+        self.assertEqual(yesterday["runs"], 2)
+
+    def test_dashboard_settings_reads_every_block_from_one_load(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_ai_assist_config({"mode": "cloud", "provider": "openai", "api_key": "sk-secret"})
+                local_state.record_update_auto_check(True)
+                with patch.object(local_state, "_load", wraps=local_state._load) as load:
+                    settings = local_state.dashboard_settings()
+        self.assertEqual(load.call_count, 1)
+        self.assertEqual(settings["ai_assist"]["mode"], "cloud")
+        self.assertTrue(settings["ai_assist"]["stored_keys"]["openai"])
+        self.assertNotIn("sk-secret", json.dumps(settings))
+        self.assertTrue(settings["update_auto_check"])
+        self.assertIn("fresh_start_context", settings["companion_preferences"])
+
+    def test_ai_assist_cache_is_cleared_when_the_provider_changes(self) -> None:
+        # Cached output belongs to the provider that produced it. Switching
+        # provider, model, endpoint, or key must not let a later compose
+        # replay it as a hit.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_ai_assist_config({"mode": "cloud", "provider": "openai", "api_key": "sk-one"})
+
+                def seed() -> None:
+                    local_state.record_ai_assist_cache(
+                        workflow="optimize_cleanup", evidence_hash="abc123", text="cached", provider="openai",
+                    )
+
+                seed()
+                local_state.record_ai_assist_config({"max_daily_usd": 0.5})
+                unrelated = local_state.ai_assist_cache_get("optimize_cleanup", "abc123")
+                local_state.record_ai_assist_config({"provider": "anthropic"})
+                after_provider = local_state.ai_assist_cache_get("optimize_cleanup", "abc123")
+                seed()
+                local_state.record_ai_assist_config({"model": "claude-haiku-4-5"})
+                after_model = local_state.ai_assist_cache_get("optimize_cleanup", "abc123")
+                seed()
+                local_state.record_ai_assist_config({"provider": "anthropic", "api_key": "sk-two"})
+                after_key = local_state.ai_assist_cache_get("optimize_cleanup", "abc123")
+
+        self.assertIsNotNone(unrelated)
+        self.assertIsNone(after_provider)
+        self.assertIsNone(after_model)
+        self.assertIsNone(after_key)
 
     def test_link_handoff_decision_next_session_keeps_source_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
