@@ -6527,6 +6527,17 @@ class HttpApiDocsTests(unittest.TestCase):
 class SetupChecklistTests(unittest.TestCase):
     """setup is the first thing a new user runs, so a broken command there is costly."""
 
+    def run_setup_command(self, *, all_steps: bool = False) -> str:
+        output = io.StringIO()
+        with (
+            patch.object(cli, "scan_all", return_value=[]),
+            patch.object(cli, "surface_coverage", return_value=[]),
+            contextlib.redirect_stdout(output),
+        ):
+            result = cli.command_setup(SimpleNamespace(all=all_steps))
+        self.assertEqual(result, 0)
+        return output.getvalue()
+
     def test_every_recommended_command_actually_parses(self):
         # Catches a typo'd flag, a renamed command, or a checklist entry left
         # behind after the command it names was removed.
@@ -6546,6 +6557,25 @@ class SetupChecklistTests(unittest.TestCase):
                 failures.append(command)
 
         self.assertEqual(failures, [], "These setup checklist commands are not valid CLI invocations.")
+
+    def test_default_setup_output_is_short_and_not_a_menu(self):
+        output = self.run_setup_command()
+
+        self.assertIn("Recommended next steps", output)
+        self.assertIn("No input is expected here", output)
+        self.assertIn("aiwatcher start --open-ui", output)
+        self.assertIn("Run `aiwatcher setup --all`", output)
+        self.assertNotIn("\n1.", output)
+        self.assertNotIn("Install Claude prompt gate", output)
+
+    def test_full_setup_output_shows_optional_hook_commands_without_numbered_choices(self):
+        output = self.run_setup_command(all_steps=True)
+
+        self.assertIn("All setup commands", output)
+        self.assertIn("No input is expected here", output)
+        self.assertIn("Install Claude prompt gate", output)
+        self.assertIn("Install Companion login autostart", output)
+        self.assertNotIn("\n1.", output)
 
     def test_every_step_is_fully_populated(self):
         valid_status = {"recommended", "optional"}
