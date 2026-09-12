@@ -361,6 +361,14 @@ def segment_session_by_prompt(source_path: str | None, *, max_chars: int = 2000)
     """
     if not source_path or not source_path.endswith(".jsonl"):
         return []
+    try:
+        stat = Path(source_path).stat()
+    except OSError:
+        return []
+    cache_key = (source_path, stat.st_mtime_ns, stat.st_size, max_chars)
+    cached = SEGMENT_CACHE.get(cache_key)
+    if cached is not None:
+        return [dict(segment) for segment in cached]
     segments: list[dict[str, object]] = []
     current: dict[str, object] | None = None
     try:
@@ -379,15 +387,23 @@ def segment_session_by_prompt(source_path: str | None, *, max_chars: int = 2000)
                         current = {
                             "prompt": text[:max_chars],
                             "turn": len(segments) + 1,
+                            "at": obj.get("timestamp") or obj.get("createdAt"),
                             "cost_usd": 0.0,
                             "tokens": 0,
+                            "cache_read_tokens": 0,
                             "tool_calls": 0,
                             "events": 0,
+                            "compacted": False,
                         }
                         segments.append(current)
                         continue
                 if current is None:
                     continue
+                if (
+                    (obj.get("type") == "system" and obj.get("subtype") == "compact_boundary")
+                    or obj.get("isCompactSummary") is True
+                ):
+                    current["compacted"] = True
                 tokens = _anthropic_usage(message.get("usage") or obj.get("usage") or {})
                 model = message.get("model") or obj.get("model")
                 current["cost_usd"] = float(current["cost_usd"]) + estimate_cost(
@@ -400,6 +416,7 @@ def segment_session_by_prompt(source_path: str | None, *, max_chars: int = 2000)
                     when=_parse_ts(obj.get("timestamp") or obj.get("createdAt")),
                 )
                 current["tokens"] = int(current["tokens"]) + _billed_input(tokens) + tokens["output"]
+                current["cache_read_tokens"] = int(current["cache_read_tokens"]) + int(tokens["cache_read"])
                 current["events"] = int(current["events"]) + 1
                 content = message.get("content")
                 if isinstance(content, list):
@@ -408,6 +425,140 @@ def segment_session_by_prompt(source_path: str | None, *, max_chars: int = 2000)
                     )
     except OSError:
         return []
+    if len(SEGMENT_CACHE) >= SEGMENT_CACHE_MAX_FILES:
+        SEGMENT_CACHE.clear()
+    SEGMENT_CACHE[cache_key] = [dict(segment) for segment in segments]
+    return segments
+
+
+# Segments per transcript, keyed on (path, mtime_ns, size, max_chars) so an
+# unchanged file is never re-read. Prompt text lives here only in memory.
+SEGMENT_CACHE: dict[tuple[str, int, int, int], list[dict[str, object]]] = {}
+SEGMENT_CACHE_MAX_FILES = 400
+
+
+def extract_session_title(source_path: str | None) -> str | None:
+    """Return the session's own title, or None when the transcript has none.
+
+    Claude Code writes `customTitle` as a top-level transcript row. The title
+    can appear anywhere, so scan only lines containing the key and cache by
+    path/mtime/size.
+    """
+    if not source_path or not source_path.endswith(".jsonl"):
+        return None
+    try:
+        stat = Path(source_path).stat()
+    except OSError:
+        return None
+    cache_key = (source_path, stat.st_mtime_ns, stat.st_size)
+    if cache_key in SESSION_TITLE_CACHE:
+        return SESSION_TITLE_CACHE[cache_key]
+    title: str | None = None
+    try:
+        with Path(source_path).open(errors="replace") as handle:
+            for line in handle:
+                if '"customTitle"' not in line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                value = obj.get("customTitle")
+                if isinstance(value, str) and value.strip():
+                    title = value.strip()[:200]
+    except OSError:
+        return None
+    if len(SESSION_TITLE_CACHE) >= SEGMENT_CACHE_MAX_FILES:
+        SESSION_TITLE_CACHE.clear()
+    SESSION_TITLE_CACHE[cache_key] = title
+    return title
+
+
+SESSION_TITLE_CACHE: dict[tuple[str, int, int], str | None] = {}
+
+
+def segment_codex_session_by_prompt(source_path: str | None, *, max_chars: int = 2000) -> list[dict[str, object]]:
+    """Split a Codex rollout into prompt-bounded turns.
+
+    Codex writes token deltas in `last_token_usage`, so each turn accumulates
+    token-count events until the next user prompt. The shape matches
+    segment_session_by_prompt() for future work-unit measurement.
+    """
+    if not source_path or not source_path.endswith(".jsonl"):
+        return []
+    try:
+        stat = Path(source_path).stat()
+    except OSError:
+        return []
+    cache_key = (source_path, stat.st_mtime_ns, stat.st_size, -max_chars)
+    cached = SEGMENT_CACHE.get(cache_key)
+    if cached is not None:
+        return [dict(segment) for segment in cached]
+    segments: list[dict[str, object]] = []
+    current: dict[str, object] | None = None
+    model: str | None = None
+    previous_total = -1
+    try:
+        with Path(source_path).open(errors="replace") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                row_type = row.get("type")
+                if row_type == "turn_context":
+                    model = str(payload.get("model") or model or "codex")
+                    continue
+                prompt_text = _codex_user_prompt_text(row_type, payload)
+                if prompt_text:
+                    current = {
+                        "prompt": prompt_text[:max_chars],
+                        "turn": len(segments) + 1,
+                        "at": row.get("timestamp"),
+                        "cost_usd": 0.0,
+                        "tokens": 0,
+                        "cache_read_tokens": 0,
+                        "tool_calls": 0,
+                        "events": 0,
+                        "compacted": False,
+                    }
+                    segments.append(current)
+                    continue
+                if current is None:
+                    continue
+                if (
+                    row_type == "response_item"
+                    and payload.get("type") in {"function_call", "custom_tool_call", "local_shell_call"}
+                ):
+                    current["tool_calls"] = int(current["tool_calls"]) + 1
+                    continue
+                if row_type != "event_msg" or payload.get("type") != "token_count":
+                    continue
+                info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+                total = info.get("total_token_usage") if isinstance(info.get("total_token_usage"), dict) else {}
+                last = info.get("last_token_usage") if isinstance(info.get("last_token_usage"), dict) else {}
+                total_tokens = int(total.get("total_tokens") or 0)
+                if not total_tokens or total_tokens == previous_total:
+                    continue
+                previous_total = total_tokens
+                event_input = int(last.get("input_tokens") or 0)
+                event_output = int(last.get("output_tokens") or 0)
+                current["tokens"] = int(current["tokens"]) + event_input + event_output
+                current["cache_read_tokens"] = int(current["cache_read_tokens"]) + int(
+                    last.get("cached_input_tokens") or 0
+                )
+                current["cost_usd"] = float(current["cost_usd"]) + estimate_cost(
+                    model, event_input, event_output, when=_parse_ts(row.get("timestamp"))
+                )
+                current["events"] = int(current["events"]) + 1
+    except OSError:
+        return []
+    if len(SEGMENT_CACHE) >= SEGMENT_CACHE_MAX_FILES:
+        SEGMENT_CACHE.clear()
+    SEGMENT_CACHE[cache_key] = [dict(segment) for segment in segments]
     return segments
 
 

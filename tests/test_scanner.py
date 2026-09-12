@@ -686,6 +686,95 @@ class PromptCacheAccountingTests(unittest.TestCase):
         self.assertEqual(sessions[0].tokens_in, 16_225)
 
 
+class PromptSegmentPrimitiveTests(unittest.TestCase):
+    def setUp(self) -> None:
+        scanner.SEGMENT_CACHE.clear()
+        scanner.SESSION_TITLE_CACHE.clear()
+
+    def tearDown(self) -> None:
+        scanner.SEGMENT_CACHE.clear()
+        scanner.SESSION_TITLE_CACHE.clear()
+
+    def test_claude_segments_carry_timestamps_cache_reads_and_compaction(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session = Path(temp_dir) / "session.jsonl"
+            rows = [
+                {"type": "custom-title", "customTitle": "Context health calibration"},
+                {
+                    "type": "user",
+                    "timestamp": "2026-09-01T10:00:00Z",
+                    "message": {"role": "user", "content": [{"type": "text", "text": "Review the billing PR"}]},
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-09-01T10:00:01Z",
+                    "message": {
+                        "role": "assistant",
+                        "model": "claude-sonnet-5",
+                        "usage": {"input_tokens": 1000, "cache_read_input_tokens": 600, "output_tokens": 100},
+                        "content": [{"type": "tool_use", "name": "Read"}],
+                    },
+                },
+                {"type": "system", "subtype": "compact_boundary", "timestamp": "2026-09-01T10:00:02Z"},
+                {
+                    "type": "user",
+                    "timestamp": "2026-09-01T10:05:00Z",
+                    "message": {"role": "user", "content": [{"type": "text", "text": "Now update pricing.py"}]},
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-09-01T10:05:01Z",
+                    "message": {
+                        "role": "assistant",
+                        "model": "claude-sonnet-5",
+                        "usage": {"input_tokens": 200, "output_tokens": 50},
+                    },
+                },
+            ]
+            session.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+
+            first = scanner.segment_session_by_prompt(str(session))
+            second = scanner.segment_session_by_prompt(str(session))
+            title = scanner.extract_session_title(str(session))
+
+        self.assertEqual(first, second)
+        self.assertEqual(title, "Context health calibration")
+        self.assertEqual(len(first), 2)
+        self.assertEqual(first[0]["at"], "2026-09-01T10:00:00Z")
+        self.assertEqual(first[0]["cache_read_tokens"], 600)
+        self.assertTrue(first[0]["compacted"])
+        self.assertEqual(first[0]["tool_calls"], 1)
+        self.assertFalse(first[1]["compacted"])
+
+    def test_codex_segments_follow_prompts_and_token_deltas(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rollout = Path(temp_dir) / "rollout.jsonl"
+            rows = [
+                {"timestamp": "2026-09-01T10:00:00Z", "type": "session_meta", "payload": {"id": "codex-1", "cwd": temp_dir}},
+                {"timestamp": "2026-09-01T10:00:01Z", "type": "turn_context", "payload": {"model": "gpt-5.2-codex"}},
+                {"timestamp": "2026-09-01T10:00:02Z", "type": "response_item", "payload": {"role": "user", "content": "Review PR #10"}},
+                {"timestamp": "2026-09-01T10:00:03Z", "type": "response_item", "payload": {"type": "function_call", "name": "read_file"}},
+                {"timestamp": "2026-09-01T10:00:04Z", "type": "event_msg", "payload": {"type": "token_count", "info": {
+                    "total_token_usage": {"input_tokens": 1000, "cached_input_tokens": 400, "output_tokens": 100, "total_tokens": 1100},
+                    "last_token_usage": {"input_tokens": 1000, "cached_input_tokens": 400, "output_tokens": 100, "total_tokens": 1100},
+                }}},
+                {"timestamp": "2026-09-01T10:05:00Z", "type": "response_item", "payload": {"role": "user", "content": "Now update pricing.py"}},
+                {"timestamp": "2026-09-01T10:05:01Z", "type": "event_msg", "payload": {"type": "token_count", "info": {
+                    "total_token_usage": {"input_tokens": 1400, "cached_input_tokens": 400, "output_tokens": 150, "total_tokens": 1550},
+                    "last_token_usage": {"input_tokens": 400, "cached_input_tokens": 0, "output_tokens": 50, "total_tokens": 450},
+                }}},
+            ]
+            rollout.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+
+            segments = scanner.segment_codex_session_by_prompt(str(rollout))
+
+        self.assertEqual([row["prompt"] for row in segments], ["Review PR #10", "Now update pricing.py"])
+        self.assertEqual(segments[0]["tokens"], 1100)
+        self.assertEqual(segments[0]["cache_read_tokens"], 400)
+        self.assertEqual(segments[0]["tool_calls"], 1)
+        self.assertEqual(segments[1]["tokens"], 450)
+
+
 class PerRequestUsageTests(unittest.TestCase):
     """Claude Code writes one transcript line per *content block*, each
     repeating the same message-level usage. Usage is reported per API request,
