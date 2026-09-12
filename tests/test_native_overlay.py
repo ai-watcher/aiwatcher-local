@@ -206,7 +206,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("def visible_waiting_rows", tk_source)
         self.assertIn("def open_waiting_row", tk_source)
         self.assertIn("def apply_waiting_rows", tk_source)
-        self.assertIn("create_text(\n                27, 10, text=str(badge_count)", tk_source)
+        self.assertIn("create_text(\n                27, 10, text=badge_text", tk_source)
         self.assertIn('"badge" in payload', tk_source)
         self.assertIn("visible_waiting_rows() == 0", tk_source)
         self.assertIn("def row_display_text", tk_source)
@@ -443,6 +443,55 @@ class NativeOverlayConfigTests(unittest.TestCase):
 
         tk_source = inspect.getsource(native_overlay.run_native_presence)
         self.assertIn('"#43d9a3" if int(working_count_var.get() or 0) > 0 else "#0052F5"', tk_source)
+
+    def test_the_running_arc_is_wide_enough_to_read(self) -> None:
+        # The first arc, 2.5 wide over 17% of the circle, was too slight to
+        # read as "in progress" at a glance; the owner asked for a bigger
+        # ring, then a quarter more. 5 wide and a third of the circle on the
+        # Swift bar, 4 wide and 120 degrees on the Tk canvas, which is 36
+        # across rather than 52. The path is inset by half the stroke so the
+        # outer edge sits on the bubble's rim instead of clipping.
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn("orbitLayer.lineWidth = 5", mac)
+        self.assertIn("orbitLayer.path = CGPath(ellipseIn: CGRect(x: 2.5, y: 2.5, width: 47, height: 47)", mac)
+        self.assertIn("orbitLayer.strokeEnd = 0.33", mac)
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn("extent=120", tk_source)
+        self.assertIn('style="arc", outline="#43d9a3", width=4', tk_source)
+
+    def test_a_hard_gate_is_never_the_quietest_state(self) -> None:
+        # A prompt or command gate holds the user's own prompt until they act,
+        # and a reviewer sat with one open and did not notice: the collapsed
+        # bubble's only attention signal was the mark's 2.5-point ring turning
+        # orange, and a gate carries no count, so it showed less than a
+        # control review does. Hard gates now get the full orange rim,
+        # pulsing; a "!" badge in place of the missing count; and the bar
+        # opens itself once on entry and does not fold away while the gate
+        # is pending. Softer attention keeps the rim steady and the calmer
+        # treatment.
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn('func isHardGate() -> Bool {\n        return ["prompt_gate", "command_gate"].contains(stateName)', mac)
+        self.assertIn("rimLayer = CAShapeLayer()", mac)
+        self.assertIn("rimLayer.lineWidth = 5", mac)
+        self.assertIn("rimLayer.isHidden = !collapsed || !needsAttention", mac)
+        self.assertIn("rimLayer.opacity = (hardGate && !reduceMotion && !pulseOn) ? 0.3 : 1.0", mac)
+        self.assertIn('(hardGate ? "!" : "")', mac)
+        self.assertIn("waitingCount <= 0 && reviewCount <= 0 && !hardGate", mac)
+        self.assertIn("if isHardGate() && !wasHardGate && collapsed {\n            setCollapsed(false)", mac)
+        auto_collapse = mac.split("func scheduleAutoCollapse")[1][:900]
+        self.assertIn("if self.isHardGate() {\n                    return", auto_collapse)
+        # The rim replaces the flooded-ground and count-badge treatments the
+        # soft states never had; they still draw no rim when expanded.
+        self.assertNotIn("session_finished", mac.split("func isHardGate")[1][:200])
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn('hard_gate = state_var.get() in {"prompt_gate", "command_gate"}', tk_source)
+        self.assertIn("collapsed_canvas.create_oval(2, 4, 34, 36, outline=rim_colour, width=4)", tk_source)
+        self.assertIn('rim_colour = "#f8cdb5"', tk_source)
+        self.assertIn('badge_text = str(badge_count) if badge_count > 0 else ("!" if hard_gate else "")', tk_source)
+        self.assertIn("and not was_hard_gate and collapsed.get():\n            set_collapsed(False)", tk_source)
+        self.assertIn('if state_var.get() in {"prompt_gate", "command_gate"}:\n                        return', tk_source)
 
     def test_tk_presence_opens_dashboard_and_prompt_without_session_claim(self) -> None:
         source = inspect.getsource(native_overlay.run_native_presence)

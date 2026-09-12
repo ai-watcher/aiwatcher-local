@@ -588,6 +588,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     var brandBlueRing: CALayer!
     var collapsedMarkView: NSView!
     var collapsedBlueRing: CALayer!
+    var rimLayer: CAShapeLayer!
     var collapsedBadge: NSTextField!
     var orbitLayer: CAShapeLayer!
     var primaryURL = dashboardURL
@@ -954,12 +955,18 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         orbitLayer = CAShapeLayer()
         orbitLayer.bounds = CGRect(x: 0, y: 0, width: 52, height: 52)
         orbitLayer.position = CGPoint(x: 26, y: 26)
-        orbitLayer.path = CGPath(ellipseIn: CGRect(x: 2, y: 2, width: 48, height: 48), transform: nil)
+        // Inset by half the stroke so the outer edge sits on the bubble's
+        // rim: a 52-point window clips anything past radius 26.
+        orbitLayer.path = CGPath(ellipseIn: CGRect(x: 2.5, y: 2.5, width: 47, height: 47), transform: nil)
         orbitLayer.fillColor = NSColor.clear.cgColor
         orbitLayer.strokeColor = NSColor(calibratedRed: 0.26, green: 0.85, blue: 0.64, alpha: 1).cgColor
-        orbitLayer.lineWidth = 2.5
+        // 5 wide and a third of the circle: the 2.5 x 17% arc the bar first
+        // shipped with was too slight to read as "in progress" at a glance
+        // (the review of the collapsed bubble asked for a bigger ring, and
+        // the owner asked for a quarter more on top of the first 4).
+        orbitLayer.lineWidth = 5
         orbitLayer.lineCap = .round
-        orbitLayer.strokeEnd = 0.17
+        orbitLayer.strokeEnd = 0.33
         orbitLayer.isHidden = true
         let spin = CABasicAnimation(keyPath: "transform.rotation.z")
         spin.fromValue = 0
@@ -968,6 +975,23 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         spin.repeatCount = .infinity
         orbitLayer.add(spin, forKey: "orbit")
         rootView.layer?.addSublayer(orbitLayer)
+
+        // The attention rim: a full orange ring on the bubble's edge while
+        // something needs the user. The mark's own ring is a 2.5-point stroke
+        // on a 19-point box, and turning that orange was the whole of the
+        // collapsed attention treatment -- a reviewer sat with a prompt held
+        // at the gate and did not notice. The rim is the same 5-point circle
+        // the orbit arc travels, drawn whole; hard gates pulse it, softer
+        // attention holds it steady.
+        rimLayer = CAShapeLayer()
+        rimLayer.bounds = CGRect(x: 0, y: 0, width: 52, height: 52)
+        rimLayer.position = CGPoint(x: 26, y: 26)
+        rimLayer.path = CGPath(ellipseIn: CGRect(x: 2.5, y: 2.5, width: 47, height: 47), transform: nil)
+        rimLayer.fillColor = NSColor.clear.cgColor
+        rimLayer.strokeColor = NSColor(calibratedRed: 0.93, green: 0.42, blue: 0.14, alpha: 1).cgColor
+        rimLayer.lineWidth = 5
+        rimLayer.isHidden = true
+        rootView.layer?.addSublayer(rimLayer)
 
         // Count badge at the bubble's top-right, kept fully inside the white
         // circle: at 45 degrees a 16px badge fits a radius-26 circle only if
@@ -1536,6 +1560,15 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         return ["prompt_gate", "command_gate", "control_recommended", "control_review", "optimize_available", "clipboard_confirm", "session_waiting"].contains(stateName)
     }
 
+    // A hard gate is the one kind of attention where the user's own prompt is
+    // held until they act: a hook has paused Claude Code and nothing happens
+    // in the terminal until the Companion gate is reviewed. Softer attention
+    // (a control to review, a session waiting) blocks nothing, so it keeps
+    // the calmer treatment.
+    func isHardGate() -> Bool {
+        return ["prompt_gate", "command_gate"].contains(stateName)
+    }
+
     func shouldShowWindow() -> Bool {
         if needsAttentionState() {
             return true
@@ -1780,15 +1813,25 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         brandBlueRing.borderColor = ringColor.cgColor
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         orbitLayer.isHidden = !collapsed || workingCount <= 0 || needsAttention || reduceMotion
+        // The rim outranks the orbit arc the way attention outranks running.
+        // A hard gate pulses it between full and faint on the same tick as
+        // the button; with Reduce Motion on it holds at full, still orange,
+        // still a whole ring.
+        let hardGate = isHardGate()
+        rimLayer.isHidden = !collapsed || !needsAttention
+        rimLayer.opacity = (hardGate && !reduceMotion && !pulseOn) ? 0.3 : 1.0
         // The collapsed bubble reserves numbers for things needing attention.
         // Completed work is reward/status text after expansion, not a mystery
-        // count sitting on screen all day.
+        // count sitting on screen all day. A hard gate carries no count, and
+        // was the one attention state with nothing on the bubble but the
+        // mark's ring: it gets a "!" so the blocked state is never the
+        // quietest one.
         collapsedBadge.stringValue = waitingCount > 0
             ? String(waitingCount)
-            : (reviewCount > 0 ? String(reviewCount) : "")
+            : (reviewCount > 0 ? String(reviewCount) : (hardGate ? "!" : ""))
         collapsedBadge.layer?.backgroundColor = ((waitingCount > 0 || needsAttention) ? orangeColor : brandBlue).cgColor
         if collapsed {
-            collapsedBadge.isHidden = waitingCount <= 0 && reviewCount <= 0
+            collapsedBadge.isHidden = waitingCount <= 0 && reviewCount <= 0 && !hardGate
         }
         applyWindowVisibility()
     }
@@ -1835,6 +1878,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         if let hold = suppressPassiveRefreshUntil, hold <= Date() {
             suppressPassiveRefreshUntil = nil
         }
+        let wasHardGate = isHardGate()
         self.stateName = incomingState
         self.detailText = json["detail"] as? String ?? ""
         // The away digest's history entries ride the same row machinery as
@@ -1957,7 +2001,16 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         self.skipProject = json["skip_project"] as? String ?? ""
         self.skipProjects = (json["skip_projects"] as? [String]) ?? []
         self.skipSessionIDs = (json["skip_session_ids"] as? [String]) ?? []
-        self.updateAppearance()
+        // Entering a hard gate opens the bar itself: the reason and the
+        // Review button are what tell the user why their prompt is hanging,
+        // and the bubble alone could only say "something". Once per gate --
+        // a user who collapses it again is not fought, and the rim and badge
+        // keep saying it.
+        if isHardGate() && !wasHardGate && collapsed {
+            setCollapsed(false)
+        } else {
+            self.updateAppearance()
+        }
     }
 
     func scheduleAutoCollapse(after delay: Double) {
@@ -1974,6 +2027,13 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
             if token == self.autoCollapseToken && !self.collapsed {
                 self.autoCollapseDeadline = nil
+                // A pending hard gate keeps the bar open: folding the reason
+                // away ten seconds after showing it is how the gate got
+                // missed. Clearing the deadline lets the next refresh
+                // schedule again once the gate resolves.
+                if self.isHardGate() {
+                    return
+                }
                 self.setCollapsed(true)
             }
         }
@@ -2733,6 +2793,7 @@ def run_native_presence(
             return
         if suppress_passive_refresh_until.get() <= time.time():
             suppress_passive_refresh_until.set(0.0)
+        was_hard_gate = state_var.get() in {"prompt_gate", "command_gate"}
         state_var.set(incoming_state)
         waiting_row_texts.clear()
         waiting_row_urls.clear()
@@ -2874,6 +2935,10 @@ def run_native_presence(
             continue_expected_tokens_var.set(int(payload.get("continue_expected_saved_context_tokens") or 0))
         except (TypeError, ValueError, tk.TclError):
             continue_expected_tokens_var.set(0)
+        # Entering a hard gate opens the bar itself, once per gate: the
+        # reason and the Review button are what say why the prompt hangs.
+        if incoming_state in {"prompt_gate", "command_gate"} and not was_hard_gate and collapsed.get():
+            set_collapsed(False)
 
     def scan_now() -> None:
         title_var.set("Scanning")
@@ -3369,6 +3434,11 @@ def run_native_presence(
             try:
                 if token == auto_collapse_token.get() and not collapsed.get():
                     auto_collapse_deadline.set(0.0)
+                    # A pending hard gate keeps the bar open; the cleared
+                    # deadline lets the next refresh schedule again once it
+                    # resolves.
+                    if state_var.get() in {"prompt_gate", "command_gate"}:
+                        return
                     set_collapsed(True)
             except tk.TclError:
                 pass
@@ -3383,10 +3453,14 @@ def run_native_presence(
             "prompt_gate", "command_gate", "control_recommended", "control_review", "optimize_available",
             "clipboard_confirm", "session_waiting",
         }
+        # A hard gate holds the user's own prompt until they act; softer
+        # attention blocks nothing. Mirrors the Swift bar's isHardGate.
+        hard_gate = state_var.get() in {"prompt_gate", "command_gate"}
         attention_bg = "#ed6a24" if pulse_var.get() else "#b84816"
         # Collapsed, the bubble stays white in every state; attention is
-        # carried by the mark's blue ring turning orange, the same job it does
-        # in the dashboard favicon -- not by flooding the ground.
+        # carried by an orange rim on the bubble's edge and the mark's blue
+        # ring turning orange, the same job it does in the dashboard favicon
+        # -- not by flooding the ground.
         shell_bg = "#ffffff" if collapsed.get() else "#090d14"
         root.configure(bg=shell_bg)
         style.configure("Presence.TFrame", background=shell_bg)
@@ -3420,13 +3494,24 @@ def run_native_presence(
         # The running indicator: a mint arc stepping around the bubble's rim
         # while any session is working, advanced on the existing pulse tick.
         # Coarser than the Swift bar's continuous orbit, which is the Tk
-        # fallback's usual fidelity. Attention outranks it.
+        # fallback's usual fidelity. Attention outranks it. A third of the
+        # circle at 4 wide, the Swift bar's 5 x 33% scaled to this canvas.
         if int(working_count_var.get() or 0) > 0 and not needs_attention:
             orbit_angle_var.set((int(orbit_angle_var.get()) - 103) % 360)
             collapsed_canvas.create_arc(
-                2, 4, 34, 36, start=orbit_angle_var.get(), extent=62,
-                style="arc", outline="#43d9a3", width=2,
+                2, 4, 34, 36, start=orbit_angle_var.get(), extent=120,
+                style="arc", outline="#43d9a3", width=4,
             )
+        # The attention rim: the whole circle in orange while something needs
+        # the user. Tk has no layer opacity, so a hard gate pulses between
+        # orange and a pale tint of it rather than between two oranges --
+        # the latter reads as flicker, not as a signal. Softer attention
+        # holds steady.
+        if needs_attention:
+            rim_colour = "#ed6a24"
+            if hard_gate and not pulse_var.get():
+                rim_colour = "#f8cdb5"
+            collapsed_canvas.create_oval(2, 4, 34, 36, outline=rim_colour, width=4)
         # The collapsed bubble reserves numbers for things needing attention.
         # Completed work is reward/status text after expansion, not a mystery
         # count sitting on screen all day.
@@ -3434,7 +3519,11 @@ def run_native_presence(
         finished_count = int(finished_count_var.get() or 0)
         review_count = int(review_count_var.get() or 0)
         badge_count = waiting_count or review_count
-        if badge_count > 0:
+        # A hard gate carries no count and was the one attention state with
+        # nothing on the bubble but the mark's ring; "!" keeps the blocked
+        # state from being the quietest one.
+        badge_text = str(badge_count) if badge_count > 0 else ("!" if hard_gate else "")
+        if badge_text:
             # Fully inside the 36-wide canvas -- the old (26..42) oval ran
             # past the canvas edge and rendered cropped.
             collapsed_canvas.create_oval(
@@ -3442,7 +3531,7 @@ def run_native_presence(
                 fill=attention_bg if waiting_count > 0 or needs_attention else "#0052F5", outline="",
             )
             collapsed_canvas.create_text(
-                27, 10, text=str(badge_count), fill="#ffffff", font=("Helvetica", 8, "bold"),
+                27, 10, text=badge_text, fill="#ffffff", font=("Helvetica", 8, "bold"),
             )
         attention_layout = has_primary_action() and not collapsed.get()
         # With a queue on screen each row carries its own Open button, so the
