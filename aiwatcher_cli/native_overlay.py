@@ -656,7 +656,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     let expandedWidth: CGFloat = 626
     let headerHeight: CGFloat = 58
     let rowHeight: CGFloat = 34
-    let maxWaitingRows = 3
+    let maxWaitingRows = 5
     // 52, not 44: the count badge sits at the circle's 45-degree corner, and
     // on a 44px bubble that corner has already curved away -- the badge was
     // half over transparent window and rendered cropped.
@@ -702,9 +702,15 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
     func reviewTitle() -> String {
         if ["control_review", "context_review"].contains(stateName) {
+            if visibleWaitingRows > 0 && reviewCount > visibleWaitingRows {
+                return "\(visibleWaitingRows) of \(reviewCount) context reviews"
+            }
             return "\(reviewCount) context review\(reviewCount == 1 ? "" : "s")"
         }
         if stateName == "session_finished" && visibleWaitingRows > 0 {
+            if finishedCount > visibleWaitingRows {
+                return "\(visibleWaitingRows) of \(finishedCount) completed runs"
+            }
             return "\(finishedCount) completed run\(finishedCount == 1 ? "" : "s")"
         }
         return String((titleLabel.stringValue.isEmpty ? "AIWatcher" : titleLabel.stringValue).prefix(40))
@@ -715,7 +721,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             let count = stateName == "session_finished" ? finishedCount : reviewCount
             let total = max(count, visibleWaitingRows)
             let hidden = max(total - visibleWaitingRows, 0)
-            return hidden > 0 ? "\(visibleWaitingRows) shown of \(total). UI has full list." : "Pick a row or open UI."
+            return hidden > 0 ? "\(hidden) more in UI. Pick a row or open UI." : "Pick a row or open UI."
         }
         return String((subtitleLabel.stringValue.isEmpty ? "Watching quietly" : subtitleLabel.stringValue).prefix(46))
     }
@@ -728,6 +734,8 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         let tool = row["tool"] as? String ?? "AI tool"
         let project = row["project"] as? String ?? ""
         let waited = row["waited_label"] as? String ?? ""
+        let severity = row["severity_label"] as? String ?? ""
+        let activity = row["activity_label"] as? String ?? ""
         let prefix: String
         if kind == "finished" {
             prefix = "Completed"
@@ -741,7 +749,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         if kind.isEmpty {
             return [tool, project, waited].filter { !$0.isEmpty }.joined(separator: " · ")
         }
-        let detail = [project, tool, waited].filter { !$0.isEmpty }.joined(separator: " · ")
+        let details = kind == "context_review"
+            ? [project, tool, severity, activity, waited]
+            : [project, tool, waited]
+        let detail = details.filter { !$0.isEmpty }.joined(separator: " · ")
         return detail.isEmpty ? prefix : "\(prefix): \(detail)"
     }
 
@@ -1221,19 +1232,24 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
     // The command travels in the state payload, so this is a pasteboard write
     // and a receipt -- no fetch, unlike the Fresh Start brief. The bar says
-    // "Copied" at once; the dashboard takes over from the next poll, having
-    // read the click from the receipt, and moves on only when the session's
-    // own log shows the /compact.
+    // "Copied" only after the pasteboard reads back the exact command; the
+    // dashboard takes over from the next poll, having read the click from the
+    // receipt, and moves on only when the session's own log shows the /compact.
     func copyCompactFromCompanion() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(compactCommand, forType: .string)
+        if !writeClipboard(compactCommand) {
+            self.titleLabel.stringValue = "Copy failed"
+            self.subtitleLabel.stringValue = "Open UI to copy /compact"
+            self.updateAppearance()
+            openURL(primaryURL)
+            return
+        }
         recordCompactDecision("copied", sessionID: primarySessionID, sha: compactSha)
         self.stateName = "compact_copied"
         self.skipState = ""
         self.primaryURL = dashboardURL
         self.suppressPassiveRefreshUntil = Date().addingTimeInterval(3.0)
         self.titleLabel.stringValue = "Copied"
-        self.subtitleLabel.stringValue = "Paste it into that session's prompt"
+        self.subtitleLabel.stringValue = "Paste /compact into that session"
         self.updateAppearance()
         self.scheduleAutoCollapse(after: 12.0)
         self.scheduleRefresh(after: 3.0)
@@ -1243,8 +1259,13 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     // the receipt notes the click against the session the row names, and the
     // others keep their buttons.
     func copyCompactRow(index: Int) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(waitingRowCommands[index], forType: .string)
+        let command = index < waitingRowCommands.count ? waitingRowCommands[index] : ""
+        if !writeClipboard(command) {
+            self.titleLabel.stringValue = "Copy failed"
+            self.subtitleLabel.stringValue = "Open UI to copy /compact"
+            self.updateAppearance()
+            return
+        }
         let sessionID = index < waitingSessionIDs.count ? waitingSessionIDs[index] : ""
         let sha = index < waitingRowShas.count ? waitingRowShas[index] : ""
         recordCompactDecision("copied", sessionID: sessionID, sha: sha)
@@ -1282,6 +1303,18 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    func writeClipboard(_ value: String) -> Bool {
+        let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty { return false }
+        NSPasteboard.general.clearContents()
+        if !NSPasteboard.general.setString(value, forType: .string) {
+            return false
+        }
+        let current = NSPasteboard.general.string(forType: .string)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return current == text
+    }
+
     func copyFreshStartFromCompanion() {
         titleLabel.stringValue = "Copying brief"
         subtitleLabel.stringValue = "Preparing Fresh Start..."
@@ -1314,8 +1347,13 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                     return
                 }
                 self.pendingClipboardOverrideSessionID = ""
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(brief, forType: .string)
+                if !self.writeClipboard(brief) {
+                    self.titleLabel.stringValue = "Copy failed"
+                    self.subtitleLabel.stringValue = "Open UI to copy the brief"
+                    self.updateAppearance()
+                    openURL(self.primaryURL)
+                    return
+                }
                 self.recordFreshStartCopied()
                 if self.primaryRuntimeAvailable {
                     self.requestRuntimeReturnForPrimary()
@@ -1715,10 +1753,17 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                 signalButton.title = signalChipText
                 signalButton.frame = NSRect(x: 384, y: 15 + yOff, width: 100, height: 28)
             }
-            planButton.frame = NSRect(x: 384, y: 15 + yOff, width: 48, height: 28)
-            askButton.frame = NSRect(x: 436, y: 15 + yOff, width: 46, height: 28)
-            scanButton.frame = NSRect(x: 486, y: 15 + yOff, width: 52, height: 28)
-            consoleButton.frame = NSRect(x: 542, y: 15 + yOff, width: 38, height: 28)
+            let utilityY = 15 + yOff
+            planButton.frame = NSRect(x: 384, y: utilityY, width: 48, height: 28)
+            askButton.frame = NSRect(x: 436, y: utilityY, width: 46, height: 28)
+            scanButton.frame = NSRect(x: 486, y: utilityY, width: 52, height: 28)
+            if showSkip {
+                skipButton.frame = NSRect(x: 542, y: utilityY, width: 50, height: 28)
+                consoleButton.frame = NSRect(x: 0, y: 0, width: 0, height: 0)
+                consoleButton.isHidden = true
+            } else {
+                consoleButton.frame = NSRect(x: 542, y: utilityY, width: 38, height: 28)
+            }
         }
         for index in 0..<maxWaitingRows {
             let visible = index < rowsShown
@@ -2579,7 +2624,7 @@ def run_native_presence(
     collapsed_width = 52
     collapsed_height = 52
     row_height = 30
-    max_waiting_rows = 3
+    max_waiting_rows = 5
     screen_width = int(root.winfo_screenwidth())
     screen_height = int(root.winfo_screenheight())
     x = 24 if "left" in position else max(16, screen_width - expanded_width - 24)
@@ -2707,10 +2752,12 @@ def run_native_presence(
         tool = str(row.get("tool") or "AI tool")
         project = str(row.get("project") or "")
         waited = str(row.get("waited_label") or "")
+        severity = str(row.get("severity_label") or "")
+        activity = str(row.get("activity_label") or "")
         if kind == "finished":
             parts = ["Completed", project, tool, waited]
         elif kind == "context_review":
-            parts = ["Context", project, tool, waited]
+            parts = ["Context", project, tool, severity, activity, waited]
         elif kind:
             parts = ["Signal", project, tool, waited]
         else:
@@ -2720,9 +2767,15 @@ def run_native_presence(
     def review_title() -> str:
         if state_var.get() in {"control_review", "context_review"}:
             count = int(review_count_var.get() or 0)
+            shown = visible_waiting_rows()
+            if shown and count > shown:
+                return f"{shown} of {count} context reviews"
             return f"{count} context review{'' if count == 1 else 's'}"
         if state_var.get() == "session_finished" and visible_waiting_rows() > 0:
             count = int(finished_count_var.get() or 0)
+            shown = visible_waiting_rows()
+            if shown and count > shown:
+                return f"{shown} of {count} completed runs"
             return f"{count} completed run{'' if count == 1 else 's'}"
         return title_var.get()[:34]
 
@@ -2732,7 +2785,7 @@ def run_native_presence(
             count = max(base_count, visible_waiting_rows())
             hidden = max(count - visible_waiting_rows(), 0)
             return (
-                f"{visible_waiting_rows()} shown of {count}. UI has full list."
+                f"{hidden} more in UI. Pick a row or open UI."
                 if hidden > 0 else "Pick a row or open UI."
             )
         return subtitle_var.get()[:46]
@@ -2992,6 +3045,18 @@ def run_native_presence(
             schedule_auto_collapse(1500)
         webbrowser.open(primary_url_var.get() or url)
 
+    def set_clipboard_text(text: str) -> bool:
+        value = text.strip()
+        if not value:
+            return False
+        try:
+            root.clipboard_clear()
+            root.clipboard_append(text)
+            root.update()
+            return root.clipboard_get().strip() == value
+        except tk.TclError:
+            return False
+
     def copy_fresh_start_from_companion() -> None:
         session_id = primary_session_id_var.get().strip()
         title_var.set("Copying brief")
@@ -3023,8 +3088,12 @@ def run_native_presence(
                 schedule_auto_collapse(30000)
                 return
             pending_clipboard_override_session_var.set("")
-            root.clipboard_clear()
-            root.clipboard_append(brief)
+            if not set_clipboard_text(brief):
+                title_var.set("Copy failed")
+                subtitle_var.set("Open UI to copy the brief")
+                update_attention_style()
+                webbrowser.open(primary_url_var.get() or url)
+                return
             payload = {
                 "session_id": session_id,
                 "decision": "copy_handoff",
@@ -3089,18 +3158,16 @@ def run_native_presence(
         except (OSError, urllib.error.URLError):
             pass
 
-    # The bar says "Copied" at once; the dashboard takes over from the next
-    # poll, having read the click from the receipt, and moves on only when
-    # the session's own log shows the /compact.
+    # The bar says "Copied" only after the clipboard reads back the exact
+    # command; the dashboard takes over from the next poll, having read the
+    # click from the receipt, and moves on only when the session's own log
+    # shows the /compact.
     def copy_compact_from_companion() -> None:
         command = compact_command_var.get().strip()
         session_id = primary_session_id_var.get().strip()
-        try:
-            root.clipboard_clear()
-            root.clipboard_append(command)
-        except tk.TclError:
-            title_var.set("Compact")
-            subtitle_var.set("Open UI to copy the command")
+        if not set_clipboard_text(command):
+            title_var.set("Copy failed")
+            subtitle_var.set("Open UI to copy /compact")
             update_attention_style()
             webbrowser.open(primary_url_var.get() or url)
             return
@@ -3109,7 +3176,7 @@ def run_native_presence(
         state_var.set("compact_copied")
         suppress_passive_refresh_until.set(time.time() + 3.0)
         title_var.set("Copied")
-        subtitle_var.set("Paste it into that session's prompt")
+        subtitle_var.set("Paste /compact into that session")
         primary_url_var.set(url)
         update_attention_style()
         schedule_auto_collapse(12000)
@@ -3118,10 +3185,10 @@ def run_native_presence(
     # the receipt notes the click against the session the row names.
     def copy_compact_row(index: int) -> None:
         command = waiting_row_commands[index] if index < len(waiting_row_commands) else ""
-        try:
-            root.clipboard_clear()
-            root.clipboard_append(command)
-        except tk.TclError:
+        if not set_clipboard_text(command):
+            title_var.set("Copy failed")
+            subtitle_var.set("Open UI to copy /compact")
+            update_attention_style()
             webbrowser.open(waiting_row_urls[index] if index < len(waiting_row_urls) else url)
             return
         session_id = waiting_row_session_ids[index] if index < len(waiting_row_session_ids) else ""

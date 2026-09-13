@@ -571,9 +571,11 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
         self.assertIn("5 projects", state["subtitle"])
         self.assertEqual(state["badge"]["count"], 5)
         self.assertEqual(state["badge"]["tone"], "info")
-        self.assertEqual(len(state["waiting_sessions"]), 3)
+        self.assertEqual(len(state["waiting_sessions"]), 5)
         self.assertEqual(state["waiting_sessions"][0]["kind"], "context_review")
         self.assertEqual(state["waiting_sessions"][0]["project"], "project-0")
+        self.assertEqual(state["waiting_sessions"][0]["severity_label"], "critical")
+        self.assertEqual(state["waiting_sessions"][0]["impact_label"], "1.0k")
         self.assertEqual(state["skip_label"], "Later")
         self.assertEqual(len(state["skip_projects"]), 5)
 
@@ -585,10 +587,28 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
             "tool": "codex-cli",
             "severity": "critical",
             "can_handoff": True,
+            "impact_label": 0,
             "latest_turn_tokens": 0,
         }])
 
         self.assertEqual(rows[0]["waited_label"], "")
+        self.assertEqual(rows[0]["severity_label"], "critical")
+
+    def test_context_review_rows_carry_activity_without_zero_noise(self):
+        rows = ui._context_review_companion_rows([{
+            "session_id": "s0",
+            "project_full": "/repo/project-0",
+            "project": "project-0",
+            "tool": "codex-cli",
+            "severity": "warning",
+            "can_handoff": True,
+            "estimated_replayed_context_label": 0,
+            "session_status": "active",
+            "session_status_label": "Active log",
+        }])
+
+        self.assertEqual(rows[0]["waited_label"], "")
+        self.assertEqual(rows[0]["activity_label"], "active log")
 
     def test_context_review_can_be_disabled_for_companion(self):
         health = [
