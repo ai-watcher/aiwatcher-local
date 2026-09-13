@@ -978,6 +978,7 @@ def _optimize_candidate_prompt(item: dict[str, object]) -> str:
     impact = str(item.get("impact_label") or "No savings claim")
     evidence_label = str(item.get("evidence_label") or "Observed/inferred")
     evidence = str(item.get("evidence") or "Local metadata only.")
+    validation_hint = str(item.get("validation_hint") or "Verify ownership and current activity before recommending cleanup.")
     safe_steps = item.get("safe_review_steps")
     review_steps = [str(step) for step in safe_steps if step] if isinstance(safe_steps, list) else []
     lines = [
@@ -998,6 +999,13 @@ def _optimize_candidate_prompt(item: dict[str, object]) -> str:
         f"- Evidence label: {evidence_label}",
         f"- Evidence: {evidence}",
         f"- Why surfaced: {reason}",
+        f"- Validation hint: {validation_hint}",
+        "",
+        "Validation before buckets",
+        "- First decide whether this is actually stale, superseded, or completed.",
+        "- Check the owning AI app, terminal, git worktree, or runtime before recommending archive/cleanup.",
+        "- If the user may still be working in this project or workspace, put it in Keep active.",
+        "- If you cannot verify ownership or current activity from the evidence, put it in Unknown.",
         "",
         "Return these buckets",
         "1. Safe to archive or clean up: item ids/names/paths if visible, with one short reason each; only after checking the owning app, git worktree, or runtime.",
@@ -1071,6 +1079,9 @@ def _optimize_candidate_evidence_hash(item: dict[str, object]) -> str:
             "evidence",
             "summary",
             "why_inactive",
+            "review_summary",
+            "validation_hint",
+            "companion_summary",
         )
     }
     return hash_prompt(json.dumps(evidence, sort_keys=True, default=str))
@@ -1455,6 +1466,14 @@ def build_optimize_inventory(
         )
         if completed:
             why_inactive += f" {completed} already have useful outcomes, so archive review is lower risk."
+        review_summary = (
+            f"Review before archiving: {len(inactive)} old {project_label(project)} session"
+            f"{'s' if len(inactive) != 1 else ''} last active {latest_label}."
+        )
+        companion_summary = (
+            f"Review before archiving: {len(inactive)} old {project_label(project)} chats carry "
+            f"~{compact_int(tokens)} context. Nothing is cleaned automatically."
+        )
         candidates.append({
             "id": f"sessions:{project}",
             "kind": "session_cluster",
@@ -1464,6 +1483,9 @@ def build_optimize_inventory(
             "summary": f"{len(inactive)} inactive same-project sessions are carrying ~{compact_int(tokens)} context. Archive or mark done once the work is no longer active.",
             "activity_summary": activity_summary,
             "why_inactive": why_inactive,
+            "review_summary": review_summary,
+            "validation_hint": "Open the owning AI app and keep any chat that still contains active or unfinished work.",
+            "companion_summary": companion_summary,
             "evidence_label": "Observed",
             "evidence": "Observed from local session timestamps, project path, token pressure, and outcome metadata. Archive action must happen in the AI app.",
             "impact_label": f"~{compact_int(tokens)} context at risk",
@@ -1475,6 +1497,12 @@ def build_optimize_inventory(
             "last_activity": latest.isoformat() if latest else None,
             "updated_label": latest_label,
             "action_label": "Copy cleanup prompt",
+            "safe_review_steps": [
+                "Open the owning AI app or session list for this project.",
+                "Keep any chat with active, unresolved, or recently resumed work.",
+                "Archive or mark done only chats whose work is completed, superseded, or captured elsewhere.",
+                "Leave unknown sessions alone until the owner confirms them.",
+            ],
         })
 
     for decision in handoff_decisions:
@@ -1501,6 +1529,8 @@ def build_optimize_inventory(
             "summary": "A Fresh Start brief was copied, but no follow-up proof is linked yet. Mark the old chat done or paste the brief into the new chat.",
             "activity_summary": f"Fresh Start receipt · copied {_elapsed_label(created_at, now=now)} · follow-up proof pending",
             "why_inactive": "AIWatcher saw a Fresh Start decision but has not linked a later same-project session yet.",
+            "review_summary": "Confirm whether the Fresh Start continuation happened before archiving the old chat.",
+            "validation_hint": "Find the follow-up session or choose continue/skip before claiming saved context.",
             "evidence_label": "Observed",
             "evidence": "Observed from AIWatcher Fresh Start receipt metadata.",
             "impact_label": f"~{compact_int(tokens)} context at risk" if tokens else None,
@@ -1554,6 +1584,12 @@ def build_optimize_inventory(
                 f"{len(related_sessions)} linked session{'s' if len(related_sessions) != 1 else ''}"
             ),
             "why_inactive": why,
+            "review_summary": (
+                "Inspect this worktree before removal."
+                if source == "git_worktree"
+                else "Inspect this scratch workspace before deleting anything."
+            ),
+            "validation_hint": "Check for uncommitted files, useful artifacts, or live AI work before cleanup.",
             "evidence_label": "Inferred",
             "evidence": evidence,
             "impact_label": "disk cleanup possible",
@@ -1587,6 +1623,8 @@ def build_optimize_inventory(
             "summary": f"{len(stale_processes)} AI-related runtime process(es) look stale or orphaned. Review before killing anything.",
             "activity_summary": f"{len(stale_processes)} stale runtime process{'es' if len(stale_processes) != 1 else ''} · {rss_impact}",
             "why_inactive": "Local process metadata shows AI-related runtimes with stale/orphan signals.",
+            "review_summary": "Review local AI runtimes; stop only ones you recognize as detached.",
+            "validation_hint": "Match PID, working directory, and app/window before stopping anything.",
             "evidence_label": "Observed",
             "evidence": "Observed from local process metadata, not provider billing.",
             "impact_label": rss_impact,
@@ -7910,18 +7948,25 @@ def build_companion_state() -> dict[str, object]:
         project_quiet = companion_skip_active(f"optimize_workspace:{project}") if project else False
         global_quiet = companion_skip_active("optimize_workspace:global")
         if not (project_quiet or global_quiet):
+            optimize_subtitle = str(
+                top.get("companion_summary")
+                or top.get("review_summary")
+                or top.get("summary")
+                or optimize.get("summary")
+                or "Review local cleanup evidence before archiving anything."
+            )
             return {
                 **base,
                 "state": "optimize_available",
                 "label": "Optimize",
                 "title": "Optimize workspace",
-                "subtitle": str(top.get("summary") or optimize.get("summary") or "Cleanup opportunity found."),
+                "subtitle": optimize_subtitle,
                 "primary_label": "Review",
                 "primary_url": "/?view=control#optimizeWorkspace",
                 "skip_label": "Skip",
                 "skip_state": "optimize_available",
                 "skip_project": project,
-                "detail": str(top.get("evidence") or "AIWatcher found local cleanup evidence."),
+                "detail": str(top.get("validation_hint") or top.get("evidence") or "AIWatcher found local cleanup evidence."),
             }
     watcher = summary.get("watcher")
     running = isinstance(watcher, dict) and bool(watcher.get("running"))

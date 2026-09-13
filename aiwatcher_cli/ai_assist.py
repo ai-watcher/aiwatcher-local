@@ -827,7 +827,9 @@ _OPTIMIZE_CLEANUP_SPEC = _WorkflowSpec(
         "You are AIWatcher's Optimize cleanup prompt composer. Create a compact, paste-ready "
         "review prompt for stale AI chats, worktrees, or runtimes. Preserve deterministic evidence "
         "boundaries: do not invent paths, sessions, costs, outcomes, or source text. Never authorize "
-        "deleting files, killing processes, archiving chats, force pushing, or other destructive cleanup."
+        "deleting files, killing processes, archiving chats, force pushing, or other destructive cleanup. "
+        "Your first job is to make the next AI session validate whether the candidate is actually stale "
+        "or still active."
     ),
     instructions=(
         "Return JSON only with these keys:\n"
@@ -838,7 +840,8 @@ _OPTIMIZE_CLEANUP_SPEC = _WorkflowSpec(
         "guardrails: string[]\n\n"
         "The final prompt must help another AI session classify the candidate into those buckets, "
         "but the AI session must only recommend; the user performs any action later in the owning app/tool. "
-        "Keep this short and concrete."
+        "Make the next_action start with a verification step that checks the owning app/tool, current "
+        "workspace, PID, path, or receipt before any archive/cleanup recommendation. Keep this short and concrete."
     ),
     evidence_heading="Local AIWatcher cleanup evidence:",
     structure=lambda parsed, trimmed: _structured_optimize_cleanup_text(parsed, local_prompt=trimmed),

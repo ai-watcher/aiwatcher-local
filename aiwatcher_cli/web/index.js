@@ -2242,14 +2242,23 @@ function renderOptimizeWorkspace(optimize) {
       const fullPath = item.project_full || item.project || '';
       const pathLine = fullPath ? `<div class="optimize-full-path"><span class="label">Full path</span><code>${esc(fullPath)}</code></div>` : '';
       const activityLine = item.activity_summary ? `<p class="optimize-activity-line">${esc(item.activity_summary)}</p>` : '';
+      const summary = item.review_summary || item.summary || item.why_inactive || 'Review this local cleanup candidate before taking action.';
+      const validation = item.validation_hint || 'Verify this is not active work before archiving or cleaning anything.';
       return `<div class="action-row ${item.tokens_at_risk ? 'medium' : 'low'}">
       <div>
         <div class="action-title">${esc(item.title)} <span class="pill">${esc(item.evidence_label || 'Observed')}</span></div>
-        <p>${esc(item.why_inactive || item.summary || '')}</p>
-        ${activityLine}
+        <p>${esc(summary)}</p>
         <div class="action-meta"><span class="pill" title="${esc(fullPath)}">${esc(item.project ? projectName({ project_full: item.project }) : 'Local machine')}</span>${item.impact_label ? `<span class="pill">${esc(item.impact_label)}</span>` : ''}<span class="pill">${esc(item.updated_label || '')}</span></div>
-        ${pathLine}
-        <p class="receipt-note">${esc(item.evidence || '')}</p>
+        <details class="aiw-details optimize-evidence">
+          <summary>Why this appeared</summary>
+          <div class="details-body optimize-card-detail">
+            <p><strong>Validate first:</strong> ${esc(validation)}</p>
+            ${item.why_inactive ? `<p>${esc(item.why_inactive)}</p>` : ''}
+            ${activityLine}
+            ${pathLine}
+            <p class="receipt-note">${esc(item.evidence || '')}</p>
+          </div>
+        </details>
       </div>
       <div class="actions">
         ${item.view ? `<button class="btn-primary" onclick="showView('${esc(item.view)}')">${esc(item.action_label || 'Review')}</button><button class="btn-quiet" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">Copy cleanup prompt</button>` : `<button class="btn-primary" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">Copy cleanup prompt</button>`}
@@ -2269,25 +2278,36 @@ function renderRuntimeOptimizeCard(item, cleanupPrompt) {
     : ['Run: aiwatcher processes --stale-only', 'Use PID, runtime, session id, and working directory to match each row to an AI app/window.', 'Confirm each process is not attached to live AI work.', 'Stop only stale/orphaned runtimes you recognize.', 'Run the command again; reclaimed RSS is the before-minus-after local memory signal.', 'Leave unknown processes alone.'];
   const command = item.review_command || 'aiwatcher processes --stale-only';
   const aiCleanup = optimizeAiButton(item.id || '');
+  const summary = item.review_summary || 'Review local AI runtimes; stop only ones you recognize as detached.';
+  const validation = item.validation_hint || 'Match PID, working directory, and app/window before stopping anything.';
   return `<div class="action-row low runtime-review-card">
     <div>
       <div class="action-title">${esc(item.title || 'Review stale AI runtimes')} <span class="pill local">Local machine</span></div>
-      <p>${esc(item.why_inactive || 'Local process metadata shows AI-related runtimes with stale/orphan signals.')}</p>
-      <div class="runtime-review-grid">
-        <div class="mini"><span class="label">Goal</span><strong>${esc(item.title || 'Review stale AI runtimes')}</strong></div>
-        <div class="mini"><span class="label">Evidence</span><strong>${esc(item.evidence_label || 'Observed')}</strong><span class="mini-note">${esc(item.evidence || 'Observed from local process metadata, not provider billing.')}</span></div>
-        <div class="mini"><span class="label">Impact signal</span><strong>${esc(item.impact_label || 'runtime clutter')}</strong><span class="mini-note">${esc(item.resource_note || 'RSS/CPU are local machine resources, not model/API spend.')}</span></div>
-        <div class="mini"><span class="label">Reward</span><strong>${esc(item.reward_label || 'Less RAM/CPU pressure after confirmed cleanup')}</strong><span class="mini-note">${esc(item.cost_note || 'Do not count dollar savings from process RSS alone.')}</span></div>
+      <p>${esc(summary)}</p>
+      <div class="action-meta">
+        <span class="pill">${esc(item.evidence_label || 'Observed')}</span>
+        <span class="pill">${esc(item.impact_label || 'runtime clutter')}</span>
+        <span class="pill">No auto-stop</span>
       </div>
-      <div class="runtime-command">
-        <span class="label">Review command</span>
-        <code>${esc(command)}</code>
-      </div>
-      <ol class="runtime-review-steps">
-        ${steps.map(step => `<li>${esc(step)}</li>`).join('')}
-      </ol>
-      <p class="receipt-note">${esc(item.privacy_note || 'This checklist uses local metadata only. It does not include prompt/source content.')}</p>
-      <p class="receipt-note">Nothing is stopped from this dashboard. Run the command, confirm live work is not attached, then stop only a runtime you recognize.</p>
+      <details class="aiw-details optimize-evidence">
+        <summary>Safe runtime review steps</summary>
+        <div class="details-body optimize-card-detail">
+          <p><strong>Validate first:</strong> ${esc(validation)}</p>
+          <p>${esc(item.why_inactive || 'Local process metadata shows AI-related runtimes with stale/orphan signals.')}</p>
+          <div class="runtime-command">
+            <span class="label">Review command</span>
+            <code>${esc(command)}</code>
+          </div>
+          <ol class="runtime-review-steps">
+            ${steps.map(step => `<li>${esc(step)}</li>`).join('')}
+          </ol>
+          <p class="receipt-note">${esc(item.evidence || 'Observed from local process metadata, not provider billing.')}</p>
+          <p class="receipt-note">${esc(item.reward_label || 'Potential local reward: less RAM/CPU pressure after confirmed cleanup.')}</p>
+          <p class="receipt-note">${esc(item.cost_note || 'Do not count dollar savings from process RSS alone.')}</p>
+          <p class="receipt-note">${esc(item.privacy_note || 'This checklist uses local metadata only. It does not include prompt/source content.')}</p>
+          <p class="receipt-note">Nothing is stopped from this dashboard. Run the command, confirm live work is not attached, then stop only a runtime you recognize.</p>
+        </div>
+      </details>
     </div>
     <div class="actions">
       <button class="btn-primary" onclick="copyOptimizeRuntimeCommand(${jsArg(command)}, this)">Copy command</button>

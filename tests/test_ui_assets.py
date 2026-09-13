@@ -1392,8 +1392,10 @@ class PlanControlTest(unittest.TestCase):
         self.assertIn("Nothing is stopped from this dashboard", self.js)
         self.assertIn("before-minus-after local memory signal", self.js)
         self.assertIn("Do not count dollar savings from process RSS alone", self.js)
-        self.assertIn("<span class=\"label\">Reward</span>", self.js)
+        self.assertIn("Safe runtime review steps", self.js)
+        self.assertIn("No auto-stop", self.js)
         self.assertIn(".runtime-review-card", self.css)
+        self.assertIn(".optimize-evidence", self.css)
 
     def test_optimize_cards_render_full_path_and_activity_signal(self):
         self.assertIn("item.activity_summary", self.js)
