@@ -172,6 +172,45 @@ class DashboardServeTests(unittest.TestCase):
         thread.start()
         return server, thread, f"http://127.0.0.1:{server.server_address[1]}"
 
+    def _serve_prompt_gate_engine(self, *, get_payload: dict | None = None, post_payload: dict | None = None):
+        captured: dict[str, object] = {}
+
+        class GateEngine(ui.BaseHTTPRequestHandler):
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+            def _send(self, status: int, payload: dict) -> None:
+                encoded = json.dumps(payload).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def do_GET(self) -> None:
+                captured["get_path"] = self.path
+                self._send(200, get_payload or {"active": True, "id": "gate-1"})
+
+            def do_POST(self) -> None:
+                captured["post_path"] = self.path
+                length = int(self.headers.get("Content-Length") or "0")
+                captured["post_body"] = json.loads(self.rfile.read(length).decode("utf-8"))
+                self._send(200, post_payload or {
+                    "ok": True,
+                    "tool": "claude",
+                    "decision_label": "Add safer brief",
+                    "original_risk": "high",
+                    "original_score": 8,
+                    "selected_risk": "low",
+                    "selected_score": 1,
+                    "impact": "Safer execution.",
+                })
+
+        server = ui.ThreadingHTTPServer(("127.0.0.1", 0), GateEngine)
+        thread = threading.Thread(target=server.handle_request)
+        thread.start()
+        return server, thread, f"http://127.0.0.1:{server.server_address[1]}/", captured
+
     def test_ambient_intervention_serves_the_shared_nudge_wording(self) -> None:
         """The overlay renders from this, so the wording ships from
         _PRESENTATIONS rather than from a second copy inside overlay.js. The
@@ -223,6 +262,98 @@ class DashboardServeTests(unittest.TestCase):
                 with request.urlopen(http_request, timeout=5) as response:
                     self.assertEqual(response.status, 200)
                 build_runtime_return.assert_called_once_with("sess-1", 30)
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_prompt_gate_proxy_returns_ephemeral_gate_payload(self) -> None:
+        gate_payload = {
+            "active": True,
+            "id": "gate-1",
+            "tool": "claude",
+            "cwd": "/repo",
+            "prompt": "delete the repo",
+            "route": {"kind": "prompt_change", "title": "Confirm first"},
+            "result": {"risk": "high", "score": 8, "suggested_prompt": "Ask before deleting."},
+        }
+        gate_server, gate_thread, gate_url, captured = self._serve_prompt_gate_engine(get_payload=gate_payload)
+        server, thread, base = self._serve_one()
+        with patch.object(ui, "active_prompt_gate", return_value={"id": "gate-1", "url": gate_url}):
+            try:
+                with request.urlopen(f"{base}/api/prompt-gate?id=gate-1", timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+                gate_thread.join(timeout=5)
+                gate_server.server_close()
+
+        self.assertTrue(payload["active"])
+        self.assertEqual(payload["prompt"], "delete the repo")
+        self.assertEqual(payload["ui_url"], "/?view=gate&gate=gate-1")
+        self.assertEqual(captured["get_path"], "/api/gate-state?id=gate-1")
+
+    def test_prompt_gate_proxy_refuses_wrong_id_and_cross_origin(self) -> None:
+        server, thread, base = self._serve_one()
+        with patch.object(ui, "active_prompt_gate", return_value={"id": "gate-1", "url": "http://127.0.0.1:9/"}):
+            try:
+                with self.assertRaises(error.HTTPError) as raised:
+                    request.urlopen(f"{base}/api/prompt-gate?id=other", timeout=5)
+                self.assertEqual(raised.exception.code, 404)
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
+        server, thread, base = self._serve_one()
+        http_request = request.Request(
+            f"{base}/api/prompt-gate?id=gate-1",
+            headers={"Origin": "http://localhost:3000"},
+        )
+        with patch.object(ui, "active_prompt_gate", return_value={"id": "gate-1", "url": "http://127.0.0.1:9/"}):
+            try:
+                with self.assertRaises(error.HTTPError) as raised:
+                    request.urlopen(http_request, timeout=5)
+                self.assertEqual(raised.exception.code, 403)
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_prompt_gate_decision_proxy_forwards_to_the_live_gate(self) -> None:
+        gate_server, gate_thread, gate_url, captured = self._serve_prompt_gate_engine()
+        server, thread, base = self._serve_one()
+        http_request = request.Request(
+            f"{base}/api/prompt-gate-decision",
+            data=json.dumps({"id": "gate-1", "decision": "use_brief", "prompt": "safer"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with patch.object(ui, "active_prompt_gate", return_value={"id": "gate-1", "url": gate_url}):
+            try:
+                with request.urlopen(http_request, timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+                gate_thread.join(timeout=5)
+                gate_server.server_close()
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(captured["post_path"], "/decision")
+        self.assertEqual(captured["post_body"], {"decision": "use_brief", "prompt": "safer"})
+
+    def test_prompt_gate_decision_refuses_pages_from_other_localhost_origins(self) -> None:
+        server, thread, base = self._serve_one()
+        http_request = request.Request(
+            f"{base}/api/prompt-gate-decision",
+            data=json.dumps({"id": "gate-1", "decision": "run_original"}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Origin": "http://localhost:3000"},
+            method="POST",
+        )
+        with patch.object(ui, "active_prompt_gate", return_value={"id": "gate-1", "url": "http://127.0.0.1:9/"}):
+            try:
+                with self.assertRaises(error.HTTPError) as raised:
+                    request.urlopen(http_request, timeout=5)
+                self.assertEqual(raised.exception.code, 403)
             finally:
                 thread.join(timeout=5)
                 server.server_close()
@@ -2263,7 +2394,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["state"], "prompt_gate")
         self.assertEqual(state["label"], "Prompt Gate")
         self.assertEqual(state["primary_label"], "Review Gate")
-        self.assertEqual(state["primary_url"], "http://127.0.0.1:9999/")
+        self.assertEqual(state["primary_url"], "/?view=gate&gate=gate-1")
+        self.assertEqual(state["control_url"], "/?view=gate&gate=gate-1")
         self.assertEqual(state["continue_label"], "Continue")
         self.assertEqual(state["continue_action"], "run_original_prompt")
         self.assertEqual(state["continue_url"], "http://127.0.0.1:9999/")

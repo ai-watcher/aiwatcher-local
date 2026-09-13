@@ -2818,6 +2818,48 @@ async function sendDecision(decision) {{
 </html>"""
 
 
+def _prompt_gate_payload(
+    *,
+    gate_id: str,
+    tool: str,
+    cwd: str,
+    prompt: str,
+    result: dict[str, object],
+    expires_at: datetime,
+) -> dict[str, object]:
+    """Ephemeral prompt-gate payload for the dashboard proxy.
+
+    This deliberately mirrors the one-shot HTML page from memory instead of
+    storing prompt text in local_state. The dashboard may render it while the
+    hook is blocked; once the gate exits, the payload disappears with the
+    temporary server.
+    """
+    brief_core, brief_suffix = _split_brief_for_display(str(result.get("suggested_prompt") or ""))
+    route = _prompt_gate_route(result)
+    return {
+        "active": True,
+        "id": gate_id,
+        "tool": tool,
+        "cwd": cwd,
+        "prompt": prompt,
+        "result": {
+            "risk": result.get("risk"),
+            "score": result.get("score"),
+            "findings": list(result.get("findings") or []),
+            "suggestions": list(result.get("suggestions") or []),
+            "suggested_prompt": str(result.get("suggested_prompt") or ""),
+            "brief_core": brief_core,
+            "brief_suffix": brief_suffix,
+            "guardrails": list(result.get("guardrails") or []),
+            "impact": _impact_summary(result),
+            "savings_label": _hero_savings_label(result),
+            "pressure_label": _hero_pressure_label(result),
+        },
+        "route": route,
+        "expires_at": expires_at.isoformat(),
+    }
+
+
 def _display_available() -> bool:
     """Best-effort check for whether a GUI display exists to open a browser.
 
@@ -2905,6 +2947,7 @@ def run_prompt_gate(
         return _fallback_prompt_gate(tool=tool, prompt=prompt, result=result)
 
     gate_id = uuid.uuid4().hex
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=max(1, timeout_seconds))
     decision_event = threading.Event()
     state: dict[str, str] = {}
 
@@ -2923,7 +2966,30 @@ def run_prompt_gate(
             self.wfile.flush()
 
         def do_GET(self) -> None:
-            if self.path != "/":
+            parsed = urlparse(self.path)
+            if parsed.path == "/api/gate-state":
+                params = parse_qs(parsed.query)
+                requested_id = params.get("id", [""])[0].strip()
+                if requested_id and requested_id != gate_id:
+                    self._send(404, json.dumps({"error": "gate not found"}), "application/json; charset=utf-8")
+                    return
+                self._send(
+                    200,
+                    json.dumps(
+                        _prompt_gate_payload(
+                            gate_id=gate_id,
+                            tool=tool,
+                            cwd=cwd,
+                            prompt=prompt,
+                            result=result,
+                            expires_at=expires_at,
+                        ),
+                        default=str,
+                    ),
+                    "application/json; charset=utf-8",
+                )
+                return
+            if parsed.path != "/":
                 self._send(404, "Not found", "text/plain; charset=utf-8")
                 return
             self._send(200, _prompt_gate_html(tool=tool, cwd=cwd, prompt=prompt, result=result))
@@ -2991,7 +3057,7 @@ def run_prompt_gate(
             risk=str(result.get("risk") or "unknown"),
             score=int(result.get("score") or 0),
             url=url,
-            expires_at=datetime.now(timezone.utc) + timedelta(seconds=max(1, timeout_seconds)),
+            expires_at=expires_at,
             workflow_mode=str(workflow.get("mode") or ""),
             workflow_label=str(workflow.get("label") or ""),
             workflow_reward=str(workflow.get("reward") or ""),

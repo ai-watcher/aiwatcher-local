@@ -631,6 +631,140 @@ async function preflightPrompt() {
     resultNode.innerHTML = '<div class="empty">Could not reach the local AIWatcher server.</div>';
   }
 }
+let promptGateLoadedFor = null;
+function promptGateIdFromUrl() {
+  return new URLSearchParams(location.search).get('gate') || '';
+}
+function renderPromptGateFailure(data) {
+  const fallback = data && data.fallback_url
+    ? `<a class="link-button" href="${esc(data.fallback_url)}" target="_blank" rel="noreferrer">Open fallback gate</a>`
+    : '';
+  return `<div class="card">
+    <div class="section-title"><div><h2>Prompt Gate unavailable</h2><p>${esc((data && data.error) || 'This gate expired or the AI tool already continued.')}</p></div></div>
+    <div class="copy-row">
+      <button class="btn-primary" onclick="showView('prompt')">Open Plan</button>
+      ${fallback}
+    </div>
+  </div>`;
+}
+function renderPromptGateReview(data) {
+  const result = data.result || {};
+  const route = data.route || {};
+  const findings = result.findings || [];
+  const suggestions = result.suggestions || [];
+  const guardrails = result.guardrails || [];
+  const risk = result.risk || 'unknown';
+  const score = result.score === undefined || result.score === null ? '-' : result.score;
+  const reward = route.reward || result.impact || 'Review this prompt before the AI tool continues.';
+  const brief = result.suggested_prompt || '';
+  const expires = data.expires_at ? `Expires ${dateLabel(data.expires_at)}` : 'Short-lived local gate';
+  const source = [data.tool, data.cwd].filter(Boolean).join(' · ');
+  return `<div class="gate-route ${esc(route.kind || '')}">
+    <div>
+      <span class="pill">${esc(route.label || 'Prompt Gate')}</span>
+      <h2>${esc(route.title || 'Review before running')}</h2>
+      <p>${esc(route.why || 'AIWatcher found a prompt worth reviewing before context is spent.')}</p>
+      <p class="plan-next-step"><strong>Next:</strong> ${esc(route.next_step || 'Choose a decision below.')}</p>
+      <div class="gate-status">
+        <span class="pill">${esc(source || 'local hook')}</span>
+        <span class="pill">${esc(expires)}</span>
+      </div>
+    </div>
+    <div class="gate-route-reward">${esc(reward)}</div>
+  </div>
+  <div class="gate-grid">
+    <section class="card gate-evidence">
+      <div class="gate-evidence-section">
+        <h3>Findings</h3>
+        ${findings.length ? `<ul class="prompt-list">${findings.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : '<p>No specific finding was attached.</p>'}
+      </div>
+      <div class="gate-evidence-section">
+        <h3>Suggestions</h3>
+        ${suggestions.length ? `<ul class="prompt-list">${suggestions.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : '<p>No extra suggestion was attached.</p>'}
+      </div>
+      ${guardrails.length ? `<div class="gate-evidence-section"><h3>Guardrails</h3><div class="pill-row">${guardrails.map(item => `<span class="pill">${esc(item.label || item)}</span>`).join('')}</div></div>` : ''}
+      <details class="gate-original">
+        <summary>Original prompt</summary>
+        <pre>${esc(data.prompt || '')}</pre>
+      </details>
+      <p>Prompt text is held only while this local hook is waiting. AIWatcher stores the decision and hashes, not this prompt text.</p>
+    </section>
+    <section class="card">
+      <div class="section-title"><div><h2>Execution brief</h2><p>Edit if needed, then send the safer brief back to the blocked AI tool.</p></div><span class="pill">${esc(risk)} · ${esc(score)}</span></div>
+      <textarea id="promptGateBrief" class="gate-brief-preview">${esc(brief)}</textarea>
+      <div id="promptGateDecisionStatus" class="gate-status" role="status"></div>
+      <div class="gate-actions">
+        <button class="btn-primary" onclick="sendPromptGateDecision('use_brief')">${esc(route.primary_label || 'Add safer brief')}</button>
+        <button class="btn-quiet" onclick="sendPromptGateDecision('edit')">Add edited brief</button>
+        <button class="btn-quiet" onclick="sendPromptGateDecision('run_original')">Run original</button>
+        <button class="btn-quiet danger" onclick="sendPromptGateDecision('cancel')">Cancel run</button>
+      </div>
+    </section>
+  </div>`;
+}
+async function loadPromptGateReview(force = false) {
+  const gateId = promptGateIdFromUrl();
+  const target = document.getElementById('promptGateReview');
+  const riskNode = document.getElementById('promptGateRisk');
+  if (!target) return;
+  if (!force && promptGateLoadedFor === gateId && target.dataset.loaded === '1') return;
+  promptGateLoadedFor = gateId;
+  target.dataset.loaded = '0';
+  target.innerHTML = '<div class="card"><div class="loading">Loading the local Prompt Gate...</div></div>';
+  if (riskNode) riskNode.textContent = 'Loading';
+  try {
+    const params = gateId ? `?id=${encodeURIComponent(gateId)}` : '';
+    const res = await fetch(`/api/prompt-gate${params}`);
+    const data = await res.json();
+    if (!res.ok || data.error || data.active === false) {
+      target.innerHTML = renderPromptGateFailure(data);
+      if (riskNode) riskNode.textContent = res.status === 410 ? 'Expired' : 'Unavailable';
+      return;
+    }
+    target.innerHTML = renderPromptGateReview(data);
+    target.dataset.loaded = '1';
+    if (riskNode) riskNode.textContent = `${data.result && data.result.risk ? data.result.risk : 'risk'} · score ${data.result && data.result.score !== undefined ? data.result.score : '-'}`;
+  } catch (error) {
+    target.innerHTML = renderPromptGateFailure({ error: 'Could not reach the local AIWatcher server.' });
+    if (riskNode) riskNode.textContent = 'Unavailable';
+  }
+}
+async function sendPromptGateDecision(decision) {
+  const status = document.getElementById('promptGateDecisionStatus');
+  const buttons = Array.from(document.querySelectorAll('#view-gate button'));
+  const promptNode = document.getElementById('promptGateBrief');
+  buttons.forEach(button => { button.disabled = true; });
+  if (status) status.innerHTML = '<span class="pill">Applying decision...</span>';
+  try {
+    const res = await fetch('/api/prompt-gate-decision', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: promptGateIdFromUrl(),
+        decision,
+        prompt: promptNode ? promptNode.value : '',
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || `Request failed (${res.status})`);
+    const riskChange = data.selected_score === null || data.selected_score === undefined
+      ? 'No prompt will run.'
+      : `Risk ${data.original_risk} (${data.original_score}) to ${data.selected_risk} (${data.selected_score})`;
+    document.getElementById('promptGateReview').innerHTML = `<div class="card">
+      <div class="section-title"><div><h2>${esc(data.decision_label || 'Decision sent')}</h2><p>Your choice has been returned to ${esc(data.tool || 'the AI tool')}.</p></div><span class="pill">Done</span></div>
+      <div class="risk-card low">
+        <h3>${esc(riskChange)}</h3>
+        <p>${esc(data.impact || 'Return to the blocked AI tool to continue.')}</p>
+      </div>
+      <p style="margin-top:12px">Return to Claude, Codex, or Cursor. This dashboard page can stay open; the one-shot gate will close itself.</p>
+    </div>`;
+    showToast('Prompt Gate decision sent');
+  } catch (error) {
+    buttons.forEach(button => { button.disabled = false; });
+    if (status) status.innerHTML = `<span class="pill">${esc(error.message || 'Decision failed')}</span>`;
+    showToast(`Could not apply Prompt Gate decision: ${error.message || 'unknown error'}`, 'error');
+  }
+}
 let toastTimer;
 function showToast(message, kind = 'success') {
   const toast = document.getElementById('toast');
@@ -5161,6 +5295,7 @@ function showView(view) {
   const days = document.getElementById('days').value;
   if (view === 'sessions' && sessionsLoadedForDays !== days) loadSessions();
   if (view === 'insights' && reportLoadedForDays !== days) loadReport();
+  if (view === 'gate') loadPromptGateReview();
   if (view === 'receipts') markFreshStartReceiptsViewed();
 }
 function showSettingsPanel(panel) {
@@ -5956,7 +6091,7 @@ document.addEventListener('keydown', event => { if (event.key === 'Escape') clos
   // Every view id, or a ?view= deep link at one of them silently does nothing.
   // test_deep_link_allowlist_covers_every_view pins this against the markup so
   // adding a section cannot quietly leave it unreachable by link.
-  if (requestedView && ['today','prompt','watch','sessions','control','projects','changes','receipts','insights','setup','first-run'].includes(requestedView)) {
+  if (requestedView && ['today','prompt','gate','watch','sessions','control','projects','changes','receipts','insights','setup','first-run'].includes(requestedView)) {
     showView(requestedView);
     if (requestedView === 'setup') {
       const requestedPanel = new URLSearchParams(location.search).get('settings') || 'general';

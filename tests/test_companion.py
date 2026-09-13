@@ -718,6 +718,7 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
             },
         )
         self.assertEqual(state["state"], "prompt_gate")
+        self.assertEqual(state["primary_url"], "/?view=gate&gate=g1")
         self.assertTrue(85 <= state["expires_in_seconds"] <= 90)
 
     def test_a_gate_without_expiry_shows_no_countdown(self):

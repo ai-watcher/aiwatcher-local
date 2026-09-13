@@ -12,6 +12,8 @@ import sys
 import tempfile
 import threading
 import time
+from urllib import error as urlerror
+from urllib import request as urlrequest
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -235,6 +237,8 @@ SAME_ORIGIN_ONLY_ROUTES = frozenset({
     "/api/ai-assist-config",
     "/api/handoff-ai-assist",
     "/api/optimize-ai-assist",
+    "/api/prompt-gate",
+    "/api/prompt-gate-decision",
 })
 
 # POST endpoints whose only fact is that they happened, so they carry no JSON
@@ -248,6 +252,99 @@ _POST_WITHOUT_BODY = frozenset({
 })
 SESSION_SNAPSHOT_SCHEMA_VERSION = 1
 SUMMARY_BACKGROUND_COOLDOWN_SECONDS = 8
+
+
+def _prompt_gate_review_url(gate: dict[str, Any]) -> str:
+    gate_id = str(gate.get("id") or "").strip()
+    return f"/?view=gate&gate={quote(gate_id)}" if gate_id else "/?view=gate"
+
+
+def _prompt_gate_engine_url(gate: dict[str, Any], path: str, *, gate_id: str | None = None) -> str:
+    base = str(gate.get("url") or "").strip()
+    if not base:
+        raise ValueError("active prompt gate has no local engine URL")
+    url = base.rstrip("/") + path
+    if gate_id:
+        url += f"?id={quote(gate_id)}"
+    return url
+
+
+def _read_json_response(response: Any) -> dict[str, Any]:
+    body = response.read().decode("utf-8")
+    parsed = json.loads(body) if body else {}
+    return parsed if isinstance(parsed, dict) else {"value": parsed}
+
+
+def _active_prompt_gate_for_request(gate_id: str) -> tuple[int, dict[str, Any] | None, dict[str, Any]]:
+    gate = active_prompt_gate()
+    if not isinstance(gate, dict):
+        return 410, None, {"active": False, "error": "Prompt Gate expired or is no longer waiting."}
+    current_id = str(gate.get("id") or "").strip()
+    if gate_id and current_id and gate_id != current_id:
+        return 404, None, {"active": False, "error": "Prompt Gate not found."}
+    if not current_id:
+        return 410, None, {"active": False, "error": "Prompt Gate is missing its local identity."}
+    return 200, gate, {}
+
+
+def build_prompt_gate_review(gate_id: str) -> tuple[int, dict[str, Any]]:
+    status, gate, error_payload = _active_prompt_gate_for_request(gate_id)
+    if gate is None:
+        return status, error_payload
+    current_id = str(gate.get("id") or "").strip()
+    try:
+        engine_url = _prompt_gate_engine_url(gate, "/api/gate-state", gate_id=current_id)
+        req = urlrequest.Request(engine_url, headers={"Accept": "application/json"})
+        with urlrequest.urlopen(req, timeout=2.0) as response:
+            payload = _read_json_response(response)
+    except urlerror.HTTPError as exc:
+        try:
+            payload = _read_json_response(exc)
+        except (OSError, ValueError, json.JSONDecodeError):
+            payload = {"error": f"Prompt Gate engine returned HTTP {exc.code}."}
+        return exc.code, {"active": False, **payload}
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return 502, {
+            "active": False,
+            "error": f"Prompt Gate is no longer reachable: {exc}",
+            "fallback_url": str(gate.get("url") or ""),
+        }
+    payload["active"] = True
+    payload["fallback_url"] = str(gate.get("url") or "")
+    payload["ui_url"] = _prompt_gate_review_url(gate)
+    return 200, payload
+
+
+def decide_prompt_gate_from_dashboard(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    gate_id = str(payload.get("id") or "").strip()
+    status, gate, error_payload = _active_prompt_gate_for_request(gate_id)
+    if gate is None:
+        return status, error_payload
+    current_id = str(gate.get("id") or "").strip()
+    forwarded = {
+        "decision": str(payload.get("decision") or "").strip(),
+        "prompt": str(payload.get("prompt") or ""),
+    }
+    try:
+        engine_url = _prompt_gate_engine_url(gate, "/decision")
+        req = urlrequest.Request(
+            engine_url,
+            data=json.dumps(forwarded).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlrequest.urlopen(req, timeout=2.0) as response:
+            response_payload = _read_json_response(response)
+    except urlerror.HTTPError as exc:
+        try:
+            response_payload = _read_json_response(exc)
+        except (OSError, ValueError, json.JSONDecodeError):
+            response_payload = {"error": f"Prompt Gate engine returned HTTP {exc.code}."}
+        return exc.code, response_payload
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return 502, {"error": f"Prompt Gate is no longer reachable: {exc}"}
+    response_payload.setdefault("id", current_id)
+    return 200, response_payload
 SUMMARY_WINDOWS = (1, 7, 30)
 # One definition of "live", shared with session_presence, which subdivides
 # this window into working/quiet. Aliased rather than duplicated so the two
@@ -7473,6 +7570,7 @@ def build_companion_state() -> dict[str, object]:
         risk = str(gate.get("risk") or "risk")
         score = gate.get("score")
         score_label = f" score {score}" if isinstance(score, int) else ""
+        review_url = _prompt_gate_review_url(gate)
         gate_id = gate.get("id")
         if isinstance(gate_id, str) and gate_id:
             try:
@@ -7497,11 +7595,11 @@ def build_companion_state() -> dict[str, object]:
             ),
             "primary_label": "Review Gate",
             "primary_action": "open_prompt_gate",
-            "primary_url": str(gate.get("url") or "/?view=prompt"),
+            "primary_url": review_url,
             "continue_label": "Continue",
             "continue_action": "run_original_prompt",
             "continue_url": str(gate.get("url") or ""),
-            "control_url": str(gate.get("url") or "/?view=prompt"),
+            "control_url": review_url,
             "detail": "A hook paused this prompt locally. Review it before the AI tool continues.",
         }
     try:
@@ -8222,6 +8320,15 @@ class UIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/companion-state":
             self._send(200, json.dumps(build_companion_state()), "application/json; charset=utf-8")
             return
+        if parsed.path == "/api/prompt-gate":
+            if self._is_cross_origin():
+                self._send(403, json.dumps({"error": "Prompt Gate answers only the dashboard's own origin"}), "application/json; charset=utf-8")
+                return
+            params = parse_qs(parsed.query)
+            gate_id = params.get("id", [""])[0].strip()
+            status, payload = build_prompt_gate_review(gate_id)
+            self._send(status, json.dumps(payload), "application/json; charset=utf-8")
+            return
         if parsed.path == "/api/companion-preferences":
             self._send(200, json.dumps(companion_preferences()), "application/json; charset=utf-8")
             return
@@ -8412,6 +8519,7 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/first-run-dismissed",
             "/api/optimize-ai-assist",
             "/api/optimize-decision",
+            "/api/prompt-gate-decision",
             "/api/companion-skip",
             "/api/companion-preferences",
             "/api/compact-decision",
@@ -8445,6 +8553,10 @@ class UIHandler(BaseHTTPRequestHandler):
             cwd = str(payload.get("cwd", "")).strip() or None
             response = build_prompt_preflight(prompt, tool=tool, cwd=cwd)
             status = 400 if response.get("error") else 200
+            self._send(status, json.dumps(response), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/prompt-gate-decision":
+            status, response = decide_prompt_gate_from_dashboard(payload)
             self._send(status, json.dumps(response), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/update-apply":

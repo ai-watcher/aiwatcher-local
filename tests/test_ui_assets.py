@@ -81,6 +81,9 @@ class WebAssetsTest(unittest.TestCase):
         self.assertIn(":root {", ui.HTML)
         self.assertIn("<script>", ui.HTML)
         self.assertIn("function showView(", ui.HTML)
+        self.assertIn('id="view-gate"', ui.HTML)
+        self.assertIn("/api/prompt-gate", ui.HTML)
+        self.assertIn("/api/prompt-gate-decision", ui.HTML)
         self.assertNotIn("<link rel=\"stylesheet\"", ui.HTML)
         self.assertNotIn("<script src=", ui.HTML)
 
@@ -321,6 +324,12 @@ class NavigationTest(unittest.TestCase):
             "stays in the ?view= allowlist: a URL someone types deliberately is "
             "not the same as a button sitting in the sidebar forever."
         ),
+        "gate": (
+            "Shown only while a hook is actively holding a prompt. It is a "
+            "blocking decision surface, not a standing dashboard section, so "
+            "the Companion deep-links into it and the gate disappears when the "
+            "tool continues or times out."
+        ),
     }
 
     @classmethod
@@ -526,7 +535,8 @@ class TrimmedHomeTest(unittest.TestCase):
             "evidencePanel", "handoffAcceptance", "handoffBrief", "handoffConstraints",
             "handoffObjective", "handoffSources", "handoffStatus", "handoffType",
             "optimizeCleanupPrompt", "optimizeReward", "outcomePanel",
-            "planDerivedZone", "promptBrief", "todayDigest",
+            "planDerivedZone", "promptBrief", "promptGateBrief",
+            "promptGateDecisionStatus", "todayDigest",
         }
         ids = set(re.findall(r'id="([\w-]+)"', self.html))
         looked_up = set(re.findall(r"""getElementById\(['"]([\w-]+)['"]\)""", self.js))
