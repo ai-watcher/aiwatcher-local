@@ -1226,19 +1226,24 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
     // The command travels in the state payload, so this is a pasteboard write
     // and a receipt -- no fetch, unlike the Fresh Start brief. The bar says
-    // "Copied" at once; the dashboard takes over from the next poll, having
-    // read the click from the receipt, and moves on only when the session's
-    // own log shows the /compact.
+    // "Copied" only after the pasteboard reads back the exact command; the
+    // dashboard takes over from the next poll, having read the click from the
+    // receipt, and moves on only when the session's own log shows the /compact.
     func copyCompactFromCompanion() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(compactCommand, forType: .string)
+        if !writeClipboard(compactCommand) {
+            self.titleLabel.stringValue = "Copy failed"
+            self.subtitleLabel.stringValue = "Open UI to copy /compact"
+            self.updateAppearance()
+            openURL(primaryURL)
+            return
+        }
         recordCompactDecision("copied", sessionID: primarySessionID, sha: compactSha)
         self.stateName = "compact_copied"
         self.skipState = ""
         self.primaryURL = dashboardURL
         self.suppressPassiveRefreshUntil = Date().addingTimeInterval(3.0)
         self.titleLabel.stringValue = "Copied"
-        self.subtitleLabel.stringValue = "Paste it into that session's prompt"
+        self.subtitleLabel.stringValue = "Paste /compact into that session"
         self.updateAppearance()
         self.scheduleAutoCollapse(after: 12.0)
         self.scheduleRefresh(after: 3.0)
@@ -1248,8 +1253,13 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     // the receipt notes the click against the session the row names, and the
     // others keep their buttons.
     func copyCompactRow(index: Int) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(waitingRowCommands[index], forType: .string)
+        let command = index < waitingRowCommands.count ? waitingRowCommands[index] : ""
+        if !writeClipboard(command) {
+            self.titleLabel.stringValue = "Copy failed"
+            self.subtitleLabel.stringValue = "Open UI to copy /compact"
+            self.updateAppearance()
+            return
+        }
         let sessionID = index < waitingSessionIDs.count ? waitingSessionIDs[index] : ""
         let sha = index < waitingRowShas.count ? waitingRowShas[index] : ""
         recordCompactDecision("copied", sessionID: sessionID, sha: sha)
@@ -1287,6 +1297,18 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    func writeClipboard(_ value: String) -> Bool {
+        let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty { return false }
+        NSPasteboard.general.clearContents()
+        if !NSPasteboard.general.setString(value, forType: .string) {
+            return false
+        }
+        let current = NSPasteboard.general.string(forType: .string)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return current == text
+    }
+
     func copyFreshStartFromCompanion() {
         titleLabel.stringValue = "Copying brief"
         subtitleLabel.stringValue = "Preparing Fresh Start..."
@@ -1319,8 +1341,13 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                     return
                 }
                 self.pendingClipboardOverrideSessionID = ""
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(brief, forType: .string)
+                if !self.writeClipboard(brief) {
+                    self.titleLabel.stringValue = "Copy failed"
+                    self.subtitleLabel.stringValue = "Open UI to copy the brief"
+                    self.updateAppearance()
+                    openURL(self.primaryURL)
+                    return
+                }
                 self.recordFreshStartCopied()
                 if self.primaryRuntimeAvailable {
                     self.requestRuntimeReturnForPrimary()
@@ -2999,6 +3026,18 @@ def run_native_presence(
             schedule_auto_collapse(1500)
         webbrowser.open(primary_url_var.get() or url)
 
+    def set_clipboard_text(text: str) -> bool:
+        value = text.strip()
+        if not value:
+            return False
+        try:
+            root.clipboard_clear()
+            root.clipboard_append(text)
+            root.update()
+            return root.clipboard_get().strip() == value
+        except tk.TclError:
+            return False
+
     def copy_fresh_start_from_companion() -> None:
         session_id = primary_session_id_var.get().strip()
         title_var.set("Copying brief")
@@ -3030,8 +3069,12 @@ def run_native_presence(
                 schedule_auto_collapse(30000)
                 return
             pending_clipboard_override_session_var.set("")
-            root.clipboard_clear()
-            root.clipboard_append(brief)
+            if not set_clipboard_text(brief):
+                title_var.set("Copy failed")
+                subtitle_var.set("Open UI to copy the brief")
+                update_attention_style()
+                webbrowser.open(primary_url_var.get() or url)
+                return
             payload = {
                 "session_id": session_id,
                 "decision": "copy_handoff",
@@ -3096,18 +3139,16 @@ def run_native_presence(
         except (OSError, urllib.error.URLError):
             pass
 
-    # The bar says "Copied" at once; the dashboard takes over from the next
-    # poll, having read the click from the receipt, and moves on only when
-    # the session's own log shows the /compact.
+    # The bar says "Copied" only after the clipboard reads back the exact
+    # command; the dashboard takes over from the next poll, having read the
+    # click from the receipt, and moves on only when the session's own log
+    # shows the /compact.
     def copy_compact_from_companion() -> None:
         command = compact_command_var.get().strip()
         session_id = primary_session_id_var.get().strip()
-        try:
-            root.clipboard_clear()
-            root.clipboard_append(command)
-        except tk.TclError:
-            title_var.set("Compact")
-            subtitle_var.set("Open UI to copy the command")
+        if not set_clipboard_text(command):
+            title_var.set("Copy failed")
+            subtitle_var.set("Open UI to copy /compact")
             update_attention_style()
             webbrowser.open(primary_url_var.get() or url)
             return
@@ -3116,7 +3157,7 @@ def run_native_presence(
         state_var.set("compact_copied")
         suppress_passive_refresh_until.set(time.time() + 3.0)
         title_var.set("Copied")
-        subtitle_var.set("Paste it into that session's prompt")
+        subtitle_var.set("Paste /compact into that session")
         primary_url_var.set(url)
         update_attention_style()
         schedule_auto_collapse(12000)
@@ -3125,10 +3166,10 @@ def run_native_presence(
     # the receipt notes the click against the session the row names.
     def copy_compact_row(index: int) -> None:
         command = waiting_row_commands[index] if index < len(waiting_row_commands) else ""
-        try:
-            root.clipboard_clear()
-            root.clipboard_append(command)
-        except tk.TclError:
+        if not set_clipboard_text(command):
+            title_var.set("Copy failed")
+            subtitle_var.set("Open UI to copy /compact")
+            update_attention_style()
             webbrowser.open(waiting_row_urls[index] if index < len(waiting_row_urls) else url)
             return
         session_id = waiting_row_session_ids[index] if index < len(waiting_row_session_ids) else ""
