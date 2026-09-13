@@ -187,7 +187,8 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("reviewTitle", mac)
         self.assertIn("applyOfflineState", mac)
         self.assertIn("skipProjects", mac)
-        self.assertIn("Open UI for all", mac)
+        self.assertIn('return "\\(visibleWaitingRows) of \\(reviewCount) context reviews"', mac)
+        self.assertIn("more in UI. Pick a row or open UI.", mac)
         self.assertIn('row["activity_label"]', mac)
         self.assertIn('row["severity_label"]', mac)
         # Height follows the queue, and the resize keeps the parked corner
@@ -203,6 +204,8 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("titleLabel.toolTip", mac)
         # A queue means per-row Open buttons, not a duplicated primary.
         self.assertIn("hasPrimaryAction() && rowsShown == 0", mac)
+        self.assertIn("skipButton.frame = NSRect(x: 542, y: utilityY, width: 50, height: 28)", mac)
+        self.assertIn("consoleButton.isHidden = true", mac)
 
         tk_source = inspect.getsource(native_overlay.run_native_presence)
         self.assertIn("waiting_sessions", tk_source)
@@ -218,6 +221,8 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('row.get("activity_label")', tk_source)
         self.assertIn('row.get("severity_label")', tk_source)
         self.assertIn("def review_title", tk_source)
+        self.assertIn('return f"{shown} of {count} context reviews"', tk_source)
+        self.assertIn('f"{hidden} more in UI. Pick a row or open UI."', tk_source)
         self.assertIn("def apply_offline_state", tk_source)
         self.assertIn("skip_projects_var", tk_source)
 

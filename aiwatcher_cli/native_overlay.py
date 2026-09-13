@@ -702,9 +702,15 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
 
     func reviewTitle() -> String {
         if ["control_review", "context_review"].contains(stateName) {
+            if visibleWaitingRows > 0 && reviewCount > visibleWaitingRows {
+                return "\(visibleWaitingRows) of \(reviewCount) context reviews"
+            }
             return "\(reviewCount) context review\(reviewCount == 1 ? "" : "s")"
         }
         if stateName == "session_finished" && visibleWaitingRows > 0 {
+            if finishedCount > visibleWaitingRows {
+                return "\(visibleWaitingRows) of \(finishedCount) completed runs"
+            }
             return "\(finishedCount) completed run\(finishedCount == 1 ? "" : "s")"
         }
         return String((titleLabel.stringValue.isEmpty ? "AIWatcher" : titleLabel.stringValue).prefix(40))
@@ -715,7 +721,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             let count = stateName == "session_finished" ? finishedCount : reviewCount
             let total = max(count, visibleWaitingRows)
             let hidden = max(total - visibleWaitingRows, 0)
-            return hidden > 0 ? "\(visibleWaitingRows) shown of \(total). Open UI for all." : "Pick a row or open UI."
+            return hidden > 0 ? "\(hidden) more in UI. Pick a row or open UI." : "Pick a row or open UI."
         }
         return String((subtitleLabel.stringValue.isEmpty ? "Watching quietly" : subtitleLabel.stringValue).prefix(46))
     }
@@ -1747,10 +1753,17 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                 signalButton.title = signalChipText
                 signalButton.frame = NSRect(x: 384, y: 15 + yOff, width: 100, height: 28)
             }
-            planButton.frame = NSRect(x: 384, y: 15 + yOff, width: 48, height: 28)
-            askButton.frame = NSRect(x: 436, y: 15 + yOff, width: 46, height: 28)
-            scanButton.frame = NSRect(x: 486, y: 15 + yOff, width: 52, height: 28)
-            consoleButton.frame = NSRect(x: 542, y: 15 + yOff, width: 38, height: 28)
+            let utilityY = 15 + yOff
+            planButton.frame = NSRect(x: 384, y: utilityY, width: 48, height: 28)
+            askButton.frame = NSRect(x: 436, y: utilityY, width: 46, height: 28)
+            scanButton.frame = NSRect(x: 486, y: utilityY, width: 52, height: 28)
+            if showSkip {
+                skipButton.frame = NSRect(x: 542, y: utilityY, width: 50, height: 28)
+                consoleButton.frame = NSRect(x: 0, y: 0, width: 0, height: 0)
+                consoleButton.isHidden = true
+            } else {
+                consoleButton.frame = NSRect(x: 542, y: utilityY, width: 38, height: 28)
+            }
         }
         for index in 0..<maxWaitingRows {
             let visible = index < rowsShown
@@ -2754,9 +2767,15 @@ def run_native_presence(
     def review_title() -> str:
         if state_var.get() in {"control_review", "context_review"}:
             count = int(review_count_var.get() or 0)
+            shown = visible_waiting_rows()
+            if shown and count > shown:
+                return f"{shown} of {count} context reviews"
             return f"{count} context review{'' if count == 1 else 's'}"
         if state_var.get() == "session_finished" and visible_waiting_rows() > 0:
             count = int(finished_count_var.get() or 0)
+            shown = visible_waiting_rows()
+            if shown and count > shown:
+                return f"{shown} of {count} completed runs"
             return f"{count} completed run{'' if count == 1 else 's'}"
         return title_var.get()[:34]
 
@@ -2766,7 +2785,7 @@ def run_native_presence(
             count = max(base_count, visible_waiting_rows())
             hidden = max(count - visible_waiting_rows(), 0)
             return (
-                f"{visible_waiting_rows()} shown of {count}. Open UI for all."
+                f"{hidden} more in UI. Pick a row or open UI."
                 if hidden > 0 else "Pick a row or open UI."
             )
         return subtitle_var.get()[:46]
