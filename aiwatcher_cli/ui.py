@@ -449,22 +449,57 @@ def _fresh_start_context_candidates(summary: dict[str, object]) -> list[dict[str
     return candidates
 
 
+def _nonzero_context_label(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (int, float)):
+        return compact_int(int(value)) if value > 0 else ""
+    text = str(value).strip()
+    if not text or text.lower() in {"0", "0.0", "n/a", "none", "no context savings claim"}:
+        return ""
+    return text
+
+
+def _context_review_activity_label(row: dict[str, object]) -> str:
+    status = str(row.get("session_status") or "").strip().lower()
+    label = str(row.get("session_status_label") or "").strip()
+    if status == "active":
+        return "active log"
+    if status == "recent":
+        return "recent log"
+    if label:
+        return label.lower()
+    age = str(row.get("age_label") or "").strip()
+    return f"quiet {age}" if age else ""
+
+
 def _context_review_companion_rows(candidates: list[dict[str, object]]) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
-    for row in candidates[:3]:
+    for row in candidates[:5]:
         project = str(row.get("project_full") or "")
-        impact = str(row.get("estimated_replayed_context_label") or row.get("impact_label") or "").strip()
+        impact = _nonzero_context_label(row.get("estimated_replayed_context_label"))
         if not impact:
-            try:
-                latest_turn_tokens = int(row.get("latest_turn_tokens") or 0)
-            except (TypeError, ValueError):
-                latest_turn_tokens = 0
-            impact = compact_int(latest_turn_tokens) if latest_turn_tokens > 0 else ""
+            impact = _nonzero_context_label(row.get("estimated_replayed_context_tokens"))
+        if not impact:
+            impact = _nonzero_context_label(row.get("impact_label"))
+        if not impact:
+            latest_value = row.get("latest_turn_tokens")
+            impact = _nonzero_context_label(latest_value)
+            if not impact:
+                try:
+                    latest_turn_tokens = int(str(latest_value or "0").replace(",", ""))
+                except (TypeError, ValueError):
+                    latest_turn_tokens = 0
+                impact = compact_int(latest_turn_tokens) if latest_turn_tokens > 0 else ""
+        severity = str(row.get("severity") or "").strip()
         rows.append({
             "session_id": str(row.get("session_id") or ""),
             "tool": tool_label(str(row.get("tool") or "")),
             "project": _project_basename(project) or str(row.get("project") or "this project"),
             "waited_label": impact,
+            "impact_label": impact,
+            "severity_label": severity,
+            "activity_label": _context_review_activity_label(row),
             "url": "/?view=watch#contextHealth",
             "kind": "context_review",
         })
@@ -3083,9 +3118,10 @@ def _context_health_card(
         if heaviest_item is not None and heaviest_item.latest_turn_tokens > health.latest_turn_tokens
         else None
     )
+    status = session_state(session) if session else None
     runtime_attachment = (
-        runtime_attachment_for_session(session, state=session_state(session), processes=[]).to_json()
-        if session
+        runtime_attachment_for_session(session, state=status, processes=[]).to_json()
+        if session and status
         else None
     )
     identity_label = str((runtime_attachment or {}).get("identity_label") or "Historical log only")
@@ -3163,6 +3199,8 @@ def _context_health_card(
         "context_summary": context_summary,
         "identity_label": identity_label,
         "return_label": return_label,
+        "session_status": str((status or {}).get("status") or ""),
+        "session_status_label": str((status or {}).get("label") or ""),
         "recommendation": health.recommendations[0] if health.recommendations else "Context is healthy.",
         "action": action,
         "runtime_attachment": runtime_attachment,
