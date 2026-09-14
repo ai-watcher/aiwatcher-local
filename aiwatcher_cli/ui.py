@@ -473,6 +473,15 @@ def _context_review_activity_label(row: dict[str, object]) -> str:
     return f"quiet {age}" if age else ""
 
 
+def _context_review_signal_label(impact: str) -> str:
+    if not impact:
+        return "estimate unavailable"
+    lowered = impact.lower()
+    if any(word in lowered for word in ("risk", "saved", "saving", "context", "token")):
+        return impact
+    return f"~{impact} replay at risk"
+
+
 def _context_review_companion_rows(candidates: list[dict[str, object]]) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for row in candidates[:5]:
@@ -498,6 +507,7 @@ def _context_review_companion_rows(candidates: list[dict[str, object]]) -> list[
             "project": _project_basename(project) or str(row.get("project") or "this project"),
             "waited_label": impact,
             "impact_label": impact,
+            "review_label": _context_review_signal_label(impact),
             "severity_label": severity,
             "activity_label": _context_review_activity_label(row),
             "url": "/?view=watch#contextHealth",
@@ -6730,7 +6740,7 @@ def _pressure_block(rows: list[SessionPresence], sessions: list[LocalSession]) -
     if cost > 0:
         stats_parts.append(f"${cost:,.2f}" if cost < 100 else f"${cost:,.0f}")
     if tokens_total > 0:
-        stats_parts.append(compact_int(tokens_total))
+        stats_parts.append(f"{compact_int(tokens_total)} total")
     return {
         "available": True,
         "reason": None,

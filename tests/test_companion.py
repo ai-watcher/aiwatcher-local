@@ -576,6 +576,7 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
         self.assertEqual(state["waiting_sessions"][0]["project"], "project-0")
         self.assertEqual(state["waiting_sessions"][0]["severity_label"], "critical")
         self.assertEqual(state["waiting_sessions"][0]["impact_label"], "1.0k")
+        self.assertEqual(state["waiting_sessions"][0]["review_label"], "~1.0k replay at risk")
         self.assertEqual(state["skip_label"], "Later")
         self.assertEqual(len(state["skip_projects"]), 5)
 
@@ -592,6 +593,7 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
         }])
 
         self.assertEqual(rows[0]["waited_label"], "")
+        self.assertEqual(rows[0]["review_label"], "estimate unavailable")
         self.assertEqual(rows[0]["severity_label"], "critical")
 
     def test_context_review_rows_carry_activity_without_zero_noise(self):
@@ -608,6 +610,7 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
         }])
 
         self.assertEqual(rows[0]["waited_label"], "")
+        self.assertEqual(rows[0]["review_label"], "estimate unavailable")
         self.assertEqual(rows[0]["activity_label"], "active log")
 
     def test_context_review_can_be_disabled_for_companion(self):
@@ -1257,7 +1260,7 @@ class CompanionPressureAndSignalTests(WaitingSessionCompanionTests):
         }):
             state = self._state(self._summary(), sessions=[session])
         pressure = state["pressure"]
-        self.assertEqual(pressure["stats_label"], f"$12.34 · {ui.compact_int(5_000_000)}")
+        self.assertEqual(pressure["stats_label"], f"$12.34 · {ui.compact_int(5_000_000)} total")
         self.assertIn("API-equivalent", pressure["stats_detail"])
 
     def test_pressure_is_cached_on_the_sessions_write_stamp(self):
