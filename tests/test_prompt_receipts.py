@@ -108,6 +108,26 @@ class SegmentCountingTests(unittest.TestCase):
         self.assertEqual([seg["cache_lifetime_seconds"] for seg in self.segments], [300, 3600, 3600])
 
 
+class CurrentPromptTests(unittest.TestCase):
+    """Which prompt a chat is on now, for the Companion and the statusline."""
+
+    def test_an_interrupted_marker_with_nothing_behind_it_is_passed_over(self) -> None:
+        segments = [
+            {"prompt": "build it", "requests": 5},
+            {"prompt": "[Request interrupted by user]", "requests": 0},
+        ]
+        self.assertEqual(scanner.current_prompt_segment(segments)["prompt"], "build it")
+
+    def test_a_prompt_just_sent_is_the_current_one(self) -> None:
+        segments = [{"prompt": "build it", "requests": 5}, {"prompt": "now the tests", "requests": 0}]
+        self.assertEqual(scanner.current_prompt_segment(segments)["prompt"], "now the tests")
+
+    def test_claude_carrying_on_after_a_compaction_counts(self) -> None:
+        segments = [{"prompt": "build it", "requests": 5}, {"prompt": "summary", "requests": 3, "compact_summary": True}]
+        self.assertTrue(scanner.current_prompt_segment(segments)["compact_summary"])
+        self.assertIsNone(scanner.current_prompt_segment([]))
+
+
 def segment(**overrides) -> dict:
     base = {
         "turn": 1, "prompt": "do it", "at": T0.isoformat(), "requests": 4, "priced": True,

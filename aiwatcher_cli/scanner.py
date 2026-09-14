@@ -512,6 +512,24 @@ def _request_cost_split(
     return resent, rewritten * price_in * multiplier, True
 
 
+def current_prompt_segment(segments: list[dict[str, object]]) -> dict[str, object] | None:
+    """The prompt a session is on now, from `segment_session_by_prompt`.
+
+    The last turn, unless it is a row Claude Code wrote rather than the user
+    and it caused nothing: an interrupted-reply marker with no requests is not
+    what the session is doing. A prompt just sent, with no reply yet, is --
+    that is the moment "working" matters most. Shared by the Companion and the
+    statusline so both name the same prompt.
+    """
+    for segment in reversed(segments):
+        if int(segment.get("requests") or 0) > 0:
+            return segment
+        text = str(segment.get("prompt") or "")
+        if not segment.get("compact_summary") and not text.startswith("[Request interrupted"):
+            return segment
+    return None
+
+
 def extract_opening_prompt(source_path: str | None, *, max_chars: int = 4000) -> str | None:
     """Return the first genuine user prompt from a Claude Code .jsonl session file.
 
