@@ -9,6 +9,55 @@ from aiwatcher_cli import native_overlay
 from aiwatcher_cli.native_overlay import overlay_config
 
 
+class AnchoredOriginTests(unittest.TestCase):
+    # Tk's y-down space; a 1920x1080 screen unless a test says otherwise.
+    def test_a_bubble_parked_on_the_right_opens_leftward(self) -> None:
+        self.assertEqual(
+            native_overlay._anchored_origin(1860, 980, 52, 52, 560, 58, 1920, 1080),
+            (1352, 974),
+        )
+
+    def test_a_bubble_parked_on_the_left_opens_rightward(self) -> None:
+        self.assertEqual(
+            native_overlay._anchored_origin(10, 980, 52, 52, 560, 58, 1920, 1080),
+            (10, 974),
+        )
+
+    def test_a_bubble_near_the_top_opens_downward(self) -> None:
+        self.assertEqual(
+            native_overlay._anchored_origin(1860, 20, 52, 52, 560, 148, 1920, 1080),
+            (1352, 20),
+        )
+
+    def test_collapsing_lands_the_bubble_back_where_it_was_parked(self) -> None:
+        bar = native_overlay._anchored_origin(1860, 980, 52, 52, 560, 58, 1920, 1080)
+        self.assertEqual(
+            native_overlay._anchored_origin(bar[0], bar[1], 560, 58, 52, 52, 1920, 1080),
+            (1860, 980),
+        )
+
+    def test_the_startup_bar_collapses_into_the_corner_not_mid_screen(self) -> None:
+        # The bar starts expanded at screen_width - 560 - 24; collapsing kept
+        # its left edge, leaving the bubble ~580px in from the right.
+        self.assertEqual(
+            native_overlay._anchored_origin(1336, 930, 560, 58, 52, 52, 1920, 1080),
+            (1844, 936),
+        )
+
+    def test_a_bar_that_would_overflow_is_clamped_on_screen(self) -> None:
+        # A bubble just left of centre on a narrow screen opens rightward but
+        # is pulled back so the full 560px fits.
+        self.assertEqual(
+            native_overlay._anchored_origin(470, 500, 52, 52, 560, 58, 1024, 768),
+            (456, 494),
+        )
+        # Dragged partly off the right edge, it still opens fully on screen.
+        self.assertEqual(
+            native_overlay._anchored_origin(1900, 500, 52, 52, 560, 58, 1920, 1080),
+            (1352, 500),
+        )
+
+
 class NativeOverlayConfigTests(unittest.TestCase):
     def test_velocity_recommends_focus_not_a_fresh_chat(self) -> None:
         config = overlay_config("velocity")
@@ -167,7 +216,12 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('85.0 * s', source)
         self.assertIn('rootView.layer?.borderWidth = collapsed ? 0 : 1', source)
         self.assertIn("setCollapsed(true)", source)
-        self.assertIn("current.maxX - targetWidth", source)
+        # Resizes anchor on where the bubble was dragged, not the configured
+        # corner -- a left-parked bubble opened off the left edge otherwise.
+        self.assertIn("anchoredFrame(width: targetWidth, height: targetHeight)", source)
+        self.assertIn("anchoredFrame(width: expandedWidth, height: target)", source)
+        self.assertIn("current.midX > screen.midX ? current.maxX - width : current.minX", source)
+        self.assertNotIn('position.contains("right") ? current.maxX', source)
         self.assertIn("hasPrimaryAction", source)
         self.assertIn("scheduleAutoCollapse", source)
 
@@ -544,6 +598,9 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("collapsed_button_motion", source)
         self.assertIn("collapsed_button_release", source)
         self.assertIn("set_collapsed(True)", source)
+        self.assertIn("resize_window(collapsed_width, collapsed_height)", source)
+        self.assertIn("window_box.update(x=new_x, y=new_y)", source)
+        self.assertNotIn('root.geometry(f"{collapsed_width}x{collapsed_height}")', source)
         self.assertIn("root.after(3000, refresh_state)", source)
         self.assertIn("has_primary_action", source)
         self.assertIn("schedule_auto_collapse", source)
