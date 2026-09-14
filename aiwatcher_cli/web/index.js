@@ -3188,7 +3188,8 @@ function healthReason(row, waitingById) {
   // size has an action attached, and it outranks the room reading, which says
   // how much space is left but not when to act on it.
   const compact = row.compact;
-  // The card charts the project's worst session; the nudge is for the one
+  // The card charts the project's worst live session (the worst of all when none
+  // is live); the nudge is for the one
   // being typed into. When they differ the sentence names which -- by the
   // title the user gave it where the tool records one.
   const compactName = compact ? (compact.title || compact.session_short || compact.session_id) : '';
@@ -3322,7 +3323,10 @@ function healthRow(row, waitingById, index) {
       </span>
       ${reason ? `<span class="rank-why">${reason}</span>` : ''}
       ${row.session_count > 1
-        ? `<span class="rank-why">${esc(row.session_count)} sessions here; this is the one under most pressure.</span>`
+        // A live session is charted ahead of a worse one that has ended, so
+        // "under most pressure" is only true across the whole project when
+        // nothing is live. Say which comparison the pick won.
+        ? `<span class="rank-why">${esc(row.session_count)} sessions here; this is the ${row.charted_because_live ? 'live one' : 'one'} under most pressure.</span>`
         : ''}
     </span>
     <span class="rank-trend" data-trend="${esc(row.session_id)}"></span>

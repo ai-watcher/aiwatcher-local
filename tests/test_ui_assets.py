@@ -942,6 +942,14 @@ class WatchRanksByWhoNeedsYouTest(unittest.TestCase):
         self.assertIn("red ? 1 : 0", self.rank)
         self.assertIn("latest", self.rank)
 
+    def test_the_pressure_claim_says_live_when_the_row_is_the_live_one(self):
+        """A live session is charted ahead of a worse one that has ended. The
+        row's "this is the one under most pressure" was then untrue for the
+        project: the ended session was worse. The sentence must follow the same
+        flag the server picked on."""
+        row = js_function_source(self.js, "healthRow")
+        self.assertIn("row.charted_because_live ? 'live one' : 'one'", row)
+
     def test_every_red_row_outranks_every_green_row(self):
         """Red has two causes: at the window, or the biggest prompt no longer
         fits in what is left. Ranking on the first alone sorted a red row with
