@@ -325,6 +325,9 @@ def _empty_state() -> dict[str, Any]:
         "optimize_decisions": [],
         "companion_skips": [],
         "compact_nudges": [],
+        # What each compaction did to the requests after it
+        # (compaction_outcomes). Token counts only, no text or paths.
+        "compaction_outcomes": [],
         "ambient_interventions": [],
         "sent_notification_keys": [],
         "active_prompt_gate": None,
@@ -419,6 +422,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("optimize_decisions", [])
     data.setdefault("companion_skips", [])
     data.setdefault("compact_nudges", [])
+    data.setdefault("compaction_outcomes", [])
     data.setdefault("ambient_interventions", [])
     data.setdefault("sent_notification_keys", [])
     data.setdefault("active_prompt_gate", None)
@@ -1063,6 +1067,54 @@ def recent_compact_nudges(limit: int = 20) -> list[dict[str, Any]]:
         return []
     rows = [row for row in data.get("compact_nudges", []) if isinstance(row, dict)]
     return list(reversed(rows[-max(1, limit):]))
+
+
+MAX_COMPACTION_OUTCOMES_STORED = 500
+
+
+def upsert_compaction_outcomes(records: list[dict[str, Any]]) -> int:
+    """Keep one row per compaction, by id, oldest first.
+
+    A stored row is replaced only when something measured changed, so a poll
+    that re-reads a transcript that has not moved writes nothing. Returns the
+    number of rows added or replaced.
+    """
+    changed = 0
+    with _locked_state():
+        data = _load()
+        rows = [row for row in data.get("compaction_outcomes", []) if isinstance(row, dict)]
+        index = {row.get("id"): position for position, row in enumerate(rows)}
+        for record in records:
+            record_id = record.get("id")
+            if not isinstance(record_id, str) or not record_id:
+                continue
+            position = index.get(record_id)
+            if position is None:
+                index[record_id] = len(rows)
+                rows.append(dict(record))
+            elif _without_measured_at(rows[position]) != _without_measured_at(record):
+                rows[position] = dict(record)
+            else:
+                continue
+            changed += 1
+        if changed:
+            rows.sort(key=lambda row: str(row.get("boundary_at") or ""))
+            data["compaction_outcomes"] = rows[-MAX_COMPACTION_OUTCOMES_STORED:]
+            _save(data)
+    return changed
+
+
+def _without_measured_at(row: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in row.items() if key != "measured_at"}
+
+
+def compaction_outcomes() -> list[dict[str, Any]]:
+    try:
+        with _locked_state():
+            data = _load()
+    except OSError:
+        return []
+    return [row for row in data.get("compaction_outcomes", []) if isinstance(row, dict)]
 
 
 def _prune_brief_tokens(data: dict[str, Any]) -> None:
