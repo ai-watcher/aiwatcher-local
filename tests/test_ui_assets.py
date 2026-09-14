@@ -526,7 +526,7 @@ class TrimmedHomeTest(unittest.TestCase):
             "evidencePanel", "handoffAcceptance", "handoffBrief", "handoffConstraints",
             "handoffObjective", "handoffSources", "handoffStatus", "handoffType",
             "optimizeCleanupPrompt", "optimizeReward", "outcomePanel",
-            "planDerivedZone", "promptBrief", "todayDigest",
+            "planDerivedZone", "promptBrief", "promptReceipts", "todayDigest",
         }
         ids = set(re.findall(r'id="([\w-]+)"', self.html))
         looked_up = set(re.findall(r"""getElementById\(['"]([\w-]+)['"]\)""", self.js))
@@ -554,7 +554,7 @@ class SessionDrawerTest(unittest.TestCase):
                          "the drawer should reach its conclusion before its evidence")
 
     def test_supporting_sections_are_collapsed(self):
-        for summary in ("Expensive asks", "Outcome evidence", "Evidence trail",
+        for summary in ("What each prompt cost", "Outcome evidence", "Evidence trail",
                         "What to check next", "Cost by event type"):
             with self.subTest(section=summary):
                 self.assertIn("<summary>%s" % summary, self.js)

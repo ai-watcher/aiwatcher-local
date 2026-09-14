@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from .local_state import recent_hook_events
-from .pricing import estimate_cost
+from .pricing import CACHE_READ_MULTIPLIER, CACHE_WRITE_1H_MULTIPLIER, CACHE_WRITE_5M_MULTIPLIER, estimate_cost, lookup
 
 
 HOME_DIR = Path.home().resolve()
@@ -358,11 +358,38 @@ def segment_session_by_prompt(source_path: str | None, *, max_chars: int = 2000)
     next real prompt) is attributed to it. Returns one dict per turn with the prompt
     text and the cost/tokens/tool-calls/events accumulated during that turn.
     Reads prompt/text content on demand; the event scan itself stores only hashes.
+
+    Counted the way the event scan counts, so turn numbers and costs agree with
+    it: a row Claude Code wrote again at a compaction is skipped
+    (_repeated_row), and one request's usage, copied onto every content-block
+    line, is counted once (_usage_receipt_key). Until 2026-09-15 this function
+    did neither, and on this machine a session the event scan put at $44 summed
+    to $270 across its turns, with 21 prompts counted twice after compactions.
+
+    Each turn also carries what a receipt for that prompt needs, all from the
+    requests themselves:
+
+      at               when the prompt was sent
+      requests         model calls it caused
+      context_before   the chat's size on the last request before it (None for the first prompt)
+      context_after    the chat's size on its last request
+      took_seconds     prompt to last request
+      gap_seconds      last request before it to the prompt: how long the chat sat idle
+      cost_resent_usd  the chat read back from the cache on each request
+      cost_recached_usd  the existing chat written into the cache again -- cache
+                       writes beyond what that request added, which is what a
+                       cache that expired during a pause costs
+      priced           every request had a list price; False means cost_usd
+                       leaves some of it out
     """
     if not source_path or not source_path.endswith(".jsonl"):
         return []
     segments: list[dict[str, object]] = []
     current: dict[str, object] | None = None
+    seen_rows: set[str] = set()
+    counted_requests: set[str] = set()
+    last_context: int | None = None
+    last_request_at: datetime | None = None
     try:
         with Path(source_path).open(errors="replace") as handle:
             for index, line in enumerate(handle):
@@ -372,7 +399,10 @@ def segment_session_by_prompt(source_path: str | None, *, max_chars: int = 2000)
                     obj = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if _repeated_row(obj, seen_rows):
+                    continue
                 message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+                stamp = _parse_ts(obj.get("timestamp") or obj.get("createdAt"))
                 if obj.get("type") == "user" and not obj.get("isMeta"):
                     text = _user_prompt_text(message.get("content"))
                     if text:
@@ -383,12 +413,42 @@ def segment_session_by_prompt(source_path: str | None, *, max_chars: int = 2000)
                             "tokens": 0,
                             "tool_calls": 0,
                             "events": 0,
+                            "at": stamp.isoformat() if stamp else None,
+                            "requests": 0,
+                            "context_before": last_context,
+                            "context_after": None,
+                            "took_seconds": None,
+                            "gap_seconds": (
+                                round((stamp - last_request_at).total_seconds())
+                                if stamp and last_request_at else None
+                            ),
+                            "cost_resent_usd": 0.0,
+                            "cost_recached_usd": 0.0,
+                            "priced": True,
+                            # Claude Code's own summary after a compaction arrives as a
+                            # user row and opens a turn here and in the event scan alike;
+                            # it is flagged rather than dropped so turn numbers still agree.
+                            "compact_summary": bool(obj.get("isCompactSummary")),
                         }
                         segments.append(current)
                         continue
                 if current is None:
                     continue
+                content = message.get("content")
+                if isinstance(content, list):
+                    current["tool_calls"] = int(current["tool_calls"]) + sum(
+                        1 for item in content if isinstance(item, dict) and item.get("type") == "tool_use"
+                    )
+                current["events"] = int(current["events"]) + 1
+                receipt = _usage_receipt_key(obj, message)
+                if receipt is not None:
+                    if receipt in counted_requests:
+                        continue
+                    counted_requests.add(receipt)
                 tokens = _anthropic_usage(message.get("usage") or obj.get("usage") or {})
+                context = _billed_input(tokens)
+                if context <= 0 and tokens["output"] <= 0:
+                    continue
                 model = message.get("model") or obj.get("model")
                 current["cost_usd"] = float(current["cost_usd"]) + estimate_cost(
                     model,
@@ -397,18 +457,52 @@ def segment_session_by_prompt(source_path: str | None, *, max_chars: int = 2000)
                     cache_write_5m=tokens["cache_write_5m"],
                     cache_write_1h=tokens["cache_write_1h"],
                     cache_read=tokens["cache_read"],
-                    when=_parse_ts(obj.get("timestamp") or obj.get("createdAt")),
+                    when=stamp,
                 )
-                current["tokens"] = int(current["tokens"]) + _billed_input(tokens) + tokens["output"]
-                current["events"] = int(current["events"]) + 1
-                content = message.get("content")
-                if isinstance(content, list):
-                    current["tool_calls"] = int(current["tool_calls"]) + sum(
-                        1 for item in content if isinstance(item, dict) and item.get("type") == "tool_use"
-                    )
+                current["tokens"] = int(current["tokens"]) + context + tokens["output"]
+                if context <= 0:
+                    continue
+                resent, recached, priced = _request_cost_split(model, tokens, last_context, stamp)
+                current["cost_resent_usd"] = float(current["cost_resent_usd"]) + resent
+                current["cost_recached_usd"] = float(current["cost_recached_usd"]) + recached
+                current["priced"] = bool(current["priced"]) and priced
+                current["requests"] = int(current["requests"]) + 1
+                current["context_after"] = context
+                if stamp and current.get("at"):
+                    current["took_seconds"] = round((stamp - datetime.fromisoformat(str(current["at"]))).total_seconds())
+                last_context = context
+                if stamp:
+                    last_request_at = stamp
     except OSError:
         return []
     return segments
+
+
+def _request_cost_split(
+    model: str | None, tokens: dict[str, int], previous_context: int | None, when: datetime | None,
+) -> tuple[float, float, bool]:
+    """(re-sent, re-cached, priced) for one request, in list-price dollars.
+
+    Re-sent is the cache read. Re-cached is the part of the cache write that
+    is not this request's own growth: writing 600K when the chat grew by 2K
+    means the existing chat went back into the cache, which is what an
+    expired cache costs. The first request of a session has nothing earlier
+    to re-cache. Subscription and unknown models are not priced.
+    """
+    rates = lookup(model, when)
+    if not rates or rates.get("subscription"):
+        return 0.0, 0.0, False
+    price_in = float(rates["in"]) / 1_000_000
+    resent = tokens["cache_read"] * price_in * CACHE_READ_MULTIPLIER
+    written = tokens["cache_write_5m"] + tokens["cache_write_1h"]
+    if previous_context is None or written <= 0:
+        return resent, 0.0, True
+    growth = max(0, _billed_input(tokens) - previous_context)
+    rewritten = max(0, written - growth)
+    multiplier = (
+        tokens["cache_write_5m"] * CACHE_WRITE_5M_MULTIPLIER + tokens["cache_write_1h"] * CACHE_WRITE_1H_MULTIPLIER
+    ) / written
+    return resent, rewritten * price_in * multiplier, True
 
 
 def extract_opening_prompt(source_path: str | None, *, max_chars: int = 4000) -> str | None:
