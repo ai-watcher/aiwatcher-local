@@ -2146,6 +2146,10 @@ PROMPT_RECEIPT_RESUMED_SECONDS = 3 * 3600
 # after a shorter pause is not explained by the pause, so the receipt names a
 # break only past this.
 CACHE_MIN_LIFETIME_SECONDS = 300
+# How many of a chat's costliest prompts the drawer shows without a click. Danny
+# chose three on 2026-09-15: on three real chats five added only 8-12 points of
+# the chat's cost for a section about 40% taller.
+PROMPT_RECEIPT_COSTLIEST = 3
 
 
 def _duration_label(seconds: int) -> str:
@@ -2204,23 +2208,37 @@ def build_prompt_receipts(segments: list[dict[str, object]]) -> dict[str, object
             took = None
             took_reason = "The chat was picked up again later, so the time since the prompt is not how long it ran."
         gap = seg.get("gap_seconds") if isinstance(seg.get("gap_seconds"), int) else None
-        note = ""
-        if priced and cost > 0:
-            if recached / cost > 0.5:
-                note = (
-                    f"re-cached after {_duration_label(gap)} away"
-                    if gap is not None and gap >= CACHE_MIN_LIFETIME_SECONDS
-                    else "mostly re-caching the chat"
-                )
-            elif resent / cost > 0.5:
-                note = "mostly re-sending the chat"
-        # The row after a compaction is Claude Code's summary, not something the
-        # user typed; its requests are Claude carrying on from that summary.
+        # Only the unusual is noted. Re-sending the chat was most of the cost on
+        # nearly every prompt, so a note saying so on each row said nothing and
+        # buried the one that matters: the chat re-cached after a break.
+        # A break explains a re-cache only if it outlasted the cache: an hour for
+        # a chat writing 1-hour entries, five minutes otherwise. A 13-minute
+        # pause in a 1-hour chat was first labelled a break (2026-09-15); the
+        # re-cache there had some other cause, and saying "break" was false.
+        lifetime = seg.get("cache_lifetime_seconds")
+        lifetime = lifetime if isinstance(lifetime, int) and lifetime > 0 else CACHE_MIN_LIFETIME_SECONDS
+        after_break = bool(
+            priced and cost > 0 and recached / cost > 0.5
+            and gap is not None and gap >= lifetime
+        )
+        note = f"re-cached after {_duration_label(gap)} away" if after_break else ""
+        # Two user rows open a turn without being something the user typed:
+        # Claude Code's summary after a compaction (its requests are Claude
+        # carrying on from it), and the marker it writes when a reply is cut off.
+        # They are labelled rather than dropped so turn numbers still agree.
+        text = str(seg.get("prompt") or "")
         summary = bool(seg.get("compact_summary"))
+        interrupted = text.startswith("[Request interrupted")
+        if summary:
+            text = "Picked up after a compaction (Claude Code's summary, not a prompt you typed)"
+        elif interrupted:
+            text = "Interrupted (Claude Code's marker, not a prompt you typed)"
         rows.append({
             "turn": seg.get("turn"),
-            "prompt": "Picked up after a compaction (Claude Code's summary, not a prompt you typed)" if summary else str(seg.get("prompt") or "")[:240],
+            "prompt": text[:240],
             "compact_summary": summary,
+            "interrupted": interrupted,
+            "after_break": after_break,
             "at": seg.get("at"),
             "requests": requests,
             "priced": priced,
@@ -2243,15 +2261,32 @@ def build_prompt_receipts(segments: list[dict[str, object]]) -> dict[str, object
         return None
     priced_rows = [row for row in rows if row["priced"]]
     total = sum(float(row["cost_usd"] or 0.0) for row in priced_rows)
-    share = lambda key: round(100 * sum(float(row[key] or 0.0) for row in priced_rows) / total) if total else None  # noqa: E731
+    parts = {key: sum(float(row[key] or 0.0) for row in priced_rows) for key in ("resent_usd", "recached_usd", "new_usd")}
+    share = lambda key: round(100 * parts[key] / total) if total else None  # noqa: E731
+    costliest = sorted(priced_rows, key=lambda row: -float(row["cost_usd"] or 0.0))[:PROMPT_RECEIPT_COSTLIEST]
+    breaks = [row for row in rows if row["after_break"]]
     return {
         "prompts": len(rows),
         "total_usd": round(total, 6),
         "total_label": money(total),
+        "resent_usd": round(parts["resent_usd"], 6),
+        "recached_usd": round(parts["recached_usd"], 6),
+        "new_usd": round(parts["new_usd"], 6),
+        "resent_label": money(parts["resent_usd"]),
+        "recached_label": money(parts["recached_usd"]),
+        "new_label": money(parts["new_usd"]),
         "resent_share_pct": share("resent_usd"),
         "recached_share_pct": share("recached_usd"),
         "new_share_pct": share("new_usd"),
         "unpriced_prompts": len(rows) - len(priced_rows),
+        "costliest": costliest,
+        "top_share_pct": round(100 * sum(float(row["cost_usd"] or 0.0) for row in costliest) / total) if total else None,
+        "breaks": {
+            "count": len(breaks),
+            "usd": round(sum(float(row["cost_usd"] or 0.0) for row in breaks), 6),
+            "usd_label": money(sum(float(row["cost_usd"] or 0.0) for row in breaks)),
+            "gaps": [_duration_label(int(row["gap_seconds"])) for row in breaks],
+        },
         "rows": rows,
     }
 

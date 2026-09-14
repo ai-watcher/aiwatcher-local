@@ -4105,23 +4105,60 @@ async function selectSession(sessionId, attempt = 0, token = null) {
     ${timeline}</div>`);
   paintDrawerHealth(s.session_id);
 }
-// What each prompt in the open session cost. Replaced the collapsed "Expensive
-// asks" (top five by a cost that counted every copied usage line), because the
-// point is to see every prompt, and a receipt behind a click is not seen.
-// Question per row: "what did this prompt cost?" -- list-price dollars for that
-// prompt's own requests, split into the same money three ways. No status
+// Where the open session's money went, and which prompts spent it. Replaced
+// the collapsed "Expensive asks" (top five by a cost that counted every copied
+// usage line). Open, because the first version -- collapsed, opening on the
+// latest and cheapest prompts, "mostly re-sending" on nearly every row -- buried
+// the figures it existed to show (Danny, 2026-09-15). Question: where did this
+// chat's list-price dollars go? Scope: this session only. The total is not
+// restated as a figure of its own; the hero already carries it. No status
 // colour: a costly prompt is not a failure.
 const PROMPT_RECEIPT_ROWS = 12;
-let promptReceiptView = { sessionId: null, sort: 'time', all: false, data: null };
+let promptReceiptView = { sessionId: null, sort: 'cost', all: false, data: null };
 function renderPromptReceipts(receipts, sessionId) {
   if (!receipts || !receipts.rows || !receipts.rows.length) return '';
-  if (promptReceiptView.sessionId !== sessionId) promptReceiptView = { sessionId, sort: 'time', all: false, data: null };
+  if (promptReceiptView.sessionId !== sessionId) promptReceiptView = { sessionId, sort: 'cost', all: false, data: null };
   promptReceiptView.data = receipts;
-  // Collapsed like the drawer's other evidence, with the figures in the
-  // summary so the closed row still says what the chat cost and where it went.
-  const shares = receipts.resent_share_pct !== null ? ` · ${esc(receipts.resent_share_pct)}% re-sending the chat` : '';
-  return `<section class="detail-section"><details class="aiw-details"><summary>What each prompt cost (${esc(receipts.prompts)} prompts · ${esc(receipts.total_label)}${shares})</summary>
-    <div class="details-body" id="promptReceipts">${promptReceiptsBody(receipts)}</div></details></section>`;
+  const total = Number(receipts.total_usd || 0);
+  const pct = value => total > 0 ? Math.round(100 * Number(value || 0) / total) : 0;
+  const parts = [
+    ['resent', 'Re-sent the chat', receipts.resent_usd, receipts.resent_label, 'Read back from the cache on every request.'],
+    ['recached', 'Re-cached it', receipts.recached_usd, receipts.recached_label, 'Written into the cache again, mostly after breaks.'],
+    ['new', 'New work', receipts.new_usd, receipts.new_label, "What the prompts added, plus Claude's replies."],
+  ];
+  const split = total > 0
+    ? `<div class="receipts-bar" aria-hidden="true">${parts.filter(([, , value]) => Number(value) > 0).map(([name, , value]) =>
+        `<span class="receipt-part-${name}" style="width:${(100 * Number(value) / total).toFixed(1)}%"></span>`).join('')}</div>
+      <div class="receipts-parts">${parts.map(([name, label, value, valueLabel, copy]) => `<div class="receipts-part" title="${esc(copy)}">
+        <span class="receipts-part-name"><span class="receipt-key receipt-part-${name}"></span>${esc(label)}</span>
+        <span class="receipts-part-value">${esc(valueLabel)}<small>${pct(value)}%</small></span></div>`).join('')}</div>`
+    : '';
+  const breaks = receipts.breaks || {};
+  const gaps = (breaks.gaps || []).slice(0, 3).join(', ') + ((breaks.gaps || []).length > 3 ? ', …' : '');
+  // The advice says how the cost works, not how much would have been saved:
+  // that would be an estimate nothing here measures.
+  const breakCallout = breaks.count
+    ? `<div class="receipts-break"><strong>${esc(breaks.count)} prompt${breaks.count === 1 ? '' : 's'} cost ${esc(breaks.usd_label)} mostly writing the chat back into the cache after a break</strong> (${esc(gaps)} away).
+        <span class="receipts-advice">Coming back to a long chat after a break writes all of it to the cache again. Compact before you step away, or start a fresh chat, so there is less to write back.</span></div>`
+    : '';
+  const costliest = receipts.costliest || [];
+  const topRows = costliest.map((row, index) => {
+    const meta = [row.added_label ? `${row.added_label} added` : '', `${row.requests} request${row.requests === 1 ? '' : 's'}`, row.took_label || '', row.note || ''].filter(Boolean).join(' · ');
+    return `<li><span class="receipts-rank">${index + 1}</span>
+      <div class="receipts-top-body"><div class="receipts-top-line"><span class="receipts-top-cost">${esc(row.api_value)}</span><span class="receipts-top-prompt">${esc(row.prompt)}</span></div>
+      <div class="receipts-top-meta">${esc(meta)}</div></div>${promptReceiptSplit(row)}</li>`;
+  }).join('');
+  const topBlock = costliest.length && receipts.prompts > costliest.length
+    ? `<h4 class="receipts-subhead">Costliest prompts</h4><ol class="receipts-top">${topRows}</ol>
+      <p class="receipts-note-line">These ${esc(costliest.length)} were ${esc(receipts.top_share_pct)}% of the chat's cost.</p>`
+    : '';
+  const unpriced = receipts.unpriced_prompts
+    ? `<p class="receipts-note-line">${esc(receipts.unpriced_prompts)} prompt(s) used a model with no list price and are not in these figures.</p>`
+    : '';
+  const heading = total > 0 ? `Where this chat's ${esc(receipts.total_label)} went` : 'What each prompt cost';
+  return `<section class="detail-section receipts-section"><div class="receipts-head"><h3>${heading}</h3><span class="receipts-tag">API list prices · on a plan, where usage went, not a bill</span></div>
+    ${split}${breakCallout}${topBlock}${unpriced}
+    <details class="aiw-details receipts-all"><summary>See all ${esc(receipts.prompts)} prompts</summary><div class="details-body" id="promptReceipts">${promptReceiptsBody(receipts)}</div></details></section>`;
 }
 function setPromptReceiptView(change) {
   promptReceiptView = { ...promptReceiptView, ...change };
@@ -4151,27 +4188,27 @@ function promptReceiptsBody(receipts) {
       ? date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
       : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
-  const shares = [
-    receipts.resent_share_pct !== null ? `${esc(receipts.resent_share_pct)}% re-sending the chat` : '',
-    receipts.recached_share_pct ? `${esc(receipts.recached_share_pct)}% re-caching it after breaks` : '',
-  ].filter(Boolean).join(' · ');
-  const unpriced = receipts.unpriced_prompts ? ` ${esc(receipts.unpriced_prompts)} prompt(s) used a model with no list price and show no cost.` : '';
   const toggle = (sort, label) => `<button type="button" class="btn-quiet${view.sort === sort ? ' is-active' : ''}" aria-pressed="${view.sort === sort}" onclick="setPromptReceiptView({ sort: '${sort}' })">${label}</button>`;
+  // No hover box on the prompt text: it covered the row beneath it.
   const body = shown.map(row => {
     const text = String(row.prompt || '');
-    return `<tr>
-      <td class="receipt-when">${esc(when(row.at))}</td>
-      <td class="receipt-prompt" title="${esc(text)}">${esc(text.length > 110 ? text.slice(0, 110) + '…' : text)}${row.note ? `<span class="receipt-note">${esc(row.note)}</span>` : ''}</td>
+    // When it was sent sits under the prompt, not in a column: a chat spanning
+    // days needs "Sep 9, 06:00 PM", and that column pushed the costs out of the
+    // 619px drawer.
+    return `<tr class="${row.after_break ? 'receipt-break-row' : ''}">
+      <td class="receipt-prompt">${esc(text.length > 110 ? text.slice(0, 110) + '…' : text)}<span class="receipt-meta">${esc(when(row.at))}${row.note ? ` · <span class="receipt-note">${esc(row.note)}</span>` : ''}</span></td>
       <td class="receipt-cost">${row.priced ? esc(row.api_value) : '<span title="This model has no list price.">no price</span>'}${promptReceiptSplit(row)}</td>
       <td class="receipt-num">${row.added_label ? esc(row.added_label) : `<span title="${esc(row.added_reason || '')}">—</span>`}</td>
       <td class="receipt-num">${esc(row.requests)}</td>
       <td class="receipt-num">${row.took_label ? esc(row.took_label) : `<span title="${esc(row.took_reason || '')}">—</span>`}</td>
     </tr>`;
   }).join('');
-  return `<p class="receipts-summary">${esc(receipts.prompts)} prompts in this chat · ${esc(receipts.total_label)} at API list prices${shares ? ` · ${shares}` : ''}. On a plan this shows where usage went, not a bill.${unpriced}</p>
-    <div class="receipts-toolbar"><span class="receipts-legend"><span class="receipt-key receipt-part-resent"></span>re-sent the chat <span class="receipt-key receipt-part-recached"></span>re-cached the chat <span class="receipt-key receipt-part-new"></span>new work</span>
-      <span class="receipts-sort">Order ${toggle('time', 'Time')}${toggle('cost', 'Cost')}</span></div>
-    <div class="table-wrap"><table class="receipts-table"><thead><tr><th>Time</th><th>Prompt</th><th>Cost</th><th>Added</th><th>Requests</th><th>Took</th></tr></thead>
+  const guide = receipts.breaks && receipts.breaks.count
+    ? 'Highlighted rows re-cached the chat after a break. Each bar splits that prompt’s cost the same three ways.'
+    : 'Each bar splits that prompt’s cost the same three ways.';
+  return `<div class="receipts-toolbar"><span>${guide}</span>
+      <span class="receipts-sort">Order ${toggle('cost', 'Cost')}${toggle('time', 'Time')}</span></div>
+    <div class="table-wrap"><table class="receipts-table"><thead><tr><th>Prompt</th><th>Cost</th><th>Added</th><th>Requests</th><th>Took</th></tr></thead>
       <tbody>${body}</tbody></table></div>
     ${hidden ? `<button type="button" class="btn-quiet receipts-more" onclick="setPromptReceiptView({ all: ${!view.all} })">${view.all ? `Show ${view.sort === 'cost' ? 'the costliest' : 'the latest'} ${PROMPT_RECEIPT_ROWS}` : `Show all ${esc(rows.length)} prompts`}</button>` : ''}`;
 }

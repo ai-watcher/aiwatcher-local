@@ -390,6 +390,10 @@ def segment_session_by_prompt(source_path: str | None, *, max_chars: int = 2000)
     counted_requests: set[str] = set()
     last_context: int | None = None
     last_request_at: datetime | None = None
+    # Whether the chat has written 1-hour cache entries yet. A cache that holds
+    # for an hour does not expire in a 13-minute pause, so what counts as a
+    # break long enough to explain a re-cache depends on it.
+    writes_1h = False
     try:
         with Path(source_path).open(errors="replace") as handle:
             for index, line in enumerate(handle):
@@ -429,6 +433,7 @@ def segment_session_by_prompt(source_path: str | None, *, max_chars: int = 2000)
                             # user row and opens a turn here and in the event scan alike;
                             # it is flagged rather than dropped so turn numbers still agree.
                             "compact_summary": bool(obj.get("isCompactSummary")),
+                            "cache_lifetime_seconds": 3600 if writes_1h else 300,
                         }
                         segments.append(current)
                         continue
@@ -471,6 +476,8 @@ def segment_session_by_prompt(source_path: str | None, *, max_chars: int = 2000)
                 if stamp and current.get("at"):
                     current["took_seconds"] = round((stamp - datetime.fromisoformat(str(current["at"]))).total_seconds())
                 last_context = context
+                if tokens["cache_write_1h"] > 0:
+                    writes_1h = True
                 if stamp:
                     last_request_at = stamp
     except OSError:

@@ -103,6 +103,10 @@ class SegmentCountingTests(unittest.TestCase):
         self.assertAlmostEqual(third["cost_recached_usd"], 55_000 * self.price_in * CACHE_WRITE_1H_MULTIPLIER)
         self.assertTrue(third["priced"])
 
+    def test_the_cache_lifetime_follows_what_the_chat_has_written(self) -> None:
+        # Nothing written yet before the first prompt; 1-hour entries after.
+        self.assertEqual([seg["cache_lifetime_seconds"] for seg in self.segments], [300, 3600, 3600])
+
 
 def segment(**overrides) -> dict:
     base = {
@@ -127,15 +131,45 @@ class PromptReceiptTests(unittest.TestCase):
 
     def test_a_short_pause_does_not_explain_a_re_cache(self) -> None:
         (row,) = ui.build_prompt_receipts([segment(gap_seconds=180)])["rows"]
-        self.assertEqual(row["note"], "mostly re-caching the chat")
+        self.assertEqual(row["note"], "")
+        self.assertFalse(row["after_break"])
 
-    def test_mostly_re_sending_is_named_and_a_balanced_prompt_is_not(self) -> None:
+    def test_a_pause_inside_a_one_hour_cache_is_not_a_break(self) -> None:
+        within, past = ui.build_prompt_receipts([
+            segment(cache_lifetime_seconds=3600, gap_seconds=13 * 60),
+            segment(cache_lifetime_seconds=3600, gap_seconds=2 * 3600),
+        ])["rows"]
+        self.assertFalse(within["after_break"])
+        self.assertEqual(within["note"], "")
+        self.assertTrue(past["after_break"])
+
+    def test_only_a_break_is_noted(self) -> None:
+        # Re-sending was most of nearly every prompt's cost, so noting it on each
+        # row said nothing.
         resent, balanced = ui.build_prompt_receipts([
             segment(cost_resent_usd=8.0, cost_recached_usd=0.0),
             segment(cost_resent_usd=4.0, cost_recached_usd=1.0),
         ])["rows"]
-        self.assertEqual(resent["note"], "mostly re-sending the chat")
-        self.assertEqual(balanced["note"], "")
+        self.assertEqual((resent["note"], balanced["note"]), ("", ""))
+
+    def test_the_chat_level_figures_the_drawer_opens_on(self) -> None:
+        receipts = ui.build_prompt_receipts([
+            segment(turn=1, cost_usd=10.0, cost_resent_usd=2.0, cost_recached_usd=7.0),                  # a break
+            segment(turn=2, cost_usd=4.0, cost_resent_usd=3.0, cost_recached_usd=0.0, gap_seconds=60),
+            segment(turn=3, cost_usd=6.0, cost_resent_usd=5.0, cost_recached_usd=0.0, gap_seconds=60),
+            segment(turn=4, cost_usd=1.0, cost_resent_usd=0.5, cost_recached_usd=0.0, gap_seconds=60),
+        ])
+        self.assertEqual(receipts["resent_label"], ui.money(10.5))
+        self.assertEqual(receipts["recached_label"], ui.money(7.0))
+        self.assertEqual(receipts["new_label"], ui.money(3.5))
+        self.assertEqual([row["turn"] for row in receipts["costliest"]], [1, 3, 2])
+        self.assertEqual(receipts["top_share_pct"], round(100 * 20 / 21))
+        self.assertEqual(receipts["breaks"], {"count": 1, "usd": 10.0, "usd_label": ui.money(10.0), "gaps": ["2h 0m"]})
+
+    def test_an_interrupted_reply_is_not_shown_as_a_prompt(self) -> None:
+        (row,) = ui.build_prompt_receipts([segment(prompt="[Request interrupted by user for tool use]")])["rows"]
+        self.assertTrue(row["interrupted"])
+        self.assertTrue(row["prompt"].startswith("Interrupted"))
 
     def test_unmeasurable_figures_carry_their_reason(self) -> None:
         first, compacted, resumed = ui.build_prompt_receipts([
