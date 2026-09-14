@@ -1566,13 +1566,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         if collapsed {
             autoCollapseDeadline = nil
         }
-        let current = window.frame
         let targetWidth = collapsed ? collapsedWidth : expandedWidth
         let targetHeight = collapsed ? collapsedHeight : expandedHeight
-        let targetX = position.contains("right") ? current.maxX - targetWidth : current.minX
-        let targetY = position.contains("top") ? current.maxY - targetHeight : current.minY
-        let target = NSRect(x: targetX, y: targetY, width: targetWidth, height: targetHeight)
-        window.setFrame(target, display: true, animate: true)
+        window.setFrame(anchoredFrame(width: targetWidth, height: targetHeight), display: true, animate: true)
         rootView.frame = NSRect(x: 0, y: 0, width: targetWidth, height: targetHeight)
         rootView.layer?.cornerRadius = collapsed ? targetHeight / 2 : 16
         applyVisibility()
@@ -1811,18 +1807,28 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // Grows away from the screen edge the window sits nearest -- judged from
+    // where the user dragged it, not the configured start position -- then
+    // clamps onto that screen. A bubble parked on the left opens rightward,
+    // one on the right opens leftward, and collapsing lands it back in place.
+    func anchoredFrame(width: CGFloat, height: CGFloat) -> NSRect {
+        let current = window.frame
+        let screen = (window.screen ?? NSScreen.main)?.visibleFrame ?? current
+        let margin: CGFloat = 8
+        var x = current.midX > screen.midX ? current.maxX - width : current.minX
+        var y = current.midY > screen.midY ? current.maxY - height : current.minY
+        x = min(max(x, screen.minX + margin), max(screen.minX + margin, screen.maxX - width - margin))
+        y = min(max(y, screen.minY + margin), max(screen.minY + margin, screen.maxY - height - margin))
+        return NSRect(x: x, y: y, width: width, height: height)
+    }
+
     // The queue can change the bar's height between polls. Anchored the same
-    // way setCollapsed anchors: a bottom-positioned bar grows upward, a
-    // top-positioned one downward, so the corner the user parked it in stays
-    // put.
+    // way setCollapsed anchors, so the corner the user parked it in stays put.
     func applyWindowSize() {
         if collapsed { return }
         let target = expandedHeight
-        let current = window.frame
-        if abs(current.height - target) < 0.5 { return }
-        let targetY = position.contains("top") ? current.maxY - target : current.minY
-        let frame = NSRect(x: current.minX, y: targetY, width: expandedWidth, height: target)
-        window.setFrame(frame, display: true, animate: true)
+        if abs(window.frame.height - target) < 0.5 { return }
+        window.setFrame(anchoredFrame(width: expandedWidth, height: target), display: true, animate: true)
         rootView.frame = NSRect(x: 0, y: 0, width: expandedWidth, height: target)
     }
 
@@ -2180,6 +2186,31 @@ def _request_runtime_return(base: str, session_id: str) -> bool:
     except (OSError, urllib.error.URLError, json.JSONDecodeError):
         return False
     return bool(result.get("ok"))
+
+
+def _anchored_origin(
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    target_width: int,
+    target_height: int,
+    screen_width: int,
+    screen_height: int,
+    margin: int = 8,
+) -> tuple[int, int]:
+    """Top-left corner for resizing a window in place, in Tk's y-down space.
+
+    The window grows away from the screen edge it sits nearest -- a bubble
+    dragged to the right expands leftward, one on the left expands rightward --
+    judged from where it is now, not the configured start position, so a
+    dragged bubble never opens off screen. The result is then clamped on screen.
+    """
+    new_x = x + width - target_width if x + width / 2 > screen_width / 2 else x
+    new_y = y + height - target_height if y + height / 2 > screen_height / 2 else y
+    new_x = min(max(new_x, margin), max(margin, screen_width - target_width - margin))
+    new_y = min(max(new_y, margin), max(margin, screen_height - target_height - margin))
+    return int(new_x), int(new_y)
 
 
 def _set_window_position(root: object, width: int, height: int) -> None:
@@ -2630,6 +2661,23 @@ def run_native_presence(
     x = 24 if "left" in position else max(16, screen_width - expanded_width - 24)
     y = 24 if "top" in position else max(16, screen_height - expanded_height - 92)
     root.geometry(f"{expanded_width}x{expanded_height}+{x}+{y}")
+    # Tracked here rather than read back through winfo_x/winfo_width, which
+    # report a 1x1 window at 0,0 until Tk maps it.
+    window_box = {"x": x, "y": y, "width": expanded_width, "height": expanded_height}
+
+    def resize_window(width: int, height: int) -> None:
+        new_x, new_y = _anchored_origin(
+            window_box["x"],
+            window_box["y"],
+            window_box["width"],
+            window_box["height"],
+            width,
+            height,
+            screen_width,
+            screen_height,
+        )
+        root.geometry(f"{width}x{height}+{new_x}+{new_y}")
+        window_box.update(x=new_x, y=new_y, width=width, height=height)
 
     style = ttk.Style(root)
     try:
@@ -2726,7 +2774,10 @@ def run_native_presence(
         drag_start["y"] = int(event.y)
 
     def move_window(event: tk.Event) -> None:
-        root.geometry(f"+{int(event.x_root) - drag_start['x']}+{int(event.y_root) - drag_start['y']}")
+        new_x = int(event.x_root) - drag_start["x"]
+        new_y = int(event.y_root) - drag_start["y"]
+        root.geometry(f"+{new_x}+{new_y}")
+        window_box.update(x=new_x, y=new_y)
 
     for draggable in (root, frame, collapsed_frame, drag, left):
         draggable.bind("<ButtonPress-1>", begin_drag)
@@ -3335,11 +3386,11 @@ def run_native_presence(
         if collapsed.get():
             frame.pack_forget()
             collapsed_frame.pack(fill="both", expand=True)
-            root.geometry(f"{collapsed_width}x{collapsed_height}")
+            resize_window(collapsed_width, collapsed_height)
         else:
             collapsed_frame.pack_forget()
             frame.pack(fill="both", expand=True)
-            root.geometry(f"{expanded_width}x{expanded_height + row_height * visible_waiting_rows()}")
+            resize_window(expanded_width, expanded_height + row_height * visible_waiting_rows())
         update_attention_style()
 
     def toggle_collapsed() -> None:
@@ -3460,7 +3511,7 @@ def run_native_presence(
                 row_widgets[index][0].pack(fill="x")
         rows_shown.set(rows)
         if not collapsed.get():
-            root.geometry(f"{expanded_width}x{expanded_height + row_height * rows}")
+            resize_window(expanded_width, expanded_height + row_height * rows)
 
     def should_show_window() -> bool:
         if state_var.get() in {
