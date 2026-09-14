@@ -1229,21 +1229,11 @@ function verdictLines(s) {
 
   const p = v.pressure || {};
   if (p.measurable) {
-    // context_window is null when the model's window is not known. That is
-    // shown as "no limit to project towards", never as another model's number.
-    const limit = p.context_window;
-    let body;
-    if (p.turns_to_critical === null || p.turns_to_critical === undefined) {
-      body = !limit
-        ? `${p.latest_turn_label} per turn. This model's context window is not known, so there is no limit to project towards.`
-        : p.latest_turn_tokens >= limit
-          ? `${p.latest_turn_label} per turn, at this model's ${compactTokens(limit)} window. No headroom left to project.`
-          : `${p.latest_turn_label} per turn of a ${compactTokens(limit)} window. Not enough turns yet to project a trend.`;
-    } else {
-      body = p.turns_to_critical > RUNWAY_MAX_PROJECTED_TURNS
-        ? `${p.latest_turn_label} per turn. More than ${RUNWAY_MAX_PROJECTED_TURNS} turns of headroom at this rate.`
-        : `${p.latest_turn_label} per turn. About ${p.turns_to_critical} turn${p.turns_to_critical === 1 ? '' : 's'} of headroom at this rate.`;
-    }
+    // Worded by roomVerdict, the same reading the Watch row and the drawer give.
+    // context_window is null when the model's window is not known, and that is
+    // said as unknown, never as another model's number.
+    const room = roomVerdict(p.context_window, p.latest_turn_tokens, p.largest_prompt_growth, p.next_prompt_may_not_fit, p.resent_tokens);
+    const body = `${room.headline}. ${room.detail}`;
     lines.push({ key: 'room', label: 'Room left', tone: p.severity, body });
   }
 
@@ -2314,9 +2304,6 @@ function renderRuntimeOptimizeCard(item, cleanupPrompt) {
    - every chart ships a table view; nothing is encoded in colour alone
 --------------------------------------------------------------------------- */
 const SVG_NS = 'http://www.w3.org/2000/svg';
-// Past this the projection is drawn no further and the caption says "N+". A
-// straight line forty turns out is already a stretch; a hundred is a fiction.
-const RUNWAY_MAX_PROJECTED_TURNS = 40;
 function svgEl(name, attrs) {
   const node = document.createElementNS(SVG_NS, name);
   for (const key in attrs) node.setAttribute(key, attrs[key]);
@@ -2392,13 +2379,14 @@ function drawMeter(node, chart) {
   // One line on the track: the model's own context window. There is no amber
   // "pressure" mark any more -- it was 75% of Claude's 200k window applied to
   // every model, and nothing happens at 75% of a window. Below the window the
-  // position is a fact, not a verdict; at it, red.
+  // position is a fact, not a verdict; at it, or once this session's biggest
+  // prompt no longer fits in what is left, red -- the same rule as roomVerdict.
   const limit = chart.context_window_n || 0;
   const latest = chart.latest_turn_tokens_n || 0;
   if (!limit) return;
   const W = 1000, H = 20, track = limit * 1.25;
   const at = value => Math.min(1, value / track) * W;
-  const tone = latest >= limit ? 'var(--red)' : 'var(--green)';
+  const tone = latest >= limit || chart.next_prompt_may_not_fit ? 'var(--red)' : 'var(--green)';
   const parts = [
     `<rect x="0" y="6" width="${W}" height="9" rx="4.5" fill="var(--surface)"/>`,
     `<rect x="0" y="6" width="${at(Math.min(latest, limit)).toFixed(1)}" height="9" rx="4.5" fill="${tone}"/>`,
@@ -2584,46 +2572,72 @@ function attachTrendHover(node, series, geom) {
    have I got" independently is how they end up disagreeing. */
 function runwayVerdict(chart) {
   if (!chart || (chart.turn_series || []).length < 3) return null;
-  // turns_to_critical is null for two opposite reasons and they must not share a
-  // sentence: a session already past the threshold is the worst case on the page,
-  // and describing it as "not on a path to" the threshold reads as reassurance.
-  if (chart.turns_to_critical === null || chart.turns_to_critical === undefined) {
-    const limit = chart.context_window_n;
-    // No known window is a third reason for null, and it is neither of the
-    // other two: not a wall, not a plateau. Unmeasured, said as unmeasured.
-    if (!limit) {
-      return {
-        severity: 'unknown',
-        headline: 'Context window unknown',
-        detail: `${compactTokens(chart.latest_turn_tokens_n)} per turn. This model's window is not on file, so there is no limit to project towards.`,
-      };
-    }
-    if (chart.latest_turn_tokens_n >= limit) {
-      return {
-        severity: 'critical',
-        headline: 'At the context window',
-        detail: `${compactTokens(chart.latest_turn_tokens_n)} per turn of a ${compactTokens(limit)} window. There is no headroom left to project.`,
-      };
-    }
+  return roomVerdict(chart.context_window_n, chart.latest_turn_tokens_n,
+    chart.largest_prompt_growth_n, chart.next_prompt_may_not_fit, chart.resent_n);
+}
+/* How much room a session has left, worded once for the Watch row, the drawer,
+   the session review and Home.
+
+   It used to be "turns of headroom": the window left divided by average growth
+   per request. A request is one call in a tool loop, not a prompt, and against a
+   1M window that division passed the 40-turn cap on every session -- one at 86%
+   of its window read the same "40+ turns" as one at 5%. A per-prompt pace did no
+   better: on real sessions an early pace ran 2-3x high, because a few long tool
+   loops carry most of the growth and nothing in the prompt predicts them.
+
+   So this states the room as a measurement and projects nothing. Below the
+   window red has one cause, decided in session_health: this session has already
+   had a prompt bigger than what is left. */
+function roomVerdict(limit, latest, largest, mayNotFit, resent) {
+  const now = latest || 0;
+  // No known window is not a wall and not room: unmeasured, said as unmeasured.
+  if (!limit) {
     return {
-      severity: 'healthy',
-      headline: 'Not growing right now',
-      detail: 'Context is flat, so there is no threshold to project towards.',
+      severity: 'unknown',
+      headline: 'Context window unknown',
+      detail: `${compactTokens(now)} per turn. This model's window is not on file, so there is no limit to measure room against.`,
     };
   }
-  // The drawn projection is capped, so nothing may quote a number the chart does
-  // not reach -- and past this range the honest reading is "plenty".
-  if (chart.turns_to_critical > RUNWAY_MAX_PROJECTED_TURNS) {
+  if (now >= limit) {
     return {
-      severity: 'healthy',
-      headline: `${RUNWAY_MAX_PROJECTED_TURNS}+ turns of headroom`,
-      detail: `Growing ${compactTokens(chart.growth_per_turn_n)}/turn. Far enough out that the exact number is noise.`,
+      severity: 'critical',
+      headline: 'At the context window',
+      detail: `${compactTokens(now)} per turn of a ${compactTokens(limit)} window. There is no room left.`,
     };
   }
+  const headline = `${compactTokens(limit - now)} left of ${compactTokens(limit)}`;
+  // What every request repeats: the latest request's cache reads, as the
+  // provider counted them. Null when the source reports no cache buckets, and
+  // then nothing is said -- never "re-sends 0". On a cache miss the history is
+  // rewritten rather than read, so the figure dips for that one request; on
+  // real sessions that was about 1% of requests.
+  const resends = resent ? `Each request re-sends ${compactTokens(resent)}.` : '';
+  // Null when the tool does not number its prompts, as Codex rollouts do not.
+  if (largest === null || largest === undefined) {
+    return {
+      severity: 'healthy',
+      headline,
+      detail: [resends, 'This tool does not mark where one prompt ends, so only reaching the window can turn this red.']
+        .filter(Boolean).join(' '),
+    };
+  }
+  if (mayNotFit) {
+    return {
+      severity: 'critical',
+      headline,
+      detail: [`The biggest prompt in this session added ${compactTokens(largest)}, so one more like it could make the tool compact on its own.`, resends]
+        .filter(Boolean).join(' '),
+    };
+  }
+  // Healthy says only what every request repeats; the biggest prompt that
+  // still fits is in the drawer's facts. Without cache figures, that fact is
+  // the most useful thing left to say.
   return {
-    severity: chart.turns_to_critical <= 10 ? 'critical' : 'warning',
-    headline: `≈${chart.turns_to_critical} turn${chart.turns_to_critical === 1 ? '' : 's'} of headroom`,
-    detail: `Growing ${compactTokens(chart.growth_per_turn_n)}/turn, since this session last shed context.`,
+    severity: 'healthy',
+    headline,
+    detail: resends || (largest > 0
+      ? `The biggest prompt in this session added ${compactTokens(largest)}, and that still fits.`
+      : 'No prompt since the last reset has grown the context.'),
   };
 }
 /* Names every line on the runway chart. The caption used to carry "Amber is
@@ -3167,8 +3181,8 @@ function healthReason(row, waitingById) {
     return mins >= 1 ? `Waiting on you for ${mins}m.` : 'Waiting on you.';
   }
   // A commit landed and most of the replay predates it: the one moment context
-  // size has an action attached, and it outranks the runway reading because the
-  // runway is a projection and this is a fact about the last few turns.
+  // size has an action attached, and it outranks the room reading, which says
+  // how much space is left but not when to act on it.
   const compact = row.compact;
   // The card charts the project's worst session; the nudge is for the one
   // being typed into. When they differ the sentence names which -- by the
@@ -3218,6 +3232,8 @@ function healthFacts(row) {
   // measurement. The drawer is opened for one session, so the
   // numbers have to say which of them is about the project it sits in.
   const session = [
+    // The input to the red rule, so a reader can check it against the room left.
+    chart.largest_prompt_growth_n ? `biggest prompt ${compactTokens(chart.largest_prompt_growth_n)}` : '',
     peakIsHistoric ? `peak ${row.peak_turn_tokens}` : '',
     row.bloat_measurable ? `${row.bloat_label} replay` : '',
     row.bloat_measurable ? `${row.replayed_cost_label} on replay` : '',
@@ -3238,24 +3254,14 @@ function healthFacts(row) {
 }
 
 function headroomLabel(chart) {
-  const turns = chart && chart.turns_to_critical;
-  if (turns === null || turns === undefined) {
-    // Null for three reasons, and only one of them is "no headroom". Reading
-    // all three as the wall put "already past the limit" on flat sessions.
-    const limit = chart && chart.context_window_n;
-    const latest = (chart && chart.latest_turn_tokens_n) || 0;
-    if (!limit) return { big: compactTokens(latest), sub: 'per turn, window unknown' };
-    if (latest >= limit) return { big: 'No headroom', sub: 'at the context window' };
-    return { big: 'Not growing', sub: 'nothing to project' };
-  }
-  // Capped where runwayVerdict caps. Uncapped this printed "110 turns" beside a
-  // reason reading "40+ turns of headroom" -- two numbers for one quantity,
-  // disagreeing, on the same row. 110 is also past the end of the drawn
-  // projection, so it was a number the chart underneath it never reaches.
-  if (turns > RUNWAY_MAX_PROJECTED_TURNS) {
-    return { big: `${RUNWAY_MAX_PROJECTED_TURNS}+ turns`, sub: 'of headroom at this rate' };
-  }
-  return { big: `${turns} turn${turns === 1 ? '' : 's'}`, sub: 'of headroom at this rate' };
+  // The same room roomVerdict states in the reason beside it, as one short
+  // figure. Measured, so it needs no cap: the capped "40+ turns" it replaced
+  // read the same on a session at 86% of its window as on one at 5%.
+  const limit = chart && chart.context_window_n;
+  const latest = (chart && chart.latest_turn_tokens_n) || 0;
+  if (!limit) return { big: compactTokens(latest), sub: 'per turn, window unknown' };
+  if (latest >= limit) return { big: 'No room', sub: 'at the context window' };
+  return { big: `${compactTokens(limit - latest)} left`, sub: `of ${compactTokens(limit)}` };
 }
 function healthRow(row, waitingById, index) {
   const reason = healthReason(row, waitingById);
@@ -5348,21 +5354,16 @@ function ambientRunning(card, presence) {
   else scale.push({ label: 'window unknown', tone: 'muted' });
   if (peak > latest) scale.push({ label: 'peaked ' + card.peak_turn_tokens, tone: 'muted' });
 
-  // Runway wording follows the data: turns_to_critical is null once a session is
-  // at its window, or when no window is known, and claiming headroom in either
-  // case would be a lie.
-  const runway = chart.turns_to_critical === null || chart.turns_to_critical === undefined
-    ? (!limit
-        ? 'This model\'s context window is not on file, so there is nothing to project towards.'
-        : latest >= limit
-          ? 'It is at this model\'s ' + compactTokens(limit) + ' window, so there is no headroom left to project.'
-          : '')
-    // Capped where runwayVerdict caps. Against a 1M window most sessions project
-    // hundreds of turns, and "841 turns" beside a card reading "40+" is two
-    // numbers for one quantity -- past the cap the honest reading is "plenty".
-    : chart.turns_to_critical > RUNWAY_MAX_PROJECTED_TURNS
-      ? 'More than <b>' + RUNWAY_MAX_PROJECTED_TURNS + ' turns</b> of headroom at the current rate.'
-      : 'About <b>' + chart.turns_to_critical + ' turns</b> of headroom at the current rate.';
+  // Room wording follows roomVerdict, so Home cannot state a different amount of
+  // room than the drawer. Kept to one short clause: this row shares an
+  // equal-height contract with the idle state, and a second sentence wraps it.
+  const room = roomVerdict(limit, latest, chart.largest_prompt_growth_n, chart.next_prompt_may_not_fit);
+  const runway = !limit || latest >= limit
+    ? esc(room.detail)
+    : room.severity === 'critical'
+      ? '<b>' + esc(compactTokens(limit - latest)) + ' left</b>, less than this session\'s biggest prompt ('
+        + esc(compactTokens(chart.largest_prompt_growth_n)) + ').'
+      : '<b>' + esc(compactTokens(limit - latest)) + ' left</b> of this model\'s ' + esc(compactTokens(limit)) + ' window.';
   // Scope. These two figures are not the same scope and the old wording put
   // them under one unscoped "it": bloat_label is ONE session's ratio -- ui.py
   // builds it from health.bloat_ratio, the representative session -- while

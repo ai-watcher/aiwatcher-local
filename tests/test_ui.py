@@ -1953,15 +1953,17 @@ class DashboardWindowTests(unittest.TestCase):
         disagree" -- Home carried a copy of the context-health card. Home is the
         ambient surface now and no longer does, so there is one reader rather
         than two. The rule that mattered survives the move: whoever states the
-        deadline derives it here rather than recomputing it, and the two opposite
-        reasons turns_to_critical can be null stay distinguishable.
+        deadline derives it here rather than recomputing it. It is worded as room
+        left now, in roomVerdict, because the turns projection it replaced read
+        "40+" on every 1M-window session.
         """
         self.assertIn("function runwayVerdict(chart)", ui.HTML)
         self.assertIn("runwayVerdict(row.chart)", ui.HTML)
+        self.assertIn("function roomVerdict(limit, latest, largest, mayNotFit, resent)", ui.HTML)
         self.assertIn("At the context window", ui.HTML)
-        self.assertIn("Not growing right now", ui.HTML)
-        # And the third reason: no window on file for this model.
+        # And the other reason: no window on file for this model.
         self.assertIn("Context window unknown", ui.HTML)
+        self.assertNotIn("turns_to_critical", ui.HTML)
 
     def test_api_equivalent_value_tile_carries_no_status_colour(self) -> None:
         """The figure is counterfactual, so no rail may imply a loss.
@@ -3747,7 +3749,7 @@ class DashboardWindowTests(unittest.TestCase):
             updated_at=now,
             model="claude-sonnet-5",
         )
-        # Climbing steadily, well short of the threshold, so a projection exists.
+        # Climbing steadily, well short of the window.
         events = [
             LocalEvent(
                 event_id=f"e{i}",
@@ -3773,9 +3775,13 @@ class DashboardWindowTests(unittest.TestCase):
         # The session model's own window, not a constant.
         self.assertEqual(chart["context_window_n"], 1_000_000)
         self.assertEqual(chart["context_resets"], 0)
-        self.assertAlmostEqual(chart["growth_per_turn_n"], 8_000, delta=1)
-        # (1_000_000 - 96_000) / 8_000 = 113
-        self.assertEqual(chart["turns_to_critical"], 113)
+        # Room is measured: 1_000_000 - 96_000. These events carry no prompt
+        # numbers, so there is no biggest prompt and nothing short of the window is red.
+        self.assertEqual(chart["tokens_left_n"], 904_000)
+        self.assertIsNone(chart["largest_prompt_growth_n"])
+        self.assertFalse(chart["next_prompt_may_not_fit"])
+        # The latest request's measured cache reads.
+        self.assertEqual(chart["resent_n"], 20_000)
         # The display strings the existing card renders must be untouched.
         self.assertEqual(cards[0]["latest_turn_tokens"], "96.0k")
 

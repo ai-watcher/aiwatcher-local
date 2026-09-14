@@ -2195,7 +2195,10 @@ def _session_verdict_inputs(row: LocalSession, events: list[LocalEvent]) -> dict
             # rendered as "no limit to project towards", never as some other
             # model's number.
             "context_window": health.context_window,
-            "turns_to_critical": health.turns_to_critical,
+            "tokens_left": health.tokens_left,
+            "largest_prompt_growth": health.largest_prompt_growth,
+            "next_prompt_may_not_fit": health.next_prompt_may_not_fit,
+            "resent_tokens": health.latest_turn_replayed_tokens if health.cache_reported else None,
             "turns_since_reset": health.turns_since_reset,
             "severity": health.severity,
         }
@@ -3179,8 +3182,13 @@ def _context_health_card(
             "turn_series": turn_series[-CONTEXT_CHART_MAX_TURNS:],
             "latest_turn_tokens_n": health.latest_turn_tokens,
             "peak_turn_tokens_n": health.peak_turn_tokens,
-            "growth_per_turn_n": round(health.segment_growth_rate),
-            "turns_to_critical": health.turns_to_critical,
+            "tokens_left_n": health.tokens_left,
+            "largest_prompt_growth_n": health.largest_prompt_growth,
+            "next_prompt_may_not_fit": health.next_prompt_may_not_fit,
+            # What the latest request carried from before, as the provider
+            # counted its cache reads. Null when the source reports no cache
+            # buckets: unmeasured, not zero.
+            "resent_n": health.latest_turn_replayed_tokens if health.cache_reported else None,
             "turns_since_reset": health.turns_since_reset,
             "context_resets": health.context_resets,
             # The model's window, null when unknown. The chart draws no limit
@@ -6317,7 +6325,9 @@ def _ask_session_evidence(
                 "severity": health.severity,
                 "latest_turn_tokens": health.latest_turn_tokens,
                 "peak_turn_tokens": health.peak_turn_tokens,
-                "turns_to_critical": health.turns_to_critical,
+                "tokens_left": health.tokens_left,
+                "largest_prompt_growth": health.largest_prompt_growth,
+                "next_prompt_may_not_fit": health.next_prompt_may_not_fit,
                 "turns_since_reset": health.turns_since_reset,
                 "replayed_cost_usd": round(health.replayed_cost_usd, 6),
             } if health else {"measurable": False},

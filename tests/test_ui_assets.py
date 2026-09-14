@@ -274,11 +274,11 @@ class AmbientSurfaceTest(unittest.TestCase):
         # end of a fixed track.
         self.assertIn("trackMax", self.js)
 
-    def test_no_headroom_claimed_once_past_the_threshold(self):
-        # turns_to_critical is null when a session is already over; claiming
-        # headroom there would be a lie the rest of the product does not tell.
-        self.assertIn("turns_to_critical", self.js)
-        self.assertIn("no headroom left to project", self.js)
+    def test_no_room_claimed_at_the_window(self):
+        # A session at its window has no room, and saying otherwise would be a
+        # lie the rest of the product does not tell.
+        self.assertIn("There is no room left.", self.js)
+        self.assertIn("next_prompt_may_not_fit", self.js)
 
     def test_dom_is_not_rewritten_when_nothing_changed(self):
         # It re-renders every 10s. Rewriting unconditionally would drop focus from
@@ -949,13 +949,14 @@ class WatchRanksByWhoNeedsYouTest(unittest.TestCase):
         The middle rung used to spell out the past-the-limit sentence here.
         That made healthReason a second place the deadline was worked out --
         the defect test_the_runway_deadline_is_computed_in_one_place exists to
-        stop -- so it now defers to runwayVerdict, which owns that wording. The
-        rung is still there; it is quoted from the one source instead."""
+        stop -- so it now defers to runwayVerdict, which hands the wording to
+        roomVerdict. The rung is still there; it is quoted from the one source
+        instead."""
         self.assertIn("Waiting on you", self.reason)
         self.assertIn("runwayVerdict(row.chart)", self.reason)
         self.assertIn("Highest per-turn here", self.reason)
-        verdict = js_function_source(self.js, "runwayVerdict")
-        self.assertIn("At the context window", verdict)
+        self.assertIn("roomVerdict(", js_function_source(self.js, "runwayVerdict"))
+        self.assertIn("At the context window", js_function_source(self.js, "roomVerdict"))
 
     def test_the_reason_follows_the_same_precedence_as_the_sort(self):
         # Or the explanation drifts from the ordering it explains.
@@ -1780,32 +1781,36 @@ class WatchRanksAndTheDrawerDiagnosesTest(unittest.TestCase):
         cls.drawer = js_function_source(cls.js, "renderSessionContextHealth")
 
     def test_one_quantity_gets_one_number(self):
-        """The row put "110 turns" in its headroom column beside a reason that
-        read "40+ turns of headroom". Both were true -- the verdict caps at the
-        end of the drawn projection and the column did not -- and side by side
-        they read as a contradiction over a number the chart never reaches."""
+        """The row once put "110 turns" in its headroom column beside a reason
+        reading "40+ turns of headroom", and later both read "40+" on every
+        1M-window session. The column and the reason now state one measured
+        amount of room from the same fields, with no cap to disagree about."""
         room = js_function_source(self.js, "headroomLabel")
-        self.assertIn("turns > RUNWAY_MAX_PROJECTED_TURNS", room)
-        self.assertIn("${RUNWAY_MAX_PROJECTED_TURNS}+ turns", room)
+        self.assertIn("limit - latest", room)
+        self.assertNotIn("RUNWAY_MAX_PROJECTED_TURNS", self.js)
+        self.assertNotIn("turns_to_critical", self.js)
         # And the drawer states it once, in the verdict, rather than repeating
         # the same two facts as a stat block underneath it.
         self.assertNotIn("health-hero", self.drawer)
         self.assertNotIn("headroomLabel", self.drawer)
-        # The session review's own Room left line projected past the end of the
-        # drawn chart too, and now sits in the same drawer as it.
+        # The session review's own Room left line reads the same wording.
         verdict = js_function_source(self.js, "verdictLines")
-        self.assertIn("p.turns_to_critical > RUNWAY_MAX_PROJECTED_TURNS", verdict)
+        self.assertIn("roomVerdict(", verdict)
 
-    def test_growth_per_turn_is_not_dressed_as_turn_size(self):
-        """runwayVerdict's healthy branch read "At 827/turn" -- the growth rate
-        -- directly above a Room left line reading "115.6k per turn", the turn
-        size. Two quantities differing by two orders of magnitude, phrased the
-        same way, one under the other."""
-        verdict = js_function_source(self.js, "runwayVerdict")
-        # Every branch that quotes the rate says it is a rate.
-        self.assertEqual(
-            verdict.count("Growing ${compactTokens(chart.growth_per_turn_n)}/turn"),
-            verdict.count("growth_per_turn_n"))
+    def test_no_surface_projects_a_growth_rate_into_room(self):
+        """A per-request growth rate was the divisor behind "turns of headroom",
+        and a per-prompt pace measured 2-3x high early in a session. Neither is
+        sent to the page any more, so nothing can quote one as room."""
+        self.assertNotIn("growth_per_turn_n", self.js)
+
+    def test_resent_is_said_only_when_measured(self):
+        """The line reads measured cache reads; a source with no cache buckets
+        sends null, and null must say nothing rather than "re-sends 0"."""
+        room = js_function_source(self.js, "roomVerdict")
+        self.assertIn("Each request re-sends", room)
+        self.assertIn("resent ?", room)
+        self.assertIn("chart.resent_n", js_function_source(self.js, "runwayVerdict"))
+        self.assertIn("p.resent_tokens", js_function_source(self.js, "verdictLines"))
 
     def test_the_diagnosis_lives_in_the_drawer(self):
         # Matched on the whole attribute, so renaming a class cannot leave the
