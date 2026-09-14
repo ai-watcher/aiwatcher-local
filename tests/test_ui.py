@@ -1781,21 +1781,33 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(len(cards), 1)
         self.assertEqual(cards[0]["session_id"], "big")
 
-    def test_health_card_does_not_let_a_live_session_outrank_a_worse_severity(self) -> None:
-        """Being reachable breaks ties inside a severity, it does not jump them."""
+    def test_health_card_charts_the_live_session_over_an_ended_critical_one(self) -> None:
+        """Reachability outranks severity.
+
+        It used to break ties inside a severity only. Then an ended session,
+        critical on bloat alone, charted instead of the one running now, the
+        project had no live card, and Home read "no per-turn numbers to show"
+        while a session was running. The ended session is not lost: it still
+        counts as critical in the project's total.
+        """
         critical, critical_events = self._pressure_session(
             "critical-gone", minutes_idle=6 * 60, turn_tokens=200_000, model="claude-haiku-4-5",
         )
+        # 20K a turn with no model: healthy, and above the 5K floor below which a
+        # session is not analysed at all. At 2K it was dropped before ranking, so
+        # this test never actually compared the two sessions.
         healthy, healthy_events = self._pressure_session(
-            "healthy-live", minutes_idle=1, turn_tokens=2_000,
+            "healthy-live", minutes_idle=1, turn_tokens=20_000,
         )
         cards = ui._context_health_cards(
             [critical, healthy], [*critical_events, *healthy_events],
         )
 
         self.assertEqual(len(cards), 1)
-        self.assertEqual(cards[0]["session_id"], "critical-gone")
-        self.assertEqual(cards[0]["severity"], "critical")
+        self.assertEqual(cards[0]["session_count"], 2, "both sessions were ranked")
+        self.assertEqual(cards[0]["session_id"], "healthy-live")
+        self.assertTrue(cards[0]["charted_because_live"])
+        self.assertEqual(cards[0]["critical_sessions"], 1)
 
     def _replay_turns(self, count=6, *, write_turn=None):
         """Turns that mostly read cache, with one optionally writing it."""
@@ -1953,15 +1965,17 @@ class DashboardWindowTests(unittest.TestCase):
         disagree" -- Home carried a copy of the context-health card. Home is the
         ambient surface now and no longer does, so there is one reader rather
         than two. The rule that mattered survives the move: whoever states the
-        deadline derives it here rather than recomputing it, and the two opposite
-        reasons turns_to_critical can be null stay distinguishable.
+        deadline derives it here rather than recomputing it. It is worded as room
+        left now, in roomVerdict, because the turns projection it replaced read
+        "40+" on every 1M-window session.
         """
         self.assertIn("function runwayVerdict(chart)", ui.HTML)
         self.assertIn("runwayVerdict(row.chart)", ui.HTML)
+        self.assertIn("function roomVerdict(limit, latest, largest, mayNotFit, resent)", ui.HTML)
         self.assertIn("At the context window", ui.HTML)
-        self.assertIn("Not growing right now", ui.HTML)
-        # And the third reason: no window on file for this model.
+        # And the other reason: no window on file for this model.
         self.assertIn("Context window unknown", ui.HTML)
+        self.assertNotIn("turns_to_critical", ui.HTML)
 
     def test_api_equivalent_value_tile_carries_no_status_colour(self) -> None:
         """The figure is counterfactual, so no rail may imply a loss.
@@ -3747,7 +3761,7 @@ class DashboardWindowTests(unittest.TestCase):
             updated_at=now,
             model="claude-sonnet-5",
         )
-        # Climbing steadily, well short of the threshold, so a projection exists.
+        # Climbing steadily, well short of the window.
         events = [
             LocalEvent(
                 event_id=f"e{i}",
@@ -3773,9 +3787,13 @@ class DashboardWindowTests(unittest.TestCase):
         # The session model's own window, not a constant.
         self.assertEqual(chart["context_window_n"], 1_000_000)
         self.assertEqual(chart["context_resets"], 0)
-        self.assertAlmostEqual(chart["growth_per_turn_n"], 8_000, delta=1)
-        # (1_000_000 - 96_000) / 8_000 = 113
-        self.assertEqual(chart["turns_to_critical"], 113)
+        # Room is measured: 1_000_000 - 96_000. These events carry no prompt
+        # numbers, so there is no biggest prompt and nothing short of the window is red.
+        self.assertEqual(chart["tokens_left_n"], 904_000)
+        self.assertIsNone(chart["largest_prompt_growth_n"])
+        self.assertFalse(chart["next_prompt_may_not_fit"])
+        # The latest request's measured cache reads.
+        self.assertEqual(chart["resent_n"], 20_000)
         # The display strings the existing card renders must be untouched.
         self.assertEqual(cards[0]["latest_turn_tokens"], "96.0k")
 
@@ -5141,7 +5159,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(app_card["session_short"], "s1")
         self.assertEqual(app_card["session_count"], 2)
         self.assertEqual(app_card["critical_sessions"], 2)
-        self.assertIn("highest-pressure source", app_card["context_summary"])
+        # s1 and s2 were both updated in the last few minutes, so the card is the
+        # live one and the claim is scoped to live sources.
+        self.assertIn("highest-pressure live source", app_card["context_summary"])
         self.assertIn("fresh session", app_card["intent_summary"])
         self.assertIn("Likely workspace", app_card["identity_label"])
         self.assertIn("Workspace only", app_card["return_label"])

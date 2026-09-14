@@ -2195,7 +2195,10 @@ def _session_verdict_inputs(row: LocalSession, events: list[LocalEvent]) -> dict
             # rendered as "no limit to project towards", never as some other
             # model's number.
             "context_window": health.context_window,
-            "turns_to_critical": health.turns_to_critical,
+            "tokens_left": health.tokens_left,
+            "largest_prompt_growth": health.largest_prompt_growth,
+            "next_prompt_may_not_fit": health.next_prompt_may_not_fit,
+            "resent_tokens": health.latest_turn_replayed_tokens if health.cache_reported else None,
             "turns_since_reset": health.turns_since_reset,
             "severity": health.severity,
         }
@@ -3136,7 +3139,10 @@ def _context_health_card(
         f"{compact_int(health.latest_turn_tokens)} tokens in the latest turn."
     )
     if len(group) > 1:
-        context_summary += f" This is the highest-pressure source among {len(group)} same-project sessions."
+        # A live session is charted ahead of a worse ended one, so the claim is
+        # scoped to live sources whenever this card is the live one.
+        scope = "highest-pressure live source" if charted_because_live else "highest-pressure source"
+        context_summary += f" This is the {scope} among {len(group)} same-project sessions."
     return {
         "charted_because_live": charted_because_live,
         "bigger_idle_label": compact_int(bigger.latest_turn_tokens) if bigger else None,
@@ -3179,8 +3185,13 @@ def _context_health_card(
             "turn_series": turn_series[-CONTEXT_CHART_MAX_TURNS:],
             "latest_turn_tokens_n": health.latest_turn_tokens,
             "peak_turn_tokens_n": health.peak_turn_tokens,
-            "growth_per_turn_n": round(health.segment_growth_rate),
-            "turns_to_critical": health.turns_to_critical,
+            "tokens_left_n": health.tokens_left,
+            "largest_prompt_growth_n": health.largest_prompt_growth,
+            "next_prompt_may_not_fit": health.next_prompt_may_not_fit,
+            # What the latest request carried from before, as the provider
+            # counted its cache reads. Null when the source reports no cache
+            # buckets: unmeasured, not zero.
+            "resent_n": health.latest_turn_replayed_tokens if health.cache_reported else None,
             "turns_since_reset": health.turns_since_reset,
             "context_resets": health.context_resets,
             # The model's window, null when unknown. The chart draws no limit
@@ -3229,7 +3240,8 @@ def _group_compact_payload(
     """The compact nudge for a project card, if any session in it has one.
 
     Assessed on the sessions still being worked in, not on the card's
-    representative: the card charts the worst session in the project, while
+    representative: the card charts the worst live session in the project (the
+    worst of all when none is live), while
     a compaction is an instruction for the one being typed into, and the two
     are usually different. Several may qualify; the one with the most to shed
     leads. Deferred means the owner said Later for that commit -- the numbers
@@ -3282,7 +3294,7 @@ def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) ->
         return str(session_state(session).get("status")) in {"active", "recent"}
 
     for group in grouped.values():
-        # Severity first, then whether the session is still live, and only then
+        # Whether the session is still live first, then severity, and only then
         # size. Ranking on size alone charted the biggest number in the project
         # regardless of whether anyone was still in it: a session left six hours
         # earlier at 824K outranked the one running right now at 343K, which was
@@ -3290,10 +3302,17 @@ def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) ->
         # fresh, hand off, copy a compact prompt -- is an instruction to do
         # something in that session, and none of them can be carried out in one
         # that has ended, so the worst *reachable* session is the useful pick.
-        # With nothing live the order is unchanged and the biggest still wins.
+        #
+        # Reachability used to sit below severity, so a live healthy session
+        # could not outrank an ended critical one. That left the project with no
+        # live card: an ended session critical on bloat alone charted instead,
+        # and Home -- which shows only the live card -- read "no per-turn
+        # numbers to show" while a session was running. The ended one still
+        # counts in critical_sessions and stays in related_sessions.
+        # With nothing live the order is unchanged and the worst still wins.
         group.sort(key=lambda item: (
-            severity_order.get(item.severity, 9),
             0 if _still_reachable(item) else 1,
+            severity_order.get(item.severity, 9),
             -int(item.latest_turn_tokens * item.bloat_ratio),
             -item.total_input_tokens,
         ))
@@ -6317,7 +6336,9 @@ def _ask_session_evidence(
                 "severity": health.severity,
                 "latest_turn_tokens": health.latest_turn_tokens,
                 "peak_turn_tokens": health.peak_turn_tokens,
-                "turns_to_critical": health.turns_to_critical,
+                "tokens_left": health.tokens_left,
+                "largest_prompt_growth": health.largest_prompt_growth,
+                "next_prompt_may_not_fit": health.next_prompt_may_not_fit,
                 "turns_since_reset": health.turns_since_reset,
                 "replayed_cost_usd": round(health.replayed_cost_usd, 6),
             } if health else {"measurable": False},
