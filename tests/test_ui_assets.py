@@ -526,7 +526,7 @@ class TrimmedHomeTest(unittest.TestCase):
             "evidencePanel", "handoffAcceptance", "handoffBrief", "handoffConstraints",
             "handoffObjective", "handoffSources", "handoffStatus", "handoffType",
             "optimizeCleanupPrompt", "optimizeReward", "outcomePanel",
-            "planDerivedZone", "promptBrief", "todayDigest",
+            "planDerivedZone", "promptBrief", "promptReceipts", "todayDigest",
         }
         ids = set(re.findall(r'id="([\w-]+)"', self.html))
         looked_up = set(re.findall(r"""getElementById\(['"]([\w-]+)['"]\)""", self.js))
@@ -535,9 +535,9 @@ class TrimmedHomeTest(unittest.TestCase):
 
 class SessionDrawerTest(unittest.TestCase):
     """The drawer is a 619px column, so its order matters more than a full-width
-    page's would: what is open is what gets read. Three things stay open -- who
-    this session is, what needs doing, and the prompt worth tightening -- and the
-    supporting evidence sits behind summaries."""
+    page's would: what is open is what gets read. Four things stay open -- who
+    this session is, what needs doing, the prompt worth tightening, and where the
+    chat's money went -- and the supporting evidence sits behind summaries."""
 
     @classmethod
     def setUpClass(cls):
@@ -554,10 +554,25 @@ class SessionDrawerTest(unittest.TestCase):
                          "the drawer should reach its conclusion before its evidence")
 
     def test_supporting_sections_are_collapsed(self):
-        for summary in ("Expensive asks", "Outcome evidence", "Evidence trail",
+        for summary in ("See all", "Outcome evidence", "Evidence trail",
                         "What to check next", "Cost by event type"):
             with self.subTest(section=summary):
                 self.assertIn("<summary>%s" % summary, self.js)
+
+    def test_where_the_money_went_is_open_and_the_list_is_not(self):
+        # The first version was collapsed, opened on the latest (cheapest)
+        # prompts and noted "mostly re-sending" on nearly every row, which
+        # buried what it was for. The split and the costliest prompts are open;
+        # the full list, ordered by cost, is behind a summary.
+        source = js_function_source(self.js, "renderPromptReceipts")
+        head = source[:source.index("<details")]
+        for part in ("Where this chat's", "Re-sent the chat", "Re-cached it", "New work",
+                     "Costliest prompts", "Compact before you step away"):
+            with self.subTest(part=part):
+                self.assertIn(part, head)
+        self.assertIn("sort: 'cost'", source)
+        body = js_function_source(self.js, "promptReceiptsBody")
+        self.assertNotIn('class="receipt-prompt" title=', body)
 
     def test_hero_does_not_restate_sections_below_it(self):
         # It used to carry Next step, API-equivalent and Return as a fact grid,
