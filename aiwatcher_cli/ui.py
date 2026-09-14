@@ -21,7 +21,7 @@ from typing import Any, Callable, Sequence
 from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
-from . import analyst, compaction, prompt_signals, statusline
+from . import analyst, compaction, compaction_outcomes, prompt_signals, statusline
 from .ai_assist import (
     AiAssistUnavailable,
     build_ai_assist_status,
@@ -7206,6 +7206,46 @@ def _compact_block(rows: list[SessionPresence], sessions: list[LocalSession]) ->
     return block
 
 
+# path -> (size, compaction markers, every record's window closed). The poll
+# runs every few seconds while a session works, and most of those polls find
+# a transcript that grew but holds nothing new to measure.
+_OUTCOME_SCAN: dict[str, tuple[int, int, bool]] = {}
+
+
+def _record_compaction_outcomes(rows: list[SessionPresence], sessions: list[LocalSession]) -> None:
+    """Keep compaction_outcomes' records current for live Claude Code sessions.
+
+    Shows nothing. The records are collected so the claim that compacting
+    saves usage can be checked on real sessions before a surface makes it.
+    A transcript is parsed only when it grew and either holds a compaction
+    not measured yet or one whose ten-prompt stretch is still open; the
+    marker count is a byte search, not a parse.
+    """
+    by_id = {session.session_id: session for session in sessions}
+    for row in rows:
+        if not row.live or row.analyst_run:
+            continue
+        session = by_id.get(row.session_id)
+        path = session.source_path if session is not None else None
+        if not path or not path.endswith(".jsonl") or "claude" not in session.tool.lower():
+            continue
+        try:
+            size = os.path.getsize(path)
+            cached = _OUTCOME_SCAN.get(path)
+            if cached is not None and cached[0] == size:
+                continue
+            markers = compaction_outcomes.compaction_markers(path)
+            if markers == 0 or (cached is not None and cached[1] == markers and cached[2]):
+                _OUTCOME_SCAN[path] = (size, markers, True)
+                continue
+            records = compaction_outcomes.record_session(session.session_id, path)
+            if len(_OUTCOME_SCAN) > 64:
+                _OUTCOME_SCAN.clear()
+            _OUTCOME_SCAN[path] = (size, markers, all(record.get("closed_by") for record in records))
+        except Exception:  # noqa: BLE001 - a measurement nobody sees must never break the Companion's poll
+            continue
+
+
 _COMPACT_STAGE_WORD = {
     "nudge": "to compact", "copied": "copied", "compacting": "compacting",
     "compacted": "compacted", "confirmed": "done",
@@ -7397,6 +7437,7 @@ def build_companion_state() -> dict[str, object]:
     finished_notice_mode = str(prefs.get("finished_sessions") or "badge_only")
     fresh_start_context_enabled = bool(prefs.get("fresh_start_context", True))
     _update_away_digest(session_rows, presence_rows)
+    _record_compaction_outcomes(presence_rows, session_rows)
     base = {
         "state": "watching",
         "label": "Watching quietly",

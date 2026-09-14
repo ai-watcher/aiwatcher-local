@@ -24,7 +24,7 @@ explicitly. See [Privacy](../README.md#privacy) for the full contract.
 - [Continuity](#continuity) -- `handoff`, `resume`, `open-session`, `return-session`, `log-decision`
 - [Monitoring](#monitoring) -- `watch`, `companion`, `statusline`, `processes`, `run`
 - [Hooks and wrappers](#hooks-and-wrappers) -- `install-claude-hook`, `uninstall-claude-hook`, `install-claude-command-gate`, `uninstall-claude-command-gate`, `install-claude-activity-hook`, `uninstall-claude-activity-hook`, `install-claude-decision-log`, `uninstall-claude-decision-log`, `install-codex-hook`, `uninstall-codex-hook`, `install-cursor-hook`, `uninstall-cursor-hook`, `install-codex-wrapper`, `uninstall-codex-wrapper`, `install-commit-hook`, `uninstall-commit-hook`, `install-statusline`, `uninstall-statusline`, `hook-status`
-- [Data and integrations](#data-and-integrations) -- `export`, `mcp`, `ui`
+- [Data and integrations](#data-and-integrations) -- `export`, `compactions`, `mcp`, `ui`
 - [Internal hook commands](#internal-hook-commands)
 
 ## Getting started
@@ -1195,6 +1195,19 @@ aiwatcher export --format json --level events --since 2026-06-01
 | `--level` | `sessions`, `events` | `sessions` | Export session summaries or privacy-safe event hashes |
 | `--since` | text |  | ISO date/datetime, for example 2026-06-01 |
 | `--days` | integer | `30` | How many days to export when --since is not given |
+
+### `aiwatcher compactions`
+
+Show what each recorded compaction did to the usage after it (data review, not a surface)
+
+```sh
+aiwatcher compactions [--days DAYS] [--json]
+```
+
+| Option | Accepts | Default | Description |
+| --- | --- | --- | --- |
+| `--days` | integer | `30` | How far back to look for transcripts to fill in from |
+| `--json` | flag |  | Emit the records and their derived figures as JSON |
 
 ### `aiwatcher mcp`
 
