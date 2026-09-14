@@ -934,13 +934,22 @@ class WatchRanksByWhoNeedsYouTest(unittest.TestCase):
         self.assertIn("waiting.has(row.session_id) ? 1 : 0", self.rank)
         # And it comes before the pressure keys, not after them.
         self.assertLess(
-            self.rank.index("waiting.has"), self.rank.index("latest >= limit"))
+            self.rank.index("waiting.has"), self.rank.index("red ? 1 : 0"))
 
     def test_the_pressure_order_is_unchanged_beneath_it(self):
         # Adding a key on top should not disturb the ranking that was already
-        # reasoned about: at the window, then bigger per turn.
-        self.assertIn("latest >= limit ? 1 : 0", self.rank)
+        # reasoned about: red, then bigger per turn.
+        self.assertIn("red ? 1 : 0", self.rank)
         self.assertIn("latest", self.rank)
+
+    def test_every_red_row_outranks_every_green_row(self):
+        """Red has two causes: at the window, or the biggest prompt no longer
+        fits in what is left. Ranking on the first alone sorted a red row with
+        40K left under a green one at 300K. The rank must use the same test as
+        the meter's tone, or a row drawn red sits below rows drawn green."""
+        self.assertIn("latest >= limit || chart.next_prompt_may_not_fit", self.rank)
+        meter = js_function_source(self.js, "drawMeter")
+        self.assertIn("latest >= limit || chart.next_prompt_may_not_fit", meter)
 
     def test_every_row_says_why_it_sits_where_it_does(self):
         """Three keys deep and none of them were visible: a reader saw an order

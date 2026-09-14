@@ -3160,12 +3160,16 @@ function healthRank(row, waiting) {
   // blocked on a question you have not seen is the one that cannot continue
   // without you, whatever its per-turn number.
   //
-  // Then the old order, unchanged: past the limit outranks below it, and within
-  // each group the bigger per-turn number leads.
+  // Then red outranks green, and within each group the bigger per-turn number
+  // leads. Red is the same test the meter's tone uses: at the window, or the
+  // session's biggest prompt no longer fits in what is left. Ranking on the
+  // window alone put a red Haiku row with 40K left below a green 1M row at
+  // 300K, because 300K is bigger.
   const chart = row.chart || {};
   const limit = chart.context_window_n || Infinity;
   const latest = chart.latest_turn_tokens_n || 0;
-  return [waiting && waiting.has(row.session_id) ? 1 : 0, latest >= limit ? 1 : 0, latest];
+  const red = latest >= limit || chart.next_prompt_may_not_fit;
+  return [waiting && waiting.has(row.session_id) ? 1 : 0, red ? 1 : 0, latest];
 }
 /* Why this row sits where it does.
  *
