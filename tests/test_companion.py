@@ -438,6 +438,25 @@ class WaitingSessionCompanionTests(unittest.TestCase):
         )
         self.assertEqual(state["state"], "session_waiting")
 
+    def test_optimize_companion_uses_review_summary_not_raw_count(self):
+        state = self._state(
+            self._summary(optimize={
+                "status": "needs_action",
+                "top": {
+                    "project": "/repo/app",
+                    "project_full": "/repo/app",
+                    "summary": "54 inactive same-project sessions are carrying context.",
+                    "companion_summary": "Review before archiving: 54 old app chats carry context. Nothing is cleaned automatically.",
+                    "validation_hint": "Open the owning AI app before archiving.",
+                },
+            }),
+        )
+
+        self.assertEqual(state["state"], "optimize_available")
+        self.assertIn("Review before archiving", state["subtitle"])
+        self.assertIn("Nothing is cleaned automatically", state["subtitle"])
+        self.assertIn("owning AI app", state["detail"])
+
     def test_the_longest_wait_leads(self):
         state = self._state(
             self._summary(),
@@ -699,6 +718,7 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
             },
         )
         self.assertEqual(state["state"], "prompt_gate")
+        self.assertEqual(state["primary_url"], "/?view=gate&gate=g1")
         self.assertTrue(85 <= state["expires_in_seconds"] <= 90)
 
     def test_a_gate_without_expiry_shows_no_countdown(self):

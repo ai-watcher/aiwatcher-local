@@ -1170,6 +1170,27 @@
     .action-title { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; font-weight: var(--fw-bold); color: var(--t-base); }
     .action-row p { margin: 6px 0 0; color: var(--muted); line-height: 1.45; }
     .action-meta { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: 10px; }
+    .optimize-card {
+      grid-template-columns: minmax(0, 1fr) minmax(300px, 620px);
+      align-items: start;
+      gap: var(--sp-4);
+    }
+    .optimize-card-copy {
+      min-width: 0;
+      max-width: 84ch;
+    }
+    .optimize-card-actions {
+      justify-self: end;
+      align-self: start;
+      justify-content: flex-end;
+      align-items: stretch;
+      max-width: 620px;
+    }
+    .optimize-card-actions button {
+      min-height: 42px;
+      white-space: normal;
+      line-height: 1.2;
+    }
     .optimize-activity-line { color: var(--text-quiet); font-size: var(--fs-2); }
     .optimize-full-path {
       display: grid;
@@ -1190,10 +1211,34 @@
     }
     .action-row .actions { justify-content: flex-end; }
     .runtime-review-card { align-items: start; }
+    .optimize-evidence {
+      margin-top: 10px;
+      max-width: min(100%, 760px);
+      background: rgba(var(--ground-rgb), .28);
+    }
+    .optimize-evidence summary {
+      padding: 9px 11px;
+      font-size: var(--fs-2);
+    }
+    .optimize-card-detail {
+      display: grid;
+      gap: var(--sp-2);
+    }
+    .optimize-card-detail p { margin: 0; }
     .runtime-review-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--sp-2); margin-top: 12px; }
     .runtime-command { display: grid; gap: var(--sp-1); margin-top: 12px; }
     .runtime-command code { overflow-wrap: anywhere; }
     .runtime-review-steps { margin: 12px 0 0; padding-left: 20px; color: var(--text-bright); line-height: 1.45; }
+    @media (max-width: 1180px) {
+      .optimize-card { grid-template-columns: 1fr; }
+      .optimize-card-copy { max-width: 100%; }
+      .optimize-card-actions {
+        justify-self: stretch;
+        justify-content: flex-start;
+        max-width: 100%;
+      }
+      .optimize-card-actions button { flex: 1 1 180px; }
+    }
     .coverage-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-3); }
     /* The coverage table. Rows align on one axis so ten tools can be compared
        rather than read one card at a time; the quiet second line in a cell is
@@ -1583,7 +1628,7 @@
     #optimizeWorkspace > details.aiw-details { margin-top: 0; }
     .runtime-review-card { border-left-color: var(--amber); background: rgba(var(--amber-rgb), .04); }
     .runtime-review-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-2); margin: 10px 0 12px; }
-    .runtime-command { margin: 10px 0; padding: 10px 12px; border: 1px solid var(--drawer-line); border-radius: var(--r-2); background: rgba(5,9,14,.28); }
+    .runtime-command { margin: 0; padding: 10px 12px; border: 1px solid var(--drawer-line); border-radius: var(--r-2); background: rgba(var(--ground-rgb), .36); }
     .runtime-command code { display: block; margin-top: 5px; color: var(--text); font-family: var(--mono); font-size: var(--fs-2); overflow-wrap: anywhere; }
     .runtime-review-steps { margin: 10px 0; padding-left: 22px; color: var(--text); line-height: 1.5; }
     .runtime-review-steps li + li { margin-top: 4px; }
@@ -1718,6 +1763,84 @@
     .plan-next-step { color: var(--text-bright); }
     .prompt-list { margin: 10px 0 0; padding-left: 18px; color: var(--text-bright); line-height: 1.55; }
     .copy-row { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: 12px; }
+    .gate-page { display: grid; gap: var(--sp-4); }
+    .gate-hero {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: var(--sp-4);
+      border-left: 4px solid var(--amber);
+    }
+    .gate-hero h2 { margin-top: 2px; }
+    .gate-review { display: grid; gap: var(--sp-4); }
+    .gate-route {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(220px, .6fr);
+      gap: var(--sp-4);
+      align-items: stretch;
+      border: 1px solid rgba(var(--blue-rgb), .28);
+      border-left: 4px solid var(--blue);
+      border-radius: var(--r-2);
+      padding: var(--sp-4);
+      background:
+        linear-gradient(135deg, rgba(var(--blue-rgb), .10), transparent 58%),
+        rgba(var(--scrim-rgb), .76);
+    }
+    .gate-route.prompt_change { border-left-color: var(--amber); }
+    .gate-route.continue { border-left-color: var(--green); }
+    .gate-route-reward {
+      border: 1px solid var(--line);
+      border-radius: var(--r-2);
+      padding: var(--sp-3);
+      background: rgba(var(--well-rgb), .42);
+      color: var(--text-bright);
+      font-weight: var(--fw-bold);
+      align-content: center;
+    }
+    .gate-grid { display: grid; grid-template-columns: minmax(280px, .7fr) minmax(0, 1fr); gap: var(--sp-4); align-items: start; }
+    .gate-evidence { display: grid; gap: var(--sp-3); }
+    .gate-evidence-section h3 {
+      margin-bottom: var(--sp-2);
+      color: var(--text-quiet);
+      text-transform: uppercase;
+      letter-spacing: .12em;
+      font-size: var(--fs-1);
+    }
+    .gate-original summary { cursor: pointer; color: var(--text-quiet); font-weight: var(--fw-bold); }
+    .gate-original pre, .gate-brief-preview {
+      margin-top: var(--sp-2);
+      max-height: 260px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: var(--r-2);
+      background: var(--ground-deep);
+      color: var(--text-bright);
+      padding: var(--sp-3);
+      font: var(--fs-2)/1.55 var(--mono);
+      white-space: pre-wrap;
+    }
+    .gate-brief-preview { min-height: 360px; resize: vertical; width: 100%; }
+    .gate-status {
+      display: flex;
+      gap: var(--sp-2);
+      flex-wrap: wrap;
+      align-items: center;
+      color: var(--muted);
+    }
+    .gate-actions {
+      position: sticky;
+      bottom: var(--sp-3);
+      display: flex;
+      gap: var(--sp-2);
+      flex-wrap: wrap;
+      padding: var(--sp-3);
+      border: 1px solid var(--line);
+      border-radius: var(--r-2);
+      background: rgba(var(--scrim-rgb), .94);
+      backdrop-filter: blur(12px);
+      box-shadow: 0 14px 38px rgba(var(--shadow-rgb), .22);
+    }
+    .gate-actions button { min-width: 148px; }
     .handoff-cta {
       margin-top: 16px;
       padding: 14px;
@@ -2105,6 +2228,8 @@
       .kpis { grid-template-columns: 1fr 1fr; }
       .two { grid-template-columns: 1fr; }
       .prompt-shell { grid-template-columns: 1fr; }
+      .gate-hero, .gate-route, .gate-grid { grid-template-columns: 1fr; display: grid; }
+      .gate-actions button { flex: 1 1 180px; }
       .coverage-grid { grid-template-columns: 1fr; }
       .receipt-summary { grid-template-columns: 1fr; }
       .session-hero-grid { grid-template-columns: 1fr 1fr; }

@@ -155,8 +155,9 @@ class AssessTests(unittest.TestCase):
         self.assertEqual(result.prompts_since_commit, 2)
         self.assertEqual(result.files_since, ["a.py", "tests/test_a.py"])
         self.assertIn(SHA[:7], result.command)
-        self.assertIn('"fix: thing"', result.command)
+        self.assertIn("commit aaaaaaa - fix: thing", result.command)
         self.assertIn("a.py, tests/test_a.py", result.command)
+        self.assertIn("Latest user ask after the boundary: next thing please.", result.command)
         self.assertTrue(result.command.startswith("/compact "))
 
     def test_the_floor_is_the_sessions_own_first_context(self) -> None:
@@ -382,6 +383,7 @@ class CodexRolloutTests(unittest.TestCase):
         self.assertEqual(result.prompts_since_commit, 1)
         self.assertEqual(result.files_since, ["src/a.py"])
         self.assertEqual(result.command, "/compact")
+        self.assertEqual(result.latest_prompt_since, "next")
         self.assertFalse(result.priced)
 
     def test_a_codex_shed_since_the_commit_is_seen(self) -> None:
@@ -417,12 +419,40 @@ class CommandTests(unittest.TestCase):
     def test_many_files_are_counted_not_listed(self) -> None:
         boundary = compaction.Boundary(sha=SHA, subject="s", committed_at=datetime.now(timezone.utc))
         command = compaction.compact_command("claude-code", boundary, [f"f{i}.py" for i in range(7)])
-        self.assertIn("f0.py, f1.py, f2.py, f3.py and 3 more files", command)
+        self.assertIn("Changed files: f0.py, f1.py, f2.py, f3.py and 3 more files.", command)
 
     def test_no_files_still_names_the_boundary(self) -> None:
         boundary = compaction.Boundary(sha=SHA, subject="", committed_at=datetime.now(timezone.utc))
         command = compaction.compact_command("claude-code", boundary, [])
-        self.assertIn(f"since commit {SHA[:7]}: the work since then", command)
+        self.assertIn(f"since commit {SHA[:7]}; summarize or drop older history", command)
+        self.assertIn("Changed files: unknown from local evidence.", command)
+
+    def test_claude_command_carries_session_context_without_nested_subject_quotes(self) -> None:
+        boundary = compaction.Boundary(
+            sha=SHA,
+            subject='Add a "Let\'s get in touch" contact tab',
+            committed_at=datetime.now(timezone.utc),
+        )
+        command = compaction.compact_command(
+            "claude-code",
+            boundary,
+            ["src/contact.tsx"],
+            project_path="/repo/site",
+            title="Portfolio website redesign",
+            latest_prompt="align the contact tab and verify mobile layout",
+            turns_since=4,
+            prompts_since=2,
+            latest_tokens=123_456,
+            context_at_commit=100_000,
+            after_estimate=50_000,
+        )
+        self.assertIn('/compact Preserve a working summary', command)
+        self.assertIn(f'commit {SHA[:7]} - Add a "Let\'s get in touch" contact tab', command)
+        self.assertIn("Workspace: /repo/site.", command)
+        self.assertIn("Session title/current task: Portfolio website redesign.", command)
+        self.assertIn("Latest user ask after the boundary: align the contact tab", command)
+        self.assertIn("latest context 123,456 tokens", command)
+        self.assertIn("Do not invent missing details.", command)
 
 
 if __name__ == "__main__":

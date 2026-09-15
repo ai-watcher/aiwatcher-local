@@ -81,6 +81,9 @@ class WebAssetsTest(unittest.TestCase):
         self.assertIn(":root {", ui.HTML)
         self.assertIn("<script>", ui.HTML)
         self.assertIn("function showView(", ui.HTML)
+        self.assertIn('id="view-gate"', ui.HTML)
+        self.assertIn("/api/prompt-gate", ui.HTML)
+        self.assertIn("/api/prompt-gate-decision", ui.HTML)
         self.assertNotIn("<link rel=\"stylesheet\"", ui.HTML)
         self.assertNotIn("<script src=", ui.HTML)
 
@@ -321,6 +324,12 @@ class NavigationTest(unittest.TestCase):
             "stays in the ?view= allowlist: a URL someone types deliberately is "
             "not the same as a button sitting in the sidebar forever."
         ),
+        "gate": (
+            "Shown only while a hook is actively holding a prompt. It is a "
+            "blocking decision surface, not a standing dashboard section, so "
+            "the Companion deep-links into it and the gate disappears when the "
+            "tool continues or times out."
+        ),
     }
 
     @classmethod
@@ -526,7 +535,8 @@ class TrimmedHomeTest(unittest.TestCase):
             "evidencePanel", "handoffAcceptance", "handoffBrief", "handoffConstraints",
             "handoffObjective", "handoffSources", "handoffStatus", "handoffType",
             "optimizeCleanupPrompt", "optimizeReward", "outcomePanel",
-            "planDerivedZone", "promptBrief", "todayDigest",
+            "planDerivedZone", "promptBrief", "promptGateBrief",
+            "promptGateDecisionStatus", "todayDigest",
         }
         ids = set(re.findall(r'id="([\w-]+)"', self.html))
         looked_up = set(re.findall(r"""getElementById\(['"]([\w-]+)['"]\)""", self.js))
@@ -1392,8 +1402,10 @@ class PlanControlTest(unittest.TestCase):
         self.assertIn("Nothing is stopped from this dashboard", self.js)
         self.assertIn("before-minus-after local memory signal", self.js)
         self.assertIn("Do not count dollar savings from process RSS alone", self.js)
-        self.assertIn("<span class=\"label\">Reward</span>", self.js)
+        self.assertIn("Safe runtime review steps", self.js)
+        self.assertIn("No auto-stop", self.js)
         self.assertIn(".runtime-review-card", self.css)
+        self.assertIn(".optimize-evidence", self.css)
 
     def test_optimize_cards_render_full_path_and_activity_signal(self):
         self.assertIn("item.activity_summary", self.js)
@@ -2422,6 +2434,18 @@ class InformationArchitectureTest(unittest.TestCase):
         self.assertIn("local_brief: next.localBrief", self.js)
         self.assertIn("typeof currentData !== 'undefined'", self.js)
         self.assertIn(".fresh-preview-next", self.css)
+
+    def test_fresh_start_loading_does_not_repaint_between_evidence_passes(self):
+        # The drawer used to flash through "finding session", session summary,
+        # basic handoff, then detailed handoff while evidence indexed. Keep one
+        # stable loading shell and ignore late responses from stale clicks.
+        self.assertIn("function renderHandoffLoading", self.js)
+        self.assertIn("handoffOpenToken", self.js)
+        handoff = js_function_source(self.js, "openHandoff")
+        self.assertIn("setDrawerContent(renderHandoffLoading(sessionId))", handoff)
+        self.assertIn("if (!isCurrent()) return", handoff)
+        self.assertNotIn("/api/handoff-basic", handoff)
+        self.assertNotIn("renderSessionSummary", handoff)
 
     def test_ask_aiwatcher_can_opt_into_ai_assist(self):
         self.assertIn('id="askUseAiAssist"', self.html)

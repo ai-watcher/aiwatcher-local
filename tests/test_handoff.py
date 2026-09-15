@@ -391,8 +391,61 @@ class HandoffTests(unittest.TestCase):
         self.assertNotIn("billing module", capsule_off["next_brief"])
         self.assertIsNone(capsule_off["costliest_prompt"])
         self.assertIn("billing module", capsule_on["next_brief"])
-        self.assertIn("Task context", capsule_on["next_brief"])
+        self.assertIn("Source session prompt evidence", capsule_on["next_brief"])
         self.assertTrue(capsule_on["include_prompt_excerpt"])
+
+    def test_prompt_opt_in_carries_bounded_session_turn_evidence(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = os.path.join(temp_dir, "session.jsonl")
+            with open(source_path, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps({
+                    "type": "user",
+                    "message": {"content": "Redesign the contact tab and preserve the analytics guardrails."},
+                    "timestamp": now.isoformat(),
+                }) + "\n")
+                handle.write(json.dumps({
+                    "type": "assistant",
+                    "message": {
+                        "model": "claude-sonnet-5",
+                        "usage": {"input_tokens": 7000, "output_tokens": 500},
+                        "content": [{"type": "tool_use", "name": "Read"}],
+                    },
+                    "timestamp": now.isoformat(),
+                }) + "\n")
+                handle.write(json.dumps({
+                    "type": "user",
+                    "message": {"content": "Now fix the mobile overflow in the Optimize cards."},
+                    "timestamp": now.isoformat(),
+                }) + "\n")
+                handle.write(json.dumps({
+                    "type": "assistant",
+                    "message": {
+                        "model": "claude-sonnet-5",
+                        "usage": {"input_tokens": 9000, "output_tokens": 700},
+                        "content": [{"type": "tool_use", "name": "Edit"}],
+                    },
+                    "timestamp": now.isoformat(),
+                }) + "\n")
+
+            session = LocalSession(
+                session_id="session-turns",
+                tool="claude-code",
+                project_path=temp_dir,
+                source_path=source_path,
+                started_at=now,
+                updated_at=now,
+            )
+
+            capsule = build_handoff_capsule(session, [], include_prompt_excerpt=True)
+
+        prompt_evidence = capsule["session_prompt_evidence"]
+        self.assertTrue(prompt_evidence["prompt_text_included"])
+        self.assertEqual(prompt_evidence["turn_count"], 2)
+        self.assertIn("Redesign the contact tab", json.dumps(prompt_evidence))
+        self.assertIn("mobile overflow", capsule["next_brief"])
+        self.assertIn("Source session prompt evidence", capsule["next_brief"])
+        self.assertIn("Recent user asks", capsule["next_brief"])
 
     def test_logged_decisions_are_surfaced_and_hedged(self) -> None:
         now = datetime.now(timezone.utc)

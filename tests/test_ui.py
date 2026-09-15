@@ -172,6 +172,45 @@ class DashboardServeTests(unittest.TestCase):
         thread.start()
         return server, thread, f"http://127.0.0.1:{server.server_address[1]}"
 
+    def _serve_prompt_gate_engine(self, *, get_payload: dict | None = None, post_payload: dict | None = None):
+        captured: dict[str, object] = {}
+
+        class GateEngine(ui.BaseHTTPRequestHandler):
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+            def _send(self, status: int, payload: dict) -> None:
+                encoded = json.dumps(payload).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def do_GET(self) -> None:
+                captured["get_path"] = self.path
+                self._send(200, get_payload or {"active": True, "id": "gate-1"})
+
+            def do_POST(self) -> None:
+                captured["post_path"] = self.path
+                length = int(self.headers.get("Content-Length") or "0")
+                captured["post_body"] = json.loads(self.rfile.read(length).decode("utf-8"))
+                self._send(200, post_payload or {
+                    "ok": True,
+                    "tool": "claude",
+                    "decision_label": "Add safer brief",
+                    "original_risk": "high",
+                    "original_score": 8,
+                    "selected_risk": "low",
+                    "selected_score": 1,
+                    "impact": "Safer execution.",
+                })
+
+        server = ui.ThreadingHTTPServer(("127.0.0.1", 0), GateEngine)
+        thread = threading.Thread(target=server.handle_request)
+        thread.start()
+        return server, thread, f"http://127.0.0.1:{server.server_address[1]}/", captured
+
     def test_ambient_intervention_serves_the_shared_nudge_wording(self) -> None:
         """The overlay renders from this, so the wording ships from
         _PRESENTATIONS rather than from a second copy inside overlay.js. The
@@ -223,6 +262,98 @@ class DashboardServeTests(unittest.TestCase):
                 with request.urlopen(http_request, timeout=5) as response:
                     self.assertEqual(response.status, 200)
                 build_runtime_return.assert_called_once_with("sess-1", 30)
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_prompt_gate_proxy_returns_ephemeral_gate_payload(self) -> None:
+        gate_payload = {
+            "active": True,
+            "id": "gate-1",
+            "tool": "claude",
+            "cwd": "/repo",
+            "prompt": "delete the repo",
+            "route": {"kind": "prompt_change", "title": "Confirm first"},
+            "result": {"risk": "high", "score": 8, "suggested_prompt": "Ask before deleting."},
+        }
+        gate_server, gate_thread, gate_url, captured = self._serve_prompt_gate_engine(get_payload=gate_payload)
+        server, thread, base = self._serve_one()
+        with patch.object(ui, "active_prompt_gate", return_value={"id": "gate-1", "url": gate_url}):
+            try:
+                with request.urlopen(f"{base}/api/prompt-gate?id=gate-1", timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+                gate_thread.join(timeout=5)
+                gate_server.server_close()
+
+        self.assertTrue(payload["active"])
+        self.assertEqual(payload["prompt"], "delete the repo")
+        self.assertEqual(payload["ui_url"], "/?view=gate&gate=gate-1")
+        self.assertEqual(captured["get_path"], "/api/gate-state?id=gate-1")
+
+    def test_prompt_gate_proxy_refuses_wrong_id_and_cross_origin(self) -> None:
+        server, thread, base = self._serve_one()
+        with patch.object(ui, "active_prompt_gate", return_value={"id": "gate-1", "url": "http://127.0.0.1:9/"}):
+            try:
+                with self.assertRaises(error.HTTPError) as raised:
+                    request.urlopen(f"{base}/api/prompt-gate?id=other", timeout=5)
+                self.assertEqual(raised.exception.code, 404)
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
+        server, thread, base = self._serve_one()
+        http_request = request.Request(
+            f"{base}/api/prompt-gate?id=gate-1",
+            headers={"Origin": "http://localhost:3000"},
+        )
+        with patch.object(ui, "active_prompt_gate", return_value={"id": "gate-1", "url": "http://127.0.0.1:9/"}):
+            try:
+                with self.assertRaises(error.HTTPError) as raised:
+                    request.urlopen(http_request, timeout=5)
+                self.assertEqual(raised.exception.code, 403)
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_prompt_gate_decision_proxy_forwards_to_the_live_gate(self) -> None:
+        gate_server, gate_thread, gate_url, captured = self._serve_prompt_gate_engine()
+        server, thread, base = self._serve_one()
+        http_request = request.Request(
+            f"{base}/api/prompt-gate-decision",
+            data=json.dumps({"id": "gate-1", "decision": "use_brief", "prompt": "safer"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with patch.object(ui, "active_prompt_gate", return_value={"id": "gate-1", "url": gate_url}):
+            try:
+                with request.urlopen(http_request, timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            finally:
+                thread.join(timeout=5)
+                server.server_close()
+                gate_thread.join(timeout=5)
+                gate_server.server_close()
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(captured["post_path"], "/decision")
+        self.assertEqual(captured["post_body"], {"decision": "use_brief", "prompt": "safer"})
+
+    def test_prompt_gate_decision_refuses_pages_from_other_localhost_origins(self) -> None:
+        server, thread, base = self._serve_one()
+        http_request = request.Request(
+            f"{base}/api/prompt-gate-decision",
+            data=json.dumps({"id": "gate-1", "decision": "run_original"}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Origin": "http://localhost:3000"},
+            method="POST",
+        )
+        with patch.object(ui, "active_prompt_gate", return_value={"id": "gate-1", "url": "http://127.0.0.1:9/"}):
+            try:
+                with self.assertRaises(error.HTTPError) as raised:
+                    request.urlopen(http_request, timeout=5)
+                self.assertEqual(raised.exception.code, 403)
             finally:
                 thread.join(timeout=5)
                 server.server_close()
@@ -2263,7 +2394,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["state"], "prompt_gate")
         self.assertEqual(state["label"], "Prompt Gate")
         self.assertEqual(state["primary_label"], "Review Gate")
-        self.assertEqual(state["primary_url"], "http://127.0.0.1:9999/")
+        self.assertEqual(state["primary_url"], "/?view=gate&gate=gate-1")
+        self.assertEqual(state["control_url"], "/?view=gate&gate=gate-1")
         self.assertEqual(state["continue_label"], "Continue")
         self.assertEqual(state["continue_action"], "run_original_prompt")
         self.assertEqual(state["continue_url"], "http://127.0.0.1:9999/")
@@ -2919,14 +3051,18 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("AIWatcher Optimize cleanup prompt", prompt)
         self.assertIn("Full path: /repo/app", prompt)
         self.assertIn("Signal: 3 sessions", prompt)
-        self.assertIn("Safe to archive or clean up", prompt)
+        self.assertIn("Safe to archive/review", prompt)
         self.assertIn("Keep active", prompt)
         self.assertIn("Unknown", prompt)
+        self.assertIn("Validation before buckets", prompt)
+        self.assertIn("Open the owning AI app", prompt)
         self.assertIn("Do not delete files", prompt)
         self.assertIn("Do not stop or kill any running process", prompt)
         self.assertIn("latest branch, PR, commit, or handoff receipt", prompt)
         self.assertIn("Tool: codex-cli", prompt)
         self.assertIn("Return these buckets", prompt)
+        for phrase in ("remove only", "delete only", "stop only"):
+            self.assertNotIn(phrase, prompt.lower())
         self.assertIn("evidence_hash", inventory["top"])
 
     def test_optimize_inventory_surfaces_stale_runtime_review_plan(self) -> None:
@@ -2949,6 +3085,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("not model/API spend", inventory["top"]["resource_note"])
         self.assertIn("unknown from RSS alone", inventory["top"]["cost_note"])
         self.assertIn("prompt/source content", inventory["top"]["privacy_note"])
+        self.assertIn("Match PID", inventory["top"]["validation_hint"])
         self.assertIn("Run: aiwatcher processes --stale-only", inventory["top"]["safe_review_steps"])
         self.assertIn("before-minus-after local memory signal", " ".join(inventory["top"]["safe_review_steps"]))
         self.assertIn("Reward: Potential local reward", inventory["top"]["cleanup_prompt"])
@@ -2956,6 +3093,30 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Unknown", inventory["top"]["cleanup_prompt"])
         self.assertIn("Copy safe review steps", inventory["top"]["action_label"])
         self.assertIn("Do not stop or kill any running process", inventory["top"]["cleanup_prompt"])
+
+    def test_optimize_candidate_prompts_do_not_authorize_destructive_cleanup(self) -> None:
+        base = {
+            "title": "Review local cleanup candidate",
+            "project_full": "/repo/app",
+            "project": "/repo/app",
+            "last_activity": "2026-09-14T00:00:00+00:00",
+            "session_count": 2,
+            "tool": "codex-cli",
+            "impact_label": "~1.2M context at risk",
+            "evidence_label": "Observed",
+            "evidence": "Observed from local metadata.",
+            "review_summary": "Review before cleanup.",
+            "validation_hint": "Verify ownership first.",
+        }
+        for kind in ("worktree", "agent_workspace", "stale_processes", "session_cluster"):
+            with self.subTest(kind=kind):
+                prompt = ui._optimize_candidate_prompt({**base, "kind": kind}).lower()
+                self.assertIn("do not delete", prompt)
+                self.assertIn("do not stop", prompt)
+                self.assertIn("separate", prompt)
+                self.assertIn("decision", prompt)
+                for phrase in ("remove only", "delete only", "stop only"):
+                    self.assertNotIn(phrase, prompt)
 
     def test_optimize_inventory_surfaces_old_agent_scratch_workspace(self) -> None:
         now = datetime.now(timezone.utc)
@@ -2981,8 +3142,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("4+ hours", inventory["top"]["why_inactive"])
         self.assertIn("local temp/scratch path shape", inventory["top"]["evidence"])
         self.assertEqual(inventory["top"]["action_label"], "Copy cleanup prompt")
-        self.assertIn("disposable scratch space", inventory["top"]["cleanup_prompt"])
-        self.assertIn("moving anything useful", inventory["top"]["cleanup_prompt"])
+        self.assertIn("if it looks disposable", inventory["top"]["cleanup_prompt"])
+        self.assertIn("separate cleanup decision", inventory["top"]["cleanup_prompt"])
+        self.assertNotIn("delete only", inventory["top"]["cleanup_prompt"].lower())
 
     def test_optimize_inventory_skips_recent_agent_scratch_workspace(self) -> None:
         now = datetime.now(timezone.utc)
@@ -3078,9 +3240,14 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(second["ai_assist_result"]["status"], "cached")
         self.assertEqual(compose.call_count, 1)
         self.assertIn("AIWatcher AI-assisted Optimize cleanup prompt", second["prompt"])
+        packet = json.loads(compose.call_args.kwargs["local_prompt"])
+        self.assertEqual(packet["workflow"], "optimize_cleanup")
+        self.assertEqual(packet["selected_candidate"]["project_full"], "/repo/app")
+        self.assertEqual(packet["selected_candidate"]["session_count"], 3)
+        self.assertIn("local_cleanup_prompt", packet)
         self.assertEqual(runs[0]["workflow"], "optimize_cleanup")
         self.assertTrue(runs[0]["cache_hit"])
-        self.assertEqual(runs[1]["evidence_hash"], candidate["evidence_hash"])
+        self.assertEqual(runs[1]["evidence_hash"], first["evidence_hash"])
         self.assertNotIn("sk-secret", json.dumps(runs))
 
     def test_ai_assist_provider_auth_failure_marks_key_rejected(self) -> None:
@@ -3229,7 +3396,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(result["ai_assist_result"]["status"], "failed")
         self.assertIn("AI Assist failed unexpectedly (AttributeError)", result["ai_assist_result"]["reason"])
         self.assertEqual(runs[0]["status"], "failed")
-        self.assertEqual(runs[0]["evidence_hash"], candidate["evidence_hash"])
+        self.assertEqual(runs[0]["evidence_hash"], result["evidence_hash"])
         self.assertIn("Do not stop or kill any running process", result["prompt"])
 
     def test_ai_assist_daily_cap_stops_cloud_calls_once_reached(self) -> None:
@@ -4901,8 +5068,79 @@ class DashboardWindowTests(unittest.TestCase):
 
         self.assertEqual(capsule["ai_assist_result"]["status"], "used")
         self.assertIn("Inspect aiwatcher_cli/web/index.js first", capsule["next_brief"])
-        self.assertEqual(improve.call_args.kwargs["local_brief"], visible_brief)
+        packet = json.loads(improve.call_args.kwargs["local_brief"])
+        self.assertEqual(packet["workflow"], "fresh_start")
+        self.assertEqual(packet["source_session"]["session_id"], "ai-fast")
+        self.assertEqual(packet["source_session"]["project"], "/repo/fast")
+        self.assertEqual(packet["local_brief"], visible_brief)
         self.assertEqual(capsule["enrichment_status"], "client_handoff_brief")
+
+    def test_ai_assisted_handoff_rejects_prompt_evidence_override_in_metadata_only(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="ai-private",
+            tool="claude-code",
+            surface="desktop",
+            project_path="/repo/private",
+            started_at=now - timedelta(hours=3),
+            updated_at=now - timedelta(minutes=7),
+            tokens_in=90_000,
+            tokens_out=4_000,
+            cost_usd=0.34,
+        )
+        visible_brief = "\n".join([
+            "AIWatcher Fresh Start brief",
+            "",
+            "Source session prompt evidence",
+            "- Prompt/source policy: Prompt excerpts included by explicit opt-in.",
+            "- Opening user ask:",
+            "  - turn 1: 10 tokens, 0 tool calls, $0.00",
+            "    Prompt: secret customer prompt text",
+        ])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with ui._SUMMARY_CACHE_LOCK:
+                ui._SESSION_INDEX.clear()
+                ui._SUMMARY_CACHE.clear()
+            ui._index_sessions([row])
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all_events", return_value=[]),
+                patch.object(ui, "safe_runtime_processes", return_value=[]),
+                patch.object(ui, "ai_assist_config", return_value={
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "max_daily_usd": 0.25,
+                    "source_access": "metadata_only",
+                    "enabled_workflows": ["fresh_start"],
+                    "api_keys": {"openai": "sk-secret"},
+                }),
+                patch.object(ui, "improve_fresh_start_brief", return_value={
+                    "status": "used",
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "model": "gpt-test",
+                    "input_chars": 120,
+                    "output_chars": 80,
+                    "source_access": "metadata_only",
+                    "text": "AIWatcher AI-assisted Fresh Start brief\n\nNext ask\n- Verify workspace identity.",
+                    "structured": {"next_ask": "Verify workspace identity."},
+                    "usage": {"prompt_tokens": 150, "completion_tokens": 50},
+                }) as improve,
+            ):
+                capsule = ui.build_ai_assisted_handoff_detail(
+                    "ai-private",
+                    days=7,
+                    target="claude",
+                    include_prompt_excerpt=False,
+                    local_brief_override=visible_brief,
+                )
+
+        self.assertEqual(capsule["ai_assist_result"]["status"], "used")
+        packet = json.loads(improve.call_args.kwargs["local_brief"])
+        self.assertNotEqual(packet["local_brief"], visible_brief)
+        self.assertNotIn("secret customer prompt text", json.dumps(packet))
+        self.assertNotEqual(capsule.get("enrichment_status"), "client_handoff_brief")
 
     def test_ai_assisted_handoff_composes_paste_ready_brief_and_receipt(self) -> None:
         now = datetime.now(timezone.utc)
@@ -4977,6 +5215,13 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(first_capsule["ai_assist_result"]["status"], "used")
         self.assertEqual(capsule["ai_assist_result"]["status"], "cached")
         self.assertEqual(improve.call_count, 1)
+        packet = json.loads(improve.call_args.kwargs["local_brief"])
+        self.assertEqual(packet["workflow"], "fresh_start")
+        self.assertEqual(packet["source_session"]["session_id"], "ai-brief")
+        self.assertEqual(packet["source_session"]["project"], "/repo/ai")
+        self.assertIn("usage_pressure", packet)
+        self.assertIn("composition_goal", packet)
+        self.assertIn("session_prompt_evidence", packet["local_evidence"])
         self.assertIn("AIWatcher AI-assisted Fresh Start brief", capsule["next_brief"])
         self.assertIn("What appears done", capsule["next_brief"])
         self.assertIn("AI Assist receipt", capsule["next_brief"])

@@ -631,6 +631,140 @@ async function preflightPrompt() {
     resultNode.innerHTML = '<div class="empty">Could not reach the local AIWatcher server.</div>';
   }
 }
+let promptGateLoadedFor = null;
+function promptGateIdFromUrl() {
+  return new URLSearchParams(location.search).get('gate') || '';
+}
+function renderPromptGateFailure(data) {
+  const fallback = data && data.fallback_url
+    ? `<a class="link-button" href="${esc(data.fallback_url)}" target="_blank" rel="noreferrer">Open fallback gate</a>`
+    : '';
+  return `<div class="card">
+    <div class="section-title"><div><h2>Prompt Gate unavailable</h2><p>${esc((data && data.error) || 'This gate expired or the AI tool already continued.')}</p></div></div>
+    <div class="copy-row">
+      <button class="btn-primary" onclick="showView('prompt')">Open Plan</button>
+      ${fallback}
+    </div>
+  </div>`;
+}
+function renderPromptGateReview(data) {
+  const result = data.result || {};
+  const route = data.route || {};
+  const findings = result.findings || [];
+  const suggestions = result.suggestions || [];
+  const guardrails = result.guardrails || [];
+  const risk = result.risk || 'unknown';
+  const score = result.score === undefined || result.score === null ? '-' : result.score;
+  const reward = route.reward || result.impact || 'Review this prompt before the AI tool continues.';
+  const brief = result.suggested_prompt || '';
+  const expires = data.expires_at ? `Expires ${dateLabel(data.expires_at)}` : 'Short-lived local gate';
+  const source = [data.tool, data.cwd].filter(Boolean).join(' · ');
+  return `<div class="gate-route ${esc(route.kind || '')}">
+    <div>
+      <span class="pill">${esc(route.label || 'Prompt Gate')}</span>
+      <h2>${esc(route.title || 'Review before running')}</h2>
+      <p>${esc(route.why || 'AIWatcher found a prompt worth reviewing before context is spent.')}</p>
+      <p class="plan-next-step"><strong>Next:</strong> ${esc(route.next_step || 'Choose a decision below.')}</p>
+      <div class="gate-status">
+        <span class="pill">${esc(source || 'local hook')}</span>
+        <span class="pill">${esc(expires)}</span>
+      </div>
+    </div>
+    <div class="gate-route-reward">${esc(reward)}</div>
+  </div>
+  <div class="gate-grid">
+    <section class="card gate-evidence">
+      <div class="gate-evidence-section">
+        <h3>Findings</h3>
+        ${findings.length ? `<ul class="prompt-list">${findings.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : '<p>No specific finding was attached.</p>'}
+      </div>
+      <div class="gate-evidence-section">
+        <h3>Suggestions</h3>
+        ${suggestions.length ? `<ul class="prompt-list">${suggestions.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : '<p>No extra suggestion was attached.</p>'}
+      </div>
+      ${guardrails.length ? `<div class="gate-evidence-section"><h3>Guardrails</h3><div class="pill-row">${guardrails.map(item => `<span class="pill">${esc(item.label || item)}</span>`).join('')}</div></div>` : ''}
+      <details class="gate-original">
+        <summary>Original prompt</summary>
+        <pre>${esc(data.prompt || '')}</pre>
+      </details>
+      <p>Prompt text is held only while this local hook is waiting. AIWatcher stores the decision and hashes, not this prompt text.</p>
+    </section>
+    <section class="card">
+      <div class="section-title"><div><h2>Execution brief</h2><p>Edit if needed, then send the safer brief back to the blocked AI tool.</p></div><span class="pill">${esc(risk)} · ${esc(score)}</span></div>
+      <textarea id="promptGateBrief" class="gate-brief-preview">${esc(brief)}</textarea>
+      <div id="promptGateDecisionStatus" class="gate-status" role="status"></div>
+      <div class="gate-actions">
+        <button class="btn-primary" onclick="sendPromptGateDecision('use_brief')">${esc(route.primary_label || 'Add safer brief')}</button>
+        <button class="btn-quiet" onclick="sendPromptGateDecision('edit')">Add edited brief</button>
+        <button class="btn-quiet" onclick="sendPromptGateDecision('run_original')">Run original</button>
+        <button class="btn-quiet danger" onclick="sendPromptGateDecision('cancel')">Cancel run</button>
+      </div>
+    </section>
+  </div>`;
+}
+async function loadPromptGateReview(force = false) {
+  const gateId = promptGateIdFromUrl();
+  const target = document.getElementById('promptGateReview');
+  const riskNode = document.getElementById('promptGateRisk');
+  if (!target) return;
+  if (!force && promptGateLoadedFor === gateId && target.dataset.loaded === '1') return;
+  promptGateLoadedFor = gateId;
+  target.dataset.loaded = '0';
+  target.innerHTML = '<div class="card"><div class="loading">Loading the local Prompt Gate...</div></div>';
+  if (riskNode) riskNode.textContent = 'Loading';
+  try {
+    const params = gateId ? `?id=${encodeURIComponent(gateId)}` : '';
+    const res = await fetch(`/api/prompt-gate${params}`);
+    const data = await res.json();
+    if (!res.ok || data.error || data.active === false) {
+      target.innerHTML = renderPromptGateFailure(data);
+      if (riskNode) riskNode.textContent = res.status === 410 ? 'Expired' : 'Unavailable';
+      return;
+    }
+    target.innerHTML = renderPromptGateReview(data);
+    target.dataset.loaded = '1';
+    if (riskNode) riskNode.textContent = `${data.result && data.result.risk ? data.result.risk : 'risk'} · score ${data.result && data.result.score !== undefined ? data.result.score : '-'}`;
+  } catch (error) {
+    target.innerHTML = renderPromptGateFailure({ error: 'Could not reach the local AIWatcher server.' });
+    if (riskNode) riskNode.textContent = 'Unavailable';
+  }
+}
+async function sendPromptGateDecision(decision) {
+  const status = document.getElementById('promptGateDecisionStatus');
+  const buttons = Array.from(document.querySelectorAll('#view-gate button'));
+  const promptNode = document.getElementById('promptGateBrief');
+  buttons.forEach(button => { button.disabled = true; });
+  if (status) status.innerHTML = '<span class="pill">Applying decision...</span>';
+  try {
+    const res = await fetch('/api/prompt-gate-decision', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: promptGateIdFromUrl(),
+        decision,
+        prompt: promptNode ? promptNode.value : '',
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || `Request failed (${res.status})`);
+    const riskChange = data.selected_score === null || data.selected_score === undefined
+      ? 'No prompt will run.'
+      : `Risk ${data.original_risk} (${data.original_score}) to ${data.selected_risk} (${data.selected_score})`;
+    document.getElementById('promptGateReview').innerHTML = `<div class="card">
+      <div class="section-title"><div><h2>${esc(data.decision_label || 'Decision sent')}</h2><p>Your choice has been returned to ${esc(data.tool || 'the AI tool')}.</p></div><span class="pill">Done</span></div>
+      <div class="risk-card low">
+        <h3>${esc(riskChange)}</h3>
+        <p>${esc(data.impact || 'Return to the blocked AI tool to continue.')}</p>
+      </div>
+      <p style="margin-top:12px">Return to Claude, Codex, or Cursor. This dashboard page can stay open; the one-shot gate will close itself.</p>
+    </div>`;
+    showToast('Prompt Gate decision sent');
+  } catch (error) {
+    buttons.forEach(button => { button.disabled = false; });
+    if (status) status.innerHTML = `<span class="pill">${esc(error.message || 'Decision failed')}</span>`;
+    showToast(`Could not apply Prompt Gate decision: ${error.message || 'unknown error'}`, 'error');
+  }
+}
 let toastTimer;
 function showToast(message, kind = 'success') {
   const toast = document.getElementById('toast');
@@ -1801,6 +1935,21 @@ function renderFreshStartPreview(capsule) {
     </div>
   </div>`;
 }
+function renderHandoffLoading(sessionId) {
+  return `<section class="detail-section handoff-loading-shell">
+    <h2>Fresh Start</h2>
+    <p>AIWatcher is preparing the handoff for this source session. Keep this drawer open; the copyable brief will stay here while evidence finishes indexing.</p>
+    <div class="ai-loading-panel" aria-live="polite">
+      <div class="ai-loading-mark">AI</div>
+      <div>
+        <strong>Loading detailed evidence...</strong>
+        <p>Timeline, outcome, git, and prompt evidence are indexing in the background. The screen will update in place when the brief is ready.</p>
+        <div class="ai-loading-bar" aria-hidden="true"></div>
+      </div>
+    </div>
+    <p class="tool-link-note">Source session: ${esc(shortSessionId(sessionId))}</p>
+  </section>`;
+}
 function freshStartReceiptWidget({ reason = '', expected = '', copy = '', controls = '' } = {}) {
   return `<div class="receipt-widget">
     <div class="receipt-widget-head">
@@ -1937,7 +2086,7 @@ function renderHandoff(capsule) {
       <span class="hint">Off by default: everything else in this brief is metadata (counts, hashes, file paths). This adds your actual prompt text from the costliest turn, so review it before pasting into another tool.</span>
     </label>
   </section>
-  ${runtimeReturnPanel(runtime, capsule.source_path)}
+    ${runtimeReturnPanel(runtime, capsule.source_path)}
   <section class="detail-section"><h3>Why start fresh now</h3>
     <ul class="insight-list">${(capsule.warnings || []).map(item => `<li>${esc(item)}</li>`).join('')}</ul>
   </section>
@@ -2027,29 +2176,18 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
     showToast('AI Assist could not improve this brief.', 'error');
   }
 }
+let handoffOpenToken = 0;
 async function openHandoff(sessionId, target = 'generic', includePrompt = false, options = null) {
+  const token = ++handoffOpenToken;
+  const isCurrent = () => token === handoffOpenToken && document.getElementById('detailDrawer').classList.contains('open');
   openDrawer('Fresh Start');
-  const node = document.getElementById('detailContent');
-  setDrawerContent('<div class="loading">Finding the source session before building the Fresh Start brief...</div>');
+  setDrawerContent(renderHandoffLoading(sessionId));
   const handoffOptions = options || handoffOptionsFromForm();
   const payload = handoffPayload(sessionId, target, includePrompt, handoffOptions);
-  const summaryPromise = fetch(`/api/session-summary?id=${encodeURIComponent(sessionId)}`)
-    .then(res => res.json())
-    .catch(() => null);
-  const basicPromise = postJson('/api/handoff-basic', payload)
-    .catch(() => null);
-  const handoffPromise = postJson('/api/handoff', payload);
-  const fastSummary = await summaryPromise;
-  if (fastSummary && !fastSummary.error) {
-    setDrawerContent(renderSessionSummary(fastSummary, 'Building Fresh Start brief...'));
-  } else {
-    setDrawerContent('<div class="loading">Building local Fresh Start brief...</div>');
-  }
-  const basicCapsule = await basicPromise;
-  if (basicCapsule && !basicCapsule.error && !includePrompt) {
-    setDrawerContent(renderHandoff(basicCapsule));
-  }
+  const handoffPromise = postJson('/api/handoff', payload)
+    .catch(error => ({ error: error.message || 'Fresh Start failed.' }));
   const capsule = await handoffPromise;
+  if (!isCurrent()) return capsule;
   if (capsule.error) {
     setDrawerContent(`<div class="empty">${esc(capsule.error)}</div>`);
     return capsule;
@@ -2242,16 +2380,25 @@ function renderOptimizeWorkspace(optimize) {
       const fullPath = item.project_full || item.project || '';
       const pathLine = fullPath ? `<div class="optimize-full-path"><span class="label">Full path</span><code>${esc(fullPath)}</code></div>` : '';
       const activityLine = item.activity_summary ? `<p class="optimize-activity-line">${esc(item.activity_summary)}</p>` : '';
-      return `<div class="action-row ${item.tokens_at_risk ? 'medium' : 'low'}">
-      <div>
+      const summary = item.review_summary || item.summary || item.why_inactive || 'Review this local cleanup candidate before taking action.';
+      const validation = item.validation_hint || 'Verify this is not active work before archiving or cleaning anything.';
+      return `<div class="action-row optimize-card ${item.tokens_at_risk ? 'medium' : 'low'}">
+      <div class="optimize-card-copy">
         <div class="action-title">${esc(item.title)} <span class="pill">${esc(item.evidence_label || 'Observed')}</span></div>
-        <p>${esc(item.why_inactive || item.summary || '')}</p>
-        ${activityLine}
+        <p>${esc(summary)}</p>
         <div class="action-meta"><span class="pill" title="${esc(fullPath)}">${esc(item.project ? projectName({ project_full: item.project }) : 'Local machine')}</span>${item.impact_label ? `<span class="pill">${esc(item.impact_label)}</span>` : ''}<span class="pill">${esc(item.updated_label || '')}</span></div>
-        ${pathLine}
-        <p class="receipt-note">${esc(item.evidence || '')}</p>
+        <details class="aiw-details optimize-evidence">
+          <summary>Why this appeared</summary>
+          <div class="details-body optimize-card-detail">
+            <p><strong>Validate first:</strong> ${esc(validation)}</p>
+            ${item.why_inactive ? `<p>${esc(item.why_inactive)}</p>` : ''}
+            ${activityLine}
+            ${pathLine}
+            <p class="receipt-note">${esc(item.evidence || '')}</p>
+          </div>
+        </details>
       </div>
-      <div class="actions">
+      <div class="actions optimize-card-actions">
         ${item.view ? `<button class="btn-primary" onclick="showView('${esc(item.view)}')">${esc(item.action_label || 'Review')}</button><button class="btn-quiet" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">Copy cleanup prompt</button>` : `<button class="btn-primary" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">Copy cleanup prompt</button>`}
         ${aiCleanup}
         <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('marked_done', this.dataset.project, this.dataset.impact, this)">Reviewed</button>
@@ -2266,30 +2413,41 @@ function renderOptimizeWorkspace(optimize) {
 function renderRuntimeOptimizeCard(item, cleanupPrompt) {
   const steps = Array.isArray(item.safe_review_steps) && item.safe_review_steps.length
     ? item.safe_review_steps
-    : ['Run: aiwatcher processes --stale-only', 'Use PID, runtime, session id, and working directory to match each row to an AI app/window.', 'Confirm each process is not attached to live AI work.', 'Stop only stale/orphaned runtimes you recognize.', 'Run the command again; reclaimed RSS is the before-minus-after local memory signal.', 'Leave unknown processes alone.'];
+    : ['Run: aiwatcher processes --stale-only', 'Use PID, runtime, session id, and working directory to match each row to an AI app/window.', 'Confirm each process is not attached to live AI work.', 'Report stale/orphaned runtimes you recognize for a separate user stop decision.', 'Run the command again; reclaimed RSS is the before-minus-after local memory signal.', 'Leave unknown processes alone.'];
   const command = item.review_command || 'aiwatcher processes --stale-only';
   const aiCleanup = optimizeAiButton(item.id || '');
-  return `<div class="action-row low runtime-review-card">
-    <div>
+  const summary = item.review_summary || 'Review local AI runtimes; identify detached ones for a separate user decision.';
+  const validation = item.validation_hint || 'Match PID, working directory, and app/window before recommending any runtime action.';
+  return `<div class="action-row optimize-card low runtime-review-card">
+    <div class="optimize-card-copy">
       <div class="action-title">${esc(item.title || 'Review stale AI runtimes')} <span class="pill local">Local machine</span></div>
-      <p>${esc(item.why_inactive || 'Local process metadata shows AI-related runtimes with stale/orphan signals.')}</p>
-      <div class="runtime-review-grid">
-        <div class="mini"><span class="label">Goal</span><strong>${esc(item.title || 'Review stale AI runtimes')}</strong></div>
-        <div class="mini"><span class="label">Evidence</span><strong>${esc(item.evidence_label || 'Observed')}</strong><span class="mini-note">${esc(item.evidence || 'Observed from local process metadata, not provider billing.')}</span></div>
-        <div class="mini"><span class="label">Impact signal</span><strong>${esc(item.impact_label || 'runtime clutter')}</strong><span class="mini-note">${esc(item.resource_note || 'RSS/CPU are local machine resources, not model/API spend.')}</span></div>
-        <div class="mini"><span class="label">Reward</span><strong>${esc(item.reward_label || 'Less RAM/CPU pressure after confirmed cleanup')}</strong><span class="mini-note">${esc(item.cost_note || 'Do not count dollar savings from process RSS alone.')}</span></div>
+      <p>${esc(summary)}</p>
+      <div class="action-meta">
+        <span class="pill">${esc(item.evidence_label || 'Observed')}</span>
+        <span class="pill">${esc(item.impact_label || 'runtime clutter')}</span>
+        <span class="pill">No auto-stop</span>
       </div>
-      <div class="runtime-command">
-        <span class="label">Review command</span>
-        <code>${esc(command)}</code>
-      </div>
-      <ol class="runtime-review-steps">
-        ${steps.map(step => `<li>${esc(step)}</li>`).join('')}
-      </ol>
-      <p class="receipt-note">${esc(item.privacy_note || 'This checklist uses local metadata only. It does not include prompt/source content.')}</p>
-      <p class="receipt-note">Nothing is stopped from this dashboard. Run the command, confirm live work is not attached, then stop only a runtime you recognize.</p>
+      <details class="aiw-details optimize-evidence">
+        <summary>Safe runtime review steps</summary>
+        <div class="details-body optimize-card-detail">
+          <p><strong>Validate first:</strong> ${esc(validation)}</p>
+          <p>${esc(item.why_inactive || 'Local process metadata shows AI-related runtimes with stale/orphan signals.')}</p>
+          <div class="runtime-command">
+            <span class="label">Review command</span>
+            <code>${esc(command)}</code>
+          </div>
+          <ol class="runtime-review-steps">
+            ${steps.map(step => `<li>${esc(step)}</li>`).join('')}
+          </ol>
+          <p class="receipt-note">${esc(item.evidence || 'Observed from local process metadata, not provider billing.')}</p>
+          <p class="receipt-note">${esc(item.reward_label || 'Potential local reward: less RAM/CPU pressure after confirmed cleanup.')}</p>
+          <p class="receipt-note">${esc(item.cost_note || 'Do not count dollar savings from process RSS alone.')}</p>
+          <p class="receipt-note">${esc(item.privacy_note || 'This checklist uses local metadata only. It does not include prompt/source content.')}</p>
+          <p class="receipt-note">Nothing is stopped from this dashboard. Run the command, confirm live work is not attached, then make any stop a separate user decision.</p>
+        </div>
+      </details>
     </div>
-    <div class="actions">
+    <div class="actions optimize-card-actions">
       <button class="btn-primary" onclick="copyOptimizeRuntimeCommand(${jsArg(command)}, this)">Copy command</button>
       <button class="btn-quiet" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">${esc(item.action_label || 'Copy cleanup prompt')}</button>
       ${aiCleanup}
@@ -5141,6 +5299,7 @@ function showView(view) {
   const days = document.getElementById('days').value;
   if (view === 'sessions' && sessionsLoadedForDays !== days) loadSessions();
   if (view === 'insights' && reportLoadedForDays !== days) loadReport();
+  if (view === 'gate') loadPromptGateReview();
   if (view === 'receipts') markFreshStartReceiptsViewed();
 }
 function showSettingsPanel(panel) {
@@ -5936,7 +6095,7 @@ document.addEventListener('keydown', event => { if (event.key === 'Escape') clos
   // Every view id, or a ?view= deep link at one of them silently does nothing.
   // test_deep_link_allowlist_covers_every_view pins this against the markup so
   // adding a section cannot quietly leave it unreachable by link.
-  if (requestedView && ['today','prompt','watch','sessions','control','projects','changes','receipts','insights','setup','first-run'].includes(requestedView)) {
+  if (requestedView && ['today','prompt','gate','watch','sessions','control','projects','changes','receipts','insights','setup','first-run'].includes(requestedView)) {
     showView(requestedView);
     if (requestedView === 'setup') {
       const requestedPanel = new URLSearchParams(location.search).get('settings') || 'general';

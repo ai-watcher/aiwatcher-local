@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .pricing import context_window, estimate_cost, lookup
-from .scanner import INJECTED_ROW_PREFIXES, _anthropic_usage, _billed_input, _repeated_row
+from .scanner import INJECTED_ROW_PREFIXES, _anthropic_usage, _billed_input, _repeated_row, _user_prompt_text
 
 # Past this, spend since the last commit is worth interrupting for. Below it a
 # figure on screen is just noise competing with the model's output.
@@ -88,6 +88,7 @@ def read_transcript(path: str, *, since: datetime | None = None) -> dict[str, An
     # row whose usage shows the new size. A surface that only reads usage
     # keeps asking for a compaction that has already happened.
     title: str | None = None
+    latest_prompt_since: str | None = None
     command_seen_at: datetime | None = None
     boundary_seen_at: datetime | None = None
     # Calls after the one that set min_context_since: zero means the latest
@@ -106,6 +107,7 @@ def read_transcript(path: str, *, since: datetime | None = None) -> dict[str, An
         "latest_context": 0, "peak_context": 0, "first_context": 0, "turns": 0, "model": None,
         "context_at_since": 0, "min_context_since": 0, "turns_since": 0, "prompts_since": 0,
         "files_since": [], "title": None, "command_seen_at": None, "boundary_seen_at": None,
+        "latest_prompt_since": None,
         "turns_after_min_since": 0, "prompts_after_min_since": 0, "context_before_min_since": 0,
     }
     try:
@@ -144,6 +146,9 @@ def read_transcript(path: str, *, since: datetime | None = None) -> dict[str, An
                     if prompt_stamp is not None and prompt_stamp >= since:
                         prompts_since += 1
                         prompts_after_min_since += 1
+                        prompt_text = _user_prompt_text(message.get("content"))
+                        if prompt_text:
+                            latest_prompt_since = _one_line(prompt_text, 240)
                 continue
 
             # The scanner's own splitter, not a copy of it. Cached input is
@@ -213,6 +218,7 @@ def read_transcript(path: str, *, since: datetime | None = None) -> dict[str, An
         "prompts_since": prompts_since,
         "files_since": files_since,
         "title": title,
+        "latest_prompt_since": latest_prompt_since,
         "command_seen_at": command_seen_at,
         "boundary_seen_at": boundary_seen_at,
         "turns_after_min_since": turns_after_min_since,
@@ -235,6 +241,11 @@ def _row_text(message: dict[str, Any]) -> str:
             if isinstance(block, dict) and block.get("type") == "text"
         )
     return ""
+
+
+def _one_line(text: str, limit: int) -> str:
+    squashed = " ".join(text.split())
+    return squashed if len(squashed) <= limit else squashed[: max(0, limit - 3)].rstrip() + "..."
 
 
 def _is_compact_command_row(obj: dict[str, Any], message: dict[str, Any]) -> bool:
