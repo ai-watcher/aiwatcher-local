@@ -48,7 +48,7 @@ class PromptStatusBlockTests(unittest.TestCase):
     session review, named by the chat and never by the prompt."""
 
     def block(self, rows, sessions, prompts):
-        with patch.object(ui, "_current_prompt_cached", side_effect=lambda path: prompts.get(path, (None, None))):
+        with patch.object(ui, "_current_prompt_cached", side_effect=lambda path, **_: prompts.get(path, (None, None))):
             return ui._prompt_status_block(rows, sessions)
 
     def test_a_working_prompt_shows_what_it_is_costing_so_far(self) -> None:
@@ -84,16 +84,22 @@ class PromptStatusBlockTests(unittest.TestCase):
         # No title in the log: the chat is named by tool and project.
         self.assertEqual(item["name"], f"{ui.tool_label('claude-code')} · aiwatcher-local")
 
-    def test_only_live_claude_code_chats_the_user_started_are_shown(self) -> None:
+    def test_only_live_chats_the_user_started_are_shown(self) -> None:
         rows = [
             presence("quiet-nothing", "quiet"),
             presence("gone", "gone"),
-            presence("codex", "working", tool="codex-cli"),
             presence("analyst", "working", analyst_run=True),
         ]
-        sessions = [session("quiet-nothing"), session("gone"), session("codex", tool="codex-cli"), session("analyst")]
-        prompts = {f"/tmp/{sid}.jsonl": (segment(requests=0, cost_usd=0.0), None) for sid in ("quiet-nothing", "gone", "codex", "analyst")}
+        sessions = [session("quiet-nothing"), session("gone"), session("analyst")]
+        prompts = {f"/tmp/{sid}.jsonl": (segment(requests=0, cost_usd=0.0), None) for sid in ("quiet-nothing", "gone", "analyst")}
         self.assertIsNone(self.block(rows, sessions, prompts))
+
+    def test_a_codex_chat_is_shown_too_and_named_by_tool(self) -> None:
+        block = self.block([presence("codex", "working", tool="codex-cli")], [session("codex", tool="codex-cli")],
+                           {"/tmp/codex.jsonl": (segment(), None)})
+        (item,) = block["items"]
+        self.assertEqual(item["name"], f"{ui.tool_label('codex-cli')} · aiwatcher-local")
+        self.assertTrue(item["rest"].startswith(f"{ui.money(1.35)} so far"))
 
     def test_working_chats_come_first(self) -> None:
         block = self.block(

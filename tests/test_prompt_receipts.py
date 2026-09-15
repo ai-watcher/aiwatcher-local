@@ -6,6 +6,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from unittest.mock import patch
+
 from aiwatcher_cli import scanner, ui
 from aiwatcher_cli.pricing import CACHE_READ_MULTIPLIER, CACHE_WRITE_1H_MULTIPLIER, estimate_cost, lookup
 
@@ -106,6 +108,109 @@ class SegmentCountingTests(unittest.TestCase):
     def test_the_cache_lifetime_follows_what_the_chat_has_written(self) -> None:
         # Nothing written yet before the first prompt; 1-hour entries after.
         self.assertEqual([seg["cache_lifetime_seconds"] for seg in self.segments], [300, 3600, 3600])
+
+
+def codex_row(minutes: float, row_type: str, payload: dict) -> dict:
+    return {"timestamp": at(minutes), "type": row_type, "payload": payload}
+
+
+def codex_tokens(minutes: float, *, context: int, cached: int, output: int, total: int) -> dict:
+    return codex_row(minutes, "event_msg", {"type": "token_count", "info": {
+        "total_token_usage": {"input_tokens": total, "output_tokens": output, "total_tokens": total + output},
+        "last_token_usage": {"input_tokens": context, "cached_input_tokens": cached, "output_tokens": output,
+                             "total_tokens": context + output},
+    }})
+
+
+def typed(minutes: float, text: str) -> dict:
+    """Codex 0.149.1+: the typed prompt in an item_completed envelope."""
+    return codex_row(minutes, "event_msg", {"type": "item_completed", "item": {
+        "type": "UserMessage", "content": [{"type": "text", "text": text}]}})
+
+
+def echoed(minutes: float, text: str) -> dict:
+    return codex_row(minutes, "response_item", {"type": "message", "role": "user",
+                                                "content": [{"type": "input_text", "text": text}]})
+
+
+class CodexSegmentTests(unittest.TestCase):
+    """Per-prompt figures from a Codex rollout, in the same shape as Claude Code's.
+    Not yet checked against a real rollout: see _segment_codex_rollout."""
+
+    MODEL = "gpt-5.3-codex"
+
+    def rollout(self, *, new_format: bool = True) -> list[dict]:
+        prompt = typed if new_format else (lambda minutes, text: codex_row(
+            minutes, "event_msg", {"type": "user_message", "message": text}))
+        return [
+            codex_row(0, "session_meta", {"id": "codex-1", "cwd": "/repo"}),
+            codex_row(0.1, "turn_context", {"model": self.MODEL, "cwd": "/repo"}),
+            echoed(0.2, "<environment_context>\n  <cwd>/repo</cwd>\n</environment_context>"),
+            echoed(0.3, "# AGENTS.md instructions for /repo"),
+            prompt(1, "build the thing"),
+            echoed(1, "build the thing"),
+            codex_tokens(2, context=40_000, cached=30_000, output=500, total=40_000),
+            codex_tokens(2, context=40_000, cached=30_000, output=500, total=40_000),   # same call reported twice
+            codex_row(2.5, "response_item", {"type": "function_call", "name": "shell"}),
+            codex_tokens(3, context=45_000, cached=40_000, output=800, total=85_000),
+            prompt(10, "and the tests"),
+            echoed(10, "and the tests"),
+            codex_tokens(11, context=50_000, cached=44_000, output=300, total=135_000),
+        ]
+
+    def segments(self, rows: list[dict]) -> list[dict]:
+        return scanner.segment_session_by_prompt(write(rows))
+
+    def test_typed_prompts_open_turns_and_injected_or_echoed_rows_do_not(self) -> None:
+        for new_format in (True, False):
+            with self.subTest(new_format=new_format):
+                first, second = self.segments(self.rollout(new_format=new_format))
+                self.assertEqual((first["prompt"], second["prompt"]), ("build the thing", "and the tests"))
+                self.assertEqual(first["requests"], 2)
+                self.assertEqual(first["tool_calls"], 1)
+
+    def test_cached_input_bills_at_the_cached_rate_and_nothing_is_re_cached(self) -> None:
+        first, second = self.segments(self.rollout())
+        expected = (
+            estimate_cost(self.MODEL, 10_000, 500, cache_read=30_000)
+            + estimate_cost(self.MODEL, 5_000, 800, cache_read=40_000)
+        )
+        self.assertAlmostEqual(first["cost_usd"], expected)
+        self.assertAlmostEqual(first["cost_resent_usd"], 70_000 * float(lookup(self.MODEL)["in"]) / 1_000_000 * CACHE_READ_MULTIPLIER)
+        self.assertEqual(first["cost_recached_usd"], 0.0)
+        self.assertTrue(first["priced"])
+        self.assertIsNone(first["context_before"])
+        self.assertEqual((second["context_before"], second["context_after"]), (45_000, 50_000))
+        self.assertEqual(second["gap_seconds"], 7 * 60)
+
+    def test_a_rollout_with_no_typed_rows_falls_back_to_user_messages(self) -> None:
+        rows = [row for row in self.rollout() if row["payload"].get("type") != "item_completed"]
+        prompts = [segment["prompt"] for segment in self.segments(rows)]
+        self.assertEqual(prompts, ["build the thing", "and the tests"])
+
+    def test_an_unnamed_model_is_not_priced(self) -> None:
+        rows = [row for row in self.rollout() if row["type"] != "turn_context"]
+        first, _second = self.segments(rows)
+        self.assertFalse(first["priced"])
+        self.assertEqual(first["cost_usd"], 0.0)
+
+    def test_the_prompt_reader_handles_both_shapes_and_skips_injected_rows(self) -> None:
+        self.assertEqual(scanner._codex_user_prompt_text("event_msg", typed(0, "hi")["payload"]), "hi")
+        self.assertIsNone(scanner._codex_user_prompt_text("event_msg", {"type": "item_completed", "item": {"type": "AgentMessage", "content": [{"type": "text", "text": "x"}]}}))
+        self.assertIsNone(scanner._codex_user_prompt_text("response_item", echoed(0, "<environment_context>x</environment_context>")["payload"]))
+        skill_part = {"type": "item_completed", "item": {"type": "UserMessage", "content": [{"type": "skill", "text": "ignore"}, {"type": "text", "text": "real"}]}}
+        self.assertEqual(scanner._codex_user_prompt_text("event_msg", skill_part), "real")
+
+    def test_the_session_scan_prices_cached_input_at_the_cached_rate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "rollout-codex-1.jsonl").write_text("\n".join(json.dumps(row) for row in self.rollout()) + "\n", encoding="utf-8")
+            with patch.object(scanner, "CODEX_SESSIONS_DIRS", [root]):
+                sessions, events = scanner.scan_codex_rollouts()
+        (session,) = sessions
+        # Session total from total_token_usage, whose cached figure is absent here.
+        self.assertAlmostEqual(session.cost_usd, estimate_cost(self.MODEL, 135_000, 300))
+        self.assertAlmostEqual(events[0].cost_usd, estimate_cost(self.MODEL, 10_000, 500, cache_read=30_000))
 
 
 class CurrentPromptTests(unittest.TestCase):

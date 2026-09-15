@@ -7369,7 +7369,7 @@ _PROMPT_STATUS_CACHE: dict[str, tuple[int, float, dict[str, object] | None, str 
 PROMPT_STATUS_MAX_ROWS = 5
 
 
-def _current_prompt_cached(path: str) -> tuple[dict[str, object] | None, str | None]:
+def _current_prompt_cached(path: str, *, read_title: bool = True) -> tuple[dict[str, object] | None, str | None]:
     try:
         info = os.stat(path)
     except OSError:
@@ -7378,7 +7378,8 @@ def _current_prompt_cached(path: str) -> tuple[dict[str, object] | None, str | N
     if cached is not None and cached[0] == info.st_size and cached[1] == info.st_mtime:
         return cached[2], cached[3]
     segment = current_prompt_segment(segment_session_by_prompt(path))
-    title = statusline.read_transcript(path).get("title") if segment is not None else None
+    # Titles come from Claude Code's transcript rows; a Codex rollout has none.
+    title = statusline.read_transcript(path).get("title") if segment is not None and read_title else None
     if len(_PROMPT_STATUS_CACHE) > 32:
         _PROMPT_STATUS_CACHE.clear()
     _PROMPT_STATUS_CACHE[path] = (info.st_size, info.st_mtime, segment, title)
@@ -7386,8 +7387,8 @@ def _current_prompt_cached(path: str) -> tuple[dict[str, object] | None, str | N
 
 
 def _prompt_status_block(rows: list[SessionPresence], sessions: list[LocalSession]) -> dict[str, object] | None:
-    """Each live Claude Code chat's current prompt: what it is costing while
-    Claude works, and its receipt once the chat has gone quiet.
+    """Each live Claude Code or Codex chat's current prompt: what it is costing
+    while the agent works, and its receipt once the chat has gone quiet.
 
     Question per item: what is this prompt costing, or what did it cost? Unit
     and scope: list-price dollars for that one prompt's requests, the same
@@ -7405,9 +7406,9 @@ def _prompt_status_block(rows: list[SessionPresence], sessions: list[LocalSessio
             continue
         session = by_id.get(row.session_id)
         path = session.source_path if session is not None else None
-        if not path or not path.endswith(".jsonl") or "claude" not in (session.tool or "").lower():
+        if not path or not path.endswith(".jsonl"):
             continue
-        segment, title = _current_prompt_cached(path)
+        segment, title = _current_prompt_cached(path, read_title="claude" in (session.tool or "").lower())
         if segment is None:
             continue
         receipt = build_prompt_receipts([segment])
