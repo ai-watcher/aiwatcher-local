@@ -1170,6 +1170,27 @@
     .action-title { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; font-weight: var(--fw-bold); color: var(--t-base); }
     .action-row p { margin: 6px 0 0; color: var(--muted); line-height: 1.45; }
     .action-meta { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: 10px; }
+    .optimize-card {
+      grid-template-columns: minmax(0, 1fr) minmax(300px, 620px);
+      align-items: start;
+      gap: var(--sp-4);
+    }
+    .optimize-card-copy {
+      min-width: 0;
+      max-width: 84ch;
+    }
+    .optimize-card-actions {
+      justify-self: end;
+      align-self: start;
+      justify-content: flex-end;
+      align-items: stretch;
+      max-width: 620px;
+    }
+    .optimize-card-actions button {
+      min-height: 42px;
+      white-space: normal;
+      line-height: 1.2;
+    }
     .optimize-activity-line { color: var(--text-quiet); font-size: var(--fs-2); }
     .optimize-full-path {
       display: grid;
@@ -1192,7 +1213,7 @@
     .runtime-review-card { align-items: start; }
     .optimize-evidence {
       margin-top: 10px;
-      max-width: min(100%, 860px);
+      max-width: min(100%, 760px);
       background: rgba(var(--ground-rgb), .28);
     }
     .optimize-evidence summary {
@@ -1208,6 +1229,16 @@
     .runtime-command { display: grid; gap: var(--sp-1); margin-top: 12px; }
     .runtime-command code { overflow-wrap: anywhere; }
     .runtime-review-steps { margin: 12px 0 0; padding-left: 20px; color: var(--text-bright); line-height: 1.45; }
+    @media (max-width: 1180px) {
+      .optimize-card { grid-template-columns: 1fr; }
+      .optimize-card-copy { max-width: 100%; }
+      .optimize-card-actions {
+        justify-self: stretch;
+        justify-content: flex-start;
+        max-width: 100%;
+      }
+      .optimize-card-actions button { flex: 1 1 180px; }
+    }
     .coverage-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-3); }
     /* The coverage table. Rows align on one axis so ten tools can be compared
        rather than read one card at a time; the quiet second line in a cell is

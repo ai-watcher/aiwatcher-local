@@ -279,6 +279,95 @@ def _clean_user_items(items: Sequence[str] | None, *, limit: int = 8, item_limit
     return cleaned
 
 
+def _session_prompt_evidence(
+    segments: Sequence[dict[str, object]],
+    *,
+    include_prompt_excerpt: bool,
+) -> dict[str, object]:
+    """Return bounded prompt-turn evidence for handoff composition.
+
+    This is intentionally a digest, not a transcript export. Metadata is always
+    safe to carry; prompt text is included only when the caller opted in.
+    """
+    rows = [segment for segment in segments if isinstance(segment, dict)]
+    total_tokens = sum(int(row.get("tokens") or 0) for row in rows)
+    total_tool_calls = sum(int(row.get("tool_calls") or 0) for row in rows)
+    total_events = sum(int(row.get("events") or 0) for row in rows)
+
+    def entry(row: dict[str, object], *, text_limit: int = 520) -> dict[str, object]:
+        item: dict[str, object] = {
+            "turn": row.get("turn"),
+            "tokens": int(row.get("tokens") or 0),
+            "tool_calls": int(row.get("tool_calls") or 0),
+            "events": int(row.get("events") or 0),
+            "cost_label": _money(float(row.get("cost_usd") or 0.0)),
+        }
+        if include_prompt_excerpt:
+            item["prompt_excerpt"] = _short(str(row.get("prompt") or ""), text_limit)
+        return item
+
+    by_cost = sorted(rows, key=lambda row: (float(row.get("cost_usd") or 0), int(row.get("tokens") or 0)), reverse=True)
+    by_tools = sorted(rows, key=lambda row: (int(row.get("tool_calls") or 0), int(row.get("tokens") or 0)), reverse=True)
+    evidence: dict[str, object] = {
+        "turn_count": len(rows),
+        "total_tokens": total_tokens,
+        "total_tokens_label": _compact_int(total_tokens),
+        "total_tool_calls": total_tool_calls,
+        "total_events": total_events,
+        "prompt_text_included": include_prompt_excerpt,
+        "prompt_policy": (
+            "Prompt excerpts included by explicit opt-in."
+            if include_prompt_excerpt
+            else "Prompt excerpts withheld; only turn counts, token pressure, and tool/event counts are included."
+        ),
+        "costliest_turns": [entry(row) for row in by_cost[:3]],
+        "tool_heavy_turns": [entry(row) for row in by_tools[:3] if int(row.get("tool_calls") or 0) > 0],
+        "recent_turns": [entry(row) for row in rows[-3:]],
+    }
+    if rows:
+        evidence["opening_turn"] = entry(rows[0], text_limit=760)
+    return evidence
+
+
+def _prompt_evidence_lines(evidence: dict[str, object]) -> list[str]:
+    if not evidence or not int(evidence.get("turn_count") or 0):
+        return []
+    lines = [
+        "",
+        "Source session prompt evidence",
+        (
+            f"- Prompt turns observed: {evidence.get('turn_count')} "
+            f"({_compact_int(int(evidence.get('total_tokens') or 0))} prompt-turn tokens, "
+            f"{evidence.get('total_tool_calls') or 0} tool calls, {evidence.get('total_events') or 0} events)."
+        ),
+        f"- Prompt/source policy: {evidence.get('prompt_policy')}",
+    ]
+
+    def add_turns(title: str, turns: object, *, limit: int = 3) -> None:
+        if not isinstance(turns, list) or not turns:
+            return
+        lines.append(f"- {title}:")
+        for turn in turns[:limit]:
+            if not isinstance(turn, dict):
+                continue
+            label = (
+                f"turn {turn.get('turn')}: {_compact_int(int(turn.get('tokens') or 0))} tokens, "
+                f"{turn.get('tool_calls') or 0} tool calls, {turn.get('cost_label') or '$0.00'}"
+            )
+            excerpt = str(turn.get("prompt_excerpt") or "").strip()
+            lines.append(f"  - {label}")
+            if excerpt:
+                lines.append(f"    Prompt: {excerpt}")
+
+    opening = evidence.get("opening_turn")
+    if isinstance(opening, dict):
+        add_turns("Opening user ask", [opening], limit=1)
+    add_turns("Recent user asks", evidence.get("recent_turns"), limit=3)
+    add_turns("Costliest turns to preserve or avoid replaying", evidence.get("costliest_turns"), limit=3)
+    add_turns("Most tool-heavy turns", evidence.get("tool_heavy_turns"), limit=2)
+    return lines
+
+
 def _brief_memory_summary(
     *,
     project_label: str,
@@ -416,6 +505,10 @@ def build_handoff_capsule(
     evidence = build_outcome_evidence(session)
     health = analyze_session_health(session, events)
     segments = segment_session_by_prompt(session.source_path)
+    session_prompt_evidence = _session_prompt_evidence(
+        segments,
+        include_prompt_excerpt=include_prompt_excerpt,
+    )
     costliest_prompt = None
     if include_prompt_excerpt and segments:
         by_cost = sorted(segments, key=lambda item: float(item.get("cost_usd") or 0), reverse=True)
@@ -545,14 +638,7 @@ def build_handoff_capsule(
             if rejected:
                 decision_lines.append(f"  Rejected: {', '.join(str(item) for item in rejected)}")
 
-    task_context_lines: list[str] = []
-    if include_prompt_excerpt and costliest_prompt and costliest_prompt.get("prompt_excerpt"):
-        task_context_lines = [
-            "",
-            f"Task context (your own prompt, turn #{costliest_prompt.get('turn')}, "
-            f"{costliest_prompt.get('cost_label')} — review before pasting elsewhere)",
-            str(costliest_prompt.get("prompt_excerpt")),
-        ]
+    session_prompt_lines = _prompt_evidence_lines(session_prompt_evidence)
 
     warning_lines = [f"- {item}" for item in warnings[:5]]
     done_lines: list[str] = []
@@ -713,9 +799,9 @@ def build_handoff_capsule(
         "",
         "Workspace evidence to inspect (not guaranteed source-session evidence)",
         *evidence_lines,
+        *session_prompt_lines,
         *commit_message_lines,
         *decision_lines,
-        *task_context_lines,
         "",
         "Fresh-session instructions",
         *[f"- {item}" for item in target_guidance],
@@ -762,6 +848,7 @@ def build_handoff_capsule(
         "warnings": warnings,
         "include_prompt_excerpt": include_prompt_excerpt,
         "costliest_prompt": costliest_prompt,
+        "session_prompt_evidence": session_prompt_evidence,
         "decisions": decisions,
         "related_workspaces": related[:3],
         "runtime_attachment": runtime_attachment or {},

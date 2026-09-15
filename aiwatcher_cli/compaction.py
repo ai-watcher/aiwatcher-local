@@ -35,6 +35,7 @@ _REFLOG_LINE = re.compile(
 # carries that movement's description instead.
 _CREATING_ACTIONS = ("commit", "merge", "cherry-pick", "pull", "revert", "rebase")
 _MAX_FILES_IN_COMMAND = 4
+_MAX_PROMPT_CHARS_IN_COMMAND = 220
 
 
 @dataclass
@@ -96,6 +97,8 @@ class Assessment:
     boundary_seen_at: str | None = None
     context_before_shed: int = 0        # for `confirmed`: the size the reply before the drop replayed
     context_after_shed: int = 0         # for `confirmed`: the size the first reply after it replayed
+    project_path: str | None = None
+    latest_prompt_since: str | None = None
 
     def __post_init__(self) -> None:
         # A recommendation is a nudge unless the log already shows a later
@@ -228,6 +231,7 @@ def codex_boundary_stats(path: str, *, since: datetime | None = None) -> dict[st
         # marker for a compaction in progress; those stay unset and the
         # lifecycle falls back to observing the drop.
         "title": None, "command_seen_at": None, "boundary_seen_at": None,
+        "latest_prompt_since": None,
         "turns_after_min_since": 0, "prompts_after_min_since": 0, "context_before_min_since": 0,
     }
     try:
@@ -255,7 +259,12 @@ def codex_boundary_stats(path: str, *, since: datetime | None = None) -> dict[st
                 for file_path in _codex_patch_paths(payload):
                     if file_path not in stats["files_since"]:
                         stats["files_since"].append(file_path)
-            if after and _codex_user_prompt_text(row_type, payload):
+            prompt_text = _codex_user_prompt_text(row_type, payload)
+            if after and prompt_text:
+                stats["latest_prompt_since"] = _one_line(
+                    prompt_text,
+                    _MAX_PROMPT_CHARS_IN_COMMAND,
+                )
                 stats["prompts_since"] += 1
                 stats["prompts_after_min_since"] += 1
             if row_type != "event_msg" or payload.get("type") != "token_count":
@@ -304,28 +313,73 @@ def _relative(path: str, root: str | None) -> str:
     return os.path.basename(path)
 
 
-def compact_command(tool: str, boundary: Boundary, files: list[str]) -> str:
+def _one_line(text: str, limit: int) -> str:
+    squashed = " ".join(str(text).split())
+    return squashed if len(squashed) <= limit else squashed[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _compact_files_phrase(files: list[str]) -> str:
+    if not files:
+        return "Changed files: unknown from local evidence."
+    shown = files[:_MAX_FILES_IN_COMMAND]
+    more = len(files) - len(shown)
+    suffix = f" and {more} more file{'s' if more != 1 else ''}" if more else ""
+    return "Changed files: " + ", ".join(shown) + suffix + "."
+
+
+def compact_command(
+    tool: str,
+    boundary: Boundary,
+    files: list[str],
+    *,
+    project_path: str | None = None,
+    title: str | None = None,
+    latest_prompt: str | None = None,
+    turns_since: int | None = None,
+    prompts_since: int | None = None,
+    latest_tokens: int | None = None,
+    context_at_commit: int | None = None,
+    after_estimate: int | None = None,
+) -> str:
     """The text Copy puts on the clipboard.
 
     Claude Code's /compact takes free-text focus, so the command says what to
-    keep -- the boundary and the files touched since -- and what to drop.
+    keep -- the boundary, active intent, and files touched since -- and what to drop.
     Codex's takes nothing, so its command is the bare word.
     """
     if "codex" in tool.lower():
         return "/compact"
     short = boundary.sha[:7]
-    subject = boundary.subject[:72]
-    named = f'commit {short} ("{subject}")' if subject else f"commit {short}"
-    if files:
-        shown = files[:_MAX_FILES_IN_COMMAND]
-        more = len(files) - len(shown)
-        work = "the work on " + ", ".join(shown) + (f" and {more} more file{'s' if more != 1 else ''}" if more else "")
-    else:
-        work = "the work since then"
-    return (
-        f"/compact Keep everything since {named}: {work}, the open decisions, "
-        "and the current task. Summarise or drop the history before that commit."
+    subject = _one_line(boundary.subject, 96)
+    named = f"commit {short} - {subject}" if subject else f"commit {short}"
+    parts = [
+        f"/compact Preserve a working summary for this active session. Boundary: keep all useful work since {named}; summarize or drop older history.",
+    ]
+    if project_path:
+        parts.append(f"Workspace: {project_path}.")
+    if title:
+        parts.append(f"Session title/current task: {_one_line(title, 140)}.")
+    if latest_prompt:
+        parts.append(f"Latest user ask after the boundary: {_one_line(latest_prompt, _MAX_PROMPT_CHARS_IN_COMMAND)}.")
+    parts.append(_compact_files_phrase(files))
+    facts: list[str] = []
+    if turns_since is not None:
+        facts.append(f"{turns_since} model turn{'s' if turns_since != 1 else ''}")
+    if prompts_since is not None:
+        facts.append(f"{prompts_since} user prompt{'s' if prompts_since != 1 else ''}")
+    if latest_tokens:
+        facts.append(f"latest context {latest_tokens:,} tokens")
+    if context_at_commit:
+        facts.append(f"context at boundary {context_at_commit:,} tokens")
+    if after_estimate:
+        facts.append(f"estimated after compact {after_estimate:,} tokens")
+    if facts:
+        parts.append("Session signals: " + "; ".join(facts) + ".")
+    parts.append(
+        "Output sections: work done, current objective, decisions/open questions, constraints, files/commands/tests to preserve, next checkpoint, and anything unknown."
     )
+    parts.append("Do not invent missing details.")
+    return " ".join(parts)
 
 
 def assess(session: LocalSession) -> Assessment | None:
@@ -408,7 +462,21 @@ def assess(session: LocalSession) -> Assessment | None:
         since_tokens=since,
         after_estimate=after,
         files_since=files,
-        command=compact_command(session.tool, boundary, files),
+        command=compact_command(
+            session.tool,
+            boundary,
+            files,
+            project_path=session.project_path,
+            title=(str(stats.get("title")).strip() or None) if stats.get("title") else None,
+            latest_prompt=(
+                str(stats.get("latest_prompt_since")).strip() or None
+            ) if stats.get("latest_prompt_since") else None,
+            turns_since=turns_since,
+            prompts_since=prompts_since,
+            latest_tokens=latest,
+            context_at_commit=at_commit,
+            after_estimate=after,
+        ),
         priced=priced,
         dead_usd_per_turn=cache_read_cost(session.model, dead) if priced else None,
         recommend=recommend,
@@ -419,6 +487,10 @@ def assess(session: LocalSession) -> Assessment | None:
         boundary_seen_at=boundary_at.isoformat() if boundary_at else None,
         context_before_shed=int(stats.get("context_before_min_since") or 0) if shed else 0,
         context_after_shed=min_since if shed else 0,
+        project_path=session.project_path,
+        latest_prompt_since=(
+            str(stats.get("latest_prompt_since")).strip() or None
+        ) if stats.get("latest_prompt_since") else None,
     )
 
 

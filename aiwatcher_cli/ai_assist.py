@@ -33,7 +33,7 @@ DEFAULT_MODELS = {
     "llama_cpp": "local-model",
 }
 
-MAX_FRESH_START_INPUT_CHARS = 9000
+MAX_FRESH_START_INPUT_CHARS = 8500
 MAX_FRESH_START_OUTPUT_TOKENS = 700
 MAX_FRESH_START_BRIEF_CHARS = 6000
 MAX_OPTIMIZE_CLEANUP_INPUT_CHARS = 7000
@@ -680,9 +680,20 @@ def _section(title: str, lines: list[str]) -> list[str]:
     return ["", title, *[f"- {line}" for line in lines]]
 
 
+def _local_prompt_from_packet(local_prompt: str) -> str:
+    parsed = _json_object_from_text(local_prompt)
+    if isinstance(parsed, dict):
+        for key in ("local_cleanup_prompt", "local_brief"):
+            value = parsed.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return str(local_prompt or "").strip()
+
+
 def _structured_handoff_text(parsed: dict[str, object]) -> str:
     goal = _clean_line(parsed.get("goal"), limit=360)
     next_ask = _clean_line(parsed.get("next_ask"), limit=420)
+    source_context = _clean_list(parsed.get("source_context") or parsed.get("session_context"), limit=5)
     what_done = _clean_list(parsed.get("what_is_done") or parsed.get("done"), limit=7)
     context = _clean_list(parsed.get("context_to_preserve") or parsed.get("context"), limit=7)
     inspect = _clean_list(parsed.get("inspect_first"), limit=7)
@@ -699,6 +710,7 @@ def _structured_handoff_text(parsed: dict[str, object]) -> str:
         "",
         "Goal",
         f"- {goal or 'Continue the same user goal from the source workspace after verifying the evidence.'}",
+        *_section("Source context", source_context),
         *_section("What appears done", what_done or ["Reconstruct the prior work from the changed files, recent commits, and source-session evidence before editing."]),
         *_section("Context to preserve", context or ["Preserve the source workspace, constraints, and small next checkpoint rather than replaying the whole prior chat."]),
         *_section("Inspect first", inspect or ["Run `git status --short` and inspect the changed files or source-of-truth docs listed in the handoff evidence."]),
@@ -740,7 +752,7 @@ def _structured_optimize_cleanup_text(parsed: dict[str, object], *, local_prompt
         ]),
         "",
         "Local evidence to verify",
-        str(local_prompt or "").strip()[:MAX_OPTIMIZE_CLEANUP_PROMPT_CHARS],
+        _local_prompt_from_packet(local_prompt)[:MAX_OPTIMIZE_CLEANUP_PROMPT_CHARS],
     ]
     return "\n".join(lines).strip()
 
@@ -784,7 +796,10 @@ _FRESH_START_SPEC = _WorkflowSpec(
     max_result_chars=MAX_FRESH_START_BRIEF_CHARS,
     system_prompt=(
         "You are AIWatcher's Fresh Start handoff composer. Your job is to turn local handoff "
-        "evidence into a useful continuation prompt for a new AI work session. Be concrete, "
+        "evidence into a useful continuation prompt for a new AI work session. You may receive "
+        "a JSON evidence packet with source_session, workspace, continuation, usage, evidence, "
+        "warnings, session_prompt_evidence, local_brief, and optional prompt excerpts. Use that packet; do not merely "
+        "paraphrase the local_brief. Be concrete, "
         "specific, and operational: extract the likely work done, user intent when it is actually "
         "present in the evidence, context worth preserving, files or commands to inspect first, "
         "what the next agent should avoid redoing, and the smallest next ask. "
@@ -798,6 +813,7 @@ _FRESH_START_SPEC = _WorkflowSpec(
     instructions=(
         "Return JSON only with these keys:\n"
         "goal: string\n"
+        "source_context: string[]\n"
         "what_is_done: string[]\n"
         "context_to_preserve: string[]\n"
         "inspect_first: string[]\n"
@@ -806,8 +822,13 @@ _FRESH_START_SPEC = _WorkflowSpec(
         "acceptance_check: string[]\n"
         "uncertainties: string[]\n\n"
         "Make the result useful for a fresh chat, forked chat, or subagent. The next_ask should "
-        "tell the new AI session exactly what to do first. Avoid echoing the section names and "
-        "boilerplate from the local handoff unless the evidence is genuinely missing. Keep it short "
+        "tell the new AI session exactly what to do first. source_context should name the source "
+        "session id, tool, project path, recency, and identity/return confidence when available. "
+        "If session_prompt_evidence includes prompt excerpts, use the opening, recent, costly, and "
+        "tool-heavy turns to infer the actual task, work done, context to preserve, and next ask. "
+        "If session_prompt_evidence says prompt text is withheld, be honest that the brief is limited "
+        "to metadata and repository evidence; do not invent the user's prior objective. "
+        "Avoid echoing the section names and boilerplate from the local handoff unless the evidence is genuinely missing. Keep it short "
         "enough to paste without carrying the whole old conversation. Do not use vague goals like "
         "\"reconstruct the current work\" unless no stronger objective is present; tie the goal to "
         "the observed workspace/tool/path/evidence instead."
@@ -826,7 +847,9 @@ _OPTIMIZE_CLEANUP_SPEC = _WorkflowSpec(
     system_prompt=(
         "You are AIWatcher's Optimize cleanup prompt composer. Create a compact, paste-ready "
         "review prompt for stale AI chats, worktrees, or runtimes. Preserve deterministic evidence "
-        "boundaries: do not invent paths, sessions, costs, outcomes, or source text. Never authorize "
+        "boundaries: do not invent paths, sessions, costs, outcomes, or source text. You may receive "
+        "a JSON evidence packet with one selected candidate plus the deterministic local cleanup prompt. "
+        "Use the selected candidate details instead of giving generic cleanup advice. Never authorize "
         "deleting files, killing processes, archiving chats, force pushing, or other destructive cleanup. "
         "Your first job is to make the next AI session validate whether the candidate is actually stale "
         "or still active."
@@ -841,7 +864,9 @@ _OPTIMIZE_CLEANUP_SPEC = _WorkflowSpec(
         "The final prompt must help another AI session classify the candidate into those buckets, "
         "but the AI session must only recommend; the user performs any action later in the owning app/tool. "
         "Make the next_action start with a verification step that checks the owning app/tool, current "
-        "workspace, PID, path, or receipt before any archive/cleanup recommendation. Keep this short and concrete."
+        "workspace, PID, path, or receipt before any archive/cleanup recommendation. Include the candidate's "
+        "full path, last activity, session count, tool, impact signal, evidence label, and uncertainty in the "
+        "relevant buckets. Keep this short and concrete."
     ),
     evidence_heading="Local AIWatcher cleanup evidence:",
     structure=lambda parsed, trimmed: _structured_optimize_cleanup_text(parsed, local_prompt=trimmed),

@@ -134,6 +134,9 @@ needed to keep the browser fallback consistent with the native companion.
 floating Companion presence control; it is intentionally content-free and does
 not expose prompt or source text. `/api/companion-scan` forces the companion to
 refresh local watch evidence without waiting for the next polling interval.
+`/api/prompt-gate` proxies the active local Prompt Gate review state into the
+dashboard shell so users return to the same AIWatcher UI instead of a temporary
+gate-only page; it answers only the dashboard's own origin.
 `/api/health` reports the running dashboard's install kind, source root,
 process id, version, and launch directory so `aiwatcher start` can avoid
 reusing a dashboard from another checkout or package install.
@@ -218,6 +221,9 @@ also hides that commit's nudge until the next commit. The nudge itself rides
 `/api/companion-state` as the `compact_recommended` state, with the ready
 `/compact` command in `compact_command`, and appears on the Watch context
 health card as `compact`.
+`/api/prompt-gate-decision` sends the dashboard action (`continue`, safer
+brief, edited brief, or cancel) back to the active Prompt Gate engine. It is
+internal to the gate overlay flow and does not run prompts or tools itself.
 `/api/ai-assist-config` saves the optional AI Assist mode. Supported modes are
 `off`, `local`, and `cloud`; source access is `metadata_only`, `prompt_opt_in`,
 or `source_opt_in`. For cloud mode, `api_key` may be supplied for the selected

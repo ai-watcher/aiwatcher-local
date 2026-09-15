@@ -1935,6 +1935,21 @@ function renderFreshStartPreview(capsule) {
     </div>
   </div>`;
 }
+function renderHandoffLoading(sessionId) {
+  return `<section class="detail-section handoff-loading-shell">
+    <h2>Fresh Start</h2>
+    <p>AIWatcher is preparing the handoff for this source session. Keep this drawer open; the copyable brief will stay here while evidence finishes indexing.</p>
+    <div class="ai-loading-panel" aria-live="polite">
+      <div class="ai-loading-mark">AI</div>
+      <div>
+        <strong>Loading detailed evidence...</strong>
+        <p>Timeline, outcome, git, and prompt evidence are indexing in the background. The screen will update in place when the brief is ready.</p>
+        <div class="ai-loading-bar" aria-hidden="true"></div>
+      </div>
+    </div>
+    <p class="tool-link-note">Source session: ${esc(shortSessionId(sessionId))}</p>
+  </section>`;
+}
 function freshStartReceiptWidget({ reason = '', expected = '', copy = '', controls = '' } = {}) {
   return `<div class="receipt-widget">
     <div class="receipt-widget-head">
@@ -2071,7 +2086,7 @@ function renderHandoff(capsule) {
       <span class="hint">Off by default: everything else in this brief is metadata (counts, hashes, file paths). This adds your actual prompt text from the costliest turn, so review it before pasting into another tool.</span>
     </label>
   </section>
-  ${runtimeReturnPanel(runtime, capsule.source_path)}
+    ${runtimeReturnPanel(runtime, capsule.source_path)}
   <section class="detail-section"><h3>Why start fresh now</h3>
     <ul class="insight-list">${(capsule.warnings || []).map(item => `<li>${esc(item)}</li>`).join('')}</ul>
   </section>
@@ -2161,29 +2176,18 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
     showToast('AI Assist could not improve this brief.', 'error');
   }
 }
+let handoffOpenToken = 0;
 async function openHandoff(sessionId, target = 'generic', includePrompt = false, options = null) {
+  const token = ++handoffOpenToken;
+  const isCurrent = () => token === handoffOpenToken && document.getElementById('detailDrawer').classList.contains('open');
   openDrawer('Fresh Start');
-  const node = document.getElementById('detailContent');
-  setDrawerContent('<div class="loading">Finding the source session before building the Fresh Start brief...</div>');
+  setDrawerContent(renderHandoffLoading(sessionId));
   const handoffOptions = options || handoffOptionsFromForm();
   const payload = handoffPayload(sessionId, target, includePrompt, handoffOptions);
-  const summaryPromise = fetch(`/api/session-summary?id=${encodeURIComponent(sessionId)}`)
-    .then(res => res.json())
-    .catch(() => null);
-  const basicPromise = postJson('/api/handoff-basic', payload)
-    .catch(() => null);
-  const handoffPromise = postJson('/api/handoff', payload);
-  const fastSummary = await summaryPromise;
-  if (fastSummary && !fastSummary.error) {
-    setDrawerContent(renderSessionSummary(fastSummary, 'Building Fresh Start brief...'));
-  } else {
-    setDrawerContent('<div class="loading">Building local Fresh Start brief...</div>');
-  }
-  const basicCapsule = await basicPromise;
-  if (basicCapsule && !basicCapsule.error && !includePrompt) {
-    setDrawerContent(renderHandoff(basicCapsule));
-  }
+  const handoffPromise = postJson('/api/handoff', payload)
+    .catch(error => ({ error: error.message || 'Fresh Start failed.' }));
   const capsule = await handoffPromise;
+  if (!isCurrent()) return capsule;
   if (capsule.error) {
     setDrawerContent(`<div class="empty">${esc(capsule.error)}</div>`);
     return capsule;
@@ -2378,8 +2382,8 @@ function renderOptimizeWorkspace(optimize) {
       const activityLine = item.activity_summary ? `<p class="optimize-activity-line">${esc(item.activity_summary)}</p>` : '';
       const summary = item.review_summary || item.summary || item.why_inactive || 'Review this local cleanup candidate before taking action.';
       const validation = item.validation_hint || 'Verify this is not active work before archiving or cleaning anything.';
-      return `<div class="action-row ${item.tokens_at_risk ? 'medium' : 'low'}">
-      <div>
+      return `<div class="action-row optimize-card ${item.tokens_at_risk ? 'medium' : 'low'}">
+      <div class="optimize-card-copy">
         <div class="action-title">${esc(item.title)} <span class="pill">${esc(item.evidence_label || 'Observed')}</span></div>
         <p>${esc(summary)}</p>
         <div class="action-meta"><span class="pill" title="${esc(fullPath)}">${esc(item.project ? projectName({ project_full: item.project }) : 'Local machine')}</span>${item.impact_label ? `<span class="pill">${esc(item.impact_label)}</span>` : ''}<span class="pill">${esc(item.updated_label || '')}</span></div>
@@ -2394,7 +2398,7 @@ function renderOptimizeWorkspace(optimize) {
           </div>
         </details>
       </div>
-      <div class="actions">
+      <div class="actions optimize-card-actions">
         ${item.view ? `<button class="btn-primary" onclick="showView('${esc(item.view)}')">${esc(item.action_label || 'Review')}</button><button class="btn-quiet" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">Copy cleanup prompt</button>` : `<button class="btn-primary" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">Copy cleanup prompt</button>`}
         ${aiCleanup}
         <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('marked_done', this.dataset.project, this.dataset.impact, this)">Reviewed</button>
@@ -2409,13 +2413,13 @@ function renderOptimizeWorkspace(optimize) {
 function renderRuntimeOptimizeCard(item, cleanupPrompt) {
   const steps = Array.isArray(item.safe_review_steps) && item.safe_review_steps.length
     ? item.safe_review_steps
-    : ['Run: aiwatcher processes --stale-only', 'Use PID, runtime, session id, and working directory to match each row to an AI app/window.', 'Confirm each process is not attached to live AI work.', 'Stop only stale/orphaned runtimes you recognize.', 'Run the command again; reclaimed RSS is the before-minus-after local memory signal.', 'Leave unknown processes alone.'];
+    : ['Run: aiwatcher processes --stale-only', 'Use PID, runtime, session id, and working directory to match each row to an AI app/window.', 'Confirm each process is not attached to live AI work.', 'Report stale/orphaned runtimes you recognize for a separate user stop decision.', 'Run the command again; reclaimed RSS is the before-minus-after local memory signal.', 'Leave unknown processes alone.'];
   const command = item.review_command || 'aiwatcher processes --stale-only';
   const aiCleanup = optimizeAiButton(item.id || '');
-  const summary = item.review_summary || 'Review local AI runtimes; stop only ones you recognize as detached.';
-  const validation = item.validation_hint || 'Match PID, working directory, and app/window before stopping anything.';
-  return `<div class="action-row low runtime-review-card">
-    <div>
+  const summary = item.review_summary || 'Review local AI runtimes; identify detached ones for a separate user decision.';
+  const validation = item.validation_hint || 'Match PID, working directory, and app/window before recommending any runtime action.';
+  return `<div class="action-row optimize-card low runtime-review-card">
+    <div class="optimize-card-copy">
       <div class="action-title">${esc(item.title || 'Review stale AI runtimes')} <span class="pill local">Local machine</span></div>
       <p>${esc(summary)}</p>
       <div class="action-meta">
@@ -2439,11 +2443,11 @@ function renderRuntimeOptimizeCard(item, cleanupPrompt) {
           <p class="receipt-note">${esc(item.reward_label || 'Potential local reward: less RAM/CPU pressure after confirmed cleanup.')}</p>
           <p class="receipt-note">${esc(item.cost_note || 'Do not count dollar savings from process RSS alone.')}</p>
           <p class="receipt-note">${esc(item.privacy_note || 'This checklist uses local metadata only. It does not include prompt/source content.')}</p>
-          <p class="receipt-note">Nothing is stopped from this dashboard. Run the command, confirm live work is not attached, then stop only a runtime you recognize.</p>
+          <p class="receipt-note">Nothing is stopped from this dashboard. Run the command, confirm live work is not attached, then make any stop a separate user decision.</p>
         </div>
       </details>
     </div>
-    <div class="actions">
+    <div class="actions optimize-card-actions">
       <button class="btn-primary" onclick="copyOptimizeRuntimeCommand(${jsArg(command)}, this)">Copy command</button>
       <button class="btn-quiet" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">${esc(item.action_label || 'Copy cleanup prompt')}</button>
       ${aiCleanup}

@@ -1105,7 +1105,7 @@ def _optimize_candidate_prompt(item: dict[str, object]) -> str:
         "- If you cannot verify ownership or current activity from the evidence, put it in Unknown.",
         "",
         "Return these buckets",
-        "1. Safe to archive or clean up: item ids/names/paths if visible, with one short reason each; only after checking the owning app, git worktree, or runtime.",
+        "1. Safe to archive/review: item ids/names/paths if visible, with one short reason each; only after checking the owning app, git worktree, or runtime.",
         "2. Keep active: anything that might still matter, is live, recently touched, or linked to current work.",
         "3. Unknown: anything whose identity, ownership, path, or status is not proven, or that needs owner confirmation.",
         "4. Project status: latest branch, PR, commit, or handoff receipt if visible.",
@@ -1122,26 +1122,26 @@ def _optimize_candidate_prompt(item: dict[str, object]) -> str:
         "- Preserve handoffs, PRs, commits, receipts, useful notes, unresolved tasks, and final source-of-truth files.",
     ]
     if kind == "session_cluster":
-        lines.append("- Action boundary: archive or mark done only inside the owning AI app after review.")
+        lines.append("- Action boundary: this prompt can only recommend review buckets; any archive/mark-done action must be a separate user decision inside the owning AI app.")
     elif kind == "fresh_start_pending":
-        lines.append("- Action boundary: link the follow-up session or mark the old receipt skipped/continued; do not claim saved tokens without proof.")
+        lines.append("- Action boundary: this prompt can only recommend whether to link the follow-up session or review the old receipt; make any mark-done/skipped action a separate user decision and do not claim saved tokens without proof.")
     elif kind == "worktree":
         lines.extend([
             f"- Inspect first: git -C {project_full or '<worktree>'} status --short",
-            "- Action boundary: remove only with git worktree-safe commands after confirmation.",
+            "- Action boundary: do not remove the worktree from this flow; if it looks stale, report the evidence and ask the user for a separate cleanup decision.",
         ])
     elif kind == "agent_workspace":
         lines.extend([
             f"- Inspect first: {project_full or '<workspace>'}",
-            "- Action boundary: delete only after confirming it is disposable scratch space and moving anything useful.",
+            "- Action boundary: do not delete the workspace from this flow; if it looks disposable, report the evidence and ask the user for a separate cleanup decision.",
         ])
     elif kind == "stale_processes":
         lines.extend([
             "- Inspect first: aiwatcher processes --stale-only",
-            "- Action boundary: stop only runtimes you recognize and have confirmed are detached from live AI work.",
+            "- Action boundary: do not stop runtimes from this flow; if one looks detached, report the PID/runtime evidence and ask the user for a separate stop decision.",
         ])
     else:
-        lines.append("- Action boundary: prefer archive/mark-done recommendations over deletion.")
+        lines.append("- Action boundary: classify the candidate only; defer archive, mark-done, delete, stop, or removal actions to a separate user-confirmed step.")
     if review_steps:
         lines.extend(["", "Safe review steps from AIWatcher", *[f"- {step}" for step in review_steps]])
     if kind == "stale_processes":
@@ -1439,10 +1439,158 @@ def _fresh_start_evidence_hash(
         "runtime_attachment": capsule.get("runtime_attachment"),
         "same_project_session_count": capsule.get("same_project_session_count"),
         "include_prompt_excerpt": capsule.get("include_prompt_excerpt"),
+        "session_prompt_evidence": capsule.get("session_prompt_evidence"),
         "source_access": source_access,
         "next_brief": capsule.get("next_brief"),
+        "workflow_version": "fresh_start_ai_packet:v3",
     }
     return hash_prompt(json.dumps(evidence, sort_keys=True, default=str))
+
+
+_PROMPT_CONTENT_MARKERS = (
+    "Task context (your own prompt",
+    "Prompt excerpt",
+    "Source session prompt evidence",
+    "Prompt/source policy: Prompt excerpts included",
+    "\n    Prompt:",
+    "\nPrompt:",
+)
+
+
+def _contains_prompt_content(text: str) -> bool:
+    return any(marker in text for marker in _PROMPT_CONTENT_MARKERS)
+
+
+def _fresh_start_ai_evidence_packet(
+    capsule: dict[str, object],
+    *,
+    source_access: str = "metadata_only",
+) -> dict[str, object]:
+    """Bounded evidence for AI-assisted Fresh Start composition.
+
+    The local brief remains the fallback and evidence boundary. This packet
+    gives the model structured context for the selected source session so it
+    can compose a better handoff without reading hidden chat history.
+    """
+    prompt_allowed = source_access in {"prompt_opt_in", "source_opt_in"}
+    evidence = capsule.get("evidence") if isinstance(capsule.get("evidence"), dict) else {}
+    usage = capsule.get("usage") if isinstance(capsule.get("usage"), dict) else {}
+    runtime = capsule.get("runtime_attachment") if isinstance(capsule.get("runtime_attachment"), dict) else {}
+    prompt_excerpt = capsule.get("costliest_prompt") if prompt_allowed else None
+    return {
+        "workflow": "fresh_start",
+        "source_access": source_access,
+        "privacy_boundary": (
+            "metadata_only includes local metadata, paths, counts, labels, hashes, and proof state only. "
+            "Prompt excerpts are included only with explicit prompt/source opt-in. Hidden/system/developer/tool "
+            "instructions are never forwarded."
+        ),
+        "source_session": {
+            "session_id": capsule.get("session_id"),
+            "project": capsule.get("project"),
+            "project_reliable": capsule.get("project_reliable"),
+            "tool": capsule.get("tool"),
+            "model": capsule.get("model"),
+            "source_path": capsule.get("source_path"),
+            "updated_at": capsule.get("updated_at"),
+            "same_project_session_count": capsule.get("same_project_session_count"),
+            "identity_label": runtime.get("identity_label"),
+            "identity_confidence": runtime.get("confidence"),
+            "identity_reason": runtime.get("identity_reason"),
+            "return_capability": runtime.get("exact_return_label"),
+            "return_reason": runtime.get("exact_return_reason"),
+        },
+        "continuation": {
+            "target": capsule.get("target"),
+            "target_label": capsule.get("target_label"),
+            "handoff_type": capsule.get("handoff_type"),
+            "handoff_type_label": capsule.get("handoff_type_label"),
+            "objective": capsule.get("objective"),
+            "source_refs": capsule.get("source_refs") or [],
+            "constraints": capsule.get("constraints") or [],
+            "acceptance_criteria": capsule.get("acceptance_criteria") or [],
+        },
+        "usage_pressure": usage,
+        "local_evidence": {
+            "commits": evidence.get("commits") if isinstance(evidence, dict) else [],
+            "changed_files": evidence.get("changed_files") if isinstance(evidence, dict) else [],
+            "tests": evidence.get("tests") if isinstance(evidence, dict) else [],
+            "confidence": evidence.get("confidence") if isinstance(evidence, dict) else None,
+            "outcome": capsule.get("outcome"),
+            "warnings": capsule.get("warnings") or [],
+            "decisions": capsule.get("decisions") or [],
+            "related_workspaces": capsule.get("related_workspaces") or [],
+            "session_prompt_evidence": capsule.get("session_prompt_evidence") or {},
+        },
+        "prompt_excerpt": prompt_excerpt if prompt_allowed else None,
+        "local_brief": str(capsule.get("next_brief") or "")[:20_000],
+        "composition_goal": [
+            "Produce one paste-ready prompt for a new AI session.",
+            "Carry forward the likely work done, decisions, files, warnings, next ask, and acceptance checks that are actually present.",
+            "If evidence is weak, make the first step identity/workspace verification instead of inventing missing history.",
+            "Use concrete paths, counts, session ids, commands, and uncertainties from this packet.",
+        ],
+    }
+
+
+def _optimize_ai_evidence_packet(candidate: dict[str, object], local_prompt: str) -> dict[str, object]:
+    """Bounded evidence for AI-assisted Optimize cleanup composition."""
+    keys = (
+        "id",
+        "kind",
+        "title",
+        "project",
+        "project_full",
+        "summary",
+        "activity_summary",
+        "why_inactive",
+        "review_summary",
+        "validation_hint",
+        "evidence_label",
+        "evidence",
+        "impact_label",
+        "context_at_risk_label",
+        "tokens_at_risk",
+        "session_count",
+        "tool",
+        "tools",
+        "last_activity",
+        "updated_label",
+        "review_command",
+        "safe_review_steps",
+        "rss_kb",
+        "reward_label",
+        "cost_note",
+        "resource_note",
+        "privacy_note",
+        "companion_summary",
+    )
+    return {
+        "workflow": "optimize_cleanup",
+        "source_access": "metadata_only",
+        "privacy_boundary": (
+            "Optimize cleanup uses local metadata only. It does not include prompt/source text, "
+            "and it must not authorize destructive cleanup."
+        ),
+        "selected_candidate": {
+            key: candidate.get(key)
+            for key in keys
+            if candidate.get(key) not in (None, "", [])
+        },
+        "required_output_buckets": [
+            "safe_to_archive_or_review",
+            "keep_active",
+            "unknown",
+            "next_action",
+        ],
+        "review_contract": [
+            "Classify only; do not delete, kill, archive, or modify anything.",
+            "Start with a verification step in the owning app, terminal, git worktree, runtime inventory, or receipt view.",
+            "Use full path, last activity, session count, tool, impact signal, and evidence label when available.",
+            "Treat ambiguous ownership or active work as keep_active or unknown.",
+        ],
+        "local_cleanup_prompt": local_prompt[:20_000],
+    }
 
 
 def _optimize_checklist(candidates: list[dict[str, object]]) -> str:
@@ -1717,11 +1865,11 @@ def build_optimize_inventory(
             "title": "Review stale AI runtimes",
             "project": "Local machine",
             "project_full": "",
-            "summary": f"{len(stale_processes)} AI-related runtime process(es) look stale or orphaned. Review before killing anything.",
+            "summary": f"{len(stale_processes)} AI-related runtime process(es) look stale or orphaned. Review before taking any action.",
             "activity_summary": f"{len(stale_processes)} stale runtime process{'es' if len(stale_processes) != 1 else ''} · {rss_impact}",
             "why_inactive": "Local process metadata shows AI-related runtimes with stale/orphan signals.",
-            "review_summary": "Review local AI runtimes; stop only ones you recognize as detached.",
-            "validation_hint": "Match PID, working directory, and app/window before stopping anything.",
+            "review_summary": "Review local AI runtimes; identify only ones you recognize as detached.",
+            "validation_hint": "Match PID, working directory, and app/window before recommending any runtime action.",
             "evidence_label": "Observed",
             "evidence": "Observed from local process metadata, not provider billing.",
             "impact_label": rss_impact,
@@ -1741,7 +1889,7 @@ def build_optimize_inventory(
                 f"Run: {review_command}",
                 "Use PID, runtime, session id, and working directory to match each row to an AI app/window.",
                 "Confirm each process is not attached to live AI work.",
-                "Stop only stale/orphaned runtimes you recognize.",
+                "Report stale/orphaned runtimes you recognize for a separate user stop decision.",
                 "Run the command again; reclaimed RSS is the before-minus-after local memory signal.",
                 "Leave unknown processes alone.",
             ],
@@ -2725,10 +2873,7 @@ def build_ai_assisted_handoff_detail(
     source_access = str(config.get("source_access") or "metadata_only")
     effective_prompt_excerpt = bool(include_prompt_excerpt and source_access in {"prompt_opt_in", "source_opt_in"})
     local_brief_from_client = str(local_brief_override or "").strip()
-    if source_access == "metadata_only" and (
-        "Task context (your own prompt" in local_brief_from_client
-        or "Prompt excerpt" in local_brief_from_client
-    ):
+    if source_access == "metadata_only" and _contains_prompt_content(local_brief_from_client):
         local_brief_from_client = ""
     if local_brief_from_client:
         capsule = build_basic_handoff_detail(
@@ -2763,6 +2908,8 @@ def build_ai_assisted_handoff_detail(
     capsule["ai_assist_prompt_excerpt_included"] = effective_prompt_excerpt
     local_brief = str(capsule.get("next_brief") or "")
     capsule["local_next_brief"] = local_brief
+    ai_evidence_packet = _fresh_start_ai_evidence_packet(capsule, source_access=source_access)
+    ai_evidence_text = json.dumps(ai_evidence_packet, sort_keys=True, default=str)
     evidence_hash = _fresh_start_evidence_hash(capsule, source_access=source_access)
 
     def with_receipt(composed: str, result: dict[str, object]) -> str:
@@ -2780,8 +2927,8 @@ def build_ai_assisted_handoff_detail(
         workflow="fresh_start",
         config=config,
         evidence_hash=evidence_hash,
-        local_text=local_brief,
-        compose=lambda: improve_fresh_start_brief(config, local_brief=local_brief, timeout=20),
+        local_text=ai_evidence_text,
+        compose=lambda: improve_fresh_start_brief(config, local_brief=ai_evidence_text, timeout=20),
         session_id=session_id,
         reason_used="User clicked Improve with AI Assist on a Fresh Start brief.",
         reason_cached="User clicked Compose AI handoff on a Fresh Start brief; cached output reused.",
@@ -2809,14 +2956,20 @@ def build_ai_assisted_optimize_cleanup_prompt(candidate_id: str, days: int = 7) 
     if candidate is None:
         return {"error": "optimize candidate not found"}
     local_prompt = str(candidate.get("cleanup_prompt") or _optimize_candidate_prompt(candidate))
-    evidence_hash = str(candidate.get("evidence_hash") or _optimize_candidate_evidence_hash(candidate))
+    ai_evidence_packet = _optimize_ai_evidence_packet(candidate, local_prompt)
+    ai_evidence_text = json.dumps(ai_evidence_packet, sort_keys=True, default=str)
+    evidence_hash = hash_prompt(json.dumps({
+        "candidate_hash": candidate.get("evidence_hash") or _optimize_candidate_evidence_hash(candidate),
+        "workflow_version": "optimize_cleanup_ai_packet:v2",
+        "packet": ai_evidence_packet,
+    }, sort_keys=True, default=str))
     config = ai_assist_config(with_secrets=True)
     outcome = _run_ai_assist_workflow(
         workflow="optimize_cleanup",
         config=config,
         evidence_hash=evidence_hash,
-        local_text=local_prompt,
-        compose=lambda: compose_optimize_cleanup_prompt(config, local_prompt=local_prompt),
+        local_text=ai_evidence_text,
+        compose=lambda: compose_optimize_cleanup_prompt(config, local_prompt=ai_evidence_text),
         session_id=normalized_id,
         reason_used="User clicked Compose AI cleanup prompt on an Optimize candidate.",
         reason_cached="User clicked Compose AI cleanup prompt on an Optimize candidate; cached output reused.",
@@ -6555,6 +6708,12 @@ def _ask_ai_evidence_packet(
             "metadata_only sends counts, paths, hashes, and labels only. prompt/source opt-in may include user "
             "prompt excerpts from local logs. Hidden/system/developer/tool instructions are never forwarded."
         ),
+        "answer_contract": [
+            "If the user asks about this session, prefer selected_sessions first; otherwise use the strongest matching context_health or optimize candidate.",
+            "Name the concrete project/path/tool/session signal that matters.",
+            "Explain why it matters now and what the next smallest safe action is.",
+            "Do not answer with only generic examples unless the local evidence is empty.",
+        ],
         "context_health": compact(
             health_rows,
             (

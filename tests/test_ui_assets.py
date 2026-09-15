@@ -2435,6 +2435,18 @@ class InformationArchitectureTest(unittest.TestCase):
         self.assertIn("typeof currentData !== 'undefined'", self.js)
         self.assertIn(".fresh-preview-next", self.css)
 
+    def test_fresh_start_loading_does_not_repaint_between_evidence_passes(self):
+        # The drawer used to flash through "finding session", session summary,
+        # basic handoff, then detailed handoff while evidence indexed. Keep one
+        # stable loading shell and ignore late responses from stale clicks.
+        self.assertIn("function renderHandoffLoading", self.js)
+        self.assertIn("handoffOpenToken", self.js)
+        handoff = js_function_source(self.js, "openHandoff")
+        self.assertIn("setDrawerContent(renderHandoffLoading(sessionId))", handoff)
+        self.assertIn("if (!isCurrent()) return", handoff)
+        self.assertNotIn("/api/handoff-basic", handoff)
+        self.assertNotIn("renderSessionSummary", handoff)
+
     def test_ask_aiwatcher_can_opt_into_ai_assist(self):
         self.assertIn('id="askUseAiAssist"', self.html)
         self.assertIn("function askAiAssistReady", self.js)

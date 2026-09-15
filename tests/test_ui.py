@@ -3051,7 +3051,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("AIWatcher Optimize cleanup prompt", prompt)
         self.assertIn("Full path: /repo/app", prompt)
         self.assertIn("Signal: 3 sessions", prompt)
-        self.assertIn("Safe to archive or clean up", prompt)
+        self.assertIn("Safe to archive/review", prompt)
         self.assertIn("Keep active", prompt)
         self.assertIn("Unknown", prompt)
         self.assertIn("Validation before buckets", prompt)
@@ -3061,6 +3061,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("latest branch, PR, commit, or handoff receipt", prompt)
         self.assertIn("Tool: codex-cli", prompt)
         self.assertIn("Return these buckets", prompt)
+        for phrase in ("remove only", "delete only", "stop only"):
+            self.assertNotIn(phrase, prompt.lower())
         self.assertIn("evidence_hash", inventory["top"])
 
     def test_optimize_inventory_surfaces_stale_runtime_review_plan(self) -> None:
@@ -3092,6 +3094,30 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Copy safe review steps", inventory["top"]["action_label"])
         self.assertIn("Do not stop or kill any running process", inventory["top"]["cleanup_prompt"])
 
+    def test_optimize_candidate_prompts_do_not_authorize_destructive_cleanup(self) -> None:
+        base = {
+            "title": "Review local cleanup candidate",
+            "project_full": "/repo/app",
+            "project": "/repo/app",
+            "last_activity": "2026-09-14T00:00:00+00:00",
+            "session_count": 2,
+            "tool": "codex-cli",
+            "impact_label": "~1.2M context at risk",
+            "evidence_label": "Observed",
+            "evidence": "Observed from local metadata.",
+            "review_summary": "Review before cleanup.",
+            "validation_hint": "Verify ownership first.",
+        }
+        for kind in ("worktree", "agent_workspace", "stale_processes", "session_cluster"):
+            with self.subTest(kind=kind):
+                prompt = ui._optimize_candidate_prompt({**base, "kind": kind}).lower()
+                self.assertIn("do not delete", prompt)
+                self.assertIn("do not stop", prompt)
+                self.assertIn("separate", prompt)
+                self.assertIn("decision", prompt)
+                for phrase in ("remove only", "delete only", "stop only"):
+                    self.assertNotIn(phrase, prompt)
+
     def test_optimize_inventory_surfaces_old_agent_scratch_workspace(self) -> None:
         now = datetime.now(timezone.utc)
         old_workspace = {
@@ -3116,8 +3142,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("4+ hours", inventory["top"]["why_inactive"])
         self.assertIn("local temp/scratch path shape", inventory["top"]["evidence"])
         self.assertEqual(inventory["top"]["action_label"], "Copy cleanup prompt")
-        self.assertIn("disposable scratch space", inventory["top"]["cleanup_prompt"])
-        self.assertIn("moving anything useful", inventory["top"]["cleanup_prompt"])
+        self.assertIn("if it looks disposable", inventory["top"]["cleanup_prompt"])
+        self.assertIn("separate cleanup decision", inventory["top"]["cleanup_prompt"])
+        self.assertNotIn("delete only", inventory["top"]["cleanup_prompt"].lower())
 
     def test_optimize_inventory_skips_recent_agent_scratch_workspace(self) -> None:
         now = datetime.now(timezone.utc)
@@ -3213,9 +3240,14 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(second["ai_assist_result"]["status"], "cached")
         self.assertEqual(compose.call_count, 1)
         self.assertIn("AIWatcher AI-assisted Optimize cleanup prompt", second["prompt"])
+        packet = json.loads(compose.call_args.kwargs["local_prompt"])
+        self.assertEqual(packet["workflow"], "optimize_cleanup")
+        self.assertEqual(packet["selected_candidate"]["project_full"], "/repo/app")
+        self.assertEqual(packet["selected_candidate"]["session_count"], 3)
+        self.assertIn("local_cleanup_prompt", packet)
         self.assertEqual(runs[0]["workflow"], "optimize_cleanup")
         self.assertTrue(runs[0]["cache_hit"])
-        self.assertEqual(runs[1]["evidence_hash"], candidate["evidence_hash"])
+        self.assertEqual(runs[1]["evidence_hash"], first["evidence_hash"])
         self.assertNotIn("sk-secret", json.dumps(runs))
 
     def test_ai_assist_provider_auth_failure_marks_key_rejected(self) -> None:
@@ -3364,7 +3396,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(result["ai_assist_result"]["status"], "failed")
         self.assertIn("AI Assist failed unexpectedly (AttributeError)", result["ai_assist_result"]["reason"])
         self.assertEqual(runs[0]["status"], "failed")
-        self.assertEqual(runs[0]["evidence_hash"], candidate["evidence_hash"])
+        self.assertEqual(runs[0]["evidence_hash"], result["evidence_hash"])
         self.assertIn("Do not stop or kill any running process", result["prompt"])
 
     def test_ai_assist_daily_cap_stops_cloud_calls_once_reached(self) -> None:
@@ -5036,8 +5068,79 @@ class DashboardWindowTests(unittest.TestCase):
 
         self.assertEqual(capsule["ai_assist_result"]["status"], "used")
         self.assertIn("Inspect aiwatcher_cli/web/index.js first", capsule["next_brief"])
-        self.assertEqual(improve.call_args.kwargs["local_brief"], visible_brief)
+        packet = json.loads(improve.call_args.kwargs["local_brief"])
+        self.assertEqual(packet["workflow"], "fresh_start")
+        self.assertEqual(packet["source_session"]["session_id"], "ai-fast")
+        self.assertEqual(packet["source_session"]["project"], "/repo/fast")
+        self.assertEqual(packet["local_brief"], visible_brief)
         self.assertEqual(capsule["enrichment_status"], "client_handoff_brief")
+
+    def test_ai_assisted_handoff_rejects_prompt_evidence_override_in_metadata_only(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="ai-private",
+            tool="claude-code",
+            surface="desktop",
+            project_path="/repo/private",
+            started_at=now - timedelta(hours=3),
+            updated_at=now - timedelta(minutes=7),
+            tokens_in=90_000,
+            tokens_out=4_000,
+            cost_usd=0.34,
+        )
+        visible_brief = "\n".join([
+            "AIWatcher Fresh Start brief",
+            "",
+            "Source session prompt evidence",
+            "- Prompt/source policy: Prompt excerpts included by explicit opt-in.",
+            "- Opening user ask:",
+            "  - turn 1: 10 tokens, 0 tool calls, $0.00",
+            "    Prompt: secret customer prompt text",
+        ])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with ui._SUMMARY_CACHE_LOCK:
+                ui._SESSION_INDEX.clear()
+                ui._SUMMARY_CACHE.clear()
+            ui._index_sessions([row])
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "scan_all_events", return_value=[]),
+                patch.object(ui, "safe_runtime_processes", return_value=[]),
+                patch.object(ui, "ai_assist_config", return_value={
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "max_daily_usd": 0.25,
+                    "source_access": "metadata_only",
+                    "enabled_workflows": ["fresh_start"],
+                    "api_keys": {"openai": "sk-secret"},
+                }),
+                patch.object(ui, "improve_fresh_start_brief", return_value={
+                    "status": "used",
+                    "mode": "cloud",
+                    "provider": "openai",
+                    "model": "gpt-test",
+                    "input_chars": 120,
+                    "output_chars": 80,
+                    "source_access": "metadata_only",
+                    "text": "AIWatcher AI-assisted Fresh Start brief\n\nNext ask\n- Verify workspace identity.",
+                    "structured": {"next_ask": "Verify workspace identity."},
+                    "usage": {"prompt_tokens": 150, "completion_tokens": 50},
+                }) as improve,
+            ):
+                capsule = ui.build_ai_assisted_handoff_detail(
+                    "ai-private",
+                    days=7,
+                    target="claude",
+                    include_prompt_excerpt=False,
+                    local_brief_override=visible_brief,
+                )
+
+        self.assertEqual(capsule["ai_assist_result"]["status"], "used")
+        packet = json.loads(improve.call_args.kwargs["local_brief"])
+        self.assertNotEqual(packet["local_brief"], visible_brief)
+        self.assertNotIn("secret customer prompt text", json.dumps(packet))
+        self.assertNotEqual(capsule.get("enrichment_status"), "client_handoff_brief")
 
     def test_ai_assisted_handoff_composes_paste_ready_brief_and_receipt(self) -> None:
         now = datetime.now(timezone.utc)
@@ -5112,6 +5215,13 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(first_capsule["ai_assist_result"]["status"], "used")
         self.assertEqual(capsule["ai_assist_result"]["status"], "cached")
         self.assertEqual(improve.call_count, 1)
+        packet = json.loads(improve.call_args.kwargs["local_brief"])
+        self.assertEqual(packet["workflow"], "fresh_start")
+        self.assertEqual(packet["source_session"]["session_id"], "ai-brief")
+        self.assertEqual(packet["source_session"]["project"], "/repo/ai")
+        self.assertIn("usage_pressure", packet)
+        self.assertIn("composition_goal", packet)
+        self.assertIn("session_prompt_evidence", packet["local_evidence"])
         self.assertIn("AIWatcher AI-assisted Fresh Start brief", capsule["next_brief"])
         self.assertIn("What appears done", capsule["next_brief"])
         self.assertIn("AI Assist receipt", capsule["next_brief"])
