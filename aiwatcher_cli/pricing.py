@@ -1,7 +1,9 @@
 """Local pricing helpers for AIWatcher Local.
 
-Prices are best-effort estimates used for personal visibility. Subscription-only
-tools intentionally return zero API cost and are labeled by the CLI.
+Prices are best-effort API-equivalent estimates used for personal visibility:
+what the tokens would cost at the provider's list price. On a subscription no
+money moves per token, and the dashboard says so. Entries marked subscription
+are models AIWatcher recognises but has no list price for, and return zero.
 """
 
 from __future__ import annotations
@@ -39,25 +41,43 @@ MODEL_PRICING: dict[str, dict[str, float | bool]] = {
     "claude-mythos-5": {"in": 10.00, "out": 50.00, "subscription": False, "context_window": _1M},
     "gpt-4o": {"in": 2.50, "out": 10.00, "subscription": False, "context_window": 128_000},
     "gpt-4o-mini": {"in": 0.15, "out": 0.60, "subscription": False, "context_window": 128_000},
-    # Family catch-alls, so an unrecognised GPT-5/Codex build resolves to
-    # "known, plan-based" rather than to None.
-    #
-    # `lookup` tries an exact key first and only then scans for a prefix, so these
-    # never shadow a specific entry above -- they catch what the specific keys
-    # miss: the bare "codex" the scanner falls back to when a rollout names no
-    # model, and any build published after this table was last edited. The
-    # distinction matters because None means "unknown model" while subscription
-    # means "known, deliberately unpriced", and only the second is a claim the
-    # dashboard can honestly render. Every GPT-5 entry here is subscription, so a
-    # prefix hit cannot pick up a rate that ought to have been billed.
+    # GPT-5 family at OpenAI's standard list prices, per 1M tokens, from
+    # https://developers.openai.com/api/docs/pricing (read 2026-09-15). Until
+    # then every Codex session was priced at $0 as a subscription product; Danny
+    # chose API-equivalent dollars everywhere, the same treatment Claude
+    # sessions get, so a Codex session's header, prompt receipts and Companion
+    # bar agree. Cached input is 10% of input for every model listed with one,
+    # which is CACHE_READ_MULTIPLIER; the -pro models list no cached price.
+    # gpt-5-codex and gpt-5.x-codex builds not listed on their own resolve to
+    # their base version by prefix (see `lookup`).
     #
     # 400K is the Codex CLI's cap (272K input + 128K reserved output), which is
     # the only place AIWatcher ever meets a GPT-5 model. The API window for the
     # newer builds is larger, and Codex can be configured to use it; a session
     # that does will exceed this figure and `session_health` reports its ceiling
     # as unknown rather than as breached.
+    "gpt-5": {"in": 1.25, "out": 10.00, "subscription": False, "context_window": 400_000},
+    "gpt-5-mini": {"in": 0.25, "out": 2.00, "subscription": False, "context_window": 400_000},
+    "gpt-5-nano": {"in": 0.05, "out": 0.40, "subscription": False, "context_window": 400_000},
+    "gpt-5-pro": {"in": 15.00, "out": 120.00, "subscription": False, "context_window": 400_000},
+    "gpt-5.1": {"in": 1.25, "out": 10.00, "subscription": False, "context_window": 400_000},
+    "gpt-5.2": {"in": 1.75, "out": 14.00, "subscription": False, "context_window": 400_000},
+    "gpt-5.2-pro": {"in": 21.00, "out": 168.00, "subscription": False, "context_window": 400_000},
+    "gpt-5.3-codex": {"in": 1.75, "out": 14.00, "subscription": False, "context_window": 400_000},
+    "gpt-5.4": {"in": 2.50, "out": 15.00, "subscription": False, "context_window": 400_000},
+    "gpt-5.4-mini": {"in": 0.75, "out": 4.50, "subscription": False, "context_window": 400_000},
+    "gpt-5.4-nano": {"in": 0.20, "out": 1.25, "subscription": False, "context_window": 400_000},
+    "gpt-5.4-pro": {"in": 30.00, "out": 180.00, "subscription": False, "context_window": 400_000},
+    "gpt-5.5": {"in": 5.00, "out": 30.00, "subscription": False, "context_window": 400_000},
+    "gpt-5.5-pro": {"in": 30.00, "out": 180.00, "subscription": False, "context_window": 400_000},
+    "gpt-5.6-luna": {"in": 0.20, "out": 1.20, "subscription": False, "context_window": 400_000},
+    "gpt-5.6-terra": {"in": 2.00, "out": 12.00, "subscription": False, "context_window": 400_000},
+    "gpt-5.6-sol": {"in": 4.00, "out": 20.00, "subscription": False, "context_window": 400_000},
+    # A Codex model AIWatcher cannot price: the bare "codex" the scanner falls
+    # back to when a rollout names no model, and (via `lookup`) any GPT-5 build
+    # newer than this table. Known, not guessed at -- None would mean "unknown
+    # model", which is a different claim from "recognised, no list price here".
     "codex": {"in": 0.0, "out": 0.0, "subscription": True, "context_window": 400_000},
-    "gpt-5": {"in": 0.0, "out": 0.0, "subscription": True, "context_window": 400_000},
 }
 
 # Prompt-cache rates, as multiples of a model's base input price. Cached reads
@@ -96,6 +116,26 @@ INTRO_PRICING: dict[str, dict[str, float | datetime]] = {
 }
 
 
+def _longest_prefix(model: str) -> str | None:
+    """The table key a dated or variant model name belongs to.
+
+    Longest match wins, so "gpt-5.4-mini-2026" is gpt-5.4-mini, not gpt-5.4,
+    and "claude-sonnet-4-5-20250929" is claude-sonnet-4-5. A key never matches
+    a different version of itself: "gpt-5" is a prefix of "gpt-5.9-codex" but a
+    "." or digit after it continues the version number, and pricing 5.9 at 5's
+    rate would be a guess. A "-" or "[" starts a variant of the same model.
+    """
+    best: str | None = None
+    for candidate in MODEL_PRICING:
+        if not model.startswith(candidate) or (best is not None and len(candidate) <= len(best)):
+            continue
+        following = model[len(candidate):len(candidate) + 1]
+        if following and (following == "." or following.isdigit()):
+            continue
+        best = candidate
+    return best
+
+
 def lookup(model: str | None, when: datetime | None = None) -> dict[str, float | bool] | None:
     """Rates for `model` as they stood at `when` (default: the standard rate).
 
@@ -110,10 +150,11 @@ def lookup(model: str | None, when: datetime | None = None) -> dict[str, float |
     pricing = MODEL_PRICING.get(normalized)
     key = normalized if pricing is not None else None
     if pricing is None:
-        for candidate, rates in MODEL_PRICING.items():
-            if normalized.startswith(candidate):
-                pricing, key = rates, candidate
-                break
+        key = _longest_prefix(normalized)
+        pricing = MODEL_PRICING.get(key) if key else None
+    if pricing is None and normalized.startswith(("gpt-5", "codex")):
+        # A GPT-5 or Codex build newer than this table: recognised, unpriced.
+        return MODEL_PRICING["codex"]
     if pricing is None:
         return None
     intro = INTRO_PRICING.get(key or "")

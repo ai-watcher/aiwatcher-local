@@ -18,7 +18,14 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from .local_state import recent_hook_events
-from .pricing import CACHE_READ_MULTIPLIER, CACHE_WRITE_1H_MULTIPLIER, CACHE_WRITE_5M_MULTIPLIER, estimate_cost, lookup
+from .pricing import (
+    CACHE_READ_MULTIPLIER,
+    CACHE_WRITE_1H_MULTIPLIER,
+    CACHE_WRITE_5M_MULTIPLIER,
+    cache_read_cost,
+    estimate_cost,
+    lookup,
+)
 
 
 HOME_DIR = Path.home().resolve()
@@ -384,6 +391,8 @@ def segment_session_by_prompt(source_path: str | None, *, max_chars: int = 2000)
     """
     if not source_path or not source_path.endswith(".jsonl"):
         return []
+    if _is_codex_rollout(source_path):
+        return _segment_codex_rollout(source_path, max_chars=max_chars)
     segments: list[dict[str, object]] = []
     current: dict[str, object] | None = None
     seen_rows: set[str] = set()
@@ -510,6 +519,150 @@ def _request_cost_split(
         tokens["cache_write_5m"] * CACHE_WRITE_5M_MULTIPLIER + tokens["cache_write_1h"] * CACHE_WRITE_1H_MULTIPLIER
     ) / written
     return resent, rewritten * price_in * multiplier, True
+
+
+def current_prompt_segment(segments: list[dict[str, object]]) -> dict[str, object] | None:
+    """The prompt a session is on now, from `segment_session_by_prompt`.
+
+    The last turn, unless it is a row Claude Code wrote rather than the user
+    and it caused nothing: an interrupted-reply marker with no requests is not
+    what the session is doing. A prompt just sent, with no reply yet, is --
+    that is the moment "working" matters most. Shared by the Companion and the
+    statusline so both name the same prompt.
+    """
+    for segment in reversed(segments):
+        if int(segment.get("requests") or 0) > 0:
+            return segment
+        text = str(segment.get("prompt") or "")
+        if not segment.get("compact_summary") and not text.startswith("[Request interrupted"):
+            return segment
+    return None
+
+
+_CODEX_ROW_TYPES = frozenset({"session_meta", "turn_context", "response_item", "event_msg", "compacted"})
+
+
+def _is_codex_rollout(path: str) -> bool:
+    """A Codex rollout, told from a Claude Code transcript by its first row."""
+    try:
+        with Path(path).open(errors="replace") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    return False
+                return isinstance(obj, dict) and obj.get("type") in _CODEX_ROW_TYPES
+    except OSError:
+        return False
+    return False
+
+
+def _segment_codex_rollout(path: str, *, max_chars: int = 2000) -> list[dict[str, object]]:
+    """`segment_session_by_prompt` for a Codex rollout: the same keys, so the
+    session review and the Companion treat both tools alike.
+
+    Built from Codex's own records, and not yet checked against real rollouts
+    on a machine that runs Codex daily (none on the one this was written on):
+
+      - A prompt is the typed row: `event_msg` user_message before Codex
+        0.149.1, `item_completed` UserMessage after. Codex also echoes each
+        prompt as a user-role `response_item`, and injects environment and
+        AGENTS.md rows the same way, so those count only in a rollout that has
+        no typed rows at all (older formats), and never when injected.
+      - A request is a `token_count` event, one call reported once (a repeated
+        total is the same call, as in the scanner). `last_token_usage.input_tokens`
+        is the whole prompt sent, cached tokens included; `cached_input_tokens`
+        bill at the cached rate; `output_tokens` is taken to include reasoning.
+      - Re-sent is the cached input. OpenAI charges no premium to write the
+        cache, so nothing is ever re-cached: that part is always zero.
+    """
+    rows: list[tuple[datetime | None, str, dict[str, Any], str | None]] = []
+    try:
+        with Path(path).open(errors="replace") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                row_type = str(obj.get("type") or "")
+                payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
+                rows.append((_parse_ts(obj.get("timestamp")), row_type, payload, _codex_user_prompt_text(row_type, payload)))
+    except OSError:
+        return []
+    typed_rows = any(text and row_type != "response_item" for _, row_type, _, text in rows)
+
+    segments: list[dict[str, object]] = []
+    current: dict[str, object] | None = None
+    model: str | None = None
+    last_context: int | None = None
+    last_request_at: datetime | None = None
+    previous_total = -1
+    for stamp, row_type, payload, text in rows:
+        if row_type == "turn_context" and payload.get("model"):
+            model = str(payload["model"])
+        if text and (row_type != "response_item" or not typed_rows):
+            current = {
+                "prompt": text[:max_chars],
+                "turn": len(segments) + 1,
+                "cost_usd": 0.0,
+                "tokens": 0,
+                "tool_calls": 0,
+                "events": 0,
+                "at": stamp.isoformat() if stamp else None,
+                "requests": 0,
+                "context_before": last_context,
+                "context_after": None,
+                "took_seconds": None,
+                "gap_seconds": round((stamp - last_request_at).total_seconds()) if stamp and last_request_at else None,
+                "cost_resent_usd": 0.0,
+                "cost_recached_usd": 0.0,
+                "priced": True,
+                "compact_summary": False,
+                "cache_lifetime_seconds": 300,
+            }
+            segments.append(current)
+            continue
+        if current is not None:
+            current["events"] = int(current["events"]) + 1
+            if row_type == "response_item" and payload.get("type") in {"function_call", "custom_tool_call", "local_shell_call"}:
+                current["tool_calls"] = int(current["tool_calls"]) + 1
+        if row_type != "event_msg" or payload.get("type") != "token_count":
+            continue
+        info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+        total = info.get("total_token_usage") if isinstance(info.get("total_token_usage"), dict) else {}
+        last = info.get("last_token_usage") if isinstance(info.get("last_token_usage"), dict) else {}
+        total_tokens = int(total.get("total_tokens") or 0)
+        if not total_tokens or total_tokens == previous_total:
+            continue
+        previous_total = total_tokens
+        context = int(last.get("input_tokens") or 0)
+        if context <= 0:
+            continue
+        cached = min(context, int(last.get("cached_input_tokens") or 0))
+        output = int(last.get("output_tokens") or 0)
+        if current is not None:
+            name = model or "codex"
+            rates = lookup(name, stamp)
+            current["cost_usd"] = float(current["cost_usd"]) + estimate_cost(
+                name, context - cached, output, cache_read=cached, when=stamp,
+            )
+            current["cost_resent_usd"] = float(current["cost_resent_usd"]) + cache_read_cost(name, cached, stamp)
+            current["priced"] = bool(current["priced"]) and bool(rates) and not rates.get("subscription")
+            current["requests"] = int(current["requests"]) + 1
+            current["context_after"] = context
+            current["tokens"] = int(current["tokens"]) + context + output
+            if stamp and current.get("at"):
+                current["took_seconds"] = round((stamp - datetime.fromisoformat(str(current["at"]))).total_seconds())
+        last_context = context
+        if stamp:
+            last_request_at = stamp
+    return segments
 
 
 def extract_opening_prompt(source_path: str | None, *, max_chars: int = 4000) -> str | None:
@@ -812,6 +965,13 @@ def _codex_user_prompt_text(row_type: str | None, payload: dict[str, Any]) -> st
         candidates = [payload.get("text"), payload.get("message"), payload.get("prompt")]
     elif row_type == "event_msg" and payload_type in {"user_message", "user_prompt", "user_input"}:
         candidates = [payload.get("text"), payload.get("message"), payload.get("prompt")]
+    elif row_type == "event_msg" and payload_type == "item_completed":
+        # Codex 0.149.1 (~2026-08-25) moved the typed prompt into an envelope:
+        # {"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"text","text":...}]}}
+        item = payload.get("item") if isinstance(payload.get("item"), dict) else {}
+        if str(item.get("type") or "") != "UserMessage":
+            return None
+        candidates = [item.get("content")]
     elif row_type == "response_item" and role == "user":
         candidates = [payload.get("content"), payload.get("text")]
     else:
@@ -822,15 +982,25 @@ def _codex_user_prompt_text(row_type: str | None, payload: dict[str, Any]) -> st
         if isinstance(candidate, str):
             parts.append(candidate)
         elif isinstance(candidate, list):
-            for item in candidate:
-                if isinstance(item, dict):
-                    text = item.get("text") or item.get("input_text")
+            for part in candidate:
+                if isinstance(part, dict):
+                    # Text parts only: a "skill" or image part is not what was typed.
+                    if part.get("type") not in (None, "text", "input_text"):
+                        continue
+                    text = part.get("text") or part.get("input_text")
                     if isinstance(text, str):
                         parts.append(text)
-                elif isinstance(item, str):
-                    parts.append(item)
+                elif isinstance(part, str):
+                    parts.append(part)
     text = "\n".join(part.strip() for part in parts if part and part.strip()).strip()
+    if text.startswith(CODEX_INJECTED_PREFIXES):
+        return None
     return text or None
+
+
+# User-role rows Codex writes itself at the start of a session: the environment
+# it runs in and the AGENTS.md instructions it loaded. Not something typed.
+CODEX_INJECTED_PREFIXES = ("<environment_context>", "<user_instructions>", "# AGENTS.md instructions")
 
 
 def _dominant_cwd(cwd_counts: dict[str, int], cwd_costs: dict[str, float]) -> str | None:
@@ -1813,6 +1983,7 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
         started_at: datetime | None = None
         updated_at: datetime | None = None
         final_input = 0
+        final_cached = 0
         final_output = 0
         agent_calls = 0
         tool_calls = 0
@@ -1895,11 +2066,18 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
                         continue
                     previous_total = total_tokens
                     final_input = int(total.get("input_tokens") or 0)
+                    final_cached = min(final_input, int(total.get("cached_input_tokens") or 0))
                     final_output = int(total.get("output_tokens") or 0)
                     agent_calls += 1
                     event_input = int(last.get("input_tokens") or 0)
                     event_output = int(last.get("output_tokens") or 0)
-                    event_cost = estimate_cost(model, event_input, event_output, when=timestamp)
+                    # Codex counts cached tokens inside input_tokens; they bill at
+                    # the cached rate, so they are split out rather than priced as
+                    # fresh input (estimate_cost's docstring).
+                    event_cached = min(event_input, int(last.get("cached_input_tokens") or 0))
+                    event_cost = estimate_cost(
+                        model, event_input - event_cached, event_output, cache_read=event_cached, when=timestamp,
+                    )
                     # Attribute each incremental turn's tokens/cost to whichever model
                     # was active for that turn — total_token_usage is cumulative and
                     # priced with only the final model, but these per-turn deltas let
@@ -1951,7 +2129,9 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
             # Session-level total, so it is dated by the session's last turn:
             # a rollup has no single moment, and the newest turn is the closest
             # honest answer for which rate card applied.
-            cost_usd=estimate_cost(model, final_input, final_output, when=updated_at),
+            cost_usd=estimate_cost(
+                model, final_input - final_cached, final_output, cache_read=final_cached, when=updated_at,
+            ),
             agent_calls=agent_calls,
             tool_calls=tool_calls,
             source_path=str(path),
@@ -1959,7 +2139,7 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
             model_breakdown={key: dict(value) for key, value in model_totals.items()},
             notes=[
                 "Measured from Codex rollout token_count events",
-                "Codex cost is subscription/plan-based, not invoice spend",
+                "Codex cost is API-equivalent at OpenAI list prices; on a ChatGPT plan no money moves per token",
             ],
         ))
     CODEX_ROLLOUT_CACHE = (signature, list(sessions), list(events))

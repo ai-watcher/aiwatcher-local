@@ -93,7 +93,7 @@ class ModelCostComparisonTests(unittest.TestCase):
 
     def test_subscription_models_are_excluded_not_counted_as_free(self) -> None:
         rows = [session(f"s{i}", model="claude-sonnet-5") for i in range(5)]
-        rows += [session(f"g{i}", model="gpt-5.2-codex", cost=0.0) for i in range(5)]
+        rows += [session(f"g{i}", model="codex", cost=0.0) for i in range(5)]
         result = model_cost_comparison(rows)
         self.assertFalse(result["available"])
         self.assertEqual(result["models_eligible"], 1)
@@ -271,7 +271,7 @@ class ReplayedContextCostTests(unittest.TestCase):
         self.assertEqual(result["sessions"][0]["session_id"], "dear")
 
     def test_subscription_model_is_skipped(self) -> None:
-        rows = [session("s1", model="gpt-5.2-codex", cache_read=5_000_000,
+        rows = [session("s1", model="codex", cache_read=5_000_000,
                         tokens_in=5_000_000, cost=0.0)]
         self.assertFalse(replayed_context_cost(rows)["available"])
 
