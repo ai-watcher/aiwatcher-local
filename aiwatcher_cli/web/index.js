@@ -3138,6 +3138,30 @@ function projectTitle(row) {
 function healthProjectName(row) {
   return projectName(row);
 }
+// A chat is named by what it is called, not by its ID. The server picks the
+// user's own name over the generated one; a chat with neither falls back to
+// project and tool, the way the Companion bar names it.
+function chatName(row) {
+  const title = String((row && (row.title || row.session_title)) || '').trim();
+  if (title) return title;
+  return [projectName(row), row && row.tool].filter(Boolean).join(' · ') || 'Untitled chat';
+}
+// Names repeat -- two chats can both be "Headroom display bug" -- so a list
+// shows when each started, and its short ID, only on the rows whose names match.
+function duplicateChatNames(rows) {
+  const counts = new Map();
+  (rows || []).forEach(row => {
+    const name = chatName(row);
+    counts.set(name, (counts.get(name) || 0) + 1);
+  });
+  return new Set([...counts].filter(([, count]) => count > 1).map(([name]) => name));
+}
+function chatDisambiguation(row) {
+  const started = row.started_at
+    ? new Date(row.started_at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+    : '';
+  return [started ? `started ${started}` : '', row.session_short || shortSessionId(row.session_id)].filter(Boolean).join(' · ');
+}
 
 function healthRank(row, waiting) {
   // "Which one needs you first" -- so a session that is literally waiting on
@@ -3257,7 +3281,7 @@ function headroomLabel(chart) {
   }
   return { big: `${turns} turn${turns === 1 ? '' : 's'}`, sub: 'of headroom at this rate' };
 }
-function healthRow(row, waitingById, index) {
+function healthRow(row, waitingById, index, sharedNames) {
   const reason = healthReason(row, waitingById);
   const room = headroomLabel(row.chart);
   const project = String(row.project_full || '');
@@ -3307,9 +3331,10 @@ function healthRow(row, waitingById, index) {
     <span class="rank-dot ${esc(row.severity)}"></span>
     <span class="rank-main">
       <span class="rank-who">
-        <button class="link-inline rank-title" type="button">${esc(healthProjectName(row))} &middot; ${esc(row.tool || 'unknown tool')}</button>
-        <span class="rank-id">${esc(row.session_short || row.session_id || 'unknown session')}</span>
+        <button class="link-inline rank-title" type="button" title="${esc(row.session_id)}">${esc(chatName(row))}</button>
+        ${sharedNames && sharedNames.has(chatName(row)) ? `<span class="rank-id">${esc(chatDisambiguation(row))}</span>` : ''}
       </span>
+      ${row.session_title ? `<span class="rank-why">${esc(healthProjectName(row))} &middot; ${esc(row.tool || 'unknown tool')}</span>` : ''}
       ${reason ? `<span class="rank-why">${reason}</span>` : ''}
       ${row.session_count > 1
         ? `<span class="rank-why">${esc(row.session_count)} sessions here; this is the one under most pressure.</span>`
@@ -3350,7 +3375,8 @@ function renderContextHealth(rows, statusArg, presence) {
   const head = tally
     ? `<div class="health-tally"><span class="health-severity ${critical ? 'critical' : 'warning'}">${esc(tally)}</span></div>`
     : '';
-  return `<div class="health-stack">${head}${batch}${ranked.map((row, i) => healthRow(row, waitingById, i)).join('')}</div>`;
+  const sharedNames = duplicateChatNames(ranked);
+  return `<div class="health-stack">${head}${batch}${ranked.map((row, i) => healthRow(row, waitingById, i, sharedNames)).join('')}</div>`;
 }
 function coverageGate(row) {
   // The gate column answers "is anything intercepted before it runs", which is
@@ -3826,8 +3852,8 @@ function renderSessionHero(s) {
   // left is the identity and the pair of numbers that are read together: how
   // much this session used, and what that came to.
   return `<section class="session-hero">
-    <h2 class="session-title">${esc(s.project_short || s.project || 'Session')}</h2>
-    <p class="session-meta">${esc(s.tool || 'unknown tool')} · ${esc(s.model || 'unknown model')}</p>
+    <h2 class="session-title">${esc(s.title || s.project_short || s.project || 'Session')}</h2>
+    <p class="session-meta">${s.title ? `${esc(s.project_short || s.project || 'unknown project')} · ` : ''}${esc(s.tool || 'unknown tool')} · ${esc(s.model || 'unknown model')}</p>
     ${renderIdentityStrip(s, runtime, s.source_path)}
     <div class="session-hero-pressure">
       <span>Tokens</span><strong>${esc(s.tokens_label || '—')}</strong>
@@ -5302,13 +5328,14 @@ function setChangeSort(key) {
 }
 function renderSessionRows(rows, filtered) {
   updateSortIndicators('session', sessionSortChosen ? sessionSort : { key: null, dir: 'desc' },
-    ['tool', 'project', 'model', 'tokens_value']);
+    ['title', 'project', 'model', 'tokens_value']);
   const ordered = sessionSortChosen ? sortedRows(rows, sessionSort) : rows;
   const tokens = tokenColumnFormatter(ordered.map(s => s.tokens_value));
+  const sharedNames = duplicateChatNames(rows);
   document.getElementById('sessionRows').innerHTML = rows.length
     ? ordered.map(s => `<tr class="clickable" onclick="selectSession('${esc(s.session_id)}')">
-        <td>${esc(s.tool)}</td>
-        <td title="${esc(projectTitle(s))}">${esc(projectName(s))}${s.match_field ? `<span class="match-note">matched on ${esc(s.match_field)}</span>` : ''}<br>${sessionStatePill(s.state)} ${s.outcome ? outcomePill(s.outcome) : outcomeEvidencePill(s)}</td>
+        <td><span title="${esc(s.session_id)}">${esc(chatName(s))}</span>${sharedNames.has(chatName(s)) ? `<span class="match-note">${esc(chatDisambiguation(s))}</span>` : ''}<br>${sessionStatePill(s.state)} ${s.outcome ? outcomePill(s.outcome) : outcomeEvidencePill(s)}</td>
+        <td title="${esc(projectTitle(s))}">${esc(projectName(s))}<span class="match-note">${esc(s.tool)}</span>${s.match_field ? `<span class="match-note">matched on ${esc(s.match_field)}</span>` : ''}</td>
         <td>${esc(s.model)}</td>
         <td class="mono num">${esc(s.tokens_value === null || s.tokens_value === undefined ? s.tokens : tokens(s.tokens_value))}</td>
         <td><button class="row-action">Review</button></td>
