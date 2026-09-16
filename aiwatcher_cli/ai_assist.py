@@ -721,7 +721,7 @@ def _structured_optimize_cleanup_text(parsed: dict[str, object], *, local_prompt
     safe = _clean_list(parsed.get("safe_to_archive_or_review") or parsed.get("safe_to_review"), limit=6)
     keep = _clean_list(parsed.get("keep_active"), limit=6)
     unknown = _clean_list(parsed.get("unknown"), limit=6)
-    next_action = _clean_list(parsed.get("next_action"), limit=5)
+    next_verification = _clean_list(parsed.get("next_verification") or parsed.get("next_action"), limit=5)
     guardrails = _clean_list(parsed.get("guardrails"), limit=6)
     lines = [
         "AIWatcher AI-assisted Optimize cleanup prompt",
@@ -731,7 +731,7 @@ def _structured_optimize_cleanup_text(parsed: dict[str, object], *, local_prompt
         *_section("Safe to archive/review", safe or ["Only mark something safe after verifying it in the owning AI app, git worktree, or runtime tool."]),
         *_section("Keep active", keep or ["Keep any session, worktree, or process that may still be connected to live work."]),
         *_section("Unknown", unknown or ["Treat missing identity, stale metadata, and ambiguous ownership as unknown until verified."]),
-        *_section("Next action", next_action or ["Review the candidate below, choose one bucket, and report the evidence for that choice without performing cleanup."]),
+        *_section("Next verification", next_verification or ["Review the candidate below, choose one bucket, and report the evidence for that choice without performing cleanup."]),
         *_section("Guardrails", guardrails or [
             "Do not delete files or folders.",
             "Do not kill processes.",
@@ -834,7 +834,7 @@ _OPTIMIZE_CLEANUP_SPEC = _WorkflowSpec(
         "safe_to_archive_or_review: string[]\n"
         "keep_active: string[]\n"
         "unknown: string[]\n"
-        "next_action: string[]\n"
+        "next_verification: string[]\n"
         "guardrails: string[]\n\n"
         "The final prompt must help another AI session classify the candidate into those buckets, "
         "but the AI session must only recommend; the user performs any action later in the owning app/tool. "
@@ -842,7 +842,7 @@ _OPTIMIZE_CLEANUP_SPEC = _WorkflowSpec(
     ),
     evidence_heading="Local AIWatcher cleanup evidence:",
     structure=lambda parsed, trimmed: _structured_optimize_cleanup_text(parsed, local_prompt=trimmed),
-    fallback_key="next_action",
+    fallback_key="next_verification",
 )
 
 

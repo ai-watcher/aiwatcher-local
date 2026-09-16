@@ -1010,12 +1010,12 @@ def _optimize_candidate_prompt(item: dict[str, object]) -> str:
         f"- Why surfaced: {reason}",
         "",
         "Return these buckets",
-        "1. Safe to archive or clean up: item ids/names/paths if visible, with one short reason each; only after checking the owning app, git worktree, or runtime.",
+        "1. Safe to archive/review: item ids/names/paths if visible, with one short reason each; only after checking the owning app, git worktree, or runtime.",
         "2. Keep active: anything that might still matter, is live, recently touched, or linked to current work.",
         "3. Unknown: anything whose identity, ownership, path, or status is not proven, or that needs owner confirmation.",
         "4. Project status: latest branch, PR, commit, or handoff receipt if visible.",
         "5. Cleanup reward: estimate context, RAM, or disk relief only when supported by the evidence above.",
-        "6. Next action: one small verification step first, then the exact action to take in the owning app or local tool.",
+        "6. Next verification: one small check the user should do before any separate cleanup decision.",
         "",
         "Guardrails",
         "- Do not delete files, folders, branches, worktrees, commits, source code, or notes.",
@@ -1027,26 +1027,26 @@ def _optimize_candidate_prompt(item: dict[str, object]) -> str:
         "- Preserve handoffs, PRs, commits, receipts, useful notes, unresolved tasks, and final source-of-truth files.",
     ]
     if kind == "session_cluster":
-        lines.append("- Action boundary: archive or mark done only inside the owning AI app after review.")
+        lines.append("- Action boundary: this prompt can only recommend review buckets; any archive/mark-done action must be a separate user decision inside the owning AI app.")
     elif kind == "fresh_start_pending":
-        lines.append("- Action boundary: link the follow-up session or mark the old receipt skipped/continued; do not claim saved tokens without proof.")
+        lines.append("- Action boundary: this prompt can only recommend whether to link the follow-up session or review the old receipt; make any mark-done/skipped action a separate user decision and do not claim saved tokens without proof.")
     elif kind == "worktree":
         lines.extend([
             f"- Inspect first: git -C {project_full or '<worktree>'} status --short",
-            "- Action boundary: remove only with git worktree-safe commands after confirmation.",
+            "- Action boundary: do not remove the worktree from this flow; if it looks stale, report the evidence and ask the user for a separate cleanup decision.",
         ])
     elif kind == "agent_workspace":
         lines.extend([
             f"- Inspect first: {project_full or '<workspace>'}",
-            "- Action boundary: delete only after confirming it is disposable scratch space and moving anything useful.",
+            "- Action boundary: do not delete the workspace from this flow; if it looks disposable, report the evidence and ask the user for a separate cleanup decision.",
         ])
     elif kind == "stale_processes":
         lines.extend([
             "- Inspect first: aiwatcher processes --stale-only",
-            "- Action boundary: stop only runtimes you recognize and have confirmed are detached from live AI work.",
+            "- Action boundary: do not stop runtimes from this flow; if one looks detached, report the PID/runtime evidence and ask the user for a separate stop decision.",
         ])
     else:
-        lines.append("- Action boundary: prefer archive/mark-done recommendations over deletion.")
+        lines.append("- Action boundary: classify the candidate only; defer archive, mark-done, delete, stop, or removal actions to a separate user-confirmed step.")
     if review_steps:
         lines.extend(["", "Safe review steps from AIWatcher", *[f"- {step}" for step in review_steps]])
     if kind == "stale_processes":
@@ -1594,7 +1594,7 @@ def build_optimize_inventory(
             "title": "Review stale AI runtimes",
             "project": "Local machine",
             "project_full": "",
-            "summary": f"{len(stale_processes)} AI-related runtime process(es) look stale or orphaned. Review before killing anything.",
+            "summary": f"{len(stale_processes)} AI-related runtime process(es) look stale or orphaned. Review before taking any action.",
             "activity_summary": f"{len(stale_processes)} stale runtime process{'es' if len(stale_processes) != 1 else ''} · {rss_impact}",
             "why_inactive": "Local process metadata shows AI-related runtimes with stale/orphan signals.",
             "evidence_label": "Observed",
@@ -1616,7 +1616,7 @@ def build_optimize_inventory(
                 f"Run: {review_command}",
                 "Use PID, runtime, session id, and working directory to match each row to an AI app/window.",
                 "Confirm each process is not attached to live AI work.",
-                "Stop only stale/orphaned runtimes you recognize.",
+                "Report stale/orphaned runtimes you recognize for a separate user stop decision.",
                 "Run the command again; reclaimed RSS is the before-minus-after local memory signal.",
                 "Leave unknown processes alone.",
             ],
@@ -7932,8 +7932,8 @@ def build_companion_state() -> dict[str, object]:
                 **base,
                 "state": "context_review",
                 "label": "Context review",
-                "subtitle": f"{project_count} projects ready for context review in Console",
-                "primary_label": "Review list",
+                "subtitle": f"{project_count} projects in Watch > Context Health",
+                "primary_label": "Review all",
                 "primary_action": "open_url",
                 "primary_url": "/?view=watch#contextHealth",
                 "skip_label": "Later",
@@ -7948,17 +7948,17 @@ def build_companion_state() -> dict[str, object]:
                     "tone": "info",
                     "label": f"{project_count} context review project{'s' if project_count != 1 else ''}",
                 },
-                "detail": "Fresh Start review is batched in Watch and only blinks while an affected AI surface is foreground.",
+                "detail": "Open Watch > Context Health to review every project, or pick one row from the Companion queue.",
             }
         return {
             **base,
             "state": "control_review",
             "label": "Review context",
             "subtitle": (
-                f"{project_count} projects need Fresh Start review"
+                f"{project_count} projects in Watch > Context Health"
                 + (f" · {critical_count} critical" if critical_count else "")
             ),
-            "primary_label": "Review",
+            "primary_label": "Review all",
             "primary_action": "open_url",
             "primary_url": "/?view=watch#contextHealth",
             "skip_label": "Later",
@@ -7975,7 +7975,7 @@ def build_companion_state() -> dict[str, object]:
             },
             "control_url": "/?view=watch#contextHealth",
             "watch_url": "/?view=watch#contextHealth",
-            "detail": "Choose which projects to Fresh Start, continue, or snooze in one batch.",
+            "detail": "Open Watch > Context Health to review every project, or pick one row from the Companion queue.",
         }
     bubble = summary.get("handoff_bubble")
     if fresh_start_context_enabled and isinstance(bubble, dict) and bubble.get("session_id"):

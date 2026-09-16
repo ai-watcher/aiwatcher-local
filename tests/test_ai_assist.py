@@ -355,7 +355,7 @@ class AiAssistTests(unittest.TestCase):
                     '{"safe_to_archive_or_review":["Old Codex chat can be reviewed in the app"],'
                     '"keep_active":["Keep sessions with recent activity"],'
                     '"unknown":["Process ownership is not proven"],'
-                    '"next_action":["Open the owning app and verify the chat is done"],'
+                    '"next_verification":["Open the owning app and verify the chat is done"],'
                     '"guardrails":["Do not delete files","Do not kill processes"]}'
                 ),
                 "usage": {"prompt_tokens": 180, "completion_tokens": 70},
@@ -378,10 +378,10 @@ class AiAssistTests(unittest.TestCase):
         self.assertIn("Safe to archive/review", result["text"])
         self.assertIn("Keep active", result["text"])
         self.assertIn("Unknown", result["text"])
-        self.assertIn("Next action", result["text"])
+        self.assertIn("Next verification", result["text"])
         self.assertIn("Do not delete files", result["text"])
         self.assertIn("Full path: /repo/app", result["text"])
-        self.assertEqual(result["structured"]["next_action"], ["Open the owning app and verify the chat is done"])
+        self.assertEqual(result["structured"]["next_verification"], ["Open the owning app and verify the chat is done"])
         self.assertNotIn("sk-secret", payload)
         self.assertLess(len(payload), 8_000)
 
