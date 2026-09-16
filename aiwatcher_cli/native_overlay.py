@@ -703,9 +703,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     func reviewTitle() -> String {
         if ["control_review", "context_review"].contains(stateName) {
             if visibleWaitingRows > 0 && reviewCount > visibleWaitingRows {
-                return "\(visibleWaitingRows) of \(reviewCount) context reviews"
+                return "\(visibleWaitingRows) of \(reviewCount) projects need review"
             }
-            return "\(reviewCount) context review\(reviewCount == 1 ? "" : "s")"
+            return reviewCount == 1 ? "1 project needs review" : "\(reviewCount) projects need review"
         }
         if stateName == "session_finished" && visibleWaitingRows > 0 {
             if finishedCount > visibleWaitingRows {
@@ -717,7 +717,12 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     }
 
     func reviewSubtitle() -> String {
-        if ["control_review", "context_review", "session_finished"].contains(stateName), visibleWaitingRows > 0 {
+        if ["control_review", "context_review"].contains(stateName), visibleWaitingRows > 0 {
+            let total = max(reviewCount, visibleWaitingRows)
+            let hidden = max(total - visibleWaitingRows, 0)
+            return hidden > 0 ? "Review before broad work. \(hidden) more in UI." : "Review before broad work. Pick a row."
+        }
+        if stateName == "session_finished", visibleWaitingRows > 0 {
             let count = stateName == "session_finished" ? finishedCount : reviewCount
             let total = max(count, visibleWaitingRows)
             let hidden = max(total - visibleWaitingRows, 0)
@@ -734,13 +739,14 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         let tool = row["tool"] as? String ?? "AI tool"
         let project = row["project"] as? String ?? ""
         let waited = row["waited_label"] as? String ?? ""
+        let review = row["review_label"] as? String ?? waited
         let severity = row["severity_label"] as? String ?? ""
         let activity = row["activity_label"] as? String ?? ""
         let prefix: String
         if kind == "finished" {
             prefix = "Completed"
         } else if kind == "context_review" {
-            prefix = "Context"
+            prefix = "Review"
         } else if kind.isEmpty {
             prefix = tool
         } else {
@@ -750,7 +756,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             return [tool, project, waited].filter { !$0.isEmpty }.joined(separator: " · ")
         }
         let details = kind == "context_review"
-            ? [project, tool, severity, activity, waited]
+            ? [project, tool, severity, activity, review]
             : [project, tool, waited]
         let detail = details.filter { !$0.isEmpty }.joined(separator: " · ")
         return detail.isEmpty ? prefix : "\(prefix): \(detail)"
@@ -761,7 +767,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         if kind == "compact" { return "Copy" }
         let canReturn = index < waitingReturnAvailable.count && waitingReturnAvailable[index]
         if canReturn { return "Return" }
-        if ["context_review", "control_review"].contains(kind) { return "Open" }
+        if ["context_review", "control_review"].contains(kind) { return "Review" }
         return kind.isEmpty ? "Open" : "Review"
     }
 
@@ -2803,12 +2809,13 @@ def run_native_presence(
         tool = str(row.get("tool") or "AI tool")
         project = str(row.get("project") or "")
         waited = str(row.get("waited_label") or "")
+        review = str(row.get("review_label") or waited)
         severity = str(row.get("severity_label") or "")
         activity = str(row.get("activity_label") or "")
         if kind == "finished":
             parts = ["Completed", project, tool, waited]
         elif kind == "context_review":
-            parts = ["Context", project, tool, severity, activity, waited]
+            parts = ["Review", project, tool, severity, activity, review]
         elif kind:
             parts = ["Signal", project, tool, waited]
         else:
@@ -2820,8 +2827,8 @@ def run_native_presence(
             count = int(review_count_var.get() or 0)
             shown = visible_waiting_rows()
             if shown and count > shown:
-                return f"{shown} of {count} context reviews"
-            return f"{count} context review{'' if count == 1 else 's'}"
+                return f"{shown} of {count} projects need review"
+            return "1 project needs review" if count == 1 else f"{count} projects need review"
         if state_var.get() == "session_finished" and visible_waiting_rows() > 0:
             count = int(finished_count_var.get() or 0)
             shown = visible_waiting_rows()
@@ -2831,7 +2838,14 @@ def run_native_presence(
         return title_var.get()[:34]
 
     def review_subtitle() -> str:
-        if state_var.get() in {"control_review", "context_review", "session_finished"} and visible_waiting_rows() > 0:
+        if state_var.get() in {"control_review", "context_review"} and visible_waiting_rows() > 0:
+            count = max(int(review_count_var.get() or 0), visible_waiting_rows())
+            hidden = max(count - visible_waiting_rows(), 0)
+            return (
+                f"Review before broad work. {hidden} more in UI."
+                if hidden > 0 else "Review before broad work. Pick a row."
+            )
+        if state_var.get() == "session_finished" and visible_waiting_rows() > 0:
             base_count = int(finished_count_var.get() or 0) if state_var.get() == "session_finished" else int(review_count_var.get() or 0)
             count = max(base_count, visible_waiting_rows())
             hidden = max(count - visible_waiting_rows(), 0)
@@ -2849,7 +2863,7 @@ def run_native_presence(
         if can_return:
             return "Return"
         if kind in {"context_review", "control_review"}:
-            return "Open"
+            return "Review"
         return "Review" if kind else "Open"
 
     def short_skip_failure_message() -> str:
