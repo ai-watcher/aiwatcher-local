@@ -189,6 +189,10 @@ class LocalSession:
     notes: list[str] = field(default_factory=list)
     # "cli" | "desktop" | None (host did not report which surface was used).
     surface: str | None = None
+    # What the chat is called: the name the user gave it, else the one the tool
+    # generated (Claude Code's customTitle / aiTitle rows, Codex's threads.title).
+    # None when the tool recorded neither.
+    title: str | None = None
     # Per-model usage within this session: {model_name: {tokens_in, tokens_out,
     # cost_usd, agent_calls, tool_calls}}. `model` above is only the highest-usage
     # model for backward compatibility — a session that used more than one model
@@ -232,6 +236,7 @@ class LocalSession:
             "notes": self.notes,
             "surface": self.surface,
             "model_breakdown": self.model_breakdown,
+            "title": self.title,
         }
 
 
@@ -344,6 +349,9 @@ def _user_prompt_text(content: Any) -> str | None:
         text = "\n".join(parts).strip()
     else:
         return None
+    # The Claude desktop app writes "<!-- attach -->" ahead of a quoted
+    # selection. It is not something typed, so it goes; the quote stays.
+    text = _LEADING_HTML_COMMENTS.sub("", text).strip()
     if not text:
         return None
     if text.startswith(INJECTED_ROW_PREFIXES):
@@ -356,6 +364,7 @@ def _user_prompt_text(content: Any) -> str | None:
 # is a thing the person typed, so none counts as a prompt -- here and in
 # statusline.read_transcript, which reads the same log.
 INJECTED_ROW_PREFIXES = ("<command", "<local-command", "<system-reminder>", "<task-notification>", "Caveat:")
+_LEADING_HTML_COMMENTS = re.compile(r"^(?:\s*<!--.*?-->)+", re.S)
 
 
 def segment_session_by_prompt(source_path: str | None, *, max_chars: int = 2000) -> list[dict[str, object]]:
@@ -1595,6 +1604,8 @@ def scan_claude_code() -> list[LocalSession]:
                 # lines that request produced. See _usage_receipt_key.
                 counted_requests: set[str] = set()
                 seen_rows: set[str] = set()
+                custom_title: str | None = None
+                generated_title: str | None = None
                 events_seen = 0
                 agent_calls = 0
                 tool_calls = 0
@@ -1643,6 +1654,11 @@ def scan_claude_code() -> list[LocalSession]:
                                     surface = "cli"
                                 elif entrypoint == "claude-desktop":
                                     surface = "desktop"
+                            # The latest of each wins: a chat can be renamed.
+                            if isinstance(obj.get("customTitle"), str) and obj["customTitle"].strip():
+                                custom_title = obj["customTitle"].strip()
+                            if isinstance(obj.get("aiTitle"), str) and obj["aiTitle"].strip():
+                                generated_title = obj["aiTitle"].strip()
 
                             message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
                             msg_type = obj.get("type") or message.get("role")
@@ -1735,6 +1751,7 @@ def scan_claude_code() -> list[LocalSession]:
                     surface=surface,
                     model_breakdown={key: dict(value) for key, value in model_totals.items()},
                     source_path=str(fpath),
+                    title=custom_title or generated_title,
                 ))
 
                 session = sessions[-1]
@@ -1911,6 +1928,7 @@ def scan_codex_cli(since: datetime | None = None) -> list[LocalSession]:
             sessions.append(
                 LocalSession(
                     session_id=row["id"],
+                    title=str(row["title"]).strip() or None if row["title"] else None,
                     tool="codex-cli",
                     project_path=row["cwd"],
                     started_at=_parse_ts(row["created_at_ms"]),
@@ -1940,6 +1958,11 @@ def scan_codex_cli(since: datetime | None = None) -> list[LocalSession]:
         conn.close()
     by_id = {row.session_id: row for row in sessions}
     for rollout in rollout_sessions:
+        # The rollout is the better record of what the thread did, but only the
+        # database knows what it is called.
+        known = by_id.get(rollout.session_id)
+        if known is not None and known.title and not rollout.title:
+            rollout.title = known.title
         by_id[rollout.session_id] = rollout
     return sorted(
         by_id.values(),

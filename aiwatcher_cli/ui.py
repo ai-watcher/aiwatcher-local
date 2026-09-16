@@ -179,7 +179,8 @@ SUMMARY_MEMORY_TTL_SECONDS = 45
 SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
 # Bump whenever build_summary's payload shape changes, so a cache written by an
 # older build is discarded instead of rendering blank sections in a newer UI.
-SUMMARY_CACHE_SCHEMA_VERSION = 8
+# 9: chat titles and start times on context-health cards and session rows.
+SUMMARY_CACHE_SCHEMA_VERSION = 9
 
 
 def restart_command(
@@ -247,7 +248,8 @@ _POST_WITHOUT_BODY = frozenset({
     "/api/handoff-receipts-viewed",
     "/api/first-run-dismissed",
 })
-SESSION_SNAPSHOT_SCHEMA_VERSION = 1
+# 2: sessions carry their chat title; a version-1 index would restore every chat nameless.
+SESSION_SNAPSHOT_SCHEMA_VERSION = 2
 SUMMARY_BACKGROUND_COOLDOWN_SECONDS = 8
 SUMMARY_WINDOWS = (1, 7, 30)
 # One definition of "live", shared with session_presence, which subdivides
@@ -554,6 +556,7 @@ def _session_from_json(raw: object) -> LocalSession | None:
         notes=[str(item) for item in notes] if isinstance(notes, list) else [],
         surface=raw.get("surface") if isinstance(raw.get("surface"), str) else None,
         model_breakdown=model_breakdown if isinstance(model_breakdown, dict) else {},
+        title=raw.get("title") if isinstance(raw.get("title"), str) and raw.get("title") else None,
     )
 
 
@@ -1813,6 +1816,9 @@ def _session_row_json(
     return {
         "tool": row.tool,
         "session_id": row.session_id,
+        "session_short": short_session_id(row.session_id),
+        "title": row.title,
+        "started_at": row.started_at.isoformat() if row.started_at else None,
         "project": project_label(row.project_path),
         "project_full": row.project_path if is_reliable_project_path(row.project_path) else "unknown",
         "model": display_model_name(row.model),
@@ -1952,6 +1958,7 @@ def session_json(row: LocalSession) -> dict[str, object]:
         "tool": row.tool,
         "project": row.project_path if is_reliable_project_path(row.project_path) else "unknown",
         "project_short": project_label(row.project_path),
+        "title": row.title,
         "model": display_model_name(row.model),
         "tokens": row.tokens_in + row.tokens_out,
         "tokens_label": compact_int(row.tokens_in + row.tokens_out),
@@ -1986,6 +1993,9 @@ def recent_session_json(
     return {
         "tool": row.tool,
         "session_id": row.session_id,
+        "session_short": short_session_id(row.session_id),
+        "title": row.title,
+        "started_at": row.started_at.isoformat() if row.started_at else None,
         "project": project_label(row.project_path),
         "project_full": row.project_path if is_reliable_project_path(row.project_path) else "unknown",
         "model": display_model_name(row.model),
@@ -2024,6 +2034,7 @@ def session_summary_json(row: LocalSession) -> dict[str, object]:
         "api_value": money(row.cost_usd),
         "calls": row.agent_calls,
         "tool_calls": row.tool_calls,
+        "title": row.title,
         "started_at": row.started_at.isoformat() if row.started_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         "source_path": row.source_path,
@@ -3301,6 +3312,8 @@ def _context_health_card(
         ),
         "session_id": health.session_id,
         "session_short": short_session_id(health.session_id),
+        "session_title": session.title if session is not None else None,
+        "started_at": session.started_at.isoformat() if session is not None and session.started_at else None,
         "tool": health.tool,
         "project": project_label(health.project_path),
         "project_full": health.project_path,
@@ -5874,6 +5887,10 @@ def _cached_session_rows() -> list[LocalSession]:
         items = raw.get("_session_index") if isinstance(raw, dict) else None
         if not isinstance(items, list):
             continue
+        # An index saved before sessions carried titles would restore every
+        # chat nameless; a full scan is better than that.
+        if not any(isinstance(item, dict) and "title" in item for item in items):
+            continue
         rows = [row for item in items if (row := _session_from_json(item)) is not None]
         if rows:
             _index_sessions(rows)
@@ -7408,7 +7425,12 @@ def _prompt_status_block(rows: list[SessionPresence], sessions: list[LocalSessio
         path = session.source_path if session is not None else None
         if not path or not path.endswith(".jsonl"):
             continue
-        segment, title = _current_prompt_cached(path, read_title="claude" in (session.tool or "").lower())
+        # The scanned session already carries its name; the transcript is read
+        # for one only when the scan has not caught up with a new chat.
+        segment, title = _current_prompt_cached(
+            path, read_title="claude" in (session.tool or "").lower() and not session.title,
+        )
+        title = session.title or title
         if segment is None:
             continue
         receipt = build_prompt_receipts([segment])
