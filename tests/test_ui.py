@@ -1145,7 +1145,7 @@ class DashboardWindowTests(unittest.TestCase):
             LocalSession(
                 session_id=f"codex{i}", tool="codex", project_path="/repo",
                 started_at=now - timedelta(hours=2), updated_at=now,
-                model="gpt-5.6-terra", tokens_in=20_000, tokens_out=1_000, cost_usd=0.0,
+                model="codex", tokens_in=20_000, tokens_out=1_000, cost_usd=0.0,
             )
             for i in range(3)
         ]

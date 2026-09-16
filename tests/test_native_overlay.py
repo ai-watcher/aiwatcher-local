@@ -392,6 +392,24 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("short_skip_failure_message", tk_source)
         self.assertIn("width=9", tk_source)
 
+    def test_prompt_rows_ride_the_queue_with_their_status(self) -> None:
+        # A row per live chat's current prompt: the server writes the whole
+        # line, the tag says working or done, and the button opens the chat.
+        mac = native_overlay.MACOS_SWIFT_PRESENCE
+        self.assertIn('"context_review", "prompt_status", "compact_recommended"].contains(stateName)', mac)
+        self.assertIn('if kind.hasPrefix("prompt_") {\n            return row["text"] as? String ?? ""', mac)
+        self.assertIn('if kind.hasPrefix("prompt_") { return "Open" }', mac)
+        self.assertIn('let tagged = kind == "compact" || kind.hasPrefix("prompt_")', mac)
+        self.assertIn('if kind == "prompt_working" {', mac)
+        self.assertIn('kind == "prompt_done"', mac)
+
+        tk_source = inspect.getsource(native_overlay.run_native_presence)
+        self.assertIn('"context_review", "prompt_status", "compact_recommended"} or not waiting_row_texts', tk_source)
+        self.assertIn('if kind.startswith("prompt_"):\n            return str(row.get("text") or "")', tk_source)
+        self.assertIn('if kind.startswith("prompt_"):\n            return "Open"', tk_source)
+        self.assertIn('elif kind.startswith("prompt_"):', tk_source)
+        self.assertIn('incoming_state in {"watching", "prompt_status"}', tk_source)
+
     def test_compaction_rows_ride_the_queue_with_their_own_copy(self) -> None:
         # Several windows can qualify after one commit. Each gets a row with
         # its own command and stage tag; a row past the nudge stage is a fact

@@ -193,8 +193,9 @@ class PromptCachePricingTests(unittest.TestCase):
         )
 
     def test_subscription_model_stays_free_even_with_cache_tokens(self) -> None:
+        # The bare "codex" the scanner records when a rollout names no model.
         self.assertEqual(
-            estimate_cost("gpt-5.2-codex", 1_000_000, 1_000_000, cache_read=1_000_000),
+            estimate_cost("codex", 1_000_000, 1_000_000, cache_read=1_000_000),
             0.0,
         )
 
@@ -210,20 +211,45 @@ class PromptCachePricingTests(unittest.TestCase):
         self.assertGreater(with_cache, counted_only * 15)
 
 
-class CodexFamilyResolvesToPlanBasedTests(unittest.TestCase):
-    """Unknown and plan-based are different claims, and only one is renderable.
+class CodexFamilyPricingTests(unittest.TestCase):
+    """GPT-5 builds are priced at OpenAI's list price, like Claude sessions; a
+    build the table does not list stays recognised and unpriced, never guessed.
 
     The scanner takes the model straight from the rollout and falls back to the
-    bare string "codex". Before the family catch-alls, anything the table did not
-    name exactly returned None -- indistinguishable from a typo, and not something
-    the dashboard could honestly label as subscription usage.
+    bare string "codex". Unknown and plan-based are different claims: None is a
+    typo-shaped hole, while "recognised, no list price here" is renderable.
     """
 
-    def test_every_codex_shape_the_scanner_can_emit_is_plan_based(self) -> None:
-        for model in ("codex", "gpt-5", "gpt-5-codex", "gpt-5.2-codex", "gpt-5.9-codex"):
+    def test_named_builds_are_priced_at_openai_list_prices(self) -> None:
+        # https://developers.openai.com/api/docs/pricing, read 2026-09-15.
+        for model, (rate_in, rate_out) in {
+            "gpt-5": (1.25, 10.00),
+            "gpt-5-codex": (1.25, 10.00),          # variant of gpt-5
+            "gpt-5.1-codex-max": (1.25, 10.00),    # variant of gpt-5.1
+            "gpt-5.2-codex": (1.75, 14.00),        # variant of gpt-5.2
+            "gpt-5.3-codex": (1.75, 14.00),
+            "gpt-5.4-mini": (0.75, 4.50),
+            "gpt-5.6-terra": (2.00, 12.00),
+        }.items():
+            with self.subTest(model=model):
+                self.assertFalse(is_subscription_model(model))
+                self.assertAlmostEqual(estimate_cost(model, 1_000_000, 1_000_000), rate_in + rate_out)
+
+    def test_cached_input_is_a_tenth_of_input_as_openai_lists_it(self) -> None:
+        self.assertAlmostEqual(estimate_cost("gpt-5", 0, 0, cache_read=1_000_000), 0.125)
+        self.assertAlmostEqual(estimate_cost("gpt-5.5", 0, 0, cache_read=1_000_000), 0.50)
+
+    def test_an_unnamed_or_unlisted_build_is_plan_based_not_guessed(self) -> None:
+        for model in ("codex", "codex-mini-latest", "gpt-5.9-codex", "gpt-5.3"):
             with self.subTest(model=model):
                 self.assertTrue(is_subscription_model(model), f"{model} fell through to None")
                 self.assertEqual(estimate_cost(model, 1_000_000, 100_000), 0.0)
+
+    def test_the_longest_prefix_wins_and_a_version_is_not_a_variant(self) -> None:
+        self.assertEqual(lookup("gpt-5.4-mini-2026-08-01")["in"], 0.75)
+        self.assertEqual(lookup("claude-sonnet-4-5-20250929"), MODEL_PRICING["claude-sonnet-4-5"])
+        self.assertNotEqual(lookup("gpt-5.9-codex"), MODEL_PRICING["gpt-5"])
+        self.assertEqual(lookup("claude-opus-4-6[1m]"), MODEL_PRICING["claude-opus-4-6"])
 
     def test_catch_alls_do_not_shadow_a_specifically_priced_model(self) -> None:
         """A prefix must never win over an exact key, or rates go silently to zero."""
@@ -244,16 +270,14 @@ class CodexFamilyResolvesToPlanBasedTests(unittest.TestCase):
         self.assertIsNone(lookup(""))
         self.assertIsNone(lookup(None))
 
-    def test_every_gpt5_entry_is_plan_based(self) -> None:
-        """The prefix catch-all is only safe while this holds — pin it.
-
-        If a priced GPT-5 API SKU is ever added, "gpt-5" as a prefix would swallow
-        it and bill it at zero. This test is the tripwire for that.
-        """
+    def test_every_listed_gpt5_entry_is_priced(self) -> None:
+        """Only the bare "codex" entry stands for "recognised, no price"; a GPT-5
+        row priced at zero would bill a real model as free."""
         for key, rates in MODEL_PRICING.items():
             if key.startswith("gpt-5"):
                 with self.subTest(model=key):
-                    self.assertTrue(rates["subscription"], f"{key} is priced but would be prefix-matched to zero")
+                    self.assertFalse(rates["subscription"])
+                    self.assertGreater(rates["in"], 0)
 
 
 if __name__ == "__main__":

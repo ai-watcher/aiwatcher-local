@@ -193,7 +193,7 @@ class UnmeasurableReplayTests(unittest.TestCase):
     def test_subscription_model_is_unmeasurable(self) -> None:
         # Priced at zero, so there is no bill to take a share of.
         events = [
-            _event(i, model="gpt-5.3-codex", cache_read=90_000, cache_write=1_000)
+            _event(i, model="codex", cache_read=90_000, cache_write=1_000)
             for i in range(4)
         ]
         for event in events:
