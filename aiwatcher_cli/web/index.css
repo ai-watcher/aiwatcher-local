@@ -63,6 +63,8 @@
       --success: #34D399;  --success-soft: rgba(52,211,153,.12);
       --primary: #60A5FA;  --primary-soft: rgba(96,165,250,.14);
       --info:    #38BDF8;  --info-soft:    rgba(56,189,248,.11);
+      /* Categories for a prompt's cost split, not verdicts: no red, amber or green. */
+      --receipt-recached: #A78BFA;  --receipt-recached-soft: rgba(167,139,250,.13);
       --warning: #FBBF24;  --warning-soft: rgba(251,191,36,.13);
       --danger:  #F87171;  --danger-soft:  rgba(248,113,113,.13);
 
@@ -171,6 +173,7 @@
       --success: #047857;  --success-soft: rgba(4,120,87,.10);
       --primary: #2563EB;  --primary-soft: rgba(37,99,235,.10);
       --info:    #0284C7;  --info-soft:    rgba(2,132,199,.10);
+      --receipt-recached: #7C3AED;  --receipt-recached-soft: rgba(124,58,237,.09);
       --warning: #B45309;  --warning-soft: rgba(180,83,9,.10);
       /* red-700 rather than red-600: as *text* on the card ground the
          lighter step measured 4.37:1, just under AA. */
@@ -1607,12 +1610,52 @@
     .risk-low { color: var(--muted); }
     .prompt-opener { font-family: var(--mono); font-size: var(--fs-2); }
     .prompt-opener-label { display: inline-block; font-size: var(--fs-1); text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-right: 6px; }
-    .asks-table td { vertical-align: top; }
-    .asks-table .ask-turn { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
-    .asks-table .ask-prompt { overflow-wrap: anywhere; white-space: pre-wrap; }
-    .asks-table .ask-tools { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
-    .asks-table .ask-cost { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
-    .asks-table .ask-share { display: block; font-size: var(--fs-1); color: var(--muted); }
+    /* Where this chat's money went (drawer). */
+    .receipts-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: var(--sp-1) var(--sp-3); margin-bottom: var(--sp-3); }
+    .receipts-head h3 { margin: 0; }
+    .receipts-tag { font-size: var(--fs-1); color: var(--muted); }
+    .receipts-bar { display: flex; height: 12px; border-radius: var(--r-pill); overflow: hidden; background: var(--bg-muted); }
+    .receipts-bar > span { display: block; height: 100%; }
+    .receipts-parts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-3); margin-top: var(--sp-3); }
+    .receipts-part { display: flex; flex-direction: column; gap: var(--sp-1); min-width: 0; }
+    .receipts-part-name { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-2); color: var(--muted); }
+    .receipts-part-value { font-family: var(--mono); font-size: var(--fs-4); font-weight: var(--fw-bold); font-variant-numeric: tabular-nums; }
+    .receipts-part-value small { margin-left: 4px; font-size: var(--fs-2); font-weight: var(--fw-normal); color: var(--muted); }
+    .receipts-break { margin-top: var(--sp-3); padding: 10px 12px; border: 1px solid var(--receipt-recached); border-radius: var(--r-2); background: var(--receipt-recached-soft); font-size: var(--fs-2); line-height: 1.45; }
+    .receipts-advice { display: block; margin-top: var(--sp-1); color: var(--muted); }
+    .receipts-subhead { margin: var(--sp-4) 0 var(--sp-2); font-size: var(--fs-2); text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+    .receipts-top { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+    .receipts-top li { display: grid; grid-template-columns: 18px minmax(0, 1fr) 72px; gap: var(--sp-2); align-items: start; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-2); background: var(--surface-raised); }
+    .receipts-rank { font-family: var(--mono); font-size: var(--fs-2); color: var(--muted); line-height: 1.6; }
+    .receipts-top-body { min-width: 0; }
+    .receipts-top-line { display: flex; align-items: baseline; gap: var(--sp-2); min-width: 0; }
+    .receipts-top-cost { flex: none; font-family: var(--mono); font-size: var(--fs-4); font-weight: var(--fw-bold); font-variant-numeric: tabular-nums; }
+    .receipts-top-prompt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .receipts-top-meta { font-size: var(--fs-2); color: var(--muted); font-variant-numeric: tabular-nums; }
+    .receipts-top li .receipt-split { width: 100%; margin-top: 9px; }
+    .receipts-note-line { margin: var(--sp-2) 0 0; font-size: var(--fs-2); color: var(--muted); }
+    .receipts-all { margin-top: var(--sp-3); }
+    .receipts-toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: var(--sp-2) var(--sp-4); margin-bottom: 6px; font-size: var(--fs-1); color: var(--muted); }
+    .receipt-key { display: inline-block; flex: none; width: 10px; height: 10px; border-radius: var(--r-1); }
+    .receipts-sort { display: inline-flex; align-items: center; gap: var(--sp-2); }
+    .receipts-table tr.receipt-break-row td { background: var(--receipt-recached-soft); }
+    .receipts-table .receipt-break-row .receipt-note { color: var(--receipt-recached); font-weight: var(--fw-med); }
+    .receipts-sort .btn-quiet[aria-pressed="true"] { border-color: var(--primary); color: var(--t-base); background: var(--primary-soft); }
+    .receipts-table td { vertical-align: top; }
+    /* Tables here get a 620px floor so wide ledgers scroll; in the 619px
+       drawer that pushed the costs out of view, so this one wraps the prompt
+       column instead. */
+    .table-wrap .receipts-table { min-width: 0; }
+    .receipts-table th:nth-child(n+2), .receipts-table .receipt-cost, .receipts-table .receipt-num { text-align: right; }
+    .receipts-table .receipt-prompt { overflow-wrap: anywhere; min-width: 16ch; }
+    .receipts-table .receipt-meta { display: block; margin-top: 2px; font-size: var(--fs-1); color: var(--muted); font-variant-numeric: tabular-nums; }
+    .receipts-table .receipt-cost, .receipts-table .receipt-num { white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .receipt-split { display: flex; width: 72px; height: 5px; margin: 5px 0 0 auto; border-radius: var(--r-pill); overflow: hidden; background: var(--bg-muted); }
+    .receipt-split > span { display: block; height: 100%; }
+    .receipt-part-resent { background: var(--primary); }
+    .receipt-part-recached { background: var(--receipt-recached); }
+    .receipt-part-new { background: var(--t-light); }
+    .receipts-more { margin-top: 8px; }
     .evt-turn { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
     .timeline-note { margin: 4px 0 8px; font-size: var(--fs-2); color: var(--muted); }
     .mini-note {
