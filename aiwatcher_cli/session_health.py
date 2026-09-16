@@ -18,7 +18,6 @@ which is both discriminating and directly actionable.
 
 from __future__ import annotations
 
-import math
 import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -33,7 +32,9 @@ from .scanner import LocalEvent, LocalSession
 # resolved per session in `_context_ceiling`; the 150K/200K constants that used
 # to live here were Claude's 200K window written down once and then applied to
 # every model, including the 1M ones. Nothing below the ceiling is a verdict --
-# a session at 60% of its window is at 60%, not "elevated".
+# a session at 60% of its window is at 60%, not "elevated" -- with one exception
+# that comes from the session rather than a picked share: its biggest prompt so
+# far no longer fits in the room left (`next_prompt_may_not_fit`).
 STALE_WARN_HOURS: float       = 24.0      # yellow: session older than 1 day
 CRITICAL_STALE_DAYS: float    = 7.0       # red: session older than 1 week
 # Tuned against the observed spread of replayed-context cost share (16-83%,
@@ -101,10 +102,19 @@ class ContextHealth:
     context_resets: int = 0            # how many times this session shed its context
     turns_since_reset: int = 0         # turns since the last one (all turns if none)
     segment_growth_rate: float = 0.0   # Δtokens_in per turn in the current segment
-    # Turns until this segment reaches context_window. None when the window is
-    # unknown, already reached, or the segment is flat/shrinking -- "not on this
-    # trajectory" beats a huge number.
-    turns_to_critical: int | None = None
+    # Room left in context_window after the latest turn. None when the window is
+    # unknown. There is deliberately no "turns left" beside it: see
+    # _largest_prompt_growth for why no pace projects reliably.
+    tokens_left: int | None = None
+    # The most context a single prompt added since the last reset. None when the
+    # tool does not number its prompts, so nothing short of the window is judged.
+    largest_prompt_growth: int | None = None
+    # A prompt as big as largest_prompt_growth would no longer fit in tokens_left.
+    next_prompt_may_not_fit: bool = False
+    # Whether the source reports cache buckets at all. When it does not,
+    # latest_turn_replayed_tokens is 0 because nothing was measured, and callers
+    # must say nothing rather than "re-sends 0".
+    cache_reported: bool = False
 
     recommendations: list[str] = field(default_factory=list)
 
@@ -139,6 +149,33 @@ def _context_ceiling(model: str | None, peak_turn_tokens: int) -> int | None:
     if window is None or peak_turn_tokens > window:
         return None
     return window
+
+
+def _largest_prompt_growth(segment: Sequence[LocalEvent]) -> int | None:
+    """Most context one prompt added in this segment, or None if prompts are unnumbered.
+
+    A prompt's growth is the context at its last request minus the context at the
+    last request before it, so a tool loop counts once however many calls it
+    made. The first prompt is measured from the segment's first event, which
+    after a reset is the post-compaction size rather than zero.
+
+    Why the biggest prompt and not an average pace: measured on real sessions,
+    the largest fifth of prompts carried ~60% of the growth, those were long tool
+    loops that nothing in the prompt text predicted, and a pace taken from the
+    first few prompts ran 2-3x high. The biggest prompt so far is the one piece
+    of history that says something true about the next one.
+    """
+    if not segment or not any(event.turn for event in segment):
+        return None
+    end_of_prompt: dict[int, int] = {}
+    for event in segment:
+        end_of_prompt[event.turn] = event.tokens_in
+    previous = segment[0].tokens_in
+    largest = 0
+    for turn in sorted(end_of_prompt):
+        largest = max(largest, end_of_prompt[turn] - previous)
+        previous = end_of_prompt[turn]
+    return largest
 
 
 def _age_hours(session: LocalSession) -> float:
@@ -210,15 +247,20 @@ def analyze_session_health(
     segment_growth_rate = statistics.mean(segment_deltas) if segment_deltas else growth_rate
     turns_since_reset = len(relevant) - 1 - segment_start
 
-    # Turns of headroom before this segment reaches the model's window. None when
-    # the question does not apply -- no known window, already at it, or
-    # flat/shrinking, where the honest answer is "not on this trajectory" rather
-    # than a very large number.
+    # Room left, and whether the next prompt could use it up. Below the window,
+    # red has exactly one cause: this session has already had a prompt bigger
+    # than what is left, so one more like it would reach the window and the tool
+    # would compact on its own. Replayed on 2026-09-14 over 43 real stretches
+    # between compactions, it fired once -- three prompts before the only
+    # auto-compaction -- and nowhere else.
     ceiling = _context_ceiling(session.model, peak)
-    if ceiling is None or latest >= ceiling or segment_growth_rate <= 0:
-        turns_to_critical = None
-    else:
-        turns_to_critical = max(1, math.ceil((ceiling - latest) / segment_growth_rate))
+    tokens_left = None if ceiling is None else max(0, ceiling - latest)
+    largest_prompt_growth = _largest_prompt_growth(relevant[segment_start:])
+    next_prompt_may_not_fit = (
+        bool(tokens_left)
+        and largest_prompt_growth is not None
+        and largest_prompt_growth >= tokens_left
+    )
 
     # Bloat ratio: what share of this session's bill was re-sent history.
     # cache_read_tokens is the replayed portion as the provider counted it, and
@@ -245,15 +287,15 @@ def analyze_session_health(
 
     is_stale           = age_hours > STALE_WARN_HOURS
     is_critical_stale  = age_days  > CRITICAL_STALE_DAYS
-    # At the window is a fact about the next call, not a heuristic, and it is the
-    # only thing the context size alone can make critical. Tools compact before
-    # they get here, so in practice this is rare; that is correct, not a gap.
+    # At the window is a fact about the next call, not a heuristic. Short of it,
+    # only next_prompt_may_not_fit can make context size critical. Tools compact
+    # before they get here, so in practice both are rare; that is correct, not a gap.
     is_critical        = ceiling is not None and latest >= ceiling
     is_high_bloat      = measurable and bloat_ratio > HIGH_BLOAT_RATIO
     is_extreme_bloat   = measurable and bloat_ratio > EXTREME_BLOAT_RATIO
 
     # Severity — stale alone is a warning, not critical; at the window or extreme bloat = critical
-    if is_critical or is_extreme_bloat or (is_critical_stale and is_high_bloat):
+    if is_critical or next_prompt_may_not_fit or is_extreme_bloat or (is_critical_stale and is_high_bloat):
         severity = "critical"
     elif is_stale or is_high_bloat or is_critical_stale:
         severity = "warning"
@@ -275,6 +317,12 @@ def analyze_session_health(
         recs.append(
             f"Context is {latest:,} tokens/turn, at this model's {ceiling:,} window. "
             "Run /compact (Codex/Claude) to compress history, or start a new session."
+        )
+    elif next_prompt_may_not_fit:
+        recs.append(
+            f"{tokens_left:,} tokens left of this model's {ceiling:,} window, and the biggest "
+            f"prompt in this session added {largest_prompt_growth:,}. One more like it could "
+            "make the tool compact on its own -- run /compact at a good stopping point."
         )
     if is_extreme_bloat:
         recs.append(
@@ -309,7 +357,10 @@ def analyze_session_health(
         context_resets=len(reset_indices),
         turns_since_reset=turns_since_reset,
         segment_growth_rate=segment_growth_rate,
-        turns_to_critical=turns_to_critical,
+        tokens_left=tokens_left,
+        largest_prompt_growth=largest_prompt_growth,
+        next_prompt_may_not_fit=next_prompt_may_not_fit,
+        cache_reported=reports_cache,
         bloat_ratio=bloat_ratio,
         efficiency_pct=efficiency,
         bloat_measurable=measurable,
@@ -395,6 +446,12 @@ def gate_health_warning(
             f"{_compact_tokens(h.latest_turn_tokens)} tokens/turn context"
             + (f" ({h.efficiency_pct:.0f}% of spend on new work)."
                if h.bloat_measurable else ".")
+        )
+    elif h.next_prompt_may_not_fit:
+        lines.append(
+            f"⚠ Context nearly full: active {tool} session has "
+            f"{_compact_tokens(h.tokens_left or 0)} left, less than its biggest prompt so far "
+            f"({_compact_tokens(h.largest_prompt_growth or 0)})."
         )
     if h.is_critical_stale:
         lines.append(
