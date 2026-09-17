@@ -1423,9 +1423,13 @@ class PlanControlTest(unittest.TestCase):
         self.assertIn("item.kind === 'stale_processes'", self.js)
         self.assertIn("aiwatcher processes --stale-only", self.js)
         self.assertIn("Nothing is stopped from this dashboard", self.js)
+        self.assertIn("separate user stop decision", self.js)
         self.assertIn("before-minus-after local memory signal", self.js)
         self.assertIn("Do not count dollar savings from process RSS alone", self.js)
-        self.assertIn("<span class=\"label\">Reward</span>", self.js)
+        self.assertIn("Safe runtime review steps", self.js)
+        self.assertIn("runtime-review-details", self.css)
+        self.assertIn("optimize-card-copy", self.js)
+        self.assertIn(".optimize-card-copy", self.css)
         self.assertIn(".runtime-review-card", self.css)
 
     def test_optimize_cards_render_full_path_and_activity_signal(self):

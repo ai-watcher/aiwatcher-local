@@ -2256,30 +2256,39 @@ function renderOptimizeWorkspace(optimize) {
 function renderRuntimeOptimizeCard(item, cleanupPrompt) {
   const steps = Array.isArray(item.safe_review_steps) && item.safe_review_steps.length
     ? item.safe_review_steps
-    : ['Run: aiwatcher processes --stale-only', 'Use PID, runtime, session id, and working directory to match each row to an AI app/window.', 'Confirm each process is not attached to live AI work.', 'Stop only stale/orphaned runtimes you recognize.', 'Run the command again; reclaimed RSS is the before-minus-after local memory signal.', 'Leave unknown processes alone.'];
+    : ['Run: aiwatcher processes --stale-only', 'Use PID, runtime, session id, and working directory to match each row to an AI app/window.', 'Confirm each process is not attached to live AI work.', 'Report stale/orphaned runtimes you recognize for a separate user stop decision.', 'Run the command again; reclaimed RSS is the before-minus-after local memory signal.', 'Leave unknown processes alone.'];
   const command = item.review_command || 'aiwatcher processes --stale-only';
   const aiCleanup = optimizeAiButton(item.id || '');
-  return `<div class="action-row low runtime-review-card">
-    <div>
+  return `<div class="action-row optimize-card low runtime-review-card">
+    <div class="optimize-card-copy">
       <div class="action-title">${esc(item.title || 'Review stale AI runtimes')} <span class="pill local">Local machine</span></div>
-      <p>${esc(item.why_inactive || 'Local process metadata shows AI-related runtimes with stale/orphan signals.')}</p>
-      <div class="runtime-review-grid">
-        <div class="mini"><span class="label">Goal</span><strong>${esc(item.title || 'Review stale AI runtimes')}</strong></div>
-        <div class="mini"><span class="label">Evidence</span><strong>${esc(item.evidence_label || 'Observed')}</strong><span class="mini-note">${esc(item.evidence || 'Observed from local process metadata, not provider billing.')}</span></div>
-        <div class="mini"><span class="label">Impact signal</span><strong>${esc(item.impact_label || 'runtime clutter')}</strong><span class="mini-note">${esc(item.resource_note || 'RSS/CPU are local machine resources, not model/API spend.')}</span></div>
-        <div class="mini"><span class="label">Reward</span><strong>${esc(item.reward_label || 'Less RAM/CPU pressure after confirmed cleanup')}</strong><span class="mini-note">${esc(item.cost_note || 'Do not count dollar savings from process RSS alone.')}</span></div>
+      <p>${esc(item.review_summary || item.why_inactive || 'Review local AI runtimes; identify detached ones for a separate user decision.')}</p>
+      <div class="action-meta">
+        <span class="pill">${esc(item.evidence_label || 'Observed')}</span>
+        <span class="pill">${esc(item.impact_label || 'runtime clutter')}</span>
+        <span class="pill">No auto-stop</span>
       </div>
-      <div class="runtime-command">
-        <span class="label">Review command</span>
-        <code>${esc(command)}</code>
-      </div>
-      <ol class="runtime-review-steps">
-        ${steps.map(step => `<li>${esc(step)}</li>`).join('')}
-      </ol>
-      <p class="receipt-note">${esc(item.privacy_note || 'This checklist uses local metadata only. It does not include prompt/source content.')}</p>
-      <p class="receipt-note">Nothing is stopped from this dashboard. Run the command, confirm live work is not attached, then stop only a runtime you recognize.</p>
+      <details class="aiw-details runtime-review-details">
+        <summary>Safe runtime review steps</summary>
+        <div class="details-body">
+          <div class="runtime-review-grid">
+            <div class="mini"><span class="label">Evidence</span><strong>${esc(item.evidence_label || 'Observed')}</strong><span class="mini-note">${esc(item.evidence || 'Observed from local process metadata, not provider billing.')}</span></div>
+            <div class="mini"><span class="label">Impact signal</span><strong>${esc(item.impact_label || 'runtime clutter')}</strong><span class="mini-note">${esc(item.resource_note || 'RSS/CPU are local machine resources, not model/API spend.')}</span></div>
+            <div class="mini"><span class="label">Reward</span><strong>${esc(item.reward_label || 'Less RAM/CPU pressure after confirmed cleanup')}</strong><span class="mini-note">${esc(item.cost_note || 'Do not count dollar savings from process RSS alone.')}</span></div>
+          </div>
+          <div class="runtime-command">
+            <span class="label">Review command</span>
+            <code>${esc(command)}</code>
+          </div>
+          <ol class="runtime-review-steps">
+            ${steps.map(step => `<li>${esc(step)}</li>`).join('')}
+          </ol>
+          <p class="receipt-note">${esc(item.privacy_note || 'This checklist uses local metadata only. It does not include prompt/source content.')}</p>
+          <p class="receipt-note">Nothing is stopped from this dashboard. Make any stop a separate user decision after matching the runtime to live work.</p>
+        </div>
+      </details>
     </div>
-    <div class="actions">
+    <div class="actions optimize-card-actions">
       <button class="btn-primary" onclick="copyOptimizeRuntimeCommand(${jsArg(command)}, this)">Copy command</button>
       <button class="btn-quiet" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">${esc(item.action_label || 'Copy cleanup prompt')}</button>
       ${aiCleanup}

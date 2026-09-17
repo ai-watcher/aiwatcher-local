@@ -2110,7 +2110,7 @@ class DashboardWindowTests(unittest.TestCase):
 
         self.assertEqual(state["state"], "control_review")
         self.assertEqual(state["label"], "Review context")
-        self.assertEqual(state["primary_label"], "Review")
+        self.assertEqual(state["primary_label"], "Review all")
         self.assertEqual(state["primary_url"], "/?view=watch#contextHealth")
         self.assertEqual(state["skip_state"], "control_recommended_group")
         self.assertEqual(state["fresh_start_project_count"], 2)
@@ -2933,7 +2933,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("AIWatcher Optimize cleanup prompt", prompt)
         self.assertIn("Full path: /repo/app", prompt)
         self.assertIn("Signal: 3 sessions", prompt)
-        self.assertIn("Safe to archive or clean up", prompt)
+        self.assertIn("Safe to archive/review", prompt)
         self.assertIn("Keep active", prompt)
         self.assertIn("Unknown", prompt)
         self.assertIn("Do not delete files", prompt)
@@ -2941,6 +2941,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("latest branch, PR, commit, or handoff receipt", prompt)
         self.assertIn("Tool: codex-cli", prompt)
         self.assertIn("Return these buckets", prompt)
+        for phrase in ("remove only", "delete only", "stop only"):
+            self.assertNotIn(phrase, prompt.lower())
         self.assertIn("evidence_hash", inventory["top"])
 
     def test_optimize_inventory_surfaces_stale_runtime_review_plan(self) -> None:
@@ -2964,12 +2966,14 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("unknown from RSS alone", inventory["top"]["cost_note"])
         self.assertIn("prompt/source content", inventory["top"]["privacy_note"])
         self.assertIn("Run: aiwatcher processes --stale-only", inventory["top"]["safe_review_steps"])
+        self.assertIn("separate user stop decision", " ".join(inventory["top"]["safe_review_steps"]))
         self.assertIn("before-minus-after local memory signal", " ".join(inventory["top"]["safe_review_steps"]))
         self.assertIn("Reward: Potential local reward", inventory["top"]["cleanup_prompt"])
         self.assertIn("aiwatcher processes --stale-only", inventory["top"]["cleanup_prompt"])
         self.assertIn("Unknown", inventory["top"]["cleanup_prompt"])
         self.assertIn("Copy safe review steps", inventory["top"]["action_label"])
         self.assertIn("Do not stop or kill any running process", inventory["top"]["cleanup_prompt"])
+        self.assertNotIn("stop only", inventory["top"]["cleanup_prompt"].lower())
 
     def test_optimize_inventory_surfaces_old_agent_scratch_workspace(self) -> None:
         now = datetime.now(timezone.utc)
@@ -2995,8 +2999,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("4+ hours", inventory["top"]["why_inactive"])
         self.assertIn("local temp/scratch path shape", inventory["top"]["evidence"])
         self.assertEqual(inventory["top"]["action_label"], "Copy cleanup prompt")
-        self.assertIn("disposable scratch space", inventory["top"]["cleanup_prompt"])
-        self.assertIn("moving anything useful", inventory["top"]["cleanup_prompt"])
+        self.assertIn("if it looks disposable", inventory["top"]["cleanup_prompt"])
+        self.assertIn("separate cleanup decision", inventory["top"]["cleanup_prompt"])
+        self.assertNotIn("delete only", inventory["top"]["cleanup_prompt"].lower())
 
     def test_optimize_inventory_skips_recent_agent_scratch_workspace(self) -> None:
         now = datetime.now(timezone.utc)
@@ -3079,8 +3084,8 @@ class DashboardWindowTests(unittest.TestCase):
                     "input_chars": 700,
                     "output_chars": 320,
                     "source_access": "metadata_only",
-                    "text": "AIWatcher AI-assisted Optimize cleanup prompt\n\nNext action\n- Review only.",
-                    "structured": {"next_action": ["Review only."]},
+                    "text": "AIWatcher AI-assisted Optimize cleanup prompt\n\nNext verification\n- Review only.",
+                    "structured": {"next_verification": ["Review only."]},
                     "usage": {"prompt_tokens": 120, "completion_tokens": 60},
                 }) as compose,
             ):
@@ -3253,7 +3258,7 @@ class DashboardWindowTests(unittest.TestCase):
         composed = {
             "status": "used", "mode": "cloud", "provider": "openai", "model": "gpt-4o-mini",
             "input_chars": 700, "output_chars": 320, "source_access": "metadata_only",
-            "text": "AIWatcher AI-assisted Optimize cleanup prompt\n\nNext action\n- Review only.",
+            "text": "AIWatcher AI-assisted Optimize cleanup prompt\n\nNext verification\n- Review only.",
             "structured": {}, "usage": {"prompt_tokens": 1_000_000, "completion_tokens": 0},
         }
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3346,7 +3351,7 @@ class DashboardWindowTests(unittest.TestCase):
         composed = {
             "status": "used", "mode": "local", "provider": "ollama", "model": "llama3.2",
             "input_chars": 700, "output_chars": 320, "source_access": "metadata_only",
-            "text": "AIWatcher AI-assisted Optimize cleanup prompt\n\nNext action\n- Review only.",
+            "text": "AIWatcher AI-assisted Optimize cleanup prompt\n\nNext verification\n- Review only.",
             "structured": {}, "usage": {},
         }
         with tempfile.TemporaryDirectory() as temp_dir:
