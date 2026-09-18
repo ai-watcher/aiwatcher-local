@@ -1392,7 +1392,7 @@ async function postJson(path, payload) {
 }
 function classifyUpdateStatus(data) {
   if (!data) return 'unknown';
-  if (data.install_kind && data.install_kind !== 'source') return 'package';
+  if (data.install_kind === 'package') return 'package';
   // A contributor on a feature branch is not blocked; they are somewhere the
   // updater does not apply. Quiet, like the package state, not a warning.
   if (data.ok && data.on_branch === false) return 'branch';
@@ -1461,7 +1461,7 @@ function setUpdateState(status, data, checkedAt = Date.now()) {
     // A pip or pipx install cannot be applied from here, so a permanent
     // "Package install" chip in the header would be a label with no action.
     banner.hidden = status === 'package';
-    banner.title = updateBannerTitle(status, data || null);
+    banner.title = updateBannerTitle(status, data || null) + (checkedAt ? `\nLast checked: ${new Date(checkedAt).toLocaleString()}` : '');
     banner.setAttribute('aria-label', banner.title);
   }
   if (label) label.textContent = updateBannerLabel(status, data || null);
@@ -1497,12 +1497,25 @@ function restoreCachedUpdateState(context = {}) {
         setUpdateState('unknown', null, 0);
         return null;
       }
-      setUpdateState(classifyUpdateStatus(cached.data), cached.data, Number(cached.checkedAt || 0) || Date.now());
+      const checkedAt = Number(cached.checkedAt || 0);
+      const expired = !checkedAt || Date.now() - checkedAt >= UPDATE_AUTO_CHECK_MS;
+      setUpdateState(expired ? 'unknown' : classifyUpdateStatus(cached.data), expired ? null : cached.data, checkedAt);
       return cached;
     }
   } catch (error) {}
   setUpdateState('unknown', null, 0);
   return null;
+}
+async function fetchDashboardJson(url, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) throw new Error(`Request failed (${response.status})`);
+    return await response.json();
+  } finally {
+    window.clearTimeout(timer);
+  }
 }
 async function refreshHeaderUpdate(options = {}) {
   // `quiet`: no toast, because the caller reports the result itself (the
@@ -1511,8 +1524,7 @@ async function refreshHeaderUpdate(options = {}) {
   const fetchRemote = options.fetch !== false;
   if (!options.background) setUpdateState('checking', updateState.data, updateState.checkedAt || Date.now());
   try {
-    const response = await fetch(`/api/update-status?fetch=${fetchRemote ? '1' : '0'}`);
-    const data = await response.json();
+    const data = await fetchDashboardJson(`/api/update-status?fetch=${fetchRemote ? '1' : '0'}`, 45000);
     setUpdateState(classifyUpdateStatus(data), data);
     if (!options.quiet) showToast(data.message || 'Update check complete', data.ok ? 'success' : 'error');
     return data;
@@ -1576,7 +1588,7 @@ async function checkForUpdates(button, options = {}) {
     const data = await refreshHeaderUpdate({ fetch: options.fetch !== false, quiet: true });
     target.innerHTML = renderUpdateStatus(data);
     if (button) {
-      button.textContent = data.install_kind === 'package'
+      button.textContent = !data.ok ? 'Retry check' : data.install_kind === 'package'
         ? 'Upgrade options'
         : data.update_available
           ? `${data.behind || ''} update${Number(data.behind) === 1 ? '' : 's'} available`.trim()
@@ -1689,7 +1701,7 @@ function renderUpdateBannerForInstall(kind) {
   const autoCheckRow = document.getElementById('updateAutoCheckRow');
   if (autoCheckRow) autoCheckRow.hidden = kind === 'package';
   const checkButton = document.getElementById('updateCheckButton');
-  if (checkButton) checkButton.textContent = kind === 'package' ? 'Show upgrade options' : 'Check for updates';
+  if (checkButton && !checkButton.disabled) checkButton.textContent = kind === 'package' ? 'Show upgrade options' : 'Check for updates';
 }
 async function setUpdateAutoCheck(enabled) {
   const box = document.getElementById('updateAutoCheck');
@@ -5685,7 +5697,7 @@ function refreshTick() {
 
 function nextRefreshDelay(data, forceRefresh) {
   const idle = document.hidden ? REFRESH_HIDDEN_MS : REFRESH_VISIBLE_MS;
-  if (data && data.cache && data.cache.refreshing && !forceRefresh) {
+  if (data && data.cache && data.cache.refreshing) {
     // Poll quickly at first so a rebuild that finishes in a second or two shows
     // up immediately, then back off to the idle cadence. A flat 1.8s here meant
     // a long rebuild fired a request every 1.8s for as long as it ran.
@@ -5788,7 +5800,11 @@ function freshnessLabel(millis) {
 }
 
 function renderFreshness() {
-  const label = lastLoadedAt ? freshnessLabel(Date.now() - lastLoadedAt) : '';
+  if (updateState.checkedAt && Date.now() - updateState.checkedAt >= UPDATE_AUTO_CHECK_MS
+      && ['current', 'available', 'branch', 'blocked'].includes(updateState.status)) {
+    setUpdateState('unknown', null, updateState.checkedAt);
+  }
+  const label = lastLoadedAt ? freshnessLabel(Math.max(0, Date.now() - lastLoadedAt)) : 'Data freshness unavailable';
   ['freshness', 'ambientFreshness'].forEach(id => {
     const node = document.getElementById(id);
     if (node) node.textContent = label;
@@ -5813,8 +5829,7 @@ async function loadOnce(resetDetail, forceRefresh) {
   const days = document.getElementById('days').value;
   let data;
   try {
-    const summaryRes = await fetch(`/api/summary?days=${days}${forceRefresh ? '&refresh=1' : ''}`);
-    data = await summaryRes.json();
+    data = await fetchDashboardJson(`/api/summary?days=${days}${forceRefresh ? '&refresh=1' : ''}`);
     currentData = data;
   } catch (error) {
     // Keep trying on the normal cadence: a dashboard that gives up after one
@@ -6015,7 +6030,8 @@ async function loadOnce(resetDetail, forceRefresh) {
   if (resetDetail && document.getElementById('detailDrawer').classList.contains('open')) closeDrawer();
   renderAmbient(data);
   renderTabState(data);
-  lastLoadedAt = Date.now();
+  const generatedAt = Date.parse((data.cache && data.cache.generated_at) || data.generated_at || '');
+  lastLoadedAt = data.summary_complete !== false && Number.isFinite(generatedAt) ? generatedAt : null;
   renderFreshness();
   return data;
 }
