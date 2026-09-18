@@ -11,10 +11,13 @@ class RefreshStatusRuntimeTests(unittest.TestCase):
         source = pathlib.Path(__file__).parents[1] / 'aiwatcher_cli/web/index.js'
         script = r'''
 const assert = require('node:assert/strict');
-const source = require('node:fs').readFileSync(process.argv[1], 'utf8');
+const original = require('node:fs').readFileSync(process.argv[1], 'utf8').replace(/\r\n/g, '\n');
+const input = process.argv[2] === 'crlf' ? original.replace(/\n/g, '\r\n') : original;
+const source = input.replace(/\r\n/g, '\n');
 function extract(name) {
   const start = source.indexOf('function ' + name + '(');
   const end = source.indexOf('\n}\n', start);
+  assert.ok(start >= 0 && end > start, 'Missing function: ' + name);
   return source.slice(start, end + 3);
 }
 global.window = {setTimeout, clearTimeout};
@@ -47,5 +50,10 @@ eval('async ' + extract('fetchDashboardJson'));
   assert.deepEqual(await fetchDashboardJson('/summary',50), {ok:true});
 })().catch(error => {console.error(error);process.exitCode=1;});
 '''
-        result = subprocess.run(['node', '-e', script, str(source)], capture_output=True, text=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for line_endings in ('lf', 'crlf'):
+            with self.subTest(line_endings=line_endings):
+                result = subprocess.run(
+                    ['node', '-e', script, str(source), line_endings],
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
