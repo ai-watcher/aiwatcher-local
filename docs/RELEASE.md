@@ -91,11 +91,25 @@ package. Still read them before publishing.
 
 ## Publish To PyPI
 
-Before publishing, bump `version` in `pyproject.toml` and commit the change.
-Prefer PyPI trusted publishing through GitHub Actions when possible, so no PyPI
-API token needs to live on a laptop or in repo config.
+Before publishing, bump `version` in both `pyproject.toml` and
+`aiwatcher_cli/__init__.py`, update any literal version assertions, and commit
+the change. Push a tag with the same version, then create a GitHub release for
+that tag. The `publish-pypi.yml` workflow builds, checks, and publishes the
+artifacts through PyPI Trusted Publishing; no PyPI API token should live on a
+laptop or in repository secrets.
 
-Manual upload, if trusted publishing is not configured:
+Configure the PyPI project with this Trusted Publisher before creating the
+release:
+
+- Owner: `ai-watcher`
+- Repository: `aiwatcher-local`
+- Workflow: `publish-pypi.yml`
+- Environment: `pypi`
+
+Create a protected GitHub environment named `pypi` and require approval there
+if releases should have a final human gate.
+
+Manual upload is an emergency fallback only:
 
 ```sh
 /tmp/aiwatcher-release/bin/python -m twine upload dist/*
