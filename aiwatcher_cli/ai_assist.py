@@ -680,15 +680,51 @@ def _section(title: str, lines: list[str]) -> list[str]:
     return ["", title, *[f"- {line}" for line in lines]]
 
 
-def _structured_handoff_text(parsed: dict[str, object]) -> str:
+def _handoff_packet(packet_text: str) -> dict[str, object]:
+    try:
+        packet = json.loads(packet_text)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return packet if isinstance(packet, dict) else {}
+
+
+def _packet_list(packet: dict[str, object], key: str, *, limit: int = 8) -> list[str]:
+    value = packet.get(key)
+    if not isinstance(value, list):
+        return []
+    return [_clean_line(item, limit=320) for item in value[:limit] if _clean_line(item, limit=320)]
+
+
+def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -> str:
+    packet = _handoff_packet(packet_text)
+    source = packet.get("source") if isinstance(packet.get("source"), dict) else {}
+    evidence = packet.get("evidence") if isinstance(packet.get("evidence"), dict) else {}
     goal = _clean_line(parsed.get("goal"), limit=360)
     next_ask = _clean_line(parsed.get("next_ask"), limit=420)
     what_done = _clean_list(parsed.get("what_is_done") or parsed.get("done"), limit=7)
+    current_state = _clean_list(parsed.get("current_state"), limit=7)
+    decisions = _clean_list(parsed.get("decisions"), limit=6)
     context = _clean_list(parsed.get("context_to_preserve") or parsed.get("context"), limit=7)
+    risks = _clean_list(parsed.get("risks_and_constraints") or parsed.get("risks"), limit=6)
     inspect = _clean_list(parsed.get("inspect_first"), limit=7)
     avoid = _clean_list(parsed.get("do_not_redo") or parsed.get("avoid"), limit=5)
+    next_steps = _clean_list(parsed.get("next_steps"), limit=6)
     uncertainties = _clean_list(parsed.get("uncertainties"), limit=5)
     acceptance = _clean_list(parsed.get("acceptance_check") or parsed.get("acceptance"), limit=5)
+
+    source_lines = [
+        f"Project: {_clean_line(source.get('project'), limit=420)}",
+        f"Session: {_clean_line(source.get('session_id'), limit=180)}",
+        f"Tool/model: {_clean_line(source.get('tool'), limit=100)} / {_clean_line(source.get('model'), limit=120)}",
+        f"Last activity: {_clean_line(source.get('updated_at'), limit=100)}",
+    ]
+    source_lines = [line for line in source_lines if not line.endswith(": ") and not line.endswith("/ ")]
+    evidence_lines = [
+        *_packet_list(evidence, "commits", limit=4),
+        *_packet_list(evidence, "changed_files", limit=8),
+        *_packet_list(evidence, "tests", limit=5),
+        *_packet_list(packet, "logged_decisions", limit=5),
+    ]
 
     lines = [
         "AIWatcher AI-assisted Fresh Start brief",
@@ -696,18 +732,24 @@ def _structured_handoff_text(parsed: dict[str, object]) -> str:
         "You are starting a fresh AI work session from an AIWatcher handoff.",
         "Do not assume access to the previous chat, hidden memory, or unstated decisions.",
         "Continue from the repository/workspace state and AIWatcher evidence below.",
+        *_section("Source context", source_lines),
         "",
-        "Goal",
+        "Objective",
         f"- {goal or 'Continue the same user goal from the source workspace after verifying the evidence.'}",
-        *_section("What appears done", what_done or ["Reconstruct the prior work from the changed files, recent commits, and source-session evidence before editing."]),
+        *_section("Completed work", what_done or ["No completed work was established by the model; verify the evidence below before editing."]),
+        *_section("Current state", current_state or _packet_list(packet, "current_state", limit=6)),
+        *_section("Decisions already made", decisions or _packet_list(packet, "logged_decisions", limit=5)),
         *_section("Context to preserve", context or ["Preserve the source workspace, constraints, and small next checkpoint rather than replaying the whole prior chat."]),
+        *_section("Risks and constraints", risks or _packet_list(packet, "constraints", limit=6)),
         *_section("Inspect first", inspect or ["Run `git status --short` and inspect the changed files or source-of-truth docs listed in the handoff evidence."]),
         *_section("Do not redo", avoid or ["Do not repeat broad discovery from the bloated session unless the evidence is insufficient."]),
+        *_section("Next steps", next_steps),
         "",
-        "Next ask",
+        "First action",
         f"- {next_ask or 'State what appears done, what remains uncertain, and the smallest safe checkpoint before editing.'}",
-        *_section("Acceptance check", acceptance or ["Report changed files, verification run, remaining uncertainty, and whether the result looks useful."]),
-        *_section("Uncertainty to verify", uncertainties),
+        *_section("Acceptance criteria", acceptance or _packet_list(packet, "acceptance_criteria", limit=5)),
+        *_section("Open questions and uncertainty", uncertainties),
+        *_section("Evidence carried forward", evidence_lines or ["No commit, file, test, or decision evidence was available."]),
         "",
         "Guardrails",
         "- Preserve unrelated changes.",
@@ -715,6 +757,46 @@ def _structured_handoff_text(parsed: dict[str, object]) -> str:
         "- Stop before destructive changes, force pushes, broad refactors, production writes, or unrelated cleanup.",
     ]
     return "\n".join(lines).strip()
+
+
+def _fresh_start_response_is_useful(parsed: dict[str, object], packet_text: str) -> bool:
+    """Reject polished boilerplate that cannot help a new session continue."""
+    if not isinstance(parsed, dict):
+        return False
+    goal = _clean_line(parsed.get("goal"), limit=500).lower()
+    next_ask = _clean_line(parsed.get("next_ask"), limit=500).lower()
+    generic = (
+        "reconstruct the prior work",
+        "verify the source session identity",
+        "continue coding tasks",
+        "continue the same user goal",
+    )
+    packet = _handoff_packet(packet_text)
+    if not goal or not next_ask:
+        return False
+    if not _clean_line(packet.get("objective"), limit=500) and any(phrase in goal for phrase in generic):
+        return False
+    populated = sum(bool(_clean_list(parsed.get(key), limit=2)) for key in (
+        "what_is_done", "current_state", "decisions", "context_to_preserve",
+        "risks_and_constraints", "inspect_first", "next_steps", "acceptance_check",
+    ))
+    if populated < 4:
+        return False
+    source = packet.get("source") if isinstance(packet.get("source"), dict) else {}
+    evidence = packet.get("evidence") if isinstance(packet.get("evidence"), dict) else {}
+    evidence_anchors: list[str] = []
+    for key in ("commits", "changed_files", "tests"):
+        value = evidence.get(key)
+        if isinstance(value, list):
+            evidence_anchors.extend(str(item) for item in value[:4])
+    evidence_anchors.extend(_packet_list(packet, "logged_decisions", limit=4))
+    anchors = evidence_anchors or [
+        str(source.get("project") or ""),
+        str(source.get("session_id") or ""),
+    ]
+    response_text = json.dumps(parsed, sort_keys=True).lower()
+    concrete = [anchor for anchor in anchors if len(anchor) >= 4 and anchor.lower() in response_text]
+    return bool(concrete)
 
 
 def _structured_optimize_cleanup_text(parsed: dict[str, object], *, local_prompt: str) -> str:
@@ -799,13 +881,19 @@ _FRESH_START_SPEC = _WorkflowSpec(
         "Return JSON only with these keys:\n"
         "goal: string\n"
         "what_is_done: string[]\n"
+        "current_state: string[]\n"
+        "decisions: string[]\n"
         "context_to_preserve: string[]\n"
+        "risks_and_constraints: string[]\n"
         "inspect_first: string[]\n"
         "do_not_redo: string[]\n"
+        "next_steps: string[]\n"
         "next_ask: string\n"
         "acceptance_check: string[]\n"
         "uncertainties: string[]\n\n"
-        "Make the result useful for a fresh chat, forked chat, or subagent. The next_ask should "
+        "Every factual statement must come from the packet. Include the exact project path and at "
+        "least one concrete commit, changed file, test, decision, command, or session id when the "
+        "packet contains one. Make the result useful for a fresh chat, forked chat, or subagent. The next_ask should "
         "tell the new AI session exactly what to do first. Avoid echoing the section names and "
         "boilerplate from the local handoff unless the evidence is genuinely missing. Keep it short "
         "enough to paste without carrying the whole old conversation. Do not use vague goals like "
@@ -813,7 +901,7 @@ _FRESH_START_SPEC = _WorkflowSpec(
         "the observed workspace/tool/path/evidence instead."
     ),
     evidence_heading="Local AIWatcher handoff evidence:",
-    structure=lambda parsed, _trimmed: _structured_handoff_text(parsed),
+    structure=_structured_handoff_text,
     fallback_key="next_ask",
 )
 
@@ -903,6 +991,10 @@ def _compose(
     response = _call_configured_chat(config, messages, max_tokens=spec.max_output_tokens, timeout=timeout)
     text = str(response.get("text") or "").strip()
     parsed = _json_object_from_text(text)
+    if spec.id == "fresh_start" and not _fresh_start_response_is_useful(parsed or {}, trimmed):
+        raise AiAssistUnavailable(
+            "AI Assist returned a generic handoff without enough concrete session evidence; using the local evidence-backed brief instead."
+        )
     final_text = spec.structure(parsed if parsed else {spec.fallback_key: text}, trimmed)
     return {
         "workflow": spec.id,
