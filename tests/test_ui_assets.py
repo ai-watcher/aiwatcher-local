@@ -3271,9 +3271,7 @@ class FeatureBranchUpdateBadgeTest(unittest.TestCase):
         self.assertIn(".update-banner.package", rule[0])
         label = js_function_source(self.js, "updateBannerLabel")
         self.assertIn("if (status === 'branch')", label)
-        self.assertIn("data && data.update_available", label)
-        self.assertIn("} available`.trim()", label)
-        self.assertIn("return 'Up to date'", label)
+        self.assertIn("return 'Feature branch'", label)
 
     def test_the_header_badge_shows_the_source_folder_and_keeps_the_full_path(self):
         self.assertIn("function updateSourceName(data)", self.js)
@@ -3297,9 +3295,14 @@ class FeatureBranchUpdateBadgeTest(unittest.TestCase):
 
     def test_clicking_the_badge_opens_full_details_without_a_success_toast(self):
         handler = js_function_source(self.js, "handleUpdateBannerClick")
+        self.assertIn("if (updateState.data) openUpdatePanel(updateState.data)", handler)
         self.assertIn("refreshHeaderUpdate({ fetch: true, quiet: true })", handler)
         self.assertIn("openUpdatePanel(data)", handler)
         self.assertIn("if (!data.ok) showToast(", handler)
+        self.assertLess(
+            handler.index("openUpdatePanel(updateState.data)"),
+            handler.index("refreshHeaderUpdate({ fetch: true, quiet: true })"),
+        )
 
     def test_source_checkout_panel_explains_branch_state_without_updates(self):
         renderer = js_function_source(self.js, "renderUpdateStatus")

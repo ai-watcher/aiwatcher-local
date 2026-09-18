@@ -1406,10 +1406,7 @@ function updateBannerLabel(status, data) {
   if (status === 'checking') return 'Checking...';
   if (status === 'available') return `${count || ''} update${count === 1 ? '' : 's'} available`.trim();
   if (status === 'blocked') return `${count || ''} update${count === 1 ? '' : 's'} blocked`.trim();
-  if (status === 'branch') {
-    if (data && data.update_available) return `${count || ''} update${count === 1 ? '' : 's'} available`.trim();
-    return 'Up to date';
-  }
+  if (status === 'branch') return 'Feature branch';
   if (status === 'current') return 'Up to date';
   if (status === 'package') return 'Package install';
   if (status === 'error') return 'Update check failed';
@@ -1439,7 +1436,7 @@ function updateBannerTitle(status, data) {
     return `Click to review and apply the latest changes from ${data.remote_ref || 'origin/main'}${location}`;
   }
   if (status === 'blocked') return `${(data && data.message) || 'Resolve local changes before applying updates'}${location}`;
-  if (status === 'branch') return `${(data && data.message) || 'Updates apply on main only'} Click to check again.${location}`;
+  if (status === 'branch') return `${(data && data.message) || 'Updates apply on main only'} Click to review update options.${location}`;
   if (status === 'current') return `AIWatcher is current. Click to check GitHub again.${location}`;
   if (status === 'package') return `Click to show package upgrade commands${location}`;
   if (status === 'error') return `${(data && data.message) || 'Click to retry the GitHub update check'}${location}`;
@@ -1652,6 +1649,11 @@ async function handleUpdateBannerClick(button) {
     openUpdatePanel(updateState.data);
     return;
   }
+  // Navigation should never wait on GitHub. A fetch can take up to the Git
+  // subprocess timeout, which made feature-branch clicks look broken even
+  // though the button had entered its checking state. Show the cached status
+  // first, then replace it with the refreshed result.
+  if (updateState.data) openUpdatePanel(updateState.data);
   const data = await refreshHeaderUpdate({ fetch: true, quiet: true });
   const status = classifyUpdateStatus(data);
   if (status === 'current') {
