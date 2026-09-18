@@ -616,8 +616,52 @@ class UpdateCommandCliTests(unittest.TestCase):
 
         self.assertEqual(result, 2)
         output = stdout.getvalue()
-        self.assertIn("is not a Git checkout", output)
+        self.assertIn("managed as a package", output)
+        self.assertNotIn(tmp, output)
         self.assertIn("pipx upgrade aiwatcher-cli", output)
+
+    def test_installed_package_is_a_healthy_state_and_never_invokes_git(self) -> None:
+        with (
+            patch.object(updater, "install_kind", return_value="package"),
+            patch.object(
+                updater,
+                "installed_source_root",
+                return_value=Path("C:/Users/test/AppData/Local/pipx/venvs/aiwatcher-cli/Lib/site-packages"),
+            ),
+            patch.object(updater, "git_capture") as git_capture,
+        ):
+            result = updater.check_for_updates()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["install_kind"], "package")
+        self.assertIsNone(result["repo"])
+        self.assertIn("installed as a package", str(result["message"]))
+        self.assertNotIn("site-packages", str(result["message"]))
+        git_capture.assert_not_called()
+
+    def test_windows_schannel_fetch_failure_has_actionable_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, ".git").mkdir()
+
+            def fake_git(_repo: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+                if args == ["rev-parse", "--is-inside-work-tree"]:
+                    return self._git_result(args, stdout="true\n")
+                if args[:2] == ["fetch", "--quiet"]:
+                    return self._git_result(
+                        args,
+                        returncode=128,
+                        stderr="fatal: unable to access URL: schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS",
+                    )
+                raise AssertionError(f"unexpected git call: {args}")
+
+            with patch.object(updater, "git_capture", side_effect=fake_git):
+                result = updater.check_for_updates(repo=tmp)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "windows_tls_restricted")
+        self.assertIn("normal PowerShell or Command Prompt", str(result["message"]))
+        self.assertNotIn("fatal:", str(result["message"]))
+        self.assertNotIn("SEC_E_NO_CREDENTIALS", str(result["message"]))
 
     def test_update_check_explains_feature_branch_even_when_main_is_current(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

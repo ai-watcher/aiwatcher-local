@@ -71,6 +71,40 @@ def _message(result: subprocess.CompletedProcess[str]) -> str:
     return (result.stderr.strip() or result.stdout.strip() or "unknown error").strip()
 
 
+def _fetch_failure_message(result: subprocess.CompletedProcess[str], remote: str) -> tuple[str, str]:
+    """Turn Git transport failures into short, actionable UI copy.
+
+    In particular, Git for Windows can inherit a restricted process token from
+    the app that launched AIWatcher. Schannel then reports
+    SEC_E_NO_CREDENTIALS even for this public repository; that is not a GitHub
+    login problem and exposing the raw `fatal:` output sends users in the wrong
+    direction.
+    """
+    detail = _message(result)
+    lowered = detail.lower()
+    if "sec_e_no_credentials" in lowered or "acquirecredentialshandle failed" in lowered:
+        return (
+            "windows_tls_restricted",
+            "Windows blocked secure GitHub access for this AIWatcher process. "
+            "Restart AIWatcher from a normal PowerShell or Command Prompt window, then check again.",
+        )
+    if (
+        "could not resolve host" in lowered
+        or "failed to connect" in lowered
+        or "network is unreachable" in lowered
+    ):
+        return ("network_unavailable", "Could not reach GitHub. Check your connection, then try again.")
+    if "authentication failed" in lowered or "could not read username" in lowered:
+        return (
+            "authentication_failed",
+            f"Git could not authenticate with {remote}. Check that remote, then try again.",
+        )
+    return (
+        "fetch_failed",
+        f"Could not refresh updates from {remote}. Run `git fetch {remote}` in the checkout for details.",
+    )
+
+
 def check_for_updates(
     *,
     repo: str | Path | None = None,
@@ -78,6 +112,7 @@ def check_for_updates(
     branch: str = "main",
     fetch: bool = True,
 ) -> dict[str, object]:
+    using_installed_source = repo is None
     root = Path(repo or installed_source_root()).expanduser().resolve()
     remote = remote or "origin"
     branch = branch or "main"
@@ -94,6 +129,20 @@ def check_for_updates(
         "guidance": package_upgrade_guidance(),
     }
 
+    # A wheel/pipx installation is complete and healthy; it simply has no Git
+    # metadata to inspect or fast-forward. Classify it before invoking Git so
+    # Windows paths under site-packages never become error messages in the UI.
+    if using_installed_source and install_kind() != "source":
+        payload.update({
+            "ok": True,
+            "install_kind": "package",
+            "version": __version__,
+            "repo": None,
+            "remote_ref": None,
+            "message": f"AIWatcher {__version__} is installed as a package. Use your installer to upgrade it.",
+        })
+        return payload
+
     if not root.exists():
         payload.update({
             "install_kind": "missing",
@@ -105,14 +154,15 @@ def check_for_updates(
     if inside.returncode != 0 or inside.stdout.strip().lower() != "true":
         payload.update({
             "install_kind": "package",
-            "message": f"{root} is not a Git checkout.",
+            "message": "This AIWatcher installation is managed as a package. Use your installer to upgrade it.",
         })
         return payload
 
     if fetch:
         fetched = git_capture(root, ["fetch", "--quiet", remote])
         if fetched.returncode != 0:
-            payload["message"] = f"Could not fetch {remote}: {_message(fetched)}"
+            error_code, message = _fetch_failure_message(fetched, remote)
+            payload.update({"error_code": error_code, "message": message})
             return payload
 
     head = git_capture(root, ["rev-parse", "--short", "HEAD"])

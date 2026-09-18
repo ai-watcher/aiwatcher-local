@@ -3333,15 +3333,26 @@ class ApplyIsASecondStepTest(unittest.TestCase):
     def test_package_installs_do_not_get_a_header_pill(self):
         self.assertIn("banner.hidden = status === 'package'", self.js)
         self.assertIn('"update_install_kind": install_kind()', self.ui_source)
+        install_renderer = js_function_source(self.js, "renderUpdateBannerForInstall")
+        self.assertIn("banner.hidden = kind === 'package'", install_renderer)
+        self.assertIn("autoCheckRow.hidden = kind === 'package'", install_renderer)
+        self.assertIn("kind === 'package' ? 'Show upgrade options'", install_renderer)
+        scheduler = js_function_source(self.js, "scheduleHeaderUpdateCheck")
+        self.assertIn("currentData.update_install_kind !== 'source'", scheduler)
         self.assertIn('"update_source_root": str(installed_source_root())', self.ui_source)
         self.assertIn("renderUpdateBannerForInstall(data.update_install_kind)", self.js)
-        scheduler = self.js.split("function scheduleHeaderUpdateCheck()", 1)[1].split("\n}\n", 1)[0]
         self.assertIn("installKind: currentData && currentData.update_install_kind", scheduler)
         self.assertIn("sourceRoot: currentData && currentData.update_source_root", scheduler)
         restore = self.js.split("function restoreCachedUpdateState", 1)[1].split("\n}\n", 1)[0]
         self.assertIn("installKind && installKind !== 'source'", restore)
         self.assertIn("clearCachedUpdateState()", restore)
         self.assertIn("cached.data.repo !== sourceRoot", restore)
+
+    def test_package_update_details_do_not_show_a_checkout_path(self):
+        renderer = js_function_source(self.js, "renderUpdateStatus")
+        self.assertIn("data.install_kind === 'source' && (data.repo || data.process_cwd)", renderer)
+        self.assertIn("Package install", renderer)
+        self.assertIn("data.version", renderer)
 
 
 class OneToastPerUpdateCheckTest(unittest.TestCase):

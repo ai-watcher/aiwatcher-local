@@ -1429,7 +1429,7 @@ function updateBranchLabel(data) {
   return checked || 'detached HEAD';
 }
 function updateBannerTitle(status, data) {
-  const source = data && data.repo ? `Source checkout: ${data.repo}` : 'Source checkout unknown';
+  const source = data && data.repo ? `Source checkout: ${data.repo}` : '';
   const launched = data && data.process_cwd ? `Launched from: ${data.process_cwd}` : '';
   const branch = data ? `GitHub branch: ${updateBranchLabel(data)}` : '';
   const target = data && data.remote_ref ? `Update target: ${data.remote_ref}` : '';
@@ -1540,7 +1540,7 @@ function renderUpdateStatus(update) {
         <span class="pill">${esc(data.dirty ? 'local changes present' : 'clean checkout')}</span>
       </div>`
     : '';
-  const location = data.repo || data.process_cwd
+  const location = data.install_kind === 'source' && (data.repo || data.process_cwd)
     ? `<div class="update-location">
         ${data.repo ? `<span><b>Source checkout</b> <code>${esc(data.repo)}</code></span>` : ''}
         ${data.process_cwd ? `<span><b>Launched from</b> <code>${esc(data.process_cwd)}</code></span>` : ''}
@@ -1555,8 +1555,12 @@ function renderUpdateStatus(update) {
       : data.update_available
         ? '<p>Resolve local changes or branch divergence before applying from the UI.</p>'
         : '';
+  const summary = data.install_kind === 'package'
+    ? `<strong>Package install${data.version ? ` · v${esc(data.version)}` : ''}</strong>`
+    : `<strong>${esc(data.message || 'Update status unavailable.')}</strong>`;
   return `<div class="update-status ${data.ok ? '' : 'warning'}">
-    <strong>${esc(data.message || 'Update status unavailable.')}</strong>
+    ${summary}
+    ${data.install_kind === 'package' ? `<p>${esc(data.message || 'Use your installer to upgrade AIWatcher.')}</p>` : ''}
     ${location}
     ${meta}
     ${action}
@@ -1575,9 +1579,11 @@ async function checkForUpdates(button, options = {}) {
     const data = await refreshHeaderUpdate({ fetch: options.fetch !== false, quiet: true });
     target.innerHTML = renderUpdateStatus(data);
     if (button) {
-      button.textContent = data.update_available
-        ? `${data.behind || ''} update${Number(data.behind) === 1 ? '' : 's'} available`.trim()
-        : 'Up to date';
+      button.textContent = data.install_kind === 'package'
+        ? 'Upgrade options'
+        : data.update_available
+          ? `${data.behind || ''} update${Number(data.behind) === 1 ? '' : 's'} available`.trim()
+          : 'Up to date';
     }
     showToast(data.message || 'Update check complete', data.ok ? 'success' : 'error');
   } catch (error) {
@@ -1660,6 +1666,7 @@ function scheduleHeaderUpdateCheck() {
     installKind: currentData && currentData.update_install_kind,
     sourceRoot: currentData && currentData.update_source_root,
   });
+  if (currentData && currentData.update_install_kind !== 'source') return;
   // Off by default. A fetch on page load is a GitHub call the user did not
   // make. The switch is in Settings > General and lives server-side, so a
   // fresh browser profile cannot re-enable it by having no cache.
@@ -1676,7 +1683,11 @@ function renderUpdateBannerForInstall(kind) {
   // Known from the summary, before any GitHub check, so a package install
   // never shows the pill at all.
   const banner = document.getElementById('updateBanner');
-  if (banner && kind === 'package') banner.hidden = true;
+  if (banner) banner.hidden = kind === 'package';
+  const autoCheckRow = document.getElementById('updateAutoCheckRow');
+  if (autoCheckRow) autoCheckRow.hidden = kind === 'package';
+  const checkButton = document.getElementById('updateCheckButton');
+  if (checkButton) checkButton.textContent = kind === 'package' ? 'Show upgrade options' : 'Check for updates';
 }
 async function setUpdateAutoCheck(enabled) {
   const box = document.getElementById('updateAutoCheck');
