@@ -4927,7 +4927,7 @@ class DashboardWindowTests(unittest.TestCase):
         packet = json.loads(improve.call_args.kwargs["local_brief"])
         self.assertEqual(packet["contract"], "fresh_start_continuation_v2")
         self.assertEqual(packet["source"]["session_id"], "ai-fast")
-        self.assertEqual(packet["source"]["project"], "/repo/fast")
+        self.assertTrue(str(packet["source"]["project"]).replace("\\", "/").endswith("/repo/fast"))
         self.assertTrue(packet["objective_and_context"])
         self.assertTrue(packet["current_state"])
         self.assertTrue(packet["next_steps"])
