@@ -323,6 +323,7 @@ def _empty_state() -> dict[str, Any]:
         "watch_notifications": [],
         "handoff_decisions": [],
         "optimize_decisions": [],
+        "improve_decisions": [],
         "companion_skips": [],
         "compact_nudges": [],
         # What each compaction did to the requests after it
@@ -420,6 +421,7 @@ def _load() -> dict[str, Any]:
     data.setdefault("watch_notifications", [])
     data.setdefault("handoff_decisions", [])
     data.setdefault("optimize_decisions", [])
+    data.setdefault("improve_decisions", [])
     data.setdefault("companion_skips", [])
     data.setdefault("compact_nudges", [])
     data.setdefault("compaction_outcomes", [])
@@ -1486,6 +1488,41 @@ def recent_optimize_decisions(limit: int = 10) -> list[dict[str, Any]]:
         return []
     rows = [row for row in data["optimize_decisions"] if isinstance(row, dict)]
     return list(reversed(rows[-max(1, limit):]))
+
+
+def record_improve_decision(key: str, decision: str) -> dict[str, Any]:
+    """Store bounded local feedback, never evidence text or provider output."""
+    if decision not in {"reviewed", "later", "expected", "helpful", "not_helpful"}:
+        raise ValueError("Unsupported Improve decision")
+    if len(key) != 64 or any(c not in "0123456789abcdef" for c in key):
+        raise ValueError("Invalid Improve evidence key")
+    record = {"key": key, "decision": decision,
+              "created_at": datetime.now(timezone.utc).isoformat()}
+    with _locked_state():
+        data = _load()
+        data["improve_decisions"].append(record)
+        data["improve_decisions"] = data["improve_decisions"][-500:]
+        _save(data)
+    return record
+
+
+def recent_improve_decisions() -> list[dict[str, Any]]:
+    with _locked_state():
+        return list(reversed(_load()["improve_decisions"][-500:]))
+
+
+def improve_snapshot() -> dict[str, Any]:
+    """One state-file read per dashboard poll, with no notes or secret config."""
+    with _locked_state():
+        data = _load()
+    return {
+        "decisions": list(reversed(data["improve_decisions"][-500:])),
+        "outcomes": {row["session_id"]: {"outcome": row.get("outcome"), "recorded_at": row.get("recorded_at")}
+                     for row in data["outcomes"] if row.get("session_id")},
+        "compactions": data["compaction_outcomes"][-20:],
+        "handoffs": list(reversed(data["handoff_decisions"][-20:])),
+        "compact_nudges": list(reversed(data["compact_nudges"][-20:])),
+    }
 
 
 def companion_preferences() -> dict[str, Any]:

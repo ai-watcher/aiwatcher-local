@@ -21,7 +21,7 @@ from typing import Any, Callable, Sequence
 from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
-from . import analyst, compaction, compaction_outcomes, prompt_signals, statusline
+from . import analyst, compaction, compaction_outcomes, improve, prompt_signals, statusline
 from .ai_assist import (
     AiAssistUnavailable,
     build_ai_assist_status,
@@ -178,7 +178,7 @@ SUMMARY_MEMORY_TTL_SECONDS = 45
 SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
 # Bump whenever build_summary's payload shape changes, so a cache written by an
 # older build is discarded instead of rendering blank sections in a newer UI.
-SUMMARY_CACHE_SCHEMA_VERSION = 8
+SUMMARY_CACHE_SCHEMA_VERSION = 9
 
 
 def restart_command(
@@ -227,6 +227,8 @@ def schedule_dashboard_restart(delay_seconds: float = 0.8) -> None:
 # provider endpoint and then make a model call that sends a Fresh Start brief,
 # with the stored bearer key attached, to whatever URL was just saved.
 SAME_ORIGIN_ONLY_ROUTES = frozenset({
+    "/api/improve-decision",
+    "/api/ask-aiwatcher",
     "/api/update-status",
     "/api/update-apply",
     "/api/update-auto-check",
@@ -4820,13 +4822,12 @@ def _false_starts_card(all_rows: list[LocalSession]) -> dict[str, object] | None
     costliest = max(empty, key=lambda row: row.cost_usd, default=None)
     return {
         "id": "false-starts",
-        "title": f"{len(empty)} short sessions produced no commit at all",
+        "title": f"{len(empty)} short sessions have no observed commit",
         "body": (
             f"Of {len(short)} sessions running {FALSE_START_MAX_CALLS} model calls or fewer across "
-            f"your recent history, {share}% left nothing behind — {money(spent)} of spend, which is "
-            "small. The count is the point, not the money: some of these answered a question worth "
-            "asking, and nothing local tells that apart from a start that went nowhere. A run of "
-            "them usually means opening in the wrong repo, or asking before scoping."
+            f"your saved evidence, {share}% had no observed commit ({money(spent)} estimated cost). "
+            "Questions, research and uncommitted work can still be useful. Review a sample before "
+            "deciding whether the next task needs a narrower scope."
         ),
         # No dollar figure, for the same reason model-mix carries none: the money
         # is not recoverable. Some of these sessions answered a question worth
@@ -4835,6 +4836,7 @@ def _false_starts_card(all_rows: list[LocalSession]) -> dict[str, object] | None
         # rank last anyway, reading as trivial when the count is the finding.
         "impact_usd": None,
         "session_id": costliest.session_id if costliest else None,
+        "evidence_ids": [row.session_id for row in sorted(empty, key=lambda row: row.cost_usd, reverse=True)],
         "severity": "info",
     }
 
@@ -4941,22 +4943,11 @@ def _insight_feed(
     needs_review: int,
     churned: int,
 ) -> list[dict[str, object]]:
-    """One ranked list, ordered by how much money each finding is about.
+    """Build comparative evidence, before the live Improve decision overlay.
 
-    Replaces three panels that were all built from the same handful of max()
-    calls -- Weekly Digest, Local Insights and Daily Journal each restated the
-    same top project, costliest session and loop count.
-
-    Two rules decide what earns a place here:
-      1. Every card names a comparison. "1.1M tokens in one session" gives the
-         reader nothing to do; "97% of it was replayed history, costing $196"
-         does. A number with no "versus" is a metric and belongs in a table.
-      2. Cards are ranked by dollars, not insertion order, so the biggest
-         finding is the one the eye lands on.
-
-    Coverage gaps (tools detected but not scanned) deliberately do NOT appear
-    here -- they are a setup concern, they never change, and mixing them in is
-    what made the old list read as noise. They live on the Coverage tab.
+    Historical dollar magnitude breaks ties; improve.current_view puts
+    reviewable evidence first and incorporates local feedback and receipts.
+    Coverage gaps belong in Settings Trust, not the improvement feed.
     """
     cards: list[dict[str, object]] = []
 
@@ -4980,9 +4971,9 @@ def _insight_feed(
         quiet_hours = float(top_state.get("age_seconds") or 0) / 3600
         quiet_label = f"{quiet_hours / 24:.1f}d" if quiet_hours >= 24 else f"{quiet_hours:.0f}h"
         closing = (
-            "It is still going, so compacting now is what buys the rest back."
+            "Recent activity was observed. Review context options before continuing; compaction can lose useful detail."
             if top_live
-            else f"It has been quiet for {quiet_label}, so this is what compacting earlier would have saved."
+            else f"It has been quiet for {quiet_label}. Review its history before your next task."
         )
         cards.append({
             "id": "replayed-context",
@@ -4993,7 +4984,7 @@ def _insight_feed(
             "body": (
                 f"{money(replay['total_replayed_usd'])} of {money(window_cost)} this window. The worst session replayed "
                 f"{top['replayed_pct']:.0f}% of its context, {money(top['replayed_usd'])} of its "
-                f"{money(top['session_usd'])}. {closing}"
+                f"{money(top['session_usd'])}. {closing} Replayed history can be useful; these costs are not recoverable savings."
             ),
             "session_label": (
                 f"{project_name(project_key(top.get('project_path')))} · {top.get('tool') or 'session'}"
@@ -5668,20 +5659,7 @@ def build_summary(
         needs_review=needs_review,
         churned=churned,
     )
-    if detected.get("cursor") and not any(row.tool == "cursor" for row in rows):
-        insights.append({
-            "title": "Cursor detected, but usage is limited",
-            "body": "Cursor is installed or running, but local token/cost history is not reliably exposed yet. Use Prompt Companion for risky prompts and treat Cursor as coverage-limited.",
-            "view": "setup",
-            "cta": "Check coverage",
-        })
-    if detected.get("ollama") and not any(row.tool == "ollama" for row in rows):
-        insights.append({
-            "title": "Ollama detected, but usage is not measured",
-            "body": "AIWatcher can see the local model runtime, but does not claim prompt, token, cost, or outcome coverage for Ollama yet.",
-            "view": "setup",
-            "cta": "Check coverage",
-        })
+    improve.attach_evidence(insights, rows, all_rows, evidence_by_session, days=days)
     survival_summary = _survival_summary()
     window_ledger = _window_ledger(all_events, days)
     unbanked = _unbanked_card(window_ledger)
@@ -5912,6 +5890,13 @@ def _cached_session_rows() -> list[LocalSession]:
 
 def _mark_summary_cache(summary: dict[str, object], *, status: str, source: str, refreshing: bool) -> dict[str, object]:
     copy = dict(summary)
+    try:
+        from .local_state import improve_snapshot
+        improve_state = improve_snapshot()
+        copy["insights"] = improve.current_view(copy.get("insights", []), state=improve_state)
+        copy["improve_results"] = improve.recent_results(improve_state)
+    except OSError:
+        copy["improve_results"] = []
     copy.pop("_session_index", None)
     # Summary payloads can be served from memory or disk for speed, but Settings
     # must reflect the current local config. Otherwise saving AI Assist briefly
@@ -6688,19 +6673,21 @@ def _ask_ai_evidence_hash(
     return hash_prompt(json.dumps(payload, sort_keys=True, default=str))
 
 
-def answer_ai_assisted_question(question: str, days: int = 7) -> dict[str, object]:
+def answer_ai_assisted_question(question: str, days: int = 7, *, insight: dict | None = None) -> dict[str, object]:
     """Answer Ask AIWatcher with optional, user-requested AI Assist."""
-    local = answer_local_question(question, days=days)
+    local = improve.local_answer(insight) if insight else answer_local_question(question, days=days)
     try:
         summary = build_summary_cached(days)
     except Exception:
         summary = {}
     public_config = ai_assist_config()
     config = ai_assist_config(with_secrets=True)
+    if insight:
+        config = {**config, "source_access": "metadata_only"}
     status = build_ai_assist_status(public_config)
     local["ai_assist"] = status
-    source_access = str(public_config.get("source_access") or "metadata_only")
-    packet = _ask_ai_evidence_packet(
+    source_access = "metadata_only" if insight else str(public_config.get("source_access") or "metadata_only")
+    packet = improve.ai_packet(insight) if insight else _ask_ai_evidence_packet(
         question,
         local,
         summary if isinstance(summary, dict) else {},
@@ -6735,6 +6722,8 @@ def answer_ai_assisted_question(question: str, days: int = 7) -> dict[str, objec
     if not outcome.get("text"):
         local["ai_assist"] = build_ai_assist_status(ai_assist_config())
         local["ai_assist_result"] = outcome["result"]
+        if insight:
+            local["privacy"] = "Local fallback shown. See AI Assist status for whether a provider request was attempted."
         return local
 
     try:
@@ -8585,6 +8574,7 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/second-opinion-contents",
             "/api/ai-assist-config",
             "/api/ask-aiwatcher",
+            "/api/improve-decision",
             "/api/handoff-basic",
             "/api/handoff-ai-assist",
             "/api/handoff",
@@ -8737,18 +8727,48 @@ class UIHandler(BaseHTTPRequestHandler):
                 return
             self._send(200, json.dumps(prefs), "application/json; charset=utf-8")
             return
-        if parsed.path == "/api/ask-aiwatcher":
+        if parsed.path in {"/api/ask-aiwatcher", "/api/improve-decision"}:
+            if not isinstance(payload, dict):
+                self._send(400, json.dumps({"error": "Expected a JSON object"}), "application/json; charset=utf-8")
+                return
             question = str(payload.get("question", "")).strip()
             raw_days = payload.get("days", 7)
             try:
                 days = max(1, min(90, int(raw_days)))
             except (TypeError, ValueError):
                 days = 7
-            response = (
-                answer_ai_assisted_question(question, days=days)
-                if bool(payload.get("ai_assist"))
-                else answer_local_question(question, days=days)
-            )
+            insight = None
+            if payload.get("insight_key") is not None or parsed.path == "/api/improve-decision":
+                key = payload.get("insight_key")
+                if not isinstance(key, str) or len(key) != 64:
+                    self._send(409, json.dumps({"error": "This evidence changed. Refresh Improve and review it again."}), "application/json; charset=utf-8")
+                    return
+                cards = build_summary_cached(days).get("insights", [])
+                insight = next((card for card in cards if card.get("evidence_key") == key), None)
+                if not insight:
+                    self._send(409, json.dumps({"error": "This evidence changed. Refresh Improve and review it again."}), "application/json; charset=utf-8")
+                    return
+            if parsed.path == "/api/improve-decision":
+                from .local_state import record_improve_decision
+                try:
+                    response = record_improve_decision(insight["evidence_key"], str(payload.get("decision", "")))
+                except ValueError as exc:
+                    self._send(400, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")
+                    return
+                except OSError:
+                    self._send(500, json.dumps({"error": "Could not save local feedback. Check local state permissions and retry."}), "application/json; charset=utf-8")
+                    return
+            elif bool(payload.get("ai_assist")):
+                confirmation_error = _ai_assist_confirmation_error(payload)
+                if confirmation_error:
+                    self._send(400, json.dumps({"error": confirmation_error}), "application/json; charset=utf-8")
+                    return
+                response = (answer_ai_assisted_question(question, days=days, insight=insight)
+                            if insight else answer_ai_assisted_question(question, days=days))
+            elif insight:
+                response = improve.local_answer(insight)
+            else:
+                response = answer_local_question(question, days=days)
             self._send(200, json.dumps(response), "application/json; charset=utf-8")
             return
         if parsed.path in {"/api/handoff-basic", "/api/handoff-ai-assist", "/api/handoff"}:

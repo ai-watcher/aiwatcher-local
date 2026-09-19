@@ -450,10 +450,11 @@
     </div>
   </section>
 
+  <dialog id="improveReview" class="improve-review" aria-labelledby="improveReviewTitle"></dialog>
   <section id="view-insights" class="view" hidden>
     <section class="card" style="margin-bottom:14px">
       <div class="section-title">
-        <div><h2>Spend and improvement signals</h2><p>Ranked by money, context pressure, and what to change next.</p></div>
+        <div><h2>Improve</h2><p>Review evidence, choose a next step, and check what changed.</p></div>
         <span class="note-chip local">Private</span>
       </div>
       <div id="insightHeadline"></div>
@@ -462,6 +463,7 @@
            and would otherwise bill its own analyst runs to the reader. -->
       <p id="analystOverhead" class="receipt-note"></p>
       <div id="insightFeed"></div>
+      <div id="improveResults" aria-live="polite"></div>
     </section>
     <p class="receipt-note" style="margin-top:4px">
       Read-only local scan &middot; no model calls unless configured &middot; no source or prompt content in summaries &middot;
