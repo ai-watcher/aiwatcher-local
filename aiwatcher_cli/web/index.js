@@ -665,7 +665,9 @@ function updateAskAiAssistControl(status = null) {
   const checkbox = document.getElementById('askUseAiAssist');
   if (checkbox && !ready) checkbox.checked = false;
 }
-function openAskPanel(question = '') {
+let askInsightKey = null;
+function openAskPanel(question = '', insightKey = null) {
+  askInsightKey = insightKey;
   document.getElementById('askBackdrop').classList.add('open');
   document.getElementById('askPanel').classList.add('open');
   document.getElementById('askPanel').setAttribute('aria-hidden', 'false');
@@ -748,7 +750,7 @@ async function askAIWatcher() {
     const res = await fetch('/api/ask-aiwatcher', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, days: Number(document.getElementById('days').value || 7), ai_assist: useAi }),
+      body: JSON.stringify({ question, days: Number(document.getElementById('days').value || 7), ai_assist: useAi, confirmed: useAi, insight_key: askInsightKey }),
     });
     const data = await res.json();
     if (!res.ok || data.error) {
@@ -5057,18 +5059,76 @@ function renderInsightFeed(insights) {
   </details>`;
 }
 function renderInsightRows(insights) {
-  return insights.map(card => `<div class="feed-row ${esc(card.severity || 'info')}${card.session_id ? ' clickable' : ''}"
-      ${card.session_id ? `onclick="selectSession('${esc(card.session_id)}')"` : ''}>
+  return insights.map(card => `<div class="feed-row ${esc(card.severity || 'info')}">
       <div class="feed-main${card.chart ? ' has-evidence' : ''}">
         <div class="feed-says">
           <strong>${esc(card.title)}</strong>
           <p>${esc(card.body)}</p>
+          ${card.evidence_key ? `<p class="receipt-note">${esc(card.scope_note)} ${esc(card.rank_reason || '')}</p>
+          <div class="improve-actions">
+            <button class="btn-primary" data-key="${esc(card.evidence_key)}" onclick="reviewImprovement(this.dataset.key)">${esc(card.action_label)}</button>
+            <label>Feedback <select data-key="${esc(card.evidence_key)}" onchange="saveImproveFeedback(this)">
+              <option value="">Choose...</option>
+              ${[['later','Later (24h)'],['expected','Expected'],['helpful','Helpful'],['not_helpful','Not helpful']].map(([value,label]) => `<option value="${value}" ${card.feedback === value ? 'selected' : ''}>${label}</option>`).join('')}
+            </select></label>
+          </div>` : ''}
           ${card.session_id && card.session_label ? `<p class="feed-session">Charted: <button class="link-inline" data-session="${esc(card.session_id)}" onclick="event.stopPropagation(); selectSession(this.dataset.session)">${esc(card.session_label)}</button></p>` : ''}
         </div>
         ${card.chart ? `<div class="feed-shows"><div class="feed-chart" data-feed-chart="${esc(card.id)}"></div>${feedChartCaption(card.chart)}</div>` : ''}
       </div>
       ${card.impact_label ? `<span class="feed-impact mono">${esc(card.impact_label)}</span>` : ''}
     </div>`).join('');
+}
+async function recordImproveDecision(key, decision) {
+  const response = await fetch('/api/improve-decision', {method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({insight_key: key, decision, days: Number(document.getElementById('days').value || 7)})});
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'Could not save feedback.');
+}
+async function saveImproveFeedback(control) {
+  if (!control.value) return;
+  control.disabled = true;
+  try {
+    await recordImproveDecision(control.dataset.key, control.value);
+    await load(false);
+    showToast('Feedback saved locally.');
+  } catch (error) { showToast(error.message, 'error'); }
+  finally { control.disabled = false; }
+}
+function reviewImprovement(key) {
+  const card = (currentData?.insights || []).find(item => item.evidence_key === key);
+  if (!card) { showToast('Refresh Improve to get current evidence.', 'error'); return; }
+  const dialog = document.getElementById('improveReview');
+  dialog.innerHTML = `<div class="section-title"><h2 id="improveReviewTitle">${esc(card.action_label)}</h2>
+    <button onclick="document.getElementById('improveReview').close()" aria-label="Close review">Close</button></div>
+    <p>${esc(card.body)}</p><p class="receipt-note">${esc(card.scope_note)}</p>
+    ${(card.next_steps || []).length ? `<ol>${card.next_steps.map(step => `<li>${esc(step)}</li>`).join('')}</ol>` : ''}
+    <p>${(card.evidence || []).length} shown of ${card.evidence_total || 0} evidence sessions. Estimated session costs, not invoice spend.</p>
+    <div class="improve-session-list">${(card.evidence || []).map(row => `<div class="improve-session">
+      <div><strong>${esc(row.project)}</strong><p>${esc(row.tool)}${row.model ? ` · ${esc(row.model)}` : ''} · ${esc(row.session_id)} · $${Number(row.cost_usd || 0).toFixed(2)}</p></div>
+      <button data-session="${esc(row.session_id)}" onclick="document.getElementById('improveReview').close(); selectSession(this.dataset.session)">Review session</button>
+    </div>`).join('') || '<p>No matching sessions remain in this evidence snapshot.</p>'}</div>
+    <div class="improve-actions"><button data-key="${esc(key)}" onclick="explainImprovement(this.dataset.key)">Ask about this signal</button></div>
+    <p class="receipt-note">Local explanation by default. Optional AI Assist receives this finding and your question, not session paths, transcripts or source files.</p>`;
+  dialog.showModal();
+  recordImproveDecision(key, 'reviewed').catch(error => showToast(error.message, 'error'));
+}
+function explainImprovement(key) {
+  document.getElementById('improveReview').close();
+  openAskPanel('What should I do next for this signal, and how can I check whether it helped?', key);
+  const checkbox = document.getElementById('askUseAiAssist');
+  if (checkbox) checkbox.checked = false;
+}
+function renderImproveResults(results) {
+  const rows = (results || []).map(item =>
+    `<div class="improve-result"><strong>${esc(item.title)}</strong><p>${esc(item.body)}</p>
+    <p class="receipt-note">${esc(item.at || '')}${item.session_id ? ` · ${esc(item.session_id)}` : ''}</p>
+    ${item.session_id ? `<button data-session="${esc(item.session_id)}" onclick="selectSession(this.dataset.session)">Review evidence</button>` : ''}</div>`
+  );
+  return `<h3>Recent follow-up results</h3>${rows.length ? rows.slice(0, 3).join('') +
+    (rows.length > 3 ? `<details class="aiw-details"><summary>${rows.length - 3} earlier results</summary>${rows.slice(3).join('')}</details>` : '')
+    : '<p class="receipt-note">No compaction measurements or Fresh Start follow-ups recorded yet.</p>'}`;
 }
 // One decision per page load; see the call site.
 let firstRunRouted = false;
@@ -5270,7 +5330,7 @@ function showView(view) {
   });
   const days = document.getElementById('days').value;
   if (view === 'sessions' && sessionsLoadedForDays !== days) loadSessions();
-  if (view === 'insights' && reportLoadedForDays !== days) loadReport();
+  if (view === 'receipts' && reportLoadedForDays !== days) loadReport();
   if (view === 'receipts') markFreshStartReceiptsViewed();
 }
 function showSettingsPanel(panel) {
@@ -5991,6 +6051,7 @@ async function loadOnce(resetDetail, forceRefresh) {
     ? `${overhead.label} — ${overhead.detail}`
     : '';
   document.getElementById('insightFeed').innerHTML = renderInsightFeed(data.insights);
+  document.getElementById('improveResults').innerHTML = renderImproveResults(data.improve_results);
   // Same two-step as the runway charts: markup first, SVG appended after, and
   // nodes collected by attribute rather than by a selector built from data.
   const feedChartNodes = {};

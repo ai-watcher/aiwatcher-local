@@ -1090,6 +1090,16 @@
     .feed-row:first-child { border-top: none; }
     .feed-row.clickable { cursor: pointer; }
     .feed-row.clickable:hover { background: var(--surface-hover); }
+    .improve-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3); margin: 12px 0; }
+    .improve-actions label { display: flex; align-items: center; gap: var(--sp-2); }
+    .improve-review { width: min(760px, calc(100vw - 32px)); max-height: 85vh; overflow: auto; padding: 20px; border: 1px solid var(--line); border-radius: var(--r-2); background: var(--surface); color: var(--text); }
+    .improve-review::backdrop { background: rgba(0, 0, 0, .45); }
+    .improve-review h2 { font-size: var(--fs-4); letter-spacing: 0; }
+    .improve-review p, .improve-session strong { overflow-wrap: anywhere; }
+    .improve-session { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--sp-3); padding: 12px 0; border-bottom: 1px solid var(--line); }
+    .improve-session > div { flex: 1 1 220px; min-width: 0; }
+    .improve-result { padding: 12px 0; border-bottom: 1px solid var(--line); }
+    #improveResults { margin-top: 24px; }
     .feed-main { flex: 1; min-width: 0; border-left: 3px solid var(--line-strong); padding-left: 13px; }
     .feed-row.high .feed-main { border-left-color: var(--red); }
     .feed-row.medium .feed-main { border-left-color: var(--amber); }
