@@ -296,6 +296,21 @@ class AiAssistTests(unittest.TestCase):
         self.assertFalse(anthropic["ready"])
 
     def test_fresh_start_improvement_composes_bounded_handoff(self) -> None:
+        evidence_packet = json.dumps({
+            "contract": "fresh_start_continuation_v2",
+            "source": {
+                "session_id": "session-1",
+                "project": "/repo/ai",
+                "tool": "codex-cli",
+                "model": "gpt-test",
+            },
+            "objective": "Finish the AI Assist settings checkpoint.",
+            "evidence": {
+                "changed_files": ["aiwatcher_cli/web/index.js"],
+                "commits": [],
+                "tests": ["node --check aiwatcher_cli/web/index.js"],
+            },
+        })
         with (
             patch.object(ai_assist, "build_ai_assist_status", return_value={
                 "ready": True,
@@ -309,9 +324,13 @@ class AiAssistTests(unittest.TestCase):
                 "text": (
                     '{"goal":"Finish the smallest checkpoint.",'
                     '"what_is_done":["Settings page exists"],'
+                    '"current_state":["The UI change is not verified yet"],'
+                    '"decisions":["Keep AI Assist optional"],'
                     '"context_to_preserve":["AI Assist is optional"],'
+                    '"risks_and_constraints":["Preserve local-only behavior"],'
                     '"inspect_first":["git status --short"],'
                     '"do_not_redo":["Do not rerun broad discovery"],'
+                    '"next_steps":["Inspect aiwatcher_cli/web/index.js"],'
                     '"next_ask":"Inspect settings files, then patch only the AI Assist config UX.",'
                     '"acceptance_check":["node --check passes"],'
                     '"uncertainties":["Confirm user-selected provider persists"]}'
@@ -327,18 +346,58 @@ class AiAssistTests(unittest.TestCase):
                     "enabled_workflows": ["fresh_start"],
                     "api_keys": {"openai": "sk-secret"},
                 },
-                local_brief="AIWatcher Fresh Start brief\n" + ("x" * 20_000),
+                local_brief=evidence_packet + (" " * 20_000),
             )
 
         payload = call.call_args.args[1][1]["content"]
         self.assertLessEqual(result["input_chars"], ai_assist.MAX_FRESH_START_INPUT_CHARS)
         self.assertIn("AIWatcher AI-assisted Fresh Start brief", result["text"])
-        self.assertIn("What appears done", result["text"])
+        self.assertIn("Completed work", result["text"])
         self.assertIn("Settings page exists", result["text"])
-        self.assertIn("Next ask", result["text"])
+        self.assertIn("First action", result["text"])
+        self.assertIn("aiwatcher_cli/web/index.js", result["text"])
         self.assertEqual(result["structured"]["goal"], "Finish the smallest checkpoint.")
         self.assertNotIn("sk-secret", payload)
         self.assertLess(len(payload), 10_000)
+
+    def test_fresh_start_rejects_generic_model_output(self) -> None:
+        evidence_packet = json.dumps({
+            "contract": "fresh_start_continuation_v2",
+            "source": {"session_id": "session-1", "project": "/repo/ai"},
+            "objective": "",
+            "evidence": {"changed_files": ["aiwatcher_cli/ui.py"]},
+        })
+        with (
+            patch.object(ai_assist, "build_ai_assist_status", return_value={
+                "ready": True,
+                "mode": "cloud",
+                "setup_hint": "Ready",
+            }),
+            patch.object(ai_assist, "_call_configured_chat", return_value={
+                "mode": "cloud",
+                "provider": "openai",
+                "model": "gpt-test",
+                "text": json.dumps({
+                    "goal": "Verify the source session identity and continue coding tasks.",
+                    "what_is_done": ["Reconstruct prior work before editing."],
+                    "inspect_first": ["Run git status --short."],
+                    "next_ask": "Run git status --short and verify the source session identity.",
+                    "acceptance_check": ["Report changed files."],
+                }),
+                "usage": {},
+            }),
+        ):
+            with self.assertRaises(ai_assist.AiAssistUnavailable):
+                ai_assist.improve_fresh_start_brief(
+                    {
+                        "mode": "cloud",
+                        "provider": "openai",
+                        "source_access": "metadata_only",
+                        "enabled_workflows": ["fresh_start"],
+                        "api_keys": {"openai": "sk-secret"},
+                    },
+                    local_brief=evidence_packet,
+                )
 
     def test_optimize_cleanup_prompt_composes_buckets_and_guardrails(self) -> None:
         with (

@@ -304,7 +304,14 @@ def _relative(path: str, root: str | None) -> str:
     return os.path.basename(path)
 
 
-def compact_command(tool: str, boundary: Boundary, files: list[str]) -> str:
+def compact_command(
+    tool: str,
+    boundary: Boundary,
+    files: list[str],
+    *,
+    session_title: str | None = None,
+    prompts_since: int = 0,
+) -> str:
     """The text Copy puts on the clipboard.
 
     Claude Code's /compact takes free-text focus, so the command says what to
@@ -314,17 +321,27 @@ def compact_command(tool: str, boundary: Boundary, files: list[str]) -> str:
     if "codex" in tool.lower():
         return "/compact"
     short = boundary.sha[:7]
-    subject = boundary.subject[:72]
+    subject = " ".join(boundary.subject.split())[:72]
     named = f'commit {short} ("{subject}")' if subject else f"commit {short}"
     if files:
-        shown = files[:_MAX_FILES_IN_COMMAND]
+        shown = [" ".join(str(path).split())[:180] for path in files[:_MAX_FILES_IN_COMMAND]]
         more = len(files) - len(shown)
-        work = "the work on " + ", ".join(shown) + (f" and {more} more file{'s' if more != 1 else ''}" if more else "")
+        work = ", ".join(shown) + (f" and {more} more file{'s' if more != 1 else ''}" if more else "")
     else:
-        work = "the work since then"
+        work = "no file paths were observed"
+    title = " ".join(str(session_title or "").split())[:100]
+    session_anchor = f" Session: {title}." if title else ""
+    prompt_anchor = f" {prompts_since} user prompt{'s' if prompts_since != 1 else ''} followed the boundary." if prompts_since else ""
     return (
-        f"/compact Keep everything since {named}: {work}, the open decisions, "
-        "and the current task. Summarise or drop the history before that commit."
+        f"/compact Create a durable continuation summary for this same session. Boundary: {named}."
+        f" Treat it as a checkpoint, not proof that all relevant work was committed.{session_anchor}{prompt_anchor}"
+        f" Files touched since the boundary: {work}. Preserve: the current objective and latest user request;"
+        " completed work since the boundary; current implementation and uncommitted state; decisions and their reasoning;"
+        " constraints, failed approaches, blockers, risks, and unresolved questions; important files, commands, tool results,"
+        " and verification; the exact smallest next action and done criteria. Output sections: Objective; Completed work;"
+        " Current state; Decisions and constraints; Risks and open questions; Important files and evidence; Verification;"
+        " Next action; Done criteria. Summarise or drop history before the boundary unless it still explains an active"
+        " requirement, decision, constraint, or failure. Do not invent missing facts; label uncertainty explicitly."
     )
 
 
@@ -408,7 +425,13 @@ def assess(session: LocalSession) -> Assessment | None:
         since_tokens=since,
         after_estimate=after,
         files_since=files,
-        command=compact_command(session.tool, boundary, files),
+        command=compact_command(
+            session.tool,
+            boundary,
+            files,
+            session_title=(str(stats.get("title")).strip() or None) if stats.get("title") else None,
+            prompts_since=prompts_since,
+        ),
         priced=priced,
         dead_usd_per_turn=cache_read_cost(session.model, dead) if priced else None,
         recommend=recommend,

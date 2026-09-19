@@ -4861,7 +4861,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Reproduce and fix", capsule["next_brief"])
         self.assertIn("Keep privacy opt-in.", capsule["next_brief"])
 
-    def test_ai_assisted_handoff_can_reuse_visible_brief_without_rescanning_events(self) -> None:
+    def test_ai_assisted_handoff_ignores_visible_shell_and_builds_evidence_packet(self) -> None:
         now = datetime.now(timezone.utc)
         row = LocalSession(
             session_id="ai-fast",
@@ -4891,7 +4891,7 @@ class DashboardWindowTests(unittest.TestCase):
             ui._index_sessions([row])
             with (
                 patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
-                patch.object(ui, "scan_all_events", side_effect=AssertionError("visible brief should skip full event enrichment")),
+                patch.object(ui, "scan_all_events", return_value=[]),
                 patch.object(ui, "safe_runtime_processes", return_value=[]),
                 patch.object(ui, "ai_assist_config", return_value={
                     "mode": "cloud",
@@ -4924,8 +4924,16 @@ class DashboardWindowTests(unittest.TestCase):
 
         self.assertEqual(capsule["ai_assist_result"]["status"], "used")
         self.assertIn("Inspect aiwatcher_cli/web/index.js first", capsule["next_brief"])
-        self.assertEqual(improve.call_args.kwargs["local_brief"], visible_brief)
-        self.assertEqual(capsule["enrichment_status"], "client_handoff_brief")
+        packet = json.loads(improve.call_args.kwargs["local_brief"])
+        self.assertEqual(packet["contract"], "fresh_start_continuation_v2")
+        self.assertEqual(packet["source"]["session_id"], "ai-fast")
+        self.assertTrue(str(packet["source"]["project"]).replace("\\", "/").endswith("/repo/fast"))
+        self.assertTrue(packet["objective_and_context"])
+        self.assertTrue(packet["current_state"])
+        self.assertTrue(packet["next_steps"])
+        self.assertTrue(packet["inspect_first"])
+        self.assertNotEqual(improve.call_args.kwargs["local_brief"], visible_brief)
+        self.assertNotEqual(capsule.get("enrichment_status"), "client_handoff_brief")
 
     def test_ai_assisted_handoff_composes_paste_ready_brief_and_receipt(self) -> None:
         now = datetime.now(timezone.utc)
@@ -5001,7 +5009,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(capsule["ai_assist_result"]["status"], "cached")
         self.assertEqual(improve.call_count, 1)
         self.assertIn("AIWatcher AI-assisted Fresh Start brief", capsule["next_brief"])
-        self.assertIn("What appears done", capsule["next_brief"])
+        self.assertIn("Goal", capsule["next_brief"])
         self.assertIn("AI Assist receipt", capsule["next_brief"])
         self.assertIn("local_next_brief", capsule)
         self.assertFalse(capsule["include_prompt_excerpt"])

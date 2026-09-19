@@ -1379,7 +1379,6 @@ function handoffPayload(sessionId, target, includePrompt, options) {
     source_refs: next.sources || [],
     constraints: next.constraints || [],
     acceptance_criteria: next.acceptance || [],
-    local_brief: next.localBrief || '',
   };
 }
 async function postJson(path, payload) {
@@ -1992,12 +1991,6 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
     if (!confirmed) return;
   }
   const options = handoffOptionsFromForm();
-  const briefNode = document.getElementById('handoffBrief');
-  const currentBrief = briefNode ? briefNode.value : '';
-  const sourceAccess = config.source_access || 'metadata_only';
-  if (currentBrief && (!includePrompt || sourceAccess === 'prompt_opt_in' || sourceAccess === 'source_opt_in')) {
-    options.localBrief = currentBrief;
-  }
   const payload = handoffPayload(sessionId, target, includePrompt, options);
   payload.confirmed = confirmed;
   const statusNode = document.getElementById('handoffStatus');
@@ -2006,7 +1999,7 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
       <div class="ai-loading-mark">AI</div>
       <div>
         <strong>Composing handoff</strong>
-        <p>AI Assist is turning local evidence into a compact fresh-session brief. Proof and savings claims stay evidence-backed.</p>
+        <p>AI Assist is loading timeline, Git, decisions, and session evidence before composing a compact continuation brief.</p>
         <div class="ai-loading-bar" aria-hidden="true"><span></span></div>
       </div>
     </div>`);
