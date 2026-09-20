@@ -1393,7 +1393,13 @@ async function postJson(path, payload) {
 }
 function classifyUpdateStatus(data) {
   if (!data) return 'unknown';
-  if (data.install_kind === 'package') return 'package';
+  if (data.install_kind && data.install_kind !== 'source') {
+    if (data.update_available && data.can_apply) return 'available';
+    if (data.update_available) return 'blocked';
+    if (data.ok === false) return 'error';
+    if (data.ok) return 'current';
+    return 'package';
+  }
   // A contributor on a feature branch is not blocked; they are somewhere the
   // updater does not apply. Quiet, like the package state, not a warning.
   if (data.ok && data.on_branch === false) return 'branch';
@@ -1409,7 +1415,7 @@ function updateBannerLabel(status, data) {
   if (status === 'blocked') return `${count || ''} update${count === 1 ? '' : 's'} blocked`.trim();
   if (status === 'branch') return 'Feature branch';
   if (status === 'current') return 'Up to date';
-  if (status === 'package') return 'Package install';
+  if (status === 'package') return 'Check updates';
   if (status === 'error') return 'Update check failed';
   return 'Check updates';
 }
@@ -1429,7 +1435,7 @@ function updateBranchLabel(data) {
 function updateBannerTitle(status, data) {
   const source = data && data.repo ? `Source checkout: ${data.repo}` : '';
   const launched = data && data.process_cwd ? `Launched from: ${data.process_cwd}` : '';
-  const branch = data ? `GitHub branch: ${updateBranchLabel(data)}` : '';
+  const branch = data && data.install_kind === 'source' ? `GitHub branch: ${updateBranchLabel(data)}` : '';
   const target = data && data.remote_ref ? `Update target: ${data.remote_ref}` : '';
   const details = [source, branch, target, launched].filter(Boolean).join('\n');
   const location = details ? `\n${details}` : '';
@@ -1439,7 +1445,7 @@ function updateBannerTitle(status, data) {
   if (status === 'blocked') return `${(data && data.message) || 'Resolve local changes before applying updates'}${location}`;
   if (status === 'branch') return `${(data && data.message) || 'Updates apply on main only'} Click to review update options.${location}`;
   if (status === 'current') return `AIWatcher is current. Click to check GitHub again.${location}`;
-  if (status === 'package') return `Click to show package upgrade commands${location}`;
+  if (status === 'package') return `Click to check for package updates${location}`;
   if (status === 'error') return `${(data && data.message) || 'Click to retry the GitHub update check'}${location}`;
   if (status === 'checking') return `Checking GitHub for AIWatcher updates${location}`;
   return `Click to check GitHub for the latest AIWatcher changes${location}`;
@@ -1459,9 +1465,7 @@ function setUpdateState(status, data, checkedAt = Date.now()) {
   if (banner) {
     banner.className = `update-banner ${status}`;
     banner.disabled = status === 'checking';
-    // A pip or pipx install cannot be applied from here, so a permanent
-    // "Package install" chip in the header would be a label with no action.
-    banner.hidden = status === 'package';
+    banner.hidden = false;
     banner.title = updateBannerTitle(status, data || null) + (checkedAt ? `\nLast checked: ${new Date(checkedAt).toLocaleString()}` : '');
     banner.setAttribute('aria-label', banner.title);
   }
@@ -1485,11 +1489,6 @@ function clearCachedUpdateState() {
 function restoreCachedUpdateState(context = {}) {
   const installKind = context.installKind || null;
   const sourceRoot = context.sourceRoot || '';
-  if (installKind && installKind !== 'source') {
-    clearCachedUpdateState();
-    setUpdateState('package', { install_kind: installKind }, 0);
-    return null;
-  }
   try {
     const cached = JSON.parse(localStorage.getItem(UPDATE_CACHE_KEY) || 'null');
     if (cached && cached.data) {
@@ -1504,6 +1503,10 @@ function restoreCachedUpdateState(context = {}) {
       return cached;
     }
   } catch (error) {}
+  if (installKind && installKind !== 'source') {
+    setUpdateState('package', { install_kind: installKind }, 0);
+    return null;
+  }
   setUpdateState('unknown', null, 0);
   return null;
 }
@@ -1549,6 +1552,13 @@ function renderUpdateStatus(update) {
         <span class="pill">${esc(data.remote_ref || 'origin/main')}</span>
         <span class="pill">${esc(data.dirty ? 'local changes present' : 'clean checkout')}</span>
       </div>`
+    : data.install_kind
+      ? `<div class="pill-row">
+          <span class="pill">${esc(data.package_manager || 'package')}</span>
+          <span class="pill">v${esc(data.version || 'unknown')}</span>
+          ${data.latest_version ? `<span class="pill">latest v${esc(data.latest_version)}</span>` : ''}
+          ${data.latest_commit ? `<span class="pill">latest ${esc(data.latest_commit)}</span>` : ''}
+        </div>`
     : '';
   const location = data.install_kind === 'source' && (data.repo || data.process_cwd)
     ? `<div class="update-location">
@@ -1559,18 +1569,20 @@ function renderUpdateStatus(update) {
       </div>`
     : '';
   const action = data.can_apply
-    ? '<p>Apply will fast-forward this clean checkout and restart the dashboard. A running Companion keeps the old code until <code>aiwatcher companion stop</code>, then <code>aiwatcher companion start</code>.</p>'
+    ? data.install_kind === 'source'
+      ? '<p>Apply will fast-forward this clean checkout and restart the dashboard. A running Companion keeps the old code until <code>aiwatcher companion stop</code>, then <code>aiwatcher companion start</code>.</p>'
+      : `<p>Apply will run <code>${esc(data.command_text || 'the package upgrade command')}</code> and restart the dashboard. A running Companion keeps the old code until <code>aiwatcher companion stop</code>, then <code>aiwatcher companion start</code>.</p>`
     : data.on_branch === false
       ? `<p>Updates apply on <code>${esc(data.branch || 'main')}</code>. Check it out to apply from here; your branch is left alone.</p>`
       : data.update_available
         ? '<p>Resolve local changes or branch divergence before applying from the UI.</p>'
         : '';
-  const summary = data.install_kind === 'package'
-    ? `<strong>Package install${data.version ? ` · v${esc(data.version)}` : ''}</strong>`
+  const summary = data.install_kind && data.install_kind !== 'source'
+    ? `<strong>${esc(data.message || `Package install${data.version ? ` · v${data.version}` : ''}`)}</strong>`
     : `<strong>${esc(data.message || 'Update status unavailable.')}</strong>`;
   return `<div class="update-status ${data.ok ? '' : 'warning'}">
     ${summary}
-    ${data.install_kind === 'package' ? `<p>${esc(data.message || 'Use your installer to upgrade AIWatcher.')}</p>` : ''}
+    ${data.install_kind && data.install_kind !== 'source' ? `<p>${esc(data.command_text ? `Updater: ${data.command_text}` : 'Use your installer to upgrade AIWatcher.')}</p>` : ''}
     ${location}
     ${meta}
     ${action}
@@ -1589,11 +1601,11 @@ async function checkForUpdates(button, options = {}) {
     const data = await refreshHeaderUpdate({ fetch: options.fetch !== false, quiet: true });
     target.innerHTML = renderUpdateStatus(data);
     if (button) {
-      button.textContent = !data.ok ? 'Retry check' : data.install_kind === 'package'
-        ? 'Upgrade options'
+      button.textContent = !data.ok
+        ? 'Retry check'
         : data.update_available
-          ? `${data.behind || ''} update${Number(data.behind) === 1 ? '' : 's'} available`.trim()
-          : 'Up to date';
+        ? `${data.behind || ''} update${Number(data.behind) === 1 ? '' : 's'} available`.trim()
+        : 'Up to date';
     }
     showToast(data.message || 'Update check complete', data.ok ? 'success' : 'error');
   } catch (error) {
@@ -1614,7 +1626,7 @@ async function applyUpdates(button, options = {}) {
   const original = button ? button.textContent : '';
   if (button) {
     button.disabled = true;
-    button.textContent = 'Applying...';
+    button.textContent = updateState.data && updateState.data.install_kind !== 'source' ? 'Upgrading...' : 'Applying...';
   }
   setUpdateState('checking', updateState.data, updateState.checkedAt || Date.now());
   try {
@@ -1681,7 +1693,6 @@ function scheduleHeaderUpdateCheck() {
     installKind: currentData && currentData.update_install_kind,
     sourceRoot: currentData && currentData.update_source_root,
   });
-  if (currentData && currentData.update_install_kind !== 'source') return;
   // Off by default. A fetch on page load is a GitHub call the user did not
   // make. The switch is in Settings > General and lives server-side, so a
   // fresh browser profile cannot re-enable it by having no cache.
@@ -1695,14 +1706,15 @@ function renderUpdateAutoCheck(enabled) {
   if (box) box.checked = !!enabled;
 }
 function renderUpdateBannerForInstall(kind) {
-  // Known from the summary, before any GitHub check, so a package install
-  // never shows the pill at all.
+  // Known from the summary, before any GitHub check. Package installs still
+  // keep the pill visible; their check compares against PyPI or the recorded
+  // direct GitHub install commit instead of a local checkout.
   const banner = document.getElementById('updateBanner');
-  if (banner) banner.hidden = kind === 'package';
+  if (banner) banner.hidden = false;
   const autoCheckRow = document.getElementById('updateAutoCheckRow');
-  if (autoCheckRow) autoCheckRow.hidden = kind === 'package';
+  if (autoCheckRow) autoCheckRow.hidden = false;
   const checkButton = document.getElementById('updateCheckButton');
-  if (checkButton && !checkButton.disabled) checkButton.textContent = kind === 'package' ? 'Show upgrade options' : 'Check for updates';
+  if (checkButton && !checkButton.disabled) checkButton.textContent = 'Check for updates';
 }
 async function setUpdateAutoCheck(enabled) {
   const box = document.getElementById('updateAutoCheck');

@@ -33,6 +33,7 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from . import __version__
 from .correlate import link_recent_fresh_start_receipts_to_sessions, link_recent_interventions_to_sessions
 from .companion import (
     background_process_kwargs,
@@ -3567,7 +3568,7 @@ def command_start(args: argparse.Namespace) -> int:
             port_attempts=int(getattr(args, "ui_port_attempts", 20)),
         )
     sessions = sessions_since(1)
-    print("AIWatcher v0.1.0 - private-by-default mode")
+    print(f"AIWatcher v{__version__} - private-by-default mode")
     print("Read-only scan. No data leaves this machine.\n")
     print("Surface coverage:")
     for row in surface_coverage(sessions):
@@ -3651,11 +3652,30 @@ def command_update(args: argparse.Namespace) -> int:
     print("AIWatcher update check\n")
     if result.get("install_kind") != "source":
         print(str(result.get("message") or "This install is not a Git checkout."))
-        print("For package installs, update with your installer instead:")
+        if result.get("latest_version"):
+            print(f"Latest package: {result.get('latest_version')}")
+        if result.get("latest_commit"):
+            print(f"Latest commit:  {result.get('latest_commit')}")
+        print("Package update commands:")
         for item in result.get("guidance", []):
             if isinstance(item, dict):
                 print(f"- {item.get('label')}: {item.get('command')}")
-        return 2
+        if not result.get("ok"):
+            return 2
+        if not result.get("update_available"):
+            return 0
+        if not apply:
+            command_text = result.get("command_text")
+            if command_text:
+                print(f"Run `aiwatcher update --apply` to run: {command_text}")
+            return 0
+        if not result.get("applied"):
+            print(str(result.get("message") or "Update failed."), file=sys.stderr)
+            return 2
+        if result.get("output"):
+            print(str(result.get("output")))
+        _print_post_update_restart_advice()
+        return 0
 
     print(f"Checkout: {result.get('repo')}")
     print(f"Current:  {result.get('current', 'unknown')}")
@@ -9339,7 +9359,7 @@ def command_mcp(_args: argparse.Namespace) -> int:
             _write_mcp_message(_mcp_response(message_id, {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "aiwatcher-local", "version": "0.1.0"},
+                "serverInfo": {"name": "aiwatcher-local", "version": __version__},
             }))
         elif method == "ping":
             _write_mcp_message(_mcp_response(message_id, {}))

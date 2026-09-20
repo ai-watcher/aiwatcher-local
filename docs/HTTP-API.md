@@ -134,16 +134,16 @@ needed to keep the browser fallback consistent with the native companion.
 floating Companion presence control; it is intentionally content-free and does
 not expose prompt or source text. `/api/companion-scan` forces the companion to
 refresh local watch evidence without waiting for the next polling interval.
-`/api/health` reports the running dashboard's install kind, source root,
-process id, version, and launch directory so `aiwatcher start` can avoid
-reusing a dashboard from another checkout or package install.
+`/api/health` reports the running dashboard's install kind, package manager,
+source root, process id, version, and launch directory so `aiwatcher start` can
+avoid reusing a dashboard from another checkout or package install.
 `/api/handoff-basic` returns a copyable Fresh Start brief without waiting for
 timeline, git, or prompt enrichment; `/api/handoff` returns the enriched drawer
-payload. `/api/update-status` checks the installed source checkout
-against GitHub when the dashboard asks for it and reports whether a clean
-fast-forward is available. The top-bar update badge uses this route when the
-user clicks it, and on page load (at most once every six hours) only if
-automatic checks are turned on in Settings (off by default).
+payload. `/api/update-status` checks source checkouts against GitHub, PyPI
+package installs against the latest package version, and direct GitHub package
+installs against the recorded installed commit. The top-bar update badge uses
+this route when the user clicks it, and on page load (at most once every six
+hours) only if automatic checks are turned on in Settings (off by default).
 `/api/ai-assist-status` returns the optional AI Assist mode, detected local
 providers, cloud-key presence by environment-variable name, privacy posture, and
 candidate workflows. Cloud keys report whether they are untested, verified, or
@@ -252,9 +252,10 @@ The command is generated only for verified UUID session ids and is run or copied
 from the recorded project directory when that directory still exists. Tools
 whose ids AIWatcher synthesises rather than reads (Cursor) return `"available":
 false` with the reason.
-`/api/update-apply` applies the same conservative source-checkout update as the
-CLI: it fast-forwards only a clean, non-diverged Git checkout and reports
-package-installer guidance otherwise. When the dashboard posts
+`/api/update-apply` applies the same conservative update as the CLI: source
+checkouts fast-forward only when clean and non-diverged, while package installs
+run the detected installer command (`pipx`, `uv tool`, or the active Python's
+`pip`). When the dashboard posts
 `{"restart": true}` after a successful apply, the local server restarts itself.
 The Companion is a separate process and is not restarted; the response carries
 `companion_running` and the message says what it needs.

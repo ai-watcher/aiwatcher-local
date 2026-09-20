@@ -3264,7 +3264,8 @@ class FeatureBranchUpdateBadgeTest(unittest.TestCase):
         body = self.js.split("function classifyUpdateStatus(data)", 1)[1].split("\n}\n", 1)[0]
         self.assertIn("return 'branch'", body)
         self.assertIn("data.ok && data.on_branch === false", body)
-        self.assertLess(body.index("return 'branch'"), body.index("return 'blocked'"))
+        source_block = body.split("data.ok && data.on_branch === false", 1)[1]
+        self.assertLess(source_block.index("return 'branch'"), source_block.index("return 'blocked'"))
 
     def test_the_branch_state_shares_the_quiet_style(self):
         rule = [line for line in self.css.splitlines() if ".update-banner.branch" in line]
@@ -3292,7 +3293,7 @@ class FeatureBranchUpdateBadgeTest(unittest.TestCase):
         html = (Path(ui.__file__).resolve().parent / "web" / "index.html").read_text(encoding="utf-8")
         button = html.split('id="updateBanner"', 1)[1].split("</button>", 1)[0]
         self.assertIn("hidden", button)
-        self.assertIn("banner.hidden = status === 'package'", self.js)
+        self.assertIn("banner.hidden = false", self.js)
 
     def test_clicking_the_badge_opens_full_details_without_a_success_toast(self):
         handler = js_function_source(self.js, "handleUpdateBannerClick")
@@ -3334,28 +3335,31 @@ class ApplyIsASecondStepTest(unittest.TestCase):
     def test_the_apply_button_names_the_restart(self):
         self.assertIn(">Apply update and restart dashboard<", self.html)
 
-    def test_package_installs_do_not_get_a_header_pill(self):
-        self.assertIn("banner.hidden = status === 'package'", self.js)
+    def test_package_installs_keep_the_update_control(self):
+        classifier = js_function_source(self.js, "classifyUpdateStatus")
+        self.assertIn("data.install_kind && data.install_kind !== 'source'", classifier)
+        self.assertIn("data.update_available && data.can_apply", classifier)
         self.assertIn('"update_install_kind": install_kind()', self.ui_source)
         install_renderer = js_function_source(self.js, "renderUpdateBannerForInstall")
-        self.assertIn("banner.hidden = kind === 'package'", install_renderer)
-        self.assertIn("autoCheckRow.hidden = kind === 'package'", install_renderer)
-        self.assertIn("kind === 'package' ? 'Show upgrade options'", install_renderer)
+        self.assertIn("banner.hidden = false", install_renderer)
+        self.assertIn("autoCheckRow.hidden = false", install_renderer)
+        self.assertIn("checkButton.textContent = 'Check for updates'", install_renderer)
         scheduler = js_function_source(self.js, "scheduleHeaderUpdateCheck")
-        self.assertIn("currentData.update_install_kind !== 'source'", scheduler)
+        self.assertNotIn("currentData.update_install_kind !== 'source'", scheduler)
         self.assertIn('"update_source_root": str(installed_source_root())', self.ui_source)
         self.assertIn("renderUpdateBannerForInstall(data.update_install_kind)", self.js)
         self.assertIn("installKind: currentData && currentData.update_install_kind", scheduler)
         self.assertIn("sourceRoot: currentData && currentData.update_source_root", scheduler)
         restore = self.js.split("function restoreCachedUpdateState", 1)[1].split("\n}\n", 1)[0]
         self.assertIn("installKind && installKind !== 'source'", restore)
-        self.assertIn("clearCachedUpdateState()", restore)
+        self.assertIn("setUpdateState('package'", restore)
         self.assertIn("cached.data.repo !== sourceRoot", restore)
 
-    def test_package_update_details_do_not_show_a_checkout_path(self):
+    def test_package_update_details_show_installer_without_checkout_path(self):
         renderer = js_function_source(self.js, "renderUpdateStatus")
         self.assertIn("data.install_kind === 'source' && (data.repo || data.process_cwd)", renderer)
-        self.assertIn("Package install", renderer)
+        self.assertIn("data.command_text", renderer)
+        self.assertIn("package_manager", renderer)
         self.assertIn("data.version", renderer)
 
 
