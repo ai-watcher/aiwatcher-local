@@ -1349,6 +1349,88 @@ def _fresh_start_evidence_hash(
     return hash_prompt(json.dumps(evidence, sort_keys=True, default=str))
 
 
+def _fresh_start_ai_evidence_packet(capsule: dict[str, object]) -> str:
+    """Build the bounded, structured facts the handoff composer may use."""
+    raw_evidence = capsule.get("evidence") if isinstance(capsule.get("evidence"), dict) else {}
+    continuation = (
+        capsule.get("continuation_context")
+        if isinstance(capsule.get("continuation_context"), dict)
+        else {}
+    )
+
+    def continuation_items(key: str, limit: int = 8) -> list[str]:
+        values = continuation.get(key)
+        if not isinstance(values, list):
+            return []
+        return [str(item).removeprefix("- ").strip()[:500] for item in values[:limit] if str(item).strip()]
+
+    commits = []
+    for item in (raw_evidence.get("commits") or [])[:5]:
+        if not isinstance(item, dict):
+            continue
+        sha = str(item.get("sha") or "").strip()
+        subject = str(item.get("subject") or "").strip()
+        commits.append(f"{sha}: {subject}".strip(": "))
+    tests = []
+    for item in (raw_evidence.get("tests") or [])[:6]:
+        if isinstance(item, dict):
+            tests.append(" | ".join(str(item.get(key) or "").strip() for key in ("name", "status", "path") if item.get(key)))
+        else:
+            tests.append(str(item))
+    logged_decisions = []
+    for item in (capsule.get("decisions") or [])[:5]:
+        if not isinstance(item, dict):
+            continue
+        summary = " ".join(str(item.get("summary") or "").split())
+        reasoning = " ".join(str(item.get("reasoning") or "").split())
+        if summary:
+            logged_decisions.append(f"{summary}{(' — ' + reasoning) if reasoning else ''}"[:500])
+    attachment = capsule.get("runtime_attachment") if isinstance(capsule.get("runtime_attachment"), dict) else {}
+    packet = {
+        "contract": "fresh_start_continuation_v2",
+        "source": {
+            "session_id": capsule.get("session_id"),
+            "project": capsule.get("project"),
+            "project_reliable": capsule.get("project_reliable"),
+            "tool": capsule.get("tool"),
+            "model": capsule.get("model"),
+            "updated_at": capsule.get("updated_at"),
+            "identity": capsule.get("source_identity_label") or attachment.get("identity_label"),
+            "return_capability": attachment.get("exact_return_label"),
+            "same_project_session_count": capsule.get("same_project_session_count"),
+        },
+        "continuation_type": capsule.get("handoff_type_label"),
+        "objective": capsule.get("objective"),
+        "objective_and_context": continuation_items("objective_and_context", 5),
+        "source_refs": list(capsule.get("source_refs") or [])[:8],
+        "constraints": list(capsule.get("constraints") or [])[:8],
+        "acceptance_criteria": list(capsule.get("acceptance_criteria") or [])[:8],
+        "logged_decisions": logged_decisions,
+        "completed_work": continuation_items("completed_work", 8),
+        "current_state": [
+            *continuation_items("current_state", 8),
+            f"Outcome: {capsule.get('outcome') or raw_evidence.get('inferred_outcome') or 'not confirmed'}",
+            f"Usage: {json.dumps(capsule.get('usage') or {}, sort_keys=True, default=str)}",
+        ],
+        "risks_and_uncertainties": continuation_items("risks_and_uncertainties", 8),
+        "next_steps": continuation_items("next_steps", 8),
+        "inspect_first": continuation_items("inspect_first", 10),
+        "evidence": {
+            "commits": commits,
+            "changed_files": [str(item) for item in (raw_evidence.get("changed_files") or [])[:12]],
+            "tests": [item for item in tests if item][:6],
+            "confidence": raw_evidence.get("confidence"),
+        },
+        "warnings": [str(item) for item in (capsule.get("warnings") or [])[:6]],
+        "prompt_excerpt": (
+            capsule.get("costliest_prompt")
+            if capsule.get("include_prompt_excerpt") and isinstance(capsule.get("costliest_prompt"), dict)
+            else None
+        ),
+    }
+    return json.dumps(packet, sort_keys=True, default=str)
+
+
 def _optimize_checklist(candidates: list[dict[str, object]]) -> str:
     lines = [
         "AIWatcher Optimize Workspace review",
@@ -2758,45 +2840,27 @@ def build_ai_assisted_handoff_detail(
     config = ai_assist_config(with_secrets=True)
     source_access = str(config.get("source_access") or "metadata_only")
     effective_prompt_excerpt = bool(include_prompt_excerpt and source_access in {"prompt_opt_in", "source_opt_in"})
-    local_brief_from_client = str(local_brief_override or "").strip()
-    if source_access == "metadata_only" and (
-        "Task context (your own prompt" in local_brief_from_client
-        or "Prompt excerpt" in local_brief_from_client
-    ):
-        local_brief_from_client = ""
-    if local_brief_from_client:
-        capsule = build_basic_handoff_detail(
-            session_id,
-            days=days,
-            target=target,
-            handoff_type=handoff_type,
-            objective=objective,
-            source_refs=source_refs,
-            constraints=constraints,
-            acceptance_criteria=acceptance_criteria,
-        )
-        if not capsule.get("error"):
-            capsule["next_brief"] = local_brief_from_client[:20_000]
-            capsule["basic"] = False
-            capsule["enrichment_status"] = "client_handoff_brief"
-    else:
-        capsule = build_handoff_detail(
-            session_id,
-            days=days,
-            target=target,
-            include_prompt_excerpt=effective_prompt_excerpt,
-            handoff_type=handoff_type,
-            objective=objective,
-            source_refs=source_refs,
-            constraints=constraints,
-            acceptance_criteria=acceptance_criteria,
-        )
+    # Never compose from the first-paint shell supplied by the browser. A
+    # model call is the expensive path, so it must wait for the authoritative
+    # timeline/Git/decision enrichment even when the drawer is still loading.
+    capsule = build_handoff_detail(
+        session_id,
+        days=days,
+        target=target,
+        include_prompt_excerpt=effective_prompt_excerpt,
+        handoff_type=handoff_type,
+        objective=objective,
+        source_refs=source_refs,
+        constraints=constraints,
+        acceptance_criteria=acceptance_criteria,
+    )
     if capsule.get("error"):
         return capsule
     capsule["ai_assist_prompt_excerpt_requested"] = bool(include_prompt_excerpt)
     capsule["ai_assist_prompt_excerpt_included"] = effective_prompt_excerpt
     local_brief = str(capsule.get("next_brief") or "")
     capsule["local_next_brief"] = local_brief
+    evidence_packet = _fresh_start_ai_evidence_packet(capsule)
     evidence_hash = _fresh_start_evidence_hash(capsule, source_access=source_access)
 
     def with_receipt(composed: str, result: dict[str, object]) -> str:
@@ -2814,8 +2878,8 @@ def build_ai_assisted_handoff_detail(
         workflow="fresh_start",
         config=config,
         evidence_hash=evidence_hash,
-        local_text=local_brief,
-        compose=lambda: improve_fresh_start_brief(config, local_brief=local_brief, timeout=20),
+        local_text=evidence_packet,
+        compose=lambda: improve_fresh_start_brief(config, local_brief=evidence_packet, timeout=20),
         session_id=session_id,
         reason_used="User clicked Improve with AI Assist on a Fresh Start brief.",
         reason_cached="User clicked Compose AI handoff on a Fresh Start brief; cached output reused.",
