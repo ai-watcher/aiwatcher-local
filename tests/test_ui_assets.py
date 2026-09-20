@@ -161,6 +161,58 @@ class LiveRefreshTest(unittest.TestCase):
         self.assertTrue(link.group(1).startswith("data:image/svg+xml,"))
 
 
+class AgentMapAssetsTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (ui._WEB_DIR / "index.js").read_text(encoding="utf-8")
+        cls.css = (ui._WEB_DIR / "index.css").read_text(encoding="utf-8")
+        cls.html = (ui._WEB_DIR / "index.html").read_text(encoding="utf-8")
+
+    def test_agent_map_lives_on_sessions_view(self):
+        sessions_view = self.html.split('id="view-sessions"', 1)[1].split('id="view-changes"', 1)[0]
+        self.assertIn('id="agentMapBody"', sessions_view)
+        self.assertIn('id="agentSessionSelect"', sessions_view)
+        self.assertIn('id="agentMapRefresh"', sessions_view)
+        self.assertIn('data-agent-mode="active"', sessions_view)
+
+    def test_agent_map_fetches_structural_metadata_endpoint(self):
+        source = js_function_source(self.js, "loadAgentHierarchy")
+        self.assertIn("/api/agent-hierarchy", source)
+        self.assertIn("cache: 'no-store'", source)
+        for sensitive in ("first_user_message", "preview", "prompt_text", "message_content"):
+            self.assertNotIn(sensitive, source)
+
+    def test_live_refresh_updates_agent_map_only_while_sessions_are_visible(self):
+        source = js_function_source(self.js, "refreshTick")
+        self.assertIn("view-sessions", source)
+        self.assertIn("loadAgentHierarchy()", source)
+
+    def test_active_mode_keeps_running_agents_and_ancestors(self):
+        source = js_function_source(self.js, "visibleAgentNodes")
+        self.assertIn("agent.status === 'running'", source)
+        self.assertIn("current.parent_agent_id", source)
+
+    def test_agent_map_has_keyboard_and_mobile_states(self):
+        self.assertIn('aria-pressed="${selectedAgentId === agent.agent_id ? \'true\' : \'false\'}"', self.js)
+        self.assertIn(".agent-node:focus-visible", self.css)
+        self.assertIn(".agent-map-layout { grid-template-columns: 1fr; }", self.css)
+
+    def test_initial_fetch_failure_replaces_the_loading_state(self):
+        source = js_function_source(self.js, "loadAgentHierarchy")
+        self.assertIn("available: false", source)
+        self.assertIn("renderAgentHierarchy()", source)
+
+    def test_successful_refresh_clears_a_previous_error(self):
+        source = js_function_source(self.js, "loadAgentHierarchy")
+        self.assertIn("if (status) status.textContent = `Updated", source)
+        self.assertNotIn("force || !status.textContent", source)
+
+    def test_window_change_immediately_refreshes_the_visible_agent_map(self):
+        source = js_function_source(self.js, "changeWindow")
+        self.assertIn("agentHierarchyCache = { sessions: [] }", source)
+        self.assertIn("loadAgentHierarchy()", source)
+
+
 class AmbientSurfaceTest(unittest.TestCase):
     """The ambient surface is the one screen the dashboard is meant to be glanced
     at. Its two states share five slots so the layout never reflows; these guard

@@ -1778,6 +1778,221 @@ def scan_codex_cli(since: datetime | None = None) -> list[LocalSession]:
     )
 
 
+def scan_codex_agent_hierarchy(since: datetime | None = None) -> dict[str, Any]:
+    """Read Codex's explicit spawn graph without reading conversation content."""
+    generated_at = datetime.now(timezone.utc).isoformat()
+    codex_db = _first_existing(CODEX_DB_PATHS)
+    if not codex_db:
+        return {
+            "available": False,
+            "source": "codex-sqlite-spawn-edges",
+            "generated_at": generated_at,
+            "reason": "Codex local state was not found.",
+            "sessions": [],
+        }
+
+    try:
+        # mode=ro remains read-only while still observing Codex's WAL updates.
+        conn = sqlite3.connect(f"{Path(codex_db).resolve().as_uri()}?mode=ro", uri=True, timeout=1.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+    except sqlite3.Error as exc:
+        return {
+            "available": False,
+            "source": "codex-sqlite-spawn-edges",
+            "generated_at": generated_at,
+            "reason": f"Codex local state could not be opened read-only: {exc}",
+            "sessions": [],
+        }
+
+    try:
+        tables = {
+            str(row[0])
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        }
+        if "threads" not in tables or "thread_spawn_edges" not in tables:
+            return {
+                "available": False,
+                "source": "codex-sqlite-spawn-edges",
+                "generated_at": generated_at,
+                "reason": "This Codex version does not expose agent spawn relationships.",
+                "sessions": [],
+            }
+
+        thread_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(threads)").fetchall()
+        }
+        edge_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(thread_spawn_edges)").fetchall()
+        }
+        if not {"id"}.issubset(thread_columns) or not {
+            "parent_thread_id", "child_thread_id", "status"
+        }.issubset(edge_columns):
+            return {
+                "available": False,
+                "source": "codex-sqlite-spawn-edges",
+                "generated_at": generated_at,
+                "reason": "Codex agent relationship metadata is incomplete.",
+                "sessions": [],
+            }
+
+        safe_columns = ["id", "cwd", "agent_nickname", "agent_role", "archived"]
+        timestamp_columns = ["created_at_ms", "created_at", "updated_at_ms", "updated_at"]
+        select_columns = [
+            column if column in thread_columns else f"NULL AS {column}"
+            for column in [*safe_columns, *timestamp_columns]
+        ]
+        thread_rows = conn.execute(
+            f"SELECT {', '.join(select_columns)} FROM threads"
+        ).fetchall()
+        edge_rows = conn.execute(
+            "SELECT parent_thread_id, child_thread_id, status FROM thread_spawn_edges"
+        ).fetchall()
+    except sqlite3.Error as exc:
+        return {
+            "available": False,
+            "source": "codex-sqlite-spawn-edges",
+            "generated_at": generated_at,
+            "reason": f"Codex agent relationships could not be read: {exc}",
+            "sessions": [],
+        }
+    finally:
+        conn.close()
+
+    threads: dict[str, dict[str, Any]] = {}
+    for row in thread_rows:
+        session_id = str(row["id"] or "")
+        if not session_id:
+            continue
+        created_at = _parse_codex_hierarchy_ts(row["created_at_ms"] or row["created_at"])
+        updated_at = _parse_codex_hierarchy_ts(row["updated_at_ms"] or row["updated_at"])
+        threads[session_id] = {
+            "agent_id": session_id,
+            "project_path": str(row["cwd"] or "") or None,
+            "name": str(row["agent_nickname"] or "") or None,
+            "role": str(row["agent_role"] or "") or None,
+            "archived": bool(row["archived"]),
+            "created_at_value": created_at,
+            "updated_at_value": updated_at,
+        }
+
+    parents: dict[str, str] = {}
+    edge_status: dict[str, str] = {}
+    for row in edge_rows:
+        parent_id = str(row["parent_thread_id"] or "")
+        child_id = str(row["child_thread_id"] or "")
+        if not parent_id or not child_id or parent_id == child_id:
+            continue
+        parents[child_id] = parent_id
+        edge_status[child_id] = str(row["status"] or "unknown").lower()
+        threads.setdefault(parent_id, _missing_codex_thread(parent_id))
+        threads.setdefault(child_id, _missing_codex_thread(child_id))
+
+    roots: dict[str, set[str]] = defaultdict(set)
+    for child_id in parents:
+        current = child_id
+        seen: set[str] = set()
+        while current in parents and current not in seen:
+            seen.add(current)
+            current = parents[current]
+        if current in seen:
+            continue
+        component = roots[current]
+        component.add(current)
+        component.update(seen)
+
+    sessions: list[dict[str, Any]] = []
+    for root_id, agent_ids in roots.items():
+        component_updated = max(
+            (threads[agent_id]["updated_at_value"] for agent_id in agent_ids if threads[agent_id]["updated_at_value"]),
+            default=None,
+        )
+        if since and component_updated and component_updated < since:
+            continue
+        has_open_agent = any(
+            edge_status.get(agent_id) == "open" and not threads[agent_id]["archived"]
+            for agent_id in agent_ids
+            if agent_id != root_id
+        )
+        agents: list[dict[str, Any]] = []
+        for agent_id in sorted(
+            agent_ids,
+            key=lambda item: threads[item]["created_at_value"] or datetime.min.replace(tzinfo=timezone.utc),
+        ):
+            thread = threads[agent_id]
+            is_root = agent_id == root_id
+            raw_status = edge_status.get(agent_id)
+            if is_root:
+                status = "running" if has_open_agent else "unknown"
+                latest_event = "working" if has_open_agent else "unknown"
+            elif raw_status == "closed":
+                status = "completed"
+                latest_event = "returned"
+            elif raw_status == "open" and not thread["archived"]:
+                status = "running"
+                latest_event = "working"
+            else:
+                status = "unknown"
+                latest_event = "unknown"
+            display_name = "Main agent" if is_root else (thread["name"] or f"Agent {agent_id[:8]}")
+            agents.append({
+                "agent_id": agent_id,
+                "parent_agent_id": parents.get(agent_id),
+                "name": display_name,
+                "role": "orchestration" if is_root else (thread["role"] or "delegated"),
+                "status": status,
+                "latest_event": latest_event,
+                "created_at": _iso_or_none(thread["created_at_value"]),
+                "updated_at": _iso_or_none(thread["updated_at_value"]),
+            })
+        sessions.append({
+            "session_id": root_id,
+            "project_path": threads[root_id]["project_path"],
+            "updated_at": _iso_or_none(component_updated),
+            "status": "running" if has_open_agent else "unknown",
+            "agent_count": len(agents),
+            "active_count": sum(agent["status"] == "running" for agent in agents),
+            "agents": agents,
+        })
+
+    sessions.sort(key=lambda item: item["updated_at"] or "", reverse=True)
+    return {
+        "available": True,
+        "source": "codex-sqlite-spawn-edges",
+        "generated_at": generated_at,
+        "reason": "Observed from Codex thread and spawn-edge metadata.",
+        "sessions": sessions,
+    }
+
+
+def _missing_codex_thread(session_id: str) -> dict[str, Any]:
+    return {
+        "agent_id": session_id,
+        "project_path": None,
+        "name": None,
+        "role": None,
+        "archived": False,
+        "created_at_value": None,
+        "updated_at_value": None,
+    }
+
+
+def _parse_codex_hierarchy_ts(value: Any) -> datetime | None:
+    try:
+        parsed = _parse_ts(value)
+    except (OSError, OverflowError, TypeError, ValueError):
+        return None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _iso_or_none(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
+
+
 def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSession], list[LocalEvent]]:
     global CODEX_ROLLOUT_CACHE
     sessions: list[LocalSession] = []

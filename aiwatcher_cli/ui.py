@@ -148,6 +148,7 @@ from .scanner import (
     model_usage_totals,
     scan_all,
     scan_all_events,
+    scan_codex_agent_hierarchy,
     segment_session_by_prompt,
     surface_coverage,
 )
@@ -1994,6 +1995,20 @@ def build_session_search(
             for row in matched
         ],
     }
+
+
+def build_agent_hierarchy(days: int = 30) -> dict[str, object]:
+    since = datetime.now(timezone.utc) - timedelta(days=max(1, min(90, days)))
+    result = scan_codex_agent_hierarchy(since=since)
+    sessions = []
+    for session in result.get("sessions", []):
+        project_path = session.get("project_path")
+        sessions.append({
+            **session,
+            "project": project_label(project_path),
+            "project_full": project_path if is_reliable_project_path(project_path) else "unknown",
+        })
+    return {**result, "sessions": sessions}
 
 
 def _survival_for_session(session_id: str) -> dict[str, str] | None:
@@ -8513,6 +8528,18 @@ class UIHandler(BaseHTTPRequestHandler):
                     evidence=evidence,
                     state_filter=state_filter,
                 )),
+                "application/json; charset=utf-8",
+            )
+            return
+        if parsed.path == "/api/agent-hierarchy":
+            params = parse_qs(parsed.query)
+            try:
+                days = max(1, min(90, int(params.get("days", ["30"])[0])))
+            except ValueError:
+                days = 30
+            self._send(
+                200,
+                json.dumps(build_agent_hierarchy(days)),
                 "application/json; charset=utf-8",
             )
             return

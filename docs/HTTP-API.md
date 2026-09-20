@@ -122,7 +122,7 @@ supported for external callers** — treat them as private and expect them to
 change without a deprecation period.
 
 `GET` — `/api/health`, `/api/summary`, `/api/companion-state`,
-`/api/companion-scan`, `/api/sessions`, `/api/session`,
+`/api/companion-scan`, `/api/sessions`, `/api/agent-hierarchy`, `/api/session`,
 `/api/session-summary`, `/api/project`, `/api/report`, `/api/journal`,
 `/api/handoff-basic`, `/api/handoff`,
 `/api/context-health`, `/api/ambient-intervention`, `/api/update-status`,
@@ -134,6 +134,9 @@ needed to keep the browser fallback consistent with the native companion.
 floating Companion presence control; it is intentionally content-free and does
 not expose prompt or source text. `/api/companion-scan` forces the companion to
 refresh local watch evidence without waiting for the next polling interval.
+`/api/agent-hierarchy` returns Codex agent nicknames, parent-child spawn links,
+lifecycle states, and timestamps for the Sessions view. It does not read or
+return prompts, message bodies, previews, source content, or tool payloads.
 `/api/health` reports the running dashboard's install kind, package manager,
 source root, process id, version, and launch directory so `aiwatcher start` can
 avoid reusing a dashboard from another checkout or package install.
