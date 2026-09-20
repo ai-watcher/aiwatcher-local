@@ -7766,29 +7766,28 @@ def build_companion_state() -> dict[str, object]:
                 pass
         tool = str(command_gate.get("tool") or "Claude Code")
         reason = str(command_gate.get("reason") or "A local command needs review before it runs.")
-        preview = str(command_gate.get("command_preview") or "").strip()
         gate_expires = _parse_iso_datetime(command_gate.get("expires_at"))
-        subtitle = reason
-        if preview:
-            subtitle = f"{preview} · {reason}"
         return {
             **base,
             "state": "command_gate",
-            "label": "Command Gate",
+            "label": "Command needs approval",
             "title": "Review command",
-            "subtitle": subtitle,
+            # Shell wrappers often begin with internal assignments such as
+            # `SP=/private/tmp/...`. They are useful on the full review page,
+            # but meaningless (and potentially sensitive) in a 46-character
+            # glanceable surface. Lead with the human reason instead.
+            "subtitle": reason,
             "expires_in_seconds": (
                 max(0, int((gate_expires - datetime.now(timezone.utc)).total_seconds()))
                 if gate_expires is not None
                 else None
             ),
-            "primary_label": "Review",
+            "primary_label": "Review command",
             "primary_action": "open_prompt_gate",
             "primary_url": str(command_gate.get("url") or "/?view=control"),
             "control_url": str(command_gate.get("url") or "/?view=control"),
             "detail": (
-                f"{tool} paused a shell command locally. Choose Allow once, Block, or Always allow before it continues."
-                + (f" Command preview: {preview}" if preview else "")
+                f"{tool} paused a shell command locally. Open the review to inspect the full command, then choose Allow once, Block, or Always allow."
             ),
         }
     # Second only to the prompt gate, and ahead of every advisory state below.

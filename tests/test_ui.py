@@ -2312,11 +2312,14 @@ class DashboardWindowTests(unittest.TestCase):
             state = ui.build_companion_state()
 
         self.assertEqual(state["state"], "command_gate")
-        self.assertEqual(state["label"], "Command Gate")
-        self.assertEqual(state["primary_label"], "Review")
+        self.assertEqual(state["label"], "Command needs approval")
+        self.assertEqual(state["primary_label"], "Review command")
         self.assertEqual(state["primary_action"], "open_prompt_gate")
         self.assertEqual(state["primary_url"], "http://127.0.0.1:9998/")
-        self.assertIn("cat .env", state["subtitle"])
+        self.assertEqual(state["subtitle"], "Reading a credential/secret file can expose its contents.")
+        self.assertNotIn("cat .env", state["subtitle"])
+        self.assertNotIn("cat .env", state["detail"])
+        self.assertIn("inspect the full command", state["detail"])
         self.assertIsInstance(state["expires_in_seconds"], int)
         mark_seen.assert_called_once_with("cmd-gate-1")
 
