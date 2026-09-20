@@ -34,7 +34,10 @@ eval(extract('nextRefreshDelay'));
 eval('async ' + extract('fetchDashboardJson'));
 (async () => {
   assert.equal(classifyUpdateStatus({ok:false,install_kind:'missing'}), 'error');
-  assert.equal(classifyUpdateStatus({ok:true,install_kind:'package'}), 'package');
+  assert.equal(classifyUpdateStatus({install_kind:'package'}), 'package');
+  assert.equal(classifyUpdateStatus({ok:true,install_kind:'package',update_available:false}), 'current');
+  assert.equal(classifyUpdateStatus({ok:true,install_kind:'package',update_available:true,can_apply:true}), 'available');
+  assert.equal(classifyUpdateStatus({ok:true,install_kind:'package',update_available:true,can_apply:false}), 'blocked');
   global.localStorage = {getItem: () => JSON.stringify({checkedAt:Date.now()-UPDATE_AUTO_CHECK_MS-1,data:{ok:true,install_kind:'source',repo:'/repo'}})};
   restoreCachedUpdateState({installKind:'source',sourceRoot:'/repo'});
   assert.equal(state[0], 'unknown');
