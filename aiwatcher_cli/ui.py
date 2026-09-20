@@ -484,7 +484,11 @@ def _context_review_signal_label(impact: str) -> str:
     return f"~{impact} replay at risk"
 
 
-def _context_review_companion_rows(candidates: list[dict[str, object]]) -> list[dict[str, object]]:
+def _context_review_companion_rows(
+    candidates: list[dict[str, object]],
+    *,
+    current_session_id: str = "",
+) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for row in candidates[:5]:
         project = str(row.get("project_full") or "")
@@ -503,8 +507,10 @@ def _context_review_companion_rows(candidates: list[dict[str, object]]) -> list[
                     latest_turn_tokens = 0
                 impact = compact_int(latest_turn_tokens) if latest_turn_tokens > 0 else ""
         severity = str(row.get("severity") or "").strip()
+        session_id = str(row.get("session_id") or "")
+        is_current = bool(current_session_id and session_id == current_session_id)
         rows.append({
-            "session_id": str(row.get("session_id") or ""),
+            "session_id": session_id,
             "tool": tool_label(str(row.get("tool") or "")),
             "project": _project_basename(project) or str(row.get("project") or "this project"),
             "waited_label": impact,
@@ -512,7 +518,9 @@ def _context_review_companion_rows(candidates: list[dict[str, object]]) -> list[
             "review_label": _context_review_signal_label(impact),
             "severity_label": severity,
             "activity_label": _context_review_activity_label(row),
-            "url": "/?view=watch#contextHealth",
+            "scope": "current" if is_current else "general",
+            "scope_label": "Current session" if is_current else "Review when ready",
+            "url": f"/?session={quote(session_id, safe='')}" if is_current and session_id else "/?view=watch#contextHealth",
             "kind": "context_review",
         })
     return rows
@@ -7984,8 +7992,8 @@ def build_companion_state() -> dict[str, object]:
             return {
                 **base,
                 "state": "context_review",
-                "label": "Context review",
-                "subtitle": f"{project_count} projects in Watch > Context Health",
+                "label": "Review when ready",
+                "subtitle": f"{project_count} saved context recommendations",
                 "primary_label": "Review all",
                 "primary_action": "open_url",
                 "primary_url": "/?view=watch#contextHealth",
@@ -8001,24 +8009,31 @@ def build_companion_state() -> dict[str, object]:
                     "tone": "info",
                     "label": f"{project_count} context review project{'s' if project_count != 1 else ''}",
                 },
-                "detail": "Open Watch > Context Health to review every project, or pick one row from the Companion queue.",
+                "detail": "These are general recommendations, not interruptions for the session in front of you. Pick a project or open all reviews in Watch.",
             }
+        foreground_session_id = str(foreground_candidate.get("session_id") or "")
+        foreground_project = _project_basename(foreground_candidate.get("project_full")) or "Current project"
+        foreground_rows = _context_review_companion_rows(
+            fresh_start_candidates,
+            current_session_id=foreground_session_id,
+        )
         return {
             **base,
             "state": "control_review",
-            "label": "Review context",
+            "label": "Current session",
             "subtitle": (
-                f"{project_count} projects in Watch > Context Health"
-                + (f" · {critical_count} critical" if critical_count else "")
+                f"{foreground_project} needs a context decision"
+                + (f" · {critical_count} critical" if critical_count > 1 else "")
             ),
-            "primary_label": "Review all",
+            "primary_label": "Review current",
             "primary_action": "open_url",
-            "primary_url": "/?view=watch#contextHealth",
+            "primary_session_id": foreground_session_id,
+            "primary_url": f"/?session={quote(foreground_session_id, safe='')}" if foreground_session_id else "/?view=watch#contextHealth",
             "skip_label": "Later",
             "skip_state": "control_recommended_group",
             "skip_project": "\n".join(project_lines),
             "skip_projects": project_lines,
-            "waiting_sessions": _context_review_companion_rows(fresh_start_candidates),
+            "waiting_sessions": foreground_rows,
             "fresh_start_project_count": project_count,
             "fresh_start_context_label": context_label,
             "badge": {
@@ -8028,7 +8043,7 @@ def build_companion_state() -> dict[str, object]:
             },
             "control_url": "/?view=watch#contextHealth",
             "watch_url": "/?view=watch#contextHealth",
-            "detail": "Open Watch > Context Health to review every project, or pick one row from the Companion queue.",
+            "detail": "Orange marks an action for the AI session in front of you. Other project recommendations remain available in the rows.",
         }
     bubble = summary.get("handoff_bubble")
     if fresh_start_context_enabled and isinstance(bubble, dict) and bubble.get("session_id"):
@@ -8112,18 +8127,29 @@ def build_companion_state() -> dict[str, object]:
                 if project_count
                 else "Context review waiting in Console"
             )
+            candidates = fresh_start_candidates or [bubble]
+            candidate_rows = _context_review_companion_rows(candidates)
+            project_name = _project_basename(bubble_project) or "One project"
             return {
                 **base,
-                "state": "watching",
-                "label": "Watching quietly",
-                "subtitle": subtitle,
-                "primary_label": "Console",
+                "state": "context_review",
+                "label": "Review when ready",
+                "subtitle": f"{project_name} · context recommendation saved",
+                "primary_label": "Open review",
                 "primary_action": "open_url",
                 "primary_url": "/?view=watch#contextHealth",
                 "skip_label": "Later",
                 "skip_state": "control_recommended_group",
                 "skip_project": bubble_project,
-                "detail": "Fresh Start nudges only blink when the matching AI tool or terminal is foreground.",
+                "skip_projects": [bubble_project] if bubble_project else [],
+                "waiting_sessions": candidate_rows,
+                "fresh_start_project_count": max(1, project_count),
+                "badge": {
+                    "count": max(1, project_count),
+                    "tone": "info",
+                    "label": f"{max(1, project_count)} saved context recommendation",
+                },
+                "detail": f"{subtitle}. This is a general recommendation, so it stays blue until the matching AI session is in front of you.",
             }
         return {
             **base,
