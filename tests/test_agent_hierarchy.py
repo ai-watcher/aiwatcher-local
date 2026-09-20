@@ -267,7 +267,7 @@ class CodexAgentHierarchyTests(unittest.TestCase):
     def test_malformed_and_naive_timestamps_degrade_safely(self) -> None:
         now = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as temp_dir:
-            db_path = Path(temp_dir) / "state with question?.sqlite"
+            db_path = Path(temp_dir) / "state with hash#.sqlite"
             self._create_db(db_path)
             self._insert_thread(db_path, "root", updated_at=now)
             self._insert_thread(db_path, "child", updated_at=now)
