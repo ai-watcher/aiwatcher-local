@@ -81,13 +81,13 @@ Use this when Python 3.10+ and pipx are already installed.
 macOS or Linux:
 
 ```sh
-pipx install aiwatcher-cli && ~/.local/bin/aiwatcher setup && ~/.local/bin/aiwatcher start --open-ui
+pipx install aiwatcher-local && ~/.local/bin/aiwatcher setup && ~/.local/bin/aiwatcher start --open-ui
 ```
 
 Windows PowerShell:
 
 ```powershell
-py -3 -m pipx install aiwatcher-cli; & "$env:USERPROFILE\.local\bin\aiwatcher.exe" setup; & "$env:USERPROFILE\.local\bin\aiwatcher.exe" start --open-ui
+py -3 -m pipx install aiwatcher-local; & "$env:USERPROFILE\.local\bin\aiwatcher.exe" setup; & "$env:USERPROFILE\.local\bin\aiwatcher.exe" start --open-ui
 ```
 
 Run `pipx ensurepath` later if you want to type `aiwatcher` without the full
@@ -105,9 +105,9 @@ command -v brew >/dev/null || { echo "Install Homebrew first: https://brew.sh"; 
 command -v python3 >/dev/null || brew install python
 command -v pipx >/dev/null || brew install pipx
 if [ -x ~/.local/bin/aiwatcher ]; then
-  pipx upgrade aiwatcher-cli
+  pipx upgrade aiwatcher-local
 else
-  pipx install aiwatcher-cli
+  pipx install aiwatcher-local
 fi
 ~/.local/bin/aiwatcher setup
 ~/.local/bin/aiwatcher start --open-ui
@@ -122,9 +122,9 @@ fi
 command -v python3 >/dev/null || sudo apt install -y python3 python3-pip
 command -v pipx >/dev/null || sudo apt install -y pipx
 if [ -x ~/.local/bin/aiwatcher ]; then
-  pipx upgrade aiwatcher-cli
+  pipx upgrade aiwatcher-local
 else
-  pipx install aiwatcher-cli
+  pipx install aiwatcher-local
 fi
 ~/.local/bin/aiwatcher setup
 ~/.local/bin/aiwatcher start --open-ui
@@ -146,9 +146,9 @@ py -3 -m pipx --version *> $null
 if ($LASTEXITCODE -ne 0) { py -3 -m pip install --user pipx }
 $aiwatcher = "$env:USERPROFILE\.local\bin\aiwatcher.exe"
 if (Test-Path $aiwatcher) {
-  py -3 -m pipx upgrade aiwatcher-cli
+  py -3 -m pipx upgrade aiwatcher-local
 } else {
-  py -3 -m pipx install aiwatcher-cli
+  py -3 -m pipx install aiwatcher-local
 }
 & $aiwatcher setup
 & $aiwatcher start --open-ui
@@ -269,10 +269,10 @@ The key detail is `python -m pip` inside the virtual environment. Do not use
 
 | Install type | Update command |
 | --- | --- |
-| PyPI `pipx` install | macOS/Linux: `pipx upgrade aiwatcher-cli`; Windows: `py -3 -m pipx upgrade aiwatcher-cli` |
-| PyPI `pip` install in a virtual environment | `python -m pip install --upgrade aiwatcher-cli` |
+| PyPI `pipx` install | macOS/Linux: `pipx upgrade aiwatcher-local`; Windows: `py -3 -m pipx upgrade aiwatcher-local` |
+| PyPI `pip` install in a virtual environment | `python -m pip install --upgrade aiwatcher-local` |
 | Source clone | `aiwatcher update --apply`, then `aiwatcher start --open-ui` |
-| `uv` tool install | `uv tool upgrade aiwatcher-cli` |
+| `uv` tool install | `uv tool upgrade aiwatcher-local` |
 
 For source clones, the top-bar update badge checks GitHub only when clicked
 unless you turn on automatic checks in Settings. Applying an update is a second
@@ -281,8 +281,15 @@ explicit step from Settings.
 The recommended install/update path is:
 
 ```sh
-pipx install aiwatcher-cli
-pipx upgrade aiwatcher-cli
+pipx install aiwatcher-local
+pipx upgrade aiwatcher-local
+```
+
+Users of the original `aiwatcher-cli` 0.1.0 package should migrate once:
+
+```sh
+pipx uninstall aiwatcher-cli
+pipx install aiwatcher-local
 ```
 
 Maintainers should use [docs/RELEASE.md](docs/RELEASE.md) before publishing.

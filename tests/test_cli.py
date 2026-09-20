@@ -252,7 +252,7 @@ class StartCommandCliTests(unittest.TestCase):
         }
         current = {
             "install_kind": "package",
-            "source_root": "/Users/test/.local/pipx/venvs/aiwatcher-cli/site-packages",
+            "source_root": "/Users/test/.local/pipx/venvs/aiwatcher-local/site-packages",
             "version": "0.1.0",
         }
         with (
@@ -279,7 +279,7 @@ class StartCommandCliTests(unittest.TestCase):
     def test_unidentified_recorded_dashboard_port_is_not_restarted_in_place(self) -> None:
         current = {
             "install_kind": "package",
-            "source_root": "/Users/test/.local/pipx/venvs/aiwatcher-cli/site-packages",
+            "source_root": "/Users/test/.local/pipx/venvs/aiwatcher-local/site-packages",
             "version": "0.1.0",
         }
         with (
@@ -618,7 +618,7 @@ class UpdateCommandCliTests(unittest.TestCase):
         output = stdout.getvalue()
         self.assertIn("managed as a package", output)
         self.assertNotIn(tmp, output)
-        self.assertIn("pipx upgrade aiwatcher-cli", output)
+        self.assertIn("pipx upgrade aiwatcher-local", output)
 
     def test_installed_package_is_a_healthy_state_and_never_invokes_git(self) -> None:
         with (
@@ -626,11 +626,11 @@ class UpdateCommandCliTests(unittest.TestCase):
             patch.object(
                 updater,
                 "installed_source_root",
-                return_value=Path("C:/Users/test/AppData/Local/pipx/venvs/aiwatcher-cli/Lib/site-packages"),
+                return_value=Path("C:/Users/test/AppData/Local/pipx/venvs/aiwatcher-local/Lib/site-packages"),
             ),
             patch.object(updater, "git_capture") as git_capture,
         ):
-            result = updater.check_for_updates()
+            result = updater.check_for_updates(fetch=False)
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["install_kind"], "package")
@@ -638,6 +638,82 @@ class UpdateCommandCliTests(unittest.TestCase):
         self.assertIn("installed as a package", str(result["message"]))
         self.assertNotIn("site-packages", str(result["message"]))
         git_capture.assert_not_called()
+
+    def test_github_package_install_compares_recorded_commit_to_main(self) -> None:
+        direct_url = {
+            "url": "https://github.com/ai-watcher/aiwatcher-local.git",
+            "vcs_info": {
+                "vcs": "git",
+                "requested_revision": "main",
+                "commit_id": "abc1234567890",
+            },
+        }
+        github_response = {
+            "ahead_by": 2,
+            "commits": [
+                {"sha": "def4567890000", "commit": {"message": "fix updater\n\nbody"}},
+                {"sha": "fedcba9876543", "commit": {"message": "release package"}},
+            ],
+        }
+        with (
+            patch.object(updater, "install_kind", return_value="package"),
+            patch.object(updater, "_direct_url_metadata", return_value=direct_url),
+            patch.object(updater, "package_manager", return_value="pipx"),
+            patch.object(updater.shutil, "which", return_value="/usr/local/bin/pipx"),
+            patch.object(updater, "_fetch_json", return_value=github_response) as fetch_json,
+            patch.object(updater, "git_capture") as git_capture,
+        ):
+            result = updater.check_for_updates()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["install_kind"], "package")
+        self.assertTrue(result["update_available"])
+        self.assertTrue(result["can_apply"])
+        self.assertEqual(result["behind"], 2)
+        self.assertEqual(result["installed_commit"], "abc123456789")
+        self.assertEqual(result["latest_commit"], "fedcba987654")
+        self.assertEqual(result["commits"][0]["subject"], "fix updater")
+        self.assertEqual(result["command"], ["pipx", "upgrade", "aiwatcher-local"])
+        self.assertIn("/compare/abc1234567890...main", fetch_json.call_args.args[0])
+        git_capture.assert_not_called()
+
+    def test_pypi_package_install_compares_versions(self) -> None:
+        with (
+            patch.object(updater, "install_kind", return_value="package"),
+            patch.object(updater, "_direct_url_metadata", return_value=None),
+            patch.object(updater, "_fetch_json", return_value={"info": {"version": "0.2.0"}}),
+        ):
+            result = updater.check_for_updates()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["latest_version"], "0.2.0")
+        self.assertTrue(result["update_available"])
+        self.assertTrue(result["can_apply"])
+        self.assertIn("0.2.0", str(result["message"]))
+
+    def test_package_apply_runs_the_detected_installer_command(self) -> None:
+        status = {
+            "ok": True,
+            "install_kind": "package",
+            "update_available": True,
+            "can_apply": True,
+            "command": ["pipx", "upgrade", "aiwatcher-local"],
+            "message": "2 update(s) available.",
+        }
+        completed = subprocess.CompletedProcess(status["command"], 0, stdout="upgraded\n", stderr="")
+        with (
+            patch.object(updater, "install_kind", return_value="package"),
+            patch.object(updater, "check_for_updates", return_value=status),
+            patch.object(updater.subprocess, "run", return_value=completed) as run,
+        ):
+            result = updater.apply_updates()
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["applied"])
+        self.assertTrue(result["restart_required"])
+        self.assertEqual(result["output"], "upgraded")
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ["pipx", "upgrade", "aiwatcher-local"])
 
     def test_windows_schannel_fetch_failure_has_actionable_copy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

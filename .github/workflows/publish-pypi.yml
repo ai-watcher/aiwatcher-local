@@ -41,7 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/project/aiwatcher-cli/
+      url: https://pypi.org/project/aiwatcher-local/
     permissions:
       id-token: write
     steps:

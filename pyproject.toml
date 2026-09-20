@@ -3,8 +3,8 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "aiwatcher-cli"
-version = "0.1.0"
+name = "aiwatcher-local"
+version = "0.1.1"
 description = "Local-first control loop for AI coding cost, safety, and outcomes"
 readme = "README.md"
 requires-python = ">=3.9"
