@@ -1063,7 +1063,8 @@ class DashboardWindowTests(unittest.TestCase):
         # dollar findings would promise a saving that does not exist.
         self.assertIsNone(card["impact_usd"])
         # Says plainly what it cannot distinguish, like the unbanked card does.
-        self.assertIn("answered a question worth asking", card["body"])
+        self.assertIn("research and uncommitted work can still be useful", card["body"])
+        self.assertNotIn("left nothing behind", card["body"])
 
     def test_false_starts_card_stays_silent_below_the_pattern_threshold(self) -> None:
         """Three of four is a coin flip, not a habit."""

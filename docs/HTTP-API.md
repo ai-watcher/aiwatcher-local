@@ -172,7 +172,12 @@ question. `/api/second-opinion-contents` records whether the analyst may open
 files in that project rather than only being given their paths. Off unless set,
 and deliberately separate from consent: agreeing to pay for a second opinion is
 not agreeing to let it read your source. `/api/ask-aiwatcher` answers
-dashboard-only local questions from indexed metadata. `/api/handoff-basic` and
+dashboard-only local questions from indexed metadata. Optional `ai_assist: true`
+uses configured AI Assist and requires `confirmed: true` when confirmation is
+enabled. This route is same-origin only. Optional `insight_key` limits the answer
+to a current Improve finding resolved by the server; stale keys return 409.
+That AI evidence packet excludes paths, transcripts and source files.
+`/api/handoff-basic` and
 `/api/handoff` accept the same dashboard-only Fresh Start options as their `GET` forms. `/api/handoff-ai-assist` runs the optional
 Fresh Start handoff composition workflow after the user explicitly asks for it;
 it makes one bounded model call, returns a compact paste-ready brief composed
@@ -208,7 +213,12 @@ companion, `/api/handoff-receipts-viewed` marks proof-pending receipts as seen,
 seen so it does not return (no body; the timestamp is the server's),
 `/api/update-auto-check` stores the Settings switch for automatic GitHub update
 checks (`{"enabled": bool}`, off by default),
-`/api/optimize-decision` records an Improve action, `/api/companion-skip`
+`/api/optimize-decision` records a workspace cleanup decision.
+`/api/improve-decision` records local feedback on a current Improve evidence key
+(`{"insight_key": "...", "days": 7, "decision": "reviewed" | "later" | "expected" | "helpful" | "not_helpful"}`).
+It is same-origin only, validates the key against current server evidence, and
+returns 409 for stale keys. It stores no prompt, source or free-text feedback.
+`/api/companion-skip`
 snoozes a non-blocking companion reminder, and
 `/api/ambient-intervention-action` records the native companion lifecycle
 (`displayed`, `acted`, `snoozed`, `dismissed`, or `failed`).
