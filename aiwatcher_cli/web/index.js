@@ -1393,13 +1393,21 @@ function handoffPayload(sessionId, target, includePrompt, options) {
     acceptance_criteria: next.acceptance || [],
   };
 }
-async function postJson(path, payload) {
-  const res = await fetch(path, {
+async function postJson(path, payload, options = {}) {
+  const timeoutMs = Number(options.timeoutMs || 0);
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  const timeoutId = controller ? window.setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const res = await fetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload || {}),
-  });
-  return res.json();
+      signal: controller ? controller.signal : undefined,
+    });
+    return await res.json();
+  } finally {
+    if (timeoutId !== null) window.clearTimeout(timeoutId);
+  }
 }
 function classifyUpdateStatus(data) {
   if (!data) return 'unknown';
@@ -2049,7 +2057,7 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
     </div>`);
   }
   try {
-    const capsule = await postJson('/api/handoff-ai-assist', payload);
+    const capsule = await postJson('/api/handoff-ai-assist', payload, { timeoutMs: 30000 });
     if (!isCurrentDrawer(token)) return;
     const working = document.getElementById('aiAssistWorking');
     if (working) working.remove();
@@ -2066,7 +2074,10 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
     if (!isCurrentDrawer(token)) return;
     const working = document.getElementById('aiAssistWorking');
     if (working) working.remove();
-    showToast('AI Assist could not improve this brief.', 'error');
+    const timedOut = error && error.name === 'AbortError';
+    showToast(timedOut
+      ? 'AI Assist took too long. The local brief is still ready; try again when the provider is responsive.'
+      : 'AI Assist could not improve this brief. The local brief is still ready.', 'error');
   }
 }
 async function openHandoff(sessionId, target = 'generic', includePrompt = false, options = null) {

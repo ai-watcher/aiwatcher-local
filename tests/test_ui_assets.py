@@ -3004,6 +3004,12 @@ class AiAssistDrawerTest(unittest.TestCase):
         self.assertIn("maybeAutoComposeFreshStart(capsule);", self._fn("openHandoff"))
         self.assertIn("auto_compose_fresh_start: document.getElementById('aiAssistAutoFreshStart').checked", self.js)
 
+    def test_fresh_start_ai_request_has_a_visible_recovery_deadline(self):
+        fn = self._fn("improveFreshStartWithAiAssist")
+        self.assertIn("{ timeoutMs: 30000 }", fn)
+        self.assertIn("error.name === 'AbortError'", fn)
+        self.assertIn("The local brief is still ready", fn)
+
     def test_an_attached_runtime_still_leaves_a_copy_that_only_copies(self):
         # The primary copies and opens the old workspace. Leaving that tool
         # for another one needs a copy that does nothing else.

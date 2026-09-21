@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import copy
 import json
 import os
 import re
@@ -269,6 +270,8 @@ UNATTRIBUTED_PROJECT = "__unattributed__"
 UNATTRIBUTED_PROJECT_LABEL = "Unattributed sessions"
 
 _SUMMARY_CACHE: dict[int, tuple[float, dict[str, object]]] = {}
+_HANDOFF_DETAIL_CACHE: dict[tuple[object, ...], tuple[float, dict[str, object]]] = {}
+HANDOFF_DETAIL_CACHE_TTL_SECONDS = 60.0
 _SUMMARY_REFRESHING: set[int] = set()
 _SUMMARY_REFRESHED_AT: dict[int, float] = {}
 _SUMMARY_CACHE_LOCK = threading.RLock()
@@ -2864,6 +2867,25 @@ def build_handoff_detail(
     row = _find_session_row(session_id, days=days)
     if not row:
         return {"error": "session not found"}
+    cache_key = (
+        session_id,
+        row.updated_at.isoformat() if row.updated_at else row.started_at.isoformat() if row.started_at else None,
+        days,
+        target,
+        include_prompt_excerpt,
+        handoff_type,
+        objective or "",
+        tuple(source_refs or []),
+        tuple(constraints or []),
+        tuple(acceptance_criteria or []),
+    )
+    now_monotonic = time.monotonic()
+    with _SUMMARY_CACHE_LOCK:
+        cached = _HANDOFF_DETAIL_CACHE.get(cache_key)
+        if cached and now_monotonic - cached[0] <= HANDOFF_DETAIL_CACHE_TTL_SECONDS:
+            capsule = copy.deepcopy(cached[1])
+            capsule["ai_assist"] = build_ai_assist_status(ai_assist_config())
+            return capsule
     events = sorted(
         [event for event in scan_all_events() if event.session_id == session_id],
         key=lambda event: event.timestamp or MIN_DT,
@@ -2890,6 +2912,11 @@ def build_handoff_detail(
     )
     capsule["ai_assist"] = build_ai_assist_status(ai_assist_config())
     capsule["context_quality"] = _fresh_start_context_quality(capsule)
+    with _SUMMARY_CACHE_LOCK:
+        _HANDOFF_DETAIL_CACHE[cache_key] = (now_monotonic, copy.deepcopy(capsule))
+        if len(_HANDOFF_DETAIL_CACHE) > 32:
+            oldest = min(_HANDOFF_DETAIL_CACHE, key=lambda key: _HANDOFF_DETAIL_CACHE[key][0])
+            _HANDOFF_DETAIL_CACHE.pop(oldest, None)
     return capsule
 
 

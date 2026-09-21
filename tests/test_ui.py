@@ -4973,6 +4973,31 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertNotEqual(improve.call_args.kwargs["local_brief"], visible_brief)
         self.assertNotEqual(capsule.get("enrichment_status"), "client_handoff_brief")
 
+    def test_handoff_detail_reuses_recent_authoritative_evidence(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="cached-handoff",
+            tool="codex-cli",
+            project_path="/repo/cache",
+            started_at=now - timedelta(hours=2),
+            updated_at=now - timedelta(minutes=2),
+        )
+        with ui._SUMMARY_CACHE_LOCK:
+            ui._SESSION_INDEX.clear()
+            ui._HANDOFF_DETAIL_CACHE.clear()
+        ui._index_sessions([row])
+        with (
+            patch.object(ui, "scan_all_events", return_value=[]) as scan,
+            patch.object(ui, "safe_runtime_processes", return_value=[]),
+            patch.object(ui, "ai_assist_config", return_value={"mode": "off"}),
+        ):
+            first = ui.build_handoff_detail("cached-handoff", days=7)
+            second = ui.build_handoff_detail("cached-handoff", days=7)
+
+        self.assertFalse(first.get("error"))
+        self.assertEqual(first["next_brief"], second["next_brief"])
+        self.assertEqual(scan.call_count, 1)
+
     def test_ai_assisted_handoff_composes_paste_ready_brief_and_receipt(self) -> None:
         now = datetime.now(timezone.utc)
         row = LocalSession(
