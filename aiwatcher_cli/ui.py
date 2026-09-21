@@ -1409,6 +1409,14 @@ def _fresh_start_ai_evidence_packet(capsule: dict[str, object]) -> str:
         },
         "continuation_type": capsule.get("handoff_type_label"),
         "objective": capsule.get("objective"),
+        "objective_evidence": {
+            "explicit_user_objective": capsule.get("objective"),
+            "prompt_excerpt_included": bool(capsule.get("include_prompt_excerpt")),
+            "rule": (
+                "Treat the objective as unknown unless explicit_user_objective or the included prompt excerpt states it. "
+                "Changed files and commits are workspace evidence, not proof of user intent."
+            ),
+        },
         "objective_and_context": continuation_items("objective_and_context", 5),
         "source_refs": list(capsule.get("source_refs") or [])[:8],
         "constraints": list(capsule.get("constraints") or [])[:8],
@@ -1436,7 +1444,28 @@ def _fresh_start_ai_evidence_packet(capsule: dict[str, object]) -> str:
             else None
         ),
     }
+    has_explicit_objective = bool(str(capsule.get("objective") or "").strip())
+    has_prompt_context = bool(packet["prompt_excerpt"])
+    packet["context_quality"] = {
+        "level": "strong" if has_explicit_objective and has_prompt_context else "partial" if has_explicit_objective or has_prompt_context else "metadata_only",
+        "objective_known": has_explicit_objective or has_prompt_context,
+        "note": (
+            "User intent is present in supplied objective or opted-in prompt evidence."
+            if has_explicit_objective or has_prompt_context
+            else "User intent is not present; compose a verification-first handoff and do not infer it from files or commits."
+        ),
+    }
     return json.dumps(packet, sort_keys=True, default=str)
+
+
+def _fresh_start_context_quality(capsule: dict[str, object]) -> dict[str, object]:
+    explicit_objective = bool(str(capsule.get("objective") or "").strip())
+    prompt_included = bool(capsule.get("include_prompt_excerpt") and capsule.get("costliest_prompt"))
+    if explicit_objective and prompt_included:
+        return {"level": "strong", "label": "Objective + prompt context", "objective_known": True}
+    if explicit_objective or prompt_included:
+        return {"level": "partial", "label": "Partial task context", "objective_known": True}
+    return {"level": "metadata_only", "label": "Objective needs verification", "objective_known": False}
 
 
 def _optimize_checklist(candidates: list[dict[str, object]]) -> str:
@@ -2787,6 +2816,11 @@ def build_basic_handoff_detail(
         "runtime_attachment": attachment.to_json(),
         "basic": True,
         "enrichment_status": "loading",
+        "context_quality": {
+            "level": "metadata_only" if not objective else "partial",
+            "label": "Objective needs verification" if not objective else "Partial task context",
+            "objective_known": bool(objective),
+        },
     }
 
 
@@ -2829,6 +2863,7 @@ def build_handoff_detail(
         same_project_session_count=_same_project_session_count(row),
     )
     capsule["ai_assist"] = build_ai_assist_status(ai_assist_config())
+    capsule["context_quality"] = _fresh_start_context_quality(capsule)
     return capsule
 
 

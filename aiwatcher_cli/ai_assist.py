@@ -873,7 +873,8 @@ _FRESH_START_SPEC = _WorkflowSpec(
         "Preserve deterministic evidence boundaries: do not invent saved tokens, commits, tests, "
         "files, outcomes, exact chat links, secrets, or prior conversation content. If prompt text "
         "or transcript content is not present, say the task must be reconstructed from repo state "
-        "and local evidence. Prefer specific evidence from the handoff over generic advice. Every "
+        "and local evidence. Never infer the user's objective from changed files, commit subjects, "
+        "or token counts; those describe workspace state, not intent. Prefer specific evidence from the handoff over generic advice. Every "
         "useful bullet should carry a concrete path, file, session id, count, decision, command, "
         "or explicit uncertainty from the evidence when one exists."
     ),
@@ -898,7 +899,8 @@ _FRESH_START_SPEC = _WorkflowSpec(
         "boilerplate from the local handoff unless the evidence is genuinely missing. Keep it short "
         "enough to paste without carrying the whole old conversation. Do not use vague goals like "
         "\"reconstruct the current work\" unless no stronger objective is present; tie the goal to "
-        "the observed workspace/tool/path/evidence instead."
+        "the observed workspace/tool/path/evidence instead. When context_quality.objective_known is false, "
+        "state that the objective is unknown and make the first action verify it; do not manufacture a coding goal."
     ),
     evidence_heading="Local AIWatcher handoff evidence:",
     structure=_structured_handoff_text,
