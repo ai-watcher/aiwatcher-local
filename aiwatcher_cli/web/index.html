@@ -268,6 +268,24 @@
         <div><h2>Sessions</h2><p>Search sessions, inspect projects, and continue prior local AI work. Prompt text is shown for your own review only, never uploaded.</p></div>
         <span class="note-chip local">Private</span>
       </div>
+      <section class="agent-map-section" aria-labelledby="agentMapTitle">
+        <div class="section-title agent-map-heading">
+          <div><h3 id="agentMapTitle">Agent map</h3><p>Recorded Codex and Claude Code relationships.</p></div>
+          <span class="note-chip" id="agentMapCoverage">Checking local metadata</span>
+        </div>
+        <div class="agent-map-toolbar">
+          <label for="agentSessionSelect">Session</label>
+          <select id="agentSessionSelect" onchange="selectAgentSession(this.value)"></select>
+          <div class="agent-map-modes" role="group" aria-label="Agent visibility">
+            <button type="button" aria-pressed="false" data-agent-mode="active" onclick="setAgentMapMode('active')">Running</button>
+            <button type="button" class="active" aria-pressed="true" data-agent-mode="all" onclick="setAgentMapMode('all')">All</button>
+          </div>
+          <button class="btn-quiet" id="agentMapRefresh" onclick="loadAgentHierarchy(true)">Refresh</button>
+        </div>
+        <div id="agentMapBody" class="agent-map-body"><div class="loading">Loading agent relationships...</div></div>
+        <p class="receipt-note agent-map-status" id="agentMapStatus" aria-live="polite"></p>
+        <p class="receipt-note" id="agentMapCoverageNote"></p>
+      </section>
       <div class="session-filters">
         <input id="sessionSearch" type="text" placeholder="Search project, tool, model, session id, or a file/topic keyword" oninput="debounceSessionSearch()">
         <select id="sessionOutcomeFilter" onchange="loadSessions()">

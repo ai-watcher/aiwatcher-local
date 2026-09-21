@@ -1520,11 +1520,11 @@ function restoreCachedUpdateState(context = {}) {
   setUpdateState('unknown', null, 0);
   return null;
 }
-async function fetchDashboardJson(url, timeoutMs = 15000) {
+async function fetchDashboardJson(url, timeoutMs = 15000, options = {}) {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetch(url, { ...options, signal: controller.signal });
     if (!response.ok) throw new Error(`Request failed (${response.status})`);
     return await response.json();
   } finally {
@@ -5187,6 +5187,7 @@ function renderImproveResults(results) {
 // One decision per page load; see the call site.
 let firstRunRouted = false;
 let sessionsLoadedForDays = null;
+let agentHierarchyLoadedForDays = null;
 let reportLoadedForDays = null;
 let reportLoading = false;
 let freshStartReceiptsMarkedViewed = false;
@@ -5197,6 +5198,11 @@ let aiAssistFormDirty = false;
 // lives in this payload, not in /api/session.
 let contextHealthCache = [];
 let sessionRowsCache = [];
+let agentHierarchyCache = { sessions: [] };
+let selectedAgentSessionId = '';
+let selectedAgentId = '';
+let agentMapMode = 'all';
+let agentHierarchyToken = 0;
 let changeRowsCache = [];
 let sessionSort = { key: 'updated_at', dir: 'desc' };
 // The server returns rows already ordered -- by relevance when there is a search
@@ -5384,6 +5390,7 @@ function showView(view) {
   });
   const days = document.getElementById('days').value;
   if (view === 'sessions' && sessionsLoadedForDays !== days) loadSessions();
+  if (view === 'sessions' && agentHierarchyLoadedForDays !== days) loadAgentHierarchy();
   if (view === 'receipts' && reportLoadedForDays !== days) loadReport();
   if (view === 'receipts') markFreshStartReceiptsViewed();
 }
@@ -5401,7 +5408,24 @@ function showSettingsPanel(panel) {
 }
 function changeWindow() {
   sessionsLoadedForDays = null;
+  agentHierarchyLoadedForDays = null;
   reportLoadedForDays = null;
+  const sessionsView = document.getElementById('view-sessions');
+  if (sessionsView && !sessionsView.hidden) {
+    agentHierarchyCache = { sessions: [] };
+    const body = document.getElementById('agentMapBody');
+    const select = document.getElementById('agentSessionSelect');
+    const coverage = document.getElementById('agentMapCoverage');
+    const status = document.getElementById('agentMapStatus');
+    if (body) body.innerHTML = '<div class="agent-map-empty"><strong>Loading agent relationships...</strong></div>';
+    if (select) {
+      select.innerHTML = '<option value="">Loading sessions...</option>';
+      select.disabled = true;
+    }
+    if (coverage) coverage.textContent = 'Loading';
+    if (status) status.textContent = 'Refreshing for the selected window...';
+    loadAgentHierarchy();
+  }
   load();
 }
 let sessionSearchTimer = null;
@@ -5414,6 +5438,197 @@ function clearSessionFilters() {
   document.getElementById('sessionOutcomeFilter').value = '';
   document.getElementById('sessionStateFilter').value = '';
   loadSessions();
+}
+
+function agentStatusLabel(status) {
+  return ({ running: 'Running', completed: 'Returned', interrupted: 'Interrupted', unknown: 'Unknown' })[status] || status || 'Unknown';
+}
+
+function agentEventLabel(eventName) {
+  return ({ working: 'working', returned: 'returned findings', interrupted: 'interrupted', completed: 'completed', unknown: 'unknown' })[eventName] || eventName || 'unknown';
+}
+
+function selectedAgentSession() {
+  const sessions = agentHierarchyCache.sessions || [];
+  return sessions.find(session => session.selection_id === selectedAgentSessionId) || sessions[0] || null;
+}
+
+function selectAgentSession(sessionId) {
+  selectedAgentSessionId = sessionId;
+  selectedAgentId = '';
+  renderAgentHierarchy();
+}
+
+function selectAgentNode(agentId) {
+  selectedAgentId = agentId;
+  renderAgentHierarchy();
+}
+
+function setAgentMapMode(mode) {
+  agentMapMode = mode === 'all' ? 'all' : 'active';
+  document.querySelectorAll('[data-agent-mode]').forEach(button => {
+    const active = button.dataset.agentMode === agentMapMode;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+  renderAgentHierarchy();
+}
+
+function visibleAgentNodes(session) {
+  const agents = session.agents || [];
+  if (agentMapMode === 'all') return agents;
+  if (!session.active_count) return [];
+  const byId = new Map(agents.map(agent => [agent.agent_id, agent]));
+  const visible = new Set(agents.filter(agent => agent.status === 'running').map(agent => agent.agent_id));
+  agents.filter(agent => agent.parent_agent_id === null).forEach(agent => visible.add(agent.agent_id));
+  [...visible].forEach(agentId => {
+    let current = byId.get(agentId);
+    const seen = new Set();
+    while (current && current.parent_agent_id && !seen.has(current.agent_id)) {
+      seen.add(current.agent_id);
+      visible.add(current.parent_agent_id);
+      current = byId.get(current.parent_agent_id);
+    }
+  });
+  return agents.filter(agent => visible.has(agent.agent_id));
+}
+
+function renderAgentBranch(agent, agents, ancestors = new Set()) {
+  if (!agent || ancestors.has(agent.agent_id)) return '';
+  if (ancestors.size >= 32) return '<li>Deeper relationships omitted from this view.</li>';
+  const nextAncestors = new Set(ancestors);
+  nextAncestors.add(agent.agent_id);
+  const children = agents
+    .filter(candidate => candidate.parent_agent_id === agent.agent_id)
+    .sort((left, right) => Date.parse(left.created_at || '') - Date.parse(right.created_at || ''));
+  return `<li>
+    <button type="button" class="agent-node${selectedAgentId === agent.agent_id ? ' selected' : ''}" data-agent="${esc(agent.agent_id)}" onclick="selectAgentNode(this.dataset.agent)" aria-pressed="${selectedAgentId === agent.agent_id ? 'true' : 'false'}">
+      <span class="agent-state-dot ${esc(agent.status)}" aria-hidden="true"></span>
+      <span class="agent-node-copy"><strong>${esc(agent.name)}</strong><small>${esc(agent.role)} · ${esc(agentEventLabel(agent.latest_event))}</small></span>
+      <span class="agent-status ${esc(agent.status)}">${esc(agentStatusLabel(agent.status))}</span>
+    </button>
+    ${children.length ? `<ul>${children.map(child => renderAgentBranch(child, agents, nextAncestors)).join('')}</ul>` : ''}
+  </li>`;
+}
+
+function renderAgentHierarchy() {
+  const body = document.getElementById('agentMapBody');
+  const select = document.getElementById('agentSessionSelect');
+  const coverage = document.getElementById('agentMapCoverage');
+  if (!body || !select || !coverage) return;
+  const sessions = agentHierarchyCache.sessions || [];
+  if (!agentHierarchyCache.available) {
+    select.innerHTML = '<option value="">No agent sessions</option>';
+    select.disabled = true;
+    coverage.textContent = 'Unavailable';
+    body.innerHTML = `<div class="agent-map-empty"><strong>Agent relationships unavailable</strong><p>${esc(agentHierarchyCache.reason || 'No supported local relationship metadata is available.')}</p></div>`;
+    return;
+  }
+  if (!sessions.length) {
+    select.innerHTML = '<option value="">No delegated sessions</option>';
+    select.disabled = true;
+    coverage.textContent = 'Observed';
+    body.innerHTML = '<div class="agent-map-empty"><strong>No recorded agent relationships in this window</strong></div>';
+    return;
+  }
+  if (!sessions.some(session => session.selection_id === selectedAgentSessionId)) {
+    selectedAgentSessionId = (sessions.find(session => session.status === 'running') || sessions[0]).selection_id;
+  }
+  const session = selectedAgentSession();
+  const allAgents = session.agents || [];
+  const agents = visibleAgentNodes(session);
+  const runningCount = allAgents.filter(agent => agent.status === 'running').length;
+  const returnedCount = allAgents.filter(agent => agent.status === 'completed').length;
+  const uncertainCount = allAgents.length - runningCount - returnedCount;
+  if (!agents.some(agent => agent.agent_id === selectedAgentId)) {
+    selectedAgentId = (agents.find(agent => agent.parent_agent_id === null) || agents[0] || {}).agent_id || '';
+  }
+  const agent = agents.find(candidate => candidate.agent_id === selectedAgentId) || agents[0];
+  const parent = agent ? allAgents.find(candidate => candidate.agent_id === agent.parent_agent_id) : null;
+  const childCount = agent ? allAgents.filter(candidate => candidate.parent_agent_id === agent.agent_id).length : 0;
+  const roots = agents.filter(candidate => candidate.parent_agent_id === null || !agents.some(parentCandidate => parentCandidate.agent_id === candidate.parent_agent_id));
+  select.disabled = false;
+  select.innerHTML = sessions.map(item => `<option value="${esc(item.selection_id)}"${item.selection_id === session.selection_id ? ' selected' : ''}>${esc(item.tool)} · ${esc(projectName(item))} · ${esc(item.session_id)} · ${esc(item.agent_count)} agents</option>`).join('');
+  coverage.textContent = `${sessions.length} session${sessions.length === 1 ? '' : 's'} observed`;
+  body.innerHTML = `<div class="agent-map-summary" aria-label="Agent status summary">
+      <span><strong>${esc(session.agent_count)}</strong> agents</span>
+      <span><strong>${esc(runningCount)}</strong> verified running</span>
+      <span><strong>${esc(returnedCount)}</strong> verified returned</span>
+      ${uncertainCount ? `<span><strong>${esc(uncertainCount)}</strong> unknown or interrupted</span>` : ''}
+      ${agentMapMode === 'active' && session.agent_count > agents.length ? `<span><strong>${esc(session.agent_count - agents.length)}</strong> hidden</span>` : ''}
+      <span class="agent-map-source">${esc(session.tool)} metadata only</span>
+    </div>
+    <p class="receipt-note">${esc(session.relationship_note || 'Recorded delegation links; execution and successful return are unverified.')}</p>
+    <p class="receipt-note">Project: ${esc(session.project_full)} · Session: ${esc(session.session_id)}</p>
+    <div class="agent-map-layout">
+      <div class="agent-tree-pane">
+        ${!agents.length ? '<p>No verified running agents. Choose All to inspect recorded relationships.</p>' : ''}
+        <ul class="agent-tree" aria-label="Agent delegation hierarchy">${roots.map(root => renderAgentBranch(root, agents)).join('')}</ul>
+      </div>
+      <aside class="agent-detail-pane" aria-label="Selected agent detail">
+        ${agent ? `<div class="agent-detail-title"><div><span>Selected agent</span><h4>${esc(agent.name)}</h4></div><span class="agent-status ${esc(agent.status)}">${esc(agentStatusLabel(agent.status))}</span></div>
+          <dl>
+            <dt>Role</dt><dd>${esc(agent.role)}</dd>
+            <dt>Latest event</dt><dd>${esc(agentEventLabel(agent.latest_event))}</dd>
+            <dt>Relationship</dt><dd>${esc(agent.relationship_status || 'unknown')}</dd>
+            <dt>Parent</dt><dd>${esc(parent ? parent.name : 'Root agent')}</dd>
+            <dt>Children</dt><dd>${esc(childCount)}</dd>
+            <dt>Updated</dt><dd>${esc(dateLabel(agent.updated_at))}</dd>
+          </dl>` : '<div class="empty">Select an agent.</div>'}
+      </aside>
+    </div>`;
+}
+
+async function loadAgentHierarchy(force = false) {
+  const days = document.getElementById('days').value;
+  const button = document.getElementById('agentMapRefresh');
+  const status = document.getElementById('agentMapStatus');
+  const focusedElement = document.activeElement;
+  const focusedAgent = focusedElement && focusedElement.dataset ? focusedElement.dataset.agent : '';
+  const token = ++agentHierarchyToken;
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Refreshing...';
+  }
+  try {
+    const res = await fetchDashboardJson(`/api/agent-hierarchy?days=${encodeURIComponent(days)}`, 15000, { cache: 'no-store' });
+    const data = res;
+    if (token !== agentHierarchyToken) return;
+    const changed = JSON.stringify(data.sessions || []) !== JSON.stringify(agentHierarchyCache.sessions || [])
+      || data.available !== agentHierarchyCache.available
+      || data.reason !== agentHierarchyCache.reason;
+    agentHierarchyCache = data;
+    agentHierarchyLoadedForDays = days;
+    const restoreFocus = focusedAgent && document.activeElement === focusedElement;
+    if (changed || force) renderAgentHierarchy();
+    if (restoreFocus && (changed || force)) {
+      const replacement = Array.from(document.querySelectorAll('[data-agent]')).find(node => node.dataset.agent === focusedAgent);
+      if (replacement) replacement.focus();
+    }
+    if (status) status.textContent = `Updated ${new Date(data.generated_at || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+    const coverageNote = document.getElementById('agentMapCoverageNote');
+    if (coverageNote) coverageNote.textContent = [
+      ...(data.coverage || []).map(item => `${item.tool}: ${item.available ? 'relationship metadata available' : 'unavailable'}`),
+      `Other tools: relationship coverage not yet available`,
+      data.truncated ? 'Partial results: scan limit reached.' : '',
+      data.partial ? 'Some local metadata is unavailable.' : '',
+      data.undated_count ? `${data.undated_count} undated groups excluded from this window.` : '',
+    ].filter(Boolean).join(' · ');
+  } catch (error) {
+    if (token !== agentHierarchyToken) return;
+    const message = error && error.message ? error.message : 'Agent relationships could not be refreshed.';
+    if (agentHierarchyLoadedForDays !== days || !agentHierarchyCache.available) {
+      agentHierarchyCache = { available: false, reason: message, sessions: [] };
+      agentHierarchyLoadedForDays = days;
+      renderAgentHierarchy();
+    }
+    if (status) status.textContent = message;
+  } finally {
+    if (button && token === agentHierarchyToken) {
+      button.disabled = false;
+      button.textContent = 'Refresh';
+    }
+  }
 }
 function compareValues(a, b, key) {
   const av = a && a[key] !== undefined && a[key] !== null ? a[key] : '';
@@ -5794,6 +6009,8 @@ function refreshTick() {
   // A scheduled tick never stacks on a load that is still running -- it waits and
   // tries again. User-initiated loads are not gated by this.
   if (loadInFlight) { scheduleRefresh(REFRESH_CATCHUP_MS); return; }
+  const sessionsView = document.getElementById('view-sessions');
+  if (sessionsView && !sessionsView.hidden) loadAgentHierarchy();
   load(false, false);
 }
 

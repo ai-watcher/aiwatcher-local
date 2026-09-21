@@ -1778,6 +1778,381 @@ def scan_codex_cli(since: datetime | None = None) -> list[LocalSession]:
     )
 
 
+AGENT_HIERARCHY_EDGE_LIMIT = 1000
+AGENT_HIERARCHY_ENTRY_LIMIT = 5000
+
+
+def scan_codex_agent_hierarchy(since: datetime | None = None) -> dict[str, Any]:
+    """Read Codex's explicit spawn graph without reading conversation content."""
+    generated_at = datetime.now(timezone.utc).isoformat()
+    codex_db = _first_existing(CODEX_DB_PATHS)
+    if not codex_db:
+        return {
+            "available": False,
+            "source": "codex-sqlite-spawn-edges",
+            "generated_at": generated_at,
+            "reason": "Codex local state was not found.",
+            "sessions": [],
+        }
+
+    try:
+        # mode=ro remains read-only while still observing Codex's WAL updates.
+        conn = sqlite3.connect(f"{Path(codex_db).resolve().as_uri()}?mode=ro", uri=True, timeout=1.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+        # Bound database work as well as returned rows; no indexes are written
+        # into another application's database.
+        progress_calls = 0
+        def stop_expensive_query() -> int:
+            nonlocal progress_calls
+            progress_calls += 1
+            return int(progress_calls > 2000)
+        conn.set_progress_handler(stop_expensive_query, 1000)
+    except sqlite3.Error as exc:
+        return {
+            "available": False,
+            "source": "codex-sqlite-spawn-edges",
+            "generated_at": generated_at,
+            "reason": f"Codex local state could not be opened read-only: {exc}",
+            "sessions": [],
+        }
+
+    try:
+        tables = {
+            str(row[0])
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        }
+        if "threads" not in tables or "thread_spawn_edges" not in tables:
+            return {
+                "available": False,
+                "source": "codex-sqlite-spawn-edges",
+                "generated_at": generated_at,
+                "reason": "This Codex version does not expose agent spawn relationships.",
+                "sessions": [],
+            }
+
+        thread_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(threads)").fetchall()
+        }
+        edge_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(thread_spawn_edges)").fetchall()
+        }
+        if not {"id"}.issubset(thread_columns) or not {
+            "parent_thread_id", "child_thread_id", "status"
+        }.issubset(edge_columns):
+            return {
+                "available": False,
+                "source": "codex-sqlite-spawn-edges",
+                "generated_at": generated_at,
+                "reason": "Codex agent relationship metadata is incomplete.",
+                "sessions": [],
+            }
+
+        safe_columns = ["id", "cwd", "agent_nickname", "agent_role", "archived"]
+        timestamp_columns = ["created_at_ms", "created_at", "updated_at_ms", "updated_at"]
+        select_columns = [
+            column if column in thread_columns else f"NULL AS {column}"
+            for column in [*safe_columns, *timestamp_columns]
+        ]
+        def timestamp_value(primary: Any, fallback: Any) -> float:
+            value = _parse_codex_hierarchy_ts(primary) or _parse_codex_hierarchy_ts(fallback)
+            return value.timestamp() if value else 0
+        conn.create_function("aiw_timestamp", 2, timestamp_value)
+        def updated_sql(alias: str) -> str:
+            columns = [f"{alias}.{column}" if column in thread_columns else "NULL" for column in ("updated_at_ms", "updated_at")]
+            return f"aiw_timestamp({', '.join(columns)})"
+        ordering = f"MAX({updated_sql('child')}, {updated_sql('parent')}) DESC,"
+        edge_rows = conn.execute(
+            "SELECT edge.parent_thread_id, edge.child_thread_id, edge.status FROM thread_spawn_edges edge "
+            "LEFT JOIN threads child ON child.id = edge.child_thread_id "
+            "LEFT JOIN threads parent ON parent.id = edge.parent_thread_id "
+            f"ORDER BY {ordering} edge.child_thread_id LIMIT ?",
+            (AGENT_HIERARCHY_EDGE_LIMIT + 1,),
+        ).fetchall()
+        truncated = len(edge_rows) > AGENT_HIERARCHY_EDGE_LIMIT
+        edge_rows = edge_rows[:AGENT_HIERARCHY_EDGE_LIMIT]
+        # Recover ancestors within a separate budget. A clipped subtree must
+        # never be presented as a different root session.
+        children = {str(row["child_thread_id"]) for row in edge_rows}
+        frontier = {str(row["parent_thread_id"]) for row in edge_rows} - children
+        incomplete_roots: set[str] = set()
+        ancestry_budget = AGENT_HIERARCHY_EDGE_LIMIT
+        while frontier:
+            next_frontier: set[str] = set()
+            for offset in range(0, len(frontier), 400):
+                batch = sorted(frontier)[offset:offset + 400]
+                ancestors = conn.execute(
+                    "SELECT parent_thread_id, child_thread_id, status FROM thread_spawn_edges "
+                    f"WHERE child_thread_id IN ({','.join('?' for _ in batch)}) LIMIT ?",
+                    [*batch, ancestry_budget + 1],
+                ).fetchall()
+                for row in ancestors:
+                    if ancestry_budget <= 0:
+                        incomplete_roots.update(batch)
+                        truncated = True
+                        break
+                    ancestry_budget -= 1
+                    edge_rows.append(row)
+                    children.add(str(row["child_thread_id"]))
+                    next_frontier.add(str(row["parent_thread_id"]))
+            frontier = next_frontier - children
+        ids = sorted({str(row[key]) for row in edge_rows for key in ("parent_thread_id", "child_thread_id") if row[key]})
+        thread_rows = []
+        for offset in range(0, len(ids), 400):
+            batch = ids[offset:offset + 400]
+            thread_rows.extend(conn.execute(
+                f"SELECT {', '.join(select_columns)} FROM threads WHERE id IN ({','.join('?' for _ in batch)})",
+                batch,
+            ).fetchall())
+    except sqlite3.Error as exc:
+        return {
+            "available": False,
+            "source": "codex-sqlite-spawn-edges",
+            "generated_at": generated_at,
+            "reason": f"Codex agent relationships could not be read: {exc}",
+            "sessions": [],
+        }
+    finally:
+        conn.close()
+
+    threads: dict[str, dict[str, Any]] = {}
+    for row in thread_rows:
+        session_id = str(row["id"] or "")
+        if not session_id:
+            continue
+        created_at = _parse_codex_hierarchy_ts(row["created_at_ms"]) or _parse_codex_hierarchy_ts(row["created_at"])
+        updated_at = _parse_codex_hierarchy_ts(row["updated_at_ms"]) or _parse_codex_hierarchy_ts(row["updated_at"])
+        threads[session_id] = {
+            "agent_id": session_id,
+            "project_path": str(row["cwd"] or "") or None,
+            "name": str(row["agent_nickname"] or "") or None,
+            "role": str(row["agent_role"] or "") or None,
+            "archived": bool(row["archived"]),
+            "created_at_value": created_at,
+            "updated_at_value": updated_at,
+        }
+
+    parents: dict[str, str] = {}
+    edge_status: dict[str, str] = {}
+    for row in edge_rows:
+        parent_id = str(row["parent_thread_id"] or "")
+        child_id = str(row["child_thread_id"] or "")
+        if not parent_id or not child_id or parent_id == child_id:
+            continue
+        parents[child_id] = parent_id
+        edge_status[child_id] = str(row["status"] or "unknown").lower()
+        threads.setdefault(parent_id, _missing_codex_thread(parent_id))
+        threads.setdefault(child_id, _missing_codex_thread(child_id))
+
+    roots: dict[str, set[str]] = defaultdict(set)
+    resolved_roots: dict[str, str | None] = {}
+    for child_id in parents:
+        current = child_id
+        seen: set[str] = set()
+        while current in parents and current not in seen and current not in resolved_roots:
+            seen.add(current)
+            current = parents[current]
+        root = None if current in seen else resolved_roots.get(current, current)
+        for item in seen:
+            resolved_roots[item] = root
+        if root is None or root in incomplete_roots:
+            continue
+        component = roots[root]
+        component.add(root)
+        component.update(seen)
+        component.add(child_id)
+
+    sessions: list[dict[str, Any]] = []
+    undated_count = 0
+    for root_id, agent_ids in roots.items():
+        component_updated = max(
+            (threads[agent_id]["updated_at_value"] for agent_id in agent_ids if threads[agent_id]["updated_at_value"]),
+            default=None,
+        )
+        if since:
+            if component_updated is None:
+                undated_count += 1
+                continue
+            if component_updated < since:
+                continue
+        agents: list[dict[str, Any]] = []
+        for agent_id in sorted(
+            agent_ids,
+            key=lambda item: threads[item]["created_at_value"] or datetime.min.replace(tzinfo=timezone.utc),
+        ):
+            thread = threads[agent_id]
+            is_root = agent_id == root_id
+            raw_status = edge_status.get(agent_id)
+            # Spawn edges establish delegation, not execution or successful return.
+            status = "unknown"
+            latest_event = "unknown"
+            display_name = "Main agent" if is_root else (thread["name"] or f"Agent {agent_id[:8]}")
+            agents.append({
+                "agent_id": agent_id,
+                "parent_agent_id": parents.get(agent_id),
+                "name": display_name,
+                "role": "orchestration" if is_root else (thread["role"] or "delegated"),
+                "status": status,
+                "latest_event": latest_event,
+                "relationship_status": raw_status if raw_status in {"open", "closed"} else "unknown",
+                "created_at": _iso_or_none(thread["created_at_value"]),
+                "updated_at": _iso_or_none(thread["updated_at_value"]),
+            })
+        sessions.append({
+            "session_id": root_id,
+            "tool": "codex-cli",
+            "project_path": threads[root_id]["project_path"],
+            "updated_at": _iso_or_none(component_updated),
+            "status": "unknown",
+            "agent_count": len(agents),
+            "active_count": sum(agent["status"] == "running" for agent in agents),
+            "agents": agents,
+        })
+
+    sessions.sort(key=lambda item: item["updated_at"] or "", reverse=True)
+    return {
+        "available": True,
+        "source": "codex-sqlite-spawn-edges",
+        "generated_at": generated_at,
+        "reason": "Observed from Codex thread and spawn-edge metadata.",
+        "sessions": sessions,
+        "truncated": truncated,
+        "undated_count": undated_count,
+    }
+
+
+def scan_claude_agent_hierarchy(since: datetime | None = None) -> dict[str, Any]:
+    """Observe session membership from documented subagent paths, never file bodies.
+
+    https://code.claude.com/docs/en/sub-agents#resume-subagents
+    A containing session is known; a nested agent's immediate parent is not.
+    """
+    sessions: list[dict[str, Any]] = []
+    remaining = AGENT_HIERARCHY_ENTRY_LIMIT
+    truncated = False
+    unreadable = False
+    available = False
+
+    def entries(path: Path):
+        nonlocal remaining, truncated, unreadable
+        try:
+            with os.scandir(path) as iterator:
+                for entry in iterator:
+                    if remaining <= 0:
+                        truncated = True
+                        return
+                    remaining -= 1
+                    if not entry.is_symlink():
+                        yield entry
+        except FileNotFoundError:
+            return
+        except OSError:
+            unreadable = True
+
+    for storage in CLAUDE_PROJECTS_DIRS:
+        if not storage.is_dir() or storage.is_symlink():
+            continue
+        available = True
+        for project in entries(storage):
+            if not project.is_dir(follow_symlinks=False):
+                continue
+            for session in entries(Path(project.path)):
+                if not session.is_dir(follow_symlinks=False):
+                    continue
+                subagents = Path(session.path) / "subagents"
+                if subagents.is_symlink():
+                    continue
+                agents = []
+                for child in entries(subagents):
+                    if not child.name.startswith("agent-") or not child.name.endswith(".jsonl") or not child.is_file(follow_symlinks=False):
+                        continue
+                    try:
+                        updated = datetime.fromtimestamp(child.stat(follow_symlinks=False).st_mtime, timezone.utc)
+                    except (OSError, OverflowError, ValueError):
+                        unreadable = True
+                        continue
+                    agent_id = Path(child.name).stem
+                    agents.append({
+                        "agent_id": agent_id, "parent_agent_id": session.name,
+                        "name": f"Agent {agent_id[6:14]}", "role": "session member; parent unverified",
+                        "status": "unknown", "latest_event": "unknown",
+                        "relationship_status": "session_member",
+                        "created_at": None, "updated_at": updated.isoformat(),
+                    })
+                if not agents:
+                    continue
+                updated = max(str(agent["updated_at"]) for agent in agents)
+                if since and datetime.fromisoformat(updated) < since:
+                    continue
+                agents.insert(0, {
+                    "agent_id": session.name, "parent_agent_id": None, "name": "Owning session",
+                    "role": "session owner", "status": "unknown", "latest_event": "unknown",
+                    "relationship_status": "unknown", "created_at": None, "updated_at": None,
+                })
+                sessions.append({
+                    "session_id": session.name, "tool": "claude-code",
+                    "project_path": None, "storage_project": project.name,
+                    "updated_at": updated, "status": "unknown", "active_count": 0,
+                    "agent_count": len(agents), "agents": agents,
+                    "relationship_note": "Session membership only; nested parents and execution status are not measured. Updated is transcript file modification time.",
+                })
+    return {
+        "available": available, "source": "claude-subagent-paths",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "sessions": sessions, "truncated": truncated, "partial": unreadable,
+        "reason": "Claude Code subagent file metadata." if available else "Claude Code local project storage was not found.",
+    }
+
+
+def scan_agent_hierarchy(since: datetime | None = None) -> dict[str, Any]:
+    sources = [("codex-cli", scan_codex_agent_hierarchy(since)), ("claude-code", scan_claude_agent_hierarchy(since))]
+    sessions = []
+    for tool, result in sources:
+        for session in result.get("sessions", []):
+            sessions.append({**session, "tool": tool, "selection_id": f"{tool}:{session['session_id']}"})
+    sessions.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
+    return {
+        "available": any(result["available"] for _, result in sources),
+        "source": "local-agent-relationships",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "reason": "Recorded relationships only; running and completion status are not established.",
+        "sessions": sessions,
+        "coverage": [{"tool": tool, "available": result["available"], "reason": result.get("reason", "")} for tool, result in sources],
+        "unsupported_tools": ["Cursor", "Windsurf", "Cline", "Ollama"],
+        "truncated": any(result.get("truncated") for _, result in sources),
+        "partial": any(result.get("partial") or not result["available"] for _, result in sources),
+        "undated_count": sum(result.get("undated_count", 0) for _, result in sources),
+    }
+
+
+def _missing_codex_thread(session_id: str) -> dict[str, Any]:
+    return {
+        "agent_id": session_id,
+        "project_path": None,
+        "name": None,
+        "role": None,
+        "archived": False,
+        "created_at_value": None,
+        "updated_at_value": None,
+    }
+
+
+def _parse_codex_hierarchy_ts(value: Any) -> datetime | None:
+    try:
+        parsed = _parse_ts(value)
+    except (OSError, OverflowError, TypeError, ValueError):
+        return None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _iso_or_none(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
+
+
 def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSession], list[LocalEvent]]:
     global CODEX_ROLLOUT_CACHE
     sessions: list[LocalSession] = []

@@ -122,7 +122,7 @@ supported for external callers** — treat them as private and expect them to
 change without a deprecation period.
 
 `GET` — `/api/health`, `/api/summary`, `/api/companion-state`,
-`/api/companion-scan`, `/api/sessions`, `/api/session`,
+`/api/companion-scan`, `/api/sessions`, `/api/agent-hierarchy`, `/api/session`,
 `/api/session-summary`, `/api/project`, `/api/report`, `/api/journal`,
 `/api/handoff-basic`, `/api/handoff`,
 `/api/context-health`, `/api/ambient-intervention`, `/api/update-status`,
@@ -134,6 +134,20 @@ needed to keep the browser fallback consistent with the native companion.
 floating Companion presence control; it is intentionally content-free and does
 not expose prompt or source text. `/api/companion-scan` forces the companion to
 refresh local watch evidence without waiting for the next polling interval.
+`/api/agent-hierarchy` returns recorded Codex spawn links and Claude Code
+subagent session membership. Claude membership comes from the documented
+`<session>/subagents/agent-<id>.jsonl` layout; it does not prove an immediate
+parent for nested agents. Execution and return status remain unknown for both
+adapters. Open/closed Codex edges and Claude file modification times are not
+activity or completion evidence. The scanner does not read transcript bodies,
+prompts, previews, or tool payloads. Selection IDs include the tool to prevent
+cross-tool collisions. Coverage is explicit for each adapter; other tools are
+not claimed as supported. Codex reads at most 1,000 recent edges plus 1,000
+ancestor edges and related thread
+metadata with a SQLite work budget; Claude inspects at most 5,000 directory
+entries without following symlinks. Truncated/partial results are marked, and
+undated Codex groups are excluded from a requested date window. The UI clips
+tree nesting at 32 levels. These limits do not affect ordinary session scans.
 `/api/health` reports the running dashboard's install kind, package manager,
 source root, process id, version, and launch directory so `aiwatcher start` can
 avoid reusing a dashboard from another checkout or package install.
