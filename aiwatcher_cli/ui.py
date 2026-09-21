@@ -503,8 +503,9 @@ def _context_review_companion_rows(candidates: list[dict[str, object]]) -> list[
                     latest_turn_tokens = 0
                 impact = compact_int(latest_turn_tokens) if latest_turn_tokens > 0 else ""
         severity = str(row.get("severity") or "").strip()
+        session_id = str(row.get("session_id") or "")
         rows.append({
-            "session_id": str(row.get("session_id") or ""),
+            "session_id": session_id,
             "tool": tool_label(str(row.get("tool") or "")),
             "project": _project_basename(project) or str(row.get("project") or "this project"),
             "waited_label": impact,
@@ -512,7 +513,9 @@ def _context_review_companion_rows(candidates: list[dict[str, object]]) -> list[
             "review_label": _context_review_signal_label(impact),
             "severity_label": severity,
             "activity_label": _context_review_activity_label(row),
-            "url": "/?view=watch#contextHealth",
+            "scope": "general",
+            "scope_label": "Review when ready",
+            "url": f"/?session={quote(session_id, safe='')}" if session_id else "/?view=watch#contextHealth",
             "kind": "context_review",
         })
     return rows
@@ -7758,29 +7761,28 @@ def build_companion_state() -> dict[str, object]:
                 pass
         tool = str(command_gate.get("tool") or "Claude Code")
         reason = str(command_gate.get("reason") or "A local command needs review before it runs.")
-        preview = str(command_gate.get("command_preview") or "").strip()
         gate_expires = _parse_iso_datetime(command_gate.get("expires_at"))
-        subtitle = reason
-        if preview:
-            subtitle = f"{preview} · {reason}"
         return {
             **base,
             "state": "command_gate",
-            "label": "Command Gate",
+            "label": "Command needs approval",
             "title": "Review command",
-            "subtitle": subtitle,
+            # Shell wrappers often begin with internal assignments such as
+            # `SP=/private/tmp/...`. They are useful on the full review page,
+            # but meaningless (and potentially sensitive) in a 46-character
+            # glanceable surface. Lead with the human reason instead.
+            "subtitle": reason,
             "expires_in_seconds": (
                 max(0, int((gate_expires - datetime.now(timezone.utc)).total_seconds()))
                 if gate_expires is not None
                 else None
             ),
-            "primary_label": "Review",
+            "primary_label": "Review command",
             "primary_action": "open_prompt_gate",
             "primary_url": str(command_gate.get("url") or "/?view=control"),
             "control_url": str(command_gate.get("url") or "/?view=control"),
             "detail": (
-                f"{tool} paused a shell command locally. Choose Allow once, Block, or Always allow before it continues."
-                + (f" Command preview: {preview}" if preview else "")
+                f"{tool} paused a shell command locally. Open the review to inspect the full command, then choose Allow once, Block, or Always allow."
             ),
         }
     # Second only to the prompt gate, and ahead of every advisory state below.
@@ -7967,12 +7969,7 @@ def build_companion_state() -> dict[str, object]:
 
     fresh_start_candidates = _fresh_start_context_candidates(summary)
     if fresh_start_context_enabled and len(fresh_start_candidates) > 1:
-        foreground_candidate = next(
-            (row for row in fresh_start_candidates if _foreground_matches_fresh_start_bubble(row)),
-            None,
-        )
         project_count = len(fresh_start_candidates)
-        critical_count = sum(1 for row in fresh_start_candidates if row.get("severity") == "critical")
         total_context = sum(int(row.get("estimated_replayed_context_tokens") or 0) for row in fresh_start_candidates)
         context_label = compact_int(total_context) if total_context else "context"
         project_lines = [
@@ -7980,41 +7977,17 @@ def build_companion_state() -> dict[str, object]:
             for row in fresh_start_candidates
             if row.get("project_full")
         ]
-        if foreground_candidate is None:
-            return {
-                **base,
-                "state": "context_review",
-                "label": "Context review",
-                "subtitle": f"{project_count} projects in Watch > Context Health",
-                "primary_label": "Review all",
-                "primary_action": "open_url",
-                "primary_url": "/?view=watch#contextHealth",
-                "skip_label": "Later",
-                "skip_state": "control_recommended_group",
-                "skip_project": "\n".join(project_lines),
-                "skip_projects": project_lines,
-                "waiting_sessions": _context_review_companion_rows(fresh_start_candidates),
-                "fresh_start_project_count": project_count,
-                "fresh_start_context_label": context_label,
-                "badge": {
-                    "count": project_count,
-                    "tone": "info",
-                    "label": f"{project_count} context review project{'s' if project_count != 1 else ''}",
-                },
-                "detail": "Open Watch > Context Health to review every project, or pick one row from the Companion queue.",
-            }
+        # Foreground detection identifies an application, not its selected chat.
+        # Never promote a same-tool candidate to an exact current-session action.
         return {
             **base,
-            "state": "control_review",
-            "label": "Review context",
-            "subtitle": (
-                f"{project_count} projects in Watch > Context Health"
-                + (f" · {critical_count} critical" if critical_count else "")
-            ),
+            "state": "context_review",
+            "label": "Review when ready",
+            "subtitle": f"{project_count} saved context recommendations",
             "primary_label": "Review all",
             "primary_action": "open_url",
             "primary_url": "/?view=watch#contextHealth",
-            "skip_label": "Later",
+            "skip_label": "Snooze all",
             "skip_state": "control_recommended_group",
             "skip_project": "\n".join(project_lines),
             "skip_projects": project_lines,
@@ -8023,12 +7996,12 @@ def build_companion_state() -> dict[str, object]:
             "fresh_start_context_label": context_label,
             "badge": {
                 "count": project_count,
-                "tone": "attention",
+                "tone": "info",
                 "label": f"{project_count} context review project{'s' if project_count != 1 else ''}",
             },
             "control_url": "/?view=watch#contextHealth",
             "watch_url": "/?view=watch#contextHealth",
-            "detail": "Open Watch > Context Health to review every project, or pick one row from the Companion queue.",
+            "detail": "Review a listed session or all recommendations in Watch. Snooze all quiets these projects for 48 hours.",
         }
     bubble = summary.get("handoff_bubble")
     if fresh_start_context_enabled and isinstance(bubble, dict) and bubble.get("session_id"):
@@ -8112,18 +8085,29 @@ def build_companion_state() -> dict[str, object]:
                 if project_count
                 else "Context review waiting in Console"
             )
+            candidates = fresh_start_candidates or [bubble]
+            candidate_rows = _context_review_companion_rows(candidates)
+            project_name = _project_basename(bubble_project) or "One project"
             return {
                 **base,
-                "state": "watching",
-                "label": "Watching quietly",
-                "subtitle": subtitle,
-                "primary_label": "Console",
+                "state": "context_review",
+                "label": "Review when ready",
+                "subtitle": f"{project_name} · context recommendation saved",
+                "primary_label": "Open review",
                 "primary_action": "open_url",
                 "primary_url": "/?view=watch#contextHealth",
                 "skip_label": "Later",
                 "skip_state": "control_recommended_group",
                 "skip_project": bubble_project,
-                "detail": "Fresh Start nudges only blink when the matching AI tool or terminal is foreground.",
+                "skip_projects": [bubble_project] if bubble_project else [],
+                "waiting_sessions": candidate_rows,
+                "fresh_start_project_count": max(1, project_count),
+                "badge": {
+                    "count": max(1, project_count),
+                    "tone": "info",
+                    "label": f"{max(1, project_count)} saved context recommendation",
+                },
+                "detail": f"{subtitle}. This is a general recommendation, so it stays blue until the matching AI session is in front of you.",
             }
         return {
             **base,

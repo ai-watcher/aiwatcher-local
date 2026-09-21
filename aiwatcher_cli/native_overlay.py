@@ -720,7 +720,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         if ["control_review", "context_review"].contains(stateName), visibleWaitingRows > 0 {
             let total = max(reviewCount, visibleWaitingRows)
             let hidden = max(total - visibleWaitingRows, 0)
-            return hidden > 0 ? "\(hidden) more in Watch. Review all or pick a row." : "Rows open Watch > Context Health."
+            return hidden > 0 ? "\(hidden) more saved in Watch. Review all or pick a project." : "Pick a project to review its context."
         }
         if stateName == "session_finished", visibleWaitingRows > 0 {
             let count = stateName == "session_finished" ? finishedCount : reviewCount
@@ -742,6 +742,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         let review = row["review_label"] as? String ?? waited
         let severity = row["severity_label"] as? String ?? ""
         let activity = row["activity_label"] as? String ?? ""
+        let scope = row["scope_label"] as? String ?? ""
         let prefix: String
         if kind == "finished" {
             prefix = "Completed"
@@ -756,7 +757,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             return [tool, project, waited].filter { !$0.isEmpty }.joined(separator: " · ")
         }
         let details = kind == "context_review"
-            ? [project, tool, severity, activity, review]
+            ? [scope, project, tool, severity, activity, review]
             : [project, tool, waited]
         let detail = details.filter { !$0.isEmpty }.joined(separator: " · ")
         return detail.isEmpty ? prefix : "\(prefix): \(detail)"
@@ -767,7 +768,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         if kind == "compact" { return "Copy" }
         let canReturn = index < waitingReturnAvailable.count && waitingReturnAvailable[index]
         if canReturn { return "Return" }
-        if ["context_review", "control_review"].contains(kind) { return "Watch" }
+        if ["context_review", "control_review"].contains(kind) { return "Review" }
         return kind.isEmpty ? "Open" : "Review"
     }
 
@@ -2811,10 +2812,11 @@ def run_native_presence(
         review = str(row.get("review_label") or waited)
         severity = str(row.get("severity_label") or "")
         activity = str(row.get("activity_label") or "")
+        scope = str(row.get("scope_label") or "")
         if kind == "finished":
             parts = ["Completed", project, tool, waited]
         elif kind == "context_review":
-            parts = ["Context health", project, tool, severity, activity, review]
+            parts = ["Context health", scope, project, tool, severity, activity, review]
         elif kind:
             parts = ["Signal", project, tool, waited]
         else:
@@ -2841,8 +2843,8 @@ def run_native_presence(
             count = max(int(review_count_var.get() or 0), visible_waiting_rows())
             hidden = max(count - visible_waiting_rows(), 0)
             return (
-                f"{hidden} more in Watch. Review all or pick a row."
-                if hidden > 0 else "Rows open Watch > Context Health."
+                f"{hidden} more saved in Watch. Review all or pick a project."
+                if hidden > 0 else "Pick a project to review its context."
             )
         if state_var.get() == "session_finished" and visible_waiting_rows() > 0:
             base_count = int(finished_count_var.get() or 0) if state_var.get() == "session_finished" else int(review_count_var.get() or 0)
@@ -2862,7 +2864,7 @@ def run_native_presence(
         if can_return:
             return "Return"
         if kind in {"context_review", "control_review"}:
-            return "Watch"
+            return "Review"
         return "Review" if kind else "Open"
 
     def short_skip_failure_message() -> str:

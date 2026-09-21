@@ -242,11 +242,12 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("applyOfflineState", mac)
         self.assertIn("skipProjects", mac)
         self.assertIn('return "\\(visibleWaitingRows) of \\(reviewCount) projects need review"', mac)
-        self.assertIn("\\(hidden) more in Watch. Review all or pick a row.", mac)
+        self.assertIn("\\(hidden) more saved in Watch. Review all or pick a project.", mac)
         self.assertIn('row["review_label"]', mac)
-        self.assertIn('if ["context_review", "control_review"].contains(kind) { return "Watch" }', mac)
+        self.assertIn('if ["context_review", "control_review"].contains(kind) { return "Review" }', mac)
         self.assertIn('row["activity_label"]', mac)
         self.assertIn('row["severity_label"]', mac)
+        self.assertIn('row["scope_label"]', mac)
         # Height follows the queue, and the resize keeps the parked corner
         # fixed the same way setCollapsed does.
         self.assertIn("func applyWindowSize()", mac)
@@ -258,7 +259,7 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("collapsedBadge.stringValue = waitingCount > 0", mac)
         self.assertIn('json.keys.contains("badge")', mac)
         self.assertIn("titleLabel.toolTip", mac)
-        # Context review queues keep both scopes: row-level Watch and Review all.
+        # Context review queues keep both scopes: row-level Review and Review all.
         self.assertIn('rowsShown == 0 || ["control_review", "context_review"].contains(stateName)', mac)
         self.assertIn("skipButton.frame = NSRect(x: 542, y: utilityY, width: 50, height: 28)", mac)
         self.assertIn("consoleButton.frame = NSRect(x: 596, y: utilityY, width: 38, height: 28)", mac)
@@ -279,8 +280,9 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn('row.get("severity_label")', tk_source)
         self.assertIn("def review_title", tk_source)
         self.assertIn('return f"{shown} of {count} projects need review"', tk_source)
-        self.assertIn('f"{hidden} more in Watch. Review all or pick a row."', tk_source)
+        self.assertIn('f"{hidden} more saved in Watch. Review all or pick a project."', tk_source)
         self.assertIn('row.get("review_label")', tk_source)
+        self.assertIn('row.get("scope_label")', tk_source)
         self.assertIn("def apply_offline_state", tk_source)
         self.assertIn("skip_projects_var", tk_source)
 

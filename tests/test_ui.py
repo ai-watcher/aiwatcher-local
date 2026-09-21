@@ -2059,7 +2059,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["skip_session_id"], "sess-1")
         self.assertEqual(state["plan_url"], "/?view=prompt")
 
-    def test_companion_state_does_not_blink_for_fresh_start_when_ai_tool_is_not_foreground(self) -> None:
+    def test_companion_state_saves_fresh_start_review_when_ai_tool_is_not_foreground(self) -> None:
         with (
             patch.object(ui, "build_summary_cached", return_value={
                 "context_health": [{
@@ -2086,10 +2086,12 @@ class DashboardWindowTests(unittest.TestCase):
         ):
             state = ui.build_companion_state()
 
-        self.assertEqual(state["state"], "watching")
-        self.assertEqual(state["label"], "Watching quietly")
-        self.assertEqual(state["primary_label"], "Console")
-        self.assertIn("Console", state["subtitle"])
+        self.assertEqual(state["state"], "context_review")
+        self.assertEqual(state["label"], "Review when ready")
+        self.assertEqual(state["primary_label"], "Open review")
+        self.assertEqual(state["primary_url"], "/?view=watch#contextHealth")
+        self.assertEqual(state["badge"]["tone"], "info")
+        self.assertEqual(state["waiting_sessions"][0]["scope"], "general")
 
     def test_companion_state_groups_multiple_fresh_start_projects(self) -> None:
         with (
@@ -2134,10 +2136,14 @@ class DashboardWindowTests(unittest.TestCase):
         ):
             state = ui.build_companion_state()
 
-        self.assertEqual(state["state"], "control_review")
-        self.assertEqual(state["label"], "Review context")
+        self.assertEqual(state["state"], "context_review")
+        self.assertEqual(state["label"], "Review when ready")
         self.assertEqual(state["primary_label"], "Review all")
         self.assertEqual(state["primary_url"], "/?view=watch#contextHealth")
+        self.assertEqual(state["badge"]["tone"], "info")
+        self.assertEqual(state["waiting_sessions"][0]["scope"], "general")
+        self.assertEqual(state["skip_label"], "Snooze all")
+        self.assertEqual(state["waiting_sessions"][1]["scope"], "general")
         self.assertEqual(state["skip_state"], "control_recommended_group")
         self.assertEqual(state["fresh_start_project_count"], 2)
         self.assertIn("/repo/app", state["skip_project"])
@@ -2337,11 +2343,14 @@ class DashboardWindowTests(unittest.TestCase):
             state = ui.build_companion_state()
 
         self.assertEqual(state["state"], "command_gate")
-        self.assertEqual(state["label"], "Command Gate")
-        self.assertEqual(state["primary_label"], "Review")
+        self.assertEqual(state["label"], "Command needs approval")
+        self.assertEqual(state["primary_label"], "Review command")
         self.assertEqual(state["primary_action"], "open_prompt_gate")
         self.assertEqual(state["primary_url"], "http://127.0.0.1:9998/")
-        self.assertIn("cat .env", state["subtitle"])
+        self.assertEqual(state["subtitle"], "Reading a credential/secret file can expose its contents.")
+        self.assertNotIn("cat .env", state["subtitle"])
+        self.assertNotIn("cat .env", state["detail"])
+        self.assertIn("inspect the full command", state["detail"])
         self.assertIsInstance(state["expires_in_seconds"], int)
         mark_seen.assert_called_once_with("cmd-gate-1")
 
