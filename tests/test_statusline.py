@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -86,6 +87,31 @@ class TranscriptReadingTests(unittest.TestCase):
         input_only = estimate_cost(MODEL, 10, 0, when=now)
         self.assertGreater(stats["total_usd"], input_only * 1_000)
         self.assertEqual(stats["latest_context"], 1_000_010)
+
+    def test_a_request_written_over_several_lines_is_counted_once(self) -> None:
+        # Claude Code copies one request's usage onto each content-block line.
+        now = datetime.now(timezone.utc)
+        line = json.loads(turn(when=now, cache_read=100_000))
+        copies = [dict(line, uuid=f"row-{n}", requestId="req-1") for n in range(4)]
+        with tempfile.TemporaryDirectory() as work:
+            path = Path(work, "t.jsonl")
+            write_transcript(path, [json.dumps(copy) for copy in copies])
+            stats = read_transcript(str(path))
+        self.assertEqual(stats["turns"], 1)
+        self.assertAlmostEqual(stats["total_usd"], estimate_cost(MODEL, 10, 200, cache_read=100_000, when=now))
+
+    def test_the_generated_chat_name_is_used_when_the_user_gave_none(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as work:
+            path = Path(work, "t.jsonl")
+            write_transcript(path, [json.dumps({"type": "ai-title", "aiTitle": "Headroom display bug"}), turn(when=now)])
+            self.assertEqual(read_transcript(str(path))["title"], "Headroom display bug")
+            write_transcript(path, [
+                json.dumps({"type": "custom-title", "customTitle": "My name"}),
+                json.dumps({"type": "ai-title", "aiTitle": "Generated"}),
+                turn(when=now),
+            ])
+            self.assertEqual(read_transcript(str(path))["title"], "My name")
 
     def test_context_reports_the_latest_turn_and_the_peak(self) -> None:
         now = datetime.now(timezone.utc)
@@ -430,6 +456,48 @@ class StatuslineRenderingTests(unittest.TestCase):
 
         line.encode("cp1252")  # must not raise
         self.assertTrue(line.isascii())
+
+    def _prompt_transcript(self, work: str) -> tuple[Path, float]:
+        now = datetime.now(timezone.utc)
+        path = Path(work, "t.jsonl")
+        prompt = lambda minutes, text: json.dumps({  # noqa: E731
+            "type": "user", "timestamp": (now - timedelta(minutes=minutes)).isoformat(),
+            "message": {"role": "user", "content": text},
+        })
+        write_transcript(path, [
+            prompt(6, "look around first"),
+            turn(when=now - timedelta(minutes=5), cache_read=350_000),
+            prompt(3, "ok build it"),
+            turn(when=now - timedelta(minutes=2), cache_read=350_000, cache_write=10_000),
+            turn(when=now - timedelta(minutes=1), cache_read=360_000, cache_write=14_500),
+        ])
+        cost = (
+            estimate_cost(MODEL, 10, 200, cache_read=350_000, cache_write_5m=10_000, when=now)
+            + estimate_cost(MODEL, 10, 200, cache_read=360_000, cache_write_5m=14_500, when=now)
+        )
+        return path, cost
+
+    def test_the_prompt_in_progress_shows_what_it_has_cost_so_far(self) -> None:
+        from aiwatcher_cli.statusline import _money, current_prompt_part
+        with tempfile.TemporaryDirectory() as work:
+            path, cost = self._prompt_transcript(work)
+            self.assertEqual(current_prompt_part(str(path)), f"this prompt {_money(cost)} +24K so far")
+            quiet = time.time() - 120
+            os.utime(path, (quiet, quiet))
+            self.assertEqual(current_prompt_part(str(path)), f"last prompt {_money(cost)} +24K")
+
+    def test_the_prompt_part_sits_between_the_session_and_the_context(self) -> None:
+        with tempfile.TemporaryDirectory() as work:
+            path, _cost = self._prompt_transcript(work)
+            line = build_statusline({"transcript_path": str(path), "workspace": {"current_dir": work}})
+        parts = line.split(" | ")
+        self.assertTrue(parts[0].endswith(" session"))
+        self.assertTrue(parts[1].startswith("this prompt $"))
+        self.assertTrue(parts[2].endswith("/turn"))
+
+    def test_the_working_window_matches_the_companions(self) -> None:
+        from aiwatcher_cli import session_presence, statusline
+        self.assertEqual(statusline.WORKING_SECONDS, session_presence.WORKING_SECONDS)
 
     def test_empty_transcript_renders_nothing(self) -> None:
         # Better than a row of zeroes: this sits under every prompt, and

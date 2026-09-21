@@ -148,6 +148,7 @@ from .scanner import (
     model_usage_totals,
     scan_all,
     scan_all_events,
+    current_prompt_segment,
     scan_agent_hierarchy,
     segment_session_by_prompt,
     surface_coverage,
@@ -179,7 +180,12 @@ SUMMARY_MEMORY_TTL_SECONDS = 45
 SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
 # Bump whenever build_summary's payload shape changes, so a cache written by an
 # older build is discarded instead of rendering blank sections in a newer UI.
-SUMMARY_CACHE_SCHEMA_VERSION = 9
+# 9: claimed twice on separate branches -- chat titles and start times on
+#    context-health cards and session rows, and the Improve evidence payload
+#    (#144). Neither build's cache matches the merged shape, so the merge takes
+#    its own number rather than inheriting a 9 that means two different things.
+# 10: both of the above.
+SUMMARY_CACHE_SCHEMA_VERSION = 10
 
 
 def restart_command(
@@ -249,7 +255,8 @@ _POST_WITHOUT_BODY = frozenset({
     "/api/handoff-receipts-viewed",
     "/api/first-run-dismissed",
 })
-SESSION_SNAPSHOT_SCHEMA_VERSION = 1
+# 2: sessions carry their chat title; a version-1 index would restore every chat nameless.
+SESSION_SNAPSHOT_SCHEMA_VERSION = 2
 SUMMARY_BACKGROUND_COOLDOWN_SECONDS = 8
 SUMMARY_WINDOWS = (1, 7, 30)
 # One definition of "live", shared with session_presence, which subdivides
@@ -569,6 +576,7 @@ def _session_from_json(raw: object) -> LocalSession | None:
         notes=[str(item) for item in notes] if isinstance(notes, list) else [],
         surface=raw.get("surface") if isinstance(raw.get("surface"), str) else None,
         model_breakdown=model_breakdown if isinstance(model_breakdown, dict) else {},
+        title=raw.get("title") if isinstance(raw.get("title"), str) and raw.get("title") else None,
     )
 
 
@@ -1910,6 +1918,9 @@ def _session_row_json(
     return {
         "tool": row.tool,
         "session_id": row.session_id,
+        "session_short": short_session_id(row.session_id),
+        "title": row.title,
+        "started_at": row.started_at.isoformat() if row.started_at else None,
         "project": project_label(row.project_path),
         "project_full": row.project_path if is_reliable_project_path(row.project_path) else "unknown",
         "model": display_model_name(row.model),
@@ -2063,6 +2074,7 @@ def session_json(row: LocalSession) -> dict[str, object]:
         "tool": row.tool,
         "project": row.project_path if is_reliable_project_path(row.project_path) else "unknown",
         "project_short": project_label(row.project_path),
+        "title": row.title,
         "model": display_model_name(row.model),
         "tokens": row.tokens_in + row.tokens_out,
         "tokens_label": compact_int(row.tokens_in + row.tokens_out),
@@ -2097,6 +2109,9 @@ def recent_session_json(
     return {
         "tool": row.tool,
         "session_id": row.session_id,
+        "session_short": short_session_id(row.session_id),
+        "title": row.title,
+        "started_at": row.started_at.isoformat() if row.started_at else None,
         "project": project_label(row.project_path),
         "project_full": row.project_path if is_reliable_project_path(row.project_path) else "unknown",
         "model": display_model_name(row.model),
@@ -2135,6 +2150,7 @@ def session_summary_json(row: LocalSession) -> dict[str, object]:
         "api_value": money(row.cost_usd),
         "calls": row.agent_calls,
         "tool_calls": row.tool_calls,
+        "title": row.title,
         "started_at": row.started_at.isoformat() if row.started_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         "source_path": row.source_path,
@@ -3400,6 +3416,8 @@ def _context_health_card(
         ),
         "session_id": health.session_id,
         "session_short": short_session_id(health.session_id),
+        "session_title": session.title if session is not None else None,
+        "started_at": session.started_at.isoformat() if session is not None and session.started_at else None,
         "tool": health.tool,
         "project": project_label(health.project_path),
         "project_full": health.project_path,
@@ -5962,6 +5980,10 @@ def _cached_session_rows() -> list[LocalSession]:
         items = raw.get("_session_index") if isinstance(raw, dict) else None
         if not isinstance(items, list):
             continue
+        # An index saved before sessions carried titles would restore every
+        # chat nameless; a full scan is better than that.
+        if not any(isinstance(item, dict) and "title" in item for item in items):
+            continue
         rows = [row for item in items if (row := _session_from_json(item)) is not None]
         if rows:
             _index_sessions(rows)
@@ -7462,6 +7484,153 @@ def _compact_block(rows: list[SessionPresence], sessions: list[LocalSession]) ->
     return block
 
 
+# path -> (size, mtime, current prompt segment, chat name). The Companion polls
+# every few seconds and a working transcript grows between most polls, so the
+# parse happens once per write rather than once per poll.
+_PROMPT_STATUS_CACHE: dict[str, tuple[int, float, dict[str, object] | None, str | None]] = {}
+# The bar's row cap (maxWaitingRows in the Swift bar, max_waiting_rows in Tk).
+PROMPT_STATUS_MAX_ROWS = 5
+
+
+def _current_prompt_cached(path: str, *, read_title: bool = True) -> tuple[dict[str, object] | None, str | None]:
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None, None
+    cached = _PROMPT_STATUS_CACHE.get(path)
+    if cached is not None and cached[0] == info.st_size and cached[1] == info.st_mtime:
+        return cached[2], cached[3]
+    segment = current_prompt_segment(segment_session_by_prompt(path))
+    # Titles come from Claude Code's transcript rows; a Codex rollout has none.
+    title = statusline.read_transcript(path).get("title") if segment is not None and read_title else None
+    if len(_PROMPT_STATUS_CACHE) > 32:
+        _PROMPT_STATUS_CACHE.clear()
+    _PROMPT_STATUS_CACHE[path] = (info.st_size, info.st_mtime, segment, title)
+    return segment, title
+
+
+def _prompt_status_block(rows: list[SessionPresence], sessions: list[LocalSession]) -> dict[str, object] | None:
+    """Each live Claude Code or Codex chat's current prompt: what it is costing
+    while the agent works, and its receipt once the chat has gone quiet.
+
+    Question per item: what is this prompt costing, or what did it cost? Unit
+    and scope: list-price dollars for that one prompt's requests, the same
+    figures as the session review (build_prompt_receipts), so the bar and the
+    drawer never disagree. "Working" is the presence rule (a write within
+    WORKING_SECONDS); "done" is quiet and holds until the next prompt, because
+    the next prompt replaces the segment. Chats are named, prompts are never
+    quoted: no prompt text on the Companion.
+    """
+    by_id = {session.session_id: session for session in sessions}
+    items: list[dict[str, object]] = []
+    now = datetime.now(timezone.utc)
+    for row in rows:
+        if not row.live or row.analyst_run or not row.measurable:
+            continue
+        session = by_id.get(row.session_id)
+        path = session.source_path if session is not None else None
+        if not path or not path.endswith(".jsonl"):
+            continue
+        # The scanned session already carries its name; the transcript is read
+        # for one only when the scan has not caught up with a new chat.
+        segment, title = _current_prompt_cached(
+            path, read_title="claude" in (session.tool or "").lower() and not session.title,
+        )
+        title = session.title or title
+        if segment is None:
+            continue
+        receipt = build_prompt_receipts([segment])
+        detail = receipt["rows"][0] if receipt else None
+        working = row.state != "quiet"
+        if not working and detail is None:
+            continue
+        at = _parse_iso_datetime(segment.get("at"))
+        elapsed = max(0, int((now - at).total_seconds())) if at is not None else None
+        name = title or " · ".join(part for part in (tool_label(session.tool), _project_basename(session.project_path)) if part)
+        if detail is None:
+            cost_label = "$0.00"
+        else:
+            cost_label = str(detail["api_value"]) if detail["priced"] else "no price"
+        if working:
+            parts = [f"{cost_label} so far" if cost_label != "no price" else cost_label]
+            if detail is not None and detail["added_label"]:
+                parts.append(str(detail["added_label"]))
+            if elapsed is not None and elapsed <= PROMPT_RECEIPT_RESUMED_SECONDS:
+                parts.append(_duration_label(elapsed))
+            tag = f"working {_duration_label(elapsed)}" if elapsed is not None and elapsed <= PROMPT_RECEIPT_RESUMED_SECONDS else "working"
+        elif detail["after_break"]:
+            parts = [cost_label, str(detail["note"])]
+            tag = "done"
+        else:
+            parts = [cost_label, str(detail["added_label"] or ""), str(detail["took_label"] or "")]
+            tag = "done"
+        items.append({
+            "session_id": row.session_id,
+            "name": name,
+            "working": working,
+            "rest": " · ".join(part for part in parts if part),
+            "tag": tag,
+            "cost_usd": float(detail["cost_usd"] or 0.0) if detail is not None and detail["priced"] else 0.0,
+            "at": segment.get("at"),
+            "url": f"/?session={quote(row.session_id, safe='')}",
+        })
+    if not items:
+        return None
+    working_items = [item for item in items if item["working"]]
+    done_items = sorted((item for item in items if not item["working"]), key=lambda item: str(item.get("at") or ""), reverse=True)
+    items = sorted(working_items, key=lambda item: str(item.get("at") or ""), reverse=True) + done_items
+    return {"items": items, "working": len(working_items), "done": len(done_items)}
+
+
+def _prompt_status_state(base: dict[str, object], block: dict[str, object]) -> dict[str, object]:
+    """The bar's words for the prompts in progress. One chat: a headline.
+    More: a headline that counts them and a row each, working first, within
+    the bar's own caps (title 18, subtitle 46, five rows). No badge of its own:
+    a receipt is news, not something to act on."""
+    items = list(block.get("items") or [])
+    detail_text = "List-price cost of each chat's current prompt, the same figures as the session review. No prompt text is shown in the Companion."
+    if len(items) == 1:
+        item = items[0]
+        label = "Working" if item["working"] else "Prompt done"
+        return {
+            **base,
+            "state": "prompt_status",
+            "label": label,
+            "title": label,
+            "subtitle": _fit_name(str(item["name"]), str(item["rest"])),
+            "primary_label": "Open",
+            "primary_action": "open_url",
+            "primary_session_id": item["session_id"],
+            "primary_url": item["url"],
+            "waiting_sessions": [],
+            "detail": detail_text,
+        }
+    working, done = int(block.get("working") or 0), int(block.get("done") or 0)
+    label = " · ".join(part for part in (f"{working} working" if working else "", f"{done} done" if done else "") if part)
+    if len(label) > 18:
+        label = f"{len(items)} chats"
+    total = sum(float(item.get("cost_usd") or 0.0) for item in items)
+    return {
+        **base,
+        "state": "prompt_status",
+        "label": label,
+        "title": label,
+        "subtitle": f"{money(total)} across {len(items)} chats' current prompts"[:46],
+        "primary_label": "Sessions",
+        "primary_action": "open_url",
+        "primary_url": "/?view=sessions",
+        "waiting_sessions": [
+            {
+                "kind": "prompt_working" if item["working"] else "prompt_done",
+                "session_id": item["session_id"],
+                "text": _fit_name(str(item["name"]), str(item["rest"]), 56),
+                "tag": str(item["tag"])[:16],
+                "url": item["url"],
+            }
+            for item in items[:PROMPT_STATUS_MAX_ROWS]
+        ],
+        "detail": detail_text,
+    }
 # path -> (size, compaction markers, every record's window closed). The poll
 # runs every few seconds while a session works, and most of those polls find
 # a transcript that grew but holds nothing new to measure.
@@ -7722,6 +7891,7 @@ def build_companion_state() -> dict[str, object]:
         "pressure": _pressure_block(presence_rows, session_rows),
         "recent_signal": _recent_signal_block(),
         "compact": _compact_block(presence_rows, session_rows),
+        "prompt_status": _prompt_status_block(presence_rows, session_rows),
     }
     try:
         gate = active_prompt_gate()
@@ -7920,6 +8090,15 @@ def build_companion_state() -> dict[str, object]:
             "detail": "Reconstructed from local records inside the gap. Dismiss clears this summary; the evidence stays in the dashboard.",
         }
 
+    # After a commit, with most of the replay predating it. Calm: "a good
+    # moment", not "blocked on you". Below waiting, which is a session that
+    # needs a look; above a finished run and every prompt receipt, because the
+    # nudge is something to do and a receipt is news -- the nudge always wins
+    # (Danny, 2026-09-15). It keeps until the context sheds.
+    compact = base.get("compact")
+    if isinstance(compact, dict) and compact.get("sessions"):
+        return _compact_companion_state(base, compact)
+
     # Below a blocked session -- blocked outranks done -- and below live work:
     # the takeover only happens while nothing is working. Field report: with
     # one session running and another freshly finished, the finished headline
@@ -7943,6 +8122,13 @@ def build_companion_state() -> dict[str, object]:
         finished_id = finished_row.session_id
         finished_count = len(finished_notices)
         many_finished = finished_count > 1 and bool(prefs.get("batch_finished_sessions", True))
+        # A finished Claude Code chat carries its prompt's receipt in place of
+        # "tool · project · ago".
+        prompt_block = base.get("prompt_status") if isinstance(base.get("prompt_status"), dict) else {}
+        receipt_item = next(
+            (item for item in prompt_block.get("items", []) if item["session_id"] == finished_id and not item["working"]),
+            None,
+        )
         return {
             **base,
             "state": "session_finished",
@@ -7951,7 +8137,11 @@ def build_companion_state() -> dict[str, object]:
             "subtitle": (
                 "Nice progress. Pick one to review or clear the notice."
                 if many_finished
-                else f"{finished_tool} · {finished_project} · {ago}"
+                else (
+                    _fit_name(str(receipt_item["name"]), str(receipt_item["rest"]))
+                    if receipt_item
+                    else f"{finished_tool} · {finished_project} · {ago}"
+                )
             ),
             "primary_label": "Review",
             "primary_action": "open_url",
@@ -7973,14 +8163,6 @@ def build_companion_state() -> dict[str, object]:
                 else "This run was active a moment ago and has gone quiet -- likely completed work awaiting review."
             ),
         }
-
-    # After a commit, with most of the replay predating it. Calm, like a
-    # finished run: "a good moment", not "blocked on you". Below waiting and
-    # finished because those are about sessions that need a look; this is about
-    # the one being typed into, and it keeps until the context sheds.
-    compact = base.get("compact")
-    if isinstance(compact, dict) and compact.get("sessions"):
-        return _compact_companion_state(base, compact)
 
     fresh_start_candidates = _fresh_start_context_candidates(summary)
     if fresh_start_context_enabled and len(fresh_start_candidates) > 1:
@@ -8237,6 +8419,12 @@ def build_companion_state() -> dict[str, object]:
         appended = f"{quiet_subtitle} · {len(finished_notices)} completed"
         if len(appended) <= 46:
             quiet_subtitle = appended
+    # The prompt in progress, or its receipt, is what is happening now in a
+    # live chat, so it takes the resting bar. Everything above -- gates,
+    # waiting, the nudge, reviews -- is something to act on and wins.
+    prompt_status = base.get("prompt_status")
+    if running and isinstance(prompt_status, dict) and prompt_status.get("items"):
+        return _prompt_status_state({**base, "detail": quiet_detail}, prompt_status)
     return {
         **base,
         "state": "watching" if running else "offline",

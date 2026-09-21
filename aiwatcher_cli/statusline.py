@@ -23,11 +23,20 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from datetime import datetime, timezone
 from typing import Any
 
 from .pricing import context_window, estimate_cost, lookup
-from .scanner import INJECTED_ROW_PREFIXES, _anthropic_usage, _billed_input, _repeated_row
+from .scanner import (
+    INJECTED_ROW_PREFIXES,
+    _anthropic_usage,
+    _billed_input,
+    _repeated_row,
+    _usage_receipt_key,
+    current_prompt_segment,
+    segment_session_by_prompt,
+)
 
 # Past this, spend since the last commit is worth interrupting for. Below it a
 # figure on screen is just noise competing with the model's output.
@@ -118,6 +127,13 @@ def read_transcript(path: str, *, since: datetime | None = None) -> dict[str, An
     # was a copy from hours before, so the bar closed a receipt on the wrong
     # size and skipped its Compacted step. Each row counts once.
     seen_rows: set[str] = set()
+    # One request's usage is copied onto each of its content-block lines
+    # (scanner._usage_receipt_key). Counted per line, the session cost here read
+    # several times the dashboard's: $180.88 against $44.40 on one chat,
+    # 2026-09-15. Each request now counts once; its file edits still count.
+    counted_requests: set[str] = set()
+    # The name Claude Code generates for a chat, used when the user gave none.
+    ai_title: str | None = None
 
     with handle:
         for line in handle:
@@ -135,6 +151,9 @@ def read_transcript(path: str, *, since: datetime | None = None) -> dict[str, An
                 custom_title = obj.get("customTitle")
                 if isinstance(custom_title, str) and custom_title.strip():
                     title = custom_title.strip()
+                generated_title = obj.get("aiTitle")
+                if isinstance(generated_title, str) and generated_title.strip():
+                    ai_title = generated_title.strip()
                 if _is_compact_boundary_row(obj):
                     boundary_seen_at = _parse_stamp(obj.get("timestamp") or obj.get("createdAt")) or boundary_seen_at
                 elif _is_compact_command_row(obj, message):
@@ -145,6 +164,16 @@ def read_transcript(path: str, *, since: datetime | None = None) -> dict[str, An
                         prompts_since += 1
                         prompts_after_min_since += 1
                 continue
+
+            receipt = _usage_receipt_key(obj, message)
+            if receipt is not None:
+                if receipt in counted_requests:
+                    if since is not None:
+                        copy_stamp = _parse_stamp(obj.get("timestamp") or obj.get("createdAt"))
+                        if copy_stamp is not None and copy_stamp >= since:
+                            _collect_files(message, files_since)
+                    continue
+                counted_requests.add(receipt)
 
             # The scanner's own splitter, not a copy of it. Cached input is
             # most of the bill on a long session, and a statusline that read
@@ -184,16 +213,7 @@ def read_transcript(path: str, *, since: datetime | None = None) -> dict[str, An
                         prompts_after_min_since = 0
                     else:
                         turns_after_min_since += 1
-                    content = message.get("content")
-                    if isinstance(content, list):
-                        for block in content:
-                            if not isinstance(block, dict) or block.get("type") != "tool_use":
-                                continue
-                            if block.get("name") not in _FILE_TOOLS:
-                                continue
-                            file_path = (block.get("input") or {}).get("file_path")
-                            if isinstance(file_path, str) and file_path and file_path not in files_since:
-                                files_since.append(file_path)
+                    _collect_files(message, files_since)
                 else:
                     context_at_since = billed_in
             previous_context = billed_in
@@ -212,7 +232,7 @@ def read_transcript(path: str, *, since: datetime | None = None) -> dict[str, An
         "turns_since": turns_since,
         "prompts_since": prompts_since,
         "files_since": files_since,
-        "title": title,
+        "title": title or ai_title,
         "command_seen_at": command_seen_at,
         "boundary_seen_at": boundary_seen_at,
         "turns_after_min_since": turns_after_min_since,
@@ -223,6 +243,46 @@ def read_transcript(path: str, *, since: datetime | None = None) -> dict[str, An
 
 _FILE_TOOLS = frozenset({"Read", "Edit", "Write", "MultiEdit", "NotebookEdit"})
 _COMPACT_COMMAND = "<command-name>/compact</command-name>"
+# How long after its last write a transcript still counts as being worked on.
+# The same figure as session_presence.WORKING_SECONDS, restated rather than
+# imported so the statusline never loads the presence layer; a test pins them.
+WORKING_SECONDS = 60
+
+
+def _collect_files(message: dict[str, Any], files_since: list[str]) -> None:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_use" or block.get("name") not in _FILE_TOOLS:
+            continue
+        file_path = (block.get("input") or {}).get("file_path")
+        if isinstance(file_path, str) and file_path and file_path not in files_since:
+            files_since.append(file_path)
+
+
+def current_prompt_part(path: str) -> str:
+    """The prompt this session is on, for the status line.
+
+    "this prompt $1.35 +24K so far" while the transcript is still being
+    written, "last prompt $8.66 +88K" once it has gone quiet. The figures are
+    the session review's (scanner.segment_session_by_prompt), so the two never
+    disagree. Empty when there is nothing priced to say: no prompt yet, no
+    request back yet, or a model with no list price.
+    """
+    segment = current_prompt_segment(segment_session_by_prompt(path))
+    if not segment or not segment.get("priced") or int(segment.get("requests") or 0) <= 0:
+        return ""
+    before, after = segment.get("context_before"), segment.get("context_after")
+    added = after - before if isinstance(before, int) and isinstance(after, int) and after >= before else None
+    try:
+        working = time.time() - os.path.getmtime(path) < WORKING_SECONDS
+    except OSError:
+        working = False
+    text = f"{'this' if working else 'last'} prompt {_money(float(segment.get('cost_usd') or 0.0))}"
+    if added is not None:
+        text += f" +{_tokens(added)}"
+    return text + (" so far" if working else "")
 
 
 def _row_text(message: dict[str, Any]) -> str:
@@ -333,6 +393,9 @@ def build_statusline(payload: dict[str, Any]) -> str:
         parts.append(f"{marker} {_money(stats['since_usd'])} since commit")
 
     parts.append(f"{_money(stats['total_usd'])} session")
+    prompt_part = current_prompt_part(transcript)
+    if prompt_part:
+        parts.append(prompt_part)
 
     # "compact" only when the latest turn is at the model's own window -- the
     # same rule as session_health._context_ceiling, restated here rather than

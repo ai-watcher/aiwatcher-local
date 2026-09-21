@@ -1703,7 +1703,7 @@ class WatchTest(unittest.TestCase):
         self.assertNotIn("healthQuietRow", self.js)
         render = js_function_source(self.js, "renderContextHealth")
         self.assertIn("healthRank(a, keys)", render)
-        self.assertIn("healthRow(row, waitingById, i)", render)
+        self.assertIn("healthRow(row, waitingById, i, sharedNames)", render)
         # Numbered from the sorted list, so the position a reader sees is the
         # position the ranking assigned.
         row = js_function_source(self.js, "healthRow")
@@ -1970,8 +1970,11 @@ class WatchRanksAndTheDrawerDiagnosesTest(unittest.TestCase):
 
     def test_the_row_names_the_session_it_opens(self):
         # A project can hold several sessions and the row is about exactly one
-        # of them; the title alone says only the project and the tool.
-        self.assertIn("row.session_short", self.row)
+        # of them. It is named by the chat's own name, and only rows whose names
+        # match another row's carry when they started and their short ID.
+        self.assertIn("chatName(row)", self.row)
+        self.assertIn("sharedNames.has(chatName(row))", self.row)
+        self.assertIn("chatDisambiguation(row)", self.row)
 
 
 class WindowSummaryTest(unittest.TestCase):

@@ -382,7 +382,9 @@ class CodexRolloutTests(unittest.TestCase):
         self.assertEqual(result.prompts_since_commit, 1)
         self.assertEqual(result.files_since, ["src/a.py"])
         self.assertEqual(result.command, "/compact")
-        self.assertFalse(result.priced)
+        # GPT-5 builds carry OpenAI list prices (pricing.MODEL_PRICING, 2026-09-15).
+        self.assertTrue(result.priced)
+        self.assertGreater(result.dead_usd_per_turn or 0, 0)
 
     def test_a_codex_shed_since_the_commit_is_seen(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

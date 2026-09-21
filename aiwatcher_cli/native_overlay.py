@@ -694,7 +694,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     // and away digests all reuse this row surface so the badge can explain
     // itself instead of dropping the user into an unlabeled count.
     var visibleWaitingRows: Int {
-        if !["session_waiting", "session_finished", "away_digest", "control_review", "context_review", "compact_recommended"].contains(stateName) || waitingRowTexts.isEmpty {
+        if !["session_waiting", "session_finished", "away_digest", "control_review", "context_review", "prompt_status", "compact_recommended"].contains(stateName) || waitingRowTexts.isEmpty {
             return 0
         }
         return min(waitingRowTexts.count, maxWaitingRows)
@@ -736,6 +736,11 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         if kind == "compact" {
             return row["text"] as? String ?? ""
         }
+        // A live chat's current prompt: the server writes the whole line
+        // (chat name and figures, never prompt text).
+        if kind.hasPrefix("prompt_") {
+            return row["text"] as? String ?? ""
+        }
         let tool = row["tool"] as? String ?? "AI tool"
         let project = row["project"] as? String ?? ""
         let waited = row["waited_label"] as? String ?? ""
@@ -766,6 +771,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     func rowActionLabel(index: Int) -> String {
         let kind = index < waitingRowKinds.count ? waitingRowKinds[index] : ""
         if kind == "compact" { return "Copy" }
+        if kind.hasPrefix("prompt_") { return "Open" }
         let canReturn = index < waitingReturnAvailable.count && waitingReturnAvailable[index]
         if canReturn { return "Return" }
         if ["context_review", "control_review"].contains(kind) { return "Review" }
@@ -1776,8 +1782,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             rowButtons[index].isHidden = !visible || (kind == "compact" && action.isEmpty)
             // Compaction rows carry their stage where waiting rows carry
             // what the session wants.
-            let tag = kind == "compact" && index < waitingRowTags.count ? waitingRowTags[index] : ""
-            let wants = kind == "compact" ? "" : (index < waitingWants.count ? waitingWants[index] : "")
+            // Prompt rows carry "working 3 min" or "done" in the same place.
+            let tagged = kind == "compact" || kind.hasPrefix("prompt_")
+            let tag = tagged && index < waitingRowTags.count ? waitingRowTags[index] : ""
+            let wants = tagged ? "" : (index < waitingWants.count ? waitingWants[index] : "")
             rowTags[index].isHidden = !visible || (wants.isEmpty && tag.isEmpty)
             if !visible { continue }
             let rowY = yOff - rowHeight * CGFloat(index + 1)
@@ -1786,7 +1794,10 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             // compaction (a good moment, not an alarm), amber for signals;
             // waiting rows keep hottest-first by position.
             let dotColor: NSColor
-            if kind == "finished" || kind == "compact" {
+            if kind == "prompt_working" {
+                // Work in progress is neither done nor a signal: brand blue.
+                dotColor = NSColor(calibratedRed: 0.23, green: 0.51, blue: 0.96, alpha: 1)
+            } else if kind == "finished" || kind == "compact" || kind == "prompt_done" {
                 dotColor = NSColor(calibratedRed: 0.36, green: 0.79, blue: 0.65, alpha: 1)
             } else if !kind.isEmpty {
                 dotColor = NSColor(calibratedRed: 0.94, green: 0.62, blue: 0.15, alpha: 1)
@@ -1796,14 +1807,16 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
                     : NSColor(calibratedRed: 0.94, green: 0.62, blue: 0.15, alpha: 1)
             }
             rowDots[index].layer?.backgroundColor = dotColor.cgColor
-            rowLabels[index].frame = NSRect(x: 46, y: rowY + 9, width: wants.isEmpty ? 462 : 350, height: 17)
+            rowLabels[index].frame = NSRect(x: 46, y: rowY + 9, width: wants.isEmpty && !kind.hasPrefix("prompt_") ? 462 : 350, height: 17)
             rowLabels[index].stringValue = index < waitingRowTexts.count ? waitingRowTexts[index] : ""
             rowTags[index].frame = NSRect(x: 400, y: rowY + 10, width: 112, height: 14)
-            rowTags[index].stringValue = kind == "compact" ? tag : (wants.isEmpty ? "" : "wants: \(wants)")
+            rowTags[index].stringValue = kind == "compact" ? tag : (kind.hasPrefix("prompt_") ? tag : (wants.isEmpty ? "" : "wants: \(wants)"))
             let canReturn = index < waitingReturnAvailable.count && waitingReturnAvailable[index]
             rowButtons[index].title = rowActionLabel(index: index)
             rowButtons[index].toolTip = kind == "compact"
                 ? (index < waitingRowCommands.count ? waitingRowCommands[index] : "")
+                : kind.hasPrefix("prompt_")
+                ? "Open this chat's session review"
                 : (canReturn
                     ? "Focus the blocked tool directly"
                     : (kind.isEmpty
@@ -2806,6 +2819,10 @@ def run_native_presence(
         kind = str(row.get("kind") or "")
         if kind == "compact":
             return str(row.get("text") or "")
+        # A live chat's current prompt: the server writes the whole line
+        # (chat name and figures, never prompt text).
+        if kind.startswith("prompt_"):
+            return str(row.get("text") or "")
         tool = str(row.get("tool") or "AI tool")
         project = str(row.get("project") or "")
         waited = str(row.get("waited_label") or "")
@@ -2860,6 +2877,8 @@ def run_native_presence(
         kind = waiting_row_kinds[index] if index < len(waiting_row_kinds) else ""
         if kind == "compact":
             return "Copy"
+        if kind.startswith("prompt_"):
+            return "Open"
         can_return = index < len(waiting_row_return) and waiting_row_return[index]
         if can_return:
             return "Return"
@@ -2997,7 +3016,8 @@ def run_native_presence(
             except (TypeError, ValueError, tk.TclError):
                 pressure_pct_var.set(0)
             pressure_severity_var.set(str(pressure.get("severity") or "ok"))
-            if incoming_state == "watching":
+            # The prompt status is the resting bar with better words; it keeps the meter's stats.
+            if incoming_state in {"watching", "prompt_status"}:
                 pressure_stats_var.set(str(pressure.get("stats_label") or "")[:20])
             else:
                 pressure_stats_var.set("")
@@ -3430,7 +3450,7 @@ def run_native_presence(
         # One row per actionable item. Waiting, context review, finished
         # batches, and away digests all reuse this row surface so the badge can
         # explain itself instead of dropping the user into an unlabeled count.
-        if state_var.get() not in {"session_waiting", "session_finished", "away_digest", "control_review", "context_review", "compact_recommended"} or not waiting_row_texts:
+        if state_var.get() not in {"session_waiting", "session_finished", "away_digest", "control_review", "context_review", "prompt_status", "compact_recommended"} or not waiting_row_texts:
             return 0
         return min(len(waiting_row_texts), max_waiting_rows)
 
@@ -3508,6 +3528,11 @@ def run_native_presence(
                     row_widgets[index][2].pack(side="right")
                 else:
                     row_widgets[index][2].pack_forget()
+            elif kind.startswith("prompt_"):
+                # "working 3 min" or "done" where a waiting row says what it wants.
+                tag = waiting_row_tags[index] if index < len(waiting_row_tags) else ""
+                row_widgets[index][3].configure(text=tag)
+                row_widgets[index][2].pack(side="right")
             else:
                 row_widgets[index][2].pack(side="right")
                 wants = waiting_row_wants[index] if index < len(waiting_row_wants) else ""
