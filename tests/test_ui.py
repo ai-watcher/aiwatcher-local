@@ -313,6 +313,31 @@ class DashboardServeTests(unittest.TestCase):
                 handoff.assert_not_called()
                 optimize.assert_not_called()
 
+    def test_cross_origin_rejection_consumes_the_bounded_post_body(self) -> None:
+        """Windows resets a closing connection that still has unread request
+        bytes, which can hide the 403 the server already wrote from the client.
+        The rejection must consume only a body already admitted by the normal
+        request-size boundary; it must not parse or execute it.
+        """
+        body = b'{"confirmed":true}'
+        handler = object.__new__(ui.UIHandler)
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = io.BytesIO(body)
+
+        handler._discard_bounded_request_body()
+
+        self.assertEqual(handler.rfile.read(), b"")
+
+    def test_cross_origin_rejection_does_not_read_an_oversized_body(self) -> None:
+        body = b"not read"
+        handler = object.__new__(ui.UIHandler)
+        handler.headers = {"Content-Length": str(ui.MAX_REQUEST_BYTES + 1)}
+        handler.rfile = io.BytesIO(body)
+
+        handler._discard_bounded_request_body()
+
+        self.assertEqual(handler.rfile.read(), body)
+
     def test_ai_assist_routes_accept_their_own_origin(self) -> None:
         status, _, (_, optimize) = self._post_ai_assist(
             "/api/optimize-ai-assist",
