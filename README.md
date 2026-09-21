@@ -104,13 +104,15 @@ ensurepath` if the standalone `pipx` command is not available yet.
 ### Standard pip
 
 Use `pip` inside a virtual environment. Do not install into the macOS,
-Homebrew, or Linux system Python.
+Homebrew, or Linux system Python. The commands below keep the environment in a
+durable user-level location instead of adding `.venv` to whichever project you
+happen to be in.
 
 macOS or Linux:
 
 ```sh
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv ~/.venvs/aiwatcher-local
+source ~/.venvs/aiwatcher-local/bin/activate
 python -m pip install --upgrade aiwatcher-local
 aiwatcher setup
 aiwatcher doctor
@@ -120,13 +122,16 @@ aiwatcher start --open-ui
 Windows PowerShell:
 
 ```powershell
-py -3 -m venv .venv
-.\.venv\Scripts\Activate.ps1
+py -3 -m venv "$env:USERPROFILE\.venvs\aiwatcher-local"
+& "$env:USERPROFILE\.venvs\aiwatcher-local\Scripts\Activate.ps1"
 python -m pip install --upgrade aiwatcher-local
 aiwatcher setup
 aiwatcher doctor
 aiwatcher start --open-ui
 ```
+
+Activate that environment again before using `aiwatcher` in a new terminal.
+Use `pipx` instead if you want the command available without activation.
 
 `setup` detects local AI tools and prints copy/paste next steps. It is not an
 interactive menu, so you do not need to type a number.
@@ -259,8 +264,10 @@ Merging into `main` does not publish a package. A maintainer deliberately bumps
 the version and creates a matching GitHub release; only that release triggers
 the PyPI publishing workflow. The maintainer chooses the version: use a patch
 release such as `0.1.2` for fixes, a minor release such as `0.2.0` for a new
-backward-compatible feature set, and a major release such as `1.0.0` when the
-product and compatibility contract are ready for it.
+feature set or an unavoidable compatibility change while the project remains
+in initial `0.x` development. Release `1.0.0` when the public compatibility
+contract is stable; after that, breaking changes require the next major version
+such as `2.0.0`.
 
 ## What It Reads
 

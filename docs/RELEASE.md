@@ -46,6 +46,7 @@ git status -sb
 git fetch origin
 git rev-parse HEAD
 git rev-parse origin/main
+test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
 python3 scripts/generate_cli_reference.py --check
 python3 -m unittest tests.test_ui_assets tests.test_ai_assist tests.test_local_state -q
 ```
@@ -97,16 +98,19 @@ package. Still read them before publishing.
 ## Publish To PyPI
 
 Pushing or merging commits to `main` never publishes PyPI automatically. The
-maintainer chooses when to release and which semantic version to use: patch for
-compatible fixes, minor for backward-compatible features, and major for a
-stable or intentionally breaking compatibility boundary.
+maintainer chooses when to release and which version to use. During initial
+`0.x` development, use patch releases for compatible fixes and minor releases
+for feature sets or unavoidable compatibility changes. Release `1.0.0` when
+the public compatibility contract is stable. After that, breaking changes
+require the next major version.
 
 Before publishing, bump `version` in both `pyproject.toml` and
 `aiwatcher_cli/__init__.py`, update any literal version assertions, and commit
 the change. Push a tag with the same version, then create a GitHub release for
 that tag. The `publish-pypi.yml` workflow builds, checks, and publishes the
 artifacts through PyPI Trusted Publishing; no PyPI API token should live on a
-laptop or in repository secrets.
+laptop or in repository secrets. The workflow also refuses to publish unless
+the release tag points to the current `origin/main` commit.
 
 Configure the PyPI project with this Trusted Publisher before creating the
 release:
