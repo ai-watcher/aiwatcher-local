@@ -19,12 +19,10 @@ jobs:
           node --check browser-extension/content.js
           node --check browser-extension/popup.js
           node browser-extension/test-background.js
-      - name: Validate VS Code adapter
-        run: node --check vscode-extension/extension.js
-      - name: Validate agent map behavior
-        run: |
           node --check aiwatcher_cli/web/index.js
           node --test tests/test-agent-map.cjs
+      - name: Validate VS Code adapter
+        run: node --check vscode-extension/extension.js
 
   test:
     strategy:
