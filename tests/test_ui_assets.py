@@ -3246,12 +3246,12 @@ class SettingsDeepLinksNameTheirPanelTest(unittest.TestCase):
         self.assertIn("get('settings')", self.js)
 
 
-class FeatureBranchUpdateBadgeTest(unittest.TestCase):
-    """A contributor on a feature branch used to see "N updates blocked" in
-    the header on every load. They are not blocked; the updater does not
-    apply where they are. The badge should be quiet, and it should name the
-    running checkout clearly enough that a truncated header does not make the
-    user wonder which copy of AIWatcher they launched."""
+class ConsistentUpdateBadgeTest(unittest.TestCase):
+    """The badge reports update state consistently across install types.
+
+    Branch, checkout, package manager, and version remain available in the
+    hover and details panel without replacing the primary status.
+    """
 
     def setUp(self):
         from pathlib import Path
@@ -3260,29 +3260,24 @@ class FeatureBranchUpdateBadgeTest(unittest.TestCase):
         self.js = (web / "index.js").read_text(encoding="utf-8")
         self.css = (web / "index.css").read_text(encoding="utf-8")
 
-    def test_the_branch_state_is_classified_before_blocked(self):
+    def test_availability_is_primary_even_when_the_update_cannot_be_applied(self):
         body = self.js.split("function classifyUpdateStatus(data)", 1)[1].split("\n}\n", 1)[0]
-        self.assertIn("return 'branch'", body)
-        self.assertIn("data.ok && data.on_branch === false", body)
-        source_block = body.split("data.ok && data.on_branch === false", 1)[1]
-        self.assertLess(source_block.index("return 'branch'"), source_block.index("return 'blocked'"))
+        self.assertIn("if (data.update_available) return 'available'", body)
+        self.assertNotIn("return 'branch'", body)
+        self.assertNotIn("return 'blocked'", body)
 
-    def test_the_branch_state_shares_the_quiet_style(self):
-        rule = [line for line in self.css.splitlines() if ".update-banner.branch" in line]
-        self.assertEqual(len(rule), 1)
-        self.assertIn(".update-banner.package", rule[0])
+    def test_the_badge_uses_common_update_labels(self):
         label = js_function_source(self.js, "updateBannerLabel")
-        self.assertIn("if (status === 'branch')", label)
-        self.assertIn("return 'Feature branch'", label)
+        self.assertIn("return 'Already up to date'", label)
+        self.assertNotIn("Feature branch", label)
 
-    def test_the_header_badge_shows_the_source_folder_and_keeps_the_full_path(self):
-        self.assertIn("function updateSourceName(data)", self.js)
-        self.assertIn("return parts.length ? parts[parts.length - 1] : source", self.js)
-        self.assertIn("`Path: ${name}`", self.js)
-        self.assertIn("return `On ${updateBranchLabel(data)}`", self.js)
-        self.assertIn("location.title = source ? `Source checkout: ${source}` : ''", self.js)
+    def test_the_header_shows_install_channel_and_keeps_details_in_the_hover(self):
+        self.assertIn("return 'Source checkout'", self.js)
+        self.assertIn("`${manager} package${data.version ? ` · v${data.version}` : ''}`", self.js)
         self.assertIn("GitHub branch: ${updateBranchLabel(data)}", self.js)
         self.assertIn("Update target: ${data.remote_ref}", self.js)
+        self.assertIn("Installer: ${data.package_manager}", self.js)
+        self.assertIn("Installed: ${data.version || 'unknown'}", self.js)
         self.assertIn("<b>GitHub branch</b>", self.js)
         self.assertIn("<b>Update target</b>", self.js)
         self.assertIn("max-width: min(360px, 30vw)", self.css)
@@ -3338,7 +3333,7 @@ class ApplyIsASecondStepTest(unittest.TestCase):
     def test_package_installs_keep_the_update_control(self):
         classifier = js_function_source(self.js, "classifyUpdateStatus")
         self.assertIn("data.install_kind && data.install_kind !== 'source'", classifier)
-        self.assertIn("data.update_available && data.can_apply", classifier)
+        self.assertIn("if (data.update_available) return 'available'", classifier)
         self.assertIn('"update_install_kind": install_kind()', self.ui_source)
         install_renderer = js_function_source(self.js, "renderUpdateBannerForInstall")
         self.assertIn("banner.hidden = false", install_renderer)
@@ -3353,7 +3348,8 @@ class ApplyIsASecondStepTest(unittest.TestCase):
         restore = self.js.split("function restoreCachedUpdateState", 1)[1].split("\n}\n", 1)[0]
         self.assertIn("installKind && installKind !== 'source'", restore)
         self.assertIn("setUpdateState('package'", restore)
-        self.assertIn("cached.data.repo !== sourceRoot", restore)
+        self.assertIn("cached.data.source_root || cached.data.repo", restore)
+        self.assertIn("cachedKind !== installKind", restore)
 
     def test_package_update_details_show_installer_without_checkout_path(self):
         renderer = js_function_source(self.js, "renderUpdateStatus")

@@ -1393,69 +1393,55 @@ async function postJson(path, payload) {
 }
 function classifyUpdateStatus(data) {
   if (!data) return 'unknown';
-  if (data.install_kind && data.install_kind !== 'source') {
-    if (data.update_available && data.can_apply) return 'available';
-    if (data.update_available) return 'blocked';
-    if (data.ok === false) return 'error';
-    if (data.ok) return 'current';
-    return 'package';
-  }
-  // A contributor on a feature branch is not blocked; they are somewhere the
-  // updater does not apply. Quiet, like the package state, not a warning.
-  if (data.ok && data.on_branch === false) return 'branch';
-  if (data.update_available && !data.can_apply) return 'blocked';
-  if (!data.ok) return 'error';
-  if (data.update_available && data.can_apply) return 'available';
+  if (data.ok === false) return 'error';
+  // Availability is the primary state for every install type. Whether this
+  // checkout can apply it is an action detail, not a different headline.
+  if (data.update_available) return 'available';
+  if (data.ok) return 'current';
+  if (data.install_kind && data.install_kind !== 'source') return 'package';
   return 'current';
 }
 function updateBannerLabel(status, data) {
   const count = Number((data && data.behind) || 0);
   if (status === 'checking') return 'Checking...';
   if (status === 'available') return `${count || ''} update${count === 1 ? '' : 's'} available`.trim();
-  if (status === 'blocked') return `${count || ''} update${count === 1 ? '' : 's'} blocked`.trim();
-  if (status === 'branch') return 'Feature branch';
-  if (status === 'current') return 'Up to date';
+  if (status === 'current') return 'Already up to date';
   if (status === 'package') return 'Check updates';
   if (status === 'error') return 'Update check failed';
   return 'Check updates';
-}
-function updateSourcePath(data) {
-  return String((data && (data.repo || data.process_cwd)) || '');
-}
-function updateSourceName(data) {
-  const source = updateSourcePath(data);
-  if (!source) return 'Source unknown';
-  const parts = source.split(/[\\/]+/).filter(Boolean);
-  return parts.length ? parts[parts.length - 1] : source;
 }
 function updateBranchLabel(data) {
   const checked = String((data && data.checked_out) || '').trim();
   return checked || 'detached HEAD';
 }
 function updateBannerTitle(status, data) {
-  const source = data && data.repo ? `Source checkout: ${data.repo}` : '';
+  const sourceRoot = data && (data.source_root || data.repo);
+  const source = sourceRoot ? `${data.install_kind === 'source' ? 'Source checkout' : 'Install location'}: ${sourceRoot}` : '';
   const launched = data && data.process_cwd ? `Launched from: ${data.process_cwd}` : '';
   const branch = data && data.install_kind === 'source' ? `GitHub branch: ${updateBranchLabel(data)}` : '';
   const target = data && data.remote_ref ? `Update target: ${data.remote_ref}` : '';
-  const details = [source, branch, target, launched].filter(Boolean).join('\n');
+  const manager = data && data.install_kind !== 'source' && data.package_manager ? `Installer: ${data.package_manager}` : '';
+  const versions = data && data.install_kind !== 'source'
+    ? [`Installed: ${data.version || 'unknown'}`, data.latest_version ? `Latest: ${data.latest_version}` : ''].filter(Boolean).join('\n')
+    : '';
+  const details = [source, manager, versions, branch, target, launched].filter(Boolean).join('\n');
   const location = details ? `\n${details}` : '';
   if (status === 'available') {
-    return `Click to review and apply the latest changes from ${data.remote_ref || 'origin/main'}${location}`;
+    return `Updates are available. Click to review update options.${location}`;
   }
-  if (status === 'blocked') return `${(data && data.message) || 'Resolve local changes before applying updates'}${location}`;
-  if (status === 'branch') return `${(data && data.message) || 'Updates apply on main only'} Click to review update options.${location}`;
-  if (status === 'current') return `AIWatcher is current. Click to check GitHub again.${location}`;
+  if (status === 'current') return `AIWatcher is already up to date. Click to check again.${location}`;
   if (status === 'package') return `Click to check for package updates${location}`;
-  if (status === 'error') return `${(data && data.message) || 'Click to retry the GitHub update check'}${location}`;
-  if (status === 'checking') return `Checking GitHub for AIWatcher updates${location}`;
-  return `Click to check GitHub for the latest AIWatcher changes${location}`;
+  if (status === 'error') return `${(data && data.message) || 'Click to retry the update check'}${location}`;
+  if (status === 'checking') return `Checking for AIWatcher updates${location}`;
+  return `Click to check for AIWatcher updates${location}`;
 }
 function updateLocationLabel(data) {
   if (!data) return 'Source unknown';
-  if (data.install_kind && data.install_kind !== 'source') return 'Installed package';
-  if (data.ok && data.on_branch === false) return `On ${updateBranchLabel(data)}`;
-  const name = updateSourceName(data);
-  return name === 'Source unknown' ? name : `Path: ${name}`;
+  if (data.install_kind && data.install_kind !== 'source') {
+    const manager = data.package_manager || 'Package';
+    return `${manager} package${data.version ? ` · v${data.version}` : ''}`;
+  }
+  return 'Source checkout';
 }
 function setUpdateState(status, data, checkedAt = Date.now()) {
   updateState = { status, data: data || null, checkedAt };
@@ -1471,9 +1457,8 @@ function setUpdateState(status, data, checkedAt = Date.now()) {
   }
   if (label) label.textContent = updateBannerLabel(status, data || null);
   if (location) {
-    const source = updateSourcePath(data || null);
     location.textContent = updateLocationLabel(data || null);
-    location.title = source ? `Source checkout: ${source}` : '';
+    location.title = '';
   }
   if (data && status !== 'checking') {
     try {
@@ -1492,7 +1477,9 @@ function restoreCachedUpdateState(context = {}) {
   try {
     const cached = JSON.parse(localStorage.getItem(UPDATE_CACHE_KEY) || 'null');
     if (cached && cached.data) {
-      if (sourceRoot && cached.data.repo && cached.data.repo !== sourceRoot) {
+      const cachedKind = cached.data.install_kind || null;
+      const cachedRoot = cached.data.source_root || cached.data.repo || '';
+      if ((installKind && cachedKind && cachedKind !== installKind) || (sourceRoot && cachedRoot !== sourceRoot)) {
         clearCachedUpdateState();
         setUpdateState('unknown', null, 0);
         return null;

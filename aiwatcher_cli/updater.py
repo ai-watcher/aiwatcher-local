@@ -187,6 +187,7 @@ def _package_update_status(*, fetch: bool, branch: str) -> dict[str, object]:
         "ok": True,
         "install_kind": "package",
         "package_manager": manager,
+        "source_root": str(installed_source_root()),
         "version": __version__,
         "repo": None,
         "remote": "github",
@@ -316,6 +317,7 @@ def check_for_updates(
     payload: dict[str, object] = {
         "ok": False,
         "repo": str(root),
+        "source_root": str(root),
         "remote": remote,
         "branch": branch,
         "remote_ref": remote_ref,
