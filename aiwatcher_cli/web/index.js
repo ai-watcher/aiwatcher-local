@@ -5225,6 +5225,7 @@ let aiAssistFormDirty = false;
 let contextHealthCache = [];
 let sessionRowsCache = [];
 let agentHierarchyCache = { sessions: [] };
+let agentHierarchyError = '';
 let selectedAgentSessionId = '';
 let selectedAgentId = '';
 let agentMapMode = 'all';
@@ -5439,6 +5440,7 @@ function changeWindow() {
   const sessionsView = document.getElementById('view-sessions');
   if (sessionsView && !sessionsView.hidden) {
     agentHierarchyCache = { sessions: [] };
+    agentHierarchyError = '';
     const body = document.getElementById('agentMapBody');
     const select = document.getElementById('agentSessionSelect');
     const coverage = document.getElementById('agentMapCoverage');
@@ -5467,11 +5469,49 @@ function clearSessionFilters() {
 }
 
 function agentStatusLabel(status) {
-  return ({ running: 'Running', completed: 'Returned', interrupted: 'Interrupted', unknown: 'Unknown' })[status] || status || 'Unknown';
+  return ({ running: 'Working', completed: 'Returned', idle: 'Idle', stale: 'Stale', interrupted: 'Interrupted', unknown: 'Unknown' })[status] || status || 'Unknown';
 }
 
 function agentEventLabel(eventName) {
-  return ({ working: 'working', returned: 'returned findings', interrupted: 'interrupted', completed: 'completed', unknown: 'unknown' })[eventName] || eventName || 'unknown';
+  return ({ working: 'working', returned: 'returned findings', idle: 'latest turn complete', stale: 'last start is stale', started: 'started without fresh activity', interrupted: 'interrupted', archived: 'archived; outcome unknown', completed: 'completed', relationship_closed: 'relationship closed; outcome unknown', scan_limited: 'lifecycle scan limited', clock_skew: 'timestamp is in the future', unknown: 'unknown' })[eventName] || eventName || 'unknown';
+}
+
+function agentEvidenceLabel(source) {
+  const labels = {
+    rollout_lifecycle: 'rollout lifecycle',
+    last_activity: 'rollout write',
+    thread_metadata: 'thread metadata',
+    spawn_edge: 'spawn relationship',
+    clock_skew: 'clock-skew guard',
+    rollout_scan_budget: 'rollout scan limit',
+  };
+  return String(source || 'unknown').split('+').map(part => labels[part] || part).join(' + ');
+}
+
+function agentSessionKind(session) {
+  if (session.is_launch_session && session.status === 'running') return 'This task';
+  if (session.is_launch_session) return 'Launch task';
+  if (session.status === 'running') return 'Working';
+  if (session.status === 'stale') return 'Stale';
+  if (['idle', 'completed', 'interrupted'].includes(session.status)) return 'History';
+  return 'Observed';
+}
+
+function shortAgentSessionId(sessionId) {
+  return String(sessionId || '').slice(0, 8) || 'unknown';
+}
+
+function updateAgentHierarchyStatus() {
+  const status = document.getElementById('agentMapStatus');
+  if (!status) return;
+  if (agentHierarchyError) {
+    status.textContent = agentHierarchyError;
+    return;
+  }
+  const checkedAt = new Date(agentHierarchyCache.generated_at || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const evidenceTimes = (selectedAgentSession()?.agents || []).map(agent => Date.parse(agent.evidence_at || '')).filter(value => !Number.isNaN(value));
+  const latestEvidence = evidenceTimes.length ? dateLabel(new Date(Math.max(...evidenceTimes)).toISOString()) : '';
+  status.textContent = `Checked ${checkedAt}${latestEvidence ? ` · Selected session evidence ${latestEvidence}` : ''}`;
 }
 
 function selectedAgentSession() {
@@ -5558,31 +5598,50 @@ function renderAgentHierarchy() {
     return;
   }
   if (!sessions.some(session => session.selection_id === selectedAgentSessionId)) {
-    selectedAgentSessionId = (sessions.find(session => session.status === 'running') || sessions[0]).selection_id;
+    const selectedSession = (
+      sessions.find(session => session.is_launch_session && session.status === 'running')
+      || sessions.find(session => session.status === 'running')
+      || sessions.find(session => session.is_launch_session)
+      || sessions[0]
+    );
+    selectedAgentSessionId = selectedSession.selection_id;
   }
   const session = selectedAgentSession();
   const allAgents = session.agents || [];
   const agents = visibleAgentNodes(session);
   const runningCount = allAgents.filter(agent => agent.status === 'running').length;
   const returnedCount = allAgents.filter(agent => agent.status === 'completed').length;
-  const uncertainCount = allAgents.length - runningCount - returnedCount;
+  const staleCount = allAgents.filter(agent => agent.status === 'stale').length;
+  const interruptedCount = allAgents.filter(agent => agent.status === 'interrupted').length;
+  const idleCount = allAgents.filter(agent => agent.status === 'idle').length;
+  const unknownCount = allAgents.filter(agent => agent.status === 'unknown').length;
+  const staleRecordCount = Number(session.stale_record_count || 0);
   if (!agents.some(agent => agent.agent_id === selectedAgentId)) {
-    selectedAgentId = (agents.find(agent => agent.parent_agent_id === null) || agents[0] || {}).agent_id || '';
+    selectedAgentId = (
+      agents.find(agent => agent.agent_id === session.launch_agent_id)
+      || agents.find(agent => agent.parent_agent_id === null)
+      || agents[0]
+      || {}
+    ).agent_id || '';
   }
   const agent = agents.find(candidate => candidate.agent_id === selectedAgentId) || agents[0];
   const parent = agent ? allAgents.find(candidate => candidate.agent_id === agent.parent_agent_id) : null;
   const childCount = agent ? allAgents.filter(candidate => candidate.parent_agent_id === agent.agent_id).length : 0;
   const roots = agents.filter(candidate => candidate.parent_agent_id === null || !agents.some(parentCandidate => parentCandidate.agent_id === candidate.parent_agent_id));
   select.disabled = false;
-  select.innerHTML = sessions.map(item => `<option value="${esc(item.selection_id)}"${item.selection_id === session.selection_id ? ' selected' : ''}>${esc(item.tool)} · ${esc(projectName(item))} · ${esc(item.session_id)} · ${esc(item.agent_count)} agents</option>`).join('');
+  select.innerHTML = sessions.map(item => `<option value="${esc(item.selection_id)}"${item.selection_id === session.selection_id ? ' selected' : ''}>${esc(agentSessionKind(item))} · ${esc(item.tool)} · ${esc(projectName(item))} · ${esc(shortAgentSessionId(item.session_id))} · ${esc(item.active_count)} working · ${esc(item.agent_count)} observed</option>`).join('');
   coverage.textContent = `${sessions.length} session${sessions.length === 1 ? '' : 's'} observed`;
   body.innerHTML = `<div class="agent-map-summary" aria-label="Agent status summary">
-      <span><strong>${esc(session.agent_count)}</strong> agents</span>
-      <span><strong>${esc(runningCount)}</strong> verified running</span>
-      <span><strong>${esc(returnedCount)}</strong> verified returned</span>
-      ${uncertainCount ? `<span><strong>${esc(uncertainCount)}</strong> unknown or interrupted</span>` : ''}
+      <span><strong>${esc(session.agent_count)}</strong> observed</span>
+      <span><strong>${esc(runningCount)}</strong> working</span>
+      <span><strong>${esc(returnedCount)}</strong> returned</span>
+      ${idleCount ? `<span><strong>${esc(idleCount)}</strong> idle</span>` : ''}
+      ${interruptedCount ? `<span><strong>${esc(interruptedCount)}</strong> interrupted</span>` : ''}
+      ${staleCount ? `<span><strong>${esc(staleCount)}</strong> stale</span>` : ''}
+      ${unknownCount ? `<span><strong>${esc(unknownCount)}</strong> unknown</span>` : ''}
+      ${staleRecordCount ? `<span><strong>${esc(staleRecordCount)}</strong> stale record${staleRecordCount === 1 ? '' : 's'}</span>` : ''}
       ${agentMapMode === 'active' && session.agent_count > agents.length ? `<span><strong>${esc(session.agent_count - agents.length)}</strong> hidden</span>` : ''}
-      <span class="agent-map-source">${esc(session.tool)} metadata only</span>
+      <span class="agent-map-source">${session.tool === 'codex-cli' ? 'Lifecycle evidence + topology' : 'Recorded relationships'}</span>
     </div>
     <p class="receipt-note">${esc(session.relationship_note || 'Recorded delegation links; execution and successful return are unverified.')}</p>
     <p class="receipt-note">Project: ${esc(session.project_full)} · Session: ${esc(session.session_id)}</p>
@@ -5596,13 +5655,18 @@ function renderAgentHierarchy() {
           <dl>
             <dt>Role</dt><dd>${esc(agent.role)}</dd>
             <dt>Latest event</dt><dd>${esc(agentEventLabel(agent.latest_event))}</dd>
-            <dt>Relationship</dt><dd>${esc(agent.relationship_status || 'unknown')}</dd>
             <dt>Parent</dt><dd>${esc(parent ? parent.name : 'Root agent')}</dd>
             <dt>Children</dt><dd>${esc(childCount)}</dd>
-            <dt>Updated</dt><dd>${esc(dateLabel(agent.updated_at))}</dd>
+            <dt>Evidence</dt><dd>${esc(agentEvidenceLabel(agent.evidence_source))}</dd>
+            <dt>Confidence</dt><dd>${esc(String(agent.confidence || 'unknown').replace(/^./, value => value.toUpperCase()))}</dd>
+            <dt>Last evidence</dt><dd>${esc(dateLabel(agent.evidence_at || agent.updated_at))}</dd>
+            <dt>Relationship</dt><dd>${esc(agent.relationship_status || 'Root')}</dd>
+            ${agent.metadata_warning === 'stale_open_edge' ? '<dt>Record</dt><dd>Open relationship is stale</dd>' : ''}
+            ${agent.stale_after ? `<dt>Stale after</dt><dd>${esc(dateLabel(agent.stale_after))}</dd>` : ''}
           </dl>` : '<div class="empty">Select an agent.</div>'}
       </aside>
     </div>`;
+  updateAgentHierarchyStatus();
 }
 
 async function loadAgentHierarchy(force = false) {
@@ -5624,6 +5688,7 @@ async function loadAgentHierarchy(force = false) {
       || data.available !== agentHierarchyCache.available
       || data.reason !== agentHierarchyCache.reason;
     agentHierarchyCache = data;
+    agentHierarchyError = '';
     agentHierarchyLoadedForDays = days;
     const restoreFocus = focusedAgent && document.activeElement === focusedElement;
     if (changed || force) renderAgentHierarchy();
@@ -5631,7 +5696,7 @@ async function loadAgentHierarchy(force = false) {
       const replacement = Array.from(document.querySelectorAll('[data-agent]')).find(node => node.dataset.agent === focusedAgent);
       if (replacement) replacement.focus();
     }
-    if (status) status.textContent = `Updated ${new Date(data.generated_at || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+    updateAgentHierarchyStatus();
     const coverageNote = document.getElementById('agentMapCoverageNote');
     if (coverageNote) coverageNote.textContent = [
       ...(data.coverage || []).map(item => `${item.tool}: ${item.available ? 'relationship metadata available' : 'unavailable'}`),
@@ -5643,6 +5708,7 @@ async function loadAgentHierarchy(force = false) {
   } catch (error) {
     if (token !== agentHierarchyToken) return;
     const message = error && error.message ? error.message : 'Agent relationships could not be refreshed.';
+    agentHierarchyError = message;
     if (agentHierarchyLoadedForDays !== days || !agentHierarchyCache.available) {
       agentHierarchyCache = { available: false, reason: message, sessions: [] };
       agentHierarchyLoadedForDays = days;

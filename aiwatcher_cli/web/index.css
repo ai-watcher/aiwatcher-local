@@ -1504,6 +1504,8 @@
     .agent-state-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
     .agent-state-dot.running { background: var(--green); }
     .agent-state-dot.completed { background: var(--blue); }
+    .agent-state-dot.idle { background: var(--muted); }
+    .agent-state-dot.stale { background: var(--amber); }
     .agent-state-dot.interrupted { background: var(--amber); }
     .agent-status {
       display: inline-flex;
@@ -1518,6 +1520,8 @@
     }
     .agent-status.running { color: var(--on-success); border-color: rgba(var(--green-rgb), .45); background: var(--green-soft); }
     .agent-status.completed { color: var(--on-brand); border-color: rgba(var(--blue-rgb), .45); background: var(--blue-soft); }
+    .agent-status.idle { color: var(--muted); background: rgba(var(--well-rgb), .28); }
+    .agent-status.stale { color: var(--on-warning); border-color: rgba(var(--amber-rgb), .45); background: var(--amber-soft); }
     .agent-status.interrupted { color: var(--on-warning); border-color: rgba(var(--amber-rgb), .45); background: var(--amber-soft); }
     .agent-detail-pane { padding: var(--sp-4); border-left: 1px solid var(--line); background: rgba(var(--well-rgb), .18); }
     .agent-detail-title { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-3); }

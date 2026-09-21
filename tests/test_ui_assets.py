@@ -192,6 +192,17 @@ class AgentMapAssetsTest(unittest.TestCase):
         self.assertIn("agent.status === 'running'", source)
         self.assertIn("current.parent_agent_id", source)
 
+    def test_agent_map_distinguishes_lifecycle_evidence_from_poll_time(self):
+        render = js_function_source(self.js, "renderAgentHierarchy")
+        load = js_function_source(self.js, "loadAgentHierarchy")
+        self.assertIn("stale_record_count", render)
+        self.assertIn("agent.evidence_source", render)
+        self.assertIn("shortAgentSessionId", render)
+        status = js_function_source(self.js, "updateAgentHierarchyStatus")
+        self.assertIn("Checked ${checkedAt}", status)
+        self.assertIn("Selected session evidence", status)
+        self.assertIn("session.is_launch_session", self.js)
+
     def test_agent_map_has_keyboard_and_mobile_states(self):
         self.assertIn('aria-pressed="${selectedAgentId === agent.agent_id ? \'true\' : \'false\'}"', self.js)
         self.assertIn(".agent-node:focus-visible", self.css)
@@ -204,7 +215,7 @@ class AgentMapAssetsTest(unittest.TestCase):
 
     def test_successful_refresh_clears_a_previous_error(self):
         source = js_function_source(self.js, "loadAgentHierarchy")
-        self.assertIn("if (status) status.textContent = `Updated", source)
+        self.assertIn("updateAgentHierarchyStatus()", source)
         self.assertNotIn("force || !status.textContent", source)
 
     def test_window_change_immediately_refreshes_the_visible_agent_map(self):
