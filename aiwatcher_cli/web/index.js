@@ -313,6 +313,7 @@ async function composeOptimizeCleanupPrompt(candidateId, button = null) {
     confirmed = window.confirm(`${label} will make one small model call to compose a safe Optimize cleanup review prompt. Continue?`);
     if (!confirmed) return;
   }
+  const token = ++drawerRequestToken;
   if (button) {
     button.dataset.copyRestore = button.textContent;
     button.textContent = 'Composing...';
@@ -330,6 +331,7 @@ async function composeOptimizeCleanupPrompt(candidateId, button = null) {
       button.textContent = button.dataset.copyRestore || 'Compose AI cleanup prompt';
       delete button.dataset.copyRestore;
     }
+    if (token !== drawerRequestToken) return;
     if (result.error) {
       showToast(result.error, 'error');
       return;
@@ -344,6 +346,7 @@ async function composeOptimizeCleanupPrompt(candidateId, button = null) {
       button.textContent = button.dataset.copyRestore || 'Compose AI cleanup prompt';
       delete button.dataset.copyRestore;
     }
+    if (token !== drawerRequestToken) return;
     showToast(`Could not compose cleanup prompt: ${error.message || 'unknown error'}`, 'error');
   }
 }
@@ -823,7 +826,12 @@ function setDrawerSubtitle(value) {
   const node = document.getElementById('drawerSubtitle');
   if (node) node.textContent = value || 'Local metadata only';
 }
+let drawerRequestToken = 0;
+function isCurrentDrawer(token) {
+  return token === drawerRequestToken && document.getElementById('detailDrawer').classList.contains('open');
+}
 function openDrawer(title, subtitle = 'Local metadata only') {
+  const token = ++drawerRequestToken;
   const content = document.getElementById('detailContent');
   if (content) content.aiwSettled = null;
   document.getElementById('drawerTitle').textContent = title;
@@ -832,8 +840,10 @@ function openDrawer(title, subtitle = 'Local metadata only') {
   document.getElementById('detailDrawer').classList.add('open');
   document.getElementById('detailDrawer').setAttribute('aria-hidden', 'false');
   document.body.classList.add('drawer-open');
+  return token;
 }
 function closeDrawer() {
+  ++drawerRequestToken;
   document.getElementById('drawerBackdrop').classList.remove('open');
   document.getElementById('detailDrawer').classList.remove('open');
   document.getElementById('detailDrawer').setAttribute('aria-hidden', 'true');
@@ -1972,6 +1982,7 @@ function renderHandoff(capsule) {
   ${changedFiles.length ? `<section class="detail-section"><details class="aiw-details"><summary>${esc(changedFiles.length)} changed file${changedFiles.length === 1 ? '' : 's'} to inspect</summary><div class="details-body"><div class="pill-row">${changedFiles.slice(0, 12).map(file => `<span class="pill">${esc(file)}</span>`).join('')}</div></div></details></section>` : ''}`;
 }
 async function copyFreshStartFromDrawer(sessionId, openRuntime = false) {
+  const token = drawerRequestToken;
   const brief = document.getElementById('handoffBrief') ? document.getElementById('handoffBrief').value : '';
   const copied = await copyText(brief, 'Fresh Start brief copied');
   if (!copied) return;
@@ -1994,7 +2005,7 @@ async function copyFreshStartFromDrawer(sessionId, openRuntime = false) {
     } catch (error) {}
   }
   const status = document.getElementById('handoffStatus');
-  if (status) {
+  if (status && isCurrentDrawer(token)) {
     const controls = '<button class="btn-primary" onclick="showView(\'receipts\'); closeDrawer()">View receipt</button><button class="btn-quiet" onclick="closeDrawer()">Done</button>';
     status.outerHTML = `<div id="handoffStatus">${freshStartReceiptWidget({
       reason: 'Fresh Start brief copied from the session drawer.',
@@ -2016,6 +2027,8 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
     confirmed = window.confirm(`${label} will make one small model call using your configured provider to compose this Fresh Start handoff. Continue?`);
     if (!confirmed) return;
   }
+  // A new composition also supersedes pending local enrichment of this drawer.
+  const token = ++drawerRequestToken;
   const options = handoffOptionsFromForm();
   const payload = handoffPayload(sessionId, target, includePrompt, options);
   payload.confirmed = confirmed;
@@ -2032,6 +2045,7 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
   }
   try {
     const capsule = await postJson('/api/handoff-ai-assist', payload);
+    if (!isCurrentDrawer(token)) return;
     const working = document.getElementById('aiAssistWorking');
     if (working) working.remove();
     if (capsule.error) {
@@ -2044,38 +2058,54 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
     else if (result.status === 'cached') showToast('Cached AI handoff ready');
     else showToast(result.reason || 'AI Assist was not used', 'error');
   } catch (error) {
+    if (!isCurrentDrawer(token)) return;
     const working = document.getElementById('aiAssistWorking');
     if (working) working.remove();
     showToast('AI Assist could not improve this brief.', 'error');
   }
 }
 async function openHandoff(sessionId, target = 'generic', includePrompt = false, options = null) {
-  openDrawer('Fresh Start');
-  const node = document.getElementById('detailContent');
+  const token = openDrawer('Fresh Start');
+  const isCurrent = () => isCurrentDrawer(token);
   setDrawerContent('<div class="loading">Finding the source session before building the Fresh Start brief...</div>');
   const handoffOptions = options || handoffOptionsFromForm();
   const payload = handoffPayload(sessionId, target, includePrompt, handoffOptions);
-  const summaryPromise = fetch(`/api/session-summary?id=${encodeURIComponent(sessionId)}`)
+  // Fast responses may arrive in any order; never replace a richer brief with
+  // an older summary, or block the basic brief on the summary request.
+  let stage = 0;
+  fetch(`/api/session-summary?id=${encodeURIComponent(sessionId)}`)
     .then(res => res.json())
+    .then(summary => {
+      if (isCurrent() && stage === 0 && summary && !summary.error) {
+        stage = 1;
+        setDrawerContent(renderSessionSummary(summary, 'Building Fresh Start brief...'));
+      }
+    })
     .catch(() => null);
   const basicPromise = postJson('/api/handoff-basic', payload)
+    .then(basic => {
+      if (isCurrent() && stage < 2 && basic && !basic.error && !includePrompt) {
+        stage = 2;
+        setDrawerContent(renderHandoff(basic));
+      }
+      return basic;
+    })
     .catch(() => null);
-  const handoffPromise = postJson('/api/handoff', payload);
-  const fastSummary = await summaryPromise;
-  if (fastSummary && !fastSummary.error) {
-    setDrawerContent(renderSessionSummary(fastSummary, 'Building Fresh Start brief...'));
-  } else {
-    setDrawerContent('<div class="loading">Building local Fresh Start brief...</div>');
-  }
-  const basicCapsule = await basicPromise;
-  if (basicCapsule && !basicCapsule.error && !includePrompt) {
-    setDrawerContent(renderHandoff(basicCapsule));
-  }
-  const capsule = await handoffPromise;
+  const capsule = await postJson('/api/handoff', payload)
+    .catch(() => ({ error: 'Could not load detailed Fresh Start evidence.' }));
+  if (!isCurrent()) return null;
   if (capsule.error) {
+    const basic = await basicPromise;
+    if (!isCurrent()) return null;
+    stage = 3;
+    if (basic && !basic.error && !includePrompt) {
+      showToast('Detailed evidence is unavailable. The basic local brief is still ready to copy.', 'error');
+      return basic;
+    }
     setDrawerContent(`<div class="empty">${esc(capsule.error)}</div>`);
     return capsule;
   }
+  stage = 3;
   setDrawerContent(renderHandoff(capsule));
   return capsule;
 }
@@ -2108,7 +2138,8 @@ async function startFreshFromBubble(sessionId) {
     showToast('Could not open the Fresh Start brief.', 'error');
     return;
   }
-  if (!capsule || capsule.error) {
+  if (!capsule) return;
+  if (capsule.error) {
     showToast((capsule && capsule.error) || 'Could not open the Fresh Start brief.', 'error');
     return;
   }
@@ -2264,16 +2295,19 @@ function renderOptimizeWorkspace(optimize) {
       const fullPath = item.project_full || item.project || '';
       const pathLine = fullPath ? `<div class="optimize-full-path"><span class="label">Full path</span><code>${esc(fullPath)}</code></div>` : '';
       const activityLine = item.activity_summary ? `<p class="optimize-activity-line">${esc(item.activity_summary)}</p>` : '';
-      return `<div class="action-row ${item.tokens_at_risk ? 'medium' : 'low'}">
-      <div>
+      return `<div class="action-row optimize-card ${item.tokens_at_risk ? 'medium' : 'low'}">
+      <div class="optimize-card-copy">
         <div class="action-title">${esc(item.title)} <span class="pill">${esc(item.evidence_label || 'Observed')}</span></div>
         <p>${esc(item.why_inactive || item.summary || '')}</p>
-        ${activityLine}
         <div class="action-meta"><span class="pill" title="${esc(fullPath)}">${esc(item.project ? projectName({ project_full: item.project }) : 'Local machine')}</span>${item.impact_label ? `<span class="pill">${esc(item.impact_label)}</span>` : ''}<span class="pill">${esc(item.updated_label || '')}</span></div>
         ${pathLine}
-        <p class="receipt-note">${esc(item.evidence || '')}</p>
+        <p class="receipt-note">Verify this is not active work before deciding whether to archive or clean it up.</p>
+        ${activityLine || item.evidence ? `<details class="aiw-details optimize-evidence"><summary>Review evidence</summary><div class="details-body">
+          ${activityLine}
+          ${item.evidence ? `<p class="receipt-note">${esc(item.evidence)}</p>` : ''}
+        </div></details>` : ''}
       </div>
-      <div class="actions">
+      <div class="actions optimize-card-actions">
         ${item.view ? `<button class="btn-primary" onclick="showView('${esc(item.view)}')">${esc(item.action_label || 'Review')}</button><button class="btn-quiet" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">Copy cleanup prompt</button>` : `<button class="btn-primary" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">Copy cleanup prompt</button>`}
         ${aiCleanup}
         <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('marked_done', this.dataset.project, this.dataset.impact, this)">Reviewed</button>
@@ -3847,11 +3881,12 @@ function miniStats(totals) {
   </div>`;
 }
 async function selectProject(project) {
-  openDrawer('Project detail');
+  const token = openDrawer('Project detail');
   setDrawerContent('<div class="loading">Loading project activity...</div>');
   const days = document.getElementById('days').value;
   const res = await fetch(`/api/project?days=${days}&project=${encodeURIComponent(project)}`);
   const data = await res.json();
+  if (!isCurrentDrawer(token)) return;
   document.getElementById('drawerTitle').textContent = data.project_short || 'Project detail';
   setDrawerContent(`<section class="detail-section"><h2>${esc(data.project_short)}</h2>
     ${miniStats(data.totals)}
@@ -3989,15 +4024,14 @@ function renderSessionActions(s) {
 // A session that has just started may not be in the index yet, so a miss is
 // retried -- but each attempt is a full round trip, so three is the ceiling.
 const SESSION_LOOKUP_ATTEMPTS = 3;
-let sessionSelectToken = 0;
 async function selectSession(sessionId, attempt = 0, token = null) {
   // Opening a second session while the first was still loading -- or still
   // retrying -- left whichever finished last on screen, including a retry for a
   // session you had already navigated away from. Each selection claims a token
   // and stale continuations stop writing.
-  if (token === null) token = ++sessionSelectToken;
-  const isCurrent = () => token === sessionSelectToken;
-  openDrawer('Session review');
+  if (token === null) token = openDrawer('Session review');
+  const isCurrent = () => isCurrentDrawer(token);
+  if (!isCurrent()) return;
   document.getElementById('drawerTitle').textContent = 'Session review';
   const node = document.getElementById('detailContent');
   setDrawerContent(attempt
@@ -4006,7 +4040,9 @@ async function selectSession(sessionId, attempt = 0, token = null) {
   const summaryPromise = fetch(`/api/session-summary?id=${encodeURIComponent(sessionId)}`)
     .then(res => res.json())
     .catch(() => null);
-  const detailPromise = fetch(`/api/session?id=${encodeURIComponent(sessionId)}`);
+  const detailPromise = fetch(`/api/session?id=${encodeURIComponent(sessionId)}`)
+    .then(res => res.json())
+    .catch(() => ({ error: 'Could not load local session details.' }));
   const fastSummary = await summaryPromise;
   if (!isCurrent()) return;
   if (fastSummary && !fastSummary.error) {
@@ -4015,8 +4051,7 @@ async function selectSession(sessionId, attempt = 0, token = null) {
   } else {
     setDrawerContent(`<div class="loading">Loading session details for ${esc(sessionId)}...</div>`);
   }
-  const res = await detailPromise;
-  const s = await res.json();
+  const s = await detailPromise;
   if (!isCurrent()) return;
   if (s.error) {
     // Retried because a session that started moments ago may not be indexed yet.
@@ -4038,7 +4073,9 @@ async function selectSession(sessionId, attempt = 0, token = null) {
     pending.className = 'loading';
     pending.textContent = s.detail_message || 'Timeline and evidence are still indexing in the background.';
     node.appendChild(pending);
-    if (attempt < 8) window.setTimeout(() => selectSession(sessionId, attempt + 1), 1400);
+    if (attempt < 8) window.setTimeout(() => {
+      if (isCurrent()) selectSession(sessionId, attempt + 1, token);
+    }, 1400);
     return;
   }
   document.getElementById('drawerTitle').textContent = 'Session review';

@@ -8352,6 +8352,22 @@ class UIHandler(BaseHTTPRequestHandler):
         site = self.headers.get("Sec-Fetch-Site", "").strip().lower()
         return site not in {"", "same-origin", "none"}
 
+    def _discard_bounded_request_body(self) -> None:
+        """Consume a rejected POST body when its declared size is safe.
+
+        Closing a Windows socket with unread request bytes can turn an already
+        written HTTP error into WSAECONNABORTED at the client. Same-origin-only
+        routes reject before parsing by design, so drain only a valid, bounded
+        Content-Length before sending that rejection. Invalid or oversized
+        requests are still never read into memory here.
+        """
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return
+        if 0 < length <= MAX_REQUEST_BYTES:
+            self.rfile.read(length)
+
     def _send(self, status: int, body: str, content_type: str) -> None:
         encoded = body.encode("utf-8")
         try:
@@ -8659,6 +8675,7 @@ class UIHandler(BaseHTTPRequestHandler):
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
         if parsed.path in SAME_ORIGIN_ONLY_ROUTES and self._is_cross_origin():
+            self._discard_bounded_request_body()
             self._send(403, json.dumps({"error": "This route answers only the dashboard's own origin"}), "application/json; charset=utf-8")
             return
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()

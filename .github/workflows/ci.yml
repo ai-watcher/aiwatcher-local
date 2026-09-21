@@ -21,6 +21,10 @@ jobs:
           node browser-extension/test-background.js
       - name: Validate VS Code adapter
         run: node --check vscode-extension/extension.js
+      - name: Validate dashboard drawer lifecycle
+        run: |
+          node --check aiwatcher_cli/web/index.js
+          node --test tests/test-drawer-lifecycle.cjs
 
   test:
     strategy:
