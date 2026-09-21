@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat as stat_module
 import subprocess
 import tempfile
 from collections import defaultdict
@@ -70,6 +71,45 @@ CODEX_SESSIONS_DIRS = _path_candidates(
     _env_path("APPDATA", "Codex", "sessions"),
     _env_path("LOCALAPPDATA", "Codex", "sessions"),
 )
+CODEX_ARCHIVED_SESSIONS_DIRS = _path_candidates(
+    HOME_DIR / ".codex" / "archived_sessions",
+    _env_path("APPDATA", "Codex", "archived_sessions"),
+    _env_path("LOCALAPPDATA", "Codex", "archived_sessions"),
+)
+CODEX_AGENT_RUNNING_FRESHNESS = timedelta(minutes=5)
+CODEX_AGENT_CLOCK_SKEW_TOLERANCE = timedelta(minutes=2)
+CODEX_ROLLOUT_MAX_LINE_BYTES = 1024 * 1024
+CODEX_ROLLOUT_SCAN_MAX_BYTES = 4 * 1024 * 1024
+CODEX_ROLLOUT_SCAN_MAX_RECORDS = 10_000
+CODEX_ROLLOUT_REQUEST_MAX_BYTES = 64 * 1024 * 1024
+CODEX_ROLLOUT_REQUEST_MAX_FILES = 2048
+CODEX_ROLLOUT_REQUEST_MAX_RECORDS = 100_000
+CODEX_LIFECYCLE_CACHE_MAX_ENTRIES = 4096
+_CODEX_LIFECYCLE_CACHE: dict[str, tuple[int, int, dict[str, Any] | None]] = {}
+
+
+@dataclass
+class _CodexRolloutScanBudget:
+    bytes_remaining: int = field(default_factory=lambda: CODEX_ROLLOUT_REQUEST_MAX_BYTES)
+    files_remaining: int = field(default_factory=lambda: CODEX_ROLLOUT_REQUEST_MAX_FILES)
+    records_remaining: int = field(default_factory=lambda: CODEX_ROLLOUT_REQUEST_MAX_RECORDS)
+
+    def begin_file(self) -> bool:
+        if self.files_remaining <= 0:
+            return False
+        self.files_remaining -= 1
+        return True
+
+    def take_bytes(self, requested: int) -> int:
+        allowed = min(requested, self.bytes_remaining)
+        self.bytes_remaining -= allowed
+        return allowed
+
+    def take_record(self) -> bool:
+        if self.records_remaining <= 0:
+            return False
+        self.records_remaining -= 1
+        return True
 CLINE_DIRS = _path_candidates(
     HOME_DIR / ".cline",
     _env_path("APPDATA", "Cline"),
@@ -1783,8 +1823,12 @@ AGENT_HIERARCHY_ENTRY_LIMIT = 5000
 
 
 def scan_codex_agent_hierarchy(since: datetime | None = None) -> dict[str, Any]:
-    """Read Codex's explicit spawn graph without reading conversation content."""
-    generated_at = datetime.now(timezone.utc).isoformat()
+    """Read Codex's spawn graph and structural rollout lifecycle events."""
+    generated_at_value = datetime.now(timezone.utc)
+    generated_at = generated_at_value.isoformat()
+    launch_thread_id = str(
+        os.environ.get("CODEX_THREAD_ID") or os.environ.get("CODEX_SESSION_ID") or ""
+    ).strip()
     codex_db = _first_existing(CODEX_DB_PATHS)
     if not codex_db:
         return {
@@ -1848,7 +1892,7 @@ def scan_codex_agent_hierarchy(since: datetime | None = None) -> dict[str, Any]:
                 "sessions": [],
             }
 
-        safe_columns = ["id", "cwd", "agent_nickname", "agent_role", "archived"]
+        safe_columns = ["id", "cwd", "agent_nickname", "agent_role", "archived", "rollout_path"]
         timestamp_columns = ["created_at_ms", "created_at", "updated_at_ms", "updated_at"]
         select_columns = [
             column if column in thread_columns else f"NULL AS {column}"
@@ -1928,6 +1972,7 @@ def scan_codex_agent_hierarchy(since: datetime | None = None) -> dict[str, Any]:
             "name": str(row["agent_nickname"] or "") or None,
             "role": str(row["agent_role"] or "") or None,
             "archived": bool(row["archived"]),
+            "rollout_path": str(row["rollout_path"] or "") or None,
             "created_at_value": created_at,
             "updated_at_value": updated_at,
         }
@@ -1963,18 +2008,67 @@ def scan_codex_agent_hierarchy(since: datetime | None = None) -> dict[str, Any]:
         component.add(child_id)
 
     sessions: list[dict[str, Any]] = []
+    rollout_scan_budget = _CodexRolloutScanBudget()
     undated_count = 0
     for root_id, agent_ids in roots.items():
-        component_updated = max(
-            (threads[agent_id]["updated_at_value"] for agent_id in agent_ids if threads[agent_id]["updated_at_value"]),
+        database_updated = max(
+            (
+                safe_value
+                for agent_id in agent_ids
+                if threads[agent_id]["updated_at_value"]
+                for safe_value in [
+                    _codex_safe_evidence_time(
+                        threads[agent_id]["updated_at_value"], generated_at_value
+                    )
+                ]
+                if safe_value
+            ),
+            default=None,
+        )
+        rollout_updated = max(
+            (
+                safe_value
+                for agent_id in agent_ids
+                for value in [_codex_rollout_mtime(threads[agent_id].get("rollout_path"))]
+                if value
+                for safe_value in [_codex_safe_evidence_time(value, generated_at_value)]
+                if safe_value
+            ),
+            default=None,
+        )
+        candidate_updated = max(
+            (value for value in (database_updated, rollout_updated) if value),
             default=None,
         )
         if since:
-            if component_updated is None:
+            if candidate_updated is None:
                 undated_count += 1
                 continue
-            if component_updated < since:
+            if candidate_updated < since:
                 continue
+        lifecycles = {
+            agent_id: _latest_codex_lifecycle_event(
+                threads[agent_id].get("rollout_path"),
+                request_budget=rollout_scan_budget,
+            )
+            for agent_id in agent_ids
+        }
+        lifecycle_updated = max(
+            (
+                safe_value
+                for lifecycle in lifecycles.values()
+                if lifecycle
+                for value in (lifecycle.get("last_write_at"), lifecycle.get("occurred_at"))
+                if value
+                for safe_value in [_codex_safe_evidence_time(value, generated_at_value)]
+                if safe_value
+            ),
+            default=None,
+        )
+        component_updated = max(
+            (value for value in (database_updated, lifecycle_updated) if value),
+            default=None,
+        )
         agents: list[dict[str, Any]] = []
         for agent_id in sorted(
             agent_ids,
@@ -1983,38 +2077,65 @@ def scan_codex_agent_hierarchy(since: datetime | None = None) -> dict[str, Any]:
             thread = threads[agent_id]
             is_root = agent_id == root_id
             raw_status = edge_status.get(agent_id)
-            # Spawn edges establish delegation, not execution or successful return.
-            status = "unknown"
-            latest_event = "unknown"
+            resolved = _resolve_codex_agent_state(
+                thread,
+                raw_status=raw_status,
+                lifecycle=lifecycles.get(agent_id),
+                is_root=is_root,
+                now=generated_at_value,
+            )
             display_name = "Main agent" if is_root else (thread["name"] or f"Agent {agent_id[:8]}")
             agents.append({
                 "agent_id": agent_id,
                 "parent_agent_id": parents.get(agent_id),
                 "name": display_name,
                 "role": "orchestration" if is_root else (thread["role"] or "delegated"),
-                "status": status,
-                "latest_event": latest_event,
-                "relationship_status": raw_status if raw_status in {"open", "closed"} else "unknown",
+                **resolved,
                 "created_at": _iso_or_none(thread["created_at_value"]),
-                "updated_at": _iso_or_none(thread["updated_at_value"]),
+                "updated_at": _iso_or_none(
+                    _codex_safe_evidence_time(thread["updated_at_value"], generated_at_value)
+                ),
             })
+        root_agent = next(agent for agent in agents if agent["agent_id"] == root_id)
+        launch_agent_id = launch_thread_id if launch_thread_id in agent_ids else None
+        active_count = sum(agent["status"] == "running" for agent in agents)
+        returned_count = sum(agent["status"] == "completed" for agent in agents)
+        stale_count = sum(agent["status"] == "stale" for agent in agents)
+        stale_record_count = sum(
+            agent["metadata_warning"] == "stale_open_edge" for agent in agents
+        )
+        session_status = "running" if active_count else ("stale" if stale_count else root_agent["status"])
         sessions.append({
             "session_id": root_id,
             "tool": "codex-cli",
+            "is_launch_session": launch_agent_id is not None,
+            "launch_agent_id": launch_agent_id,
             "project_path": threads[root_id]["project_path"],
             "updated_at": _iso_or_none(component_updated),
-            "status": "unknown",
+            "status": session_status,
+            "root_status": root_agent["status"],
             "agent_count": len(agents),
-            "active_count": sum(agent["status"] == "running" for agent in agents),
+            "active_count": active_count,
+            "returned_count": returned_count,
+            "stale_count": stale_count,
+            "stale_record_count": stale_record_count,
             "agents": agents,
+            "relationship_note": "Topology comes from Codex spawn records; status comes from structural rollout lifecycle events when available.",
         })
 
-    sessions.sort(key=lambda item: item["updated_at"] or "", reverse=True)
+    sessions.sort(
+        key=lambda item: (
+            item["is_launch_session"],
+            item["status"] == "running",
+            item["updated_at"] or "",
+        ),
+        reverse=True,
+    )
     return {
         "available": True,
-        "source": "codex-sqlite-spawn-edges",
+        "source": "codex-topology-and-rollout-lifecycle",
         "generated_at": generated_at,
-        "reason": "Observed from Codex thread and spawn-edge metadata.",
+        "reason": "Observed from Codex topology and structural rollout lifecycle events.",
         "sessions": sessions,
         "truncated": truncated,
         "undated_count": undated_count,
@@ -2110,12 +2231,19 @@ def scan_agent_hierarchy(since: datetime | None = None) -> dict[str, Any]:
     for tool, result in sources:
         for session in result.get("sessions", []):
             sessions.append({**session, "tool": tool, "selection_id": f"{tool}:{session['session_id']}"})
-    sessions.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
+    sessions.sort(
+        key=lambda item: (
+            bool(item.get("is_launch_session")),
+            item.get("status") == "running",
+            item.get("updated_at") or "",
+        ),
+        reverse=True,
+    )
     return {
         "available": any(result["available"] for _, result in sources),
         "source": "local-agent-relationships",
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "reason": "Recorded relationships only; running and completion status are not established.",
+        "reason": "Codex lifecycle evidence and recorded local agent relationships; coverage varies by tool.",
         "sessions": sessions,
         "coverage": [{"tool": tool, "available": result["available"], "reason": result.get("reason", "")} for tool, result in sources],
         "unsupported_tools": ["Cursor", "Windsurf", "Cline", "Ollama"],
@@ -2132,9 +2260,272 @@ def _missing_codex_thread(session_id: str) -> dict[str, Any]:
         "name": None,
         "role": None,
         "archived": False,
+        "rollout_path": None,
         "created_at_value": None,
         "updated_at_value": None,
     }
+
+
+def _latest_codex_lifecycle_event(
+    rollout_path: Any,
+    *,
+    request_budget: _CodexRolloutScanBudget | None = None,
+) -> dict[str, Any] | None:
+    """Return the newest task boundary without retaining rollout content."""
+    path = _validated_codex_rollout_path(rollout_path)
+    if path is None:
+        return None
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    if not stat_module.S_ISREG(stat.st_mode):
+        return None
+    cache_key = str(path)
+    cached = _CODEX_LIFECYCLE_CACHE.get(cache_key)
+    signature = (stat.st_mtime_ns, stat.st_size)
+    if cached and cached[:2] == signature:
+        return cached[2]
+
+    if request_budget is not None and not request_budget.begin_file():
+        return {
+            "event": "scan_budget_exhausted",
+            "occurred_at": None,
+            "last_write_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc),
+        }
+
+    result = None
+    record_budget_exhausted = False
+    try:
+        for record_index, line in enumerate(
+            _reverse_file_lines(
+                path,
+                max_bytes=CODEX_ROLLOUT_SCAN_MAX_BYTES,
+                request_budget=request_budget,
+            )
+        ):
+            if record_index >= CODEX_ROLLOUT_SCAN_MAX_RECORDS:
+                record_budget_exhausted = True
+                break
+            if request_budget is not None and not request_budget.take_record():
+                record_budget_exhausted = True
+                break
+            try:
+                item = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if not isinstance(item, dict) or item.get("type") != "event_msg":
+                continue
+            payload = item.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            event_name = payload.get("type")
+            if event_name not in {"task_started", "task_complete"}:
+                continue
+            result = {
+                "event": event_name,
+                "occurred_at": _parse_codex_hierarchy_ts(item.get("timestamp")),
+                "last_write_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc),
+            }
+            break
+    except OSError:
+        return None
+    request_budget_exhausted = request_budget is not None and (
+        request_budget.bytes_remaining <= 0 or request_budget.records_remaining <= 0
+    )
+    if result is None and (
+        record_budget_exhausted
+        or stat.st_size > CODEX_ROLLOUT_SCAN_MAX_BYTES
+        or request_budget_exhausted
+    ):
+        result = {
+            "event": "scan_budget_exhausted",
+            "occurred_at": None,
+            "last_write_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc),
+        }
+    if not (result and result.get("event") == "scan_budget_exhausted" and request_budget_exhausted):
+        if cache_key not in _CODEX_LIFECYCLE_CACHE and len(_CODEX_LIFECYCLE_CACHE) >= CODEX_LIFECYCLE_CACHE_MAX_ENTRIES:
+            _CODEX_LIFECYCLE_CACHE.pop(next(iter(_CODEX_LIFECYCLE_CACHE)))
+        _CODEX_LIFECYCLE_CACHE[cache_key] = (*signature, result)
+    return result
+
+
+def _codex_rollout_mtime(rollout_path: Any) -> datetime | None:
+    path = _validated_codex_rollout_path(rollout_path)
+    if path is None:
+        return None
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+    except OSError:
+        return None
+
+
+def _validated_codex_rollout_path(value: Any) -> Path | None:
+    if not value:
+        return None
+    try:
+        path = Path(str(value)).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if path.suffix.lower() != ".jsonl":
+        return None
+    for sessions_dir in [*CODEX_SESSIONS_DIRS, *CODEX_ARCHIVED_SESSIONS_DIRS]:
+        try:
+            path.relative_to(sessions_dir.expanduser().resolve())
+        except (OSError, RuntimeError, ValueError):
+            continue
+        return path
+    return None
+
+
+def _reverse_file_lines(
+    path: Path,
+    block_size: int = 64 * 1024,
+    max_line_size: int = CODEX_ROLLOUT_MAX_LINE_BYTES,
+    max_bytes: int = CODEX_ROLLOUT_SCAN_MAX_BYTES,
+    request_budget: _CodexRolloutScanBudget | None = None,
+) -> Iterable[bytes]:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    with os.fdopen(descriptor, "rb") as handle:
+        if not stat_module.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            return
+        handle.seek(0, os.SEEK_END)
+        position = handle.tell()
+        scan_start = max(0, position - max_bytes)
+        remainder = b""
+        discarding_oversized_line = False
+        while position > scan_start:
+            read_size = min(block_size, position - scan_start)
+            if request_budget is not None:
+                read_size = request_budget.take_bytes(read_size)
+                if read_size <= 0:
+                    break
+            position -= read_size
+            handle.seek(position)
+            chunk = handle.read(read_size)
+            if discarding_oversized_line:
+                boundary = chunk.rfind(b"\n")
+                if boundary < 0:
+                    continue
+                chunk = chunk[:boundary]
+                discarding_oversized_line = False
+            chunk += remainder
+            lines = chunk.split(b"\n")
+            remainder = lines[0]
+            for line in reversed(lines[1:]):
+                if line.strip() and len(line) <= max_line_size:
+                    yield line
+            if len(remainder) > max_line_size:
+                remainder = b""
+                discarding_oversized_line = True
+        if position == 0 and not discarding_oversized_line and remainder.strip():
+            yield remainder
+
+
+def _resolve_codex_agent_state(
+    thread: dict[str, Any],
+    *,
+    raw_status: str | None,
+    lifecycle: dict[str, Any] | None,
+    is_root: bool,
+    now: datetime,
+) -> dict[str, Any]:
+    lifecycle_event = lifecycle.get("event") if lifecycle else None
+    lifecycle_at = lifecycle.get("occurred_at") if lifecycle else None
+    rollout_write_at = lifecycle.get("last_write_at") if lifecycle else None
+    future_lifecycle = any(
+        value > now + CODEX_AGENT_CLOCK_SKEW_TOLERANCE
+        for value in (rollout_write_at, lifecycle_at)
+        if value
+    )
+    lifecycle_activity_at = max(
+        (
+            safe_value
+            for value in (rollout_write_at, lifecycle_at)
+            if value
+            for safe_value in [_codex_safe_evidence_time(value, now)]
+            if safe_value
+        ),
+        default=None,
+    )
+    evidence_at = lifecycle_activity_at or _codex_safe_evidence_time(thread.get("updated_at_value"), now)
+    stale_after = None
+
+    if future_lifecycle:
+        status = "unknown"
+        latest_event = "clock_skew"
+        evidence_source = "rollout_lifecycle+clock_skew"
+        confidence = "low"
+    elif lifecycle_event == "task_complete":
+        status = "idle" if is_root else "completed"
+        latest_event = "idle" if is_root else "returned"
+        evidence_source = "rollout_lifecycle"
+        confidence = "high"
+    elif lifecycle_event == "scan_budget_exhausted":
+        status = "unknown"
+        latest_event = "scan_limited"
+        evidence_source = "rollout_scan_budget"
+        confidence = "low"
+    elif lifecycle_event == "task_started":
+        if thread.get("archived") or (raw_status == "closed" and not is_root):
+            status = "interrupted"
+            latest_event = "interrupted"
+            evidence_source = "rollout_lifecycle+thread_metadata"
+            confidence = "high"
+        elif lifecycle_activity_at is None:
+            status = "unknown"
+            latest_event = "started"
+            evidence_source = "rollout_lifecycle"
+            confidence = "low"
+        else:
+            stale_after_value = lifecycle_activity_at + CODEX_AGENT_RUNNING_FRESHNESS
+            stale_after = _iso_or_none(stale_after_value)
+            if now <= stale_after_value:
+                status = "running"
+                latest_event = "working"
+                confidence = "medium"
+            else:
+                status = "stale"
+                latest_event = "stale"
+                confidence = "medium"
+            evidence_source = "rollout_lifecycle+last_activity"
+    elif thread.get("archived"):
+        status = "unknown"
+        latest_event = "archived"
+        evidence_source = "thread_metadata"
+        confidence = "low"
+    elif not is_root and raw_status == "closed":
+        status = "unknown"
+        latest_event = "relationship_closed"
+        evidence_source = "spawn_edge"
+        confidence = "low"
+    else:
+        status = "unknown"
+        latest_event = "unknown"
+        evidence_source = "spawn_edge" if raw_status else "thread_metadata"
+        confidence = "low"
+
+    metadata_warning = None
+    if not is_root and raw_status == "open" and status in {"completed", "interrupted", "stale"}:
+        metadata_warning = "stale_open_edge"
+
+    return {
+        "status": status,
+        "latest_event": latest_event,
+        "evidence_source": evidence_source,
+        "evidence_at": _iso_or_none(evidence_at),
+        "confidence": confidence,
+        "stale_after": stale_after,
+        "relationship_status": raw_status,
+        "metadata_warning": metadata_warning,
+    }
+
+
+def _codex_safe_evidence_time(value: datetime | None, now: datetime) -> datetime | None:
+    if value is None or value > now:
+        return None
+    return value
 
 
 def _parse_codex_hierarchy_ts(value: Any) -> datetime | None:

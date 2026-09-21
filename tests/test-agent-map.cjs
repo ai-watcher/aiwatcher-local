@@ -31,8 +31,9 @@ function harness() {
     dateLabel: value => value || 'unknown',
     fetchDashboardJson: () => new Promise((resolve, reject) => pending.push({ resolve, reject })),
   });
-  vm.runInContext("let agentHierarchyCache = {sessions: []}; let selectedAgentSessionId = ''; let selectedAgentId = ''; let agentMapMode = 'all'; let agentHierarchyToken = 0; let agentHierarchyLoadedForDays = null;", ctx);
-  for (const name of ['esc', 'projectName', 'agentStatusLabel', 'agentEventLabel', 'selectedAgentSession', 'selectAgentSession',
+  vm.runInContext("let agentHierarchyCache = {sessions: []}; let agentHierarchyError = ''; let selectedAgentSessionId = ''; let selectedAgentId = ''; let agentMapMode = 'all'; let agentHierarchyToken = 0; let agentHierarchyLoadedForDays = null;", ctx);
+  for (const name of ['esc', 'projectName', 'agentStatusLabel', 'agentEventLabel', 'agentEvidenceLabel', 'agentSessionKind',
+    'shortAgentSessionId', 'updateAgentHierarchyStatus', 'selectedAgentSession', 'selectAgentSession',
     'visibleAgentNodes', 'renderAgentBranch', 'renderAgentHierarchy', 'loadAgentHierarchy']) vm.runInContext(extract(name), ctx);
   return { ctx, node, document, pending, focusCount: () => focused };
 }
@@ -101,10 +102,12 @@ test('failures retain last data with an error, and successful refresh clears it'
   await failed;
   assert.match(h.node('agentSessionSelect').innerHTML, /root-a/);
   assert.equal(h.node('agentMapStatus').textContent, 'offline');
+  h.ctx.selectAgentSession('codex-cli:root-b');
+  assert.equal(h.node('agentMapStatus').textContent, 'offline');
   const recovered = h.ctx.loadAgentHierarchy();
   h.pending[2].resolve(payload);
   await recovered;
-  assert.match(h.node('agentMapStatus').textContent, /^Updated/);
+  assert.match(h.node('agentMapStatus').textContent, /^Checked/);
 });
 
 test('deep trees are clipped rather than overflowing the stack', () => {
