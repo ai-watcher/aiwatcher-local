@@ -384,11 +384,30 @@ class CodexAgentHierarchyTests(unittest.TestCase):
                 self._insert_thread(db, ident, updated_at=stamp)
             self._insert_edge(db, "root", "child", "open")
             self._insert_edge(db, "expired-root", "expired-child", "closed")
-            with sqlite3.connect(db) as conn:
+            conn = sqlite3.connect(db)
+            try:
                 conn.execute("UPDATE threads SET updated_at_ms = NULL WHERE id = 'root'")
+                conn.commit()
+            finally:
+                conn.close()
             with patch.object(scanner, "AGENT_HIERARCHY_EDGE_LIMIT", 1):
                 result = self._scan(db, since=datetime(2026, 1, 1, tzinfo=timezone.utc))
         self.assertEqual([row["session_id"] for row in result["sessions"]], ["root"])
+
+    def test_ancestry_budget_exhaustion_does_not_invent_a_root(self):
+        with tempfile.TemporaryDirectory() as temp:
+            db = Path(temp) / "state.sqlite"
+            self._create_db(db)
+            old = datetime(2025, 1, 1, tzinfo=timezone.utc)
+            now = datetime(2026, 9, 20, tzinfo=timezone.utc)
+            for ident in ("root", "a", "b", "leaf"):
+                self._insert_thread(db, ident, updated_at=now if ident == "leaf" else old)
+            for parent, child in (("root", "a"), ("a", "b"), ("b", "leaf")):
+                self._insert_edge(db, parent, child, "open")
+            with patch.object(scanner, "AGENT_HIERARCHY_EDGE_LIMIT", 1):
+                result = self._scan(db)
+        self.assertEqual(result["sessions"], [])
+        self.assertTrue(result["truncated"])
 
 
 class ClaudeAgentHierarchyTests(unittest.TestCase):
