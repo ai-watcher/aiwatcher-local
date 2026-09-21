@@ -96,6 +96,11 @@ package. Still read them before publishing.
 
 ## Publish To PyPI
 
+Pushing or merging commits to `main` never publishes PyPI automatically. The
+maintainer chooses when to release and which semantic version to use: patch for
+compatible fixes, minor for backward-compatible features, and major for a
+stable or intentionally breaking compatibility boundary.
+
 Before publishing, bump `version` in both `pyproject.toml` and
 `aiwatcher_cli/__init__.py`, update any literal version assertions, and commit
 the change. Push a tag with the same version, then create a GitHub release for
