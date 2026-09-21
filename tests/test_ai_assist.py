@@ -323,6 +323,7 @@ class AiAssistTests(unittest.TestCase):
                 "model": "gpt-test",
                 "text": (
                     '{"goal":"Finish the smallest checkpoint.",'
+                    '"objective_status":"Confirmed from supplied objective",'
                     '"what_is_done":["Settings page exists"],'
                     '"current_state":["The UI change is not verified yet"],'
                     '"decisions":["Keep AI Assist optional"],'
@@ -333,6 +334,7 @@ class AiAssistTests(unittest.TestCase):
                     '"next_steps":["Inspect aiwatcher_cli/web/index.js"],'
                     '"next_ask":"Inspect settings files, then patch only the AI Assist config UX.",'
                     '"acceptance_check":["node --check passes"],'
+                    '"verification_already_run":["No verification observed yet"],'
                     '"uncertainties":["Confirm user-selected provider persists"]}'
                 ),
                 "usage": {"prompt_tokens": 200, "completion_tokens": 50},
@@ -398,6 +400,27 @@ class AiAssistTests(unittest.TestCase):
                     },
                     local_brief=evidence_packet,
                 )
+
+    def test_fresh_start_rejects_git_status_only_when_objective_is_unknown(self) -> None:
+        evidence_packet = json.dumps({
+            "contract": "fresh_start_continuation_v2",
+            "source": {"session_id": "session-1", "project": "/repo/ai"},
+            "objective": "",
+            "context_quality": {"objective_known": False},
+            "evidence": {"changed_files": ["aiwatcher_cli/ui.py"]},
+        })
+        parsed = {
+            "goal": "The objective is unknown; confirm the intended task.",
+            "objective_status": "Unknown",
+            "what_is_done": ["aiwatcher_cli/ui.py is changed"],
+            "current_state": ["Working tree contains one changed file"],
+            "risks_and_constraints": ["Do not overwrite unrelated changes"],
+            "inspect_first": ["aiwatcher_cli/ui.py"],
+            "next_steps": ["Inspect the change"],
+            "next_ask": "Run `git status --short`",
+            "acceptance_check": ["User confirms the task"],
+        }
+        self.assertFalse(ai_assist._fresh_start_response_is_useful(parsed, evidence_packet))
 
     def test_optimize_cleanup_prompt_composes_buckets_and_guardrails(self) -> None:
         with (
