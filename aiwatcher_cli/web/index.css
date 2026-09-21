@@ -1202,9 +1202,10 @@
       word-break: break-word;
     }
     .action-row .actions { justify-content: flex-end; }
-    .optimize-card { align-items: start; }
+    .optimize-card { align-items: start; grid-template-columns: minmax(0, 1fr); }
     .optimize-card-copy { min-width: 0; }
     .optimize-card-actions { align-self: start; }
+    .optimize-card .actions { justify-content: flex-start; }
     .runtime-review-card { align-items: start; grid-template-columns: minmax(0, 1fr); }
     .runtime-review-card .actions { justify-content: flex-start; }
     .runtime-review-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--sp-2); margin-top: 12px; }

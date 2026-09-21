@@ -620,8 +620,8 @@ class SessionDrawerTest(unittest.TestCase):
         another, overwriting the good render with the old one's loading message.
         Each selection claims a token; stale continuations stop writing."""
         source = js_function_source(self.js, "selectSession")
-        self.assertIn("sessionSelectToken", source)
-        self.assertEqual(source.count("if (!isCurrent()) return;"), 2)
+        self.assertIn("isCurrentDrawer(token)", source)
+        self.assertEqual(source.count("if (!isCurrent()) return;"), 3)
         self.assertIn("if (isCurrent()) selectSession(sessionId, attempt + 1, token)", source)
 
     def test_a_retry_says_that_it_is_retrying(self):
