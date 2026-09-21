@@ -711,6 +711,8 @@ def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -
     next_steps = _clean_list(parsed.get("next_steps"), limit=6)
     uncertainties = _clean_list(parsed.get("uncertainties"), limit=5)
     acceptance = _clean_list(parsed.get("acceptance_check") or parsed.get("acceptance"), limit=5)
+    verification = _clean_list(parsed.get("verification_already_run") or parsed.get("verification"), limit=5)
+    objective_status = _clean_line(parsed.get("objective_status"), limit=180)
 
     source_lines = [
         f"Project: {_clean_line(source.get('project'), limit=420)}",
@@ -736,6 +738,7 @@ def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -
         "",
         "Objective",
         f"- {goal or 'Continue the same user goal from the source workspace after verifying the evidence.'}",
+        f"- Status: {objective_status or ('Confirmed from supplied context.' if packet.get('objective') else 'Not captured; confirm the desired outcome before editing.')}",
         *_section("Completed work", what_done or ["No completed work was established by the model; verify the evidence below before editing."]),
         *_section("Current state", current_state or _packet_list(packet, "current_state", limit=6)),
         *_section("Decisions already made", decisions or _packet_list(packet, "logged_decisions", limit=5)),
@@ -748,6 +751,7 @@ def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -
         "First action",
         f"- {next_ask or 'State what appears done, what remains uncertain, and the smallest safe checkpoint before editing.'}",
         *_section("Acceptance criteria", acceptance or _packet_list(packet, "acceptance_criteria", limit=5)),
+        *_section("Verification already observed", verification or _packet_list(evidence, "tests", limit=5) or ["No completed verification was observed; do not claim the prior work is verified."]),
         *_section("Open questions and uncertainty", uncertainties),
         *_section("Evidence carried forward", evidence_lines or ["No commit, file, test, or decision evidence was available."]),
         "",
@@ -772,8 +776,19 @@ def _fresh_start_response_is_useful(parsed: dict[str, object], packet_text: str)
         "continue the same user goal",
     )
     packet = _handoff_packet(packet_text)
+    objective_known = bool(
+        _clean_line(packet.get("objective"), limit=500)
+        or ((packet.get("context_quality") or {}).get("objective_known") if isinstance(packet.get("context_quality"), dict) else False)
+    )
     if not goal or not next_ask:
         return False
+    if not objective_known:
+        combined = f"{goal} {next_ask} {_clean_line(parsed.get('objective_status'), limit=300)}"
+        if not any(term in combined for term in ("unknown", "not captured", "confirm the desired", "confirm the intended", "ask the user")):
+            return False
+        normalized_ask = next_ask.replace("`", "").rstrip(".")
+        if normalized_ask in {"run git status --short", "check git status"}:
+            return False
     if not _clean_line(packet.get("objective"), limit=500) and any(phrase in goal for phrase in generic):
         return False
     populated = sum(bool(_clean_list(parsed.get(key), limit=2)) for key in (
@@ -891,6 +906,8 @@ _FRESH_START_SPEC = _WorkflowSpec(
         "next_steps: string[]\n"
         "next_ask: string\n"
         "acceptance_check: string[]\n"
+        "verification_already_run: string[]\n"
+        "objective_status: string\n"
         "uncertainties: string[]\n\n"
         "Every factual statement must come from the packet. Include the exact project path and at "
         "least one concrete commit, changed file, test, decision, command, or session id when the "
@@ -900,7 +917,9 @@ _FRESH_START_SPEC = _WorkflowSpec(
         "enough to paste without carrying the whole old conversation. Do not use vague goals like "
         "\"reconstruct the current work\" unless no stronger objective is present; tie the goal to "
         "the observed workspace/tool/path/evidence instead. When context_quality.objective_known is false, "
-        "state that the objective is unknown and make the first action verify it; do not manufacture a coding goal."
+        "state that the objective is unknown and make the first action inspect concrete evidence and ask one focused "
+        "outcome question; do not manufacture a coding goal or use `git status` alone as the first action. "
+        "Separate verification already observed from checks the new session still needs to run."
     ),
     evidence_heading="Local AIWatcher handoff evidence:",
     structure=_structured_handoff_text,
