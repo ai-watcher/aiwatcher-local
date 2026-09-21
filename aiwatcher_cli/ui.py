@@ -148,7 +148,7 @@ from .scanner import (
     model_usage_totals,
     scan_all,
     scan_all_events,
-    scan_codex_agent_hierarchy,
+    scan_agent_hierarchy,
     segment_session_by_prompt,
     surface_coverage,
 )
@@ -1999,7 +1999,7 @@ def build_session_search(
 
 def build_agent_hierarchy(days: int = 30) -> dict[str, object]:
     since = datetime.now(timezone.utc) - timedelta(days=max(1, min(90, days)))
-    result = scan_codex_agent_hierarchy(since=since)
+    result = scan_agent_hierarchy(since=since)
     sessions = []
     for session in result.get("sessions", []):
         project_path = session.get("project_path")

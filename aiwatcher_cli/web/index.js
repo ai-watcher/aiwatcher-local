@@ -1510,11 +1510,11 @@ function restoreCachedUpdateState(context = {}) {
   setUpdateState('unknown', null, 0);
   return null;
 }
-async function fetchDashboardJson(url, timeoutMs = 15000) {
+async function fetchDashboardJson(url, timeoutMs = 15000, options = {}) {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetch(url, { ...options, signal: controller.signal });
     if (!response.ok) throw new Error(`Request failed (${response.status})`);
     return await response.json();
   } finally {
@@ -5164,7 +5164,7 @@ let sessionRowsCache = [];
 let agentHierarchyCache = { sessions: [] };
 let selectedAgentSessionId = '';
 let selectedAgentId = '';
-let agentMapMode = 'active';
+let agentMapMode = 'all';
 let agentHierarchyToken = 0;
 let changeRowsCache = [];
 let sessionSort = { key: 'updated_at', dir: 'desc' };
@@ -5413,7 +5413,7 @@ function agentEventLabel(eventName) {
 
 function selectedAgentSession() {
   const sessions = agentHierarchyCache.sessions || [];
-  return sessions.find(session => session.session_id === selectedAgentSessionId) || sessions[0] || null;
+  return sessions.find(session => session.selection_id === selectedAgentSessionId) || sessions[0] || null;
 }
 
 function selectAgentSession(sessionId) {
@@ -5439,13 +5439,16 @@ function setAgentMapMode(mode) {
 
 function visibleAgentNodes(session) {
   const agents = session.agents || [];
-  if (agentMapMode === 'all' || !session.active_count) return agents;
+  if (agentMapMode === 'all') return agents;
+  if (!session.active_count) return [];
   const byId = new Map(agents.map(agent => [agent.agent_id, agent]));
   const visible = new Set(agents.filter(agent => agent.status === 'running').map(agent => agent.agent_id));
   agents.filter(agent => agent.parent_agent_id === null).forEach(agent => visible.add(agent.agent_id));
   [...visible].forEach(agentId => {
     let current = byId.get(agentId);
-    while (current && current.parent_agent_id) {
+    const seen = new Set();
+    while (current && current.parent_agent_id && !seen.has(current.agent_id)) {
+      seen.add(current.agent_id);
       visible.add(current.parent_agent_id);
       current = byId.get(current.parent_agent_id);
     }
@@ -5455,6 +5458,7 @@ function visibleAgentNodes(session) {
 
 function renderAgentBranch(agent, agents, ancestors = new Set()) {
   if (!agent || ancestors.has(agent.agent_id)) return '';
+  if (ancestors.size >= 32) return '<li>Deeper relationships omitted from this view.</li>';
   const nextAncestors = new Set(ancestors);
   nextAncestors.add(agent.agent_id);
   const children = agents
@@ -5480,18 +5484,18 @@ function renderAgentHierarchy() {
     select.innerHTML = '<option value="">No agent sessions</option>';
     select.disabled = true;
     coverage.textContent = 'Unavailable';
-    body.innerHTML = `<div class="agent-map-empty"><strong>Agent relationships unavailable</strong><p>${esc(agentHierarchyCache.reason || 'This Codex version does not expose spawn relationships.')}</p></div>`;
+    body.innerHTML = `<div class="agent-map-empty"><strong>Agent relationships unavailable</strong><p>${esc(agentHierarchyCache.reason || 'No supported local relationship metadata is available.')}</p></div>`;
     return;
   }
   if (!sessions.length) {
     select.innerHTML = '<option value="">No delegated sessions</option>';
     select.disabled = true;
     coverage.textContent = 'Observed';
-    body.innerHTML = '<div class="agent-map-empty"><strong>No delegated Codex sessions in this window</strong><p>Sessions with subagents will appear here as Codex records spawn relationships.</p></div>';
+    body.innerHTML = '<div class="agent-map-empty"><strong>No recorded agent relationships in this window</strong></div>';
     return;
   }
-  if (!sessions.some(session => session.session_id === selectedAgentSessionId)) {
-    selectedAgentSessionId = (sessions.find(session => session.status === 'running') || sessions[0]).session_id;
+  if (!sessions.some(session => session.selection_id === selectedAgentSessionId)) {
+    selectedAgentSessionId = (sessions.find(session => session.status === 'running') || sessions[0]).selection_id;
   }
   const session = selectedAgentSession();
   const allAgents = session.agents || [];
@@ -5507,18 +5511,21 @@ function renderAgentHierarchy() {
   const childCount = agent ? allAgents.filter(candidate => candidate.parent_agent_id === agent.agent_id).length : 0;
   const roots = agents.filter(candidate => candidate.parent_agent_id === null || !agents.some(parentCandidate => parentCandidate.agent_id === candidate.parent_agent_id));
   select.disabled = false;
-  select.innerHTML = sessions.map(item => `<option value="${esc(item.session_id)}"${item.session_id === session.session_id ? ' selected' : ''}>${esc(projectName(item))} · ${esc(item.active_count)} active · ${esc(item.agent_count)} agents</option>`).join('');
+  select.innerHTML = sessions.map(item => `<option value="${esc(item.selection_id)}"${item.selection_id === session.selection_id ? ' selected' : ''}>${esc(item.tool)} · ${esc(projectName(item))} · ${esc(item.session_id)} · ${esc(item.agent_count)} agents</option>`).join('');
   coverage.textContent = `${sessions.length} session${sessions.length === 1 ? '' : 's'} observed`;
   body.innerHTML = `<div class="agent-map-summary" aria-label="Agent status summary">
       <span><strong>${esc(session.agent_count)}</strong> agents</span>
-      <span><strong>${esc(runningCount)}</strong> running</span>
-      <span><strong>${esc(returnedCount)}</strong> returned</span>
+      <span><strong>${esc(runningCount)}</strong> verified running</span>
+      <span><strong>${esc(returnedCount)}</strong> verified returned</span>
       ${uncertainCount ? `<span><strong>${esc(uncertainCount)}</strong> unknown or interrupted</span>` : ''}
       ${agentMapMode === 'active' && session.agent_count > agents.length ? `<span><strong>${esc(session.agent_count - agents.length)}</strong> hidden</span>` : ''}
-      <span class="agent-map-source">Codex metadata only</span>
+      <span class="agent-map-source">${esc(session.tool)} metadata only</span>
     </div>
+    <p class="receipt-note">${esc(session.relationship_note || 'Recorded delegation links; execution and successful return are unverified.')}</p>
+    <p class="receipt-note">Project: ${esc(session.project_full)} · Session: ${esc(session.session_id)}</p>
     <div class="agent-map-layout">
       <div class="agent-tree-pane">
+        ${!agents.length ? '<p>No verified running agents. Choose All to inspect recorded relationships.</p>' : ''}
         <ul class="agent-tree" aria-label="Agent delegation hierarchy">${roots.map(root => renderAgentBranch(root, agents)).join('')}</ul>
       </div>
       <aside class="agent-detail-pane" aria-label="Selected agent detail">
@@ -5526,6 +5533,7 @@ function renderAgentHierarchy() {
           <dl>
             <dt>Role</dt><dd>${esc(agent.role)}</dd>
             <dt>Latest event</dt><dd>${esc(agentEventLabel(agent.latest_event))}</dd>
+            <dt>Relationship</dt><dd>${esc(agent.relationship_status || 'unknown')}</dd>
             <dt>Parent</dt><dd>${esc(parent ? parent.name : 'Root agent')}</dd>
             <dt>Children</dt><dd>${esc(childCount)}</dd>
             <dt>Updated</dt><dd>${esc(dateLabel(agent.updated_at))}</dd>
@@ -5538,28 +5546,37 @@ async function loadAgentHierarchy(force = false) {
   const days = document.getElementById('days').value;
   const button = document.getElementById('agentMapRefresh');
   const status = document.getElementById('agentMapStatus');
-  const focusedAgent = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.agent : '';
+  const focusedElement = document.activeElement;
+  const focusedAgent = focusedElement && focusedElement.dataset ? focusedElement.dataset.agent : '';
   const token = ++agentHierarchyToken;
   if (button) {
     button.disabled = true;
     button.textContent = 'Refreshing...';
   }
   try {
-    const res = await fetch(`/api/agent-hierarchy?days=${encodeURIComponent(days)}`, { cache: 'no-store' });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Agent relationships could not be refreshed.');
+    const res = await fetchDashboardJson(`/api/agent-hierarchy?days=${encodeURIComponent(days)}`, 15000, { cache: 'no-store' });
+    const data = res;
     if (token !== agentHierarchyToken) return;
     const changed = JSON.stringify(data.sessions || []) !== JSON.stringify(agentHierarchyCache.sessions || [])
       || data.available !== agentHierarchyCache.available
       || data.reason !== agentHierarchyCache.reason;
     agentHierarchyCache = data;
     agentHierarchyLoadedForDays = days;
+    const restoreFocus = focusedAgent && document.activeElement === focusedElement;
     if (changed || force) renderAgentHierarchy();
-    if (focusedAgent) {
+    if (restoreFocus && (changed || force)) {
       const replacement = Array.from(document.querySelectorAll('[data-agent]')).find(node => node.dataset.agent === focusedAgent);
       if (replacement) replacement.focus();
     }
     if (status) status.textContent = `Updated ${new Date(data.generated_at || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+    const coverageNote = document.getElementById('agentMapCoverageNote');
+    if (coverageNote) coverageNote.textContent = [
+      ...(data.coverage || []).map(item => `${item.tool}: ${item.available ? 'relationship metadata available' : 'unavailable'}`),
+      `Other tools: relationship coverage not yet available`,
+      data.truncated ? 'Partial results: scan limit reached.' : '',
+      data.partial ? 'Some local metadata is unavailable.' : '',
+      data.undated_count ? `${data.undated_count} undated groups excluded from this window.` : '',
+    ].filter(Boolean).join(' · ');
   } catch (error) {
     if (token !== agentHierarchyToken) return;
     const message = error && error.message ? error.message : 'Agent relationships could not be refreshed.';

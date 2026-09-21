@@ -1444,6 +1444,7 @@
     .agent-map-modes button { min-height: 32px; padding: 5px 10px; border: 0; background: transparent; color: var(--muted); }
     .agent-map-modes button.active { background: var(--blue-soft); color: var(--on-brand); }
     .agent-map-body { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+    .agent-map-body > .receipt-note { padding: 0 var(--sp-3); overflow-wrap: anywhere; }
     .agent-map-summary {
       display: flex;
       align-items: center;

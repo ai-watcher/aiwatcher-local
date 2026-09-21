@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -163,17 +164,19 @@ class CodexAgentHierarchyTests(unittest.TestCase):
 
         self.assertEqual(session["session_id"], "root")
         self.assertEqual(session["project_path"], "/work/agent-project")
-        self.assertEqual(session["status"], "running")
+        self.assertEqual(session["status"], "unknown")
         self.assertEqual(session["agent_count"], 4)
-        self.assertEqual(session["active_count"], 2)
+        self.assertEqual(session["active_count"], 0)
         self.assertEqual(set(agents), {"root", "chloe", "adam", "darwin"})
 
         self.assertIsNone(agents["root"]["parent_agent_id"])
-        self.assertEqual((agents["root"]["status"], agents["root"]["latest_event"]), ("running", "working"))
+        self.assertEqual((agents["root"]["status"], agents["root"]["latest_event"]), ("unknown", "unknown"))
         self.assertEqual(agents["chloe"]["parent_agent_id"], "root")
-        self.assertEqual((agents["chloe"]["status"], agents["chloe"]["latest_event"]), ("running", "working"))
+        self.assertEqual((agents["chloe"]["status"], agents["chloe"]["latest_event"]), ("unknown", "unknown"))
+        self.assertEqual(agents["chloe"]["relationship_status"], "open")
         self.assertEqual(agents["adam"]["parent_agent_id"], "chloe")
-        self.assertEqual((agents["adam"]["status"], agents["adam"]["latest_event"]), ("completed", "returned"))
+        self.assertEqual((agents["adam"]["status"], agents["adam"]["latest_event"]), ("unknown", "unknown"))
+        self.assertEqual(agents["adam"]["relationship_status"], "closed")
         self.assertEqual(agents["darwin"]["parent_agent_id"], "root")
         self.assertEqual((agents["darwin"]["status"], agents["darwin"]["latest_event"]), ("unknown", "unknown"))
 
@@ -228,7 +231,7 @@ class CodexAgentHierarchyTests(unittest.TestCase):
         self.assertEqual(session["active_count"], 0)
         agents = {agent["agent_id"]: agent for agent in session["agents"]}
         self.assertEqual((agents["recent-root"]["status"], agents["recent-root"]["latest_event"]), ("unknown", "unknown"))
-        self.assertEqual((agents["recent-child"]["status"], agents["recent-child"]["latest_event"]), ("completed", "returned"))
+        self.assertEqual((agents["recent-child"]["status"], agents["recent-child"]["latest_event"]), ("unknown", "unknown"))
 
     def test_archived_open_child_does_not_make_the_root_running(self) -> None:
         now = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
@@ -247,7 +250,7 @@ class CodexAgentHierarchyTests(unittest.TestCase):
         self.assertEqual(agents["root"]["status"], "unknown")
         self.assertEqual(agents["child"]["status"], "unknown")
 
-    def test_closed_edge_remains_returned_when_the_thread_is_archived(self) -> None:
+    def test_closed_edge_never_proves_return_when_the_thread_is_archived(self) -> None:
         now = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "state_5.sqlite"
@@ -262,7 +265,7 @@ class CodexAgentHierarchyTests(unittest.TestCase):
         agents = {agent["agent_id"]: agent for agent in session["agents"]}
         self.assertEqual((session["status"], session["active_count"]), ("unknown", 0))
         self.assertEqual((agents["root"]["status"], agents["root"]["latest_event"]), ("unknown", "unknown"))
-        self.assertEqual((agents["child"]["status"], agents["child"]["latest_event"]), ("completed", "returned"))
+        self.assertEqual((agents["child"]["status"], agents["child"]["latest_event"]), ("unknown", "unknown"))
 
     def test_malformed_and_naive_timestamps_degrade_safely(self) -> None:
         now = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
@@ -293,7 +296,7 @@ class CodexAgentHierarchyTests(unittest.TestCase):
         self.assertEqual(len(result["sessions"]), 1)
         agents = {agent["agent_id"]: agent for agent in result["sessions"][0]["agents"]}
         self.assertEqual(agents["root"]["updated_at"], "2026-09-20T12:00:00+00:00")
-        self.assertIsNone(agents["child"]["updated_at"])
+        self.assertEqual(agents["child"]["updated_at"], now.isoformat())
 
     def test_missing_spawn_edge_table_is_reported_as_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -313,6 +316,135 @@ class CodexAgentHierarchyTests(unittest.TestCase):
         self.assertEqual(result["sessions"], [])
         self.assertIsNotNone(datetime.fromisoformat(result["generated_at"].replace("Z", "+00:00")))
 
+    def test_undated_orphan_is_excluded_from_a_date_window(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "state.sqlite"
+            self._create_db(db_path)
+            self._insert_edge(db_path, "missing-root", "missing-child", "open")
+            result = self._scan(db_path, since=datetime(2026, 9, 19, tzinfo=timezone.utc))
+        self.assertEqual(result["sessions"], [])
+        self.assertEqual(result["undated_count"], 1)
+
+    def test_edge_limit_is_explicit_and_private_columns_are_never_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "state.sqlite"
+            self._create_db(db_path)
+            now = datetime.now(timezone.utc)
+            for index in range(5):
+                self._insert_thread(db_path, str(index), updated_at=now)
+            for index in range(1, 5):
+                self._insert_edge(db_path, "0", str(index), "open")
+            connect = sqlite3.connect
+            def safe_connection(*args, **kwargs):
+                conn = connect(*args, **kwargs)
+                def authorize(action, table, column, *_):
+                    if action == sqlite3.SQLITE_READ and table == "threads" and column in {"title", "first_user_message", "preview", "name"}:
+                        return sqlite3.SQLITE_DENY
+                    return sqlite3.SQLITE_OK
+                conn.set_authorizer(authorize)
+                return conn
+            with patch.object(scanner, "AGENT_HIERARCHY_EDGE_LIMIT", 2), patch.object(scanner.sqlite3, "connect", side_effect=safe_connection):
+                result = self._scan(db_path)
+        self.assertTrue(result["available"])
+        self.assertTrue(result["truncated"])
+        self.assertEqual(result["sessions"][0]["agent_count"], 3)
+        self.assertEqual(result["sessions"][0]["active_count"], 0)
+
+    def test_cycles_do_not_hang_or_invent_a_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "state.sqlite"
+            self._create_db(db_path)
+            self._insert_edge(db_path, "a", "b", "open")
+            self._insert_edge(db_path, "b", "a", "open")
+            result = self._scan(db_path)
+        self.assertEqual(result["sessions"], [])
+
+    def test_limited_scan_recovers_the_real_root(self):
+        with tempfile.TemporaryDirectory() as temp:
+            db = Path(temp) / "state.sqlite"
+            self._create_db(db)
+            old = datetime(2025, 1, 1, tzinfo=timezone.utc)
+            now = datetime(2026, 9, 20, tzinfo=timezone.utc)
+            for ident, stamp in (("root", old), ("middle", old), ("leaf", now)):
+                self._insert_thread(db, ident, updated_at=stamp)
+            self._insert_edge(db, "root", "middle", "open")
+            self._insert_edge(db, "middle", "leaf", "closed")
+            with patch.object(scanner, "AGENT_HIERARCHY_EDGE_LIMIT", 1):
+                result = self._scan(db)
+        self.assertEqual(result["sessions"][0]["session_id"], "root")
+        self.assertEqual(result["sessions"][0]["agent_count"], 3)
+
+    def test_parent_timestamp_and_nullable_milliseconds_rank_recent_groups(self):
+        with tempfile.TemporaryDirectory() as temp:
+            db = Path(temp) / "state.sqlite"
+            self._create_db(db)
+            old = datetime(2025, 1, 1, tzinfo=timezone.utc)
+            now = datetime(2026, 9, 20, tzinfo=timezone.utc)
+            for ident, stamp in (("root", now), ("child", old), ("expired-root", old), ("expired-child", old)):
+                self._insert_thread(db, ident, updated_at=stamp)
+            self._insert_edge(db, "root", "child", "open")
+            self._insert_edge(db, "expired-root", "expired-child", "closed")
+            with sqlite3.connect(db) as conn:
+                conn.execute("UPDATE threads SET updated_at_ms = NULL WHERE id = 'root'")
+            with patch.object(scanner, "AGENT_HIERARCHY_EDGE_LIMIT", 1):
+                result = self._scan(db, since=datetime(2026, 1, 1, tzinfo=timezone.utc))
+        self.assertEqual([row["session_id"] for row in result["sessions"]], ["root"])
+
+
+class ClaudeAgentHierarchyTests(unittest.TestCase):
+    def test_session_membership_does_not_read_prompts_or_claim_execution(self):
+        with tempfile.TemporaryDirectory() as temp:
+            storage = Path(temp) / "projects"
+            agents = storage / "encoded-project" / "session-a" / "subagents"
+            agents.mkdir(parents=True)
+            transcript = agents / "agent-worker.jsonl"
+            transcript.write_text('SECRET-PROMPT and PRIVATE-SOURCE', encoding="utf-8")
+            with patch.object(scanner, "CLAUDE_PROJECTS_DIRS", [storage]), patch.object(Path, "open", side_effect=AssertionError("Transcript content must not be opened")):
+                result = scanner.scan_claude_agent_hierarchy()
+        self.assertTrue(result["available"])
+        session = result["sessions"][0]
+        self.assertEqual(session["tool"], "claude-code")
+        self.assertEqual(session["session_id"], "session-a")
+        self.assertEqual(session["active_count"], 0)
+        self.assertTrue(all(agent["status"] == "unknown" for agent in session["agents"]))
+        self.assertEqual(session["agents"][1]["relationship_status"], "session_member")
+        self.assertIn("nested parents", session["relationship_note"])
+        self.assertNotIn("SECRET", json.dumps(result))
+
+    def test_old_files_and_directory_budget(self):
+        with tempfile.TemporaryDirectory() as temp:
+            storage = Path(temp)
+            agents = storage / "project" / "session" / "subagents"
+            agents.mkdir(parents=True)
+            transcript = agents / "agent-old.jsonl"
+            transcript.touch()
+            os.utime(transcript, (1, 1))
+            with patch.object(scanner, "CLAUDE_PROJECTS_DIRS", [storage]):
+                result = scanner.scan_claude_agent_hierarchy(since=datetime(2026, 1, 1, tzinfo=timezone.utc))
+                self.assertEqual(result["sessions"], [])
+                with patch.object(scanner, "AGENT_HIERARCHY_ENTRY_LIMIT", 1):
+                    limited = scanner.scan_claude_agent_hierarchy()
+                self.assertTrue(limited["truncated"])
+
+    def test_tools_with_same_session_id_do_not_collide(self):
+        sources = {
+            "available": True, "sessions": [{"session_id": "same", "updated_at": None, "agents": []}],
+        }
+        with patch.object(scanner, "scan_codex_agent_hierarchy", return_value=sources), patch.object(scanner, "scan_claude_agent_hierarchy", return_value=sources):
+            result = scanner.scan_agent_hierarchy()
+        self.assertEqual({row["selection_id"] for row in result["sessions"]}, {"codex-cli:same", "claude-code:same"})
+        self.assertIn("Cursor", result["unsupported_tools"])
+        self.assertEqual(len(result["coverage"]), 2)
+
+    def test_one_tool_unavailable_does_not_hide_the_other(self):
+        codex = {"available": False, "reason": "schema unavailable", "sessions": []}
+        claude = {"available": True, "sessions": [{"session_id": "c", "updated_at": None, "agents": []}]}
+        with patch.object(scanner, "scan_codex_agent_hierarchy", return_value=codex), patch.object(scanner, "scan_claude_agent_hierarchy", return_value=claude):
+            result = scanner.scan_agent_hierarchy()
+        self.assertTrue(result["available"])
+        self.assertTrue(result["partial"])
+        self.assertEqual(result["sessions"][0]["tool"], "claude-code")
+
 
 class AgentHierarchyUiModelTests(unittest.TestCase):
     def test_ui_model_adds_safe_project_labels(self) -> None:
@@ -331,7 +463,7 @@ class AgentHierarchyUiModelTests(unittest.TestCase):
                 "agents": [],
             }],
         }
-        with patch.object(ui, "scan_codex_agent_hierarchy", return_value=payload) as scan:
+        with patch.object(ui, "scan_agent_hierarchy", return_value=payload) as scan:
             result = ui.build_agent_hierarchy(days=7)
 
         self.assertEqual(result["sessions"][0]["project"], "/work/payments")
