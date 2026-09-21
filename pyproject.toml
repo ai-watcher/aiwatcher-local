@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "aiwatcher-cli"
-version = "0.1.0"
-description = "Private local control loop for AI coding cost, safety, and outcomes"
+name = "aiwatcher-local"
+version = "0.1.1"
+description = "Local-first control loop for AI coding cost, safety, and outcomes"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "Apache-2.0"
@@ -14,6 +14,18 @@ authors = [
 ]
 dependencies = []
 keywords = ["ai", "observability", "llm", "coding-agents", "cost"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Quality Assurance",
+]
 
 [project.scripts]
 aiwatcher = "aiwatcher_cli.cli:main"
@@ -21,6 +33,8 @@ aiwatcher = "aiwatcher_cli.cli:main"
 [project.urls]
 Homepage = "https://www.getaiwatcher.com"
 Documentation = "https://github.com/ai-watcher/aiwatcher-local"
+Repository = "https://github.com/ai-watcher/aiwatcher-local"
+Issues = "https://github.com/ai-watcher/aiwatcher-local/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]

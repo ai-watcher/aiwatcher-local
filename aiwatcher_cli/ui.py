@@ -21,7 +21,7 @@ from typing import Any, Callable, Sequence
 from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
-from . import analyst, compaction, prompt_signals, statusline
+from . import analyst, compaction, compaction_outcomes, improve, prompt_signals, statusline
 from .ai_assist import (
     AiAssistUnavailable,
     build_ai_assist_status,
@@ -149,6 +149,7 @@ from .scanner import (
     scan_all,
     scan_all_events,
     current_prompt_segment,
+    scan_agent_hierarchy,
     segment_session_by_prompt,
     surface_coverage,
 )
@@ -179,8 +180,12 @@ SUMMARY_MEMORY_TTL_SECONDS = 45
 SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
 # Bump whenever build_summary's payload shape changes, so a cache written by an
 # older build is discarded instead of rendering blank sections in a newer UI.
-# 9: chat titles and start times on context-health cards and session rows.
-SUMMARY_CACHE_SCHEMA_VERSION = 9
+# 9: claimed twice on separate branches -- chat titles and start times on
+#    context-health cards and session rows, and the Improve evidence payload
+#    (#144). Neither build's cache matches the merged shape, so the merge takes
+#    its own number rather than inheriting a 9 that means two different things.
+# 10: both of the above.
+SUMMARY_CACHE_SCHEMA_VERSION = 10
 
 
 def restart_command(
@@ -229,6 +234,8 @@ def schedule_dashboard_restart(delay_seconds: float = 0.8) -> None:
 # provider endpoint and then make a model call that sends a Fresh Start brief,
 # with the stored bearer key attached, to whatever URL was just saved.
 SAME_ORIGIN_ONLY_ROUTES = frozenset({
+    "/api/improve-decision",
+    "/api/ask-aiwatcher",
     "/api/update-status",
     "/api/update-apply",
     "/api/update-auto-check",
@@ -476,6 +483,15 @@ def _context_review_activity_label(row: dict[str, object]) -> str:
     return f"quiet {age}" if age else ""
 
 
+def _context_review_signal_label(impact: str) -> str:
+    if not impact:
+        return "estimate unavailable"
+    lowered = impact.lower()
+    if any(word in lowered for word in ("risk", "saved", "saving", "context", "token")):
+        return impact
+    return f"~{impact} replay at risk"
+
+
 def _context_review_companion_rows(candidates: list[dict[str, object]]) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for row in candidates[:5]:
@@ -495,15 +511,19 @@ def _context_review_companion_rows(candidates: list[dict[str, object]]) -> list[
                     latest_turn_tokens = 0
                 impact = compact_int(latest_turn_tokens) if latest_turn_tokens > 0 else ""
         severity = str(row.get("severity") or "").strip()
+        session_id = str(row.get("session_id") or "")
         rows.append({
-            "session_id": str(row.get("session_id") or ""),
+            "session_id": session_id,
             "tool": tool_label(str(row.get("tool") or "")),
             "project": _project_basename(project) or str(row.get("project") or "this project"),
             "waited_label": impact,
             "impact_label": impact,
+            "review_label": _context_review_signal_label(impact),
             "severity_label": severity,
             "activity_label": _context_review_activity_label(row),
-            "url": "/?view=watch#contextHealth",
+            "scope": "general",
+            "scope_label": "Review when ready",
+            "url": f"/?session={quote(session_id, safe='')}" if session_id else "/?view=watch#contextHealth",
             "kind": "context_review",
         })
     return rows
@@ -1004,12 +1024,12 @@ def _optimize_candidate_prompt(item: dict[str, object]) -> str:
         f"- Why surfaced: {reason}",
         "",
         "Return these buckets",
-        "1. Safe to archive or clean up: item ids/names/paths if visible, with one short reason each; only after checking the owning app, git worktree, or runtime.",
+        "1. Safe to archive/review: item ids/names/paths if visible, with one short reason each; only after checking the owning app, git worktree, or runtime.",
         "2. Keep active: anything that might still matter, is live, recently touched, or linked to current work.",
         "3. Unknown: anything whose identity, ownership, path, or status is not proven, or that needs owner confirmation.",
         "4. Project status: latest branch, PR, commit, or handoff receipt if visible.",
         "5. Cleanup reward: estimate context, RAM, or disk relief only when supported by the evidence above.",
-        "6. Next action: one small verification step first, then the exact action to take in the owning app or local tool.",
+        "6. Next verification: one small check the user should do before any separate cleanup decision.",
         "",
         "Guardrails",
         "- Do not delete files, folders, branches, worktrees, commits, source code, or notes.",
@@ -1021,26 +1041,26 @@ def _optimize_candidate_prompt(item: dict[str, object]) -> str:
         "- Preserve handoffs, PRs, commits, receipts, useful notes, unresolved tasks, and final source-of-truth files.",
     ]
     if kind == "session_cluster":
-        lines.append("- Action boundary: archive or mark done only inside the owning AI app after review.")
+        lines.append("- Action boundary: this prompt can only recommend review buckets; any archive/mark-done action must be a separate user decision inside the owning AI app.")
     elif kind == "fresh_start_pending":
-        lines.append("- Action boundary: link the follow-up session or mark the old receipt skipped/continued; do not claim saved tokens without proof.")
+        lines.append("- Action boundary: this prompt can only recommend whether to link the follow-up session or review the old receipt; make any mark-done/skipped action a separate user decision and do not claim saved tokens without proof.")
     elif kind == "worktree":
         lines.extend([
             f"- Inspect first: git -C {project_full or '<worktree>'} status --short",
-            "- Action boundary: remove only with git worktree-safe commands after confirmation.",
+            "- Action boundary: do not remove the worktree from this flow; if it looks stale, report the evidence and ask the user for a separate cleanup decision.",
         ])
     elif kind == "agent_workspace":
         lines.extend([
             f"- Inspect first: {project_full or '<workspace>'}",
-            "- Action boundary: delete only after confirming it is disposable scratch space and moving anything useful.",
+            "- Action boundary: do not delete the workspace from this flow; if it looks disposable, report the evidence and ask the user for a separate cleanup decision.",
         ])
     elif kind == "stale_processes":
         lines.extend([
             "- Inspect first: aiwatcher processes --stale-only",
-            "- Action boundary: stop only runtimes you recognize and have confirmed are detached from live AI work.",
+            "- Action boundary: do not stop runtimes from this flow; if one looks detached, report the PID/runtime evidence and ask the user for a separate stop decision.",
         ])
     else:
-        lines.append("- Action boundary: prefer archive/mark-done recommendations over deletion.")
+        lines.append("- Action boundary: classify the candidate only; defer archive, mark-done, delete, stop, or removal actions to a separate user-confirmed step.")
     if review_steps:
         lines.extend(["", "Safe review steps from AIWatcher", *[f"- {step}" for step in review_steps]])
     if kind == "stale_processes":
@@ -1341,6 +1361,88 @@ def _fresh_start_evidence_hash(
     return hash_prompt(json.dumps(evidence, sort_keys=True, default=str))
 
 
+def _fresh_start_ai_evidence_packet(capsule: dict[str, object]) -> str:
+    """Build the bounded, structured facts the handoff composer may use."""
+    raw_evidence = capsule.get("evidence") if isinstance(capsule.get("evidence"), dict) else {}
+    continuation = (
+        capsule.get("continuation_context")
+        if isinstance(capsule.get("continuation_context"), dict)
+        else {}
+    )
+
+    def continuation_items(key: str, limit: int = 8) -> list[str]:
+        values = continuation.get(key)
+        if not isinstance(values, list):
+            return []
+        return [str(item).removeprefix("- ").strip()[:500] for item in values[:limit] if str(item).strip()]
+
+    commits = []
+    for item in (raw_evidence.get("commits") or [])[:5]:
+        if not isinstance(item, dict):
+            continue
+        sha = str(item.get("sha") or "").strip()
+        subject = str(item.get("subject") or "").strip()
+        commits.append(f"{sha}: {subject}".strip(": "))
+    tests = []
+    for item in (raw_evidence.get("tests") or [])[:6]:
+        if isinstance(item, dict):
+            tests.append(" | ".join(str(item.get(key) or "").strip() for key in ("name", "status", "path") if item.get(key)))
+        else:
+            tests.append(str(item))
+    logged_decisions = []
+    for item in (capsule.get("decisions") or [])[:5]:
+        if not isinstance(item, dict):
+            continue
+        summary = " ".join(str(item.get("summary") or "").split())
+        reasoning = " ".join(str(item.get("reasoning") or "").split())
+        if summary:
+            logged_decisions.append(f"{summary}{(' — ' + reasoning) if reasoning else ''}"[:500])
+    attachment = capsule.get("runtime_attachment") if isinstance(capsule.get("runtime_attachment"), dict) else {}
+    packet = {
+        "contract": "fresh_start_continuation_v2",
+        "source": {
+            "session_id": capsule.get("session_id"),
+            "project": capsule.get("project"),
+            "project_reliable": capsule.get("project_reliable"),
+            "tool": capsule.get("tool"),
+            "model": capsule.get("model"),
+            "updated_at": capsule.get("updated_at"),
+            "identity": capsule.get("source_identity_label") or attachment.get("identity_label"),
+            "return_capability": attachment.get("exact_return_label"),
+            "same_project_session_count": capsule.get("same_project_session_count"),
+        },
+        "continuation_type": capsule.get("handoff_type_label"),
+        "objective": capsule.get("objective"),
+        "objective_and_context": continuation_items("objective_and_context", 5),
+        "source_refs": list(capsule.get("source_refs") or [])[:8],
+        "constraints": list(capsule.get("constraints") or [])[:8],
+        "acceptance_criteria": list(capsule.get("acceptance_criteria") or [])[:8],
+        "logged_decisions": logged_decisions,
+        "completed_work": continuation_items("completed_work", 8),
+        "current_state": [
+            *continuation_items("current_state", 8),
+            f"Outcome: {capsule.get('outcome') or raw_evidence.get('inferred_outcome') or 'not confirmed'}",
+            f"Usage: {json.dumps(capsule.get('usage') or {}, sort_keys=True, default=str)}",
+        ],
+        "risks_and_uncertainties": continuation_items("risks_and_uncertainties", 8),
+        "next_steps": continuation_items("next_steps", 8),
+        "inspect_first": continuation_items("inspect_first", 10),
+        "evidence": {
+            "commits": commits,
+            "changed_files": [str(item) for item in (raw_evidence.get("changed_files") or [])[:12]],
+            "tests": [item for item in tests if item][:6],
+            "confidence": raw_evidence.get("confidence"),
+        },
+        "warnings": [str(item) for item in (capsule.get("warnings") or [])[:6]],
+        "prompt_excerpt": (
+            capsule.get("costliest_prompt")
+            if capsule.get("include_prompt_excerpt") and isinstance(capsule.get("costliest_prompt"), dict)
+            else None
+        ),
+    }
+    return json.dumps(packet, sort_keys=True, default=str)
+
+
 def _optimize_checklist(candidates: list[dict[str, object]]) -> str:
     lines = [
         "AIWatcher Optimize Workspace review",
@@ -1588,7 +1690,7 @@ def build_optimize_inventory(
             "title": "Review stale AI runtimes",
             "project": "Local machine",
             "project_full": "",
-            "summary": f"{len(stale_processes)} AI-related runtime process(es) look stale or orphaned. Review before killing anything.",
+            "summary": f"{len(stale_processes)} AI-related runtime process(es) look stale or orphaned. Review before taking any action.",
             "activity_summary": f"{len(stale_processes)} stale runtime process{'es' if len(stale_processes) != 1 else ''} · {rss_impact}",
             "why_inactive": "Local process metadata shows AI-related runtimes with stale/orphan signals.",
             "evidence_label": "Observed",
@@ -1610,7 +1712,7 @@ def build_optimize_inventory(
                 f"Run: {review_command}",
                 "Use PID, runtime, session id, and working directory to match each row to an AI app/window.",
                 "Confirm each process is not attached to live AI work.",
-                "Stop only stale/orphaned runtimes you recognize.",
+                "Report stale/orphaned runtimes you recognize for a separate user stop decision.",
                 "Run the command again; reclaimed RSS is the before-minus-after local memory signal.",
                 "Leave unknown processes alone.",
             ],
@@ -1907,6 +2009,20 @@ def build_session_search(
             for row in matched
         ],
     }
+
+
+def build_agent_hierarchy(days: int = 30) -> dict[str, object]:
+    since = datetime.now(timezone.utc) - timedelta(days=max(1, min(90, days)))
+    result = scan_agent_hierarchy(since=since)
+    sessions = []
+    for session in result.get("sessions", []):
+        project_path = session.get("project_path")
+        sessions.append({
+            **session,
+            "project": project_label(project_path),
+            "project_full": project_path if is_reliable_project_path(project_path) else "unknown",
+        })
+    return {**result, "sessions": sessions}
 
 
 def _survival_for_session(session_id: str) -> dict[str, str] | None:
@@ -2360,7 +2476,10 @@ def _session_verdict_inputs(row: LocalSession, events: list[LocalEvent]) -> dict
             # rendered as "no limit to project towards", never as some other
             # model's number.
             "context_window": health.context_window,
-            "turns_to_critical": health.turns_to_critical,
+            "tokens_left": health.tokens_left,
+            "largest_prompt_growth": health.largest_prompt_growth,
+            "next_prompt_may_not_fit": health.next_prompt_may_not_fit,
+            "resent_tokens": health.latest_turn_replayed_tokens if health.cache_reported else None,
             "turns_since_reset": health.turns_since_reset,
             "severity": health.severity,
         }
@@ -2755,45 +2874,27 @@ def build_ai_assisted_handoff_detail(
     config = ai_assist_config(with_secrets=True)
     source_access = str(config.get("source_access") or "metadata_only")
     effective_prompt_excerpt = bool(include_prompt_excerpt and source_access in {"prompt_opt_in", "source_opt_in"})
-    local_brief_from_client = str(local_brief_override or "").strip()
-    if source_access == "metadata_only" and (
-        "Task context (your own prompt" in local_brief_from_client
-        or "Prompt excerpt" in local_brief_from_client
-    ):
-        local_brief_from_client = ""
-    if local_brief_from_client:
-        capsule = build_basic_handoff_detail(
-            session_id,
-            days=days,
-            target=target,
-            handoff_type=handoff_type,
-            objective=objective,
-            source_refs=source_refs,
-            constraints=constraints,
-            acceptance_criteria=acceptance_criteria,
-        )
-        if not capsule.get("error"):
-            capsule["next_brief"] = local_brief_from_client[:20_000]
-            capsule["basic"] = False
-            capsule["enrichment_status"] = "client_handoff_brief"
-    else:
-        capsule = build_handoff_detail(
-            session_id,
-            days=days,
-            target=target,
-            include_prompt_excerpt=effective_prompt_excerpt,
-            handoff_type=handoff_type,
-            objective=objective,
-            source_refs=source_refs,
-            constraints=constraints,
-            acceptance_criteria=acceptance_criteria,
-        )
+    # Never compose from the first-paint shell supplied by the browser. A
+    # model call is the expensive path, so it must wait for the authoritative
+    # timeline/Git/decision enrichment even when the drawer is still loading.
+    capsule = build_handoff_detail(
+        session_id,
+        days=days,
+        target=target,
+        include_prompt_excerpt=effective_prompt_excerpt,
+        handoff_type=handoff_type,
+        objective=objective,
+        source_refs=source_refs,
+        constraints=constraints,
+        acceptance_criteria=acceptance_criteria,
+    )
     if capsule.get("error"):
         return capsule
     capsule["ai_assist_prompt_excerpt_requested"] = bool(include_prompt_excerpt)
     capsule["ai_assist_prompt_excerpt_included"] = effective_prompt_excerpt
     local_brief = str(capsule.get("next_brief") or "")
     capsule["local_next_brief"] = local_brief
+    evidence_packet = _fresh_start_ai_evidence_packet(capsule)
     evidence_hash = _fresh_start_evidence_hash(capsule, source_access=source_access)
 
     def with_receipt(composed: str, result: dict[str, object]) -> str:
@@ -2811,8 +2912,8 @@ def build_ai_assisted_handoff_detail(
         workflow="fresh_start",
         config=config,
         evidence_hash=evidence_hash,
-        local_text=local_brief,
-        compose=lambda: improve_fresh_start_brief(config, local_brief=local_brief, timeout=20),
+        local_text=evidence_packet,
+        compose=lambda: improve_fresh_start_brief(config, local_brief=evidence_packet, timeout=20),
         session_id=session_id,
         reason_used="User clicked Improve with AI Assist on a Fresh Start brief.",
         reason_cached="User clicked Compose AI handoff on a Fresh Start brief; cached output reused.",
@@ -3302,7 +3403,10 @@ def _context_health_card(
         f"{compact_int(health.latest_turn_tokens)} tokens in the latest turn."
     )
     if len(group) > 1:
-        context_summary += f" This is the highest-pressure source among {len(group)} same-project sessions."
+        # A live session is charted ahead of a worse ended one, so the claim is
+        # scoped to live sources whenever this card is the live one.
+        scope = "highest-pressure live source" if charted_because_live else "highest-pressure source"
+        context_summary += f" This is the {scope} among {len(group)} same-project sessions."
     return {
         "charted_because_live": charted_because_live,
         "bigger_idle_label": compact_int(bigger.latest_turn_tokens) if bigger else None,
@@ -3347,8 +3451,13 @@ def _context_health_card(
             "turn_series": turn_series[-CONTEXT_CHART_MAX_TURNS:],
             "latest_turn_tokens_n": health.latest_turn_tokens,
             "peak_turn_tokens_n": health.peak_turn_tokens,
-            "growth_per_turn_n": round(health.segment_growth_rate),
-            "turns_to_critical": health.turns_to_critical,
+            "tokens_left_n": health.tokens_left,
+            "largest_prompt_growth_n": health.largest_prompt_growth,
+            "next_prompt_may_not_fit": health.next_prompt_may_not_fit,
+            # What the latest request carried from before, as the provider
+            # counted its cache reads. Null when the source reports no cache
+            # buckets: unmeasured, not zero.
+            "resent_n": health.latest_turn_replayed_tokens if health.cache_reported else None,
             "turns_since_reset": health.turns_since_reset,
             "context_resets": health.context_resets,
             # The model's window, null when unknown. The chart draws no limit
@@ -3397,7 +3506,8 @@ def _group_compact_payload(
     """The compact nudge for a project card, if any session in it has one.
 
     Assessed on the sessions still being worked in, not on the card's
-    representative: the card charts the worst session in the project, while
+    representative: the card charts the worst live session in the project (the
+    worst of all when none is live), while
     a compaction is an instruction for the one being typed into, and the two
     are usually different. Several may qualify; the one with the most to shed
     leads. Deferred means the owner said Later for that commit -- the numbers
@@ -3450,7 +3560,7 @@ def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) ->
         return str(session_state(session).get("status")) in {"active", "recent"}
 
     for group in grouped.values():
-        # Severity first, then whether the session is still live, and only then
+        # Whether the session is still live first, then severity, and only then
         # size. Ranking on size alone charted the biggest number in the project
         # regardless of whether anyone was still in it: a session left six hours
         # earlier at 824K outranked the one running right now at 343K, which was
@@ -3458,10 +3568,17 @@ def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) ->
         # fresh, hand off, copy a compact prompt -- is an instruction to do
         # something in that session, and none of them can be carried out in one
         # that has ended, so the worst *reachable* session is the useful pick.
-        # With nothing live the order is unchanged and the biggest still wins.
+        #
+        # Reachability used to sit below severity, so a live healthy session
+        # could not outrank an ended critical one. That left the project with no
+        # live card: an ended session critical on bloat alone charted instead,
+        # and Home -- which shows only the live card -- read "no per-turn
+        # numbers to show" while a session was running. The ended one still
+        # counts in critical_sessions and stays in related_sessions.
+        # With nothing live the order is unchanged and the worst still wins.
         group.sort(key=lambda item: (
-            severity_order.get(item.severity, 9),
             0 if _still_reachable(item) else 1,
+            severity_order.get(item.severity, 9),
             -int(item.latest_turn_tokens * item.bloat_ratio),
             -item.total_input_tokens,
         ))
@@ -4805,13 +4922,12 @@ def _false_starts_card(all_rows: list[LocalSession]) -> dict[str, object] | None
     costliest = max(empty, key=lambda row: row.cost_usd, default=None)
     return {
         "id": "false-starts",
-        "title": f"{len(empty)} short sessions produced no commit at all",
+        "title": f"{len(empty)} short sessions have no observed commit",
         "body": (
             f"Of {len(short)} sessions running {FALSE_START_MAX_CALLS} model calls or fewer across "
-            f"your recent history, {share}% left nothing behind — {money(spent)} of spend, which is "
-            "small. The count is the point, not the money: some of these answered a question worth "
-            "asking, and nothing local tells that apart from a start that went nowhere. A run of "
-            "them usually means opening in the wrong repo, or asking before scoping."
+            f"your saved evidence, {share}% had no observed commit ({money(spent)} estimated cost). "
+            "Questions, research and uncommitted work can still be useful. Review a sample before "
+            "deciding whether the next task needs a narrower scope."
         ),
         # No dollar figure, for the same reason model-mix carries none: the money
         # is not recoverable. Some of these sessions answered a question worth
@@ -4820,6 +4936,7 @@ def _false_starts_card(all_rows: list[LocalSession]) -> dict[str, object] | None
         # rank last anyway, reading as trivial when the count is the finding.
         "impact_usd": None,
         "session_id": costliest.session_id if costliest else None,
+        "evidence_ids": [row.session_id for row in sorted(empty, key=lambda row: row.cost_usd, reverse=True)],
         "severity": "info",
     }
 
@@ -4926,22 +5043,11 @@ def _insight_feed(
     needs_review: int,
     churned: int,
 ) -> list[dict[str, object]]:
-    """One ranked list, ordered by how much money each finding is about.
+    """Build comparative evidence, before the live Improve decision overlay.
 
-    Replaces three panels that were all built from the same handful of max()
-    calls -- Weekly Digest, Local Insights and Daily Journal each restated the
-    same top project, costliest session and loop count.
-
-    Two rules decide what earns a place here:
-      1. Every card names a comparison. "1.1M tokens in one session" gives the
-         reader nothing to do; "97% of it was replayed history, costing $196"
-         does. A number with no "versus" is a metric and belongs in a table.
-      2. Cards are ranked by dollars, not insertion order, so the biggest
-         finding is the one the eye lands on.
-
-    Coverage gaps (tools detected but not scanned) deliberately do NOT appear
-    here -- they are a setup concern, they never change, and mixing them in is
-    what made the old list read as noise. They live on the Coverage tab.
+    Historical dollar magnitude breaks ties; improve.current_view puts
+    reviewable evidence first and incorporates local feedback and receipts.
+    Coverage gaps belong in Settings Trust, not the improvement feed.
     """
     cards: list[dict[str, object]] = []
 
@@ -4965,9 +5071,9 @@ def _insight_feed(
         quiet_hours = float(top_state.get("age_seconds") or 0) / 3600
         quiet_label = f"{quiet_hours / 24:.1f}d" if quiet_hours >= 24 else f"{quiet_hours:.0f}h"
         closing = (
-            "It is still going, so compacting now is what buys the rest back."
+            "Recent activity was observed. Review context options before continuing; compaction can lose useful detail."
             if top_live
-            else f"It has been quiet for {quiet_label}, so this is what compacting earlier would have saved."
+            else f"It has been quiet for {quiet_label}. Review its history before your next task."
         )
         cards.append({
             "id": "replayed-context",
@@ -4978,7 +5084,7 @@ def _insight_feed(
             "body": (
                 f"{money(replay['total_replayed_usd'])} of {money(window_cost)} this window. The worst session replayed "
                 f"{top['replayed_pct']:.0f}% of its context, {money(top['replayed_usd'])} of its "
-                f"{money(top['session_usd'])}. {closing}"
+                f"{money(top['session_usd'])}. {closing} Replayed history can be useful; these costs are not recoverable savings."
             ),
             "session_label": (
                 f"{project_name(project_key(top.get('project_path')))} · {top.get('tool') or 'session'}"
@@ -5653,20 +5759,7 @@ def build_summary(
         needs_review=needs_review,
         churned=churned,
     )
-    if detected.get("cursor") and not any(row.tool == "cursor" for row in rows):
-        insights.append({
-            "title": "Cursor detected, but usage is limited",
-            "body": "Cursor is installed or running, but local token/cost history is not reliably exposed yet. Use Prompt Companion for risky prompts and treat Cursor as coverage-limited.",
-            "view": "setup",
-            "cta": "Check coverage",
-        })
-    if detected.get("ollama") and not any(row.tool == "ollama" for row in rows):
-        insights.append({
-            "title": "Ollama detected, but usage is not measured",
-            "body": "AIWatcher can see the local model runtime, but does not claim prompt, token, cost, or outcome coverage for Ollama yet.",
-            "view": "setup",
-            "cta": "Check coverage",
-        })
+    improve.attach_evidence(insights, rows, all_rows, evidence_by_session, days=days)
     survival_summary = _survival_summary()
     window_ledger = _window_ledger(all_events, days)
     unbanked = _unbanked_card(window_ledger)
@@ -5901,6 +5994,13 @@ def _cached_session_rows() -> list[LocalSession]:
 
 def _mark_summary_cache(summary: dict[str, object], *, status: str, source: str, refreshing: bool) -> dict[str, object]:
     copy = dict(summary)
+    try:
+        from .local_state import improve_snapshot
+        improve_state = improve_snapshot()
+        copy["insights"] = improve.current_view(copy.get("insights", []), state=improve_state)
+        copy["improve_results"] = improve.recent_results(improve_state)
+    except OSError:
+        copy["improve_results"] = []
     copy.pop("_session_index", None)
     # Summary payloads can be served from memory or disk for speed, but Settings
     # must reflect the current local config. Otherwise saving AI Assist briefly
@@ -6489,7 +6589,9 @@ def _ask_session_evidence(
                 "severity": health.severity,
                 "latest_turn_tokens": health.latest_turn_tokens,
                 "peak_turn_tokens": health.peak_turn_tokens,
-                "turns_to_critical": health.turns_to_critical,
+                "tokens_left": health.tokens_left,
+                "largest_prompt_growth": health.largest_prompt_growth,
+                "next_prompt_may_not_fit": health.next_prompt_may_not_fit,
                 "turns_since_reset": health.turns_since_reset,
                 "replayed_cost_usd": round(health.replayed_cost_usd, 6),
             } if health else {"measurable": False},
@@ -6675,19 +6777,21 @@ def _ask_ai_evidence_hash(
     return hash_prompt(json.dumps(payload, sort_keys=True, default=str))
 
 
-def answer_ai_assisted_question(question: str, days: int = 7) -> dict[str, object]:
+def answer_ai_assisted_question(question: str, days: int = 7, *, insight: dict | None = None) -> dict[str, object]:
     """Answer Ask AIWatcher with optional, user-requested AI Assist."""
-    local = answer_local_question(question, days=days)
+    local = improve.local_answer(insight) if insight else answer_local_question(question, days=days)
     try:
         summary = build_summary_cached(days)
     except Exception:
         summary = {}
     public_config = ai_assist_config()
     config = ai_assist_config(with_secrets=True)
+    if insight:
+        config = {**config, "source_access": "metadata_only"}
     status = build_ai_assist_status(public_config)
     local["ai_assist"] = status
-    source_access = str(public_config.get("source_access") or "metadata_only")
-    packet = _ask_ai_evidence_packet(
+    source_access = "metadata_only" if insight else str(public_config.get("source_access") or "metadata_only")
+    packet = improve.ai_packet(insight) if insight else _ask_ai_evidence_packet(
         question,
         local,
         summary if isinstance(summary, dict) else {},
@@ -6722,6 +6826,8 @@ def answer_ai_assisted_question(question: str, days: int = 7) -> dict[str, objec
     if not outcome.get("text"):
         local["ai_assist"] = build_ai_assist_status(ai_assist_config())
         local["ai_assist_result"] = outcome["result"]
+        if insight:
+            local["privacy"] = "Local fallback shown. See AI Assist status for whether a provider request was attempted."
         return local
 
     try:
@@ -6902,7 +7008,7 @@ def _pressure_block(rows: list[SessionPresence], sessions: list[LocalSession]) -
     if cost > 0:
         stats_parts.append(f"${cost:,.2f}" if cost < 100 else f"${cost:,.0f}")
     if tokens_total > 0:
-        stats_parts.append(compact_int(tokens_total))
+        stats_parts.append(f"{compact_int(tokens_total)} total")
     return {
         "available": True,
         "reason": None,
@@ -7525,6 +7631,44 @@ def _prompt_status_state(base: dict[str, object], block: dict[str, object]) -> d
         ],
         "detail": detail_text,
     }
+# path -> (size, compaction markers, every record's window closed). The poll
+# runs every few seconds while a session works, and most of those polls find
+# a transcript that grew but holds nothing new to measure.
+_OUTCOME_SCAN: dict[str, tuple[int, int, bool]] = {}
+
+
+def _record_compaction_outcomes(rows: list[SessionPresence], sessions: list[LocalSession]) -> None:
+    """Keep compaction_outcomes' records current for live Claude Code sessions.
+
+    Shows nothing. The records are collected so the claim that compacting
+    saves usage can be checked on real sessions before a surface makes it.
+    A transcript is parsed only when it grew and either holds a compaction
+    not measured yet or one whose ten-prompt stretch is still open; the
+    marker count is a byte search, not a parse.
+    """
+    by_id = {session.session_id: session for session in sessions}
+    for row in rows:
+        if not row.live or row.analyst_run:
+            continue
+        session = by_id.get(row.session_id)
+        path = session.source_path if session is not None else None
+        if not path or not path.endswith(".jsonl") or "claude" not in session.tool.lower():
+            continue
+        try:
+            size = os.path.getsize(path)
+            cached = _OUTCOME_SCAN.get(path)
+            if cached is not None and cached[0] == size:
+                continue
+            markers = compaction_outcomes.compaction_markers(path)
+            if markers == 0 or (cached is not None and cached[1] == markers and cached[2]):
+                _OUTCOME_SCAN[path] = (size, markers, True)
+                continue
+            records = compaction_outcomes.record_session(session.session_id, path)
+            if len(_OUTCOME_SCAN) > 64:
+                _OUTCOME_SCAN.clear()
+            _OUTCOME_SCAN[path] = (size, markers, all(record.get("closed_by") for record in records))
+        except Exception:  # noqa: BLE001 - a measurement nobody sees must never break the Companion's poll
+            continue
 
 
 _COMPACT_STAGE_WORD = {
@@ -7718,6 +7862,7 @@ def build_companion_state() -> dict[str, object]:
     finished_notice_mode = str(prefs.get("finished_sessions") or "badge_only")
     fresh_start_context_enabled = bool(prefs.get("fresh_start_context", True))
     _update_away_digest(session_rows, presence_rows)
+    _record_compaction_outcomes(presence_rows, session_rows)
     base = {
         "state": "watching",
         "label": "Watching quietly",
@@ -7801,29 +7946,28 @@ def build_companion_state() -> dict[str, object]:
                 pass
         tool = str(command_gate.get("tool") or "Claude Code")
         reason = str(command_gate.get("reason") or "A local command needs review before it runs.")
-        preview = str(command_gate.get("command_preview") or "").strip()
         gate_expires = _parse_iso_datetime(command_gate.get("expires_at"))
-        subtitle = reason
-        if preview:
-            subtitle = f"{preview} · {reason}"
         return {
             **base,
             "state": "command_gate",
-            "label": "Command Gate",
+            "label": "Command needs approval",
             "title": "Review command",
-            "subtitle": subtitle,
+            # Shell wrappers often begin with internal assignments such as
+            # `SP=/private/tmp/...`. They are useful on the full review page,
+            # but meaningless (and potentially sensitive) in a 46-character
+            # glanceable surface. Lead with the human reason instead.
+            "subtitle": reason,
             "expires_in_seconds": (
                 max(0, int((gate_expires - datetime.now(timezone.utc)).total_seconds()))
                 if gate_expires is not None
                 else None
             ),
-            "primary_label": "Review",
+            "primary_label": "Review command",
             "primary_action": "open_prompt_gate",
             "primary_url": str(command_gate.get("url") or "/?view=control"),
             "control_url": str(command_gate.get("url") or "/?view=control"),
             "detail": (
-                f"{tool} paused a shell command locally. Choose Allow once, Block, or Always allow before it continues."
-                + (f" Command preview: {preview}" if preview else "")
+                f"{tool} paused a shell command locally. Open the review to inspect the full command, then choose Allow once, Block, or Always allow."
             ),
         }
     # Second only to the prompt gate, and ahead of every advisory state below.
@@ -8022,12 +8166,7 @@ def build_companion_state() -> dict[str, object]:
 
     fresh_start_candidates = _fresh_start_context_candidates(summary)
     if fresh_start_context_enabled and len(fresh_start_candidates) > 1:
-        foreground_candidate = next(
-            (row for row in fresh_start_candidates if _foreground_matches_fresh_start_bubble(row)),
-            None,
-        )
         project_count = len(fresh_start_candidates)
-        critical_count = sum(1 for row in fresh_start_candidates if row.get("severity") == "critical")
         total_context = sum(int(row.get("estimated_replayed_context_tokens") or 0) for row in fresh_start_candidates)
         context_label = compact_int(total_context) if total_context else "context"
         project_lines = [
@@ -8035,41 +8174,17 @@ def build_companion_state() -> dict[str, object]:
             for row in fresh_start_candidates
             if row.get("project_full")
         ]
-        if foreground_candidate is None:
-            return {
-                **base,
-                "state": "context_review",
-                "label": "Context review",
-                "subtitle": f"{project_count} projects ready for context review in Console",
-                "primary_label": "Review list",
-                "primary_action": "open_url",
-                "primary_url": "/?view=watch#contextHealth",
-                "skip_label": "Later",
-                "skip_state": "control_recommended_group",
-                "skip_project": "\n".join(project_lines),
-                "skip_projects": project_lines,
-                "waiting_sessions": _context_review_companion_rows(fresh_start_candidates),
-                "fresh_start_project_count": project_count,
-                "fresh_start_context_label": context_label,
-                "badge": {
-                    "count": project_count,
-                    "tone": "info",
-                    "label": f"{project_count} context review project{'s' if project_count != 1 else ''}",
-                },
-                "detail": "Fresh Start review is batched in Watch and only blinks while an affected AI surface is foreground.",
-            }
+        # Foreground detection identifies an application, not its selected chat.
+        # Never promote a same-tool candidate to an exact current-session action.
         return {
             **base,
-            "state": "control_review",
-            "label": "Review context",
-            "subtitle": (
-                f"{project_count} projects need Fresh Start review"
-                + (f" · {critical_count} critical" if critical_count else "")
-            ),
-            "primary_label": "Review",
+            "state": "context_review",
+            "label": "Review when ready",
+            "subtitle": f"{project_count} saved context recommendations",
+            "primary_label": "Review all",
             "primary_action": "open_url",
             "primary_url": "/?view=watch#contextHealth",
-            "skip_label": "Later",
+            "skip_label": "Snooze all",
             "skip_state": "control_recommended_group",
             "skip_project": "\n".join(project_lines),
             "skip_projects": project_lines,
@@ -8078,12 +8193,12 @@ def build_companion_state() -> dict[str, object]:
             "fresh_start_context_label": context_label,
             "badge": {
                 "count": project_count,
-                "tone": "attention",
+                "tone": "info",
                 "label": f"{project_count} context review project{'s' if project_count != 1 else ''}",
             },
             "control_url": "/?view=watch#contextHealth",
             "watch_url": "/?view=watch#contextHealth",
-            "detail": "Choose which projects to Fresh Start, continue, or snooze in one batch.",
+            "detail": "Review a listed session or all recommendations in Watch. Snooze all quiets these projects for 48 hours.",
         }
     bubble = summary.get("handoff_bubble")
     if fresh_start_context_enabled and isinstance(bubble, dict) and bubble.get("session_id"):
@@ -8167,18 +8282,29 @@ def build_companion_state() -> dict[str, object]:
                 if project_count
                 else "Context review waiting in Console"
             )
+            candidates = fresh_start_candidates or [bubble]
+            candidate_rows = _context_review_companion_rows(candidates)
+            project_name = _project_basename(bubble_project) or "One project"
             return {
                 **base,
-                "state": "watching",
-                "label": "Watching quietly",
-                "subtitle": subtitle,
-                "primary_label": "Console",
+                "state": "context_review",
+                "label": "Review when ready",
+                "subtitle": f"{project_name} · context recommendation saved",
+                "primary_label": "Open review",
                 "primary_action": "open_url",
                 "primary_url": "/?view=watch#contextHealth",
                 "skip_label": "Later",
                 "skip_state": "control_recommended_group",
                 "skip_project": bubble_project,
-                "detail": "Fresh Start nudges only blink when the matching AI tool or terminal is foreground.",
+                "skip_projects": [bubble_project] if bubble_project else [],
+                "waiting_sessions": candidate_rows,
+                "fresh_start_project_count": max(1, project_count),
+                "badge": {
+                    "count": max(1, project_count),
+                    "tone": "info",
+                    "label": f"{max(1, project_count)} saved context recommendation",
+                },
+                "detail": f"{subtitle}. This is a general recommendation, so it stays blue until the matching AI session is in front of you.",
             }
         return {
             **base,
@@ -8413,6 +8539,22 @@ class UIHandler(BaseHTTPRequestHandler):
         site = self.headers.get("Sec-Fetch-Site", "").strip().lower()
         return site not in {"", "same-origin", "none"}
 
+    def _discard_bounded_request_body(self) -> None:
+        """Consume a rejected POST body when its declared size is safe.
+
+        Closing a Windows socket with unread request bytes can turn an already
+        written HTTP error into WSAECONNABORTED at the client. Same-origin-only
+        routes reject before parsing by design, so drain only a valid, bounded
+        Content-Length before sending that rejection. Invalid or oversized
+        requests are still never read into memory here.
+        """
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return
+        if 0 < length <= MAX_REQUEST_BYTES:
+            self.rfile.read(length)
+
     def _send(self, status: int, body: str, content_type: str) -> None:
         encoded = body.encode("utf-8")
         try:
@@ -8577,6 +8719,18 @@ class UIHandler(BaseHTTPRequestHandler):
                 "application/json; charset=utf-8",
             )
             return
+        if parsed.path == "/api/agent-hierarchy":
+            params = parse_qs(parsed.query)
+            try:
+                days = max(1, min(90, int(params.get("days", ["30"])[0])))
+            except ValueError:
+                days = 30
+            self._send(
+                200,
+                json.dumps(build_agent_hierarchy(days)),
+                "application/json; charset=utf-8",
+            )
+            return
         if parsed.path == "/api/project":
             params = parse_qs(parsed.query)
             try:
@@ -8699,6 +8853,7 @@ class UIHandler(BaseHTTPRequestHandler):
             "/api/second-opinion-contents",
             "/api/ai-assist-config",
             "/api/ask-aiwatcher",
+            "/api/improve-decision",
             "/api/handoff-basic",
             "/api/handoff-ai-assist",
             "/api/handoff",
@@ -8719,6 +8874,7 @@ class UIHandler(BaseHTTPRequestHandler):
             self._send(404, "Not found", "text/plain; charset=utf-8")
             return
         if parsed.path in SAME_ORIGIN_ONLY_ROUTES and self._is_cross_origin():
+            self._discard_bounded_request_body()
             self._send(403, json.dumps({"error": "This route answers only the dashboard's own origin"}), "application/json; charset=utf-8")
             return
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
@@ -8851,18 +9007,48 @@ class UIHandler(BaseHTTPRequestHandler):
                 return
             self._send(200, json.dumps(prefs), "application/json; charset=utf-8")
             return
-        if parsed.path == "/api/ask-aiwatcher":
+        if parsed.path in {"/api/ask-aiwatcher", "/api/improve-decision"}:
+            if not isinstance(payload, dict):
+                self._send(400, json.dumps({"error": "Expected a JSON object"}), "application/json; charset=utf-8")
+                return
             question = str(payload.get("question", "")).strip()
             raw_days = payload.get("days", 7)
             try:
                 days = max(1, min(90, int(raw_days)))
             except (TypeError, ValueError):
                 days = 7
-            response = (
-                answer_ai_assisted_question(question, days=days)
-                if bool(payload.get("ai_assist"))
-                else answer_local_question(question, days=days)
-            )
+            insight = None
+            if payload.get("insight_key") is not None or parsed.path == "/api/improve-decision":
+                key = payload.get("insight_key")
+                if not isinstance(key, str) or len(key) != 64:
+                    self._send(409, json.dumps({"error": "This evidence changed. Refresh Improve and review it again."}), "application/json; charset=utf-8")
+                    return
+                cards = build_summary_cached(days).get("insights", [])
+                insight = next((card for card in cards if card.get("evidence_key") == key), None)
+                if not insight:
+                    self._send(409, json.dumps({"error": "This evidence changed. Refresh Improve and review it again."}), "application/json; charset=utf-8")
+                    return
+            if parsed.path == "/api/improve-decision":
+                from .local_state import record_improve_decision
+                try:
+                    response = record_improve_decision(insight["evidence_key"], str(payload.get("decision", "")))
+                except ValueError as exc:
+                    self._send(400, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")
+                    return
+                except OSError:
+                    self._send(500, json.dumps({"error": "Could not save local feedback. Check local state permissions and retry."}), "application/json; charset=utf-8")
+                    return
+            elif bool(payload.get("ai_assist")):
+                confirmation_error = _ai_assist_confirmation_error(payload)
+                if confirmation_error:
+                    self._send(400, json.dumps({"error": confirmation_error}), "application/json; charset=utf-8")
+                    return
+                response = (answer_ai_assisted_question(question, days=days, insight=insight)
+                            if insight else answer_ai_assisted_question(question, days=days))
+            elif insight:
+                response = improve.local_answer(insight)
+            else:
+                response = answer_local_question(question, days=days)
             self._send(200, json.dumps(response), "application/json; charset=utf-8")
             return
         if parsed.path in {"/api/handoff-basic", "/api/handoff-ai-assist", "/api/handoff"}:

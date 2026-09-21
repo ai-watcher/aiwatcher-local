@@ -703,9 +703,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     func reviewTitle() -> String {
         if ["control_review", "context_review"].contains(stateName) {
             if visibleWaitingRows > 0 && reviewCount > visibleWaitingRows {
-                return "\(visibleWaitingRows) of \(reviewCount) context reviews"
+                return "\(visibleWaitingRows) of \(reviewCount) projects need review"
             }
-            return "\(reviewCount) context review\(reviewCount == 1 ? "" : "s")"
+            return reviewCount == 1 ? "1 project needs review" : "\(reviewCount) projects need review"
         }
         if stateName == "session_finished" && visibleWaitingRows > 0 {
             if finishedCount > visibleWaitingRows {
@@ -717,7 +717,12 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
     }
 
     func reviewSubtitle() -> String {
-        if ["control_review", "context_review", "session_finished"].contains(stateName), visibleWaitingRows > 0 {
+        if ["control_review", "context_review"].contains(stateName), visibleWaitingRows > 0 {
+            let total = max(reviewCount, visibleWaitingRows)
+            let hidden = max(total - visibleWaitingRows, 0)
+            return hidden > 0 ? "\(hidden) more saved in Watch. Review all or pick a project." : "Pick a project to review its context."
+        }
+        if stateName == "session_finished", visibleWaitingRows > 0 {
             let count = stateName == "session_finished" ? finishedCount : reviewCount
             let total = max(count, visibleWaitingRows)
             let hidden = max(total - visibleWaitingRows, 0)
@@ -739,13 +744,15 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         let tool = row["tool"] as? String ?? "AI tool"
         let project = row["project"] as? String ?? ""
         let waited = row["waited_label"] as? String ?? ""
+        let review = row["review_label"] as? String ?? waited
         let severity = row["severity_label"] as? String ?? ""
         let activity = row["activity_label"] as? String ?? ""
+        let scope = row["scope_label"] as? String ?? ""
         let prefix: String
         if kind == "finished" {
             prefix = "Completed"
         } else if kind == "context_review" {
-            prefix = "Context"
+            prefix = "Context health"
         } else if kind.isEmpty {
             prefix = tool
         } else {
@@ -755,7 +762,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             return [tool, project, waited].filter { !$0.isEmpty }.joined(separator: " · ")
         }
         let details = kind == "context_review"
-            ? [project, tool, severity, activity, waited]
+            ? [scope, project, tool, severity, activity, review]
             : [project, tool, waited]
         let detail = details.filter { !$0.isEmpty }.joined(separator: " · ")
         return detail.isEmpty ? prefix : "\(prefix): \(detail)"
@@ -767,7 +774,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         if kind.hasPrefix("prompt_") { return "Open" }
         let canReturn = index < waitingReturnAvailable.count && waitingReturnAvailable[index]
         if canReturn { return "Return" }
-        if ["context_review", "control_review"].contains(kind) { return "Open" }
+        if ["context_review", "control_review"].contains(kind) { return "Review" }
         return kind.isEmpty ? "Open" : "Review"
     }
 
@@ -1675,9 +1682,9 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         brandMarkView.frame = NSRect(x: 30, y: 16 + yOff, width: 32, height: 26)
         collapseButton.frame = NSRect(x: 604, y: 37 + yOff, width: 18, height: 18)
         let attention = needsAttentionState()
-        // With a queue on screen each row carries its own Open button, so the
-        // single primary would only duplicate the first row's.
-        let showPrimary = hasPrimaryAction() && rowsShown == 0
+        // Context review queues need both scopes: a row-level Watch button and
+        // a Review all button for the full Context Health list.
+        let showPrimary = hasPrimaryAction() && (rowsShown == 0 || ["control_review", "context_review"].contains(stateName))
         let showChip = !signalChipText.isEmpty && !attention && !showPrimary
         planButton.isHidden = attention || showChip || showPrimary
         askButton.isHidden = attention || showChip || showPrimary
@@ -1761,8 +1768,7 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
             scanButton.frame = NSRect(x: 486, y: utilityY, width: 52, height: 28)
             if showSkip {
                 skipButton.frame = NSRect(x: 542, y: utilityY, width: 50, height: 28)
-                consoleButton.frame = NSRect(x: 0, y: 0, width: 0, height: 0)
-                consoleButton.isHidden = true
+                consoleButton.frame = NSRect(x: 596, y: utilityY, width: 38, height: 28)
             } else {
                 consoleButton.frame = NSRect(x: 542, y: utilityY, width: 38, height: 28)
             }
@@ -2820,12 +2826,14 @@ def run_native_presence(
         tool = str(row.get("tool") or "AI tool")
         project = str(row.get("project") or "")
         waited = str(row.get("waited_label") or "")
+        review = str(row.get("review_label") or waited)
         severity = str(row.get("severity_label") or "")
         activity = str(row.get("activity_label") or "")
+        scope = str(row.get("scope_label") or "")
         if kind == "finished":
             parts = ["Completed", project, tool, waited]
         elif kind == "context_review":
-            parts = ["Context", project, tool, severity, activity, waited]
+            parts = ["Context health", scope, project, tool, severity, activity, review]
         elif kind:
             parts = ["Signal", project, tool, waited]
         else:
@@ -2837,8 +2845,8 @@ def run_native_presence(
             count = int(review_count_var.get() or 0)
             shown = visible_waiting_rows()
             if shown and count > shown:
-                return f"{shown} of {count} context reviews"
-            return f"{count} context review{'' if count == 1 else 's'}"
+                return f"{shown} of {count} projects need review"
+            return "1 project needs review" if count == 1 else f"{count} projects need review"
         if state_var.get() == "session_finished" and visible_waiting_rows() > 0:
             count = int(finished_count_var.get() or 0)
             shown = visible_waiting_rows()
@@ -2848,7 +2856,14 @@ def run_native_presence(
         return title_var.get()[:34]
 
     def review_subtitle() -> str:
-        if state_var.get() in {"control_review", "context_review", "session_finished"} and visible_waiting_rows() > 0:
+        if state_var.get() in {"control_review", "context_review"} and visible_waiting_rows() > 0:
+            count = max(int(review_count_var.get() or 0), visible_waiting_rows())
+            hidden = max(count - visible_waiting_rows(), 0)
+            return (
+                f"{hidden} more saved in Watch. Review all or pick a project."
+                if hidden > 0 else "Pick a project to review its context."
+            )
+        if state_var.get() == "session_finished" and visible_waiting_rows() > 0:
             base_count = int(finished_count_var.get() or 0) if state_var.get() == "session_finished" else int(review_count_var.get() or 0)
             count = max(base_count, visible_waiting_rows())
             hidden = max(count - visible_waiting_rows(), 0)
@@ -2868,7 +2883,7 @@ def run_native_presence(
         if can_return:
             return "Return"
         if kind in {"context_review", "control_review"}:
-            return "Open"
+            return "Review"
         return "Review" if kind else "Open"
 
     def short_skip_failure_message() -> str:
@@ -3677,9 +3692,11 @@ def run_native_presence(
                 27, 10, text=badge_text, fill="#ffffff", font=("Helvetica", 8, "bold"),
             )
         attention_layout = has_primary_action() and not collapsed.get()
-        # With a queue on screen each row carries its own Open button, so the
-        # single primary would only duplicate the first row's.
-        should_show_primary = attention_layout and visible_waiting_rows() == 0
+        # Context review queues need both scopes: a row-level Watch button and
+        # a Review all button for the full Context Health list.
+        should_show_primary = attention_layout and (
+            visible_waiting_rows() == 0 or state_var.get() in {"control_review", "context_review"}
+        )
         # The missed-nudge chip borrows Plan/Ask's slot -- both remain a click
         # away in the Console, a recent signal is not.
         show_chip = bool(signal_chip_var.get()) and not attention_layout and not collapsed.get()

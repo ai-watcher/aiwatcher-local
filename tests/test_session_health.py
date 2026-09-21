@@ -40,6 +40,7 @@ def _event(
     cache_read: int = 0,
     cache_write: int = 0,
     model: str | None = MODEL,
+    turn: int = 0,
 ) -> LocalEvent:
     """One model_usage event, priced the way the scanner prices it.
 
@@ -68,6 +69,7 @@ def _event(
         cache_read_tokens=cache_read,
         cache_write_tokens=cache_write,
         cost_usd=cost,
+        turn=turn,
     )
 
 
@@ -228,25 +230,29 @@ class ContextResetTests(unittest.TestCase):
         # five +8K ones, and a steadily growing session reports as shrinking.
         self.assertGreater(health.growth_rate, 0)
 
-    def test_projection_uses_only_the_segment_since_the_last_reset(self) -> None:
+    def test_segment_growth_uses_only_the_turns_since_the_last_reset(self) -> None:
         health = self._health([50_000, 58_000, 66_000, 74_000, 20_000, 28_000, 36_000])
         assert health is not None
         self.assertEqual(health.turns_since_reset, 2)
         self.assertAlmostEqual(health.segment_growth_rate, 8_000.0)
-        # From 36K at +8K/turn, Sonnet 5's 1M window is 120.5 turns out.
         self.assertEqual(health.context_window, 1_000_000)
-        self.assertEqual(health.turns_to_critical, 121)
+        # Room is measured, not projected from that rate.
+        self.assertEqual(health.tokens_left, 964_000)
 
-    def test_no_projection_when_the_session_is_not_on_that_trajectory(self) -> None:
+    def test_unnumbered_prompts_leave_only_the_window_to_judge(self) -> None:
+        # These fixtures carry no prompt numbers, as Codex rollouts do not, so
+        # there is no biggest prompt to hold the room against.
         flat = self._health([100_000, 100_000, 100_000, 100_000])
         assert flat is not None
         self.assertEqual(flat.context_resets, 0)
-        self.assertIsNone(flat.turns_to_critical)
+        self.assertIsNone(flat.largest_prompt_growth)
+        self.assertFalse(flat.next_prompt_may_not_fit)
 
         at_window = self._health([185_000, 190_000, 195_000, 200_000], model="claude-haiku-4-5")
         assert at_window is not None
         self.assertEqual(at_window.context_window, 200_000)
-        self.assertIsNone(at_window.turns_to_critical)
+        self.assertEqual(at_window.tokens_left, 0)
+        self.assertFalse(at_window.next_prompt_may_not_fit)
 
     def test_small_session_jitter_is_not_a_reset(self) -> None:
         """Below the floor, a halving is noise — every session would show resets."""
@@ -261,6 +267,75 @@ class ContextResetTests(unittest.TestCase):
         self.assertEqual(health.context_resets, 0)
         self.assertEqual(health.turns_since_reset, 3)
         self.assertAlmostEqual(health.segment_growth_rate, health.growth_rate)
+
+
+class BiggestPromptRuleTests(unittest.TestCase):
+    """Below the window, red has one cause: a prompt this session already had
+    would no longer fit in the room left.
+
+    It replaced "turns of headroom", which divided the room by average growth
+    per request and passed its 40-turn cap on every 1M-window session. Haiku's
+    200K window keeps the fixtures small.
+    """
+
+    MODEL = "claude-haiku-4-5"
+
+    def _health(self, prompts: list[list[int]]):
+        """Each inner list is one prompt: the context after each request it made."""
+        events, index = [], 0
+        for turn, requests in enumerate(prompts, start=1):
+            for tokens_in in requests:
+                events.append(_event(index, tokens_in=tokens_in, model=self.MODEL, turn=turn))
+                index += 1
+        return analyze_session_health(_session(model=self.MODEL), events)
+
+    def test_a_tool_loop_counts_as_one_prompt(self) -> None:
+        # Four requests of 10-15K each make one prompt of 40K.
+        health = self._health([[50_000, 60_000, 75_000, 90_000], [95_000]])
+        assert health is not None
+        self.assertEqual(health.largest_prompt_growth, 40_000)
+        self.assertEqual(health.tokens_left, 105_000)
+        self.assertFalse(health.next_prompt_may_not_fit)
+        self.assertEqual(health.severity, "healthy")
+
+    def test_red_once_the_biggest_prompt_no_longer_fits(self) -> None:
+        # Prompts of 30K, 10K and 50K leave 50K: one more like the biggest reaches the window.
+        health = self._health([[60_000, 90_000], [100_000], [150_000]])
+        assert health is not None
+        self.assertEqual(health.largest_prompt_growth, 50_000)
+        self.assertEqual(health.tokens_left, 50_000)
+        self.assertTrue(health.next_prompt_may_not_fit)
+        self.assertFalse(health.is_context_critical)
+        self.assertEqual(health.severity, "critical")
+        self.assertIn("biggest prompt in this session added 50,000", " ".join(health.recommendations))
+
+    def test_a_prompt_before_the_last_reset_does_not_count(self) -> None:
+        # A 150K prompt, a compaction to 100K, then prompts of 30K and 20K.
+        # Counting the old prompt would call 50K of room critical.
+        health = self._health([[30_000, 180_000], [190_000], [100_000, 130_000], [150_000]])
+        assert health is not None
+        self.assertEqual(health.context_resets, 1)
+        self.assertEqual(health.largest_prompt_growth, 30_000)
+        self.assertEqual(health.tokens_left, 50_000)
+        self.assertFalse(health.next_prompt_may_not_fit)
+
+
+class ResentIsOnlyStatedWhereMeasuredTests(unittest.TestCase):
+    """"Each request re-sends X" reads the latest request's cache reads. A source
+    with no cache buckets has measured nothing, and must not read as "re-sends 0"."""
+
+    def test_cache_reads_are_reported_when_the_source_has_them(self) -> None:
+        events = [_event(i, tokens_in=v, cache_read=v - 5_000) for i, v in enumerate([50_000, 60_000, 70_000])]
+        health = analyze_session_health(_session(), events)
+        assert health is not None
+        self.assertTrue(health.cache_reported)
+        self.assertEqual(health.latest_turn_replayed_tokens, 65_000)
+
+    def test_no_cache_buckets_is_unreported_rather_than_zero(self) -> None:
+        events = [_event(i, tokens_in=v) for i, v in enumerate([50_000, 60_000, 70_000])]
+        health = analyze_session_health(_session(), events)
+        assert health is not None
+        self.assertFalse(health.cache_reported)
 
 
 class ContextWindowIsTheModelsOwnTests(unittest.TestCase):
@@ -286,9 +361,9 @@ class ContextWindowIsTheModelsOwnTests(unittest.TestCase):
         for health in (codex, sonnet):
             self.assertFalse(health.is_context_critical)
             self.assertEqual(health.severity, "healthy")
-            self.assertIsNotNone(health.turns_to_critical)
-        # Nearer its window, so fewer turns of headroom.
-        self.assertLess(codex.turns_to_critical, sonnet.turns_to_critical)
+        # Nearer its own window, so less room: 189K left against 789K.
+        self.assertEqual(codex.tokens_left, 189_000)
+        self.assertEqual(sonnet.tokens_left, 789_000)
 
     def test_at_the_window_is_the_one_thing_size_alone_makes_critical(self) -> None:
         health = self._health([150_000, 170_000, 190_000, 200_000], "claude-haiku-4-5")
@@ -308,7 +383,7 @@ class ContextWindowIsTheModelsOwnTests(unittest.TestCase):
         health = self._health([500_000, 600_000, 700_000, 800_000], "model-nobody-knows")
         assert health is not None
         self.assertIsNone(health.context_window)
-        self.assertIsNone(health.turns_to_critical)
+        self.assertIsNone(health.tokens_left)
         self.assertFalse(health.is_context_critical)
         self.assertEqual(health.severity, "healthy")
 
@@ -319,7 +394,7 @@ class ContextWindowIsTheModelsOwnTests(unittest.TestCase):
         health = self._health([150_000, 200_000, 225_000, 250_000], "claude-haiku-4-5")
         assert health is not None
         self.assertIsNone(health.context_window)
-        self.assertIsNone(health.turns_to_critical)
+        self.assertIsNone(health.tokens_left)
         self.assertFalse(health.is_context_critical)
 
     def test_claude_codes_1m_suffix_names_the_bigger_window(self) -> None:

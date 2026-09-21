@@ -94,7 +94,7 @@ CATEGORIES: list[tuple[str, str, list[str]]] = [
     (
         "Data and integrations",
         "Get local evidence out, or plug AIWatcher into another surface.",
-        ["export", "mcp", "ui"],
+        ["export", "compactions", "mcp", "ui"],
     ),
 ]
 

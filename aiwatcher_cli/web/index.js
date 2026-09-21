@@ -313,6 +313,7 @@ async function composeOptimizeCleanupPrompt(candidateId, button = null) {
     confirmed = window.confirm(`${label} will make one small model call to compose a safe Optimize cleanup review prompt. Continue?`);
     if (!confirmed) return;
   }
+  const token = ++drawerRequestToken;
   if (button) {
     button.dataset.copyRestore = button.textContent;
     button.textContent = 'Composing...';
@@ -330,6 +331,7 @@ async function composeOptimizeCleanupPrompt(candidateId, button = null) {
       button.textContent = button.dataset.copyRestore || 'Compose AI cleanup prompt';
       delete button.dataset.copyRestore;
     }
+    if (token !== drawerRequestToken) return;
     if (result.error) {
       showToast(result.error, 'error');
       return;
@@ -344,6 +346,7 @@ async function composeOptimizeCleanupPrompt(candidateId, button = null) {
       button.textContent = button.dataset.copyRestore || 'Compose AI cleanup prompt';
       delete button.dataset.copyRestore;
     }
+    if (token !== drawerRequestToken) return;
     showToast(`Could not compose cleanup prompt: ${error.message || 'unknown error'}`, 'error');
   }
 }
@@ -665,7 +668,9 @@ function updateAskAiAssistControl(status = null) {
   const checkbox = document.getElementById('askUseAiAssist');
   if (checkbox && !ready) checkbox.checked = false;
 }
-function openAskPanel(question = '') {
+let askInsightKey = null;
+function openAskPanel(question = '', insightKey = null) {
+  askInsightKey = insightKey;
   document.getElementById('askBackdrop').classList.add('open');
   document.getElementById('askPanel').classList.add('open');
   document.getElementById('askPanel').setAttribute('aria-hidden', 'false');
@@ -748,7 +753,7 @@ async function askAIWatcher() {
     const res = await fetch('/api/ask-aiwatcher', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, days: Number(document.getElementById('days').value || 7), ai_assist: useAi }),
+      body: JSON.stringify({ question, days: Number(document.getElementById('days').value || 7), ai_assist: useAi, confirmed: useAi, insight_key: askInsightKey }),
     });
     const data = await res.json();
     if (!res.ok || data.error) {
@@ -821,7 +826,12 @@ function setDrawerSubtitle(value) {
   const node = document.getElementById('drawerSubtitle');
   if (node) node.textContent = value || 'Local metadata only';
 }
+let drawerRequestToken = 0;
+function isCurrentDrawer(token) {
+  return token === drawerRequestToken && document.getElementById('detailDrawer').classList.contains('open');
+}
 function openDrawer(title, subtitle = 'Local metadata only') {
+  const token = ++drawerRequestToken;
   const content = document.getElementById('detailContent');
   if (content) content.aiwSettled = null;
   document.getElementById('drawerTitle').textContent = title;
@@ -830,8 +840,10 @@ function openDrawer(title, subtitle = 'Local metadata only') {
   document.getElementById('detailDrawer').classList.add('open');
   document.getElementById('detailDrawer').setAttribute('aria-hidden', 'false');
   document.body.classList.add('drawer-open');
+  return token;
 }
 function closeDrawer() {
+  ++drawerRequestToken;
   document.getElementById('drawerBackdrop').classList.remove('open');
   document.getElementById('detailDrawer').classList.remove('open');
   document.getElementById('detailDrawer').setAttribute('aria-hidden', 'true');
@@ -1229,21 +1241,11 @@ function verdictLines(s) {
 
   const p = v.pressure || {};
   if (p.measurable) {
-    // context_window is null when the model's window is not known. That is
-    // shown as "no limit to project towards", never as another model's number.
-    const limit = p.context_window;
-    let body;
-    if (p.turns_to_critical === null || p.turns_to_critical === undefined) {
-      body = !limit
-        ? `${p.latest_turn_label} per turn. This model's context window is not known, so there is no limit to project towards.`
-        : p.latest_turn_tokens >= limit
-          ? `${p.latest_turn_label} per turn, at this model's ${compactTokens(limit)} window. No headroom left to project.`
-          : `${p.latest_turn_label} per turn of a ${compactTokens(limit)} window. Not enough turns yet to project a trend.`;
-    } else {
-      body = p.turns_to_critical > RUNWAY_MAX_PROJECTED_TURNS
-        ? `${p.latest_turn_label} per turn. More than ${RUNWAY_MAX_PROJECTED_TURNS} turns of headroom at this rate.`
-        : `${p.latest_turn_label} per turn. About ${p.turns_to_critical} turn${p.turns_to_critical === 1 ? '' : 's'} of headroom at this rate.`;
-    }
+    // Worded by roomVerdict, the same reading the Watch row and the drawer give.
+    // context_window is null when the model's window is not known, and that is
+    // said as unknown, never as another model's number.
+    const room = roomVerdict(p.context_window, p.latest_turn_tokens, p.largest_prompt_growth, p.next_prompt_may_not_fit, p.resent_tokens);
+    const body = `${room.headline}. ${room.detail}`;
     lines.push({ key: 'room', label: 'Room left', tone: p.severity, body });
   }
 
@@ -1389,7 +1391,6 @@ function handoffPayload(sessionId, target, includePrompt, options) {
     source_refs: next.sources || [],
     constraints: next.constraints || [],
     acceptance_criteria: next.acceptance || [],
-    local_brief: next.localBrief || '',
   };
 }
 async function postJson(path, payload) {
@@ -1402,7 +1403,13 @@ async function postJson(path, payload) {
 }
 function classifyUpdateStatus(data) {
   if (!data) return 'unknown';
-  if (data.install_kind && data.install_kind !== 'source') return 'package';
+  if (data.install_kind && data.install_kind !== 'source') {
+    if (data.update_available && data.can_apply) return 'available';
+    if (data.update_available) return 'blocked';
+    if (data.ok === false) return 'error';
+    if (data.ok) return 'current';
+    return 'package';
+  }
   // A contributor on a feature branch is not blocked; they are somewhere the
   // updater does not apply. Quiet, like the package state, not a warning.
   if (data.ok && data.on_branch === false) return 'branch';
@@ -1416,12 +1423,9 @@ function updateBannerLabel(status, data) {
   if (status === 'checking') return 'Checking...';
   if (status === 'available') return `${count || ''} update${count === 1 ? '' : 's'} available`.trim();
   if (status === 'blocked') return `${count || ''} update${count === 1 ? '' : 's'} blocked`.trim();
-  if (status === 'branch') {
-    if (data && data.update_available) return `${count || ''} update${count === 1 ? '' : 's'} available`.trim();
-    return 'Up to date';
-  }
+  if (status === 'branch') return 'Feature branch';
   if (status === 'current') return 'Up to date';
-  if (status === 'package') return 'Package install';
+  if (status === 'package') return 'Check updates';
   if (status === 'error') return 'Update check failed';
   return 'Check updates';
 }
@@ -1439,9 +1443,9 @@ function updateBranchLabel(data) {
   return checked || 'detached HEAD';
 }
 function updateBannerTitle(status, data) {
-  const source = data && data.repo ? `Source checkout: ${data.repo}` : 'Source checkout unknown';
+  const source = data && data.repo ? `Source checkout: ${data.repo}` : '';
   const launched = data && data.process_cwd ? `Launched from: ${data.process_cwd}` : '';
-  const branch = data ? `GitHub branch: ${updateBranchLabel(data)}` : '';
+  const branch = data && data.install_kind === 'source' ? `GitHub branch: ${updateBranchLabel(data)}` : '';
   const target = data && data.remote_ref ? `Update target: ${data.remote_ref}` : '';
   const details = [source, branch, target, launched].filter(Boolean).join('\n');
   const location = details ? `\n${details}` : '';
@@ -1449,9 +1453,9 @@ function updateBannerTitle(status, data) {
     return `Click to review and apply the latest changes from ${data.remote_ref || 'origin/main'}${location}`;
   }
   if (status === 'blocked') return `${(data && data.message) || 'Resolve local changes before applying updates'}${location}`;
-  if (status === 'branch') return `${(data && data.message) || 'Updates apply on main only'} Click to check again.${location}`;
+  if (status === 'branch') return `${(data && data.message) || 'Updates apply on main only'} Click to review update options.${location}`;
   if (status === 'current') return `AIWatcher is current. Click to check GitHub again.${location}`;
-  if (status === 'package') return `Click to show package upgrade commands${location}`;
+  if (status === 'package') return `Click to check for package updates${location}`;
   if (status === 'error') return `${(data && data.message) || 'Click to retry the GitHub update check'}${location}`;
   if (status === 'checking') return `Checking GitHub for AIWatcher updates${location}`;
   return `Click to check GitHub for the latest AIWatcher changes${location}`;
@@ -1471,10 +1475,8 @@ function setUpdateState(status, data, checkedAt = Date.now()) {
   if (banner) {
     banner.className = `update-banner ${status}`;
     banner.disabled = status === 'checking';
-    // A pip or pipx install cannot be applied from here, so a permanent
-    // "Package install" chip in the header would be a label with no action.
-    banner.hidden = status === 'package';
-    banner.title = updateBannerTitle(status, data || null);
+    banner.hidden = false;
+    banner.title = updateBannerTitle(status, data || null) + (checkedAt ? `\nLast checked: ${new Date(checkedAt).toLocaleString()}` : '');
     banner.setAttribute('aria-label', banner.title);
   }
   if (label) label.textContent = updateBannerLabel(status, data || null);
@@ -1497,11 +1499,6 @@ function clearCachedUpdateState() {
 function restoreCachedUpdateState(context = {}) {
   const installKind = context.installKind || null;
   const sourceRoot = context.sourceRoot || '';
-  if (installKind && installKind !== 'source') {
-    clearCachedUpdateState();
-    setUpdateState('package', { install_kind: installKind }, 0);
-    return null;
-  }
   try {
     const cached = JSON.parse(localStorage.getItem(UPDATE_CACHE_KEY) || 'null');
     if (cached && cached.data) {
@@ -1510,12 +1507,29 @@ function restoreCachedUpdateState(context = {}) {
         setUpdateState('unknown', null, 0);
         return null;
       }
-      setUpdateState(classifyUpdateStatus(cached.data), cached.data, Number(cached.checkedAt || 0) || Date.now());
+      const checkedAt = Number(cached.checkedAt || 0);
+      const expired = !checkedAt || Date.now() - checkedAt >= UPDATE_AUTO_CHECK_MS;
+      setUpdateState(expired ? 'unknown' : classifyUpdateStatus(cached.data), expired ? null : cached.data, checkedAt);
       return cached;
     }
   } catch (error) {}
+  if (installKind && installKind !== 'source') {
+    setUpdateState('package', { install_kind: installKind }, 0);
+    return null;
+  }
   setUpdateState('unknown', null, 0);
   return null;
+}
+async function fetchDashboardJson(url, timeoutMs = 15000, options = {}) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    if (!response.ok) throw new Error(`Request failed (${response.status})`);
+    return await response.json();
+  } finally {
+    window.clearTimeout(timer);
+  }
 }
 async function refreshHeaderUpdate(options = {}) {
   // `quiet`: no toast, because the caller reports the result itself (the
@@ -1524,8 +1538,7 @@ async function refreshHeaderUpdate(options = {}) {
   const fetchRemote = options.fetch !== false;
   if (!options.background) setUpdateState('checking', updateState.data, updateState.checkedAt || Date.now());
   try {
-    const response = await fetch(`/api/update-status?fetch=${fetchRemote ? '1' : '0'}`);
-    const data = await response.json();
+    const data = await fetchDashboardJson(`/api/update-status?fetch=${fetchRemote ? '1' : '0'}`, 45000);
     setUpdateState(classifyUpdateStatus(data), data);
     if (!options.quiet) showToast(data.message || 'Update check complete', data.ok ? 'success' : 'error');
     return data;
@@ -1549,8 +1562,15 @@ function renderUpdateStatus(update) {
         <span class="pill">${esc(data.remote_ref || 'origin/main')}</span>
         <span class="pill">${esc(data.dirty ? 'local changes present' : 'clean checkout')}</span>
       </div>`
+    : data.install_kind
+      ? `<div class="pill-row">
+          <span class="pill">${esc(data.package_manager || 'package')}</span>
+          <span class="pill">v${esc(data.version || 'unknown')}</span>
+          ${data.latest_version ? `<span class="pill">latest v${esc(data.latest_version)}</span>` : ''}
+          ${data.latest_commit ? `<span class="pill">latest ${esc(data.latest_commit)}</span>` : ''}
+        </div>`
     : '';
-  const location = data.repo || data.process_cwd
+  const location = data.install_kind === 'source' && (data.repo || data.process_cwd)
     ? `<div class="update-location">
         ${data.repo ? `<span><b>Source checkout</b> <code>${esc(data.repo)}</code></span>` : ''}
         ${data.process_cwd ? `<span><b>Launched from</b> <code>${esc(data.process_cwd)}</code></span>` : ''}
@@ -1559,14 +1579,20 @@ function renderUpdateStatus(update) {
       </div>`
     : '';
   const action = data.can_apply
-    ? '<p>Apply will fast-forward this clean checkout and restart the dashboard. A running Companion keeps the old code until <code>aiwatcher companion stop</code>, then <code>aiwatcher companion start</code>.</p>'
+    ? data.install_kind === 'source'
+      ? '<p>Apply will fast-forward this clean checkout and restart the dashboard. A running Companion keeps the old code until <code>aiwatcher companion stop</code>, then <code>aiwatcher companion start</code>.</p>'
+      : `<p>Apply will run <code>${esc(data.command_text || 'the package upgrade command')}</code> and restart the dashboard. A running Companion keeps the old code until <code>aiwatcher companion stop</code>, then <code>aiwatcher companion start</code>.</p>`
     : data.on_branch === false
       ? `<p>Updates apply on <code>${esc(data.branch || 'main')}</code>. Check it out to apply from here; your branch is left alone.</p>`
       : data.update_available
         ? '<p>Resolve local changes or branch divergence before applying from the UI.</p>'
         : '';
+  const summary = data.install_kind && data.install_kind !== 'source'
+    ? `<strong>${esc(data.message || `Package install${data.version ? ` · v${data.version}` : ''}`)}</strong>`
+    : `<strong>${esc(data.message || 'Update status unavailable.')}</strong>`;
   return `<div class="update-status ${data.ok ? '' : 'warning'}">
-    <strong>${esc(data.message || 'Update status unavailable.')}</strong>
+    ${summary}
+    ${data.install_kind && data.install_kind !== 'source' ? `<p>${esc(data.command_text ? `Updater: ${data.command_text}` : 'Use your installer to upgrade AIWatcher.')}</p>` : ''}
     ${location}
     ${meta}
     ${action}
@@ -1585,7 +1611,9 @@ async function checkForUpdates(button, options = {}) {
     const data = await refreshHeaderUpdate({ fetch: options.fetch !== false, quiet: true });
     target.innerHTML = renderUpdateStatus(data);
     if (button) {
-      button.textContent = data.update_available
+      button.textContent = !data.ok
+        ? 'Retry check'
+        : data.update_available
         ? `${data.behind || ''} update${Number(data.behind) === 1 ? '' : 's'} available`.trim()
         : 'Up to date';
     }
@@ -1608,7 +1636,7 @@ async function applyUpdates(button, options = {}) {
   const original = button ? button.textContent : '';
   if (button) {
     button.disabled = true;
-    button.textContent = 'Applying...';
+    button.textContent = updateState.data && updateState.data.install_kind !== 'source' ? 'Upgrading...' : 'Applying...';
   }
   setUpdateState('checking', updateState.data, updateState.checkedAt || Date.now());
   try {
@@ -1656,6 +1684,11 @@ async function handleUpdateBannerClick(button) {
     openUpdatePanel(updateState.data);
     return;
   }
+  // Navigation should never wait on GitHub. A fetch can take up to the Git
+  // subprocess timeout, which made feature-branch clicks look broken even
+  // though the button had entered its checking state. Show the cached status
+  // first, then replace it with the refreshed result.
+  if (updateState.data) openUpdatePanel(updateState.data);
   const data = await refreshHeaderUpdate({ fetch: true, quiet: true });
   const status = classifyUpdateStatus(data);
   if (status === 'current') {
@@ -1683,10 +1716,15 @@ function renderUpdateAutoCheck(enabled) {
   if (box) box.checked = !!enabled;
 }
 function renderUpdateBannerForInstall(kind) {
-  // Known from the summary, before any GitHub check, so a package install
-  // never shows the pill at all.
+  // Known from the summary, before any GitHub check. Package installs still
+  // keep the pill visible; their check compares against PyPI or the recorded
+  // direct GitHub install commit instead of a local checkout.
   const banner = document.getElementById('updateBanner');
-  if (banner && kind === 'package') banner.hidden = true;
+  if (banner) banner.hidden = false;
+  const autoCheckRow = document.getElementById('updateAutoCheckRow');
+  if (autoCheckRow) autoCheckRow.hidden = false;
+  const checkButton = document.getElementById('updateCheckButton');
+  if (checkButton && !checkButton.disabled) checkButton.textContent = 'Check for updates';
 }
 async function setUpdateAutoCheck(enabled) {
   const box = document.getElementById('updateAutoCheck');
@@ -1944,6 +1982,7 @@ function renderHandoff(capsule) {
   ${changedFiles.length ? `<section class="detail-section"><details class="aiw-details"><summary>${esc(changedFiles.length)} changed file${changedFiles.length === 1 ? '' : 's'} to inspect</summary><div class="details-body"><div class="pill-row">${changedFiles.slice(0, 12).map(file => `<span class="pill">${esc(file)}</span>`).join('')}</div></div></details></section>` : ''}`;
 }
 async function copyFreshStartFromDrawer(sessionId, openRuntime = false) {
+  const token = drawerRequestToken;
   const brief = document.getElementById('handoffBrief') ? document.getElementById('handoffBrief').value : '';
   const copied = await copyText(brief, 'Fresh Start brief copied');
   if (!copied) return;
@@ -1966,7 +2005,7 @@ async function copyFreshStartFromDrawer(sessionId, openRuntime = false) {
     } catch (error) {}
   }
   const status = document.getElementById('handoffStatus');
-  if (status) {
+  if (status && isCurrentDrawer(token)) {
     const controls = '<button class="btn-primary" onclick="showView(\'receipts\'); closeDrawer()">View receipt</button><button class="btn-quiet" onclick="closeDrawer()">Done</button>';
     status.outerHTML = `<div id="handoffStatus">${freshStartReceiptWidget({
       reason: 'Fresh Start brief copied from the session drawer.',
@@ -1988,13 +2027,9 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
     confirmed = window.confirm(`${label} will make one small model call using your configured provider to compose this Fresh Start handoff. Continue?`);
     if (!confirmed) return;
   }
+  // A new composition also supersedes pending local enrichment of this drawer.
+  const token = ++drawerRequestToken;
   const options = handoffOptionsFromForm();
-  const briefNode = document.getElementById('handoffBrief');
-  const currentBrief = briefNode ? briefNode.value : '';
-  const sourceAccess = config.source_access || 'metadata_only';
-  if (currentBrief && (!includePrompt || sourceAccess === 'prompt_opt_in' || sourceAccess === 'source_opt_in')) {
-    options.localBrief = currentBrief;
-  }
   const payload = handoffPayload(sessionId, target, includePrompt, options);
   payload.confirmed = confirmed;
   const statusNode = document.getElementById('handoffStatus');
@@ -2003,13 +2038,14 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
       <div class="ai-loading-mark">AI</div>
       <div>
         <strong>Composing handoff</strong>
-        <p>AI Assist is turning local evidence into a compact fresh-session brief. Proof and savings claims stay evidence-backed.</p>
+        <p>AI Assist is loading timeline, Git, decisions, and session evidence before composing a compact continuation brief.</p>
         <div class="ai-loading-bar" aria-hidden="true"><span></span></div>
       </div>
     </div>`);
   }
   try {
     const capsule = await postJson('/api/handoff-ai-assist', payload);
+    if (!isCurrentDrawer(token)) return;
     const working = document.getElementById('aiAssistWorking');
     if (working) working.remove();
     if (capsule.error) {
@@ -2022,38 +2058,54 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
     else if (result.status === 'cached') showToast('Cached AI handoff ready');
     else showToast(result.reason || 'AI Assist was not used', 'error');
   } catch (error) {
+    if (!isCurrentDrawer(token)) return;
     const working = document.getElementById('aiAssistWorking');
     if (working) working.remove();
     showToast('AI Assist could not improve this brief.', 'error');
   }
 }
 async function openHandoff(sessionId, target = 'generic', includePrompt = false, options = null) {
-  openDrawer('Fresh Start');
-  const node = document.getElementById('detailContent');
+  const token = openDrawer('Fresh Start');
+  const isCurrent = () => isCurrentDrawer(token);
   setDrawerContent('<div class="loading">Finding the source session before building the Fresh Start brief...</div>');
   const handoffOptions = options || handoffOptionsFromForm();
   const payload = handoffPayload(sessionId, target, includePrompt, handoffOptions);
-  const summaryPromise = fetch(`/api/session-summary?id=${encodeURIComponent(sessionId)}`)
+  // Fast responses may arrive in any order; never replace a richer brief with
+  // an older summary, or block the basic brief on the summary request.
+  let stage = 0;
+  fetch(`/api/session-summary?id=${encodeURIComponent(sessionId)}`)
     .then(res => res.json())
+    .then(summary => {
+      if (isCurrent() && stage === 0 && summary && !summary.error) {
+        stage = 1;
+        setDrawerContent(renderSessionSummary(summary, 'Building Fresh Start brief...'));
+      }
+    })
     .catch(() => null);
   const basicPromise = postJson('/api/handoff-basic', payload)
+    .then(basic => {
+      if (isCurrent() && stage < 2 && basic && !basic.error && !includePrompt) {
+        stage = 2;
+        setDrawerContent(renderHandoff(basic));
+      }
+      return basic;
+    })
     .catch(() => null);
-  const handoffPromise = postJson('/api/handoff', payload);
-  const fastSummary = await summaryPromise;
-  if (fastSummary && !fastSummary.error) {
-    setDrawerContent(renderSessionSummary(fastSummary, 'Building Fresh Start brief...'));
-  } else {
-    setDrawerContent('<div class="loading">Building local Fresh Start brief...</div>');
-  }
-  const basicCapsule = await basicPromise;
-  if (basicCapsule && !basicCapsule.error && !includePrompt) {
-    setDrawerContent(renderHandoff(basicCapsule));
-  }
-  const capsule = await handoffPromise;
+  const capsule = await postJson('/api/handoff', payload)
+    .catch(() => ({ error: 'Could not load detailed Fresh Start evidence.' }));
+  if (!isCurrent()) return null;
   if (capsule.error) {
+    const basic = await basicPromise;
+    if (!isCurrent()) return null;
+    stage = 3;
+    if (basic && !basic.error && !includePrompt) {
+      showToast('Detailed evidence is unavailable. The basic local brief is still ready to copy.', 'error');
+      return basic;
+    }
     setDrawerContent(`<div class="empty">${esc(capsule.error)}</div>`);
     return capsule;
   }
+  stage = 3;
   setDrawerContent(renderHandoff(capsule));
   return capsule;
 }
@@ -2086,7 +2138,8 @@ async function startFreshFromBubble(sessionId) {
     showToast('Could not open the Fresh Start brief.', 'error');
     return;
   }
-  if (!capsule || capsule.error) {
+  if (!capsule) return;
+  if (capsule.error) {
     showToast((capsule && capsule.error) || 'Could not open the Fresh Start brief.', 'error');
     return;
   }
@@ -2242,16 +2295,19 @@ function renderOptimizeWorkspace(optimize) {
       const fullPath = item.project_full || item.project || '';
       const pathLine = fullPath ? `<div class="optimize-full-path"><span class="label">Full path</span><code>${esc(fullPath)}</code></div>` : '';
       const activityLine = item.activity_summary ? `<p class="optimize-activity-line">${esc(item.activity_summary)}</p>` : '';
-      return `<div class="action-row ${item.tokens_at_risk ? 'medium' : 'low'}">
-      <div>
+      return `<div class="action-row optimize-card ${item.tokens_at_risk ? 'medium' : 'low'}">
+      <div class="optimize-card-copy">
         <div class="action-title">${esc(item.title)} <span class="pill">${esc(item.evidence_label || 'Observed')}</span></div>
         <p>${esc(item.why_inactive || item.summary || '')}</p>
-        ${activityLine}
         <div class="action-meta"><span class="pill" title="${esc(fullPath)}">${esc(item.project ? projectName({ project_full: item.project }) : 'Local machine')}</span>${item.impact_label ? `<span class="pill">${esc(item.impact_label)}</span>` : ''}<span class="pill">${esc(item.updated_label || '')}</span></div>
         ${pathLine}
-        <p class="receipt-note">${esc(item.evidence || '')}</p>
+        <p class="receipt-note">Verify this is not active work before deciding whether to archive or clean it up.</p>
+        ${activityLine || item.evidence ? `<details class="aiw-details optimize-evidence"><summary>Review evidence</summary><div class="details-body">
+          ${activityLine}
+          ${item.evidence ? `<p class="receipt-note">${esc(item.evidence)}</p>` : ''}
+        </div></details>` : ''}
       </div>
-      <div class="actions">
+      <div class="actions optimize-card-actions">
         ${item.view ? `<button class="btn-primary" onclick="showView('${esc(item.view)}')">${esc(item.action_label || 'Review')}</button><button class="btn-quiet" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">Copy cleanup prompt</button>` : `<button class="btn-primary" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">Copy cleanup prompt</button>`}
         ${aiCleanup}
         <button class="btn-quiet" data-project="${esc(item.project_full || '')}" data-impact="${esc(item.impact_label || '')}" onclick="recordOptimizeDecision('marked_done', this.dataset.project, this.dataset.impact, this)">Reviewed</button>
@@ -2266,30 +2322,39 @@ function renderOptimizeWorkspace(optimize) {
 function renderRuntimeOptimizeCard(item, cleanupPrompt) {
   const steps = Array.isArray(item.safe_review_steps) && item.safe_review_steps.length
     ? item.safe_review_steps
-    : ['Run: aiwatcher processes --stale-only', 'Use PID, runtime, session id, and working directory to match each row to an AI app/window.', 'Confirm each process is not attached to live AI work.', 'Stop only stale/orphaned runtimes you recognize.', 'Run the command again; reclaimed RSS is the before-minus-after local memory signal.', 'Leave unknown processes alone.'];
+    : ['Run: aiwatcher processes --stale-only', 'Use PID, runtime, session id, and working directory to match each row to an AI app/window.', 'Confirm each process is not attached to live AI work.', 'Report stale/orphaned runtimes you recognize for a separate user stop decision.', 'Run the command again; reclaimed RSS is the before-minus-after local memory signal.', 'Leave unknown processes alone.'];
   const command = item.review_command || 'aiwatcher processes --stale-only';
   const aiCleanup = optimizeAiButton(item.id || '');
-  return `<div class="action-row low runtime-review-card">
-    <div>
+  return `<div class="action-row optimize-card low runtime-review-card">
+    <div class="optimize-card-copy">
       <div class="action-title">${esc(item.title || 'Review stale AI runtimes')} <span class="pill local">Local machine</span></div>
-      <p>${esc(item.why_inactive || 'Local process metadata shows AI-related runtimes with stale/orphan signals.')}</p>
-      <div class="runtime-review-grid">
-        <div class="mini"><span class="label">Goal</span><strong>${esc(item.title || 'Review stale AI runtimes')}</strong></div>
-        <div class="mini"><span class="label">Evidence</span><strong>${esc(item.evidence_label || 'Observed')}</strong><span class="mini-note">${esc(item.evidence || 'Observed from local process metadata, not provider billing.')}</span></div>
-        <div class="mini"><span class="label">Impact signal</span><strong>${esc(item.impact_label || 'runtime clutter')}</strong><span class="mini-note">${esc(item.resource_note || 'RSS/CPU are local machine resources, not model/API spend.')}</span></div>
-        <div class="mini"><span class="label">Reward</span><strong>${esc(item.reward_label || 'Less RAM/CPU pressure after confirmed cleanup')}</strong><span class="mini-note">${esc(item.cost_note || 'Do not count dollar savings from process RSS alone.')}</span></div>
+      <p>${esc(item.review_summary || item.why_inactive || 'Review local AI runtimes; identify detached ones for a separate user decision.')}</p>
+      <div class="action-meta">
+        <span class="pill">${esc(item.evidence_label || 'Observed')}</span>
+        <span class="pill">${esc(item.impact_label || 'runtime clutter')}</span>
+        <span class="pill">No auto-stop</span>
       </div>
-      <div class="runtime-command">
-        <span class="label">Review command</span>
-        <code>${esc(command)}</code>
-      </div>
-      <ol class="runtime-review-steps">
-        ${steps.map(step => `<li>${esc(step)}</li>`).join('')}
-      </ol>
-      <p class="receipt-note">${esc(item.privacy_note || 'This checklist uses local metadata only. It does not include prompt/source content.')}</p>
-      <p class="receipt-note">Nothing is stopped from this dashboard. Run the command, confirm live work is not attached, then stop only a runtime you recognize.</p>
+      <details class="aiw-details runtime-review-details">
+        <summary>Safe runtime review steps</summary>
+        <div class="details-body">
+          <div class="runtime-review-grid">
+            <div class="mini"><span class="label">Evidence</span><strong>${esc(item.evidence_label || 'Observed')}</strong><span class="mini-note">${esc(item.evidence || 'Observed from local process metadata, not provider billing.')}</span></div>
+            <div class="mini"><span class="label">Impact signal</span><strong>${esc(item.impact_label || 'runtime clutter')}</strong><span class="mini-note">${esc(item.resource_note || 'RSS/CPU are local machine resources, not model/API spend.')}</span></div>
+            <div class="mini"><span class="label">Reward</span><strong>${esc(item.reward_label || 'Less RAM/CPU pressure after confirmed cleanup')}</strong><span class="mini-note">${esc(item.cost_note || 'Do not count dollar savings from process RSS alone.')}</span></div>
+          </div>
+          <div class="runtime-command">
+            <span class="label">Review command</span>
+            <code>${esc(command)}</code>
+          </div>
+          <ol class="runtime-review-steps">
+            ${steps.map(step => `<li>${esc(step)}</li>`).join('')}
+          </ol>
+          <p class="receipt-note">${esc(item.privacy_note || 'This checklist uses local metadata only. It does not include prompt/source content.')}</p>
+          <p class="receipt-note">Nothing is stopped from this dashboard. Make any stop a separate user decision after matching the runtime to live work.</p>
+        </div>
+      </details>
     </div>
-    <div class="actions">
+    <div class="actions optimize-card-actions">
       <button class="btn-primary" onclick="copyOptimizeRuntimeCommand(${jsArg(command)}, this)">Copy command</button>
       <button class="btn-quiet" onclick="copyText(${jsArg(cleanupPrompt)}, 'Cleanup prompt copied')">${esc(item.action_label || 'Copy cleanup prompt')}</button>
       ${aiCleanup}
@@ -2314,9 +2379,6 @@ function renderRuntimeOptimizeCard(item, cleanupPrompt) {
    - every chart ships a table view; nothing is encoded in colour alone
 --------------------------------------------------------------------------- */
 const SVG_NS = 'http://www.w3.org/2000/svg';
-// Past this the projection is drawn no further and the caption says "N+". A
-// straight line forty turns out is already a stretch; a hundred is a fiction.
-const RUNWAY_MAX_PROJECTED_TURNS = 40;
 function svgEl(name, attrs) {
   const node = document.createElementNS(SVG_NS, name);
   for (const key in attrs) node.setAttribute(key, attrs[key]);
@@ -2392,13 +2454,14 @@ function drawMeter(node, chart) {
   // One line on the track: the model's own context window. There is no amber
   // "pressure" mark any more -- it was 75% of Claude's 200k window applied to
   // every model, and nothing happens at 75% of a window. Below the window the
-  // position is a fact, not a verdict; at it, red.
+  // position is a fact, not a verdict; at it, or once this session's biggest
+  // prompt no longer fits in what is left, red -- the same rule as roomVerdict.
   const limit = chart.context_window_n || 0;
   const latest = chart.latest_turn_tokens_n || 0;
   if (!limit) return;
   const W = 1000, H = 20, track = limit * 1.25;
   const at = value => Math.min(1, value / track) * W;
-  const tone = latest >= limit ? 'var(--red)' : 'var(--green)';
+  const tone = latest >= limit || chart.next_prompt_may_not_fit ? 'var(--red)' : 'var(--green)';
   const parts = [
     `<rect x="0" y="6" width="${W}" height="9" rx="4.5" fill="var(--surface)"/>`,
     `<rect x="0" y="6" width="${at(Math.min(latest, limit)).toFixed(1)}" height="9" rx="4.5" fill="${tone}"/>`,
@@ -2584,46 +2647,72 @@ function attachTrendHover(node, series, geom) {
    have I got" independently is how they end up disagreeing. */
 function runwayVerdict(chart) {
   if (!chart || (chart.turn_series || []).length < 3) return null;
-  // turns_to_critical is null for two opposite reasons and they must not share a
-  // sentence: a session already past the threshold is the worst case on the page,
-  // and describing it as "not on a path to" the threshold reads as reassurance.
-  if (chart.turns_to_critical === null || chart.turns_to_critical === undefined) {
-    const limit = chart.context_window_n;
-    // No known window is a third reason for null, and it is neither of the
-    // other two: not a wall, not a plateau. Unmeasured, said as unmeasured.
-    if (!limit) {
-      return {
-        severity: 'unknown',
-        headline: 'Context window unknown',
-        detail: `${compactTokens(chart.latest_turn_tokens_n)} per turn. This model's window is not on file, so there is no limit to project towards.`,
-      };
-    }
-    if (chart.latest_turn_tokens_n >= limit) {
-      return {
-        severity: 'critical',
-        headline: 'At the context window',
-        detail: `${compactTokens(chart.latest_turn_tokens_n)} per turn of a ${compactTokens(limit)} window. There is no headroom left to project.`,
-      };
-    }
+  return roomVerdict(chart.context_window_n, chart.latest_turn_tokens_n,
+    chart.largest_prompt_growth_n, chart.next_prompt_may_not_fit, chart.resent_n);
+}
+/* How much room a session has left, worded once for the Watch row, the drawer,
+   the session review and Home.
+
+   It used to be "turns of headroom": the window left divided by average growth
+   per request. A request is one call in a tool loop, not a prompt, and against a
+   1M window that division passed the 40-turn cap on every session -- one at 86%
+   of its window read the same "40+ turns" as one at 5%. A per-prompt pace did no
+   better: on real sessions an early pace ran 2-3x high, because a few long tool
+   loops carry most of the growth and nothing in the prompt predicts them.
+
+   So this states the room as a measurement and projects nothing. Below the
+   window red has one cause, decided in session_health: this session has already
+   had a prompt bigger than what is left. */
+function roomVerdict(limit, latest, largest, mayNotFit, resent) {
+  const now = latest || 0;
+  // No known window is not a wall and not room: unmeasured, said as unmeasured.
+  if (!limit) {
     return {
-      severity: 'healthy',
-      headline: 'Not growing right now',
-      detail: 'Context is flat, so there is no threshold to project towards.',
+      severity: 'unknown',
+      headline: 'Context window unknown',
+      detail: `${compactTokens(now)} per turn. This model's window is not on file, so there is no limit to measure room against.`,
     };
   }
-  // The drawn projection is capped, so nothing may quote a number the chart does
-  // not reach -- and past this range the honest reading is "plenty".
-  if (chart.turns_to_critical > RUNWAY_MAX_PROJECTED_TURNS) {
+  if (now >= limit) {
     return {
-      severity: 'healthy',
-      headline: `${RUNWAY_MAX_PROJECTED_TURNS}+ turns of headroom`,
-      detail: `Growing ${compactTokens(chart.growth_per_turn_n)}/turn. Far enough out that the exact number is noise.`,
+      severity: 'critical',
+      headline: 'At the context window',
+      detail: `${compactTokens(now)} per turn of a ${compactTokens(limit)} window. There is no room left.`,
     };
   }
+  const headline = `${compactTokens(limit - now)} left of ${compactTokens(limit)}`;
+  // What every request repeats: the latest request's cache reads, as the
+  // provider counted them. Null when the source reports no cache buckets, and
+  // then nothing is said -- never "re-sends 0". On a cache miss the history is
+  // rewritten rather than read, so the figure dips for that one request; on
+  // real sessions that was about 1% of requests.
+  const resends = resent ? `Each request re-sends ${compactTokens(resent)}.` : '';
+  // Null when the tool does not number its prompts, as Codex rollouts do not.
+  if (largest === null || largest === undefined) {
+    return {
+      severity: 'healthy',
+      headline,
+      detail: [resends, 'This tool does not mark where one prompt ends, so only reaching the window can turn this red.']
+        .filter(Boolean).join(' '),
+    };
+  }
+  if (mayNotFit) {
+    return {
+      severity: 'critical',
+      headline,
+      detail: [`The biggest prompt in this session added ${compactTokens(largest)}, so one more like it could make the tool compact on its own.`, resends]
+        .filter(Boolean).join(' '),
+    };
+  }
+  // Healthy says only what every request repeats; the biggest prompt that
+  // still fits is in the drawer's facts. Without cache figures, that fact is
+  // the most useful thing left to say.
   return {
-    severity: chart.turns_to_critical <= 10 ? 'critical' : 'warning',
-    headline: `≈${chart.turns_to_critical} turn${chart.turns_to_critical === 1 ? '' : 's'} of headroom`,
-    detail: `Growing ${compactTokens(chart.growth_per_turn_n)}/turn, since this session last shed context.`,
+    severity: 'healthy',
+    headline,
+    detail: resends || (largest > 0
+      ? `The biggest prompt in this session added ${compactTokens(largest)}, and that still fits.`
+      : 'No prompt since the last reset has grown the context.'),
   };
 }
 /* Names every line on the runway chart. The caption used to carry "Amber is
@@ -3170,12 +3259,16 @@ function healthRank(row, waiting) {
   // blocked on a question you have not seen is the one that cannot continue
   // without you, whatever its per-turn number.
   //
-  // Then the old order, unchanged: past the limit outranks below it, and within
-  // each group the bigger per-turn number leads.
+  // Then red outranks green, and within each group the bigger per-turn number
+  // leads. Red is the same test the meter's tone uses: at the window, or the
+  // session's biggest prompt no longer fits in what is left. Ranking on the
+  // window alone put a red Haiku row with 40K left below a green 1M row at
+  // 300K, because 300K is bigger.
   const chart = row.chart || {};
   const limit = chart.context_window_n || Infinity;
   const latest = chart.latest_turn_tokens_n || 0;
-  return [waiting && waiting.has(row.session_id) ? 1 : 0, latest >= limit ? 1 : 0, latest];
+  const red = latest >= limit || chart.next_prompt_may_not_fit;
+  return [waiting && waiting.has(row.session_id) ? 1 : 0, red ? 1 : 0, latest];
 }
 /* Why this row sits where it does.
  *
@@ -3191,10 +3284,11 @@ function healthReason(row, waitingById) {
     return mins >= 1 ? `Waiting on you for ${mins}m.` : 'Waiting on you.';
   }
   // A commit landed and most of the replay predates it: the one moment context
-  // size has an action attached, and it outranks the runway reading because the
-  // runway is a projection and this is a fact about the last few turns.
+  // size has an action attached, and it outranks the room reading, which says
+  // how much space is left but not when to act on it.
   const compact = row.compact;
-  // The card charts the project's worst session; the nudge is for the one
+  // The card charts the project's worst live session (the worst of all when none
+  // is live); the nudge is for the one
   // being typed into. When they differ the sentence names which -- by the
   // title the user gave it where the tool records one.
   const compactName = compact ? (compact.title || compact.session_short || compact.session_id) : '';
@@ -3242,6 +3336,8 @@ function healthFacts(row) {
   // measurement. The drawer is opened for one session, so the
   // numbers have to say which of them is about the project it sits in.
   const session = [
+    // The input to the red rule, so a reader can check it against the room left.
+    chart.largest_prompt_growth_n ? `biggest prompt ${compactTokens(chart.largest_prompt_growth_n)}` : '',
     peakIsHistoric ? `peak ${row.peak_turn_tokens}` : '',
     row.bloat_measurable ? `${row.bloat_label} replay` : '',
     row.bloat_measurable ? `${row.replayed_cost_label} on replay` : '',
@@ -3262,24 +3358,14 @@ function healthFacts(row) {
 }
 
 function headroomLabel(chart) {
-  const turns = chart && chart.turns_to_critical;
-  if (turns === null || turns === undefined) {
-    // Null for three reasons, and only one of them is "no headroom". Reading
-    // all three as the wall put "already past the limit" on flat sessions.
-    const limit = chart && chart.context_window_n;
-    const latest = (chart && chart.latest_turn_tokens_n) || 0;
-    if (!limit) return { big: compactTokens(latest), sub: 'per turn, window unknown' };
-    if (latest >= limit) return { big: 'No headroom', sub: 'at the context window' };
-    return { big: 'Not growing', sub: 'nothing to project' };
-  }
-  // Capped where runwayVerdict caps. Uncapped this printed "110 turns" beside a
-  // reason reading "40+ turns of headroom" -- two numbers for one quantity,
-  // disagreeing, on the same row. 110 is also past the end of the drawn
-  // projection, so it was a number the chart underneath it never reaches.
-  if (turns > RUNWAY_MAX_PROJECTED_TURNS) {
-    return { big: `${RUNWAY_MAX_PROJECTED_TURNS}+ turns`, sub: 'of headroom at this rate' };
-  }
-  return { big: `${turns} turn${turns === 1 ? '' : 's'}`, sub: 'of headroom at this rate' };
+  // The same room roomVerdict states in the reason beside it, as one short
+  // figure. Measured, so it needs no cap: the capped "40+ turns" it replaced
+  // read the same on a session at 86% of its window as on one at 5%.
+  const limit = chart && chart.context_window_n;
+  const latest = (chart && chart.latest_turn_tokens_n) || 0;
+  if (!limit) return { big: compactTokens(latest), sub: 'per turn, window unknown' };
+  if (latest >= limit) return { big: 'No room', sub: 'at the context window' };
+  return { big: `${compactTokens(limit - latest)} left`, sub: `of ${compactTokens(limit)}` };
 }
 function healthRow(row, waitingById, index, sharedNames) {
   const reason = healthReason(row, waitingById);
@@ -3337,7 +3423,10 @@ function healthRow(row, waitingById, index, sharedNames) {
       ${row.session_title ? `<span class="rank-why">${esc(healthProjectName(row))} &middot; ${esc(row.tool || 'unknown tool')}</span>` : ''}
       ${reason ? `<span class="rank-why">${reason}</span>` : ''}
       ${row.session_count > 1
-        ? `<span class="rank-why">${esc(row.session_count)} sessions here; this is the one under most pressure.</span>`
+        // A live session is charted ahead of a worse one that has ended, so
+        // "under most pressure" is only true across the whole project when
+        // nothing is live. Say which comparison the pick won.
+        ? `<span class="rank-why">${esc(row.session_count)} sessions here; this is the ${row.charted_because_live ? 'live one' : 'one'} under most pressure.</span>`
         : ''}
     </span>
     <span class="rank-trend" data-trend="${esc(row.session_id)}"></span>
@@ -3818,11 +3907,12 @@ function miniStats(totals) {
   </div>`;
 }
 async function selectProject(project) {
-  openDrawer('Project detail');
+  const token = openDrawer('Project detail');
   setDrawerContent('<div class="loading">Loading project activity...</div>');
   const days = document.getElementById('days').value;
   const res = await fetch(`/api/project?days=${days}&project=${encodeURIComponent(project)}`);
   const data = await res.json();
+  if (!isCurrentDrawer(token)) return;
   document.getElementById('drawerTitle').textContent = data.project_short || 'Project detail';
   setDrawerContent(`<section class="detail-section"><h2>${esc(data.project_short)}</h2>
     ${miniStats(data.totals)}
@@ -3960,15 +4050,14 @@ function renderSessionActions(s) {
 // A session that has just started may not be in the index yet, so a miss is
 // retried -- but each attempt is a full round trip, so three is the ceiling.
 const SESSION_LOOKUP_ATTEMPTS = 3;
-let sessionSelectToken = 0;
 async function selectSession(sessionId, attempt = 0, token = null) {
   // Opening a second session while the first was still loading -- or still
   // retrying -- left whichever finished last on screen, including a retry for a
   // session you had already navigated away from. Each selection claims a token
   // and stale continuations stop writing.
-  if (token === null) token = ++sessionSelectToken;
-  const isCurrent = () => token === sessionSelectToken;
-  openDrawer('Session review');
+  if (token === null) token = openDrawer('Session review');
+  const isCurrent = () => isCurrentDrawer(token);
+  if (!isCurrent()) return;
   document.getElementById('drawerTitle').textContent = 'Session review';
   const node = document.getElementById('detailContent');
   setDrawerContent(attempt
@@ -3977,7 +4066,9 @@ async function selectSession(sessionId, attempt = 0, token = null) {
   const summaryPromise = fetch(`/api/session-summary?id=${encodeURIComponent(sessionId)}`)
     .then(res => res.json())
     .catch(() => null);
-  const detailPromise = fetch(`/api/session?id=${encodeURIComponent(sessionId)}`);
+  const detailPromise = fetch(`/api/session?id=${encodeURIComponent(sessionId)}`)
+    .then(res => res.json())
+    .catch(() => ({ error: 'Could not load local session details.' }));
   const fastSummary = await summaryPromise;
   if (!isCurrent()) return;
   if (fastSummary && !fastSummary.error) {
@@ -3986,8 +4077,7 @@ async function selectSession(sessionId, attempt = 0, token = null) {
   } else {
     setDrawerContent(`<div class="loading">Loading session details for ${esc(sessionId)}...</div>`);
   }
-  const res = await detailPromise;
-  const s = await res.json();
+  const s = await detailPromise;
   if (!isCurrent()) return;
   if (s.error) {
     // Retried because a session that started moments ago may not be indexed yet.
@@ -4009,7 +4099,9 @@ async function selectSession(sessionId, attempt = 0, token = null) {
     pending.className = 'loading';
     pending.textContent = s.detail_message || 'Timeline and evidence are still indexing in the background.';
     node.appendChild(pending);
-    if (attempt < 8) window.setTimeout(() => selectSession(sessionId, attempt + 1), 1400);
+    if (attempt < 8) window.setTimeout(() => {
+      if (isCurrent()) selectSession(sessionId, attempt + 1, token);
+    }, 1400);
     return;
   }
   document.getElementById('drawerTitle').textContent = 'Session review';
@@ -5047,12 +5139,19 @@ function renderInsightFeed(insights) {
   </details>`;
 }
 function renderInsightRows(insights) {
-  return insights.map(card => `<div class="feed-row ${esc(card.severity || 'info')}${card.session_id ? ' clickable' : ''}"
-      ${card.session_id ? `onclick="selectSession('${esc(card.session_id)}')"` : ''}>
+  return insights.map(card => `<div class="feed-row ${esc(card.severity || 'info')}">
       <div class="feed-main${card.chart ? ' has-evidence' : ''}">
         <div class="feed-says">
           <strong>${esc(card.title)}</strong>
           <p>${esc(card.body)}</p>
+          ${card.evidence_key ? `<p class="receipt-note">${esc(card.scope_note)} ${esc(card.rank_reason || '')}</p>
+          <div class="improve-actions">
+            <button class="btn-primary" data-key="${esc(card.evidence_key)}" onclick="reviewImprovement(this.dataset.key)">${esc(card.action_label)}</button>
+            <label>Feedback <select data-key="${esc(card.evidence_key)}" onchange="saveImproveFeedback(this)">
+              <option value="">Choose...</option>
+              ${[['later','Later (24h)'],['expected','Expected'],['helpful','Helpful'],['not_helpful','Not helpful']].map(([value,label]) => `<option value="${value}" ${card.feedback === value ? 'selected' : ''}>${label}</option>`).join('')}
+            </select></label>
+          </div>` : ''}
           ${card.session_id && card.session_label ? `<p class="feed-session">Charted: <button class="link-inline" data-session="${esc(card.session_id)}" onclick="event.stopPropagation(); selectSession(this.dataset.session)">${esc(card.session_label)}</button></p>` : ''}
         </div>
         ${card.chart ? `<div class="feed-shows"><div class="feed-chart" data-feed-chart="${esc(card.id)}"></div>${feedChartCaption(card.chart)}</div>` : ''}
@@ -5060,9 +5159,61 @@ function renderInsightRows(insights) {
       ${card.impact_label ? `<span class="feed-impact mono">${esc(card.impact_label)}</span>` : ''}
     </div>`).join('');
 }
+async function recordImproveDecision(key, decision) {
+  const response = await fetch('/api/improve-decision', {method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({insight_key: key, decision, days: Number(document.getElementById('days').value || 7)})});
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'Could not save feedback.');
+}
+async function saveImproveFeedback(control) {
+  if (!control.value) return;
+  control.disabled = true;
+  try {
+    await recordImproveDecision(control.dataset.key, control.value);
+    await load(false);
+    showToast('Feedback saved locally.');
+  } catch (error) { showToast(error.message, 'error'); }
+  finally { control.disabled = false; }
+}
+function reviewImprovement(key) {
+  const card = (currentData?.insights || []).find(item => item.evidence_key === key);
+  if (!card) { showToast('Refresh Improve to get current evidence.', 'error'); return; }
+  const dialog = document.getElementById('improveReview');
+  dialog.innerHTML = `<div class="section-title"><h2 id="improveReviewTitle">${esc(card.action_label)}</h2>
+    <button onclick="document.getElementById('improveReview').close()" aria-label="Close review">Close</button></div>
+    <p>${esc(card.body)}</p><p class="receipt-note">${esc(card.scope_note)}</p>
+    ${(card.next_steps || []).length ? `<ol>${card.next_steps.map(step => `<li>${esc(step)}</li>`).join('')}</ol>` : ''}
+    <p>${(card.evidence || []).length} shown of ${card.evidence_total || 0} evidence sessions. Estimated session costs, not invoice spend.</p>
+    <div class="improve-session-list">${(card.evidence || []).map(row => `<div class="improve-session">
+      <div><strong>${esc(row.project)}</strong><p>${esc(row.tool)}${row.model ? ` · ${esc(row.model)}` : ''} · ${esc(row.session_id)} · $${Number(row.cost_usd || 0).toFixed(2)}</p></div>
+      <button data-session="${esc(row.session_id)}" onclick="document.getElementById('improveReview').close(); selectSession(this.dataset.session)">Review session</button>
+    </div>`).join('') || '<p>No matching sessions remain in this evidence snapshot.</p>'}</div>
+    <div class="improve-actions"><button data-key="${esc(key)}" onclick="explainImprovement(this.dataset.key)">Ask about this signal</button></div>
+    <p class="receipt-note">Local explanation by default. Optional AI Assist receives this finding and your question, not session paths, transcripts or source files.</p>`;
+  dialog.showModal();
+  recordImproveDecision(key, 'reviewed').catch(error => showToast(error.message, 'error'));
+}
+function explainImprovement(key) {
+  document.getElementById('improveReview').close();
+  openAskPanel('What should I do next for this signal, and how can I check whether it helped?', key);
+  const checkbox = document.getElementById('askUseAiAssist');
+  if (checkbox) checkbox.checked = false;
+}
+function renderImproveResults(results) {
+  const rows = (results || []).map(item =>
+    `<div class="improve-result"><strong>${esc(item.title)}</strong><p>${esc(item.body)}</p>
+    <p class="receipt-note">${esc(item.at || '')}${item.session_id ? ` · ${esc(item.session_id)}` : ''}</p>
+    ${item.session_id ? `<button data-session="${esc(item.session_id)}" onclick="selectSession(this.dataset.session)">Review evidence</button>` : ''}</div>`
+  );
+  return `<h3>Recent follow-up results</h3>${rows.length ? rows.slice(0, 3).join('') +
+    (rows.length > 3 ? `<details class="aiw-details"><summary>${rows.length - 3} earlier results</summary>${rows.slice(3).join('')}</details>` : '')
+    : '<p class="receipt-note">No compaction measurements or Fresh Start follow-ups recorded yet.</p>'}`;
+}
 // One decision per page load; see the call site.
 let firstRunRouted = false;
 let sessionsLoadedForDays = null;
+let agentHierarchyLoadedForDays = null;
 let reportLoadedForDays = null;
 let reportLoading = false;
 let freshStartReceiptsMarkedViewed = false;
@@ -5073,6 +5224,11 @@ let aiAssistFormDirty = false;
 // lives in this payload, not in /api/session.
 let contextHealthCache = [];
 let sessionRowsCache = [];
+let agentHierarchyCache = { sessions: [] };
+let selectedAgentSessionId = '';
+let selectedAgentId = '';
+let agentMapMode = 'all';
+let agentHierarchyToken = 0;
 let changeRowsCache = [];
 let sessionSort = { key: 'updated_at', dir: 'desc' };
 // The server returns rows already ordered -- by relevance when there is a search
@@ -5260,7 +5416,8 @@ function showView(view) {
   });
   const days = document.getElementById('days').value;
   if (view === 'sessions' && sessionsLoadedForDays !== days) loadSessions();
-  if (view === 'insights' && reportLoadedForDays !== days) loadReport();
+  if (view === 'sessions' && agentHierarchyLoadedForDays !== days) loadAgentHierarchy();
+  if (view === 'receipts' && reportLoadedForDays !== days) loadReport();
   if (view === 'receipts') markFreshStartReceiptsViewed();
 }
 function showSettingsPanel(panel) {
@@ -5277,7 +5434,24 @@ function showSettingsPanel(panel) {
 }
 function changeWindow() {
   sessionsLoadedForDays = null;
+  agentHierarchyLoadedForDays = null;
   reportLoadedForDays = null;
+  const sessionsView = document.getElementById('view-sessions');
+  if (sessionsView && !sessionsView.hidden) {
+    agentHierarchyCache = { sessions: [] };
+    const body = document.getElementById('agentMapBody');
+    const select = document.getElementById('agentSessionSelect');
+    const coverage = document.getElementById('agentMapCoverage');
+    const status = document.getElementById('agentMapStatus');
+    if (body) body.innerHTML = '<div class="agent-map-empty"><strong>Loading agent relationships...</strong></div>';
+    if (select) {
+      select.innerHTML = '<option value="">Loading sessions...</option>';
+      select.disabled = true;
+    }
+    if (coverage) coverage.textContent = 'Loading';
+    if (status) status.textContent = 'Refreshing for the selected window...';
+    loadAgentHierarchy();
+  }
   load();
 }
 let sessionSearchTimer = null;
@@ -5290,6 +5464,197 @@ function clearSessionFilters() {
   document.getElementById('sessionOutcomeFilter').value = '';
   document.getElementById('sessionStateFilter').value = '';
   loadSessions();
+}
+
+function agentStatusLabel(status) {
+  return ({ running: 'Running', completed: 'Returned', interrupted: 'Interrupted', unknown: 'Unknown' })[status] || status || 'Unknown';
+}
+
+function agentEventLabel(eventName) {
+  return ({ working: 'working', returned: 'returned findings', interrupted: 'interrupted', completed: 'completed', unknown: 'unknown' })[eventName] || eventName || 'unknown';
+}
+
+function selectedAgentSession() {
+  const sessions = agentHierarchyCache.sessions || [];
+  return sessions.find(session => session.selection_id === selectedAgentSessionId) || sessions[0] || null;
+}
+
+function selectAgentSession(sessionId) {
+  selectedAgentSessionId = sessionId;
+  selectedAgentId = '';
+  renderAgentHierarchy();
+}
+
+function selectAgentNode(agentId) {
+  selectedAgentId = agentId;
+  renderAgentHierarchy();
+}
+
+function setAgentMapMode(mode) {
+  agentMapMode = mode === 'all' ? 'all' : 'active';
+  document.querySelectorAll('[data-agent-mode]').forEach(button => {
+    const active = button.dataset.agentMode === agentMapMode;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+  renderAgentHierarchy();
+}
+
+function visibleAgentNodes(session) {
+  const agents = session.agents || [];
+  if (agentMapMode === 'all') return agents;
+  if (!session.active_count) return [];
+  const byId = new Map(agents.map(agent => [agent.agent_id, agent]));
+  const visible = new Set(agents.filter(agent => agent.status === 'running').map(agent => agent.agent_id));
+  agents.filter(agent => agent.parent_agent_id === null).forEach(agent => visible.add(agent.agent_id));
+  [...visible].forEach(agentId => {
+    let current = byId.get(agentId);
+    const seen = new Set();
+    while (current && current.parent_agent_id && !seen.has(current.agent_id)) {
+      seen.add(current.agent_id);
+      visible.add(current.parent_agent_id);
+      current = byId.get(current.parent_agent_id);
+    }
+  });
+  return agents.filter(agent => visible.has(agent.agent_id));
+}
+
+function renderAgentBranch(agent, agents, ancestors = new Set()) {
+  if (!agent || ancestors.has(agent.agent_id)) return '';
+  if (ancestors.size >= 32) return '<li>Deeper relationships omitted from this view.</li>';
+  const nextAncestors = new Set(ancestors);
+  nextAncestors.add(agent.agent_id);
+  const children = agents
+    .filter(candidate => candidate.parent_agent_id === agent.agent_id)
+    .sort((left, right) => Date.parse(left.created_at || '') - Date.parse(right.created_at || ''));
+  return `<li>
+    <button type="button" class="agent-node${selectedAgentId === agent.agent_id ? ' selected' : ''}" data-agent="${esc(agent.agent_id)}" onclick="selectAgentNode(this.dataset.agent)" aria-pressed="${selectedAgentId === agent.agent_id ? 'true' : 'false'}">
+      <span class="agent-state-dot ${esc(agent.status)}" aria-hidden="true"></span>
+      <span class="agent-node-copy"><strong>${esc(agent.name)}</strong><small>${esc(agent.role)} · ${esc(agentEventLabel(agent.latest_event))}</small></span>
+      <span class="agent-status ${esc(agent.status)}">${esc(agentStatusLabel(agent.status))}</span>
+    </button>
+    ${children.length ? `<ul>${children.map(child => renderAgentBranch(child, agents, nextAncestors)).join('')}</ul>` : ''}
+  </li>`;
+}
+
+function renderAgentHierarchy() {
+  const body = document.getElementById('agentMapBody');
+  const select = document.getElementById('agentSessionSelect');
+  const coverage = document.getElementById('agentMapCoverage');
+  if (!body || !select || !coverage) return;
+  const sessions = agentHierarchyCache.sessions || [];
+  if (!agentHierarchyCache.available) {
+    select.innerHTML = '<option value="">No agent sessions</option>';
+    select.disabled = true;
+    coverage.textContent = 'Unavailable';
+    body.innerHTML = `<div class="agent-map-empty"><strong>Agent relationships unavailable</strong><p>${esc(agentHierarchyCache.reason || 'No supported local relationship metadata is available.')}</p></div>`;
+    return;
+  }
+  if (!sessions.length) {
+    select.innerHTML = '<option value="">No delegated sessions</option>';
+    select.disabled = true;
+    coverage.textContent = 'Observed';
+    body.innerHTML = '<div class="agent-map-empty"><strong>No recorded agent relationships in this window</strong></div>';
+    return;
+  }
+  if (!sessions.some(session => session.selection_id === selectedAgentSessionId)) {
+    selectedAgentSessionId = (sessions.find(session => session.status === 'running') || sessions[0]).selection_id;
+  }
+  const session = selectedAgentSession();
+  const allAgents = session.agents || [];
+  const agents = visibleAgentNodes(session);
+  const runningCount = allAgents.filter(agent => agent.status === 'running').length;
+  const returnedCount = allAgents.filter(agent => agent.status === 'completed').length;
+  const uncertainCount = allAgents.length - runningCount - returnedCount;
+  if (!agents.some(agent => agent.agent_id === selectedAgentId)) {
+    selectedAgentId = (agents.find(agent => agent.parent_agent_id === null) || agents[0] || {}).agent_id || '';
+  }
+  const agent = agents.find(candidate => candidate.agent_id === selectedAgentId) || agents[0];
+  const parent = agent ? allAgents.find(candidate => candidate.agent_id === agent.parent_agent_id) : null;
+  const childCount = agent ? allAgents.filter(candidate => candidate.parent_agent_id === agent.agent_id).length : 0;
+  const roots = agents.filter(candidate => candidate.parent_agent_id === null || !agents.some(parentCandidate => parentCandidate.agent_id === candidate.parent_agent_id));
+  select.disabled = false;
+  select.innerHTML = sessions.map(item => `<option value="${esc(item.selection_id)}"${item.selection_id === session.selection_id ? ' selected' : ''}>${esc(item.tool)} · ${esc(projectName(item))} · ${esc(item.session_id)} · ${esc(item.agent_count)} agents</option>`).join('');
+  coverage.textContent = `${sessions.length} session${sessions.length === 1 ? '' : 's'} observed`;
+  body.innerHTML = `<div class="agent-map-summary" aria-label="Agent status summary">
+      <span><strong>${esc(session.agent_count)}</strong> agents</span>
+      <span><strong>${esc(runningCount)}</strong> verified running</span>
+      <span><strong>${esc(returnedCount)}</strong> verified returned</span>
+      ${uncertainCount ? `<span><strong>${esc(uncertainCount)}</strong> unknown or interrupted</span>` : ''}
+      ${agentMapMode === 'active' && session.agent_count > agents.length ? `<span><strong>${esc(session.agent_count - agents.length)}</strong> hidden</span>` : ''}
+      <span class="agent-map-source">${esc(session.tool)} metadata only</span>
+    </div>
+    <p class="receipt-note">${esc(session.relationship_note || 'Recorded delegation links; execution and successful return are unverified.')}</p>
+    <p class="receipt-note">Project: ${esc(session.project_full)} · Session: ${esc(session.session_id)}</p>
+    <div class="agent-map-layout">
+      <div class="agent-tree-pane">
+        ${!agents.length ? '<p>No verified running agents. Choose All to inspect recorded relationships.</p>' : ''}
+        <ul class="agent-tree" aria-label="Agent delegation hierarchy">${roots.map(root => renderAgentBranch(root, agents)).join('')}</ul>
+      </div>
+      <aside class="agent-detail-pane" aria-label="Selected agent detail">
+        ${agent ? `<div class="agent-detail-title"><div><span>Selected agent</span><h4>${esc(agent.name)}</h4></div><span class="agent-status ${esc(agent.status)}">${esc(agentStatusLabel(agent.status))}</span></div>
+          <dl>
+            <dt>Role</dt><dd>${esc(agent.role)}</dd>
+            <dt>Latest event</dt><dd>${esc(agentEventLabel(agent.latest_event))}</dd>
+            <dt>Relationship</dt><dd>${esc(agent.relationship_status || 'unknown')}</dd>
+            <dt>Parent</dt><dd>${esc(parent ? parent.name : 'Root agent')}</dd>
+            <dt>Children</dt><dd>${esc(childCount)}</dd>
+            <dt>Updated</dt><dd>${esc(dateLabel(agent.updated_at))}</dd>
+          </dl>` : '<div class="empty">Select an agent.</div>'}
+      </aside>
+    </div>`;
+}
+
+async function loadAgentHierarchy(force = false) {
+  const days = document.getElementById('days').value;
+  const button = document.getElementById('agentMapRefresh');
+  const status = document.getElementById('agentMapStatus');
+  const focusedElement = document.activeElement;
+  const focusedAgent = focusedElement && focusedElement.dataset ? focusedElement.dataset.agent : '';
+  const token = ++agentHierarchyToken;
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Refreshing...';
+  }
+  try {
+    const res = await fetchDashboardJson(`/api/agent-hierarchy?days=${encodeURIComponent(days)}`, 15000, { cache: 'no-store' });
+    const data = res;
+    if (token !== agentHierarchyToken) return;
+    const changed = JSON.stringify(data.sessions || []) !== JSON.stringify(agentHierarchyCache.sessions || [])
+      || data.available !== agentHierarchyCache.available
+      || data.reason !== agentHierarchyCache.reason;
+    agentHierarchyCache = data;
+    agentHierarchyLoadedForDays = days;
+    const restoreFocus = focusedAgent && document.activeElement === focusedElement;
+    if (changed || force) renderAgentHierarchy();
+    if (restoreFocus && (changed || force)) {
+      const replacement = Array.from(document.querySelectorAll('[data-agent]')).find(node => node.dataset.agent === focusedAgent);
+      if (replacement) replacement.focus();
+    }
+    if (status) status.textContent = `Updated ${new Date(data.generated_at || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+    const coverageNote = document.getElementById('agentMapCoverageNote');
+    if (coverageNote) coverageNote.textContent = [
+      ...(data.coverage || []).map(item => `${item.tool}: ${item.available ? 'relationship metadata available' : 'unavailable'}`),
+      `Other tools: relationship coverage not yet available`,
+      data.truncated ? 'Partial results: scan limit reached.' : '',
+      data.partial ? 'Some local metadata is unavailable.' : '',
+      data.undated_count ? `${data.undated_count} undated groups excluded from this window.` : '',
+    ].filter(Boolean).join(' · ');
+  } catch (error) {
+    if (token !== agentHierarchyToken) return;
+    const message = error && error.message ? error.message : 'Agent relationships could not be refreshed.';
+    if (agentHierarchyLoadedForDays !== days || !agentHierarchyCache.available) {
+      agentHierarchyCache = { available: false, reason: message, sessions: [] };
+      agentHierarchyLoadedForDays = days;
+      renderAgentHierarchy();
+    }
+    if (status) status.textContent = message;
+  } finally {
+    if (button && token === agentHierarchyToken) {
+      button.disabled = false;
+      button.textContent = 'Refresh';
+    }
+  }
 }
 function compareValues(a, b, key) {
   const av = a && a[key] !== undefined && a[key] !== null ? a[key] : '';
@@ -5469,21 +5834,16 @@ function ambientRunning(card, presence) {
   else scale.push({ label: 'window unknown', tone: 'muted' });
   if (peak > latest) scale.push({ label: 'peaked ' + card.peak_turn_tokens, tone: 'muted' });
 
-  // Runway wording follows the data: turns_to_critical is null once a session is
-  // at its window, or when no window is known, and claiming headroom in either
-  // case would be a lie.
-  const runway = chart.turns_to_critical === null || chart.turns_to_critical === undefined
-    ? (!limit
-        ? 'This model\'s context window is not on file, so there is nothing to project towards.'
-        : latest >= limit
-          ? 'It is at this model\'s ' + compactTokens(limit) + ' window, so there is no headroom left to project.'
-          : '')
-    // Capped where runwayVerdict caps. Against a 1M window most sessions project
-    // hundreds of turns, and "841 turns" beside a card reading "40+" is two
-    // numbers for one quantity -- past the cap the honest reading is "plenty".
-    : chart.turns_to_critical > RUNWAY_MAX_PROJECTED_TURNS
-      ? 'More than <b>' + RUNWAY_MAX_PROJECTED_TURNS + ' turns</b> of headroom at the current rate.'
-      : 'About <b>' + chart.turns_to_critical + ' turns</b> of headroom at the current rate.';
+  // Room wording follows roomVerdict, so Home cannot state a different amount of
+  // room than the drawer. Kept to one short clause: this row shares an
+  // equal-height contract with the idle state, and a second sentence wraps it.
+  const room = roomVerdict(limit, latest, chart.largest_prompt_growth_n, chart.next_prompt_may_not_fit);
+  const runway = !limit || latest >= limit
+    ? esc(room.detail)
+    : room.severity === 'critical'
+      ? '<b>' + esc(compactTokens(limit - latest)) + ' left</b>, less than this session\'s biggest prompt ('
+        + esc(compactTokens(chart.largest_prompt_growth_n)) + ').'
+      : '<b>' + esc(compactTokens(limit - latest)) + ' left</b> of this model\'s ' + esc(compactTokens(limit)) + ' window.';
   // Scope. These two figures are not the same scope and the old wording put
   // them under one unscoped "it": bloat_label is ONE session's ratio -- ui.py
   // builds it from health.bloat_ratio, the representative session -- while
@@ -5676,12 +6036,14 @@ function refreshTick() {
   // A scheduled tick never stacks on a load that is still running -- it waits and
   // tries again. User-initiated loads are not gated by this.
   if (loadInFlight) { scheduleRefresh(REFRESH_CATCHUP_MS); return; }
+  const sessionsView = document.getElementById('view-sessions');
+  if (sessionsView && !sessionsView.hidden) loadAgentHierarchy();
   load(false, false);
 }
 
 function nextRefreshDelay(data, forceRefresh) {
   const idle = document.hidden ? REFRESH_HIDDEN_MS : REFRESH_VISIBLE_MS;
-  if (data && data.cache && data.cache.refreshing && !forceRefresh) {
+  if (data && data.cache && data.cache.refreshing) {
     // Poll quickly at first so a rebuild that finishes in a second or two shows
     // up immediately, then back off to the idle cadence. A flat 1.8s here meant
     // a long rebuild fired a request every 1.8s for as long as it ran.
@@ -5784,7 +6146,11 @@ function freshnessLabel(millis) {
 }
 
 function renderFreshness() {
-  const label = lastLoadedAt ? freshnessLabel(Date.now() - lastLoadedAt) : '';
+  if (updateState.checkedAt && Date.now() - updateState.checkedAt >= UPDATE_AUTO_CHECK_MS
+      && ['current', 'available', 'branch', 'blocked'].includes(updateState.status)) {
+    setUpdateState('unknown', null, updateState.checkedAt);
+  }
+  const label = lastLoadedAt ? freshnessLabel(Math.max(0, Date.now() - lastLoadedAt)) : 'Data freshness unavailable';
   ['freshness', 'ambientFreshness'].forEach(id => {
     const node = document.getElementById(id);
     if (node) node.textContent = label;
@@ -5809,8 +6175,7 @@ async function loadOnce(resetDetail, forceRefresh) {
   const days = document.getElementById('days').value;
   let data;
   try {
-    const summaryRes = await fetch(`/api/summary?days=${days}${forceRefresh ? '&refresh=1' : ''}`);
-    data = await summaryRes.json();
+    data = await fetchDashboardJson(`/api/summary?days=${days}${forceRefresh ? '&refresh=1' : ''}`);
     currentData = data;
   } catch (error) {
     // Keep trying on the normal cadence: a dashboard that gives up after one
@@ -5987,6 +6352,7 @@ async function loadOnce(resetDetail, forceRefresh) {
     ? `${overhead.label} — ${overhead.detail}`
     : '';
   document.getElementById('insightFeed').innerHTML = renderInsightFeed(data.insights);
+  document.getElementById('improveResults').innerHTML = renderImproveResults(data.improve_results);
   // Same two-step as the runway charts: markup first, SVG appended after, and
   // nodes collected by attribute rather than by a selector built from data.
   const feedChartNodes = {};
@@ -6011,7 +6377,8 @@ async function loadOnce(resetDetail, forceRefresh) {
   if (resetDetail && document.getElementById('detailDrawer').classList.contains('open')) closeDrawer();
   renderAmbient(data);
   renderTabState(data);
-  lastLoadedAt = Date.now();
+  const generatedAt = Date.parse((data.cache && data.cache.generated_at) || data.generated_at || '');
+  lastLoadedAt = data.summary_complete !== false && Number.isFinite(generatedAt) ? generatedAt : null;
   renderFreshness();
   return data;
 }

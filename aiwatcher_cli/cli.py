@@ -33,6 +33,7 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from . import __version__
 from .correlate import link_recent_fresh_start_receipts_to_sessions, link_recent_interventions_to_sessions
 from .companion import (
     background_process_kwargs,
@@ -47,7 +48,7 @@ from .companion import (
     uninstall_login_autostart,
 )
 from .evidence_capture import record_missing_evidence_snapshots
-from . import compaction, prompt_signals
+from . import compaction, compaction_outcomes, prompt_signals
 from .local_state import (
     COMMAND_GATE_BLOCKED_DECISIONS,
     VALID_OUTCOMES,
@@ -3567,7 +3568,7 @@ def command_start(args: argparse.Namespace) -> int:
             port_attempts=int(getattr(args, "ui_port_attempts", 20)),
         )
     sessions = sessions_since(1)
-    print("AIWatcher v0.1.0 - private-by-default mode")
+    print(f"AIWatcher v{__version__} - private-by-default mode")
     print("Read-only scan. No data leaves this machine.\n")
     print("Surface coverage:")
     for row in surface_coverage(sessions):
@@ -3651,11 +3652,30 @@ def command_update(args: argparse.Namespace) -> int:
     print("AIWatcher update check\n")
     if result.get("install_kind") != "source":
         print(str(result.get("message") or "This install is not a Git checkout."))
-        print("For package installs, update with your installer instead:")
+        if result.get("latest_version"):
+            print(f"Latest package: {result.get('latest_version')}")
+        if result.get("latest_commit"):
+            print(f"Latest commit:  {result.get('latest_commit')}")
+        print("Package update commands:")
         for item in result.get("guidance", []):
             if isinstance(item, dict):
                 print(f"- {item.get('label')}: {item.get('command')}")
-        return 2
+        if not result.get("ok"):
+            return 2
+        if not result.get("update_available"):
+            return 0
+        if not apply:
+            command_text = result.get("command_text")
+            if command_text:
+                print(f"Run `aiwatcher update --apply` to run: {command_text}")
+            return 0
+        if not result.get("applied"):
+            print(str(result.get("message") or "Update failed."), file=sys.stderr)
+            return 2
+        if result.get("output"):
+            print(str(result.get("output")))
+        _print_post_update_restart_advice()
+        return 0
 
     print(f"Checkout: {result.get('repo')}")
     print(f"Current:  {result.get('current', 'unknown')}")
@@ -4388,6 +4408,31 @@ def _post_commit_hook_path(repo: str) -> str | None:
     if not os.path.isabs(git_dir):
         git_dir = os.path.join(repo, git_dir)
     return os.path.join(git_dir, "hooks", "post-commit")
+
+
+def command_compactions(args: argparse.Namespace) -> int:
+    """What each recorded compaction did to the requests after it.
+
+    For reviewing the data before any surface claims a saving. Fills in
+    compactions from transcripts still on disk first, so the report does not
+    depend on the dashboard having been open when they happened.
+    """
+    from .scanner import CLAUDE_PROJECTS_DIRS
+
+    since = datetime.now(timezone.utc) - timedelta(days=max(1, args.days))
+    try:
+        compaction_outcomes.backfill(CLAUDE_PROJECTS_DIRS, since=since)
+    except OSError as exc:
+        print(f"Could not read Claude Code transcripts: {exc}", file=sys.stderr)
+    records = compaction_outcomes.local_state.compaction_outcomes()
+    if args.json:
+        print(json.dumps(
+            [{**record, "figures": compaction_outcomes.figures(record)} for record in records],
+            indent=2,
+        ))
+        return 0
+    print(compaction_outcomes.render_report(records))
+    return 0
 
 
 def command_commit_receipt(args: argparse.Namespace) -> int:
@@ -9314,7 +9359,7 @@ def command_mcp(_args: argparse.Namespace) -> int:
             _write_mcp_message(_mcp_response(message_id, {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "aiwatcher-local", "version": "0.1.0"},
+                "serverInfo": {"name": "aiwatcher-local", "version": __version__},
             }))
         elif method == "ping":
             _write_mcp_message(_mcp_response(message_id, {}))
@@ -9659,6 +9704,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print nothing when there is no receipt to show; used by the git hook",
     )
     receipt.set_defaults(func=command_commit_receipt)
+
+    compactions = sub.add_parser(
+        "compactions", help="Show what each recorded compaction did to the usage after it (data review, not a surface)",
+    )
+    compactions.add_argument("--days", type=int, default=30, help="How far back to look for transcripts to fill in from")
+    compactions.add_argument("--json", action="store_true", help="Emit the records and their derived figures as JSON")
+    compactions.set_defaults(func=command_compactions)
 
     install_receipt = sub.add_parser(
         "install-commit-hook",

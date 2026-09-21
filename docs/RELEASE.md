@@ -7,12 +7,17 @@ Use this before publishing AIWatcher Local to a public package registry.
 AIWatcher currently has two Python package lanes:
 
 - `ai-watcher`: the existing PyPI SDK package, imported as `aiwatcher`.
-- `aiwatcher-cli`: the AIWatcher Local CLI package from this repository,
+- `aiwatcher-local`: the AIWatcher Local application from this repository,
   imported internally as `aiwatcher_cli` and installed as the `aiwatcher`
   terminal command.
 
 Keep those separate. Do not publish this repository as `ai-watcher`, or it will
 collide with the SDK lane and confuse users.
+
+The original `aiwatcher-cli` 0.1.0 distribution was published on September 18,
+2026. It is superseded by `aiwatcher-local`; do not publish new application
+releases under the old name. Existing pipx users must uninstall the old
+distribution and install `aiwatcher-local` once.
 
 For the current OSS Local product, PyPI is the primary public package registry.
 It matches the implementation language, the `pipx` install path, and the
@@ -29,7 +34,7 @@ delegates to the Python CLI. The only JavaScript package manifests today are:
 
 For npm distribution, create a deliberate package first, such as a browser
 extension package, VS Code extension package, JavaScript SDK package, or thin
-`aiwatcher-cli` / `@ai-watcher/local` installer wrapper. Do not publish the repo
+`aiwatcher-local` / `@ai-watcher/local` installer wrapper. Do not publish the repo
 root to npm until that package boundary exists.
 
 ## Preflight
@@ -41,6 +46,7 @@ git status -sb
 git fetch origin
 git rev-parse HEAD
 git rev-parse origin/main
+test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
 python3 scripts/generate_cli_reference.py --check
 python3 -m unittest tests.test_ui_assets tests.test_ai_assist tests.test_local_state -q
 ```
@@ -68,8 +74,8 @@ python3 -m venv /tmp/aiwatcher-release
 /tmp/aiwatcher-release/bin/python -m pip install build twine pip-audit setuptools wheel
 /tmp/aiwatcher-release/bin/python -m build --no-isolation
 /tmp/aiwatcher-release/bin/python -m twine check dist/*
-tar -tf dist/aiwatcher_cli-*.tar.gz
-unzip -l dist/aiwatcher_cli-*.whl
+tar -tf dist/aiwatcher_local-*.tar.gz
+unzip -l dist/aiwatcher_local-*.whl
 ```
 
 The wheel should contain only `aiwatcher_cli`, `aiwatcher_cli/web`, metadata,
@@ -91,11 +97,34 @@ package. Still read them before publishing.
 
 ## Publish To PyPI
 
-Before publishing, bump `version` in `pyproject.toml` and commit the change.
-Prefer PyPI trusted publishing through GitHub Actions when possible, so no PyPI
-API token needs to live on a laptop or in repo config.
+Pushing or merging commits to `main` never publishes PyPI automatically. The
+maintainer chooses when to release and which version to use. During initial
+`0.x` development, use patch releases for compatible fixes and minor releases
+for feature sets or unavoidable compatibility changes. Release `1.0.0` when
+the public compatibility contract is stable. After that, breaking changes
+require the next major version.
 
-Manual upload, if trusted publishing is not configured:
+Before publishing, bump `version` in both `pyproject.toml` and
+`aiwatcher_cli/__init__.py`, update any literal version assertions, and commit
+the change. Push a tag with the same version, then create a GitHub release for
+that tag. The `publish-pypi.yml` workflow builds, checks, and publishes the
+artifacts through PyPI Trusted Publishing; no PyPI API token should live on a
+laptop or in repository secrets. The workflow also refuses to publish unless
+the release tag points to the current `origin/main` commit.
+
+Configure the PyPI project with this Trusted Publisher before creating the
+release:
+
+- PyPI project: `aiwatcher-local`
+- Owner: `ai-watcher`
+- Repository: `aiwatcher-local`
+- Workflow: `publish-pypi.yml`
+- Environment: `pypi`
+
+Create a protected GitHub environment named `pypi` and require approval there
+if releases should have a final human gate.
+
+Manual upload is an emergency fallback only:
 
 ```sh
 /tmp/aiwatcher-release/bin/python -m twine upload dist/*
@@ -104,7 +133,7 @@ Manual upload, if trusted publishing is not configured:
 After upload:
 
 ```sh
-pipx install aiwatcher-cli
+pipx install aiwatcher-local
 aiwatcher setup
 aiwatcher start --open-ui
 ```

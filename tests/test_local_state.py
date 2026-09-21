@@ -277,7 +277,7 @@ class LocalStateTests(unittest.TestCase):
                     model="gpt-test",
                     mode="cloud",
                     source_access="metadata_only",
-                    structured={"next_action": ["review only"]},
+                    structured={"next_verification": ["review only"]},
                     usage={"prompt_tokens": 10, "raw": "ignored"},
                 )
                 cached = local_state.ai_assist_cache_get("optimize_cleanup", "abc123")

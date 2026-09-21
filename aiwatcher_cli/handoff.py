@@ -591,7 +591,10 @@ def build_handoff_capsule(
             "- Git working-tree changes may come from another AI chat or manual edits in the same repository."
         )
     if not project_reliable:
-        uncertainty_lines.append("- AIWatcher could not confidently identify the project path.")
+        uncertainty_lines.extend([
+            "- AIWatcher could not confidently identify the project path.",
+            "- Ask the user to confirm the repository/path before editing.",
+        ])
     if not include_prompt_excerpt:
         uncertainty_lines.append("- Prompt text was not included; infer the task from repository state and local evidence.")
     if not evidence.tests:
@@ -611,22 +614,6 @@ def build_handoff_capsule(
             "",
             "Source of truth to load first",
             *[f"- {item}" for item in source_ref_lines],
-        ]
-
-    constraint_section: list[str] = []
-    if constraint_lines:
-        constraint_section = [
-            "",
-            "Do not lose these constraints",
-            *[f"- {item}" for item in constraint_lines],
-        ]
-
-    acceptance_section: list[str] = []
-    if acceptance_lines:
-        acceptance_section = [
-            "",
-            "Acceptance checks",
-            *[f"- {item}" for item in acceptance_lines],
         ]
 
     memory_summary = _brief_memory_summary(
@@ -649,20 +636,31 @@ def build_handoff_capsule(
         f"Target tool: {TARGET_LABELS[target]}.",
         f"Continuation type: {HANDOFF_TYPE_LABELS[handoff_type]}.",
         "",
-        "Summary from previous work",
+        "Objective and context",
         *memory_summary["summary"],
         "",
-        "Decisions made",
-        *memory_summary["decisions"],
+        "Completed work",
+        *done_lines,
         "",
         "Current state",
         *memory_summary["current_state"],
         "",
-        "Open next step",
-        *memory_summary["open"],
+        "Decisions and constraints",
+        *memory_summary["decisions"],
+        *([f"- {item}" for item in constraint_lines] if constraint_lines else ["- No additional user constraints were recorded."]),
         "",
-        "Files/evidence to inspect first",
+        "Risks and uncertainties",
+        *uncertainty_lines,
+        "",
+        "Next steps",
+        *memory_summary["open"],
+        *checkpoint_lines[1:],
+        "",
+        "Inspect first",
         *memory_summary["files"],
+        "",
+        "Acceptance criteria",
+        *([f"- {item}" for item in acceptance_lines] if acceptance_lines else [f"- {profile['finish']}"]),
         "",
         "Source session identity",
         *source_identity_lines,
@@ -690,17 +688,6 @@ def build_handoff_capsule(
         f"- Project confidence: {'reliable' if project_reliable else 'unconfirmed'}",
         *([f"- Related active workspace: {path}" for path in related[:3]] if related else []),
         *source_section,
-        *constraint_section,
-        *acceptance_section,
-        "",
-        "What appears done",
-        *done_lines,
-        "",
-        "What remains uncertain",
-        *uncertainty_lines,
-        "",
-        "Recommended next checkpoint",
-        *checkpoint_lines,
         "",
         "Source session signals",
         f"- Source tool/model: {session.tool} / {session.model or 'unknown'}",
@@ -767,6 +754,15 @@ def build_handoff_capsule(
         "runtime_attachment": runtime_attachment or {},
         "source_identity_label": source_identity_label,
         "same_project_session_count": max(1, int(same_project_session_count or 1)),
+        "continuation_context": {
+            "objective_and_context": memory_summary["summary"],
+            "completed_work": done_lines,
+            "current_state": memory_summary["current_state"],
+            "decisions": memory_summary["decisions"],
+            "risks_and_uncertainties": uncertainty_lines,
+            "next_steps": [*memory_summary["open"], *checkpoint_lines[1:]],
+            "inspect_first": memory_summary["files"],
+        },
         "next_brief": next_brief,
     }
 

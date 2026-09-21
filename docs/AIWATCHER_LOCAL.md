@@ -81,7 +81,7 @@ The Python SDK already owns the `ai-watcher` PyPI package and imports as
 
 AIWatcher Local ships separately:
 
-- PyPI distribution: `aiwatcher-cli`
+- PyPI distribution: `aiwatcher-local`
 - Terminal command: `aiwatcher`
 - Internal module: `aiwatcher_cli`
 
@@ -89,7 +89,7 @@ This avoids import-name collisions while still giving developers the clean
 command they expect:
 
 ```bash
-pipx install aiwatcher-cli
+pipx install aiwatcher-local
 aiwatcher today
 aiwatcher ui
 ```
@@ -107,7 +107,7 @@ Users who want to install into the current Python environment can use:
 python -m pip install --upgrade git+https://github.com/ai-watcher/aiwatcher-local.git
 ```
 
-After the PyPI release, `pipx install aiwatcher-cli` should become the
+After the PyPI release, `pipx install aiwatcher-local` should become the
 recommended public install path.
 
 ## Run From This Repo
@@ -283,8 +283,8 @@ inside the user's current workflow.
 
 There are four public install/update paths:
 
-1. **Published package:** `pipx install aiwatcher-cli`, then `pipx upgrade
-   aiwatcher-cli` when a new release lands.
+1. **Published package:** `pipx install aiwatcher-local`, then `pipx upgrade
+   aiwatcher-local` when a new release lands.
 2. **GitHub package install:** `pipx install
    git+https://github.com/ai-watcher/aiwatcher-local.git` for an isolated CLI,
    or `python -m pip install --upgrade
@@ -292,10 +292,15 @@ There are four public install/update paths:
    environment.
 3. **uv tool install:** `uv tool install
    git+https://github.com/ai-watcher/aiwatcher-local.git`, then `uv tool
-   upgrade aiwatcher-cli`.
+   upgrade aiwatcher-local`.
 4. **Contributor or early-adopter clone:** `git clone`, `python -m pip install
    -e .`, then `aiwatcher update` to check GitHub and `aiwatcher update --apply`
    to fast-forward a clean checkout.
+
+The initial `aiwatcher-cli` 0.1.0 distribution was renamed before wider
+adoption because AIWatcher Local is primarily a local UI application, not only
+a command-line tool. Existing pipx users migrate once with `pipx uninstall
+aiwatcher-cli` followed by `pipx install aiwatcher-local`.
 
 The source-checkout update path is deliberately conservative:
 
@@ -310,9 +315,11 @@ The source-checkout update path is deliberately conservative:
 The dashboard top bar calls the same check and shows `Up to date` or an
 updates-available badge. Applying is a separate click on the Updates card in
 Settings, never from the badge itself, and only when the checkout is safe.
-Package installs do not show the badge. The dashboard sends an explicit restart request only after a
-successful apply. Package installs get copyable `pipx`, `pip`, or GitHub package
-upgrade commands instead of pretending a source fast-forward is possible.
+Package installs use the same badge: PyPI installs compare package versions,
+and GitHub package installs compare the recorded installed commit with `main`.
+The dashboard sends an explicit restart request only after a successful apply.
+Package installs run the detected installer (`pipx`, `uv tool`, or the active
+Python's `pip`) instead of pretending a source fast-forward is possible.
 
 Settings is organized as subpages:
 

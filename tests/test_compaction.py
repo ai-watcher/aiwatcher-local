@@ -420,11 +420,36 @@ class CommandTests(unittest.TestCase):
         boundary = compaction.Boundary(sha=SHA, subject="s", committed_at=datetime.now(timezone.utc))
         command = compaction.compact_command("claude-code", boundary, [f"f{i}.py" for i in range(7)])
         self.assertIn("f0.py, f1.py, f2.py, f3.py and 3 more files", command)
+        self.assertIn("current objective and latest user request", command)
+        self.assertIn("Decisions and constraints", command)
+        self.assertIn("exact smallest next action", command)
+        self.assertIn("Do not invent missing facts", command)
 
     def test_no_files_still_names_the_boundary(self) -> None:
         boundary = compaction.Boundary(sha=SHA, subject="", committed_at=datetime.now(timezone.utc))
         command = compaction.compact_command("claude-code", boundary, [])
-        self.assertIn(f"since commit {SHA[:7]}: the work since then", command)
+        self.assertIn(f"Boundary: commit {SHA[:7]}", command)
+        self.assertIn("no file paths were observed", command)
+
+    def test_session_anchors_are_included_without_claiming_the_commit_is_complete(self) -> None:
+        boundary = compaction.Boundary(
+            sha=SHA,
+            subject="Deliver contact enquiries by email via Resend",
+            committed_at=datetime.now(timezone.utc),
+        )
+        command = compaction.compact_command(
+            "claude-code",
+            boundary,
+            ["src/contact.ts"],
+            session_title="Portfolio contact delivery",
+            prompts_since=4,
+        )
+
+        self.assertIn(f'commit {SHA[:7]} ("Deliver contact enquiries by email via Resend")', command)
+        self.assertIn("Session: Portfolio contact delivery.", command)
+        self.assertIn("4 user prompts followed the boundary.", command)
+        self.assertIn("checkpoint, not proof", command)
+        self.assertIn("src/contact.ts", command)
 
 
 if __name__ == "__main__":

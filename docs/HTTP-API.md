@@ -122,7 +122,7 @@ supported for external callers** — treat them as private and expect them to
 change without a deprecation period.
 
 `GET` — `/api/health`, `/api/summary`, `/api/companion-state`,
-`/api/companion-scan`, `/api/sessions`, `/api/session`,
+`/api/companion-scan`, `/api/sessions`, `/api/agent-hierarchy`, `/api/session`,
 `/api/session-summary`, `/api/project`, `/api/report`, `/api/journal`,
 `/api/handoff-basic`, `/api/handoff`,
 `/api/context-health`, `/api/ambient-intervention`, `/api/update-status`,
@@ -134,16 +134,30 @@ needed to keep the browser fallback consistent with the native companion.
 floating Companion presence control; it is intentionally content-free and does
 not expose prompt or source text. `/api/companion-scan` forces the companion to
 refresh local watch evidence without waiting for the next polling interval.
-`/api/health` reports the running dashboard's install kind, source root,
-process id, version, and launch directory so `aiwatcher start` can avoid
-reusing a dashboard from another checkout or package install.
+`/api/agent-hierarchy` returns recorded Codex spawn links and Claude Code
+subagent session membership. Claude membership comes from the documented
+`<session>/subagents/agent-<id>.jsonl` layout; it does not prove an immediate
+parent for nested agents. Execution and return status remain unknown for both
+adapters. Open/closed Codex edges and Claude file modification times are not
+activity or completion evidence. The scanner does not read transcript bodies,
+prompts, previews, or tool payloads. Selection IDs include the tool to prevent
+cross-tool collisions. Coverage is explicit for each adapter; other tools are
+not claimed as supported. Codex reads at most 1,000 recent edges plus 1,000
+ancestor edges and related thread
+metadata with a SQLite work budget; Claude inspects at most 5,000 directory
+entries without following symlinks. Truncated/partial results are marked, and
+undated Codex groups are excluded from a requested date window. The UI clips
+tree nesting at 32 levels. These limits do not affect ordinary session scans.
+`/api/health` reports the running dashboard's install kind, package manager,
+source root, process id, version, and launch directory so `aiwatcher start` can
+avoid reusing a dashboard from another checkout or package install.
 `/api/handoff-basic` returns a copyable Fresh Start brief without waiting for
 timeline, git, or prompt enrichment; `/api/handoff` returns the enriched drawer
-payload. `/api/update-status` checks the installed source checkout
-against GitHub when the dashboard asks for it and reports whether a clean
-fast-forward is available. The top-bar update badge uses this route when the
-user clicks it, and on page load (at most once every six hours) only if
-automatic checks are turned on in Settings (off by default).
+payload. `/api/update-status` checks source checkouts against GitHub, PyPI
+package installs against the latest package version, and direct GitHub package
+installs against the recorded installed commit. The top-bar update badge uses
+this route when the user clicks it, and on page load (at most once every six
+hours) only if automatic checks are turned on in Settings (off by default).
 `/api/ai-assist-status` returns the optional AI Assist mode, detected local
 providers, cloud-key presence by environment-variable name, privacy posture, and
 candidate workflows. Cloud keys report whether they are untested, verified, or
@@ -172,7 +186,12 @@ question. `/api/second-opinion-contents` records whether the analyst may open
 files in that project rather than only being given their paths. Off unless set,
 and deliberately separate from consent: agreeing to pay for a second opinion is
 not agreeing to let it read your source. `/api/ask-aiwatcher` answers
-dashboard-only local questions from indexed metadata. `/api/handoff-basic` and
+dashboard-only local questions from indexed metadata. Optional `ai_assist: true`
+uses configured AI Assist and requires `confirmed: true` when confirmation is
+enabled. This route is same-origin only. Optional `insight_key` limits the answer
+to a current Improve finding resolved by the server; stale keys return 409.
+That AI evidence packet excludes paths, transcripts and source files.
+`/api/handoff-basic` and
 `/api/handoff` accept the same dashboard-only Fresh Start options as their `GET` forms. `/api/handoff-ai-assist` runs the optional
 Fresh Start handoff composition workflow after the user explicitly asks for it;
 it makes one bounded model call, returns a compact paste-ready brief composed
@@ -208,7 +227,12 @@ companion, `/api/handoff-receipts-viewed` marks proof-pending receipts as seen,
 seen so it does not return (no body; the timestamp is the server's),
 `/api/update-auto-check` stores the Settings switch for automatic GitHub update
 checks (`{"enabled": bool}`, off by default),
-`/api/optimize-decision` records an Improve action, `/api/companion-skip`
+`/api/optimize-decision` records a workspace cleanup decision.
+`/api/improve-decision` records local feedback on a current Improve evidence key
+(`{"insight_key": "...", "days": 7, "decision": "reviewed" | "later" | "expected" | "helpful" | "not_helpful"}`).
+It is same-origin only, validates the key against current server evidence, and
+returns 409 for stale keys. It stores no prompt, source or free-text feedback.
+`/api/companion-skip`
 snoozes a non-blocking companion reminder, and
 `/api/ambient-intervention-action` records the native companion lifecycle
 (`displayed`, `acted`, `snoozed`, `dismissed`, or `failed`).
@@ -242,9 +266,10 @@ The command is generated only for verified UUID session ids and is run or copied
 from the recorded project directory when that directory still exists. Tools
 whose ids AIWatcher synthesises rather than reads (Cursor) return `"available":
 false` with the reason.
-`/api/update-apply` applies the same conservative source-checkout update as the
-CLI: it fast-forwards only a clean, non-diverged Git checkout and reports
-package-installer guidance otherwise. When the dashboard posts
+`/api/update-apply` applies the same conservative update as the CLI: source
+checkouts fast-forward only when clean and non-diverged, while package installs
+run the detected installer command (`pipx`, `uv tool`, or the active Python's
+`pip`). When the dashboard posts
 `{"restart": true}` after a successful apply, the local server restarts itself.
 The Companion is a separate process and is not restarted; the response carries
 `companion_running` and the message says what it needs.

@@ -313,6 +313,31 @@ class DashboardServeTests(unittest.TestCase):
                 handoff.assert_not_called()
                 optimize.assert_not_called()
 
+    def test_cross_origin_rejection_consumes_the_bounded_post_body(self) -> None:
+        """Windows resets a closing connection that still has unread request
+        bytes, which can hide the 403 the server already wrote from the client.
+        The rejection must consume only a body already admitted by the normal
+        request-size boundary; it must not parse or execute it.
+        """
+        body = b'{"confirmed":true}'
+        handler = object.__new__(ui.UIHandler)
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = io.BytesIO(body)
+
+        handler._discard_bounded_request_body()
+
+        self.assertEqual(handler.rfile.read(), b"")
+
+    def test_cross_origin_rejection_does_not_read_an_oversized_body(self) -> None:
+        body = b"not read"
+        handler = object.__new__(ui.UIHandler)
+        handler.headers = {"Content-Length": str(ui.MAX_REQUEST_BYTES + 1)}
+        handler.rfile = io.BytesIO(body)
+
+        handler._discard_bounded_request_body()
+
+        self.assertEqual(handler.rfile.read(), body)
+
     def test_ai_assist_routes_accept_their_own_origin(self) -> None:
         status, _, (_, optimize) = self._post_ai_assist(
             "/api/optimize-ai-assist",
@@ -1063,7 +1088,8 @@ class DashboardWindowTests(unittest.TestCase):
         # dollar findings would promise a saving that does not exist.
         self.assertIsNone(card["impact_usd"])
         # Says plainly what it cannot distinguish, like the unbanked card does.
-        self.assertIn("answered a question worth asking", card["body"])
+        self.assertIn("research and uncommitted work can still be useful", card["body"])
+        self.assertNotIn("left nothing behind", card["body"])
 
     def test_false_starts_card_stays_silent_below_the_pattern_threshold(self) -> None:
         """Three of four is a coin flip, not a habit."""
@@ -1781,21 +1807,33 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(len(cards), 1)
         self.assertEqual(cards[0]["session_id"], "big")
 
-    def test_health_card_does_not_let_a_live_session_outrank_a_worse_severity(self) -> None:
-        """Being reachable breaks ties inside a severity, it does not jump them."""
+    def test_health_card_charts_the_live_session_over_an_ended_critical_one(self) -> None:
+        """Reachability outranks severity.
+
+        It used to break ties inside a severity only. Then an ended session,
+        critical on bloat alone, charted instead of the one running now, the
+        project had no live card, and Home read "no per-turn numbers to show"
+        while a session was running. The ended session is not lost: it still
+        counts as critical in the project's total.
+        """
         critical, critical_events = self._pressure_session(
             "critical-gone", minutes_idle=6 * 60, turn_tokens=200_000, model="claude-haiku-4-5",
         )
+        # 20K a turn with no model: healthy, and above the 5K floor below which a
+        # session is not analysed at all. At 2K it was dropped before ranking, so
+        # this test never actually compared the two sessions.
         healthy, healthy_events = self._pressure_session(
-            "healthy-live", minutes_idle=1, turn_tokens=2_000,
+            "healthy-live", minutes_idle=1, turn_tokens=20_000,
         )
         cards = ui._context_health_cards(
             [critical, healthy], [*critical_events, *healthy_events],
         )
 
         self.assertEqual(len(cards), 1)
-        self.assertEqual(cards[0]["session_id"], "critical-gone")
-        self.assertEqual(cards[0]["severity"], "critical")
+        self.assertEqual(cards[0]["session_count"], 2, "both sessions were ranked")
+        self.assertEqual(cards[0]["session_id"], "healthy-live")
+        self.assertTrue(cards[0]["charted_because_live"])
+        self.assertEqual(cards[0]["critical_sessions"], 1)
 
     def _replay_turns(self, count=6, *, write_turn=None):
         """Turns that mostly read cache, with one optionally writing it."""
@@ -1953,15 +1991,17 @@ class DashboardWindowTests(unittest.TestCase):
         disagree" -- Home carried a copy of the context-health card. Home is the
         ambient surface now and no longer does, so there is one reader rather
         than two. The rule that mattered survives the move: whoever states the
-        deadline derives it here rather than recomputing it, and the two opposite
-        reasons turns_to_critical can be null stay distinguishable.
+        deadline derives it here rather than recomputing it. It is worded as room
+        left now, in roomVerdict, because the turns projection it replaced read
+        "40+" on every 1M-window session.
         """
         self.assertIn("function runwayVerdict(chart)", ui.HTML)
         self.assertIn("runwayVerdict(row.chart)", ui.HTML)
+        self.assertIn("function roomVerdict(limit, latest, largest, mayNotFit, resent)", ui.HTML)
         self.assertIn("At the context window", ui.HTML)
-        self.assertIn("Not growing right now", ui.HTML)
-        # And the third reason: no window on file for this model.
+        # And the other reason: no window on file for this model.
         self.assertIn("Context window unknown", ui.HTML)
+        self.assertNotIn("turns_to_critical", ui.HTML)
 
     def test_api_equivalent_value_tile_carries_no_status_colour(self) -> None:
         """The figure is counterfactual, so no rail may imply a loss.
@@ -2019,7 +2059,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(state["skip_session_id"], "sess-1")
         self.assertEqual(state["plan_url"], "/?view=prompt")
 
-    def test_companion_state_does_not_blink_for_fresh_start_when_ai_tool_is_not_foreground(self) -> None:
+    def test_companion_state_saves_fresh_start_review_when_ai_tool_is_not_foreground(self) -> None:
         with (
             patch.object(ui, "build_summary_cached", return_value={
                 "context_health": [{
@@ -2046,10 +2086,12 @@ class DashboardWindowTests(unittest.TestCase):
         ):
             state = ui.build_companion_state()
 
-        self.assertEqual(state["state"], "watching")
-        self.assertEqual(state["label"], "Watching quietly")
-        self.assertEqual(state["primary_label"], "Console")
-        self.assertIn("Console", state["subtitle"])
+        self.assertEqual(state["state"], "context_review")
+        self.assertEqual(state["label"], "Review when ready")
+        self.assertEqual(state["primary_label"], "Open review")
+        self.assertEqual(state["primary_url"], "/?view=watch#contextHealth")
+        self.assertEqual(state["badge"]["tone"], "info")
+        self.assertEqual(state["waiting_sessions"][0]["scope"], "general")
 
     def test_companion_state_groups_multiple_fresh_start_projects(self) -> None:
         with (
@@ -2094,10 +2136,14 @@ class DashboardWindowTests(unittest.TestCase):
         ):
             state = ui.build_companion_state()
 
-        self.assertEqual(state["state"], "control_review")
-        self.assertEqual(state["label"], "Review context")
-        self.assertEqual(state["primary_label"], "Review")
+        self.assertEqual(state["state"], "context_review")
+        self.assertEqual(state["label"], "Review when ready")
+        self.assertEqual(state["primary_label"], "Review all")
         self.assertEqual(state["primary_url"], "/?view=watch#contextHealth")
+        self.assertEqual(state["badge"]["tone"], "info")
+        self.assertEqual(state["waiting_sessions"][0]["scope"], "general")
+        self.assertEqual(state["skip_label"], "Snooze all")
+        self.assertEqual(state["waiting_sessions"][1]["scope"], "general")
         self.assertEqual(state["skip_state"], "control_recommended_group")
         self.assertEqual(state["fresh_start_project_count"], 2)
         self.assertIn("/repo/app", state["skip_project"])
@@ -2297,11 +2343,14 @@ class DashboardWindowTests(unittest.TestCase):
             state = ui.build_companion_state()
 
         self.assertEqual(state["state"], "command_gate")
-        self.assertEqual(state["label"], "Command Gate")
-        self.assertEqual(state["primary_label"], "Review")
+        self.assertEqual(state["label"], "Command needs approval")
+        self.assertEqual(state["primary_label"], "Review command")
         self.assertEqual(state["primary_action"], "open_prompt_gate")
         self.assertEqual(state["primary_url"], "http://127.0.0.1:9998/")
-        self.assertIn("cat .env", state["subtitle"])
+        self.assertEqual(state["subtitle"], "Reading a credential/secret file can expose its contents.")
+        self.assertNotIn("cat .env", state["subtitle"])
+        self.assertNotIn("cat .env", state["detail"])
+        self.assertIn("inspect the full command", state["detail"])
         self.assertIsInstance(state["expires_in_seconds"], int)
         mark_seen.assert_called_once_with("cmd-gate-1")
 
@@ -2919,7 +2968,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("AIWatcher Optimize cleanup prompt", prompt)
         self.assertIn("Full path: /repo/app", prompt)
         self.assertIn("Signal: 3 sessions", prompt)
-        self.assertIn("Safe to archive or clean up", prompt)
+        self.assertIn("Safe to archive/review", prompt)
         self.assertIn("Keep active", prompt)
         self.assertIn("Unknown", prompt)
         self.assertIn("Do not delete files", prompt)
@@ -2927,6 +2976,8 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("latest branch, PR, commit, or handoff receipt", prompt)
         self.assertIn("Tool: codex-cli", prompt)
         self.assertIn("Return these buckets", prompt)
+        for phrase in ("remove only", "delete only", "stop only"):
+            self.assertNotIn(phrase, prompt.lower())
         self.assertIn("evidence_hash", inventory["top"])
 
     def test_optimize_inventory_surfaces_stale_runtime_review_plan(self) -> None:
@@ -2950,12 +3001,14 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("unknown from RSS alone", inventory["top"]["cost_note"])
         self.assertIn("prompt/source content", inventory["top"]["privacy_note"])
         self.assertIn("Run: aiwatcher processes --stale-only", inventory["top"]["safe_review_steps"])
+        self.assertIn("separate user stop decision", " ".join(inventory["top"]["safe_review_steps"]))
         self.assertIn("before-minus-after local memory signal", " ".join(inventory["top"]["safe_review_steps"]))
         self.assertIn("Reward: Potential local reward", inventory["top"]["cleanup_prompt"])
         self.assertIn("aiwatcher processes --stale-only", inventory["top"]["cleanup_prompt"])
         self.assertIn("Unknown", inventory["top"]["cleanup_prompt"])
         self.assertIn("Copy safe review steps", inventory["top"]["action_label"])
         self.assertIn("Do not stop or kill any running process", inventory["top"]["cleanup_prompt"])
+        self.assertNotIn("stop only", inventory["top"]["cleanup_prompt"].lower())
 
     def test_optimize_inventory_surfaces_old_agent_scratch_workspace(self) -> None:
         now = datetime.now(timezone.utc)
@@ -2981,8 +3034,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("4+ hours", inventory["top"]["why_inactive"])
         self.assertIn("local temp/scratch path shape", inventory["top"]["evidence"])
         self.assertEqual(inventory["top"]["action_label"], "Copy cleanup prompt")
-        self.assertIn("disposable scratch space", inventory["top"]["cleanup_prompt"])
-        self.assertIn("moving anything useful", inventory["top"]["cleanup_prompt"])
+        self.assertIn("if it looks disposable", inventory["top"]["cleanup_prompt"])
+        self.assertIn("separate cleanup decision", inventory["top"]["cleanup_prompt"])
+        self.assertNotIn("delete only", inventory["top"]["cleanup_prompt"].lower())
 
     def test_optimize_inventory_skips_recent_agent_scratch_workspace(self) -> None:
         now = datetime.now(timezone.utc)
@@ -3065,8 +3119,8 @@ class DashboardWindowTests(unittest.TestCase):
                     "input_chars": 700,
                     "output_chars": 320,
                     "source_access": "metadata_only",
-                    "text": "AIWatcher AI-assisted Optimize cleanup prompt\n\nNext action\n- Review only.",
-                    "structured": {"next_action": ["Review only."]},
+                    "text": "AIWatcher AI-assisted Optimize cleanup prompt\n\nNext verification\n- Review only.",
+                    "structured": {"next_verification": ["Review only."]},
                     "usage": {"prompt_tokens": 120, "completion_tokens": 60},
                 }) as compose,
             ):
@@ -3239,7 +3293,7 @@ class DashboardWindowTests(unittest.TestCase):
         composed = {
             "status": "used", "mode": "cloud", "provider": "openai", "model": "gpt-4o-mini",
             "input_chars": 700, "output_chars": 320, "source_access": "metadata_only",
-            "text": "AIWatcher AI-assisted Optimize cleanup prompt\n\nNext action\n- Review only.",
+            "text": "AIWatcher AI-assisted Optimize cleanup prompt\n\nNext verification\n- Review only.",
             "structured": {}, "usage": {"prompt_tokens": 1_000_000, "completion_tokens": 0},
         }
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3332,7 +3386,7 @@ class DashboardWindowTests(unittest.TestCase):
         composed = {
             "status": "used", "mode": "local", "provider": "ollama", "model": "llama3.2",
             "input_chars": 700, "output_chars": 320, "source_access": "metadata_only",
-            "text": "AIWatcher AI-assisted Optimize cleanup prompt\n\nNext action\n- Review only.",
+            "text": "AIWatcher AI-assisted Optimize cleanup prompt\n\nNext verification\n- Review only.",
             "structured": {}, "usage": {},
         }
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3747,7 +3801,7 @@ class DashboardWindowTests(unittest.TestCase):
             updated_at=now,
             model="claude-sonnet-5",
         )
-        # Climbing steadily, well short of the threshold, so a projection exists.
+        # Climbing steadily, well short of the window.
         events = [
             LocalEvent(
                 event_id=f"e{i}",
@@ -3773,9 +3827,13 @@ class DashboardWindowTests(unittest.TestCase):
         # The session model's own window, not a constant.
         self.assertEqual(chart["context_window_n"], 1_000_000)
         self.assertEqual(chart["context_resets"], 0)
-        self.assertAlmostEqual(chart["growth_per_turn_n"], 8_000, delta=1)
-        # (1_000_000 - 96_000) / 8_000 = 113
-        self.assertEqual(chart["turns_to_critical"], 113)
+        # Room is measured: 1_000_000 - 96_000. These events carry no prompt
+        # numbers, so there is no biggest prompt and nothing short of the window is red.
+        self.assertEqual(chart["tokens_left_n"], 904_000)
+        self.assertIsNone(chart["largest_prompt_growth_n"])
+        self.assertFalse(chart["next_prompt_may_not_fit"])
+        # The latest request's measured cache reads.
+        self.assertEqual(chart["resent_n"], 20_000)
         # The display strings the existing card renders must be untouched.
         self.assertEqual(cards[0]["latest_turn_tokens"], "96.0k")
 
@@ -4838,7 +4896,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertIn("Reproduce and fix", capsule["next_brief"])
         self.assertIn("Keep privacy opt-in.", capsule["next_brief"])
 
-    def test_ai_assisted_handoff_can_reuse_visible_brief_without_rescanning_events(self) -> None:
+    def test_ai_assisted_handoff_ignores_visible_shell_and_builds_evidence_packet(self) -> None:
         now = datetime.now(timezone.utc)
         row = LocalSession(
             session_id="ai-fast",
@@ -4868,7 +4926,7 @@ class DashboardWindowTests(unittest.TestCase):
             ui._index_sessions([row])
             with (
                 patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
-                patch.object(ui, "scan_all_events", side_effect=AssertionError("visible brief should skip full event enrichment")),
+                patch.object(ui, "scan_all_events", return_value=[]),
                 patch.object(ui, "safe_runtime_processes", return_value=[]),
                 patch.object(ui, "ai_assist_config", return_value={
                     "mode": "cloud",
@@ -4901,8 +4959,16 @@ class DashboardWindowTests(unittest.TestCase):
 
         self.assertEqual(capsule["ai_assist_result"]["status"], "used")
         self.assertIn("Inspect aiwatcher_cli/web/index.js first", capsule["next_brief"])
-        self.assertEqual(improve.call_args.kwargs["local_brief"], visible_brief)
-        self.assertEqual(capsule["enrichment_status"], "client_handoff_brief")
+        packet = json.loads(improve.call_args.kwargs["local_brief"])
+        self.assertEqual(packet["contract"], "fresh_start_continuation_v2")
+        self.assertEqual(packet["source"]["session_id"], "ai-fast")
+        self.assertTrue(str(packet["source"]["project"]).replace("\\", "/").endswith("/repo/fast"))
+        self.assertTrue(packet["objective_and_context"])
+        self.assertTrue(packet["current_state"])
+        self.assertTrue(packet["next_steps"])
+        self.assertTrue(packet["inspect_first"])
+        self.assertNotEqual(improve.call_args.kwargs["local_brief"], visible_brief)
+        self.assertNotEqual(capsule.get("enrichment_status"), "client_handoff_brief")
 
     def test_ai_assisted_handoff_composes_paste_ready_brief_and_receipt(self) -> None:
         now = datetime.now(timezone.utc)
@@ -4978,7 +5044,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(capsule["ai_assist_result"]["status"], "cached")
         self.assertEqual(improve.call_count, 1)
         self.assertIn("AIWatcher AI-assisted Fresh Start brief", capsule["next_brief"])
-        self.assertIn("What appears done", capsule["next_brief"])
+        self.assertIn("Goal", capsule["next_brief"])
         self.assertIn("AI Assist receipt", capsule["next_brief"])
         self.assertIn("local_next_brief", capsule)
         self.assertFalse(capsule["include_prompt_excerpt"])
@@ -5141,7 +5207,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(app_card["session_short"], "s1")
         self.assertEqual(app_card["session_count"], 2)
         self.assertEqual(app_card["critical_sessions"], 2)
-        self.assertIn("highest-pressure source", app_card["context_summary"])
+        # s1 and s2 were both updated in the last few minutes, so the card is the
+        # live one and the claim is scoped to live sources.
+        self.assertIn("highest-pressure live source", app_card["context_summary"])
         self.assertIn("fresh session", app_card["intent_summary"])
         self.assertIn("Likely workspace", app_card["identity_label"])
         self.assertIn("Workspace only", app_card["return_label"])
