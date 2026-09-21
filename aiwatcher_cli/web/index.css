@@ -614,7 +614,7 @@
       font-size: var(--fs-1); font-weight: var(--fw-med);
       color: currentColor; opacity: .78;
     }
-    .update-banner.unknown, .update-banner.checking, .update-banner.package, .update-banner.branch {
+    .update-banner.unknown, .update-banner.checking, .update-banner.package {
       color: var(--on-brand);
       border-color: rgba(var(--blue-rgb), .40);
       background: var(--blue-soft);
@@ -629,7 +629,7 @@
       border-color: rgba(var(--amber-rgb), .48);
       background: var(--amber-soft);
     }
-    .update-banner.blocked, .update-banner.error {
+    .update-banner.error {
       color: var(--on-danger);
       border-color: rgba(var(--red-rgb), .46);
       background: var(--red-soft);
