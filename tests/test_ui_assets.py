@@ -568,7 +568,7 @@ class TrimmedHomeTest(unittest.TestCase):
         built_at_runtime = {
             "aiAssistApiKey", "aiAssistApiKeyRow", "aiAssistBaseUrl",
             "aiAssistBaseUrlRow", "aiAssistCap", "aiAssistClearKey",
-            "aiAssistConfirm", "aiAssistForgetKey", "aiAssistKeyStatus",
+            "aiAssistAutoFreshStart", "aiAssistConfirm", "aiAssistForgetKey", "aiAssistKeyStatus",
             "aiAssistMode", "aiAssistModel", "aiAssistProvider",
             "aiAssistProviderHint", "aiAssistProviderRow", "aiAssistSettings",
             "aiAssistSetupBox", "aiAssistSetupCopy",
@@ -2997,6 +2997,12 @@ class AiAssistDrawerTest(unittest.TestCase):
                 self.assertIn("confirmed = window.confirm(", fn)
                 self.assertNotIn("confirmed: true", fn)
                 self.assertTrue("payload.confirmed = confirmed" in fn or "confirmed,\n" in fn)
+
+    def test_auto_compose_waits_for_detailed_evidence_and_is_explicitly_configured(self):
+        self.assertIn("if (!capsule || capsule.basic", self.js)
+        self.assertIn("config.auto_compose_fresh_start", self.js)
+        self.assertIn("maybeAutoComposeFreshStart(capsule);", self._fn("openHandoff"))
+        self.assertIn("auto_compose_fresh_start: document.getElementById('aiAssistAutoFreshStart').checked", self.js)
 
     def test_an_attached_runtime_still_leaves_a_copy_that_only_copies(self):
         # The primary copies and opens the old workspace. Leaving that tool

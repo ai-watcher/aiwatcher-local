@@ -4967,6 +4967,9 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertTrue(packet["current_state"])
         self.assertTrue(packet["next_steps"])
         self.assertTrue(packet["inspect_first"])
+        self.assertFalse(packet["objective_evidence"]["explicit_user_objective"])
+        self.assertFalse(packet["context_quality"]["objective_known"])
+        self.assertEqual(packet["context_quality"]["level"], "metadata_only")
         self.assertNotEqual(improve.call_args.kwargs["local_brief"], visible_brief)
         self.assertNotEqual(capsule.get("enrichment_status"), "client_handoff_brief")
 

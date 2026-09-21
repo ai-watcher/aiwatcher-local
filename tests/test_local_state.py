@@ -302,6 +302,11 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(config["max_daily_usd"], 0.25)
         self.assertEqual(local_state._normalize_ai_assist_config({"max_daily_usd": float("inf")})["max_daily_usd"], 0.25)
 
+    def test_ai_assist_auto_compose_fresh_start_is_explicit_opt_in(self) -> None:
+        self.assertFalse(local_state.default_ai_assist_config()["auto_compose_fresh_start"])
+        config = local_state._normalize_ai_assist_config({"auto_compose_fresh_start": True})
+        self.assertTrue(config["auto_compose_fresh_start"])
+
     def test_ai_assist_day_spend_sums_only_todays_priced_cloud_calls(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")

@@ -102,6 +102,7 @@ def default_ai_assist_config() -> dict[str, Any]:
         "max_daily_usd": 0.25,
         "source_access": "metadata_only",
         "require_confirmation": True,
+        "auto_compose_fresh_start": False,
         "enabled_workflows": list(DEFAULT_AI_ASSIST_WORKFLOWS),
         "api_keys": {},
         "provider_checks": {},
@@ -170,6 +171,7 @@ def _normalize_ai_assist_config(value: Any) -> dict[str, Any]:
     config["max_daily_usd"] = _safe_float(value.get("max_daily_usd"), float(config["max_daily_usd"]))
     config["source_access"] = source_access if source_access in AI_ASSIST_SOURCE_ACCESS else "metadata_only"
     config["require_confirmation"] = bool(value.get("require_confirmation", True))
+    config["auto_compose_fresh_start"] = bool(value.get("auto_compose_fresh_start", False))
     workflows = value.get("enabled_workflows")
     if isinstance(workflows, list):
         normalized = [str(item).strip().lower() for item in workflows]
