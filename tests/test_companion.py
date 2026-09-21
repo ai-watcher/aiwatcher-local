@@ -573,14 +573,14 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
         self.assertEqual(state["badge"]["tone"], "info")
         self.assertEqual(len(state["waiting_sessions"]), 5)
         self.assertEqual(state["waiting_sessions"][0]["kind"], "context_review")
-        self.assertEqual(state["waiting_sessions"][0]["url"], "/?view=watch#contextHealth")
+        self.assertEqual(state["waiting_sessions"][0]["url"], "/?session=s0")
         self.assertEqual(state["waiting_sessions"][0]["project"], "project-0")
         self.assertEqual(state["waiting_sessions"][0]["severity_label"], "critical")
         self.assertEqual(state["waiting_sessions"][0]["impact_label"], "1.0k")
         self.assertEqual(state["waiting_sessions"][0]["review_label"], "~1.0k replay at risk")
         self.assertEqual(state["waiting_sessions"][0]["scope"], "general")
         self.assertEqual(state["waiting_sessions"][0]["scope_label"], "Review when ready")
-        self.assertEqual(state["skip_label"], "Later")
+        self.assertEqual(state["skip_label"], "Snooze all")
         self.assertEqual(len(state["skip_projects"]), 5)
 
     def test_one_background_context_candidate_is_a_saved_review_not_generic_watching(self):
@@ -605,9 +605,9 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
         self.assertEqual(state["badge"]["tone"], "info")
         self.assertEqual(state["waiting_sessions"][0]["scope"], "general")
         self.assertEqual(state["waiting_sessions"][0]["scope_label"], "Review when ready")
-        self.assertEqual(state["waiting_sessions"][0]["url"], "/?view=watch#contextHealth")
+        self.assertEqual(state["waiting_sessions"][0]["url"], "/?session=s-background")
 
-    def test_foreground_context_candidate_is_the_orange_current_session_action(self):
+    def test_foreground_tool_never_proves_current_session_across_tools(self):
         health = [
             {
                 "session_id": "s-current",
@@ -627,21 +627,23 @@ class CompanionPresencePayloadTests(WaitingSessionCompanionTests):
             },
         ]
 
-        with patch.object(
-            ui,
-            "_foreground_matches_fresh_start_bubble",
-            side_effect=lambda row: row.get("session_id") == "s-current",
-        ):
-            state = self._state(self._summary(context_health=health), sessions=[])
-
-        self.assertEqual(state["state"], "control_review")
-        self.assertEqual(state["label"], "Current session")
-        self.assertEqual(state["primary_label"], "Review current")
-        self.assertEqual(state["primary_url"], "/?session=s-current")
-        self.assertEqual(state["badge"]["tone"], "attention")
-        self.assertEqual(state["waiting_sessions"][0]["scope"], "current")
-        self.assertEqual(state["waiting_sessions"][0]["scope_label"], "Current session")
-        self.assertEqual(state["waiting_sessions"][1]["scope"], "general")
+        for tool, foreground in (("codex-cli", "terminal"), ("codex-cli", "codex"),
+                                 ("claude-code", "claude"), ("claude-code", "terminal"),
+                                 ("cursor", "cursor"), ("ollama", "terminal"),
+                                 ("unknown-tool", None)):
+            with self.subTest(tool=tool, foreground=foreground):
+                candidates = [{**row, "tool": tool} for row in health]
+                with patch.object(ui, "foreground_tool", return_value=foreground):
+                    state = self._state(self._summary(context_health=candidates), sessions=[])
+                self.assertEqual(state["state"], "context_review")
+                self.assertEqual(state["primary_label"], "Review all")
+                self.assertFalse(state.get("primary_session_id"))
+                self.assertEqual(state["badge"]["tone"], "info")
+                self.assertEqual(state["skip_label"], "Snooze all")
+                self.assertLessEqual(len(state["skip_label"]), 10)
+                self.assertEqual(state["skip_projects"], ["/repo/current-project", "/repo/later-project"])
+                self.assertTrue(all(row["scope"] == "general" for row in state["waiting_sessions"]))
+                self.assertEqual(state["waiting_sessions"][0]["url"], "/?session=s-current")
 
     def test_context_review_rows_hide_unknown_zero_impact(self):
         rows = ui._context_review_companion_rows([{
