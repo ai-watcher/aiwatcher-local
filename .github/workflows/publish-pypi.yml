@@ -12,6 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -31,6 +33,15 @@ jobs:
           if tag.lstrip("v") != version:
               raise SystemExit(f"Release tag {tag!r} does not match package version {version!r}")
           PY
+      - name: Verify release commit is current main
+        run: |
+          git fetch origin main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" || {
+            echo "Release tag must point to the current origin/main commit."
+            echo "tag:  $(git rev-parse HEAD)"
+            echo "main: $(git rev-parse origin/main)"
+            exit 1
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: python-package-distributions
