@@ -32,7 +32,7 @@ function harness() {
     fetchDashboardJson: () => new Promise((resolve, reject) => pending.push({ resolve, reject })),
   });
   vm.runInContext("let agentHierarchyCache = {sessions: []}; let selectedAgentSessionId = ''; let selectedAgentId = ''; let agentMapMode = 'all'; let agentHierarchyToken = 0; let agentHierarchyLoadedForDays = null;", ctx);
-  for (const name of ['esc', 'projectName', 'agentStatusLabel', 'agentEventLabel', 'selectedAgentSession', 'selectAgentSession',
+  for (const name of ['esc', 'projectName', 'sessionName', 'agentStatusLabel', 'agentEventLabel', 'selectedAgentSession', 'selectAgentSession',
     'visibleAgentNodes', 'renderAgentBranch', 'renderAgentHierarchy', 'loadAgentHierarchy']) vm.runInContext(extract(name), ctx);
   return { ctx, node, document, pending, focusCount: () => focused };
 }
@@ -121,4 +121,39 @@ test('local metadata is escaped before rendering', async () => {
   await done;
   assert.ok(!h.node('agentSessionSelect').innerHTML.includes('<script>'));
   assert.ok(!h.node('agentMapBody').innerHTML.includes('<script>'));
+});
+
+test('a named chat shows its name beside the id, never instead of it', async () => {
+  const h = harness();
+  const named = fixture('claude-code', 'root-a');
+  named.session_title = 'Context health calibration';
+  const done = h.ctx.loadAgentHierarchy();
+  h.pending[0].resolve({ available: true, sessions: [named] });
+  await done;
+  const body = h.node('agentMapBody').innerHTML;
+  assert.match(body, /Context health calibration/);
+  assert.match(body, /root-a/);
+  const select = h.node('agentSessionSelect').innerHTML;
+  assert.match(select, /Context health calibration/);
+  assert.match(select, /root-a/);
+});
+
+test('an unnamed chat is labelled by its id alone', async () => {
+  const h = harness();
+  const done = h.ctx.loadAgentHierarchy();
+  h.pending[0].resolve({ available: true, sessions: [fixture('claude-code', 'root-a')] });
+  await done;
+  assert.match(h.node('agentMapBody').innerHTML, /Session: root-a/);
+});
+
+test('a long chat name is clipped so the id stays visible in the select', async () => {
+  const h = harness();
+  const named = fixture('claude-code', 'root-a');
+  named.session_title = 'x'.repeat(80);
+  const done = h.ctx.loadAgentHierarchy();
+  h.pending[0].resolve({ available: true, sessions: [named] });
+  await done;
+  const select = h.node('agentSessionSelect').innerHTML;
+  assert.match(select, /root-a/);
+  assert.ok(!select.includes('x'.repeat(41)));
 });

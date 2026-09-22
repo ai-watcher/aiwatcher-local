@@ -645,6 +645,61 @@ def _find_session_row(session_id: str, *, days: int = 30) -> LocalSession | None
     return None
 
 
+def _session_titles(session_ids: set[str], *, days: int = 30) -> dict[str, str]:
+    """Chat names for these sessions, from state the dashboard already derived.
+
+    The agent map reads only file names and filesystem metadata and never opens
+    a transcript, so it cannot learn a chat's name on its own. The session index
+    already carries one, put there by the ordinary scan, which makes the name a
+    join rather than a new read -- the map's privacy boundary is unchanged.
+
+    Cheap tiers only: memory, then the cached summaries, then the disk cache.
+    Deliberately no fall-through to rows_for_window(): a name is worth less than
+    a rescan, and a miss just leaves the row showing the id it shows today.
+    """
+    wanted = {session_id for session_id in session_ids if session_id}
+    if not wanted:
+        return {}
+
+    def lookup() -> tuple[dict[str, str], set[str]]:
+        """Titles found, and the ids the index has never heard of.
+
+        Absent and untitled are different: a chat the index knows but that has
+        no name is already answered, and re-reading the disk cache for it every
+        call would buy nothing. Only a genuine absence is worth another tier.
+        """
+        titles: dict[str, str] = {}
+        missing: set[str] = set()
+        with _SUMMARY_CACHE_LOCK:
+            for session_id in wanted:
+                row = _SESSION_INDEX.get(session_id)
+                if row is None:
+                    missing.add(session_id)
+                elif row.title:
+                    titles[session_id] = row.title
+        return titles, missing
+
+    titles, missing = lookup()
+    if not missing:
+        return titles
+    with _SUMMARY_CACHE_LOCK:
+        summaries = [cached[1] for cached in _SUMMARY_CACHE.values()]
+    for summary in summaries:
+        _index_sessions_from_summary(summary)
+    titles, missing = lookup()
+    if not missing:
+        return titles
+    for candidate_days in (days, 1, 7, 30, 90):
+        disk = _read_summary_disk_cache(candidate_days, max_age_seconds=SUMMARY_DISK_TTL_SECONDS)
+        if not disk:
+            continue
+        _index_sessions_from_summary(disk)
+        titles, missing = lookup()
+        if not missing:
+            break
+    return titles
+
+
 def summarize(rows: list[LocalSession]) -> dict[str, float | int]:
     return {
         "sessions": len(rows),
@@ -2014,13 +2069,22 @@ def build_session_search(
 def build_agent_hierarchy(days: int = 30) -> dict[str, object]:
     since = datetime.now(timezone.utc) - timedelta(days=max(1, min(90, days)))
     result = scan_agent_hierarchy(since=since)
+    raw_sessions = result.get("sessions", [])
+    titles = _session_titles(
+        {str(session.get("session_id") or "") for session in raw_sessions},
+        days=days,
+    )
     sessions = []
-    for session in result.get("sessions", []):
+    for session in raw_sessions:
         project_path = session.get("project_path")
+        session_id = str(session.get("session_id") or "")
         sessions.append({
             **session,
             "project": project_label(project_path),
             "project_full": project_path if is_reliable_project_path(project_path) else "unknown",
+            # None, not the id: the front end decides how an unnamed chat reads,
+            # and a name that is really an id would be a label telling a lie.
+            "session_title": titles.get(session_id) or None,
         })
     return {**result, "sessions": sessions}
 

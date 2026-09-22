@@ -3200,6 +3200,19 @@ function unbankedColours(segments) {
 // only, so a backslash path came back whole. Two segments rather than one
 // because the leaf alone does not separate aiwatcher-local-public from
 // aiwatcher-local-pr46 at a glance.
+// A chat's name for the agent map, which learns it by joining the session
+// index rather than by opening a transcript. Returns '' when the chat has no
+// name, so the caller renders the id alone exactly as it does today -- an
+// unnamed chat must not be given a label that is really its id.
+function sessionName(row) {
+  const title = String((row && row.session_title) || '').trim();
+  if (!title) return '';
+  // The id stays in the same label (#147 keeps it there so two sessions of one
+  // project cannot silently collide), so a long name is clipped rather than
+  // allowed to push the id out of a narrow select.
+  return title.length > 40 ? `${title.slice(0, 39)}\u2026` : title;
+}
+
 function projectName(row) {
   const full = String((row && (row.project_full || row.project)) || '');
   const parts = full.split(/[\\/]+/).filter(Boolean);
@@ -5561,7 +5574,7 @@ function renderAgentHierarchy() {
   const childCount = agent ? allAgents.filter(candidate => candidate.parent_agent_id === agent.agent_id).length : 0;
   const roots = agents.filter(candidate => candidate.parent_agent_id === null || !agents.some(parentCandidate => parentCandidate.agent_id === candidate.parent_agent_id));
   select.disabled = false;
-  select.innerHTML = sessions.map(item => `<option value="${esc(item.selection_id)}"${item.selection_id === session.selection_id ? ' selected' : ''}>${esc(item.tool)} · ${esc(projectName(item))} · ${esc(item.session_id)} · ${esc(item.agent_count)} agents</option>`).join('');
+  select.innerHTML = sessions.map(item => `<option value="${esc(item.selection_id)}"${item.selection_id === session.selection_id ? ' selected' : ''}>${esc(item.tool)} · ${esc(projectName(item))}${sessionName(item) ? ` · ${esc(sessionName(item))}` : ''} · ${esc(item.session_id)} · ${esc(item.agent_count)} agents</option>`).join('');
   coverage.textContent = `${sessions.length} session${sessions.length === 1 ? '' : 's'} observed`;
   body.innerHTML = `<div class="agent-map-summary" aria-label="Agent status summary">
       <span><strong>${esc(session.agent_count)}</strong> agents</span>
@@ -5572,7 +5585,7 @@ function renderAgentHierarchy() {
       <span class="agent-map-source">${esc(session.tool)} metadata only</span>
     </div>
     <p class="receipt-note">${esc(session.relationship_note || 'Recorded delegation links; execution and successful return are unverified.')}</p>
-    <p class="receipt-note">Project: ${esc(session.project_full)} · Session: ${esc(session.session_id)}</p>
+    <p class="receipt-note">Project: ${esc(session.project_full)} · Session: ${sessionName(session) ? `${esc(sessionName(session))} · ` : ''}${esc(session.session_id)}</p>
     <div class="agent-map-layout">
       <div class="agent-tree-pane">
         ${!agents.length ? '<p>No verified running agents. Choose All to inspect recorded relationships.</p>' : ''}
