@@ -492,5 +492,90 @@ class AgentHierarchyUiModelTests(unittest.TestCase):
         self.assertNotIn("prompt", json.dumps(result).lower())
 
 
+class AgentMapChatNameTests(unittest.TestCase):
+    """The map names a chat by joining the session index, never by reading one.
+
+    scan_agent_hierarchy inspects file names and filesystem metadata only, so a
+    chat's name has to arrive from state the dashboard already derived.
+    """
+
+    def setUp(self) -> None:
+        self._saved = dict(ui._SESSION_INDEX)
+        ui._SESSION_INDEX.clear()
+
+    def tearDown(self) -> None:
+        ui._SESSION_INDEX.clear()
+        ui._SESSION_INDEX.update(self._saved)
+
+    @staticmethod
+    def _payload(*session_ids: str) -> dict[str, object]:
+        return {
+            "available": True,
+            "source": "claude-subagent-files",
+            "generated_at": "2026-09-22T12:00:00+00:00",
+            "sessions": [
+                {
+                    "session_id": session_id,
+                    "project_path": "/work/payments",
+                    "updated_at": "2026-09-22T12:00:00+00:00",
+                    "status": "running",
+                    "agent_count": 1,
+                    "active_count": 1,
+                    "agents": [],
+                }
+                for session_id in session_ids
+            ],
+        }
+
+    def _index(self, session_id: str, title: str | None) -> None:
+        row = ui._session_from_json(
+            {"session_id": session_id, "tool": "claude-code", "title": title}
+        )
+        self.assertIsNotNone(row)
+        ui._SESSION_INDEX[session_id] = row
+
+    def test_a_named_chat_reaches_the_map_beside_its_id(self) -> None:
+        self._index("abc123", "Context health calibration")
+        with patch.object(ui, "scan_agent_hierarchy", return_value=self._payload("abc123")):
+            result = ui.build_agent_hierarchy(days=7)
+        session = result["sessions"][0]
+        self.assertEqual(session["session_title"], "Context health calibration")
+        # Beside, not instead of: the id stays in the payload so two sessions of
+        # one project cannot silently collide in a label.
+        self.assertEqual(session["session_id"], "abc123")
+
+    def test_an_unnamed_chat_carries_no_title_rather_than_its_id(self) -> None:
+        self._index("abc123", None)
+        with patch.object(ui, "scan_agent_hierarchy", return_value=self._payload("abc123")), \
+                patch.object(ui, "_read_summary_disk_cache", return_value=None):
+            result = ui.build_agent_hierarchy(days=7)
+        self.assertIsNone(result["sessions"][0]["session_title"])
+
+    def test_an_indexed_but_unnamed_chat_does_not_reread_the_disk_cache(self) -> None:
+        # Absent and untitled are different. The index has answered for this
+        # chat; chasing further tiers for it would cost a disk read per paint.
+        self._index("abc123", None)
+        with patch.object(ui, "scan_agent_hierarchy", return_value=self._payload("abc123")), \
+                patch.object(ui, "_read_summary_disk_cache") as disk:
+            ui.build_agent_hierarchy(days=7)
+        disk.assert_not_called()
+
+    def test_a_chat_the_index_never_saw_does_not_trigger_a_rescan(self) -> None:
+        # A name is worth less than a scan: rows_for_window() walks transcripts,
+        # so a miss must fall back to showing the id, which is what it did before.
+        with patch.object(ui, "scan_agent_hierarchy", return_value=self._payload("never-indexed")), \
+                patch.object(ui, "_read_summary_disk_cache", return_value=None), \
+                patch.object(ui, "rows_for_window") as rows:
+            result = ui.build_agent_hierarchy(days=7)
+        rows.assert_not_called()
+        self.assertIsNone(result["sessions"][0]["session_title"])
+
+    def test_naming_adds_no_prompt_or_transcript_content(self) -> None:
+        self._index("abc123", "Context health calibration")
+        with patch.object(ui, "scan_agent_hierarchy", return_value=self._payload("abc123")):
+            result = ui.build_agent_hierarchy(days=7)
+        self.assertNotIn("prompt", json.dumps(result).lower())
+
+
 if __name__ == "__main__":
     unittest.main()
