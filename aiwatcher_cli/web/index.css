@@ -1416,10 +1416,9 @@
     }
     .session-filters input[type="text"]:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
     .agent-map-section {
-      margin: var(--sp-5) 0 var(--sp-4);
-      padding: var(--sp-5) 0;
+      margin-top: var(--sp-5);
+      padding-top: var(--sp-5);
       border-top: 1px solid var(--line);
-      border-bottom: 1px solid var(--line);
     }
     .agent-map-heading { margin-bottom: var(--sp-3); }
     .agent-map-heading h3 { margin: 0; font-size: var(--fs-4); letter-spacing: 0; }
@@ -1465,7 +1464,7 @@
     .agent-tree ul { margin: 0; padding: 0; list-style: none; }
     .agent-tree ul {
       position: relative;
-      margin-left: 20px;
+      margin-left: 45px;
       padding-left: 20px;
       border-left: 1px solid var(--line-strong);
     }
@@ -1478,6 +1477,29 @@
       width: 18px;
       border-top: 1px solid var(--line-strong);
     }
+    .agent-branch-row { display: flex; align-items: center; gap: var(--sp-1); }
+    .agent-branch-toggle,
+    .agent-branch-toggle-spacer { flex: none; width: 28px; height: 28px; }
+    .agent-branch-toggle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      border: 0;
+      border-radius: var(--r-1);
+      background: transparent;
+      color: var(--muted);
+      font-size: var(--fs-2);
+    }
+    .agent-branch-chevron {
+      width: 7px;
+      height: 7px;
+      border-right: 2px solid currentColor;
+      border-bottom: 2px solid currentColor;
+      transform: translateX(-1px) rotate(-45deg);
+    }
+    .agent-branch-toggle[aria-expanded="true"] .agent-branch-chevron { transform: translateY(-2px) rotate(45deg); }
+    .agent-branch-toggle:hover { background: rgba(var(--blue-rgb), .055); color: var(--text); }
     .agent-node {
       display: grid;
       grid-template-columns: 10px minmax(0, 1fr) auto;

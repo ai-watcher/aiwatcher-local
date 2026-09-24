@@ -174,6 +174,8 @@ class AgentMapAssetsTest(unittest.TestCase):
         self.assertIn('id="agentSessionSelect"', sessions_view)
         self.assertIn('id="agentMapRefresh"', sessions_view)
         self.assertIn('data-agent-mode="active"', sessions_view)
+        # The table is what the page is for; the map must not push it down.
+        self.assertLess(sessions_view.index('id="sessionRows"'), sessions_view.index('id="agentMapBody"'))
 
     def test_agent_map_fetches_structural_metadata_endpoint(self):
         source = js_function_source(self.js, "loadAgentHierarchy")

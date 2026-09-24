@@ -31,9 +31,9 @@ function harness() {
     dateLabel: value => value || 'unknown',
     fetchDashboardJson: () => new Promise((resolve, reject) => pending.push({ resolve, reject })),
   });
-  vm.runInContext("let agentHierarchyCache = {sessions: []}; let selectedAgentSessionId = ''; let selectedAgentId = ''; let agentMapMode = 'all'; let agentHierarchyToken = 0; let agentHierarchyLoadedForDays = null;", ctx);
+  vm.runInContext("let agentHierarchyCache = {sessions: []}; let selectedAgentSessionId = ''; let selectedAgentId = ''; let agentMapMode = 'all'; let agentHierarchyToken = 0; let agentHierarchyLoadedForDays = null; let agentBranchChoices = new Map(); const AGENT_BRANCH_AUTO_COLLAPSE_CHILDREN = 6;", ctx);
   for (const name of ['esc', 'projectName', 'sessionName', 'agentStatusLabel', 'agentEventLabel', 'selectedAgentSession', 'selectAgentSession',
-    'visibleAgentNodes', 'renderAgentBranch', 'renderAgentHierarchy', 'loadAgentHierarchy']) vm.runInContext(extract(name), ctx);
+    'visibleAgentNodes', 'agentBranchKey', 'agentBranchHasRunning', 'agentBranchOpen', 'toggleAgentBranch', 'renderAgentBranch', 'renderAgentHierarchy', 'loadAgentHierarchy']) vm.runInContext(extract(name), ctx);
   return { ctx, node, document, pending, focusCount: () => focused };
 }
 const payload = { available: true, sessions: [fixture('codex-cli', 'root-a'), fixture('codex-cli', 'root-b'), fixture('claude-code', 'root-a')] };
@@ -156,4 +156,41 @@ test('a long chat name is clipped so the id stays visible in the select', async 
   const select = h.node('agentSessionSelect').innerHTML;
   assert.match(select, /root-a/);
   assert.ok(!select.includes('x'.repeat(41)));
+});
+
+function wideSession(runningChild) {
+  const agents = [{ agent_id: 'owner', parent_agent_id: null, name: 'Owner', status: 'unknown' }];
+  for (let i = 0; i < 17; i++) agents.push({ agent_id: 'a' + i, parent_agent_id: 'owner', name: 'Agent ' + i,
+    status: runningChild && i === 3 ? 'running' : 'unknown' });
+  return { tool: 'claude-code', selection_id: 'claude-code:wide', session_id: 'wide', project_full: '/demo',
+    active_count: runningChild ? 1 : 0, agent_count: agents.length, status: 'unknown', agents };
+}
+
+test('wide branches start collapsed and the reader can open them', () => {
+  const h = harness();
+  vm.runInContext('agentHierarchyCache = ' + JSON.stringify({ available: true, sessions: [wideSession(false)] }), h.ctx);
+  h.ctx.renderAgentHierarchy();
+  let html = h.node('agentMapBody').innerHTML;
+  assert.doesNotMatch(html, /Agent 16/);
+  assert.match(html, /17 subagents collapsed/);
+  assert.match(html, /aria-expanded="false"/);
+  h.ctx.toggleAgentBranch('owner', true);
+  html = h.node('agentMapBody').innerHTML;
+  assert.match(html, /Agent 16/);
+  assert.match(html, /aria-expanded="true"/);
+});
+
+test('a wide branch hiding a running agent starts open', () => {
+  const h = harness();
+  vm.runInContext('agentHierarchyCache = ' + JSON.stringify({ available: true, sessions: [wideSession(true)] }), h.ctx);
+  h.ctx.renderAgentHierarchy();
+  assert.match(h.node('agentMapBody').innerHTML, /Agent 16/);
+});
+
+test('small branches stay open', async () => {
+  const h = harness();
+  const done = h.ctx.loadAgentHierarchy();
+  h.pending[0].resolve(payload);
+  await done;
+  assert.match(h.node('agentMapBody').innerHTML, />Child</);
 });
