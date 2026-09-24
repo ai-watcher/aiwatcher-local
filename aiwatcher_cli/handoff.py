@@ -279,6 +279,11 @@ def _clean_user_items(items: Sequence[str] | None, *, limit: int = 8, item_limit
     return cleaned
 
 
+def _indefinite_article(label: str) -> str:
+    """"an AI coding session", not "a AI coding session"."""
+    return "an" if label[:1].lower() in "aeiou" else "a"
+
+
 def _brief_memory_summary(
     *,
     project_label: str,
@@ -304,7 +309,7 @@ def _brief_memory_summary(
         summary.append(f"- You were trying to: {objective_text}")
     else:
         summary.append(
-            f"- The exact user objective was not captured. This was a {session_label} in {project_part}; "
+            f"- The exact user objective was not captured. This was {_indefinite_article(session_label)} {session_label} in {project_part}; "
             "use the evidence below to reconstruct the state, then ask one focused question to confirm the intended next outcome before editing."
         )
     summary.append(

@@ -49,6 +49,8 @@ class HandoffTests(unittest.TestCase):
         self.assertIn("Objective and context", capsule["next_brief"])
         self.assertIn("Objective status: not captured; confirmation required before edits", capsule["next_brief"])
         self.assertIn("What outcome should I continue toward in this project?", capsule["next_brief"])
+        self.assertIn("This was an AI", capsule["next_brief"])
+        self.assertNotIn("This was a a", capsule["next_brief"])
         self.assertIn("Completed work", capsule["next_brief"])
         self.assertIn("Decisions and constraints", capsule["next_brief"])
         self.assertIn("Current state", capsule["next_brief"])

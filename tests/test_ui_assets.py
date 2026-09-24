@@ -3016,6 +3016,13 @@ class AiAssistDrawerTest(unittest.TestCase):
         self.assertIn("wasOpen", helper)
         self.assertIn("rebuilt.open = true", helper)
 
+    def test_drawer_copy_does_not_promise_confirmation_when_auto_compose_runs(self):
+        start = self.js.index("function renderHandoff(")
+        fn = self.js[start:self.js.index("\nfunction ", start + 1)]
+        self.assertIn("aiConfig.auto_compose_fresh_start", fn)
+        self.assertIn("It runs automatically once detailed evidence is ready", fn)
+        self.assertNotIn("acceptance checks. It runs only after your confirmation.'", fn)
+
     def test_fresh_start_ai_request_has_a_visible_recovery_deadline(self):
         fn = self._fn("improveFreshStartWithAiAssist")
         self.assertIn("{ timeoutMs: 30000 }", fn)

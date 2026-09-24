@@ -1915,8 +1915,16 @@ function renderHandoff(capsule) {
   const primaryHelp = canOpenRuntime
     ? 'AIWatcher will copy the brief, open the safest available workspace or app target, and save a local Fresh Start receipt.'
     : 'AIWatcher will copy the brief and save a local Fresh Start receipt. Open the correct AI chat or workspace yourself before pasting.';
+  // Say how the run actually starts: the auto-compose setting runs it with no
+  // prompt, so promising confirmation there contradicts the receipt below.
+  const aiConfig = aiAssist.config || {};
+  const aiRunNote = aiConfig.auto_compose_fresh_start
+    ? 'It runs automatically once detailed evidence is ready, because auto-compose is on.'
+    : aiConfig.require_confirmation === false
+      ? 'It runs when you click.'
+      : 'It runs only after your confirmation.';
   const actionHelp = aiReady
-    ? 'AI Assist is ready. Compose the handoff first to get a compact brief with work done, context to preserve, next ask, and acceptance checks. It runs only after your confirmation.'
+    ? `AI Assist is ready. Compose the handoff first to get a compact brief with work done, context to preserve, next ask, and acceptance checks. ${aiRunNote}`
     : primaryHelp;
   const primaryAction = aiReady
     ? `<button class="btn-primary" onclick="improveFreshStartWithAiAssist('${esc(capsule.session_id)}','${esc(target)}', ${includePrompt ? 'true' : 'false'})">Compose AI handoff</button>`
