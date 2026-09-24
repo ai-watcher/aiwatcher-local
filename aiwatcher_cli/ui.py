@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from . import __version__
 from . import analyst, compaction, compaction_outcomes, improve, prompt_signals, statusline
 from .ai_assist import (
+    AiAssistRejected,
     AiAssistUnavailable,
     build_ai_assist_status,
     compose_ask_aiwatcher_answer,
@@ -1192,8 +1193,12 @@ def _run_ai_assist_workflow(
     reason_used: str,
     reason_cached: str,
     finalize: Callable[[str, dict[str, object]], str] | None = None,
+    retry_rejected: bool = True,
 ) -> dict[str, object]:
     """Run one model-backed workflow: cap, cache, call, receipts, key status.
+
+    `retry_rejected=False` (automatic runs) skips evidence whose last answer
+    was rejected; a user's click still gets a fresh attempt.
 
     Returns {"text": composed text or None, "result": the ai_assist_result
     dict for the response}. Fresh Start and Optimize both go through here, so
@@ -1250,12 +1255,46 @@ def _run_ai_assist_workflow(
             "receipt": record,
             "cache": {"evidence_hash": cache_hash},
         }}
+    if cached and cached.get("rejected") and not retry_rejected:
+        return skipped(
+            "AI Assist already rejected an answer for this unchanged evidence; showing the local brief. "
+            "Compose AI handoff tries again."
+        )
     # A cache hit is free, so the spend check comes after it.
     cap_reason = _ai_assist_cap_error(config)
     if cap_reason:
         return skipped(cap_reason)
     try:
         result = compose()
+    except AiAssistRejected as rejection:
+        # The call completed and was billed; only the answer was discarded.
+        _record_ai_assist_provider_outcome(config, result={"provider": rejection.provider or ""})
+        record = record_ai_assist_run(
+            workflow=workflow,
+            status="rejected",
+            session_id=session_id,
+            mode=rejection.mode or mode,
+            provider=rejection.provider or str(config.get("provider") or "none"),
+            model=rejection.model or str(config.get("model") or "") or None,
+            input_chars=len(local_text),
+            source_access=source_access,
+            reason=str(rejection),
+            usage=rejection.usage,
+            evidence_hash=evidence_hash,
+            cache_hit=False,
+        )
+        record_ai_assist_cache(
+            workflow=workflow,
+            evidence_hash=cache_hash,
+            text="",
+            mode=rejection.mode,
+            provider=rejection.provider,
+            model=rejection.model,
+            source_access=source_access,
+            usage=rejection.usage,
+            rejected=True,
+        )
+        return {"text": None, "result": {"status": "failed", "reason": str(rejection), "receipt": record}}
     except Exception as exc:  # noqa: BLE001 - the builder must always answer
         failure = _ai_assist_failure(exc)
         _record_ai_assist_provider_outcome(config, error=failure)
@@ -3003,6 +3042,7 @@ def build_ai_assisted_handoff_detail(
             else "User clicked Compose AI handoff on a Fresh Start brief; cached output reused."
         ),
         finalize=with_receipt,
+        retry_rejected=not automatic,
     )
     if outcome.get("text"):
         capsule["next_brief"] = outcome["text"]

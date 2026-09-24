@@ -5025,6 +5025,35 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(first["next_brief"], second["next_brief"])
         self.assertEqual(scan.call_count, 1)
 
+    def test_rejected_answer_is_billed_and_not_retried_automatically(self) -> None:
+        config = {"mode": "cloud", "max_daily_usd": 5, "provider": "anthropic", "model": "claude-haiku-4-5"}
+        rejection = ui.AiAssistRejected(
+            "AI Assist returned a generic handoff",
+            provider="anthropic", mode="cloud", model="claude-haiku-4-5",
+            usage={"input_tokens": 1_000_000, "output_tokens": 0},
+        )
+        compose = Mock(side_effect=rejection)
+
+        def run(retry_rejected: bool) -> dict[str, object]:
+            return ui._run_ai_assist_workflow(
+                workflow="fresh_start", config=config, evidence_hash="same-evidence",
+                local_text="packet", compose=compose, session_id="s1",
+                reason_used="used", reason_cached="cached", retry_rejected=retry_rejected,
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                first = run(retry_rejected=False)
+                automatic_again = run(retry_rejected=False)
+                clicked = run(retry_rejected=True)
+
+        self.assertEqual(first["result"]["receipt"]["status"], "rejected")
+        self.assertEqual(first["result"]["receipt"]["cost_usd"], 1.0)
+        self.assertEqual(automatic_again["result"]["status"], "skipped")
+        self.assertEqual(clicked["result"]["receipt"]["status"], "rejected")
+        self.assertEqual(compose.call_count, 2)
+
     def test_handoff_detail_cache_misses_after_a_commit_or_edit(self) -> None:
         # A commit changes the Git evidence without touching the session log;
         # reusing the cached capsule would hand the model pre-commit evidence.
