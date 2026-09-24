@@ -1714,8 +1714,13 @@ def record_ai_assist_cache(
     source_access: str | None = None,
     structured: dict[str, Any] | None = None,
     usage: dict[str, Any] | None = None,
+    rejected: bool = False,
 ) -> dict[str, Any]:
-    """Cache a bounded, local-only AI Assist output by deterministic evidence hash."""
+    """Cache a bounded, local-only AI Assist output by deterministic evidence hash.
+
+    `rejected` records that the answer for this evidence was discarded, so an
+    automatic rerun on unchanged evidence can skip instead of paying again.
+    """
     workflow_value = workflow.strip().lower()
     if workflow_value not in AI_ASSIST_WORKFLOWS:
         raise ValueError(f"workflow must be one of: {', '.join(sorted(AI_ASSIST_WORKFLOWS))}")
@@ -1739,6 +1744,7 @@ def record_ai_assist_cache(
         "source_access": source_access if source_access in AI_ASSIST_SOURCE_ACCESS else "metadata_only",
         "structured": structured if isinstance(structured, dict) else {},
         "usage": safe_usage,
+        "rejected": bool(rejected),
     }
     with _locked_state():
         data = _load()
@@ -1777,8 +1783,9 @@ def record_ai_assist_run(
     if workflow_value not in AI_ASSIST_WORKFLOWS:
         raise ValueError(f"workflow must be one of: {', '.join(sorted(AI_ASSIST_WORKFLOWS))}")
     status_value = status.strip().lower()
-    if status_value not in {"used", "skipped", "failed"}:
-        raise ValueError("status must be used, skipped, or failed")
+    # "rejected": the provider answered and billed, AIWatcher discarded the answer.
+    if status_value not in {"used", "skipped", "failed", "rejected"}:
+        raise ValueError("status must be used, skipped, failed, or rejected")
     safe_usage: dict[str, Any] = {}
     if isinstance(usage, dict):
         for key in ("prompt_tokens", "completion_tokens", "total_tokens", "input_tokens", "output_tokens"):
@@ -1788,7 +1795,7 @@ def record_ai_assist_run(
     cost_usd, priced = _ai_assist_run_cost(
         model,
         safe_usage,
-        billable=(status_value == "used" and not cache_hit and (mode or "").strip().lower() == "cloud"),
+        billable=(status_value in {"used", "rejected"} and not cache_hit and (mode or "").strip().lower() == "cloud"),
     )
     record = {
         "id": str(uuid.uuid4()),
@@ -1862,7 +1869,7 @@ def ai_assist_day_spend(now: datetime | None = None) -> dict[str, Any]:
     for run in runs:
         if not isinstance(run, dict):
             continue
-        if run.get("status") != "used" or run.get("cache_hit") or run.get("mode") != "cloud":
+        if run.get("status") not in {"used", "rejected"} or run.get("cache_hit") or run.get("mode") != "cloud":
             continue
         try:
             ran_at = datetime.fromisoformat(str(run.get("created_at")))

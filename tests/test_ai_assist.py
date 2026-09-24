@@ -445,6 +445,54 @@ class AiAssistTests(unittest.TestCase):
         }
         self.assertTrue(ai_assist._fresh_start_response_is_useful(parsed, evidence_packet))
 
+    def test_fresh_start_accepts_a_decision_title_without_the_whole_reasoning(self) -> None:
+        # A session whose only evidence is logged decisions used to require the
+        # answer to quote a ~300-character "title — reasoning" line verbatim.
+        evidence_packet = json.dumps({
+            "contract": "fresh_start_continuation_v2",
+            "source": {"session_id": "session-1", "project": "/repo/ai"},
+            "objective": "",
+            "context_quality": {"objective_known": False},
+            "evidence": {"commits": [], "changed_files": [], "tests": []},
+            "logged_decisions": [
+                "Split the site into Local and Enterprise pages — they have different value props, "
+                "not just different buyers, and one page cannot lead with both without burying one.",
+            ],
+        })
+        parsed = {
+            "goal": "Objective unknown; confirm the intended outcome.",
+            "objective_status": "Not captured",
+            "what_is_done": ["Decided: Split the site into Local and Enterprise pages"],
+            "current_state": ["No commits or changed files observed"],
+            "risks_and_constraints": ["Do not reopen settled decisions"],
+            "inspect_first": ["Site page sources"],
+            "next_steps": ["Ask which page to work on"],
+            "next_ask": "Ask the user which page to continue.",
+            "acceptance_check": ["User confirms the outcome"],
+        }
+        self.assertTrue(ai_assist._fresh_start_response_is_useful(parsed, evidence_packet))
+
+    def test_fresh_start_rejection_carries_the_billed_usage(self) -> None:
+        packet = json.dumps({
+            "contract": "fresh_start_continuation_v2",
+            "source": {"session_id": "session-1", "project": "/repo/ai"},
+            "objective": "",
+            "context_quality": {"objective_known": False},
+        })
+        with (
+            patch.object(ai_assist, "build_ai_assist_status", return_value={"ready": True, "mode": "cloud"}),
+            patch.object(ai_assist, "_call_configured_chat", return_value={
+                "mode": "cloud", "provider": "anthropic", "model": "claude-haiku-4-5",
+                "text": '{"goal":"Continue coding tasks","next_ask":"Run git status"}',
+                "usage": {"input_tokens": 900, "output_tokens": 120},
+            }),
+        ):
+            with self.assertRaises(ai_assist.AiAssistRejected) as caught:
+                ai_assist.improve_fresh_start_brief({"mode": "cloud"}, local_brief=packet)
+
+        self.assertEqual(caught.exception.model, "claude-haiku-4-5")
+        self.assertEqual(caught.exception.usage, {"input_tokens": 900, "output_tokens": 120})
+
     def test_optimize_cleanup_prompt_composes_buckets_and_guardrails(self) -> None:
         with (
             patch.object(ai_assist, "build_ai_assist_status", return_value={

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import socket
 import time
@@ -62,6 +63,28 @@ class AiAssistUnavailable(RuntimeError):
         # _call_configured_chat so an "auto" config can still record which
         # key was rejected.
         self.provider = provider
+
+
+class AiAssistRejected(AiAssistUnavailable):
+    """The provider answered, AIWatcher discarded the answer as unusable.
+
+    Unlike other failures this call completed and was billed, so it carries
+    the response's mode, model, and token usage for the spend ledger.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str | None = None,
+        mode: str | None = None,
+        model: str | None = None,
+        usage: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, provider=provider)
+        self.mode = mode
+        self.model = model
+        self.usage = usage if isinstance(usage, dict) else {}
 
 
 def _port_open(host: str, port: int, *, timeout: float = 0.06) -> bool:
@@ -808,8 +831,14 @@ def _fresh_start_response_is_useful(parsed: dict[str, object], packet_text: str)
         value = evidence.get(key)
         if isinstance(value, list):
             evidence_anchors.extend(str(item) for item in value[:4])
-    evidence_anchors.extend(_packet_list(packet, "logged_decisions", limit=4))
-    anchors = evidence_anchors or [
+    # A logged decision is "title — reasoning". Requiring the whole paragraph
+    # verbatim rejected every decision-only session; the title is the anchor.
+    evidence_anchors.extend(
+        re.split(r"\s[—–-]\s", item, maxsplit=1)[0].strip()
+        for item in _packet_list(packet, "logged_decisions", limit=4)
+    )
+    anchors = [
+        *evidence_anchors,
         str(source.get("project") or ""),
         str(source.get("session_id") or ""),
     ]
@@ -1017,8 +1046,12 @@ def _compose(
     text = str(response.get("text") or "").strip()
     parsed = _json_object_from_text(text)
     if spec.id == "fresh_start" and not _fresh_start_response_is_useful(parsed or {}, trimmed):
-        raise AiAssistUnavailable(
-            "AI Assist returned a generic handoff without enough concrete session evidence; using the local evidence-backed brief instead."
+        raise AiAssistRejected(
+            "AI Assist returned a generic handoff without enough concrete session evidence; using the local evidence-backed brief instead.",
+            provider=str(response.get("provider") or "") or None,
+            mode=str(response.get("mode") or "") or None,
+            model=str(response.get("model") or "") or None,
+            usage=response.get("usage") if isinstance(response.get("usage"), dict) else {},
         )
     final_text = spec.structure(parsed if parsed else {spec.fallback_key: text}, trimmed)
     return {
