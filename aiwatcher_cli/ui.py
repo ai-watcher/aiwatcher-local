@@ -3064,19 +3064,28 @@ def _payload_items(payload: dict[str, object], name: str) -> list[str]:
     return _query_items({name: values}, name)
 
 
-def _ai_assist_confirmation_error(payload: dict[str, object]) -> str | None:
+def _ai_assist_confirmation_error(
+    payload: dict[str, object], *, allow_automatic_fresh_start: bool = False,
+) -> str | None:
     """Return why a model call may not start, or None when it may.
 
     "Ask before every AI Assist run" used to be enforced only by a browser
     confirm() dialog, so any local client could spend the cloud budget with
     no prompt at all. The client now sends `confirmed: true` after the user
     agrees, and the server refuses without it while the setting is on.
+
+    An automatic Fresh Start run sends `automatic: true` instead of claiming a
+    confirmation nobody gave. The server accepts it only on the Fresh Start
+    route and only while the user's own auto-compose setting is on.
     """
     if not isinstance(payload, dict):
         return "AI Assist requests need a JSON object body"
-    if not ai_assist_config().get("require_confirmation", True):
+    config = ai_assist_config()
+    if not config.get("require_confirmation", True):
         return None
     if bool(payload.get("confirmed")):
+        return None
+    if allow_automatic_fresh_start and bool(payload.get("automatic")) and bool(config.get("auto_compose_fresh_start")):
         return None
     return (
         "AI Assist run needs explicit confirmation: send confirmed: true after the user agrees, "
@@ -9128,7 +9137,7 @@ class UIHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/handoff-basic":
                 response = build_basic_handoff_detail(session_id, days, target, **handoff_options)
             elif parsed.path == "/api/handoff-ai-assist":
-                confirmation_error = _ai_assist_confirmation_error(payload)
+                confirmation_error = _ai_assist_confirmation_error(payload, allow_automatic_fresh_start=True)
                 if confirmation_error:
                     self._send(400, json.dumps({"error": confirmation_error}), "application/json; charset=utf-8")
                     return

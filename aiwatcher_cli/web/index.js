@@ -2043,8 +2043,8 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
   const token = ++drawerRequestToken;
   const options = handoffOptionsFromForm();
   const payload = handoffPayload(sessionId, target, includePrompt, options);
-  confirmed = automatic || confirmed;
   payload.confirmed = confirmed;
+  if (automatic) payload.automatic = true;
   const statusNode = document.getElementById('handoffStatus');
   if (statusNode) {
     statusNode.insertAdjacentHTML('afterend', `<div id="aiAssistWorking" class="ai-loading-panel">
@@ -3650,7 +3650,7 @@ function renderAiAssistSettings(status) {
         </select></label>
         ${workflowChecks}
         <label class="check-row"><input id="aiAssistAutoFreshStart" type="checkbox" ${c.auto_compose_fresh_start ? 'checked' : ''}> Automatically compose Fresh Start handoffs</label>
-        <p class="receipt-note">Uses one bounded model call after detailed evidence is ready. Reopening unchanged evidence uses the cached result at no additional model cost.</p>
+        <p class="receipt-note">Uses one bounded model call after detailed evidence is ready, without the confirmation prompt even when "Ask before every AI Assist run" is on. Reopening unchanged evidence uses the cached result at no additional model cost.</p>
         <label class="check-row"><input id="aiAssistConfirm" type="checkbox" ${c.require_confirmation !== false ? 'checked' : ''}> Ask before every AI Assist run</label>
         <div class="ai-assist-provider-strip">
           ${localProviders.map(row => `<span class="provider-chip ${row.available ? 'ready' : ''}">${esc(row.label)}: ${esc(row.detail)}</span>`).join('')}

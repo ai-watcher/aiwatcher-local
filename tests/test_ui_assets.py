@@ -3003,6 +3003,9 @@ class AiAssistDrawerTest(unittest.TestCase):
         self.assertIn("config.auto_compose_fresh_start", self.js)
         self.assertIn("maybeAutoComposeFreshStart(capsule);", self._fn("openHandoff"))
         self.assertIn("auto_compose_fresh_start: document.getElementById('aiAssistAutoFreshStart').checked", self.js)
+        fn = self._fn("improveFreshStartWithAiAssist")
+        self.assertIn("payload.automatic = true", fn)
+        self.assertNotIn("confirmed = automatic", fn)
 
     def test_fresh_start_ai_request_has_a_visible_recovery_deadline(self):
         fn = self._fn("improveFreshStartWithAiAssist")

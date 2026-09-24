@@ -290,6 +290,30 @@ class DashboardServeTests(unittest.TestCase):
         self.assertIn("confirmation", body["error"])
         optimize.assert_not_called()
 
+    def test_automatic_fresh_start_is_accepted_only_when_the_user_enabled_it(self) -> None:
+        # The auto path says it is automatic instead of claiming a confirmation
+        # nobody gave; the server honours that only from the user's own setting.
+        status, body, (handoff, _) = self._post_ai_assist(
+            "/api/handoff-ai-assist", {"session_id": "sess-1", "automatic": True},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("confirmation", body["error"])
+        handoff.assert_not_called()
+
+        enabled = {"require_confirmation": True, "auto_compose_fresh_start": True}
+        with patch.object(ui, "ai_assist_config", return_value=enabled):
+            status, _, (handoff, _) = self._post_ai_assist(
+                "/api/handoff-ai-assist", {"session_id": "sess-1", "automatic": True},
+            )
+            self.assertEqual(status, 200)
+            handoff.assert_called_once()
+
+            status, body, (_, optimize) = self._post_ai_assist(
+                "/api/optimize-ai-assist", {"candidate_id": "sessions:/repo/app", "automatic": True},
+            )
+            self.assertEqual(status, 400)
+            optimize.assert_not_called()
+
     def test_ai_assist_routes_skip_confirmation_when_the_setting_is_off(self) -> None:
         with patch.object(ui, "ai_assist_config", return_value={"require_confirmation": False}):
             status, body, (_, optimize) = self._post_ai_assist(

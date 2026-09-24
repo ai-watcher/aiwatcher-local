@@ -783,8 +783,12 @@ def _fresh_start_response_is_useful(parsed: dict[str, object], packet_text: str)
     if not goal or not next_ask:
         return False
     if not objective_known:
-        combined = f"{goal} {next_ask} {_clean_line(parsed.get('objective_status'), limit=300)}"
-        if not any(term in combined for term in ("unknown", "not captured", "confirm the desired", "confirm the intended", "ask the user")):
+        objective_status = _clean_line(parsed.get("objective_status"), limit=300).lower()
+        combined = f"{goal} {next_ask} {objective_status}"
+        if not any(term in combined for term in (
+            "unknown", "not known", "not captured", "unclear", "confirm the desired", "confirm the intended",
+            "ask the user", "ask which", "which outcome",
+        )):
             return False
         normalized_ask = next_ask.replace("`", "").rstrip(".")
         if normalized_ask in {"run git status --short", "check git status"}:

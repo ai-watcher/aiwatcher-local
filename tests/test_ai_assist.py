@@ -422,6 +422,29 @@ class AiAssistTests(unittest.TestCase):
         }
         self.assertFalse(ai_assist._fresh_start_response_is_useful(parsed, evidence_packet))
 
+    def test_fresh_start_accepts_unknown_objective_status_in_any_case(self) -> None:
+        # Models capitalise the status field ("Unknown"). Rejecting that threw
+        # away a paid, honest answer and fell back to the local brief.
+        evidence_packet = json.dumps({
+            "contract": "fresh_start_continuation_v2",
+            "source": {"session_id": "session-1", "project": "/repo/ai"},
+            "objective": "",
+            "context_quality": {"objective_known": False},
+            "evidence": {"changed_files": ["aiwatcher_cli/ui.py"]},
+        })
+        parsed = {
+            "goal": "Pick up work in /repo/ai from session session-1.",
+            "objective_status": "Unknown",
+            "what_is_done": ["aiwatcher_cli/ui.py is changed in /repo/ai"],
+            "current_state": ["Working tree contains one changed file"],
+            "risks_and_constraints": ["Do not overwrite unrelated changes"],
+            "inspect_first": ["aiwatcher_cli/ui.py"],
+            "next_steps": ["Inspect the change"],
+            "next_ask": "Inspect aiwatcher_cli/ui.py, then ask which outcome to pursue.",
+            "acceptance_check": ["User confirms the task"],
+        }
+        self.assertTrue(ai_assist._fresh_start_response_is_useful(parsed, evidence_packet))
+
     def test_optimize_cleanup_prompt_composes_buckets_and_guardrails(self) -> None:
         with (
             patch.object(ai_assist, "build_ai_assist_status", return_value={
