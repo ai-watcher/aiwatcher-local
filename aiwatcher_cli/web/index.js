@@ -3576,6 +3576,15 @@ function renderCoverage(rows) {
   </p>`;
 }
 
+// The settings mount is rebuilt on every data refresh; a new <details> starts
+// closed, so carry the user's open/closed choice across the rebuild.
+function mountAiAssistSettings(node, status) {
+  const advanced = node.querySelector('details.ai-assist-advanced');
+  const wasOpen = !!(advanced && advanced.open);
+  node.innerHTML = renderAiAssistSettings(status);
+  const rebuilt = node.querySelector('details.ai-assist-advanced');
+  if (rebuilt && wasOpen) rebuilt.open = true;
+}
 function renderAiAssistSettings(status) {
   const s = status || {};
   const c = s.config || {};
@@ -3841,7 +3850,7 @@ async function saveAiAssistSettings() {
     aiAssistFormDirty = false;
     if (currentData) currentData.ai_assist = status;
     const mount = document.getElementById('aiAssistSettingsMount') || document.getElementById('aiAssistSettings');
-    if (mount) mount.innerHTML = renderAiAssistSettings(status);
+    if (mount) mountAiAssistSettings(mount, status);
     updateAiAssistFormVisibility();
     showToast('AI Assist settings saved');
   } catch (error) {
@@ -6458,7 +6467,7 @@ async function loadOnce(resetDetail, forceRefresh) {
   document.getElementById('coverageRowsSettings').innerHTML = renderCoverage(coverage);
   const aiAssistNode = document.getElementById('aiAssistSettingsMount') || document.getElementById('aiAssistSettings');
   if (aiAssistNode && !(aiAssistFormDirty && activeSettingsPanel === 'ai')) {
-    aiAssistNode.innerHTML = renderAiAssistSettings(data.ai_assist || {});
+    mountAiAssistSettings(aiAssistNode, data.ai_assist || {});
     updateAiAssistFormVisibility();
   }
   const companionNode = document.getElementById('companionSettingsMount');

@@ -493,6 +493,23 @@ class AiAssistTests(unittest.TestCase):
         self.assertEqual(caught.exception.model, "claude-haiku-4-5")
         self.assertEqual(caught.exception.usage, {"input_tokens": 900, "output_tokens": 120})
 
+    def test_fresh_start_cut_off_answer_says_so_and_has_room_to_finish(self) -> None:
+        # Both live rejections on 2026-09-24 used exactly the 700-token cap:
+        # the JSON was truncated, unparseable, and reported as "generic".
+        self.assertGreaterEqual(ai_assist.MAX_FRESH_START_OUTPUT_TOKENS, 1400)
+        packet = json.dumps({"contract": "fresh_start_continuation_v2", "source": {"project": "/repo/ai"}})
+        with (
+            patch.object(ai_assist, "build_ai_assist_status", return_value={"ready": True, "mode": "cloud"}),
+            patch.object(ai_assist, "_call_configured_chat", return_value={
+                "mode": "cloud", "provider": "anthropic", "model": "claude-haiku-4-5",
+                "text": '{"goal":"Objective unknown","what_is_done":["Decided: split the si',
+                "usage": {"input_tokens": 1800, "output_tokens": 700},
+            }),
+        ):
+            with self.assertRaises(ai_assist.AiAssistRejected) as caught:
+                ai_assist.improve_fresh_start_brief({"mode": "cloud"}, local_brief=packet)
+        self.assertIn("cut off", str(caught.exception))
+
     def test_optimize_cleanup_prompt_composes_buckets_and_guardrails(self) -> None:
         with (
             patch.object(ai_assist, "build_ai_assist_status", return_value={

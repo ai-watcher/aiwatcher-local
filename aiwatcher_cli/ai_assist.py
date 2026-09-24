@@ -35,7 +35,9 @@ DEFAULT_MODELS = {
 }
 
 MAX_FRESH_START_INPUT_CHARS = 9000
-MAX_FRESH_START_OUTPUT_TOKENS = 700
+# The Fresh Start JSON has 13 fields; at 700 real answers were cut off mid-object,
+# could not be parsed, and were rejected as generic after being billed.
+MAX_FRESH_START_OUTPUT_TOKENS = 1400
 MAX_FRESH_START_BRIEF_CHARS = 6000
 MAX_OPTIMIZE_CLEANUP_INPUT_CHARS = 7000
 MAX_OPTIMIZE_CLEANUP_OUTPUT_TOKENS = 600
@@ -1047,7 +1049,11 @@ def _compose(
     parsed = _json_object_from_text(text)
     if spec.id == "fresh_start" and not _fresh_start_response_is_useful(parsed or {}, trimmed):
         raise AiAssistRejected(
-            "AI Assist returned a generic handoff without enough concrete session evidence; using the local evidence-backed brief instead.",
+            (
+                "AI Assist's answer was cut off or was not valid JSON; using the local evidence-backed brief instead."
+                if parsed is None
+                else "AI Assist returned a generic handoff without enough concrete session evidence; using the local evidence-backed brief instead."
+            ),
             provider=str(response.get("provider") or "") or None,
             mode=str(response.get("mode") or "") or None,
             model=str(response.get("model") or "") or None,
