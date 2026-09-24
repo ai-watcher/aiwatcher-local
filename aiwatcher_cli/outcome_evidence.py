@@ -294,6 +294,18 @@ def check_commit_undone(repo: str, sha: str, *, tracked_paths: set[str] | None =
     }
 
 
+def repo_state_fingerprint(session: LocalSession) -> str | None:
+    """Return HEAD plus the changed-path list, so callers caching handoff
+    evidence can tell a commit or new edit apart from an unchanged tree."""
+    repo = _repo_root(session.project_path)
+    if not repo:
+        return None
+    result = _run_git(repo, ["status", "--porcelain=v2", "--branch", "--untracked-files=no"])
+    if not result or result.returncode != 0:
+        return None
+    return result.stdout
+
+
 def _changed_files(repo: str) -> list[str]:
     result = _run_git(repo, ["diff", "--name-only", "HEAD"])
     if result and result.returncode == 0:

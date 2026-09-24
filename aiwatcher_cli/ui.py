@@ -103,7 +103,7 @@ from .local_state import (
     hash_prompt,
     state_path,
 )
-from .outcome_evidence import VALID_EVIDENCE_OUTCOMES, build_outcome_evidence, evidence_for_sessions
+from .outcome_evidence import VALID_EVIDENCE_OUTCOMES, build_outcome_evidence, evidence_for_sessions, repo_state_fingerprint
 from .local_state import dismiss_first_run, first_run_dismissed_at
 from .local_state import compact_nudge, record_compact_nudge, update_compact_nudge
 from .ledger import (
@@ -1451,28 +1451,35 @@ def _fresh_start_ai_evidence_packet(capsule: dict[str, object]) -> str:
             else None
         ),
     }
-    has_explicit_objective = bool(str(capsule.get("objective") or "").strip())
-    has_prompt_context = bool(packet["prompt_excerpt"])
-    packet["context_quality"] = {
-        "level": "strong" if has_explicit_objective and has_prompt_context else "partial" if has_explicit_objective or has_prompt_context else "metadata_only",
-        "objective_known": has_explicit_objective or has_prompt_context,
-        "note": (
-            "User intent is present in supplied objective or opted-in prompt evidence."
-            if has_explicit_objective or has_prompt_context
-            else "User intent is not present; compose a verification-first handoff and do not infer it from files or commits."
-        ),
-    }
+    packet["context_quality"] = _fresh_start_context_quality(capsule)
     return json.dumps(packet, sort_keys=True, default=str)
 
 
 def _fresh_start_context_quality(capsule: dict[str, object]) -> dict[str, object]:
+    """The one answer to "does this handoff know what the user wanted?".
+
+    The drawer chip, the first-paint shell, and the packet sent to the model
+    all read it here so they cannot disagree.
+    """
     explicit_objective = bool(str(capsule.get("objective") or "").strip())
-    prompt_included = bool(capsule.get("include_prompt_excerpt") and capsule.get("costliest_prompt"))
+    prompt_included = bool(capsule.get("include_prompt_excerpt") and isinstance(capsule.get("costliest_prompt"), dict))
+    known = explicit_objective or prompt_included
     if explicit_objective and prompt_included:
-        return {"level": "strong", "label": "Objective + prompt context", "objective_known": True}
-    if explicit_objective or prompt_included:
-        return {"level": "partial", "label": "Partial task context", "objective_known": True}
-    return {"level": "metadata_only", "label": "Objective needs verification", "objective_known": False}
+        level, label = "strong", "Objective + prompt context"
+    elif known:
+        level, label = "partial", "Partial task context"
+    else:
+        level, label = "metadata_only", "Objective needs verification"
+    return {
+        "level": level,
+        "label": label,
+        "objective_known": known,
+        "note": (
+            "User intent is present in supplied objective or opted-in prompt evidence."
+            if known
+            else "User intent is not present; compose a verification-first handoff and do not infer it from files or commits."
+        ),
+    }
 
 
 def _optimize_checklist(candidates: list[dict[str, object]]) -> str:
@@ -2845,11 +2852,7 @@ def build_basic_handoff_detail(
         "runtime_attachment": attachment.to_json(),
         "basic": True,
         "enrichment_status": "loading",
-        "context_quality": {
-            "level": "metadata_only" if not objective else "partial",
-            "label": "Objective needs verification" if not objective else "Partial task context",
-            "objective_known": bool(objective),
-        },
+        "context_quality": _fresh_start_context_quality({"objective": objective}),
     }
 
 
@@ -2878,6 +2881,9 @@ def build_handoff_detail(
         tuple(source_refs or []),
         tuple(constraints or []),
         tuple(acceptance_criteria or []),
+        # Commits and edits change the Git evidence without touching the
+        # session log, so the tree itself is part of what makes a hit valid.
+        repo_state_fingerprint(row),
     )
     now_monotonic = time.monotonic()
     with _SUMMARY_CACHE_LOCK:
@@ -2931,8 +2937,13 @@ def build_ai_assisted_handoff_detail(
     constraints: list[str] | None = None,
     acceptance_criteria: list[str] | None = None,
     local_brief_override: str | None = None,
+    automatic: bool = False,
 ) -> dict[str, object]:
-    """Return a user-requested AI-composed Fresh Start brief with receipt."""
+    """Return an AI-composed Fresh Start brief with receipt.
+
+    `automatic` marks a run started by the user's auto-compose setting rather
+    than a click, so the receipt and ledger do not claim a confirmation.
+    """
     config = ai_assist_config(with_secrets=True)
     source_access = str(config.get("source_access") or "metadata_only")
     effective_prompt_excerpt = bool(include_prompt_excerpt and source_access in {"prompt_opt_in", "source_opt_in"})
@@ -2966,7 +2977,11 @@ def build_ai_assisted_handoff_detail(
             f"- Source access: {result.get('source_access') or 'metadata_only'}",
             "- Scope: Composed the paste-ready handoff from local AIWatcher evidence.",
             "- Evidence boundary: local session identity, token/cost totals, files, commits, outcomes, and proof claims remain authoritative.",
-            "- Cost boundary: one user-confirmed bounded model call; no saved-token claim is made by this AI step.",
+            (
+                "- Cost boundary: one bounded model call started by the auto-compose setting; no saved-token claim is made by this AI step."
+                if automatic
+                else "- Cost boundary: one user-confirmed bounded model call; no saved-token claim is made by this AI step."
+            ),
         ])
         return "\n\n".join([composed, receipt_text]).rstrip()
 
@@ -2977,8 +2992,16 @@ def build_ai_assisted_handoff_detail(
         local_text=evidence_packet,
         compose=lambda: improve_fresh_start_brief(config, local_brief=evidence_packet, timeout=20),
         session_id=session_id,
-        reason_used="User clicked Improve with AI Assist on a Fresh Start brief.",
-        reason_cached="User clicked Compose AI handoff on a Fresh Start brief; cached output reused.",
+        reason_used=(
+            "Auto-compose setting composed a Fresh Start brief."
+            if automatic
+            else "User clicked Improve with AI Assist on a Fresh Start brief."
+        ),
+        reason_cached=(
+            "Auto-compose setting reopened a Fresh Start brief; cached output reused."
+            if automatic
+            else "User clicked Compose AI handoff on a Fresh Start brief; cached output reused."
+        ),
         finalize=with_receipt,
     )
     if outcome.get("text"):
@@ -9148,6 +9171,7 @@ class UIHandler(BaseHTTPRequestHandler):
                     target,
                     include_prompt_excerpt,
                     local_brief_override=str(payload.get("local_brief") or ""),
+                    automatic=bool(payload.get("automatic")) and not bool(payload.get("confirmed")),
                     **handoff_options,
                 )
             else:

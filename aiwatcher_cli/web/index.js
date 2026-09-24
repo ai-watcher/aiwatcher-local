@@ -2076,7 +2076,7 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
     if (working) working.remove();
     const timedOut = error && error.name === 'AbortError';
     showToast(timedOut
-      ? 'AI Assist took too long. The local brief is still ready; try again when the provider is responsive.'
+      ? 'AI Assist is taking too long. The local brief is still ready. The model call may still finish; if it does, Compose AI handoff reuses that result at no extra cost.'
       : 'AI Assist could not improve this brief. The local brief is still ready.', 'error');
   }
 }

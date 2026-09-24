@@ -272,6 +272,7 @@ class DashboardServeTests(unittest.TestCase):
         self.assertEqual(args[:4], ("sess-1", 30, "codex", True))
         self.assertEqual(kwargs["handoff_type"], "coding")
         self.assertEqual(kwargs["objective"], "Continue the AI Assist handoff.")
+        self.assertFalse(kwargs["automatic"])
 
     def test_ai_assist_routes_refuse_a_model_call_without_confirmation(self) -> None:
         # "Ask before every AI Assist run" is on by default. A browser confirm()
@@ -307,6 +308,8 @@ class DashboardServeTests(unittest.TestCase):
             )
             self.assertEqual(status, 200)
             handoff.assert_called_once()
+            # The receipt must not claim the user confirmed an automatic run.
+            self.assertTrue(handoff.call_args.kwargs["automatic"])
 
             status, body, (_, optimize) = self._post_ai_assist(
                 "/api/optimize-ai-assist", {"candidate_id": "sessions:/repo/app", "automatic": True},
@@ -5021,6 +5024,50 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertFalse(first.get("error"))
         self.assertEqual(first["next_brief"], second["next_brief"])
         self.assertEqual(scan.call_count, 1)
+
+    def test_handoff_detail_cache_misses_after_a_commit_or_edit(self) -> None:
+        # A commit changes the Git evidence without touching the session log;
+        # reusing the cached capsule would hand the model pre-commit evidence.
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="cached-handoff-git",
+            tool="codex-cli",
+            project_path="/repo/cache",
+            started_at=now - timedelta(hours=2),
+            updated_at=now - timedelta(minutes=2),
+        )
+        with ui._SUMMARY_CACHE_LOCK:
+            ui._SESSION_INDEX.clear()
+            ui._HANDOFF_DETAIL_CACHE.clear()
+        ui._index_sessions([row])
+        with (
+            patch.object(ui, "scan_all_events", return_value=[]) as scan,
+            patch.object(ui, "safe_runtime_processes", return_value=[]),
+            patch.object(ui, "ai_assist_config", return_value={"mode": "off"}),
+            patch.object(ui, "repo_state_fingerprint", side_effect=["head-a", "head-a", "head-b"]),
+        ):
+            ui.build_handoff_detail("cached-handoff-git", days=7)
+            ui.build_handoff_detail("cached-handoff-git", days=7)
+            ui.build_handoff_detail("cached-handoff-git", days=7)
+
+        self.assertEqual(scan.call_count, 2)
+
+    def test_fresh_start_context_quality_has_one_definition(self) -> None:
+        # The drawer chip, the first-paint shell, and the model packet must agree.
+        prompt = {"prompt": "Fix the gate"}
+        cases = [
+            ({}, "metadata_only", False),
+            ({"objective": "  "}, "metadata_only", False),
+            ({"include_prompt_excerpt": True, "costliest_prompt": None}, "metadata_only", False),
+            ({"objective": "Ship it"}, "partial", True),
+            ({"include_prompt_excerpt": True, "costliest_prompt": prompt}, "partial", True),
+            ({"objective": "Ship it", "include_prompt_excerpt": True, "costliest_prompt": prompt}, "strong", True),
+        ]
+        for capsule, level, known in cases:
+            with self.subTest(capsule=capsule):
+                quality = ui._fresh_start_context_quality(capsule)
+                self.assertEqual(quality["level"], level)
+                self.assertEqual(quality["objective_known"], known)
 
     def test_ai_assisted_handoff_composes_paste_ready_brief_and_receipt(self) -> None:
         now = datetime.now(timezone.utc)
