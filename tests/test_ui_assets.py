@@ -3007,6 +3007,15 @@ class AiAssistDrawerTest(unittest.TestCase):
         self.assertIn("payload.automatic = true", fn)
         self.assertNotIn("confirmed = automatic", fn)
 
+    def test_advanced_ai_assist_options_stay_open_across_data_refreshes(self):
+        # The refresh rebuilt the panel and every rebuilt <details> started closed.
+        self.assertNotIn("innerHTML = renderAiAssistSettings(data.ai_assist", self.js)
+        self.assertIn("mountAiAssistSettings(aiAssistNode, data.ai_assist || {});", self.js)
+        start = self.js.index("function mountAiAssistSettings(")
+        helper = self.js[start:self.js.index("\nfunction ", start + 1)]
+        self.assertIn("wasOpen", helper)
+        self.assertIn("rebuilt.open = true", helper)
+
     def test_fresh_start_ai_request_has_a_visible_recovery_deadline(self):
         fn = self._fn("improveFreshStartWithAiAssist")
         self.assertIn("{ timeoutMs: 30000 }", fn)
