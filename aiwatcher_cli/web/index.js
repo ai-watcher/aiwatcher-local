@@ -5228,6 +5228,9 @@ let agentHierarchyCache = { sessions: [] };
 let selectedAgentSessionId = '';
 let selectedAgentId = '';
 let agentMapMode = 'all';
+// Branch open/closed choices the reader made, keyed by session and agent so a
+// 10s refresh re-renders the tree without undoing them.
+let agentBranchChoices = new Map();
 let agentHierarchyToken = 0;
 let changeRowsCache = [];
 let sessionSort = { key: 'updated_at', dir: 'desc' };
@@ -5519,6 +5522,37 @@ function visibleAgentNodes(session) {
   return agents.filter(agent => visible.has(agent.agent_id));
 }
 
+// A Claude Code session that fans out to a dozen subagents printed every one of
+// them, pushing the rest of the Sessions view off screen. Wide branches start
+// closed; 6 is a layout default (about one screen of rows), not a measurement.
+// A branch hiding a running agent starts open, since that is the row worth
+// seeing, and a choice the reader made always wins.
+const AGENT_BRANCH_AUTO_COLLAPSE_CHILDREN = 6;
+
+function agentBranchKey(agentId) {
+  return `${selectedAgentSessionId}|${agentId}`;
+}
+
+function agentBranchHasRunning(agent, agents, seen = new Set()) {
+  if (seen.has(agent.agent_id)) return false;
+  seen.add(agent.agent_id);
+  return agents.some(child => child.parent_agent_id === agent.agent_id
+    && (child.status === 'running' || agentBranchHasRunning(child, agents, seen)));
+}
+
+function agentBranchOpen(agent, children, agents) {
+  const key = agentBranchKey(agent.agent_id);
+  if (agentBranchChoices.has(key)) return agentBranchChoices.get(key);
+  return children.length <= AGENT_BRANCH_AUTO_COLLAPSE_CHILDREN || agentBranchHasRunning(agent, agents);
+}
+
+function toggleAgentBranch(agentId, open) {
+  agentBranchChoices.set(agentBranchKey(agentId), open);
+  renderAgentHierarchy();
+  const toggle = Array.from(document.querySelectorAll('[data-agent-toggle]')).find(node => node.dataset.agentToggle === agentId);
+  if (toggle) toggle.focus();
+}
+
 function renderAgentBranch(agent, agents, ancestors = new Set()) {
   if (!agent || ancestors.has(agent.agent_id)) return '';
   if (ancestors.size >= 32) return '<li>Deeper relationships omitted from this view.</li>';
@@ -5527,13 +5561,21 @@ function renderAgentBranch(agent, agents, ancestors = new Set()) {
   const children = agents
     .filter(candidate => candidate.parent_agent_id === agent.agent_id)
     .sort((left, right) => Date.parse(left.created_at || '') - Date.parse(right.created_at || ''));
+  const open = children.length ? agentBranchOpen(agent, children, agents) : false;
+  const childLabel = `${children.length} subagent${children.length === 1 ? '' : 's'}`;
+  const toggle = children.length
+    ? `<button type="button" class="agent-branch-toggle" data-agent-toggle="${esc(agent.agent_id)}" onclick="toggleAgentBranch(this.dataset.agentToggle, ${open ? 'false' : 'true'})" aria-expanded="${open ? 'true' : 'false'}" aria-label="${open ? 'Collapse' : 'Expand'} ${esc(childLabel)} under ${esc(agent.name)}"><span class="agent-branch-chevron" aria-hidden="true"></span></button>`
+    : '<span class="agent-branch-toggle-spacer" aria-hidden="true"></span>';
   return `<li>
-    <button type="button" class="agent-node${selectedAgentId === agent.agent_id ? ' selected' : ''}" data-agent="${esc(agent.agent_id)}" onclick="selectAgentNode(this.dataset.agent)" aria-pressed="${selectedAgentId === agent.agent_id ? 'true' : 'false'}">
-      <span class="agent-state-dot ${esc(agent.status)}" aria-hidden="true"></span>
-      <span class="agent-node-copy"><strong>${esc(agent.name)}</strong><small>${esc(agent.role)} · ${esc(agentEventLabel(agent.latest_event))}</small></span>
-      <span class="agent-status ${esc(agent.status)}">${esc(agentStatusLabel(agent.status))}</span>
-    </button>
-    ${children.length ? `<ul>${children.map(child => renderAgentBranch(child, agents, nextAncestors)).join('')}</ul>` : ''}
+    <div class="agent-branch-row">
+      ${toggle}
+      <button type="button" class="agent-node${selectedAgentId === agent.agent_id ? ' selected' : ''}" data-agent="${esc(agent.agent_id)}" onclick="selectAgentNode(this.dataset.agent)" aria-pressed="${selectedAgentId === agent.agent_id ? 'true' : 'false'}">
+        <span class="agent-state-dot ${esc(agent.status)}" aria-hidden="true"></span>
+        <span class="agent-node-copy"><strong>${esc(agent.name)}</strong><small>${esc(agent.role)} · ${esc(agentEventLabel(agent.latest_event))}${children.length && !open ? ` · ${esc(childLabel)} collapsed` : ''}</small></span>
+        <span class="agent-status ${esc(agent.status)}">${esc(agentStatusLabel(agent.status))}</span>
+      </button>
+    </div>
+    ${children.length && open ? `<ul>${children.map(child => renderAgentBranch(child, agents, nextAncestors)).join('')}</ul>` : ''}
   </li>`;
 }
 
