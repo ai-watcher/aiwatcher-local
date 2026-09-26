@@ -224,6 +224,37 @@ Merging a change into GitHub `main` does **not** update PyPI installations. A
 maintainer must publish a newer version first. If PyPI still has the same
 version, `pipx upgrade` correctly reports that nothing changed.
 
+An installation made directly from GitHub is different: commits can change
+while the package still declares the same version. For that install type,
+`aiwatcher update --apply` and the Console use `pipx reinstall
+aiwatcher-local` so the recorded Git commit actually advances. A plain `pipx
+upgrade` may clone the latest commit and still keep the existing files when
+both builds declare the same version.
+
+### Restart after an update
+
+Updating files does not replace AIWatcher processes that are already running.
+Restart the dashboard and Companion so both use the newly installed code:
+
+```console
+aiwatcher companion stop
+aiwatcher ui --restart --open
+```
+
+The second command starts a fresh dashboard and Companion. If the floating
+Companion says `UI offline`, use the same sequence, then verify:
+
+```console
+aiwatcher companion status
+aiwatcher doctor
+aiwatcher update
+```
+
+A pipx installation is shared across the laptop; it does not belong to the
+workspace where the install or update command happened. The Console reports
+the directory the running process was started from separately from the package
+location and update channel.
+
 Use a reinstall only when the environment is broken or you need to change its
 Python interpreter:
 

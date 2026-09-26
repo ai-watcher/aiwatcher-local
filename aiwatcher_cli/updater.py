@@ -50,13 +50,27 @@ def install_identity() -> dict[str, object]:
     }
 
 
-def package_upgrade_guidance() -> list[dict[str, str]]:
-    direct = _direct_url_metadata()
+def package_upgrade_guidance(direct: dict[str, Any] | None = None) -> list[dict[str, str]]:
+    direct = direct if direct is not None else _direct_url_metadata()
     spec = _package_spec(direct)
+    git_backed = _direct_url_commit(direct) is not None
     return [
-        {"label": "pipx", "command": f"pipx upgrade {PACKAGE_NAME}"},
-        {"label": "pip", "command": f"python -m pip install --upgrade {spec}"},
-        {"label": "uv tool", "command": f"uv tool upgrade {PACKAGE_NAME}"},
+        {
+            "label": "pipx",
+            "command": f"pipx {'reinstall' if git_backed else 'upgrade'} {PACKAGE_NAME}",
+        },
+        {
+            "label": "pip",
+            "command": (
+                f"python -m pip install --upgrade --force-reinstall --no-deps {spec}"
+                if git_backed
+                else f"python -m pip install --upgrade {spec}"
+            ),
+        },
+        {
+            "label": "uv tool",
+            "command": f"uv tool {'install --force ' + spec if git_backed else 'upgrade ' + PACKAGE_NAME}",
+        },
         {
             "label": "GitHub package install",
             "command": f"python -m pip install --upgrade git+https://github.com/{GITHUB_REPO}.git",
@@ -165,11 +179,15 @@ def _package_update_command(manager: str | None = None, direct: dict[str, Any] |
     manager = manager or package_manager()
     direct = direct if direct is not None else _direct_url_metadata()
     spec = _package_spec(direct)
+    git_backed = _direct_url_commit(direct) is not None
     if manager == "pipx" and shutil.which("pipx"):
-        return ["pipx", "upgrade", PACKAGE_NAME]
+        return ["pipx", "reinstall" if git_backed else "upgrade", PACKAGE_NAME]
     if manager == "uv" and shutil.which("uv"):
-        return ["uv", "tool", "upgrade", PACKAGE_NAME]
-    return [sys.executable, "-m", "pip", "install", "--upgrade", spec]
+        return ["uv", "tool", "install", "--force", spec] if git_backed else ["uv", "tool", "upgrade", PACKAGE_NAME]
+    command = [sys.executable, "-m", "pip", "install", "--upgrade"]
+    if git_backed:
+        command.extend(["--force-reinstall", "--no-deps"])
+    return [*command, spec]
 
 
 def _package_command_payload(command: Sequence[str]) -> dict[str, object]:
@@ -193,9 +211,10 @@ def _package_update_status(*, fetch: bool, branch: str) -> dict[str, object]:
         "remote": "github",
         "branch": branch,
         "remote_ref": f"github/{branch}",
+        "update_channel": "github" if _direct_url_commit(direct) else "pypi",
         "update_available": False,
         "can_apply": False,
-        "guidance": package_upgrade_guidance(),
+        "guidance": package_upgrade_guidance(direct),
         **_package_command_payload(command),
     }
 
@@ -222,6 +241,7 @@ def _package_update_status(*, fetch: bool, branch: str) -> dict[str, object]:
         commits = data.get("commits") if isinstance(data.get("commits"), list) else []
         latest = (commits[-1].get("sha") if commits and isinstance(commits[-1], dict) else data.get("sha")) or None
         payload.update({
+            "update_unit": "commit",
             "installed_commit": commit[:12],
             "latest_commit": str(latest)[:12] if latest else None,
             "behind": behind,
@@ -237,7 +257,7 @@ def _package_update_status(*, fetch: bool, branch: str) -> dict[str, object]:
             ],
         })
         payload["message"] = (
-            f"{behind} update(s) available for this package install."
+            f"{behind} newer commit(s) available for this GitHub package install."
             if behind
             else "Already up to date."
         )
@@ -255,6 +275,7 @@ def _package_update_status(*, fetch: bool, branch: str) -> dict[str, object]:
     latest_version = str((data.get("info") or {}).get("version") or "")
     update_available = bool(latest_version) and _version_key(latest_version) > _version_key(__version__)
     payload.update({
+        "update_unit": "version",
         "latest_version": latest_version or None,
         "behind": 1 if update_available else 0,
         "update_available": update_available,
