@@ -2954,6 +2954,51 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(rows[0]["observed_followup"]["direction"], "smaller")
         self.assertIn("not a final saved-token", rows[0]["observed_followup"]["basis"])
 
+    def test_source_session_summary_exposes_linked_fresh_start_completion(self) -> None:
+        source = LocalSession(
+            session_id="source",
+            tool="codex-cli",
+            project_path="/repo/app",
+            updated_at=datetime.now(timezone.utc),
+        )
+        receipt = {
+            "id": "receipt-1",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "source_session_id": "source",
+            "decision": "copy_handoff",
+            "next_session_id": "follow-up",
+            "next_session_correlation": {
+                "status": "linked",
+                "confidence": "high",
+                "reason": "Observed a later same-project session.",
+            },
+        }
+        with (
+            patch.object(ui, "recent_handoff_decisions", return_value=[receipt]),
+            patch.object(ui, "get_outcome", return_value=None),
+            patch.object(ui, "safe_runtime_processes", return_value=[]),
+        ):
+            summary = ui.session_summary_json(source)
+
+        completion = summary["fresh_start_completion"]
+        self.assertEqual(completion["status"], "completed")
+        self.assertEqual(completion["next_session_id"], "follow-up")
+        self.assertEqual(completion["confidence"], "high")
+
+    def test_source_session_summary_exposes_pending_fresh_start_receipt(self) -> None:
+        receipt = {
+            "id": "receipt-1",
+            "source_session_id": "source",
+            "decision": "copy_handoff",
+            "next_session_id": None,
+            "next_session_correlation": {"status": "waiting", "reason": "Waiting for a later session."},
+        }
+        with patch.object(ui, "recent_handoff_decisions", return_value=[receipt]):
+            completion = ui._fresh_start_completion("source")
+
+        self.assertEqual(completion["status"], "proof_pending")
+        self.assertIsNone(completion["next_session_id"])
+
     def test_optimize_inventory_detects_stale_session_cluster(self) -> None:
         now = datetime.now(timezone.utc)
         rows = [

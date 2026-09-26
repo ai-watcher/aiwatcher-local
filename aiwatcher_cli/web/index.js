@@ -4057,7 +4057,9 @@ function renderSessionSummary(s, label = 'Loading detailed evidence...') {
         ? `<button class="btn-primary" disabled>${esc(action.label || 'Review outcome')}</button>`
         : `<button class="btn-primary" disabled>${esc(action.label || 'Review session')}</button>`
     : '';
+  const completion = renderFreshStartCompletion(s);
   return `<div class="session-review-shell">${renderSessionHero(s)}${renderSessionContextHealth(s.session_id)}
+  ${completion || `
   <section class="detail-section recommended-action loading-action">
     <div class="section-title">
       <div><h3>${esc(action ? action.label : 'Review session')}</h3><p>${esc(action ? action.reason : 'AIWatcher is loading full local evidence for this session.')}</p></div>
@@ -4072,7 +4074,33 @@ function renderSessionSummary(s, label = 'Loading detailed evidence...') {
         <div class="ai-loading-bar" aria-hidden="true"></div>
       </div>
     </div>
-  </section></div>`;
+  </section>`}
+  ${completion ? `<div class="ai-loading-panel" aria-live="polite">
+    <div class="ai-loading-mark">AI</div><div><strong>${esc(label)}</strong>
+    <p>Timeline, outcome, git, and prompt evidence are indexing in the background.</p>
+    <div class="ai-loading-bar" aria-hidden="true"></div></div>
+  </div>` : ''}</div>`;
+}
+function renderFreshStartCompletion(s) {
+  const completion = s.fresh_start_completion || null;
+  if (!completion) return '';
+  const completed = completion.status === 'completed';
+  const nextButton = completed && completion.next_session_id
+    ? `<button class="btn-primary" onclick="selectSession('${esc(completion.next_session_id)}')">Open follow-up</button>`
+    : '';
+  return `<section class="detail-section recommended-action action-composer settled fresh-start-completion">
+    <div class="action-composer-head">
+      <h3>${completed ? 'Completed' : 'In progress'}</h3>
+      <strong>${esc(completion.label || (completed ? 'Fresh Start completed' : 'Fresh Start proof pending'))}</strong>
+      <p>${esc(completion.reason || '')}</p>
+    </div>
+    <div class="action-evidence">
+      <span class="confidence-chip observed">receipt saved</span>
+      ${completion.confidence ? `<span class="pill">${esc(completion.confidence)} confidence</span>` : ''}
+    </div>
+    <div class="action-buttons">${nextButton}<button class="btn-quiet" onclick="showView('receipts'); closeDrawer()">View receipt</button></div>
+    <p class="tool-link-note">The context chart remains as historical evidence; this recommendation is no longer outstanding.</p>
+  </section>`;
 }
 function renderSessionActions(s) {
   const actions = s.actions || [];
@@ -4298,7 +4326,7 @@ async function selectSession(sessionId, attempt = 0, token = null) {
     promptReview = `${coaching}${renderPromptReceipts(s.prompt_receipts, s.session_id)}<section class="detail-section"><h3>Prompt context</h3>${opener}</section>`;
   }
   setDrawerContent(`<div class="session-review-shell">${renderSessionHero(s)}${renderSessionContextHealth(s.session_id)}
-    ${renderSessionActions(s)}
+    ${renderFreshStartCompletion(s) || renderSessionActions(s)}
     ${renderVerdict(s)}
     ${outcomeActions}
     ${promptReview}

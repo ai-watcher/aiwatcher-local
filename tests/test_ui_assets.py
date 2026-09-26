@@ -670,6 +670,17 @@ class SessionDrawerTest(unittest.TestCase):
         self.assertNotIn("API-equivalent", actions)
         self.assertNotIn("s.tokens_label", actions)
 
+    def test_linked_fresh_start_replaces_the_repeated_session_action(self):
+        completion = js_function_source(self.js, "renderFreshStartCompletion")
+        self.assertIn("Fresh Start completed", completion)
+        self.assertIn("Open follow-up", completion)
+        self.assertIn("View receipt", completion)
+        self.assertIn("historical evidence", completion)
+        summary = js_function_source(self.js, "renderSessionSummary")
+        self.assertIn("renderFreshStartCompletion(s)", summary)
+        select = js_function_source(self.js, "selectSession")
+        self.assertIn("renderFreshStartCompletion(s) || renderSessionActions(s)", select)
+
     def test_the_verdict_is_three_separate_judgements(self):
         """One verdict answered three questions at once with a single token
         threshold, so it could not say anything. They are now separate lines,

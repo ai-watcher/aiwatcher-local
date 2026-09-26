@@ -2384,6 +2384,7 @@ def session_summary_json(row: LocalSession) -> dict[str, object]:
         "state": state,
         "runtime_attachment": attachment.to_json(),
         "actions": session_actions(row, outcome=outcome, attachment=attachment),
+        "fresh_start_completion": _fresh_start_completion(row.session_id),
         "summary_only": True,
         "detail_status": "loading",
     }
@@ -2394,6 +2395,36 @@ def build_session_summary(session_id: str, days: int = 30) -> dict[str, object]:
     if not row:
         return {"error": "session not found"}
     return session_summary_json(row)
+
+
+def _fresh_start_completion(session_id: str) -> dict[str, object] | None:
+    """Return the latest actionable Fresh Start receipt for a source session."""
+    try:
+        decisions = recent_handoff_decisions(limit=50)
+    except OSError:
+        return None
+    for decision in decisions:
+        if not isinstance(decision, dict):
+            continue
+        source_id = decision.get("source_session_id") or decision.get("session_id")
+        if source_id != session_id or decision.get("decision") not in {"new_chat", "copy_handoff"}:
+            continue
+        next_session_id = decision.get("next_session_id")
+        correlation = decision.get("next_session_correlation") if isinstance(decision.get("next_session_correlation"), dict) else {}
+        linked = bool(next_session_id) and str(correlation.get("status") or "linked") == "linked"
+        return {
+            "status": "completed" if linked else "proof_pending",
+            "label": "Fresh Start completed" if linked else "Fresh Start copied; proof pending",
+            "reason": str(
+                correlation.get("reason")
+                or ("A later same-project session was linked to this Fresh Start receipt." if linked else "Waiting to observe a later same-project session.")
+            ),
+            "receipt_id": decision.get("id"),
+            "created_at": decision.get("created_at"),
+            "next_session_id": next_session_id,
+            "confidence": correlation.get("confidence"),
+        }
+    return None
 
 
 def event_json(row: LocalEvent) -> dict[str, object]:
@@ -2775,6 +2806,7 @@ def build_session_detail(session_id: str, days: int = 30, *, allow_pending: bool
         pass
     return {
         **session_json(row),
+        "fresh_start_completion": _fresh_start_completion(row.session_id),
         "privacy": "Prompt text is shown only when you inspect this local session; it is not uploaded or persisted in summaries.",
         "verdict": _session_verdict_inputs(row, events),
         "insights": session_insights(row),
