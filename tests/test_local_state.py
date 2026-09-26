@@ -302,6 +302,26 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(config["max_daily_usd"], 0.25)
         self.assertEqual(local_state._normalize_ai_assist_config({"max_daily_usd": float("inf")})["max_daily_usd"], 0.25)
 
+    def test_ai_assist_auto_compose_fresh_start_is_explicit_opt_in(self) -> None:
+        self.assertFalse(local_state.default_ai_assist_config()["auto_compose_fresh_start"])
+        config = local_state._normalize_ai_assist_config({"auto_compose_fresh_start": True})
+        self.assertTrue(config["auto_compose_fresh_start"])
+
+    def test_rejected_ai_assist_answer_is_billed_and_counts_toward_the_cap(self) -> None:
+        # The provider answered and charged; AIWatcher discarding the answer
+        # does not make the call free. Recording $0 let the cap miss it.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                rejected = local_state.record_ai_assist_run(
+                    workflow="fresh_start", status="rejected", mode="cloud", provider="anthropic",
+                    model="claude-haiku-4-5", usage={"input_tokens": 1_000_000, "output_tokens": 0},
+                )
+                spend = local_state.ai_assist_day_spend()
+
+        self.assertEqual(rejected["cost_usd"], 1.0)
+        self.assertEqual(spend["spent_usd"], 1.0)
+
     def test_ai_assist_day_spend_sums_only_todays_priced_cloud_calls(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")

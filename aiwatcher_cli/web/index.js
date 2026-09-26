@@ -1393,13 +1393,21 @@ function handoffPayload(sessionId, target, includePrompt, options) {
     acceptance_criteria: next.acceptance || [],
   };
 }
-async function postJson(path, payload) {
-  const res = await fetch(path, {
+async function postJson(path, payload, options = {}) {
+  const timeoutMs = Number(options.timeoutMs || 0);
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  const timeoutId = controller ? window.setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const res = await fetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload || {}),
-  });
-  return res.json();
+      signal: controller ? controller.signal : undefined,
+    });
+    return await res.json();
+  } finally {
+    if (timeoutId !== null) window.clearTimeout(timeoutId);
+  }
 }
 function classifyUpdateStatus(data) {
   if (!data) return 'unknown';
@@ -1898,6 +1906,7 @@ function renderHandoff(capsule) {
   const assisted = aiResult.status === 'used' || aiResult.status === 'cached';
   const aiReady = aiAssist.ready && (aiAssist.mode || 'off') !== 'off' && !assisted;
   const sourceAccess = ((aiAssist.config || {}).source_access || aiResult.source_access || 'metadata_only');
+  const contextQuality = capsule.context_quality || {};
   setDrawerSubtitle(assisted ? `AI-assisted handoff · ${sourceAccess}` : aiReady ? `AI Assist available · ${sourceAccess}` : 'Local metadata only');
   const enrichment = capsule.basic
     ? '<div class="loading">Basic brief is ready. Loading timeline, git evidence, and prompt enrichment...</div>'
@@ -1906,8 +1915,16 @@ function renderHandoff(capsule) {
   const primaryHelp = canOpenRuntime
     ? 'AIWatcher will copy the brief, open the safest available workspace or app target, and save a local Fresh Start receipt.'
     : 'AIWatcher will copy the brief and save a local Fresh Start receipt. Open the correct AI chat or workspace yourself before pasting.';
+  // Say how the run actually starts: the auto-compose setting runs it with no
+  // prompt, so promising confirmation there contradicts the receipt below.
+  const aiConfig = aiAssist.config || {};
+  const aiRunNote = aiConfig.auto_compose_fresh_start
+    ? 'It runs automatically once detailed evidence is ready, because auto-compose is on.'
+    : aiConfig.require_confirmation === false
+      ? 'It runs when you click.'
+      : 'It runs only after your confirmation.';
   const actionHelp = aiReady
-    ? 'AI Assist is ready. Compose the handoff first to get a compact brief with work done, context to preserve, next ask, and acceptance checks. It runs only after your confirmation.'
+    ? `AI Assist is ready. Compose the handoff first to get a compact brief with work done, context to preserve, next ask, and acceptance checks. ${aiRunNote}`
     : primaryHelp;
   const primaryAction = aiReady
     ? `<button class="btn-primary" onclick="improveFreshStartWithAiAssist('${esc(capsule.session_id)}','${esc(target)}', ${includePrompt ? 'true' : 'false'})">Compose AI handoff</button>`
@@ -1938,7 +1955,10 @@ function renderHandoff(capsule) {
           <h3>${assisted ? 'AI-assisted prompt to paste' : 'Prompt to paste'}</h3>
           <p>${assisted ? (aiResult.status === 'cached' ? 'This handoff was reused from the AI Assist cache for the same evidence. Review once, copy, then paste into the fresh session.' : 'This is the composed handoff. Review once, copy, then paste into the fresh session.') : 'This local brief is ready now. Compose with AI Assist first if you want a tighter handoff.'}</p>
         </div>
-        <span class="confidence-chip observed">${assisted ? 'AI assisted' : 'local rules'}</span>
+        <div class="pill-row">
+          <span class="confidence-chip ${contextQuality.level === 'strong' ? 'observed' : 'inferred'}">${esc(contextQuality.label || 'Objective needs verification')}</span>
+          <span class="confidence-chip observed">${assisted ? 'AI assisted' : 'local rules'}</span>
+        </div>
       </div>
       <textarea id="handoffBrief" class="brief-box">${esc(capsule.next_brief || '')}</textarea>
       <div class="copy-row"><button class="btn-primary" onclick="copyFreshStartFromDrawer('${esc(capsule.session_id)}', false)">Copy brief</button></div>
@@ -2005,12 +2025,25 @@ async function copyFreshStartFromDrawer(sessionId, openRuntime = false) {
 async function regenerateHandoff(sessionId, target = 'generic', includePrompt = false) {
   await openHandoff(sessionId, target, includePrompt, handoffOptionsFromForm('coding'));
 }
-async function improveFreshStartWithAiAssist(sessionId, target = 'generic', includePrompt = false) {
+const autoFreshStartCompositions = new Set();
+function maybeAutoComposeFreshStart(capsule) {
+  const status = capsule && capsule.ai_assist ? capsule.ai_assist : {};
+  const config = status.config || {};
+  const result = capsule && capsule.ai_assist_result ? capsule.ai_assist_result : {};
+  if (!capsule || capsule.basic || result.status === 'used' || result.status === 'cached') return;
+  if (!status.ready || !config.auto_compose_fresh_start) return;
+  if (!Array.isArray(config.enabled_workflows) || !config.enabled_workflows.includes('fresh_start')) return;
+  const key = `${capsule.session_id || ''}:${capsule.updated_at || ''}:${capsule.target || 'generic'}:${capsule.include_prompt_excerpt ? 'prompt' : 'metadata'}`;
+  if (autoFreshStartCompositions.has(key)) return;
+  autoFreshStartCompositions.add(key);
+  improveFreshStartWithAiAssist(capsule.session_id, capsule.target || 'generic', !!capsule.include_prompt_excerpt, true);
+}
+async function improveFreshStartWithAiAssist(sessionId, target = 'generic', includePrompt = false, automatic = false) {
   const status = (typeof currentData !== 'undefined' && currentData && currentData.ai_assist) ? currentData.ai_assist : null;
   const config = status && status.config ? status.config : {};
   const label = (status && status.active_label) || 'AI Assist';
   let confirmed = false;
-  if (config.require_confirmation !== false) {
+  if (!automatic && config.require_confirmation !== false) {
     confirmed = window.confirm(`${label} will make one small model call using your configured provider to compose this Fresh Start handoff. Continue?`);
     if (!confirmed) return;
   }
@@ -2019,19 +2052,20 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
   const options = handoffOptionsFromForm();
   const payload = handoffPayload(sessionId, target, includePrompt, options);
   payload.confirmed = confirmed;
+  if (automatic) payload.automatic = true;
   const statusNode = document.getElementById('handoffStatus');
   if (statusNode) {
     statusNode.insertAdjacentHTML('afterend', `<div id="aiAssistWorking" class="ai-loading-panel">
       <div class="ai-loading-mark">AI</div>
       <div>
-        <strong>Composing handoff</strong>
-        <p>AI Assist is loading timeline, Git, decisions, and session evidence before composing a compact continuation brief.</p>
+        <strong>${automatic ? 'Preparing your AI handoff' : 'Composing handoff'}</strong>
+        <p>Detailed timeline, Git, decisions, and session evidence are ready. AI Assist is composing a compact continuation brief; the local prompt below remains available.</p>
         <div class="ai-loading-bar" aria-hidden="true"><span></span></div>
       </div>
     </div>`);
   }
   try {
-    const capsule = await postJson('/api/handoff-ai-assist', payload);
+    const capsule = await postJson('/api/handoff-ai-assist', payload, { timeoutMs: 30000 });
     if (!isCurrentDrawer(token)) return;
     const working = document.getElementById('aiAssistWorking');
     if (working) working.remove();
@@ -2048,7 +2082,10 @@ async function improveFreshStartWithAiAssist(sessionId, target = 'generic', incl
     if (!isCurrentDrawer(token)) return;
     const working = document.getElementById('aiAssistWorking');
     if (working) working.remove();
-    showToast('AI Assist could not improve this brief.', 'error');
+    const timedOut = error && error.name === 'AbortError';
+    showToast(timedOut
+      ? 'AI Assist is taking too long. The local brief is still ready. The model call may still finish; if it does, Compose AI handoff reuses that result at no extra cost.'
+      : 'AI Assist could not improve this brief. The local brief is still ready.', 'error');
   }
 }
 async function openHandoff(sessionId, target = 'generic', includePrompt = false, options = null) {
@@ -2094,6 +2131,7 @@ async function openHandoff(sessionId, target = 'generic', includePrompt = false,
   }
   stage = 3;
   setDrawerContent(renderHandoff(capsule));
+  if (typeof maybeAutoComposeFreshStart === 'function') maybeAutoComposeFreshStart(capsule);
   return capsule;
 }
 async function recordHandoffDecision(bubble, decision) {
@@ -3527,6 +3565,15 @@ function renderCoverage(rows) {
   </p>`;
 }
 
+// The settings mount is rebuilt on every data refresh; a new <details> starts
+// closed, so carry the user's open/closed choice across the rebuild.
+function mountAiAssistSettings(node, status) {
+  const advanced = node.querySelector('details.ai-assist-advanced');
+  const wasOpen = !!(advanced && advanced.open);
+  node.innerHTML = renderAiAssistSettings(status);
+  const rebuilt = node.querySelector('details.ai-assist-advanced');
+  if (rebuilt && wasOpen) rebuilt.open = true;
+}
 function renderAiAssistSettings(status) {
   const s = status || {};
   const c = s.config || {};
@@ -3632,6 +3679,8 @@ function renderAiAssistSettings(status) {
           <option value="source_opt_in" ${c.source_access === 'source_opt_in' ? 'selected' : ''}>Source files only after confirmation</option>
         </select></label>
         ${workflowChecks}
+        <label class="check-row"><input id="aiAssistAutoFreshStart" type="checkbox" ${c.auto_compose_fresh_start ? 'checked' : ''}> Automatically compose Fresh Start handoffs</label>
+        <p class="receipt-note">Uses one bounded model call after detailed evidence is ready, without the confirmation prompt even when "Ask before every AI Assist run" is on. Reopening unchanged evidence uses the cached result at no additional model cost.</p>
         <label class="check-row"><input id="aiAssistConfirm" type="checkbox" ${c.require_confirmation !== false ? 'checked' : ''}> Ask before every AI Assist run</label>
         <div class="ai-assist-provider-strip">
           ${localProviders.map(row => `<span class="provider-chip ${row.available ? 'ready' : ''}">${esc(row.label)}: ${esc(row.detail)}</span>`).join('')}
@@ -3776,6 +3825,7 @@ async function saveAiAssistSettings() {
     max_daily_usd: Number(document.getElementById('aiAssistCap').value || 0),
     source_access: document.getElementById('aiAssistSourceAccess').value,
     require_confirmation: document.getElementById('aiAssistConfirm').checked,
+    auto_compose_fresh_start: document.getElementById('aiAssistAutoFreshStart').checked,
     enabled_workflows: Array.from(document.querySelectorAll('[data-ai-assist-workflow]:checked')).map(node => node.value),
   };
   try {
@@ -3789,7 +3839,7 @@ async function saveAiAssistSettings() {
     aiAssistFormDirty = false;
     if (currentData) currentData.ai_assist = status;
     const mount = document.getElementById('aiAssistSettingsMount') || document.getElementById('aiAssistSettings');
-    if (mount) mount.innerHTML = renderAiAssistSettings(status);
+    if (mount) mountAiAssistSettings(mount, status);
     updateAiAssistFormVisibility();
     showToast('AI Assist settings saved');
   } catch (error) {
@@ -6337,7 +6387,7 @@ async function loadOnce(resetDetail, forceRefresh) {
   document.getElementById('coverageRowsSettings').innerHTML = renderCoverage(coverage);
   const aiAssistNode = document.getElementById('aiAssistSettingsMount') || document.getElementById('aiAssistSettings');
   if (aiAssistNode && !(aiAssistFormDirty && activeSettingsPanel === 'ai')) {
-    aiAssistNode.innerHTML = renderAiAssistSettings(data.ai_assist || {});
+    mountAiAssistSettings(aiAssistNode, data.ai_assist || {});
     updateAiAssistFormVisibility();
   }
   const companionNode = document.getElementById('companionSettingsMount');

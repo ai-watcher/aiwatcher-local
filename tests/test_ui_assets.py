@@ -570,7 +570,7 @@ class TrimmedHomeTest(unittest.TestCase):
         built_at_runtime = {
             "aiAssistApiKey", "aiAssistApiKeyRow", "aiAssistBaseUrl",
             "aiAssistBaseUrlRow", "aiAssistCap", "aiAssistClearKey",
-            "aiAssistConfirm", "aiAssistForgetKey", "aiAssistKeyStatus",
+            "aiAssistAutoFreshStart", "aiAssistConfirm", "aiAssistForgetKey", "aiAssistKeyStatus",
             "aiAssistMode", "aiAssistModel", "aiAssistProvider",
             "aiAssistProviderHint", "aiAssistProviderRow", "aiAssistSettings",
             "aiAssistSetupBox", "aiAssistSetupCopy",
@@ -2999,6 +2999,37 @@ class AiAssistDrawerTest(unittest.TestCase):
                 self.assertIn("confirmed = window.confirm(", fn)
                 self.assertNotIn("confirmed: true", fn)
                 self.assertTrue("payload.confirmed = confirmed" in fn or "confirmed,\n" in fn)
+
+    def test_auto_compose_waits_for_detailed_evidence_and_is_explicitly_configured(self):
+        self.assertIn("if (!capsule || capsule.basic", self.js)
+        self.assertIn("config.auto_compose_fresh_start", self.js)
+        self.assertIn("maybeAutoComposeFreshStart(capsule);", self._fn("openHandoff"))
+        self.assertIn("auto_compose_fresh_start: document.getElementById('aiAssistAutoFreshStart').checked", self.js)
+        fn = self._fn("improveFreshStartWithAiAssist")
+        self.assertIn("payload.automatic = true", fn)
+        self.assertNotIn("confirmed = automatic", fn)
+
+    def test_advanced_ai_assist_options_stay_open_across_data_refreshes(self):
+        # The refresh rebuilt the panel and every rebuilt <details> started closed.
+        self.assertNotIn("innerHTML = renderAiAssistSettings(data.ai_assist", self.js)
+        self.assertIn("mountAiAssistSettings(aiAssistNode, data.ai_assist || {});", self.js)
+        start = self.js.index("function mountAiAssistSettings(")
+        helper = self.js[start:self.js.index("\nfunction ", start + 1)]
+        self.assertIn("wasOpen", helper)
+        self.assertIn("rebuilt.open = true", helper)
+
+    def test_drawer_copy_does_not_promise_confirmation_when_auto_compose_runs(self):
+        start = self.js.index("function renderHandoff(")
+        fn = self.js[start:self.js.index("\nfunction ", start + 1)]
+        self.assertIn("aiConfig.auto_compose_fresh_start", fn)
+        self.assertIn("It runs automatically once detailed evidence is ready", fn)
+        self.assertNotIn("acceptance checks. It runs only after your confirmation.'", fn)
+
+    def test_fresh_start_ai_request_has_a_visible_recovery_deadline(self):
+        fn = self._fn("improveFreshStartWithAiAssist")
+        self.assertIn("{ timeoutMs: 30000 }", fn)
+        self.assertIn("error.name === 'AbortError'", fn)
+        self.assertIn("The local brief is still ready", fn)
 
     def test_an_attached_runtime_still_leaves_a_copy_that_only_copies(self):
         # The primary copies and opens the old workspace. Leaving that tool

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import socket
 import time
@@ -34,7 +35,9 @@ DEFAULT_MODELS = {
 }
 
 MAX_FRESH_START_INPUT_CHARS = 9000
-MAX_FRESH_START_OUTPUT_TOKENS = 700
+# The Fresh Start JSON has 13 fields; at 700 real answers were cut off mid-object,
+# could not be parsed, and were rejected as generic after being billed.
+MAX_FRESH_START_OUTPUT_TOKENS = 1400
 MAX_FRESH_START_BRIEF_CHARS = 6000
 MAX_OPTIMIZE_CLEANUP_INPUT_CHARS = 7000
 MAX_OPTIMIZE_CLEANUP_OUTPUT_TOKENS = 600
@@ -62,6 +65,28 @@ class AiAssistUnavailable(RuntimeError):
         # _call_configured_chat so an "auto" config can still record which
         # key was rejected.
         self.provider = provider
+
+
+class AiAssistRejected(AiAssistUnavailable):
+    """The provider answered, AIWatcher discarded the answer as unusable.
+
+    Unlike other failures this call completed and was billed, so it carries
+    the response's mode, model, and token usage for the spend ledger.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str | None = None,
+        mode: str | None = None,
+        model: str | None = None,
+        usage: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, provider=provider)
+        self.mode = mode
+        self.model = model
+        self.usage = usage if isinstance(usage, dict) else {}
 
 
 def _port_open(host: str, port: int, *, timeout: float = 0.06) -> bool:
@@ -711,6 +736,8 @@ def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -
     next_steps = _clean_list(parsed.get("next_steps"), limit=6)
     uncertainties = _clean_list(parsed.get("uncertainties"), limit=5)
     acceptance = _clean_list(parsed.get("acceptance_check") or parsed.get("acceptance"), limit=5)
+    verification = _clean_list(parsed.get("verification_already_run") or parsed.get("verification"), limit=5)
+    objective_status = _clean_line(parsed.get("objective_status"), limit=180)
 
     source_lines = [
         f"Project: {_clean_line(source.get('project'), limit=420)}",
@@ -736,6 +763,7 @@ def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -
         "",
         "Objective",
         f"- {goal or 'Continue the same user goal from the source workspace after verifying the evidence.'}",
+        f"- Status: {objective_status or ('Confirmed from supplied context.' if packet.get('objective') else 'Not captured; confirm the desired outcome before editing.')}",
         *_section("Completed work", what_done or ["No completed work was established by the model; verify the evidence below before editing."]),
         *_section("Current state", current_state or _packet_list(packet, "current_state", limit=6)),
         *_section("Decisions already made", decisions or _packet_list(packet, "logged_decisions", limit=5)),
@@ -748,6 +776,7 @@ def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -
         "First action",
         f"- {next_ask or 'State what appears done, what remains uncertain, and the smallest safe checkpoint before editing.'}",
         *_section("Acceptance criteria", acceptance or _packet_list(packet, "acceptance_criteria", limit=5)),
+        *_section("Verification already observed", verification or _packet_list(evidence, "tests", limit=5) or ["No completed verification was observed; do not claim the prior work is verified."]),
         *_section("Open questions and uncertainty", uncertainties),
         *_section("Evidence carried forward", evidence_lines or ["No commit, file, test, or decision evidence was available."]),
         "",
@@ -772,8 +801,23 @@ def _fresh_start_response_is_useful(parsed: dict[str, object], packet_text: str)
         "continue the same user goal",
     )
     packet = _handoff_packet(packet_text)
+    objective_known = bool(
+        _clean_line(packet.get("objective"), limit=500)
+        or ((packet.get("context_quality") or {}).get("objective_known") if isinstance(packet.get("context_quality"), dict) else False)
+    )
     if not goal or not next_ask:
         return False
+    if not objective_known:
+        objective_status = _clean_line(parsed.get("objective_status"), limit=300).lower()
+        combined = f"{goal} {next_ask} {objective_status}"
+        if not any(term in combined for term in (
+            "unknown", "not known", "not captured", "unclear", "confirm the desired", "confirm the intended",
+            "ask the user", "ask which", "which outcome",
+        )):
+            return False
+        normalized_ask = next_ask.replace("`", "").rstrip(".")
+        if normalized_ask in {"run git status --short", "check git status"}:
+            return False
     if not _clean_line(packet.get("objective"), limit=500) and any(phrase in goal for phrase in generic):
         return False
     populated = sum(bool(_clean_list(parsed.get(key), limit=2)) for key in (
@@ -789,8 +833,14 @@ def _fresh_start_response_is_useful(parsed: dict[str, object], packet_text: str)
         value = evidence.get(key)
         if isinstance(value, list):
             evidence_anchors.extend(str(item) for item in value[:4])
-    evidence_anchors.extend(_packet_list(packet, "logged_decisions", limit=4))
-    anchors = evidence_anchors or [
+    # A logged decision is "title — reasoning". Requiring the whole paragraph
+    # verbatim rejected every decision-only session; the title is the anchor.
+    evidence_anchors.extend(
+        re.split(r"\s[—–-]\s", item, maxsplit=1)[0].strip()
+        for item in _packet_list(packet, "logged_decisions", limit=4)
+    )
+    anchors = [
+        *evidence_anchors,
         str(source.get("project") or ""),
         str(source.get("session_id") or ""),
     ]
@@ -873,7 +923,8 @@ _FRESH_START_SPEC = _WorkflowSpec(
         "Preserve deterministic evidence boundaries: do not invent saved tokens, commits, tests, "
         "files, outcomes, exact chat links, secrets, or prior conversation content. If prompt text "
         "or transcript content is not present, say the task must be reconstructed from repo state "
-        "and local evidence. Prefer specific evidence from the handoff over generic advice. Every "
+        "and local evidence. Never infer the user's objective from changed files, commit subjects, "
+        "or token counts; those describe workspace state, not intent. Prefer specific evidence from the handoff over generic advice. Every "
         "useful bullet should carry a concrete path, file, session id, count, decision, command, "
         "or explicit uncertainty from the evidence when one exists."
     ),
@@ -890,6 +941,8 @@ _FRESH_START_SPEC = _WorkflowSpec(
         "next_steps: string[]\n"
         "next_ask: string\n"
         "acceptance_check: string[]\n"
+        "verification_already_run: string[]\n"
+        "objective_status: string\n"
         "uncertainties: string[]\n\n"
         "Every factual statement must come from the packet. Include the exact project path and at "
         "least one concrete commit, changed file, test, decision, command, or session id when the "
@@ -898,7 +951,10 @@ _FRESH_START_SPEC = _WorkflowSpec(
         "boilerplate from the local handoff unless the evidence is genuinely missing. Keep it short "
         "enough to paste without carrying the whole old conversation. Do not use vague goals like "
         "\"reconstruct the current work\" unless no stronger objective is present; tie the goal to "
-        "the observed workspace/tool/path/evidence instead."
+        "the observed workspace/tool/path/evidence instead. When context_quality.objective_known is false, "
+        "state that the objective is unknown and make the first action inspect concrete evidence and ask one focused "
+        "outcome question; do not manufacture a coding goal or use `git status` alone as the first action. "
+        "Separate verification already observed from checks the new session still needs to run."
     ),
     evidence_heading="Local AIWatcher handoff evidence:",
     structure=_structured_handoff_text,
@@ -992,8 +1048,16 @@ def _compose(
     text = str(response.get("text") or "").strip()
     parsed = _json_object_from_text(text)
     if spec.id == "fresh_start" and not _fresh_start_response_is_useful(parsed or {}, trimmed):
-        raise AiAssistUnavailable(
-            "AI Assist returned a generic handoff without enough concrete session evidence; using the local evidence-backed brief instead."
+        raise AiAssistRejected(
+            (
+                "AI Assist's answer was cut off or was not valid JSON; using the local evidence-backed brief instead."
+                if parsed is None
+                else "AI Assist returned a generic handoff without enough concrete session evidence; using the local evidence-backed brief instead."
+            ),
+            provider=str(response.get("provider") or "") or None,
+            mode=str(response.get("mode") or "") or None,
+            model=str(response.get("model") or "") or None,
+            usage=response.get("usage") if isinstance(response.get("usage"), dict) else {},
         )
     final_text = spec.structure(parsed if parsed else {spec.fallback_key: text}, trimmed)
     return {
