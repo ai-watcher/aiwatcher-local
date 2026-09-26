@@ -673,7 +673,9 @@ class UpdateCommandCliTests(unittest.TestCase):
         self.assertEqual(result["installed_commit"], "abc123456789")
         self.assertEqual(result["latest_commit"], "fedcba987654")
         self.assertEqual(result["commits"][0]["subject"], "fix updater")
-        self.assertEqual(result["command"], ["pipx", "upgrade", "aiwatcher-local"])
+        self.assertEqual(result["command"], ["pipx", "reinstall", "aiwatcher-local"])
+        self.assertEqual(result["update_channel"], "github")
+        self.assertEqual(result["update_unit"], "commit")
         self.assertIn("/compare/abc1234567890...main", fetch_json.call_args.args[0])
         git_capture.assert_not_called()
 
@@ -681,6 +683,8 @@ class UpdateCommandCliTests(unittest.TestCase):
         with (
             patch.object(updater, "install_kind", return_value="package"),
             patch.object(updater, "_direct_url_metadata", return_value=None),
+            patch.object(updater, "package_manager", return_value="pipx"),
+            patch.object(updater.shutil, "which", return_value="/usr/local/bin/pipx"),
             patch.object(updater, "_fetch_json", return_value={"info": {"version": "0.2.0"}}),
         ):
             result = updater.check_for_updates()
@@ -689,7 +693,27 @@ class UpdateCommandCliTests(unittest.TestCase):
         self.assertEqual(result["latest_version"], "0.2.0")
         self.assertTrue(result["update_available"])
         self.assertTrue(result["can_apply"])
+        self.assertEqual(result["command"], ["pipx", "upgrade", "aiwatcher-local"])
+        self.assertEqual(result["update_channel"], "pypi")
+        self.assertEqual(result["update_unit"], "version")
         self.assertIn("0.2.0", str(result["message"]))
+
+    def test_git_package_install_forces_reinstall_when_pipx_is_unavailable(self) -> None:
+        direct_url = {
+            "url": "https://github.com/ai-watcher/aiwatcher-local.git",
+            "vcs_info": {"vcs": "git", "requested_revision": "main", "commit_id": "abc123"},
+        }
+        with patch.object(updater.shutil, "which", return_value=None):
+            command = updater._package_update_command("pip", direct_url)
+
+        self.assertEqual(
+            command,
+            [
+                sys.executable, "-m", "pip", "install", "--upgrade",
+                "--force-reinstall", "--no-deps",
+                "git+https://github.com/ai-watcher/aiwatcher-local.git@main",
+            ],
+        )
 
     def test_package_apply_runs_the_detected_installer_command(self) -> None:
         status = {

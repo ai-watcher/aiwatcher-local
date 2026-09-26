@@ -1414,6 +1414,10 @@ function classifyUpdateStatus(data) {
 function updateBannerLabel(status, data) {
   const count = Number((data && data.behind) || 0);
   if (status === 'checking') return 'Checking...';
+  if (status === 'available' && data && data.update_unit === 'commit') {
+    return `${count || ''} newer commit${count === 1 ? '' : 's'}`.trim();
+  }
+  if (status === 'available' && data && data.update_unit === 'version') return 'New version available';
   if (status === 'available') return `${count || ''} update${count === 1 ? '' : 's'} available`.trim();
   if (status === 'current') return 'Already up to date';
   if (status === 'package') return 'Check updates';
@@ -1431,10 +1435,13 @@ function updateBannerTitle(status, data) {
   const branch = data && data.install_kind === 'source' ? `GitHub branch: ${updateBranchLabel(data)}` : '';
   const target = data && data.remote_ref ? `Update target: ${data.remote_ref}` : '';
   const manager = data && data.install_kind !== 'source' && data.package_manager ? `Installer: ${data.package_manager}` : '';
+  const channel = data && data.install_kind !== 'source' && data.update_channel
+    ? `Update channel: ${data.update_channel === 'github' ? 'GitHub commits' : 'PyPI releases'}`
+    : '';
   const versions = data && data.install_kind !== 'source'
     ? [`Installed: ${data.version || 'unknown'}`, data.latest_version ? `Latest: ${data.latest_version}` : ''].filter(Boolean).join('\n')
     : '';
-  const details = [source, manager, versions, branch, target, launched].filter(Boolean).join('\n');
+  const details = [source, manager, channel, versions, branch, target, launched].filter(Boolean).join('\n');
   const location = details ? `\n${details}` : '';
   if (status === 'available') {
     return `Updates are available. Click to review update options.${location}`;
@@ -1449,7 +1456,8 @@ function updateLocationLabel(data) {
   if (!data) return 'Source unknown';
   if (data.install_kind && data.install_kind !== 'source') {
     const manager = data.package_manager || 'Package';
-    return `${manager} package${data.version ? ` · v${data.version}` : ''}`;
+    const channel = data.update_channel === 'github' ? 'GitHub' : data.update_channel === 'pypi' ? 'PyPI' : '';
+    return `${channel ? `${channel} · ` : ''}${manager}${data.version ? ` · v${data.version}` : ''}`;
   }
   return 'Source checkout';
 }
@@ -1564,7 +1572,13 @@ function renderUpdateStatus(update) {
         ${data.checked_out !== undefined ? `<span><b>GitHub branch</b> <code>${esc(updateBranchLabel(data))}</code></span>` : ''}
         ${data.remote_ref ? `<span><b>Update target</b> <code>${esc(data.remote_ref)}</code></span>` : ''}
       </div>`
-    : '';
+    : data.install_kind && data.install_kind !== 'source' && (data.source_root || data.process_cwd)
+      ? `<div class="update-location">
+          ${data.source_root ? `<span><b>Installed package</b> <code>${esc(data.source_root)}</code></span>` : ''}
+          ${data.process_cwd ? `<span><b>Started from</b> <code>${esc(data.process_cwd)}</code></span>` : ''}
+          <span><b>Update channel</b> <code>${esc(data.update_channel === 'github' ? 'GitHub commits' : 'PyPI releases')}</code></span>
+        </div>`
+      : '';
   const action = data.can_apply
     ? data.install_kind === 'source'
       ? '<p>Apply will fast-forward this clean checkout and restart the dashboard. A running Companion keeps the old code until <code>aiwatcher companion stop</code>, then <code>aiwatcher companion start</code>.</p>'
@@ -1601,7 +1615,7 @@ async function checkForUpdates(button, options = {}) {
       button.textContent = !data.ok
         ? 'Retry check'
         : data.update_available
-        ? `${data.behind || ''} update${Number(data.behind) === 1 ? '' : 's'} available`.trim()
+        ? updateBannerLabel('available', data)
         : 'Up to date';
     }
     showToast(data.message || 'Update check complete', data.ok ? 'success' : 'error');

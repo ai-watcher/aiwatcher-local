@@ -3326,14 +3326,17 @@ class ConsistentUpdateBadgeTest(unittest.TestCase):
     def test_the_badge_uses_common_update_labels(self):
         label = js_function_source(self.js, "updateBannerLabel")
         self.assertIn("return 'Already up to date'", label)
+        self.assertIn("newer commit", label)
+        self.assertIn("New version available", label)
         self.assertNotIn("Feature branch", label)
 
     def test_the_header_shows_install_channel_and_keeps_details_in_the_hover(self):
         self.assertIn("return 'Source checkout'", self.js)
-        self.assertIn("`${manager} package${data.version ? ` · v${data.version}` : ''}`", self.js)
+        self.assertIn("`${channel ? `${channel} · ` : ''}${manager}${data.version ? ` · v${data.version}` : ''}`", self.js)
         self.assertIn("GitHub branch: ${updateBranchLabel(data)}", self.js)
         self.assertIn("Update target: ${data.remote_ref}", self.js)
         self.assertIn("Installer: ${data.package_manager}", self.js)
+        self.assertIn("Update channel: ${data.update_channel === 'github' ? 'GitHub commits' : 'PyPI releases'}", self.js)
         self.assertIn("Installed: ${data.version || 'unknown'}", self.js)
         self.assertIn("<b>GitHub branch</b>", self.js)
         self.assertIn("<b>Update target</b>", self.js)
@@ -3410,7 +3413,9 @@ class ApplyIsASecondStepTest(unittest.TestCase):
 
     def test_package_update_details_show_installer_without_checkout_path(self):
         renderer = js_function_source(self.js, "renderUpdateStatus")
-        self.assertIn("data.install_kind === 'source' && (data.repo || data.process_cwd)", renderer)
+        self.assertIn("<b>Installed package</b>", renderer)
+        self.assertIn("<b>Started from</b>", renderer)
+        self.assertIn("<b>Update channel</b>", renderer)
         self.assertIn("data.command_text", renderer)
         self.assertIn("package_manager", renderer)
         self.assertIn("data.version", renderer)
