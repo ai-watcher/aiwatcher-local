@@ -3402,14 +3402,17 @@ class ApplyIsASecondStepTest(unittest.TestCase):
         scheduler = js_function_source(self.js, "scheduleHeaderUpdateCheck")
         self.assertNotIn("currentData.update_install_kind !== 'source'", scheduler)
         self.assertIn('"update_source_root": str(installed_source_root())', self.ui_source)
+        self.assertIn('"update_install_revision": package_install_revision()', self.ui_source)
         self.assertIn("renderUpdateBannerForInstall(data.update_install_kind)", self.js)
         self.assertIn("installKind: currentData && currentData.update_install_kind", scheduler)
         self.assertIn("sourceRoot: currentData && currentData.update_source_root", scheduler)
+        self.assertIn("installRevision: currentData && currentData.update_install_revision", scheduler)
         restore = self.js.split("function restoreCachedUpdateState", 1)[1].split("\n}\n", 1)[0]
         self.assertIn("installKind && installKind !== 'source'", restore)
         self.assertIn("setUpdateState('package'", restore)
         self.assertIn("cached.data.source_root || cached.data.repo", restore)
         self.assertIn("cachedKind !== installKind", restore)
+        self.assertIn("cachedRevision !== installRevision", restore)
 
     def test_package_update_details_show_installer_without_checkout_path(self):
         renderer = js_function_source(self.js, "renderUpdateStatus")

@@ -45,9 +45,17 @@ def install_identity() -> dict[str, object]:
         "package_manager": package_manager(),
         "source_root": str(installed_source_root()),
         "version": __version__,
+        "install_revision": package_install_revision(),
         "pid": os.getpid(),
         "process_cwd": str(Path.cwd().resolve()),
     }
+
+
+def package_install_revision() -> str:
+    """Stable package identity for invalidating cached update results."""
+    if install_kind() == "source":
+        return __version__
+    return _direct_url_commit(_direct_url_metadata()) or __version__
 
 
 def package_upgrade_guidance(direct: dict[str, Any] | None = None) -> list[dict[str, str]]:
@@ -201,6 +209,7 @@ def _package_update_status(*, fetch: bool, branch: str) -> dict[str, object]:
     direct = _direct_url_metadata()
     manager = package_manager()
     command = _package_update_command(manager, direct)
+    installed_commit = _direct_url_commit(direct)
     payload: dict[str, object] = {
         "ok": True,
         "install_kind": "package",
@@ -211,7 +220,8 @@ def _package_update_status(*, fetch: bool, branch: str) -> dict[str, object]:
         "remote": "github",
         "branch": branch,
         "remote_ref": f"github/{branch}",
-        "update_channel": "github" if _direct_url_commit(direct) else "pypi",
+        "update_channel": "github" if installed_commit else "pypi",
+        "install_revision": installed_commit or __version__,
         "update_available": False,
         "can_apply": False,
         "guidance": package_upgrade_guidance(direct),
@@ -225,7 +235,7 @@ def _package_update_status(*, fetch: bool, branch: str) -> dict[str, object]:
         )
         return payload
 
-    commit = _direct_url_commit(direct)
+    commit = installed_commit
     if commit:
         compare = urllib.parse.quote(f"{commit}...{branch}", safe=".")
         try:
@@ -472,14 +482,20 @@ def apply_updates(
                 "message": f"Package update failed: {_message(updated)}",
             })
             return status
-        status.update({
+        refreshed = check_for_updates(repo=repo, remote=remote, branch=branch, fetch=fetch)
+        result = refreshed if refreshed.get("ok") else {
+            **status,
+            "update_available": False,
+            "can_apply": False,
+        }
+        result.update({
             "ok": True,
             "applied": True,
             "restart_required": True,
             "output": updated.stdout.strip() or updated.stderr.strip() or "Package upgraded.",
             "message": "Updated. AIWatcher processes already running keep the old code until restarted.",
         })
-        return status
+        return result
 
     status = check_for_updates(repo=repo, remote=remote, branch=branch, fetch=fetch)
     if not status.get("ok"):

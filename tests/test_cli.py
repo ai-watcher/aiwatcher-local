@@ -725,9 +725,16 @@ class UpdateCommandCliTests(unittest.TestCase):
             "message": "2 update(s) available.",
         }
         completed = subprocess.CompletedProcess(status["command"], 0, stdout="upgraded\n", stderr="")
+        refreshed = {
+            **status,
+            "update_available": False,
+            "can_apply": False,
+            "behind": 0,
+            "message": "Already up to date.",
+        }
         with (
             patch.object(updater, "install_kind", return_value="package"),
-            patch.object(updater, "check_for_updates", return_value=status),
+            patch.object(updater, "check_for_updates", side_effect=[status, refreshed]) as check,
             patch.object(updater.subprocess, "run", return_value=completed) as run,
         ):
             result = updater.apply_updates()
@@ -736,6 +743,8 @@ class UpdateCommandCliTests(unittest.TestCase):
         self.assertTrue(result["applied"])
         self.assertTrue(result["restart_required"])
         self.assertEqual(result["output"], "upgraded")
+        self.assertFalse(result["update_available"])
+        self.assertEqual(check.call_count, 2)
         run.assert_called_once()
         self.assertEqual(run.call_args.args[0], ["pipx", "upgrade", "aiwatcher-local"])
 
