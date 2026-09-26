@@ -598,7 +598,7 @@ aiwatcher watch --interval 30 --notify
 | `--cost-threshold` | number | `5.0` | Flag a session above this API-equivalent cost, in dollars |
 | `--calls-threshold` | integer | `250` | Flag a session above this many model calls |
 | `--tokens-threshold` | integer | `500000` | Flag a session above this many tokens |
-| `--notify` | flag |  | Send a best-effort local OS notification when watch recommends action, and for outcome-review signals (survival, churn, same-file re-prompt, cost-per-surviving-change) |
+| `--notify` | flag |  | Send a best-effort local OS notification when watch recommends action, and for outcome-review signals (kept lines, churn, same-file re-prompt, cost per kept change) |
 | `--overlay` | flag |  | Open a local AIWatcher companion overlay when watch recommends Fresh Start or another action |
 | `--companion` | flag |  | Mark this foreground watch as the dashboard-independent companion process |
 | `--target` | `claude`, `codex`, `cursor`, `generic`, `vscode` | `generic` | Format the auto-generated CRITICAL-context Fresh Start brief for this AI tool |

@@ -240,7 +240,7 @@ class ChurnDowngradesInferredOutcomeTests(unittest.TestCase):
 
         self.assertEqual(evidence.inferred_outcome, "churned")
         self.assertEqual(evidence.confidence, "medium")
-        self.assertTrue(any("did not survive" in reason for reason in evidence.reasons))
+        self.assertTrue(any("is gone from" in reason for reason in evidence.reasons))
 
     def test_survived_status_does_not_change_useful(self) -> None:
         now = datetime.now(timezone.utc)
