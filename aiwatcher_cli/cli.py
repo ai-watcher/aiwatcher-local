@@ -4650,9 +4650,9 @@ def command_changes(args: argparse.Namespace) -> int:
             "work was authored, not when git restamped it."
         )
     if not by_change:
-        print("Survival not measured yet. Run `aiwatcher today` to compute it.")
+        print("Kept lines not measured yet. Run `aiwatcher today` to compute it.")
     else:
-        print("Blank survival means not measured, not 'did not survive'. It is a floor either way.")
+        print("A blank means not measured, not 'gone'. It is a floor either way.")
     print_unbanked_line(events, days=args.days, ledger=ledger)
     return 0
 
@@ -4914,7 +4914,7 @@ def command_report(args: argparse.Namespace) -> int:
         # keys long after the digest started returning the new schema, and every
         # `aiwatcher report` run crashed with a KeyError the moment survival became
         # available. A missing key should cost a field, not the command.
-        line = f"\nCost per surviving line: {survival.get('cost_per_surviving_line_label', '-')}"
+        line = f"\nCost per kept line: {survival.get('cost_per_surviving_line_label', '-')}"
         per_line = survival.get("cost_per_line_label")
         if per_line:
             line += f" (vs {per_line} per line written)"
@@ -4930,7 +4930,7 @@ def command_report(args: argparse.Namespace) -> int:
     elif survival.get("reason"):
         # Blank is not zero. Saying why it is unmeasured beats printing nothing
         # and letting the reader assume nothing survived.
-        print(f"\nCost per surviving line: {survival['reason']}")
+        print(f"\nCost per kept line: {survival['reason']}")
 
     print(f"\nRecommended: {digest['recommendation']}")
 
@@ -6654,8 +6654,8 @@ def _check_outcome_review_signals(rows: Sequence[LocalSession]) -> None:
                     continue
             project_name = project_label(session.project_path)
             if status == "survived":
-                title = "AIWatcher: change survived"
-                reason = f"{project_name} - This session's change survived {bucket} days. Mark it useful?"
+                title = "AIWatcher: change still there"
+                reason = f"{project_name} - This session's change is still there {bucket} days on. Mark it useful?"
             else:
                 title = "AIWatcher: change churned"
                 reason = f"{project_name} - This session looked useful, but the commit no longer exists on the branch."
@@ -6723,9 +6723,9 @@ def _check_outcome_review_signals(rows: Sequence[LocalSession]) -> None:
                 signal_type="cost_per_surviving_line",
                 session_id="",
                 tool="local",
-                title="AIWatcher: cost-per-surviving-line available",
+                title="AIWatcher: cost per kept line available",
                 reason=(
-                    "Cost per surviving line is now available for your local history -- "
+                    "Cost per kept line is now available for your local history -- "
                     "measured from how much of each change is still in the code."
                 ),
                 url=_outcome_dashboard_url(),
@@ -9861,8 +9861,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Send a best-effort local OS notification when watch recommends action, "
-            "and for outcome-review signals (survival, churn, same-file re-prompt, "
-            "cost-per-surviving-change)"
+            "and for outcome-review signals (kept lines, churn, same-file re-prompt, "
+            "cost per kept change)"
         ),
     )
     watch.add_argument(

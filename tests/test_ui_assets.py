@@ -814,7 +814,7 @@ class HomeStatRowTest(unittest.TestCase):
         self.assertIn(".metric-card .sub { min-height:", self.css)
 
     def test_cost_per_surviving_line_has_its_own_card(self):
-        self.assertIn('<div class="label">Cost per surviving line</div>', self.row)
+        self.assertIn('<div class="label">Cost per kept line</div>', self.row)
         # Not a sentence inside the Useful outcomes card any more.
         self.assertNotIn("per surviving line —", self.js)
 
@@ -2922,7 +2922,7 @@ class CorrectnessSweepTest(unittest.TestCase):
     def test_the_surviving_line_label_is_not_doubled(self):
         # The span renders "$0.03 per surviving line"; the prefix said it again
         # and made the line longer than before the fix that added the scope note.
-        self.assertNotIn("Cost per surviving line: <span", self.html)
+        self.assertNotIn("Cost per kept line: <span", self.html)
         self.assertIn('id="costPerSurviving"', self.html)
 
     def test_the_quiet_state_states_its_session_count_once(self):

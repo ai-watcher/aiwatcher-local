@@ -1296,7 +1296,7 @@ class PromptSavingsBaselineTests(unittest.TestCase):
             "cost_coverage_pct": 81.0,
         })
 
-        self.assertIn("Cost per surviving line: $0.42", output)
+        self.assertIn("Cost per kept line: $0.42", output)
         self.assertIn("$0.19 per line written", output)
         self.assertIn("73.0% of lines still standing across 28 changes", output)
         self.assertIn("81.0% of the window's banked spend", output)
@@ -1308,7 +1308,7 @@ class PromptSavingsBaselineTests(unittest.TestCase):
         # figure should cost the detail line, not the whole command.
         output = self._run_report({"available": True, "cost_per_surviving_line_label": "$0.42"})
 
-        self.assertIn("Cost per surviving line: $0.42", output)
+        self.assertIn("Cost per kept line: $0.42", output)
         self.assertNotIn("still standing", output)
 
     def test_report_states_why_survival_is_unmeasured(self) -> None:
@@ -3282,8 +3282,8 @@ class OutcomeReviewSignalTests(unittest.TestCase):
 
         notify.assert_called_once()
         title, body = notify.call_args.args[0], notify.call_args.args[1]
-        self.assertIn("survived", title.lower())
-        self.assertIn("survived 7 days", body)
+        self.assertIn("still there", title.lower())
+        self.assertIn("still there 7 days on", body)
         self.assertIn("Mark it useful?", body)
         record_sent.assert_called_once_with(f"{row.session_id}:survival:7")
         record_watch.assert_called_once()
@@ -3471,7 +3471,7 @@ class OutcomeReviewSignalTests(unittest.TestCase):
 
         notify.assert_called_once()
         body = notify.call_args.args[1]
-        self.assertIn("Cost per surviving line is now available", body)
+        self.assertIn("Cost per kept line is now available", body)
         record_sent.assert_called_once_with("cost_per_surviving_line:available")
         _, kwargs = record_watch.call_args
         self.assertEqual(kwargs["session_id"], "")

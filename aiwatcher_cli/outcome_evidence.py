@@ -402,7 +402,7 @@ def build_outcome_evidence(session: LocalSession, *, survival: dict[str, str] | 
         evidence.inferred_outcome = "churned"
         evidence.confidence = "medium"
         evidence.reasons.append(
-            "The commit that looked useful did not survive on the current branch -- "
+            "The commit that looked useful is gone from the current branch -- "
             "it was likely reverted or rewritten."
         )
     return evidence

@@ -1202,7 +1202,7 @@ function renderEvidence(evidence) {
       <div class="mini"><span class="label">Nearby commits</span><strong>${esc(commits.length)}</strong></div>
       <div class="mini"><span class="label">Changed files</span><strong>${esc(files.length)}</strong></div>
     </div>
-    ${survival ? `<div class="pill-row"><span class="pill">Survival: ${esc(survival)}</span></div>` : ''}
+    ${survival ? `<div class="pill-row"><span class="pill">${esc(survival === 'survived' ? 'Still there' : survival === 'churned' ? 'Gone' : 'Not measured')}</span></div>` : ''}
     ${evidence.same_file_reprompt ? '<div class="pill-row"><span class="pill rework">A later session touched the same file(s) again soon after</span></div>' : ''}
     ${tests.length ? `<div class="pill-row"><span class="pill">${esc(tests.length)} recent test artifact${tests.length === 1 ? '' : 's'}</span></div>` : ''}
     ${reasons.length ? `<ul class="insight-list">${reasons.map(reason => `<li>${esc(reason)}</li>`).join('')}</ul>` : ''}
@@ -2251,7 +2251,7 @@ function renderChangeTotals(rows, meta, unbanked) {
     <div class="mini"><span class="label">Attributed spend</span><strong>${esc(fmtMoney(cost))}</strong>${unbankedUsd > 0
       ? `<span class="mini-note">${esc(unbanked.unbanked_label)} has no commit to attach to</span>` : ''}</div>
     <div class="mini"><span class="label">Lines changed</span><strong>${esc(lines.toLocaleString())}</strong></div>
-    <div class="mini"><span class="label">Survival measured</span><strong>${esc(survivalDetail)}</strong>${survivalNote}</div>
+    <div class="mini"><span class="label">Kept lines measured</span><strong>${esc(survivalDetail)}</strong>${survivalNote}</div>
   </div>`;
 }
 function fmtMoney(value) {
@@ -4548,8 +4548,8 @@ function renderFirstRun(card) {
          ${card.repos ? `<li><b>${esc(card.repos)}</b> git repos found.</li>` : ''}
          <li>No AI sessions recorded yet.</li>
        </ul>
-       <p class="first-run-note">Cost and survival figures appear after a few sessions. Survival
-         needs commits about a week old before it means anything.</p>`;
+       <p class="first-run-note">Cost and kept-line figures appear after a few sessions. Measuring
+         what is still there needs commits about a week old before it means anything.</p>`;
 
   host.innerHTML = `<span class="eyebrow">First run</span>
     ${finding}

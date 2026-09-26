@@ -278,7 +278,7 @@ AIWatcher reads local evidence that AI tools already store on your machine.
 | Claude Code | Local JSONL session history under `~/.claude` when present |
 | Codex | Local rollout/session history when available |
 | Cursor and other tools | Detected local history where the tool exposes it |
-| Git repositories | Commit metadata, diffs, survival checks, and local working tree state |
+| Git repositories | Commit metadata, diffs, kept-line checks, and local working tree state |
 | Runtime watch | Process metadata such as age, CPU/RAM, command, and known session flags |
 
 AIWatcher stores local receipts, hashes, decisions, outcomes, and metadata. It

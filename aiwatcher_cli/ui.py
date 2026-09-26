@@ -3271,7 +3271,7 @@ def build_weekly_digest(days: int = 7) -> dict[str, object]:
     except OSError:
         # Same shape _survival_summary() returns when it has nothing, so every
         # consumer has one schema to read rather than two.
-        survival = {"available": False, "reason": "Survival cache could not be read."}
+        survival = {"available": False, "reason": "Kept-line cache could not be read."}
 
     recommendation = _recommend_weekly_improvement(
         commands_blocked=len(blocked),
@@ -5263,7 +5263,7 @@ def _insight_feed(
             "body": (
                 "Rebased, reset or amended away. This does not mean the work was undone -- "
                 "a revert leaves the original commit in place and would not show up here. "
-                "Cost per surviving line is the measure of whether the work lasted."
+                "Cost per kept line is the measure of whether the work lasted."
             ),
             "impact_usd": None,
             "session_id": None,

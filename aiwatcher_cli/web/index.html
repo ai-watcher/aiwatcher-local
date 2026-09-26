@@ -139,7 +139,7 @@
          question they answer.
 
          Home asks "is something happening right now that I should deal with".
-         Cost per useful change and cost per surviving line answer "was the
+         Cost per useful change and cost per kept line answer "was the
          spend worth it", which is a question you ask at the end of a period,
          not mid-task with an editor open. On Prove they stop being a standing
          summary and become the evidence under a claim. -->
@@ -335,15 +335,15 @@
           <th class="num"><button class="sort-head" onclick="setChangeSort('lines_changed')">Lines <span id="sort-change-lines_changed"></span></button></th>
           <th class="num"><button class="sort-head" onclick="setChangeSort('usd_per_line')">$/line <span id="sort-change-usd_per_line"></span></button></th>
           <th class="num"><button class="sort-head" onclick="setChangeSort('survival_pct')">Still standing <span id="sort-change-survival_pct"></span></button></th>
-          <th class="num"><button class="sort-head" onclick="setChangeSort('usd_per_surviving_line')">$/surviving line <span id="sort-change-usd_per_surviving_line"></span></button></th>
+          <th class="num"><button class="sort-head" onclick="setChangeSort('usd_per_surviving_line')">$/kept line <span id="sort-change-usd_per_surviving_line"></span></button></th>
         </tr></thead>
         <tbody id="changeRows"></tbody>
       </table></div>
       <p class="receipt-note">A change's cost is the AI spend in that repo since the previous change, attributed per
         model call rather than per session, and capped at a 12h lookback from when the work was <em>authored</em> —
-        rebasing rewrites a commit's date, and keying off that stranded the spend behind it. Survival is only measured
+        rebasing rewrites a commit's date, and keying off that stranded the spend behind it. Kept lines are only measured
         for changes old enough to judge and costly enough to reach the sampling budget — a blank means not measured,
-        not "did not survive". It is a floor either way: reformatting moves attribution away from the original change.</p>
+        not "gone". It is a floor either way: reformatting moves attribution away from the original change.</p>
     </div>
   </section>
 
@@ -429,7 +429,7 @@
            dashboard is willing to judge, so it gets a slot, not a sentence. The
            green rail is the shared identity of the two outcome-quality ratios,
            not a claim about the value -- it is green at every value. -->
-      <div class="card metric-card metric-green"><div class="label">Cost per surviving line</div><div class="value" id="costPerSurviving">-</div><div class="sub" id="costPerSurvivingSub">-</div><div class="metric-spark" id="survivalMeter" hidden></div></div>
+      <div class="card metric-card metric-green"><div class="label">Cost per kept line</div><div class="value" id="costPerSurviving">-</div><div class="sub" id="costPerSurvivingSub">-</div><div class="metric-spark" id="survivalMeter" hidden></div></div>
       <div class="card metric-card metric-blue"><div class="label">Sessions observed</div><div class="value" id="sessions">-</div><div class="sub">This machine only</div><div class="metric-spark" data-tile-spark="sessions" hidden></div></div>
       <div class="card metric-card metric-neutral"><div class="label">API-equivalent value</div><div class="value" id="apiValue">-</div><div class="sub">Excludes subscription allocation</div><div class="metric-spark" data-tile-spark="apiValue" hidden></div></div>
     </section>

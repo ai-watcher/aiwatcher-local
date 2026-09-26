@@ -42,7 +42,7 @@ NEXT_STEPS = {
         "Mark useful work accordingly. For an actual abandoned start, define a smaller next task with a clear stopping point.",
     ],
     "churned": [
-        "Check whether the change survives under a different commit after an amend or rebase.",
+        "Check whether the change is still there under a different commit after an amend or rebase.",
         "Confirm the outcome from the current work. Do not restore or reset a branch based only on commit reachability.",
     ],
     "outcome-review": [
