@@ -195,6 +195,7 @@ BRIEF_TOKEN_TTL_SECONDS = 900
 # Leading underscore is load-bearing: nothing outside this module (and
 # nothing else in this module) should reach for this lock on its own.
 _STATE_LOCK = threading.RLock()
+_AI_ASSIST_CLOUD_LOCK = threading.Lock()
 LOCK_TIMEOUT_SECONDS = 10
 LOCK_POLL_SECONDS = 0.05
 
@@ -226,6 +227,10 @@ class StateReadError(OSError):
 
 def _lock_path() -> Path:
     return state_path().parent / ".local-state.lock"
+
+
+def _ai_assist_cloud_lock_path() -> Path:
+    return state_path().parent / ".ai-assist-cloud-call.lock"
 
 
 def _acquire_file_lock(handle) -> None:
@@ -269,6 +274,51 @@ def _release_file_lock(handle) -> None:
             pass
     else:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def acquire_ai_assist_cloud_call_lock():
+    """Claim the one cloud-call slot shared by threads and UI processes.
+
+    Returns an opaque file handle when acquired and None when another call is
+    active. Lock-file existence alone is harmless; the OS releases the lock if
+    a process exits.
+    """
+    if not _AI_ASSIST_CLOUD_LOCK.acquire(blocking=False):
+        return None
+    handle = None
+    try:
+        lock_path = _ai_assist_cloud_lock_path()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(lock_path, "a+b")
+        if handle.seek(0, os.SEEK_END) == 0:
+            handle.write(b"\0")
+            handle.flush()
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            handle.close()
+            _AI_ASSIST_CLOUD_LOCK.release()
+            return None
+        return handle
+    except Exception:
+        if handle is not None:
+            handle.close()
+        _AI_ASSIST_CLOUD_LOCK.release()
+        raise
+
+
+def release_ai_assist_cloud_call_lock(handle) -> None:
+    if handle is None:
+        return
+    try:
+        _release_file_lock(handle)
+    finally:
+        handle.close()
+        _AI_ASSIST_CLOUD_LOCK.release()
 
 
 @contextlib.contextmanager
@@ -1850,7 +1900,7 @@ def _ai_assist_run_cost(model: str | None, usage: dict[str, Any], *, billable: b
 def ai_assist_day_spend(now: datetime | None = None) -> dict[str, Any]:
     """Today's cloud AI Assist spend, UTC calendar day, from run receipts.
 
-    The daily cap in Settings is checked against this before every model
+    The daily spend threshold in Settings is checked against this before every model
     call. Runs whose model has no known price cannot be summed, so they are
     counted separately and the caller can say so.
     """

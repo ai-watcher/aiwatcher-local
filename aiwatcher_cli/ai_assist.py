@@ -312,7 +312,7 @@ def build_ai_assist_status(config: dict[str, Any]) -> dict[str, object]:
         setup_hint = "The provider rejected this key. Paste a replacement in Settings -> AI Assist."
     elif mode == "cloud" and cloud_ready and selected_check_status == "verified":
         status_label = "Ready"
-        setup_hint = "Cloud Assist can run only after confirmation and within the daily cap."
+        setup_hint = "Cloud Assist can run only after confirmation and within the daily spend threshold."
     elif mode == "cloud" and cloud_ready:
         status_label = "Configured, not tested"
         setup_hint = "AIWatcher will test this key on the next confirmed AI Assist run."

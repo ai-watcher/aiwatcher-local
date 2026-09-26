@@ -47,9 +47,10 @@ function harness() {
     paintDrawerHealth() {}, currentData: { ai_assist: { config: {} } },
     encodeURIComponent,
   });
-  vm.runInContext('let drawerRequestToken = 0; const SESSION_LOOKUP_ATTEMPTS = 3;', context);
+  vm.runInContext('let drawerRequestToken = 0; const SESSION_LOOKUP_ATTEMPTS = 3; const autoFreshStartCompositionsInFlight = new Set();', context);
   for (const name of ['isCurrentDrawer', 'openDrawer', 'closeDrawer', 'openHandoff',
-    'selectSession', 'selectProject', 'improveFreshStartWithAiAssist']) {
+    'selectSession', 'selectProject', 'improveFreshStartWithAiAssist',
+    'freshStartAutoComposeKey', 'maybeAutoComposeFreshStart']) {
     vm.runInContext(functionSource(name), context);
   }
   function respond(url, value, occurrence = 0) {
@@ -186,6 +187,77 @@ test('AI response cannot replace a newer session drawer', async () => {
   await ai;
   assert.equal(h.writes.length, 0);
   assert.equal(h.notices.length, 0);
+});
+
+test('automatic Fresh Start composes once while in flight and can reuse the server cache later', async () => {
+  const h = harness();
+  const capsule = {
+    session_id: 'A', updated_at: '2026-09-26T12:00:00Z', target: 'codex',
+    objective: 'Finish the current task', source_refs: ['git status'],
+    constraints: ['Keep tests green'], acceptance_criteria: ['CI passes'],
+    ai_assist: { ready: true, config: { auto_compose_fresh_start: true, enabled_workflows: ['fresh_start'] } },
+  };
+
+  h.context.maybeAutoComposeFreshStart(capsule);
+  h.context.maybeAutoComposeFreshStart(capsule);
+  assert.equal(h.requests.filter(item => item.url === '/api/handoff-ai-assist').length, 1);
+
+  h.respond('/api/handoff-ai-assist', { id: 'A-ai', ai_assist_result: { status: 'used' } });
+  await flush();
+  h.context.maybeAutoComposeFreshStart(capsule);
+  assert.equal(h.requests.filter(item => item.url === '/api/handoff-ai-assist').length, 2);
+  h.respond('/api/handoff-ai-assist', { id: 'A-cached', ai_assist_result: { status: 'cached' } }, 1);
+  await flush();
+});
+
+test('automatic Fresh Start treats edited handoff inputs as a distinct request', async () => {
+  const h = harness();
+  const capsule = {
+    session_id: 'A', updated_at: '2026-09-26T12:00:00Z', target: 'codex',
+    objective: 'First objective', source_refs: [], constraints: [], acceptance_criteria: [],
+    ai_assist: { ready: true, config: { auto_compose_fresh_start: true, enabled_workflows: ['fresh_start'] } },
+  };
+
+  h.context.maybeAutoComposeFreshStart(capsule);
+  h.context.maybeAutoComposeFreshStart({ ...capsule, objective: 'Refined objective' });
+  assert.equal(h.requests.filter(item => item.url === '/api/handoff-ai-assist').length, 2);
+  h.respond('/api/handoff-ai-assist', { id: 'old', ai_assist_result: { status: 'used' } });
+  h.respond('/api/handoff-ai-assist', { id: 'new', ai_assist_result: { status: 'used' } }, 1);
+  await flush();
+});
+
+test('automatic Fresh Start treats refreshed server evidence as a distinct request', async () => {
+  const h = harness();
+  const capsule = {
+    session_id: 'A', updated_at: '2026-09-26T12:00:00Z', target: 'codex',
+    fresh_start_evidence_id: 'git-state-a',
+    objective: 'Same objective', source_refs: [], constraints: [], acceptance_criteria: [],
+    ai_assist: { ready: true, config: { auto_compose_fresh_start: true, enabled_workflows: ['fresh_start'] } },
+  };
+
+  h.context.maybeAutoComposeFreshStart(capsule);
+  h.context.maybeAutoComposeFreshStart({ ...capsule, fresh_start_evidence_id: 'git-state-b' });
+  assert.equal(h.requests.filter(item => item.url === '/api/handoff-ai-assist').length, 2);
+  h.respond('/api/handoff-ai-assist', { id: 'old', ai_assist_result: { status: 'used' } });
+  h.respond('/api/handoff-ai-assist', { id: 'new', ai_assist_result: { status: 'used' } }, 1);
+  await flush();
+});
+
+test('failed automatic Fresh Start releases its in-flight key for retry', async () => {
+  const h = harness();
+  const capsule = {
+    session_id: 'A', updated_at: '2026-09-26T12:00:00Z', target: 'codex',
+    objective: 'Retry safely', source_refs: [], constraints: [], acceptance_criteria: [],
+    ai_assist: { ready: true, config: { auto_compose_fresh_start: true, enabled_workflows: ['fresh_start'] } },
+  };
+
+  h.context.maybeAutoComposeFreshStart(capsule);
+  h.requests.find(item => item.url === '/api/handoff-ai-assist').reject(new Error('offline'));
+  await flush();
+  h.context.maybeAutoComposeFreshStart(capsule);
+  assert.equal(h.requests.filter(item => item.url === '/api/handoff-ai-assist').length, 2);
+  h.respond('/api/handoff-ai-assist', { id: 'retry', ai_assist_result: { status: 'used' } }, 1);
+  await flush();
 });
 
 test('abandoned session detail rejection is handled even if the summary is still pending', async () => {

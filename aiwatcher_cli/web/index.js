@@ -2044,7 +2044,27 @@ async function copyFreshStartFromDrawer(sessionId, openRuntime = false) {
 async function regenerateHandoff(sessionId, target = 'generic', includePrompt = false) {
   await openHandoff(sessionId, target, includePrompt, handoffOptionsFromForm('coding'));
 }
-const autoFreshStartCompositions = new Set();
+const autoFreshStartCompositionsInFlight = new Set();
+function freshStartAutoComposeKey(capsule) {
+  const config = capsule.ai_assist && capsule.ai_assist.config ? capsule.ai_assist.config : {};
+  return JSON.stringify([
+    capsule.fresh_start_evidence_id || [
+      capsule.session_id || '',
+      capsule.updated_at || '',
+      capsule.target || 'generic',
+      !!capsule.include_prompt_excerpt,
+      capsule.handoff_type || 'coding',
+      capsule.objective || '',
+      capsule.source_refs || [],
+      capsule.constraints || [],
+      capsule.acceptance_criteria || [],
+    ],
+    config.mode || 'off',
+    config.provider || 'none',
+    config.model || '',
+    config.base_url || '',
+  ]);
+}
 function maybeAutoComposeFreshStart(capsule) {
   const status = capsule && capsule.ai_assist ? capsule.ai_assist : {};
   const config = status.config || {};
@@ -2052,10 +2072,16 @@ function maybeAutoComposeFreshStart(capsule) {
   if (!capsule || capsule.basic || result.status === 'used' || result.status === 'cached') return;
   if (!status.ready || !config.auto_compose_fresh_start) return;
   if (!Array.isArray(config.enabled_workflows) || !config.enabled_workflows.includes('fresh_start')) return;
-  const key = `${capsule.session_id || ''}:${capsule.updated_at || ''}:${capsule.target || 'generic'}:${capsule.include_prompt_excerpt ? 'prompt' : 'metadata'}`;
-  if (autoFreshStartCompositions.has(key)) return;
-  autoFreshStartCompositions.add(key);
-  improveFreshStartWithAiAssist(capsule.session_id, capsule.target || 'generic', !!capsule.include_prompt_excerpt, true);
+  const key = freshStartAutoComposeKey(capsule);
+  if (autoFreshStartCompositionsInFlight.has(key)) return;
+  autoFreshStartCompositionsInFlight.add(key);
+  const release = () => autoFreshStartCompositionsInFlight.delete(key);
+  improveFreshStartWithAiAssist(
+    capsule.session_id,
+    capsule.target || 'generic',
+    !!capsule.include_prompt_excerpt,
+    true,
+  ).then(release, release);
 }
 async function improveFreshStartWithAiAssist(sessionId, target = 'generic', includePrompt = false, automatic = false) {
   const status = (typeof currentData !== 'undefined' && currentData && currentData.ai_assist) ? currentData.ai_assist : null;
@@ -3691,7 +3717,7 @@ function renderAiAssistSettings(status) {
       <details class="ai-assist-advanced">
         <summary>Advanced options</summary>
         <label><span class="label">Model, optional</span><input id="aiAssistModel" value="${esc(c.model || '')}" placeholder="Leave blank for provider default"></label>
-        <label><span class="label">Daily cap for cloud mode</span><input id="aiAssistCap" type="number" min="0" step="0.01" value="${esc(c.max_daily_usd ?? 0.25)}"></label>
+        <label><span class="label">Daily spend threshold for cloud mode</span><input id="aiAssistCap" type="number" min="0" step="0.01" value="${esc(c.max_daily_usd ?? 0.25)}"><span class="hint">New calls stop once recorded spend reaches this amount. One bounded call can cross it; cache hits remain available.</span></label>
         <label><span class="label">Source access</span><select id="aiAssistSourceAccess">
           <option value="metadata_only" ${c.source_access === 'metadata_only' ? 'selected' : ''}>Metadata only</option>
           <option value="prompt_opt_in" ${c.source_access === 'prompt_opt_in' ? 'selected' : ''}>Prompt text only after confirmation</option>
@@ -3789,7 +3815,7 @@ function updateAiAssistFormVisibility() {
         setupCopy.textContent = 'The provider rejected this key. Paste a replacement and save before using AI Assist.';
       } else if (checkStatus === 'verified') {
         setupTitle.textContent = 'Cloud key verified';
-        setupCopy.textContent = 'AIWatcher can use this provider after confirmation and within your daily cap.';
+        setupCopy.textContent = 'AIWatcher can use this provider after confirmation and within your daily spend threshold.';
       } else if (keyConfigured) {
         setupTitle.textContent = 'Cloud key saved';
         setupCopy.textContent = 'AIWatcher will test this key on the next confirmed AI Assist run.';

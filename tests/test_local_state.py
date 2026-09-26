@@ -30,6 +30,16 @@ def _mp_record_intervention_worker(state_file: str, index: int) -> None:
     )
 
 
+def _mp_hold_ai_assist_cloud_lock(state_file: str, entered, release) -> None:
+    os.environ["AIWATCHER_STATE_FILE"] = state_file
+    handle = local_state.acquire_ai_assist_cloud_call_lock()
+    if handle is None:
+        return
+    entered.set()
+    release.wait(10)
+    local_state.release_ai_assist_cloud_call_lock(handle)
+
+
 class LocalStateTests(unittest.TestCase):
     def test_state_lock_is_only_ever_used_inside_locked_state(self) -> None:
         # _STATE_LOCK guards only in-process threads; a bare `with _STATE_LOCK:`
@@ -1030,6 +1040,26 @@ class LocalStateTests(unittest.TestCase):
                 data = local_state._load()
 
         self.assertEqual(len(data["interventions"]), 8)
+
+    def test_ai_assist_cloud_call_lock_is_shared_across_processes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "local-state.json")
+            entered = multiprocessing.Event()
+            release = multiprocessing.Event()
+            holder = multiprocessing.Process(
+                target=_mp_hold_ai_assist_cloud_lock,
+                args=(state_file, entered, release),
+            )
+            holder.start()
+            self.assertTrue(entered.wait(5), "child process did not acquire the cloud-call lock")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                self.assertIsNone(local_state.acquire_ai_assist_cloud_call_lock())
+                release.set()
+                holder.join(timeout=10)
+                self.assertEqual(holder.exitcode, 0)
+                handle = local_state.acquire_ai_assist_cloud_call_lock()
+                self.assertIsNotNone(handle)
+                local_state.release_ai_assist_cloud_call_lock(handle)
 
     def test_active_prompt_gate_expires_and_clears(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
