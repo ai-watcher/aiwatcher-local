@@ -154,7 +154,14 @@ from .scanner import (
     surface_coverage,
 )
 from .local_state import record_update_auto_check, update_auto_check_enabled
-from .updater import apply_updates, check_for_updates, install_identity, install_kind, installed_source_root
+from .updater import (
+    apply_updates,
+    check_for_updates,
+    install_identity,
+    install_kind,
+    installed_source_root,
+    package_install_revision,
+)
 
 
 MAX_REQUEST_BYTES = 64 * 1024
@@ -5948,6 +5955,7 @@ def build_summary(
         "update_auto_check": update_auto_check_enabled(),
         "update_install_kind": install_kind(),
         "update_source_root": str(installed_source_root()),
+        "update_install_revision": package_install_revision(),
         "ai_assist": build_ai_assist_status(ai_assist_config()),
         "companion_preferences": companion_preferences(),
         "ai_assist_runs": recent_ai_assist_runs(limit=10),
@@ -6083,6 +6091,7 @@ def _mark_summary_cache(summary: dict[str, object], *, status: str, source: str,
     copy["update_auto_check"] = settings["update_auto_check"]
     copy["update_install_kind"] = install_kind()
     copy["update_source_root"] = str(installed_source_root())
+    copy["update_install_revision"] = package_install_revision()
     copy["companion_preferences"] = settings["companion_preferences"]
     generated_at = copy.get("generated_at") if isinstance(copy.get("generated_at"), str) else None
     copy["cache_schema_version"] = SUMMARY_CACHE_SCHEMA_VERSION
@@ -6297,6 +6306,7 @@ def _build_summary_shell(
         "update_auto_check": update_auto_check_enabled(),
         "update_install_kind": install_kind(),
         "update_source_root": str(installed_source_root()),
+        "update_install_revision": package_install_revision(),
         "ai_assist": build_ai_assist_status(ai_assist_config()),
         "companion_preferences": companion_preferences(),
         "ai_assist_runs": recent_ai_assist_runs(limit=10),

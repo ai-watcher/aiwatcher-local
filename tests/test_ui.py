@@ -4331,6 +4331,7 @@ class DashboardWindowTests(unittest.TestCase):
                 with (
                     patch.object(ui, "install_kind", return_value="package"),
                     patch.object(ui, "installed_source_root", return_value=Path("/site-packages/aiwatcher")),
+                    patch.object(ui, "package_install_revision", return_value="commit-new"),
                 ):
                     marked = ui._mark_summary_cache(
                         {
@@ -4349,6 +4350,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertTrue(marked["update_auto_check"])
         self.assertEqual(marked["update_install_kind"], "package")
         self.assertEqual(marked["update_source_root"], str(Path("/site-packages/aiwatcher")))
+        self.assertEqual(marked["update_install_revision"], "commit-new")
 
     def test_shared_refresh_scans_once_and_materializes_all_windows(self) -> None:
         now = datetime.now(timezone.utc)

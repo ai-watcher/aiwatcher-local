@@ -1492,12 +1492,16 @@ function clearCachedUpdateState() {
 function restoreCachedUpdateState(context = {}) {
   const installKind = context.installKind || null;
   const sourceRoot = context.sourceRoot || '';
+  const installRevision = context.installRevision || '';
   try {
     const cached = JSON.parse(localStorage.getItem(UPDATE_CACHE_KEY) || 'null');
     if (cached && cached.data) {
       const cachedKind = cached.data.install_kind || null;
       const cachedRoot = cached.data.source_root || cached.data.repo || '';
-      if ((installKind && cachedKind && cachedKind !== installKind) || (sourceRoot && cachedRoot !== sourceRoot)) {
+      const cachedRevision = cached.data.install_revision || '';
+      if ((installKind && cachedKind && cachedKind !== installKind)
+          || (sourceRoot && cachedRoot !== sourceRoot)
+          || (installRevision && cachedRevision && cachedRevision !== installRevision)) {
         clearCachedUpdateState();
         setUpdateState('unknown', null, 0);
         return null;
@@ -1703,6 +1707,7 @@ function scheduleHeaderUpdateCheck() {
   const cached = restoreCachedUpdateState({
     installKind: currentData && currentData.update_install_kind,
     sourceRoot: currentData && currentData.update_source_root,
+    installRevision: currentData && currentData.update_install_revision,
   });
   // Off by default. A fetch on page load is a GitHub call the user did not
   // make. The switch is in Settings > General and lives server-side, so a
