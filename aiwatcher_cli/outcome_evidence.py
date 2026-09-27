@@ -8,12 +8,14 @@ does not upload source, prompt text, diffs, or team data.
 from __future__ import annotations
 
 import os
+import hashlib
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from .local_state import recent_commit_receipts, recent_verification_receipts
 from .scanner import LocalSession
 
 
@@ -40,6 +42,16 @@ class OutcomeEvidence:
     session_id: str
     project_path: str | None
     repo_root: str | None = None
+    repository_id: str | None = None
+    checkout_path: str | None = None
+    branch: str | None = None
+    head: str | None = None
+    upstream: str | None = None
+    ahead: int | None = None
+    behind: int | None = None
+    dirty: bool = False
+    unpushed_commits: list[dict[str, Any]] = field(default_factory=list)
+    commit_receipts: list[dict[str, Any]] = field(default_factory=list)
     commits: list[dict[str, Any]] = field(default_factory=list)
     changed_files: list[str] = field(default_factory=list)
     files_touched: list[str] = field(default_factory=list)  # files touched by this session's own commits
@@ -55,6 +67,16 @@ class OutcomeEvidence:
             "session_id": self.session_id,
             "project_path": self.project_path,
             "repo_root": self.repo_root,
+            "repository_id": self.repository_id,
+            "checkout_path": self.checkout_path,
+            "branch": self.branch,
+            "head": self.head,
+            "upstream": self.upstream,
+            "ahead": self.ahead,
+            "behind": self.behind,
+            "dirty": self.dirty,
+            "unpushed_commits": self.unpushed_commits,
+            "commit_receipts": self.commit_receipts,
             "commits": self.commits,
             "changed_files": self.changed_files,
             "files_touched": self.files_touched,
@@ -103,6 +125,183 @@ def _repo_root(path: str | None) -> str | None:
     root = result.stdout.strip() or None
     _REPO_ROOT_CACHE[path] = root
     return root
+
+
+def _git_text(repo: str, args: list[str]) -> str | None:
+    result = _run_git(repo, args)
+    if not result or result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _git_common_dir(repo: str | None) -> str | None:
+    if not repo:
+        return None
+    value = _git_text(repo, ["rev-parse", "--git-common-dir"])
+    if not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute():
+        path = Path(repo, path)
+    try:
+        return str(path.resolve())
+    except OSError:
+        return str(path)
+
+
+def _checkout_root(session: LocalSession) -> str | None:
+    """Return the exact checkout observed by the tool when it is trustworthy.
+
+    ``project_path`` intentionally groups linked worktrees under one project in
+    parts of the scanner. Fresh Start needs the opposite: the checkout that
+    contains the branch, commits, and dirty files the user was actually using.
+    ``raw_cwd`` preserves that observation. Only prefer it when Git confirms it
+    belongs to the same repository as the grouped project path.
+    """
+    grouped = _repo_root(session.project_path)
+    observed = _repo_root(session.raw_cwd)
+    if not observed:
+        return grouped
+    if not grouped:
+        return observed
+    observed_common = _git_common_dir(observed)
+    grouped_common = _git_common_dir(grouped)
+    if observed_common and grouped_common and observed_common == grouped_common:
+        return observed
+    return grouped
+
+
+def _count_revisions(repo: str, revision_range: str) -> int | None:
+    value = _git_text(repo, ["rev-list", "--count", revision_range])
+    try:
+        return int(value) if value is not None else None
+    except ValueError:
+        return None
+
+
+def _checkout_state(repo: str) -> dict[str, Any]:
+    branch = _git_text(repo, ["branch", "--show-current"])
+    head = _git_text(repo, ["rev-parse", "--short=12", "HEAD"])
+    upstream = _git_text(repo, ["rev-parse", "--abbrev-ref", "@{upstream}"])
+    status = _git_text(repo, ["status", "--porcelain"])
+    comparison_ref = upstream
+    if not comparison_ref:
+        remote_head = _git_text(repo, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+        current_branch = branch or ""
+        candidates = [remote_head, "main", "master"]
+        comparison_ref = next(
+            (
+                candidate for candidate in candidates
+                if candidate and candidate != current_branch
+                and _git_text(repo, ["rev-parse", "--verify", candidate])
+            ),
+            None,
+        )
+    ahead = _count_revisions(repo, f"{comparison_ref}..HEAD") if comparison_ref else None
+    behind = _count_revisions(repo, f"HEAD..{comparison_ref}") if comparison_ref else None
+    unpushed: list[dict[str, Any]] = []
+    if comparison_ref and ahead:
+        log = _git_text(repo, ["log", "--format=%h%x1f%s", f"{comparison_ref}..HEAD"])
+        for line in (log or "").splitlines()[:10]:
+            sha, _, subject = line.partition("\x1f")
+            if sha:
+                unpushed.append({"sha": sha, "subject": subject.strip()})
+    return {
+        "branch": branch,
+        "head": head,
+        "upstream": upstream,
+        "comparison_ref": comparison_ref,
+        "ahead": ahead,
+        "behind": behind,
+        "dirty": bool(status),
+        "dirty_fingerprint": hashlib.sha256((status or "").encode("utf-8")).hexdigest()[:24],
+        "unpushed_commits": unpushed,
+    }
+
+
+def _repository_id(repo: str) -> str | None:
+    roots = _git_text(repo, ["rev-list", "--max-parents=0", "HEAD"])
+    values = sorted(line.strip() for line in (roots or "").splitlines() if line.strip())
+    return values[0][:16] if values else None
+
+
+def _same_checkout(left: object, right: object) -> bool:
+    if not left or not right:
+        return False
+    try:
+        return os.path.realpath(str(left)) == os.path.realpath(str(right))
+    except (OSError, ValueError):
+        return False
+
+
+def _session_commit_receipts(
+    session: LocalSession,
+    repository_id: str | None,
+    checkout_path: str | None,
+) -> list[dict[str, Any]]:
+    if not repository_id:
+        return []
+    start, end = _session_window(session)
+    if not start:
+        return []
+    lower = start - timedelta(hours=1)
+    upper = (end or start) + timedelta(hours=COMMIT_LOOKAHEAD_HOURS)
+    matched: list[dict[str, Any]] = []
+    for receipt in recent_commit_receipts(repository_id=repository_id, limit=100):
+        if not _same_checkout(receipt.get("checkout_path"), checkout_path):
+            continue
+        try:
+            stamp = datetime.fromisoformat(str(receipt.get("recorded_at") or "").replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        if lower <= stamp <= upper:
+            matched.append(receipt)
+    return matched[:20]
+
+
+def _verification_receipts(
+    session: LocalSession,
+    repository_id: str | None,
+    checkout_path: str | None,
+    state: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if not repository_id:
+        return []
+    start, end = _session_window(session)
+    if not start:
+        return []
+    lower = start - timedelta(hours=1)
+    upper = (end or start) + timedelta(hours=COMMIT_LOOKAHEAD_HOURS)
+    results: list[dict[str, Any]] = []
+    for receipt in recent_verification_receipts(repository_id=repository_id, limit=100):
+        if not _same_checkout(receipt.get("checkout_path"), checkout_path):
+            continue
+        try:
+            stamp = datetime.fromisoformat(str(receipt.get("finished_at") or "").replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        if not lower <= stamp <= upper:
+            continue
+        receipt_head = str(receipt.get("head") or "")
+        state_head = str(state.get("head") or "")
+        current = (
+            bool(receipt_head and state_head)
+            and (receipt_head.startswith(state_head) or state_head.startswith(receipt_head))
+            and receipt.get("dirty_fingerprint") == state.get("dirty_fingerprint")
+        )
+        results.append({
+            "name": receipt.get("runner"),
+            "status": receipt.get("status"),
+            "finished_at": receipt.get("finished_at"),
+            "head": receipt.get("head"),
+            "current": current,
+            "source": "AIWatcher verification receipt",
+        })
+    return results[:10]
 
 
 def _session_window(session: LocalSession) -> tuple[datetime | None, datetime | None]:
@@ -203,7 +402,7 @@ def repo_root_for_session(session: LocalSession) -> str | None:
     """Public wrapper so survival re-checks (cli.py) can re-derive a session's real repo path
     fresh from its live project_path, instead of ever needing to read it back from persisted
     (deliberately hashed) evidence_snapshot storage."""
-    return _repo_root(session.project_path)
+    return _checkout_root(session)
 
 
 def check_commit_survival(repo: str, sha: str) -> str:
@@ -358,6 +557,8 @@ def _detect_test_artifacts(repo: str, session: LocalSession) -> list[dict[str, A
             results.append({
                 "artifact": relative,
                 "updated_at": stamp.isoformat(),
+                "status": "result unknown",
+                "source": "local test artifact",
             })
             if len(results) >= 10:
                 return results
@@ -384,21 +585,50 @@ def build_outcome_evidence(session: LocalSession, *, survival: dict[str, str] | 
     not to have stuck around, without this function needing to know how or
     where that history is stored.
     """
-    repo = _repo_root(session.project_path)
+    repo = _checkout_root(session)
     evidence = OutcomeEvidence(session_id=session.session_id, project_path=session.project_path, repo_root=repo, survival=survival)
     if not repo:
         evidence.reasons.append("No git repository was detected for this session.")
         return evidence
 
+    state = _checkout_state(repo)
+    evidence.checkout_path = repo
+    evidence.repository_id = _repository_id(repo)
+    evidence.branch = state["branch"]
+    evidence.head = state["head"]
+    evidence.upstream = state["upstream"]
+    evidence.ahead = state["ahead"]
+    evidence.behind = state["behind"]
+    evidence.dirty = state["dirty"]
+    evidence.unpushed_commits = state["unpushed_commits"]
+    evidence.commit_receipts = _session_commit_receipts(session, evidence.repository_id, repo)
+
     evidence.commits = _recent_commits(repo, session)
+    known_shas = {str(item.get("sha") or "") for item in evidence.commits}
+    for receipt in evidence.commit_receipts:
+        sha = str(receipt.get("sha") or "")
+        if sha and not any(sha.startswith(known) or known.startswith(sha) for known in known_shas if known):
+            evidence.commits.append({
+                "sha": sha[:12],
+                "subject": str(receipt.get("subject") or ""),
+                "body": "",
+                "committed_at": receipt.get("recorded_at"),
+                "receipt_observed": True,
+            })
+            known_shas.add(sha)
     evidence.changed_files = _changed_files(repo)
     evidence.files_touched = _files_touched(repo, evidence.commits)
-    evidence.tests = _detect_test_artifacts(repo, session)
+    evidence.tests = _verification_receipts(session, evidence.repository_id, repo, state)
+    evidence.tests.extend(_detect_test_artifacts(repo, session))
 
-    if evidence.commits and evidence.tests:
+    current_pass = any(
+        item.get("status") == "passed" and item.get("current") is True
+        for item in evidence.tests
+    )
+    if evidence.commits and current_pass:
         evidence.inferred_outcome = "useful"
         evidence.confidence = "medium"
-        evidence.reasons.append("A nearby commit and recent test artifacts were detected.")
+        evidence.reasons.append("A nearby commit and a passing verification for the current Git state were detected.")
     elif evidence.commits:
         evidence.inferred_outcome = "useful"
         evidence.confidence = "low"

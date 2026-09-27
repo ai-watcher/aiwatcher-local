@@ -8,6 +8,7 @@ standalone so it can later become the public `aiwatcher` package entrypoint.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import os
@@ -80,6 +81,8 @@ from .local_state import (
     record_ambient_intervention_action,
     record_active_command_gate,
     record_command_decision,
+    record_commit_receipt,
+    record_verification_receipt,
     record_decision,
     record_evidence_snapshot,
     record_intervention,
@@ -102,7 +105,7 @@ from .local_state import (
     upsert_ambient_intervention,
 )
 from .handoff import HANDOFF_TYPE_LABELS, TARGET_LABELS, build_handoff_capsule, render_handoff_capsule
-from .ledger import Ledger, build_ledger, cost_per_surviving_line, repos_matching, unbanked_summary
+from .ledger import Ledger, build_ledger, cost_per_surviving_line, repo_identity, repos_matching, unbanked_summary
 from .statusline import statusline_from_stdin, statusline_settings_snippet
 from .receipt import (
     RECEIPT_DAYS,
@@ -4398,16 +4401,16 @@ def _commit_hook_body(command: str) -> str:
 
 def _post_commit_hook_path(repo: str) -> str | None:
     result = subprocess.run(
-        ["git", "-C", repo, "rev-parse", "--git-dir"],
+        ["git", "-C", repo, "rev-parse", "--git-path", "hooks/post-commit"],
         check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if result.returncode != 0:
         return None
-    git_dir = result.stdout.strip()
-    if not os.path.isabs(git_dir):
-        git_dir = os.path.join(repo, git_dir)
-    return os.path.join(git_dir, "hooks", "post-commit")
+    hook_path = result.stdout.strip()
+    if not os.path.isabs(hook_path):
+        hook_path = os.path.join(repo, hook_path)
+    return os.path.normpath(hook_path)
 
 
 def command_compactions(args: argparse.Namespace) -> int:
@@ -4472,6 +4475,28 @@ def command_commit_receipt(args: argparse.Namespace) -> int:
             if not args.quiet_if_empty:
                 print(receipt.get("reason") or "No receipt available for this commit.")
             return 0
+        branch_result = subprocess.run(
+            ["git", "-C", repo, "branch", "--show-current"],
+            check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        upstream_result = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "--abbrev-ref", "@{upstream}"],
+            check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        try:
+            record_commit_receipt({
+                **receipt,
+                "repository_id": repo_identity(repo),
+                "checkout_path": os.path.realpath(repo),
+                "branch": branch_result.stdout.strip() if branch_result.returncode == 0 else None,
+                "upstream": upstream_result.stdout.strip() if upstream_result.returncode == 0 else None,
+            })
+        except (OSError, ValueError):
+            # Persistence enriches later handoffs; it must never suppress the
+            # terminal receipt or make an already-successful commit look bad.
+            pass
         if args.json:
             print(json.dumps(receipt, indent=2))
             return 0
@@ -6968,6 +6993,48 @@ def command_watch(args: argparse.Namespace) -> int:
         return 0
 
 
+def _verification_runner(command: list[str]) -> str | None:
+    """Return a safe label for an allowlisted verification command."""
+    if not command:
+        return None
+    names = [Path(part).name.lower() for part in command[:4]]
+    first = names[0]
+    if first in {"pytest", "py.test"}:
+        return "pytest"
+    if first in {"python", "python3", "py"} and len(command) >= 3 and command[1] == "-m":
+        module = str(command[2]).lower()
+        if module in {"pytest", "unittest"}:
+            return f"python -m {module}"
+    if first in {"npm", "pnpm", "yarn", "bun"}:
+        action = str(command[1]).lower() if len(command) > 1 else ""
+        script = str(command[2]).lower() if action == "run" and len(command) > 2 else action
+        if script in {"test", "check", "lint", "build", "typecheck", "smoke"}:
+            return f"{first} {('run ' if action == 'run' else '')}{script}"
+    if first in {"cargo", "go", "dotnet", "mvn", "mvnw", "gradle", "gradlew"}:
+        action = str(command[1]).lower() if len(command) > 1 else ""
+        if action in {"test", "check", "verify", "build"}:
+            return f"{first} {action}"
+    return None
+
+
+def _verification_git_fingerprint(cwd: str) -> dict[str, str | None]:
+    def git(*parts: str) -> str | None:
+        result = subprocess.run(
+            ["git", "-C", cwd, *parts], check=False, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    checkout = git("rev-parse", "--show-toplevel")
+    head = git("rev-parse", "HEAD")
+    status = git("status", "--porcelain=v1")
+    return {
+        "checkout": checkout,
+        "head": head,
+        "dirty_fingerprint": hashlib.sha256((status or "").encode("utf-8")).hexdigest()[:24] if status is not None else None,
+    }
+
+
 def command_run(args: argparse.Namespace) -> int:
     command = list(args.command)
     if command and command[0] == "--":
@@ -6977,6 +7044,8 @@ def command_run(args: argparse.Namespace) -> int:
         return 2
 
     run_started = datetime.now().astimezone()
+    verification_runner = _verification_runner(command)
+    verification_before = _verification_git_fingerprint(os.getcwd()) if verification_runner else {}
     print("AIWatcher Local run")
     print("Watching local AI logs while your command runs. No prompt or source content is uploaded.\n")
     print(f"$ {' '.join(command)}\n")
@@ -6987,6 +7056,26 @@ def command_run(args: argparse.Namespace) -> int:
     except OSError as exc:
         print(f"Could not run command: {exc}", file=sys.stderr)
         return 2
+
+    if verification_runner and verification_before.get("checkout"):
+        checkout = str(verification_before["checkout"])
+        verification_after = _verification_git_fingerprint(checkout)
+        finished_at = datetime.now(timezone.utc).isoformat()
+        try:
+            record_verification_receipt(
+                runner=verification_runner,
+                checkout_path=checkout,
+                repository_id=repo_identity(checkout),
+                head=verification_after.get("head"),
+                dirty_fingerprint=verification_after.get("dirty_fingerprint"),
+                started_at=run_started.astimezone(timezone.utc).isoformat(),
+                finished_at=finished_at,
+                exit_code=int(completed.returncode),
+            )
+        except (OSError, ValueError):
+            # The wrapped command's real exit code always wins over optional
+            # evidence persistence.
+            pass
 
     after_rows = scan_all()
     candidates = [

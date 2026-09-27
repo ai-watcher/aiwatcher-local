@@ -41,6 +41,55 @@ def _mp_hold_ai_assist_cloud_lock(state_file: str, entered, release) -> None:
 
 
 class LocalStateTests(unittest.TestCase):
+    def test_commit_receipts_are_durable_and_replace_same_checkout_sha(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_commit_receipt({
+                    "sha": "abc123",
+                    "subject": "first title",
+                    "repository_id": "repo-1",
+                    "checkout_path": "/repo/worktree",
+                    "branch": "review",
+                    "cost_usd": 0.12,
+                    "files_changed": 2,
+                })
+                local_state.record_commit_receipt({
+                    "sha": "abc123",
+                    "subject": "updated title",
+                    "repository_id": "repo-1",
+                    "checkout_path": "/repo/worktree",
+                    "branch": "review",
+                    "cost_usd": 0.12,
+                    "files_changed": 2,
+                })
+                rows = local_state.recent_commit_receipts(repository_id="repo-1")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["subject"], "updated title")
+        self.assertEqual(rows[0]["checkout_path"], "/repo/worktree")
+
+    def test_verification_receipt_stores_result_without_command_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_verification_receipt(
+                    runner="pytest",
+                    checkout_path="/repo/review",
+                    repository_id="repo-1",
+                    head="abc123",
+                    dirty_fingerprint="clean",
+                    started_at="2026-09-27T01:00:00+00:00",
+                    finished_at="2026-09-27T01:01:00+00:00",
+                    exit_code=0,
+                )
+                rows = local_state.recent_verification_receipts(repository_id="repo-1")
+
+        self.assertEqual(rows[0]["status"], "passed")
+        self.assertEqual(rows[0]["runner"], "pytest")
+        self.assertNotIn("output", rows[0])
+        self.assertNotIn("command", rows[0])
+
     def test_state_lock_is_only_ever_used_inside_locked_state(self) -> None:
         # _STATE_LOCK guards only in-process threads; a bare `with _STATE_LOCK:`
         # in a new record_*/recent_*/get_* function would compile and pass

@@ -366,6 +366,8 @@ def _empty_state() -> dict[str, Any]:
         "outcomes": [],
         "hook_events": [],
         "evidence_snapshots": [],
+        "commit_receipts": [],
+        "verification_receipts": [],
         "decisions": [],
         "baselines": {},
         "survival_summary": {},
@@ -464,6 +466,8 @@ def _load() -> dict[str, Any]:
     data.setdefault("outcomes", [])
     data.setdefault("hook_events", [])
     data.setdefault("evidence_snapshots", [])
+    data.setdefault("commit_receipts", [])
+    data.setdefault("verification_receipts", [])
     data.setdefault("decisions", [])
     data.setdefault("baselines", {})
     data.setdefault("survival_summary", {})
@@ -2430,6 +2434,105 @@ def record_evidence_snapshot(session_id: str, evidence: dict[str, Any]) -> dict[
         data["evidence_snapshots"] = data["evidence_snapshots"][-500:]
         _save(data)
     return record
+
+
+MAX_COMMIT_RECEIPTS_STORED = 500
+
+
+def record_commit_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+    """Persist the small Git facts printed by the post-commit receipt.
+
+    Commit subjects and paths are already local Git metadata. No prompt text,
+    source content, diff, terminal output, or environment value is stored.
+    """
+    sha = str(receipt.get("sha") or "").strip()[:40]
+    checkout = str(receipt.get("checkout_path") or receipt.get("repo") or "").strip()[:1000]
+    if not sha or not checkout:
+        raise ValueError("sha and checkout_path are required")
+    record = {
+        "sha": sha,
+        "subject": str(receipt.get("subject") or "").strip()[:500],
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "repository_id": str(receipt.get("repository_id") or "").strip()[:160] or None,
+        "checkout_path": checkout,
+        "branch": str(receipt.get("branch") or "").strip()[:300] or None,
+        "upstream": str(receipt.get("upstream") or "").strip()[:300] or None,
+        "cost_usd": _safe_float(receipt.get("cost_usd"), 0.0),
+        "files_changed": max(0, int(receipt.get("files_changed") or 0)),
+    }
+    with _locked_state():
+        data = _load()
+        data["commit_receipts"] = [
+            row for row in data["commit_receipts"]
+            if not (isinstance(row, dict) and row.get("sha") == sha and row.get("checkout_path") == checkout)
+        ]
+        data["commit_receipts"].append(record)
+        data["commit_receipts"] = data["commit_receipts"][-MAX_COMMIT_RECEIPTS_STORED:]
+        _save(data)
+    return record
+
+
+def recent_commit_receipts(*, repository_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    try:
+        with _locked_state():
+            rows = list(_load().get("commit_receipts", []))
+    except OSError:
+        return []
+    filtered = [
+        dict(row) for row in rows if isinstance(row, dict)
+        and (not repository_id or row.get("repository_id") == repository_id)
+    ]
+    return list(reversed(filtered[-max(0, limit):]))
+
+
+MAX_VERIFICATION_RECEIPTS_STORED = 500
+
+
+def record_verification_receipt(
+    *,
+    runner: str,
+    checkout_path: str,
+    exit_code: int,
+    started_at: str,
+    finished_at: str,
+    repository_id: str | None = None,
+    head: str | None = None,
+    dirty_fingerprint: str | None = None,
+) -> dict[str, Any]:
+    """Store a bounded test/check result without command output or arguments."""
+    record = {
+        "id": str(uuid.uuid4()),
+        "runner": runner.strip()[:160],
+        "checkout_path": checkout_path.strip()[:1000],
+        "repository_id": repository_id.strip()[:160] if repository_id else None,
+        "head": head.strip()[:40] if head else None,
+        "dirty_fingerprint": dirty_fingerprint.strip()[:80] if dirty_fingerprint else None,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "exit_code": int(exit_code),
+        "status": "passed" if int(exit_code) == 0 else "failed",
+    }
+    if not record["runner"] or not record["checkout_path"]:
+        raise ValueError("runner and checkout_path are required")
+    with _locked_state():
+        data = _load()
+        data["verification_receipts"].append(record)
+        data["verification_receipts"] = data["verification_receipts"][-MAX_VERIFICATION_RECEIPTS_STORED:]
+        _save(data)
+    return record
+
+
+def recent_verification_receipts(*, repository_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    try:
+        with _locked_state():
+            rows = list(_load().get("verification_receipts", []))
+    except OSError:
+        return []
+    filtered = [
+        dict(row) for row in rows if isinstance(row, dict)
+        and (not repository_id or row.get("repository_id") == repository_id)
+    ]
+    return list(reversed(filtered[-max(0, limit):]))
 
 
 VALID_SURVIVAL_BUCKETS = ("7", "14", "30")

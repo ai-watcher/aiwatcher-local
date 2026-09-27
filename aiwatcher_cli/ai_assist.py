@@ -724,6 +724,7 @@ def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -
     packet = _handoff_packet(packet_text)
     source = packet.get("source") if isinstance(packet.get("source"), dict) else {}
     evidence = packet.get("evidence") if isinstance(packet.get("evidence"), dict) else {}
+    checkout = packet.get("checkout") if isinstance(packet.get("checkout"), dict) else {}
     goal = _clean_line(parsed.get("goal"), limit=360)
     next_ask = _clean_line(parsed.get("next_ask"), limit=420)
     what_done = _clean_list(parsed.get("what_is_done") or parsed.get("done"), limit=7)
@@ -746,6 +747,33 @@ def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -
         f"Last activity: {_clean_line(source.get('updated_at'), limit=100)}",
     ]
     source_lines = [line for line in source_lines if not line.endswith(": ") and not line.endswith("/ ")]
+    checkout_lines: list[str] = []
+    if checkout.get("path"):
+        checkout_lines.append(f"Checkout: {_clean_line(checkout.get('path'), limit=420)}")
+    if checkout.get("branch") or checkout.get("head"):
+        checkout_lines.append(
+            f"Branch/HEAD: {_clean_line(checkout.get('branch'), limit=180) or 'unknown'} / "
+            f"{_clean_line(checkout.get('head'), limit=80) or 'unknown'}"
+        )
+    if checkout.get("upstream"):
+        checkout_lines.append(f"Upstream: {_clean_line(checkout.get('upstream'), limit=180)}")
+    if checkout.get("ahead") is not None or checkout.get("behind") is not None:
+        if checkout.get("upstream"):
+            checkout_lines.append(f"Push state: {checkout.get('ahead') or 0} ahead, {checkout.get('behind') or 0} behind")
+        else:
+            checkout_lines.append(
+                f"Local branch state: {checkout.get('ahead') or 0} ahead, {checkout.get('behind') or 0} behind "
+                "the nearest observed base; remote push status is unknown"
+            )
+    if checkout:
+        checkout_lines.append(f"Working tree: {'has local changes' if checkout.get('dirty') else 'clean'}")
+    for item in list(checkout.get("unpushed_commits") or [])[:6]:
+        if isinstance(item, dict):
+            label = "Unpushed commit" if checkout.get("upstream") else "Local commit ahead of observed base"
+            checkout_lines.append(
+                f"{label}: {_clean_line(item.get('sha'), limit=40)} "
+                f"{_clean_line(item.get('subject'), limit=240)}"
+            )
     evidence_lines = [
         *_packet_list(evidence, "commits", limit=4),
         *_packet_list(evidence, "changed_files", limit=8),
@@ -760,6 +788,7 @@ def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -
         "Do not assume access to the previous chat, hidden memory, or unstated decisions.",
         "Continue from the repository/workspace state and AIWatcher evidence below.",
         *_section("Source context", source_lines),
+        *_section("Working checkout", checkout_lines),
         "",
         "Objective",
         f"- {goal or 'Continue the same user goal from the source workspace after verifying the evidence.'}",
@@ -776,7 +805,7 @@ def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -
         "First action",
         f"- {next_ask or 'State what appears done, what remains uncertain, and the smallest safe checkpoint before editing.'}",
         *_section("Acceptance criteria", acceptance or _packet_list(packet, "acceptance_criteria", limit=5)),
-        *_section("Verification already observed", verification or _packet_list(evidence, "tests", limit=5) or ["No completed verification was observed; do not claim the prior work is verified."]),
+        *_section("Verification and test signals", verification or _packet_list(evidence, "tests", limit=5) or ["No completed verification was observed; do not claim the prior work is verified."]),
         *_section("Open questions and uncertainty", uncertainties),
         *_section("Evidence carried forward", evidence_lines or ["No commit, file, test, or decision evidence was available."]),
         "",
@@ -946,7 +975,8 @@ _FRESH_START_SPEC = _WorkflowSpec(
         "uncertainties: string[]\n\n"
         "Every factual statement must come from the packet. Include the exact project path and at "
         "least one concrete commit, changed file, test, decision, command, or session id when the "
-        "packet contains one. Make the result useful for a fresh chat, forked chat, or subagent. The next_ask should "
+        "packet contains one. Make the result useful for a fresh chat, forked chat, or subagent. Preserve the exact "
+        "checkout, branch, unpushed state, and verification status from the packet. The next_ask should "
         "tell the new AI session exactly what to do first. Avoid echoing the section names and "
         "boilerplate from the local handoff unless the evidence is genuinely missing. Keep it short "
         "enough to paste without carrying the whole old conversation. Do not use vague goals like "
@@ -954,7 +984,9 @@ _FRESH_START_SPEC = _WorkflowSpec(
         "the observed workspace/tool/path/evidence instead. When context_quality.objective_known is false, "
         "state that the objective is unknown and make the first action inspect concrete evidence and ask one focused "
         "outcome question; do not manufacture a coding goal or use `git status` alone as the first action. "
-        "Separate verification already observed from checks the new session still needs to run."
+        "Separate verification already observed from checks the new session still needs to run. Avoid token totals "
+        "and session counts unless they change the next action. Do not repeat the same uncertainty in multiple "
+        "sections. Target 150-300 words."
     ),
     evidence_heading="Local AIWatcher handoff evidence:",
     structure=_structured_handoff_text,
@@ -1060,6 +1092,17 @@ def _compose(
             usage=response.get("usage") if isinstance(response.get("usage"), dict) else {},
         )
     final_text = spec.structure(parsed if parsed else {spec.fallback_key: text}, trimmed)
+    bounded_text = final_text
+    if len(bounded_text) > spec.max_result_chars:
+        bounded_text = bounded_text[:spec.max_result_chars]
+        line_break = bounded_text.rfind("\n")
+        if line_break > spec.max_result_chars // 2:
+            bounded_text = bounded_text[:line_break]
+        else:
+            word_break = bounded_text.rfind(" ")
+            if word_break > spec.max_result_chars // 2:
+                bounded_text = bounded_text[:word_break]
+        bounded_text = bounded_text.rstrip() + "\n\nAdditional evidence omitted; inspect the AIWatcher receipt for details."
     return {
         "workflow": spec.id,
         "status": "used",
@@ -1069,7 +1112,7 @@ def _compose(
         "input_chars": len(trimmed),
         "output_chars": len(final_text),
         "source_access": config.get("source_access") or "metadata_only",
-        "text": final_text[:spec.max_result_chars],
+        "text": bounded_text,
         "structured": parsed or {},
         "usage": response.get("usage") if isinstance(response.get("usage"), dict) else {},
     }

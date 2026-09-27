@@ -491,10 +491,21 @@ def build_handoff_capsule(
     ]
 
     evidence_lines = [
+        f"- Active checkout: {evidence.checkout_path or project_label}",
+        f"- Branch/HEAD: {evidence.branch or 'unknown'} / {evidence.head or 'unknown'}",
         f"- Nearby commits: {len(evidence.commits)}",
         f"- Changed files: {len(evidence.changed_files)}",
         f"- Test artifacts: {len(evidence.tests)}",
     ]
+    if evidence.upstream:
+        evidence_lines.append(
+            f"- Upstream state: {evidence.upstream}; {evidence.ahead or 0} commit(s) ahead, "
+            f"{evidence.behind or 0} behind."
+        )
+    elif evidence.branch:
+        evidence_lines.append("- Upstream state: no upstream branch is configured.")
+    for commit in evidence.unpushed_commits[:5]:
+        evidence_lines.append(f"  - Unpushed commit: {commit.get('sha')}: {commit.get('subject')}")
     shown_commits = evidence.commits[:3]
     for commit in shown_commits:
         subject = str(commit.get("subject") or "").strip()
@@ -577,6 +588,12 @@ def build_handoff_capsule(
         done_lines.append(
             f"- The workspace has {len(evidence.changed_files)} changed file(s) on disk; treat them as possible in-progress context, not proof from this source session."
         )
+    if evidence.unpushed_commits:
+        destination = evidence.upstream or "the nearest observed base branch"
+        done_lines.append(
+            f"- {len(evidence.unpushed_commits)} local commit(s) are ahead of {destination}."
+            + (" They have not been pushed to the configured upstream." if evidence.upstream else " No upstream is configured, so remote push status is unknown.")
+        )
     if decisions:
         done_lines.append("- Local decision notes exist; review them before changing direction.")
     if not done_lines:
@@ -642,93 +659,83 @@ def build_handoff_capsule(
     next_brief = "\n".join([
         "AIWatcher Fresh Start brief",
         "",
-        f"You are starting a fresh {profile['session_label']}. Do not assume access to the previous chat.",
-        "Continue from source-session metadata and workspace state, not from hidden conversation history.",
-        f"Target tool: {TARGET_LABELS[target]}.",
-        f"Continuation type: {HANDOFF_TYPE_LABELS[handoff_type]}.",
+        f"Start a fresh {profile['session_label']} from this handoff; the previous chat is unavailable.",
+        "Use the exact checkout and evidence below. Do not invent intent or completed work.",
         "",
         "Objective and context",
         *memory_summary["summary"],
         f"- Objective status: {'confirmed from user input' if objective_text else 'not captured; confirmation required before edits'}.",
         "",
-        "Completed work",
-        *done_lines,
-        "",
-        "Current state",
-        *memory_summary["current_state"],
-        "",
-        "Decisions and constraints",
-        *memory_summary["decisions"],
-        *([f"- {item}" for item in constraint_lines] if constraint_lines else ["- No additional user constraints were recorded."]),
-        "",
-        "Risks and uncertainties",
-        *uncertainty_lines,
-        "",
-        "Next steps",
-        *memory_summary["open"],
-        *checkpoint_lines[1:],
-        "",
-        "Inspect first",
-        *memory_summary["files"],
-        "",
-        "Acceptance criteria",
-        *([f"- {item}" for item in acceptance_lines] if acceptance_lines else [f"- {profile['finish']}"]),
-        "",
-        "Source session identity",
-        *source_identity_lines,
-        *(
-            [
-                f"- Same-project sessions observed: {same_project_session_count}",
-                "- If this is not the intended source chat, stop and ask the user which session to continue.",
-            ]
-            if same_project_session_count > 1
-            else []
-        ),
-        "",
-        "Goal",
-        *([f"- User objective: {objective_text}"] if objective_text else []),
-        *[f"- {item}" for item in profile["purpose"]],
-        "",
-        "How to continue",
-        "- If this is a fresh chat: first reconstruct the task from the workspace and evidence below.",
-        "- If this is a forked chat: keep the parent chat as source of truth and return only the final summary, files touched, verification, and unresolved questions.",
-        "- If this is a subagent task: inspect only the assigned lane, then report evidence and recommendations back to the orchestrator.",
-        "- If evidence is insufficient, ask one focused clarification instead of guessing.",
-        "",
-        "Workspace",
+        "Working checkout",
         f"- Project: {project_label}",
         f"- Project confidence: {'reliable' if project_reliable else 'unconfirmed'}",
-        *([f"- Related active workspace: {path}" for path in related[:3]] if related else []),
-        *source_section,
+        f"- Path: {evidence.checkout_path or project_label}",
+        f"- Branch/HEAD: {evidence.branch or 'unknown'} / {evidence.head or 'unknown'}",
+        *(
+            [f"- Upstream: {evidence.upstream}; {evidence.ahead or 0} ahead, {evidence.behind or 0} behind."]
+            if evidence.upstream else ["- Upstream: not configured or not observed."]
+        ),
+        f"- Working tree: {'has local changes' if evidence.dirty else 'clean'}.",
+        *[
+            f"- {'Unpushed' if evidence.upstream else 'Local commit ahead of observed base'}: "
+            f"{item.get('sha')} {item.get('subject')}"
+            for item in evidence.unpushed_commits[:5]
+        ],
         "",
-        "Source session signals",
-        f"- Source tool/model: {session.tool} / {session.model or 'unknown'}",
-        f"- Usage pressure: {_usage_pressure_label(session)}",
-        f"- Return capability: {exact_return_label}",
-        f"- Outcome status: {outcome or evidence.inferred_outcome or 'not confirmed'}",
-        "",
-        "Why AIWatcher suggested Fresh Start",
-        *warning_lines,
-        "",
-        "Workspace evidence to inspect (not guaranteed source-session evidence)",
-        *evidence_lines,
+        "Completed work and current state",
+        *done_lines,
+        *memory_summary["current_state"][:3],
+        *[f"- Commit: {item.get('sha')}: {item.get('subject')}" for item in evidence.commits[:4]],
+        *[f"- Changed file: {path}" for path in evidence.changed_files[:8]],
+        *([f"- ...and {len(evidence.commits) - 4} more commit(s); inspect `git log`." ] if len(evidence.commits) > 4 else []),
+        *([f"- ...and {len(evidence.changed_files) - 8} more changed file(s); inspect `git status --short`." ] if len(evidence.changed_files) > 8 else []),
+        *(
+            ["- No nearby commit evidence was found; avoid overwriting local edits until their owner and intent are clear."]
+            if not evidence.commits and evidence.changed_files else []
+        ),
         *commit_message_lines,
-        *decision_lines,
+        "",
+        "Verification and test signals",
+        *(
+            [
+                f"- {item.get('artifact') or item.get('name')}: "
+                f"{item.get('status') or item.get('updated_at') or 'observed'}"
+                f"{' (current for this Git state)' if item.get('current') is True else ' (stale; Git state changed)' if item.get('current') is False else ''}"
+                for item in evidence.tests[:6]
+            ]
+            if evidence.tests else ["- No completed verification was observed; do not claim the prior work is verified."]
+        ),
+        "",
+        "Decisions and constraints",
+        *(["- Decisions below are self-reported and not verified against what actually happened."] if decisions else []),
+        *(decision_lines[2:] if decisions else memory_summary["decisions"][:5]),
+        *([f"- {item}" for item in constraint_lines] if constraint_lines else []),
+        "",
+        "Open questions and uncertainty",
+        *uncertainty_lines[:4],
+        "",
+        "First action",
+        *memory_summary["open"][:2],
+        *memory_summary["files"][:5],
+        *([f"- Inspect `git show {evidence.commits[0].get('sha')} --stat` before changing landed work."] if evidence.commits else []),
+        "- Ask one focused outcome question if the objective remains unknown; do not use `git status` as the only next action.",
+        "",
+        "Source session identity",
+        *source_identity_lines[:4],
+        f"- Source tool/model: {session.tool} / {session.model or 'unknown'}",
+        f"- Target: {TARGET_LABELS[target]}",
+        f"- Continuation type: {HANDOFF_TYPE_LABELS[handoff_type]}.",
+        *([f"- Same-project sessions observed: {same_project_session_count}"] if same_project_session_count > 1 else []),
+        *[f"- Related active workspace: {path}" for path in related[:3]],
+        "",
+        *source_section,
         *task_context_lines,
         "",
-        "Fresh-session instructions",
-        *[f"- {item}" for item in target_guidance],
-        "- If the source session identity does not match the user's intended work, stop and ask before editing.",
-        "- First reply with what appears done, what remains uncertain, and the smallest next checkpoint.",
-        "- If the objective is not captured, inspect the listed evidence first and then ask one focused outcome question before editing.",
-        "- State which files or commands you will inspect before editing.",
-        "- Implement only the smallest checkpoint after the plan is clear.",
-        "- If continuing in Claude/Codex/Cursor, keep the same repository path active before editing.",
+        "Acceptance criteria and guardrails",
+        *([f"- {item}" for item in acceptance_lines] if acceptance_lines else [f"- {profile['finish']}"]),
         "- Preserve unrelated changes and do not expose secrets.",
-        "- Stop before destructive changes, broad refactors, secret exposure, or unrelated cleanup.",
-        "",
-        "When finished",
-        f"- {profile['finish']}",
+        "- Keep the exact checkout above active unless the user explicitly chooses another workspace.",
+        "- Stop before destructive changes, force pushes, broad refactors, production writes, or unrelated cleanup.",
     ])
 
     return {

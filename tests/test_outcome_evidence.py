@@ -6,7 +6,9 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
+from aiwatcher_cli import local_state
 from aiwatcher_cli.outcome_evidence import (
     annotate_same_file_reprompt,
     build_outcome_evidence,
@@ -46,6 +48,133 @@ def commit_file(temp_dir: str, filename: str, content: str, message: str, *, whe
 
 
 class OutcomeEvidenceTests(unittest.TestCase):
+    def test_test_artifact_does_not_claim_a_passed_verification(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            init_repo(temp_dir)
+            commit_file(temp_dir, "app.py", "base\n", "base", when=now - timedelta(minutes=2))
+            artifact = repo / "junit-results.xml"
+            artifact.write_text("<testsuite failures='1'/>\n", encoding="utf-8")
+            os.utime(artifact, (now.timestamp(), now.timestamp()))
+            session = LocalSession(
+                session_id="artifact-only", tool="codex-cli", project_path=temp_dir,
+                started_at=now - timedelta(minutes=1), updated_at=now + timedelta(minutes=1),
+            )
+            evidence = build_outcome_evidence(session)
+
+        artifact_evidence = next(item for item in evidence.tests if item.get("artifact") == "junit-results.xml")
+        self.assertEqual(artifact_evidence["status"], "result unknown")
+        self.assertEqual(artifact_evidence["source"], "local test artifact")
+        self.assertEqual(evidence.confidence, "low")
+
+    def test_marks_verification_current_only_for_matching_git_state(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = os.path.join(temp_dir, "repo")
+            os.mkdir(repo)
+            init_repo(repo)
+            head = commit_file(repo, "app.py", "base\n", "base", when=now)
+            repository_id = run_out(["git", "rev-list", "--max-parents=0", "HEAD"], repo)[:16]
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_verification_receipt(
+                    runner="pytest",
+                    checkout_path=repo,
+                    repository_id=repository_id,
+                    head=head,
+                    dirty_fingerprint="e3b0c44298fc1c149afbf4c8",
+                    started_at=now.isoformat(),
+                    finished_at=(now + timedelta(minutes=1)).isoformat(),
+                    exit_code=0,
+                )
+                session = LocalSession(
+                    session_id="verified", tool="codex-cli", project_path=repo,
+                    started_at=now, updated_at=now + timedelta(minutes=2),
+                )
+                evidence = build_outcome_evidence(session)
+
+        self.assertEqual(evidence.tests[0]["name"], "pytest")
+        self.assertEqual(evidence.tests[0]["status"], "passed")
+        self.assertTrue(evidence.tests[0]["current"])
+
+    def test_uses_observed_linked_worktree_and_reports_unpushed_state(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            main = Path(temp_dir, "main")
+            worktree = Path(temp_dir, "review")
+            main.mkdir()
+            init_repo(str(main))
+            commit_file(str(main), "app.py", "base\n", "base", when=now - timedelta(hours=1))
+            run(["git", "worktree", "add", "-b", "review-pr", str(worktree)], str(main))
+            run(["git", "branch", "--set-upstream-to", "master", "review-pr"], str(worktree))
+            commit_file(str(worktree), "fix.py", "fixed\n", "fix handoff", when=now + timedelta(minutes=1))
+
+            session = LocalSession(
+                session_id="worktree-session",
+                tool="claude-code",
+                project_path=str(main),
+                raw_cwd=str(worktree),
+                started_at=now,
+                updated_at=now + timedelta(minutes=2),
+            )
+            evidence = build_outcome_evidence(session)
+
+        self.assertEqual(Path(evidence.checkout_path or "").resolve(), worktree.resolve())
+        self.assertEqual(Path(evidence.repo_root or "").resolve(), worktree.resolve())
+        self.assertEqual(evidence.branch, "review-pr")
+        self.assertEqual(evidence.upstream, "master")
+        self.assertEqual(evidence.ahead, 1)
+        self.assertEqual(evidence.behind, 0)
+        self.assertFalse(evidence.dirty)
+        self.assertEqual(evidence.unpushed_commits[0]["subject"], "fix handoff")
+
+    def test_no_upstream_branch_reports_commits_ahead_of_local_base(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            main = Path(temp_dir, "main")
+            worktree = Path(temp_dir, "review")
+            main.mkdir()
+            init_repo(str(main))
+            commit_file(str(main), "app.py", "base\n", "base", when=now - timedelta(hours=1))
+            run(["git", "worktree", "add", "-b", "review-pr", str(worktree)], str(main))
+            commit_file(str(worktree), "fix.py", "fixed\n", "local review fix", when=now)
+
+            session = LocalSession(
+                session_id="no-upstream", tool="codex-cli", project_path=str(main), raw_cwd=str(worktree),
+                started_at=now - timedelta(minutes=2), updated_at=now + timedelta(minutes=1),
+            )
+            evidence = build_outcome_evidence(session)
+
+        self.assertIsNone(evidence.upstream)
+        self.assertEqual(evidence.ahead, 1)
+        self.assertEqual(evidence.unpushed_commits[0]["subject"], "local review fix")
+
+    def test_receipts_from_sibling_checkout_are_not_attributed(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            main = Path(temp_dir, "main")
+            worktree = Path(temp_dir, "review")
+            main.mkdir()
+            init_repo(str(main))
+            head = commit_file(str(main), "app.py", "base\n", "base", when=now - timedelta(minutes=2))
+            run(["git", "worktree", "add", "-b", "review-pr", str(worktree)], str(main))
+            repository_id = run_out(["git", "rev-list", "--max-parents=0", "HEAD"], str(main))[:16]
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_verification_receipt(
+                    runner="pytest", checkout_path=str(main), repository_id=repository_id, head=head,
+                    dirty_fingerprint="e3b0c44298fc1c149afbf4c8", started_at=now.isoformat(),
+                    finished_at=(now + timedelta(seconds=5)).isoformat(), exit_code=0,
+                )
+                session = LocalSession(
+                    session_id="sibling", tool="codex-cli", project_path=str(main), raw_cwd=str(worktree),
+                    started_at=now - timedelta(minutes=1), updated_at=now + timedelta(minutes=1),
+                )
+                evidence = build_outcome_evidence(session)
+
+        self.assertFalse(any(item.get("name") == "pytest" for item in evidence.tests))
+
     def test_detects_nearby_commit_and_captures_real_subject_and_body(self) -> None:
         # Commit subjects/bodies are intentionally captured as real text, not
         # hashed: unlike a prompt, a commit message is written by whoever made
