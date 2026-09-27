@@ -1428,6 +1428,13 @@ function updateBranchLabel(data) {
   const checked = String((data && data.checked_out) || '').trim();
   return checked || 'detached HEAD';
 }
+function compactWorkspacePath(value) {
+  const raw = String(value || '').replace(/[\\/]+$/, '');
+  if (!raw) return '';
+  const normalized = raw.replace(/\\/g, '/');
+  const name = normalized.split('/').filter(Boolean).pop() || normalized;
+  return normalized === name ? name : `…/${name}`;
+}
 function updateBannerTitle(status, data) {
   const sourceRoot = data && (data.source_root || data.repo);
   const source = sourceRoot ? `${data.install_kind === 'source' ? 'Source checkout' : 'Install location'}: ${sourceRoot}` : '';
@@ -1454,12 +1461,14 @@ function updateBannerTitle(status, data) {
 }
 function updateLocationLabel(data) {
   if (!data) return 'Source unknown';
+  const workspace = compactWorkspacePath(data.process_cwd);
   if (data.install_kind && data.install_kind !== 'source') {
     const manager = data.package_manager || 'Package';
     const channel = data.update_channel === 'github' ? 'GitHub' : data.update_channel === 'pypi' ? 'PyPI' : '';
+    if (workspace) return `${workspace} · ${channel ? `${channel}/` : ''}${manager}`;
     return `${channel ? `${channel} · ` : ''}${manager}${data.version ? ` · v${data.version}` : ''}`;
   }
-  return 'Source checkout';
+  return workspace ? `${workspace} · source` : 'Source checkout';
 }
 function setUpdateState(status, data, checkedAt = Date.now()) {
   updateState = { status, data: data || null, checkedAt };
