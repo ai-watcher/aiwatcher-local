@@ -174,8 +174,14 @@ class AgentMapAssetsTest(unittest.TestCase):
         self.assertIn('id="agentSessionSelect"', sessions_view)
         self.assertIn('id="agentMapRefresh"', sessions_view)
         self.assertIn('data-agent-mode="active"', sessions_view)
-        # The table is what the page is for; the map must not push it down.
-        self.assertLess(sessions_view.index('id="sessionRows"'), sessions_view.index('id="agentMapBody"'))
+        self.assertIn('id="sessionsListTab"', sessions_view)
+        self.assertIn('id="sessionsAgentsTab"', sessions_view)
+        self.assertIn('id="agentMapPanel"', sessions_view)
+        self.assertIn("function setSessionsView", self.js)
+        self.assertIn("sessions_mode", self.js)
+        self.assertIn("function handleSessionsTabKey", self.js)
+        self.assertIn("ArrowRight", self.js)
+        self.assertIn("tabIndex = showAgents ? -1 : 0", self.js)
 
     def test_agent_map_fetches_structural_metadata_endpoint(self):
         source = js_function_source(self.js, "loadAgentHierarchy")
@@ -187,6 +193,7 @@ class AgentMapAssetsTest(unittest.TestCase):
     def test_live_refresh_updates_agent_map_only_while_sessions_are_visible(self):
         source = js_function_source(self.js, "refreshTick")
         self.assertIn("view-sessions", source)
+        self.assertIn("sessionsViewMode === 'agents'", source)
         self.assertIn("loadAgentHierarchy()", source)
 
     def test_active_mode_keeps_running_agents_and_ancestors(self):
@@ -223,6 +230,7 @@ class AgentMapAssetsTest(unittest.TestCase):
     def test_window_change_immediately_refreshes_the_visible_agent_map(self):
         source = js_function_source(self.js, "changeWindow")
         self.assertIn("agentHierarchyCache = { sessions: [] }", source)
+        self.assertIn("sessionsViewMode === 'agents'", source)
         self.assertIn("loadAgentHierarchy()", source)
 
 

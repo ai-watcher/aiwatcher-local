@@ -32,7 +32,7 @@ function harness() {
     fetchDashboardJson: () => new Promise((resolve, reject) => pending.push({ resolve, reject })),
   });
   vm.runInContext("let agentHierarchyCache = {sessions: []}; let agentHierarchyError = ''; let selectedAgentSessionId = ''; let selectedAgentId = ''; let agentMapMode = 'all'; let agentHierarchyToken = 0; let agentHierarchyLoadedForDays = null; let agentBranchChoices = new Map(); const AGENT_BRANCH_AUTO_COLLAPSE_CHILDREN = 6;", ctx);
-  for (const name of ['esc', 'projectName', 'sessionName', 'agentStatusLabel', 'agentEventLabel', 'agentEvidenceLabel', 'agentSessionKind',
+  for (const name of ['esc', 'projectName', 'safeSessionTitle', 'sessionName', 'agentStatusLabel', 'agentEventLabel', 'agentEvidenceLabel', 'agentSessionKind',
     'shortAgentSessionId', 'updateAgentHierarchyStatus', 'selectedAgentSession', 'selectAgentSession',
     'visibleAgentNodes', 'agentBranchKey', 'agentBranchHasRunning', 'agentBranchOpen', 'toggleAgentBranch',
     'renderAgentBranch', 'renderAgentHierarchy', 'loadAgentHierarchy']) vm.runInContext(extract(name), ctx);
@@ -164,6 +164,39 @@ test('a long chat name is clipped so the id stays visible in the select', async 
   const select = h.node('agentSessionSelect').innerHTML;
   assert.match(select, /root-a/);
   assert.ok(!select.includes('x'.repeat(41)));
+});
+
+test('approval review payload is labelled without rendering transcript text', async () => {
+  const h = harness();
+  const named = fixture('codex-cli', 'root-a');
+  named.session_title = 'The following is the Codex agent history whose request action you are assessing. >>> TRANSCRIPT START private tool output';
+  const done = h.ctx.loadAgentHierarchy();
+  h.pending[0].resolve({ available: true, sessions: [named] });
+  await done;
+  const select = h.node('agentSessionSelect').innerHTML;
+  assert.match(select, /Approval review/);
+  assert.doesNotMatch(select, /private tool output/);
+});
+
+test('session view tab arrows wrap and Home/End choose boundaries', () => {
+  const focused = [];
+  const nodes = {
+    sessionsListTab: { id: 'sessionsListTab', focus: () => focused.push('list') },
+    sessionsAgentsTab: { id: 'sessionsAgentsTab', focus: () => focused.push('agents') },
+  };
+  const ctx = vm.createContext({ document: { getElementById: id => nodes[id] } });
+  vm.runInContext("let selected = ''; function setSessionsView(mode) { selected = mode; }", ctx);
+  vm.runInContext(extract('handleSessionsTabKey'), ctx);
+  const press = (key, id) => ctx.handleSessionsTabKey({ key, currentTarget: nodes[id], preventDefault() {} });
+  press('ArrowRight', 'sessionsAgentsTab');
+  assert.equal(vm.runInContext('selected', ctx), 'list');
+  press('ArrowLeft', 'sessionsListTab');
+  assert.equal(vm.runInContext('selected', ctx), 'agents');
+  press('Home', 'sessionsAgentsTab');
+  assert.equal(vm.runInContext('selected', ctx), 'list');
+  press('End', 'sessionsListTab');
+  assert.equal(vm.runInContext('selected', ctx), 'agents');
+  assert.deepEqual(focused, ['list', 'agents', 'list', 'agents']);
 });
 
 function wideSession(runningChild) {

@@ -268,6 +268,11 @@
         <div><h2>Sessions</h2><p>Search sessions, inspect projects, and continue prior local AI work. Prompt text is shown for your own review only, never uploaded.</p></div>
         <span class="note-chip local">Private</span>
       </div>
+      <div class="sessions-view-tabs" role="tablist" aria-label="Sessions views">
+        <button type="button" id="sessionsListTab" class="active" role="tab" aria-selected="true" aria-controls="sessionListPanel" tabindex="0" onclick="setSessionsView('list')" onkeydown="handleSessionsTabKey(event)">Session list</button>
+        <button type="button" id="sessionsAgentsTab" role="tab" aria-selected="false" aria-controls="agentMapPanel" tabindex="-1" onclick="setSessionsView('agents')" onkeydown="handleSessionsTabKey(event)">Agent map</button>
+      </div>
+      <div id="sessionListPanel" role="tabpanel" aria-labelledby="sessionsListTab">
       <div class="session-filters">
         <input id="sessionSearch" type="text" placeholder="Search project, tool, model, session id, or a file/topic keyword" oninput="debounceSessionSearch()">
         <select id="sessionOutcomeFilter" onchange="loadSessions()">
@@ -296,10 +301,8 @@
         </tr></thead>
         <tbody id="sessionRows"></tbody>
       </table></div>
-      <!-- Below the table, not above it: the map for one session is a detail
-           of the list, and above it an 18-agent session pushed the list itself
-           off the first screen of a page named for it. -->
-      <section class="agent-map-section" aria-labelledby="agentMapTitle">
+      </div>
+      <section id="agentMapPanel" class="agent-map-section" role="tabpanel" aria-labelledby="sessionsAgentsTab" hidden>
         <div class="section-title agent-map-heading">
           <div><h3 id="agentMapTitle">Agent map</h3><p>Codex lifecycle evidence and recorded Claude Code relationships.</p></div>
           <span class="note-chip" id="agentMapCoverage">Checking local metadata</span>

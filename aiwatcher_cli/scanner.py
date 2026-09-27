@@ -1959,16 +1959,39 @@ def scan_codex_cli(since: datetime | None = None) -> list[LocalSession]:
 
     sessions: list[LocalSession] = []
     try:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(threads)").fetchall()}
+        private_columns = [column for column in ("first_user_message", "preview") if column in columns]
+        selected_title_columns = [
+            f"{column} AS {column}" if column in columns else f"NULL AS {column}"
+            for column in ("name", "title", "first_user_message", "preview")
+        ]
         rows = conn.execute(
-            "SELECT id, cwd, title, model, tokens_used, created_at_ms, updated_at_ms, archived "
-            "FROM threads ORDER BY created_at_ms DESC"
+            f"SELECT id, cwd, {', '.join(selected_title_columns)}, model, tokens_used, "
+            "created_at_ms, updated_at_ms, archived FROM threads ORDER BY created_at_ms DESC"
         ).fetchall()
         for row in rows:
             tokens = int(row["tokens_used"] or 0)
+            name = str(row["name"] or "").strip()
+            legacy_title = str(row["title"] or "").strip()
+            title = name or None
+            if not title and legacy_title:
+                if not private_columns:
+                    # Old Codex databases predate prompt mirrors in `threads`
+                    # and used title as the concise chat label.
+                    title = legacy_title
+                else:
+                    normalized_title = " ".join(legacy_title.split())
+                    prompt_mirrors = {
+                        " ".join(str(row[column] or "").split())
+                        for column in private_columns
+                        if str(row[column] or "").strip()
+                    }
+                    if prompt_mirrors and normalized_title not in prompt_mirrors:
+                        title = legacy_title
             sessions.append(
                 LocalSession(
                     session_id=row["id"],
-                    title=str(row["title"]).strip() or None if row["title"] else None,
+                    title=title,
                     tool="codex-cli",
                     project_path=row["cwd"],
                     started_at=_parse_ts(row["created_at_ms"]),

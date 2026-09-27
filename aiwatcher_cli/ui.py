@@ -192,7 +192,8 @@ SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
 #    (#144). Neither build's cache matches the merged shape, so the merge takes
 #    its own number rather than inheriting a 9 that means two different things.
 # 10: both of the above.
-SUMMARY_CACHE_SCHEMA_VERSION = 10
+# 11: Codex chat labels use the concise name field and reject prompt-mirroring caches.
+SUMMARY_CACHE_SCHEMA_VERSION = 11
 
 
 def restart_command(
@@ -263,7 +264,8 @@ _POST_WITHOUT_BODY = frozenset({
     "/api/first-run-dismissed",
 })
 # 2: sessions carry their chat title; a version-1 index would restore every chat nameless.
-SESSION_SNAPSHOT_SCHEMA_VERSION = 2
+# 3: Codex titles are concise names; version 2 may contain full first-user-message payloads.
+SESSION_SNAPSHOT_SCHEMA_VERSION = 3
 SUMMARY_BACKGROUND_COOLDOWN_SECONDS = 8
 SUMMARY_WINDOWS = (1, 7, 30)
 # One definition of "live", shared with session_presence, which subdivides
@@ -542,6 +544,27 @@ def project_label(path: str | None, max_len: int = 54) -> str:
     return short_path(path, max_len)
 
 
+_CODEX_REVIEW_TITLE_MARKERS = (
+    "the following is the codex agent history whose request action you are assessing",
+    ">>> transcript start",
+    ">>> approval request start",
+)
+
+
+def display_session_title(title: str | None) -> str | None:
+    """Return a trusted chat label without turning captured payloads into UI copy."""
+    if not isinstance(title, str):
+        return None
+    raw = title.strip()
+    if not raw:
+        return None
+    lowered = raw.lower()
+    if any(marker in lowered for marker in _CODEX_REVIEW_TITLE_MARKERS):
+        match = re.search(r"reviewed codex session id:\s*([\w-]+)", raw, re.IGNORECASE)
+        return f"Approval review · {short_session_id(match.group(1))}" if match else "Approval review"
+    return raw
+
+
 def in_window(session: LocalSession, since: datetime) -> bool:
     stamp = session.updated_at or session.started_at
     return bool(stamp and stamp.astimezone() >= since)
@@ -682,8 +705,10 @@ def _session_titles(session_ids: set[str], *, days: int = 30) -> dict[str, str]:
                 row = _SESSION_INDEX.get(session_id)
                 if row is None:
                     missing.add(session_id)
-                elif row.title:
-                    titles[session_id] = row.title
+                else:
+                    title = display_session_title(row.title)
+                    if title:
+                        titles[session_id] = title
         return titles, missing
 
     titles, missing = lookup()
@@ -1981,7 +2006,7 @@ def _session_row_json(
         "tool": row.tool,
         "session_id": row.session_id,
         "session_short": short_session_id(row.session_id),
-        "title": row.title,
+        "title": display_session_title(row.title),
         "started_at": row.started_at.isoformat() if row.started_at else None,
         "project": project_label(row.project_path),
         "project_full": row.project_path if is_reliable_project_path(row.project_path) else "unknown",
@@ -2145,7 +2170,7 @@ def session_json(row: LocalSession) -> dict[str, object]:
         "tool": row.tool,
         "project": row.project_path if is_reliable_project_path(row.project_path) else "unknown",
         "project_short": project_label(row.project_path),
-        "title": row.title,
+        "title": display_session_title(row.title),
         "model": display_model_name(row.model),
         "tokens": row.tokens_in + row.tokens_out,
         "tokens_label": compact_int(row.tokens_in + row.tokens_out),
@@ -2181,7 +2206,7 @@ def recent_session_json(
         "tool": row.tool,
         "session_id": row.session_id,
         "session_short": short_session_id(row.session_id),
-        "title": row.title,
+        "title": display_session_title(row.title),
         "started_at": row.started_at.isoformat() if row.started_at else None,
         "project": project_label(row.project_path),
         "project_full": row.project_path if is_reliable_project_path(row.project_path) else "unknown",
@@ -2221,7 +2246,7 @@ def session_summary_json(row: LocalSession) -> dict[str, object]:
         "api_value": money(row.cost_usd),
         "calls": row.agent_calls,
         "tool_calls": row.tool_calls,
-        "title": row.title,
+        "title": display_session_title(row.title),
         "started_at": row.started_at.isoformat() if row.started_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         "source_path": row.source_path,
@@ -3487,7 +3512,7 @@ def _context_health_card(
         ),
         "session_id": health.session_id,
         "session_short": short_session_id(health.session_id),
-        "session_title": session.title if session is not None else None,
+        "session_title": display_session_title(session.title) if session is not None else None,
         "started_at": session.started_at.isoformat() if session is not None and session.started_at else None,
         "tool": health.tool,
         "project": project_label(health.project_path),
@@ -6048,6 +6073,8 @@ def _cached_session_rows() -> list[LocalSession]:
         try:
             raw = json.loads(_summary_cache_path(days).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(raw, dict) or raw.get("cache_schema_version") != SUMMARY_CACHE_SCHEMA_VERSION:
             continue
         items = raw.get("_session_index") if isinstance(raw, dict) else None
         if not isinstance(items, list):
