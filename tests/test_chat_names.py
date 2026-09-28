@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -68,6 +69,21 @@ class ScannedTitleTests(unittest.TestCase):
 
 
 class SessionPayloadTests(unittest.TestCase):
+    def test_short_chat_name_is_preserved(self) -> None:
+        self.assertEqual(ui.display_session_title("Headroom display bug"), "Headroom display bug")
+
+    def test_long_unicode_chat_name_is_preserved(self) -> None:
+        title = "Review the session formatting 日本語 " + ("details " * 30)
+        self.assertEqual(ui.display_session_title(title), title.rstrip())
+
+    def test_approval_review_payload_never_becomes_a_chat_name(self) -> None:
+        title = (
+            "The following is the Codex agent history whose request action you are assessing. "
+            ">>> TRANSCRIPT START tool output and private prompt <<< TRANSCRIPT END "
+            "Reviewed Codex session id: 01a0df34-1b9a-75a0-a53a-7ccc1cff8f2e"
+        )
+        self.assertEqual(ui.display_session_title(title), "Approval review · 01a0df34...8f2e")
+
     def test_session_rows_carry_the_name_the_start_and_the_short_id(self) -> None:
         session = LocalSession(
             session_id="0b4bfd95-4c9b-45d2-8301-4d44178f005b", tool="claude-code", project_path="/repo",
@@ -79,7 +95,7 @@ class SessionPayloadTests(unittest.TestCase):
         self.assertEqual(row["session_short"], ui.short_session_id(session.session_id))
 
     def test_the_cached_summary_is_invalidated_for_the_new_fields(self) -> None:
-        self.assertGreaterEqual(ui.SUMMARY_CACHE_SCHEMA_VERSION, 9)
+        self.assertGreaterEqual(ui.SUMMARY_CACHE_SCHEMA_VERSION, 11)
 
     def test_the_saved_session_index_keeps_the_name(self) -> None:
         # The dashboard restores sessions from session-index.json on start; a
@@ -90,7 +106,100 @@ class SessionPayloadTests(unittest.TestCase):
         self.assertEqual(ui._session_from_json(saved).title, "Issue exploration")
         self.assertIsNone(ui._session_from_json({**saved, "title": None}).title)
         # An index written before titles existed is not restored.
-        self.assertGreaterEqual(ui.SESSION_SNAPSHOT_SCHEMA_VERSION, 2)
+        self.assertGreaterEqual(ui.SESSION_SNAPSHOT_SCHEMA_VERSION, 3)
+
+    def test_old_summary_cache_with_prompt_title_is_not_migrated(self) -> None:
+        session = LocalSession(
+            session_id="unsafe", tool="codex-cli", project_path="/repo",
+            title="SENTINEL PRIVATE PROMPT DUMP",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            summary_path = Path(tmp) / "summary.json"
+            summary_path.write_text(json.dumps({
+                "cache_schema_version": ui.SUMMARY_CACHE_SCHEMA_VERSION - 1,
+                "_session_index": ui._session_index_payload([session]),
+            }), encoding="utf-8")
+            snapshot_path = Path(tmp) / "missing-session-index.json"
+            with ui._SUMMARY_CACHE_LOCK:
+                previous = dict(ui._SESSION_INDEX)
+                ui._SESSION_INDEX.clear()
+            try:
+                with patch.object(ui, "SUMMARY_WINDOWS", (7,)), \
+                        patch.object(ui, "_summary_cache_path", return_value=summary_path), \
+                        patch.object(ui, "_session_snapshot_path", return_value=snapshot_path):
+                    self.assertEqual(ui._cached_session_rows(), [])
+            finally:
+                with ui._SUMMARY_CACHE_LOCK:
+                    ui._SESSION_INDEX.clear()
+                    ui._SESSION_INDEX.update(previous)
+
+
+class CodexDatabaseNameTests(unittest.TestCase):
+    def scan(self, *, with_name: bool, title: str, prompt: str = "", preview: str = "", name: str | None = None) -> LocalSession:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.sqlite"
+            conn = sqlite3.connect(path)
+            try:
+                private_columns = ", first_user_message TEXT, preview TEXT" if prompt or preview or with_name else ""
+                name_column = ", name TEXT" if with_name else ""
+                conn.execute(
+                    "CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT, title TEXT, model TEXT, "
+                    "tokens_used INTEGER, created_at_ms INTEGER, updated_at_ms INTEGER, archived INTEGER"
+                    f"{private_columns}{name_column})"
+                )
+                columns = ["id", "cwd", "title", "model", "tokens_used", "created_at_ms", "updated_at_ms", "archived"]
+                values: list[object] = ["codex-1", "/repo", title, "gpt-6", 10, 1_000, 2_000, 0]
+                if prompt or preview or with_name:
+                    columns.extend(["first_user_message", "preview"])
+                    values.extend([prompt, preview])
+                if with_name:
+                    columns.append("name")
+                    values.append(name)
+                conn.execute(
+                    f"INSERT INTO threads ({', '.join(columns)}) VALUES ({', '.join('?' for _ in values)})",
+                    values,
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            with patch.object(scanner, "CODEX_DB_PATHS", [path]), patch.object(scanner, "CODEX_SESSIONS_DIRS", []):
+                rows = scanner.scan_codex_cli()
+        return next(row for row in rows if row.session_id == "codex-1")
+
+    def test_concise_name_wins_over_prompt_mirror(self) -> None:
+        prompt = "private prompt " * 5000
+        row = self.scan(with_name=True, title=prompt, prompt=prompt, preview=prompt, name="Hierarchy display bug")
+        self.assertEqual(row.title, "Hierarchy display bug")
+        payload = json.dumps(ui._session_index_payload([row]))
+        self.assertNotIn("private prompt", payload)
+
+    def test_prompt_mirror_without_name_fails_closed(self) -> None:
+        prompt = "SENTINEL-PRIVATE-PROMPT " * 2000
+        row = self.scan(with_name=True, title=prompt, prompt=prompt, preview=prompt, name=None)
+        self.assertIsNone(row.title)
+        self.assertNotIn("SENTINEL-PRIVATE-PROMPT", json.dumps(ui._session_index_payload([row])))
+
+    def test_whitespace_variant_of_prompt_mirror_fails_closed(self) -> None:
+        row = self.scan(
+            with_name=True,
+            title="  private prompt\nwith details  ",
+            prompt="private prompt with   details",
+            preview="",
+            name=None,
+        )
+        self.assertIsNone(row.title)
+
+    def test_missing_prompt_mirrors_fail_closed_in_modern_database(self) -> None:
+        row = self.scan(with_name=True, title="unproven legacy value", prompt="", preview="", name=None)
+        self.assertIsNone(row.title)
+
+    def test_distinct_legacy_title_is_used_when_it_is_not_prompt_or_preview(self) -> None:
+        row = self.scan(with_name=False, title="Useful concise title", prompt="private prompt", preview="private preview")
+        self.assertEqual(row.title, "Useful concise title")
+
+    def test_old_database_with_only_title_still_loads(self) -> None:
+        row = self.scan(with_name=False, title="Legacy chat name")
+        self.assertEqual(row.title, "Legacy chat name")
 
 
 class CompanionNameTests(unittest.TestCase):
@@ -139,6 +248,10 @@ class PageTests(unittest.TestCase):
         self.assertIn("duplicateChatNames(rows)", rows)
         self.assertIn("sharedNames.has(chatName(s))", rows)
         self.assertIn("chatDisambiguation(s)", rows)
+
+    def test_the_browser_defensively_rejects_transcript_titles(self) -> None:
+        self.assertIn("function safeSessionTitle", self.js)
+        self.assertIn("safeSessionTitle(row && (row.title || row.session_title))", self.js)
 
     def test_only_matching_names_are_told_apart(self) -> None:
         source = self.function("duplicateChatNames")

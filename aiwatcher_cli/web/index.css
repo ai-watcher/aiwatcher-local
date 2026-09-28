@@ -1409,6 +1409,34 @@
     .row-open:hover { color: var(--text); }
     .sort-head span { display: inline-block; min-width: 10px; color: var(--blue); }
     tr.clickable:hover { background: rgba(var(--blue-rgb), .05); }
+    .sessions-view-tabs {
+      display: inline-grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--sp-1);
+      padding: 2px;
+      margin-bottom: var(--sp-3);
+      border: 1px solid var(--line-strong);
+      border-radius: var(--r-2);
+      background: var(--surface-raised);
+    }
+    .sessions-view-tabs button {
+      min-height: 34px;
+      padding: 6px 12px;
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+    }
+    .sessions-view-tabs button.active { background: var(--blue-soft); color: var(--on-brand); }
+    .sessions-view-tabs button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+    #sessionListPanel[hidden], #agentMapPanel[hidden] { display: none; }
+    .session-chat-name {
+      display: -webkit-box;
+      max-width: 52rem;
+      overflow: hidden;
+      overflow-wrap: anywhere;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+    }
     .session-filters { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; margin: 14px 0 4px; }
     .session-filters input[type="text"] {
       flex: 1; min-width: 220px; border: 1px solid var(--line-strong); background: var(--surface-raised);
@@ -1416,9 +1444,7 @@
     }
     .session-filters input[type="text"]:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
     .agent-map-section {
-      margin-top: var(--sp-5);
-      padding-top: var(--sp-5);
-      border-top: 1px solid var(--line);
+      padding-top: var(--sp-2);
     }
     .agent-map-heading { margin-bottom: var(--sp-3); }
     .agent-map-heading h3 { margin: 0; font-size: var(--fs-4); letter-spacing: 0; }

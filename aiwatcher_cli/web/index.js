@@ -3292,12 +3292,25 @@ function unbankedColours(segments) {
 // only, so a backslash path came back whole. Two segments rather than one
 // because the leaf alone does not separate aiwatcher-local-public from
 // aiwatcher-local-pr46 at a glance.
+function safeSessionTitle(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const lowered = raw.toLowerCase();
+  if (lowered.includes('the following is the codex agent history whose request action you are assessing')
+      || lowered.includes('>>> transcript start')
+      || lowered.includes('>>> approval request start')) {
+    const match = raw.match(/reviewed codex session id:\s*([\w-]+)/i);
+    return match ? `Approval review · ${shortSessionId(match[1])}` : 'Approval review';
+  }
+  return raw;
+}
+
 // A chat's name for the agent map, which learns it by joining the session
 // index rather than by opening a transcript. Returns '' when the chat has no
 // name, so the caller renders the id alone exactly as it does today -- an
 // unnamed chat must not be given a label that is really its id.
 function sessionName(row) {
-  const title = String((row && row.session_title) || '').trim();
+  const title = safeSessionTitle(row && row.session_title);
   if (!title) return '';
   // The id stays in the same label (#147 keeps it there so two sessions of one
   // project cannot silently collide), so a long name is clipped rather than
@@ -3323,7 +3336,7 @@ function healthProjectName(row) {
 // user's own name over the generated one; a chat with neither falls back to
 // project and tool, the way the Companion bar names it.
 function chatName(row) {
-  const title = String((row && (row.title || row.session_title)) || '').trim();
+  const title = safeSessionTitle(row && (row.title || row.session_title));
   if (title) return title;
   return [projectName(row), row && row.tool].filter(Boolean).join(' · ') || 'Untitled chat';
 }
@@ -5361,6 +5374,7 @@ let agentHierarchyError = '';
 let selectedAgentSessionId = '';
 let selectedAgentId = '';
 let agentMapMode = 'all';
+let sessionsViewMode = new URLSearchParams(location.search).get('sessions_mode') === 'agents' ? 'agents' : 'list';
 // Branch open/closed choices the reader made, keyed by session and agent so a
 // 10s refresh re-renders the tree without undoing them.
 let agentBranchChoices = new Map();
@@ -5524,6 +5538,45 @@ async function continueFreshStartProject(sessionId, project) {
   );
   if (!quieted) await load(true, true);
 }
+function setSessionsView(mode, updateUrl = true) {
+  sessionsViewMode = mode === 'agents' ? 'agents' : 'list';
+  const listPanel = document.getElementById('sessionListPanel');
+  const agentPanel = document.getElementById('agentMapPanel');
+  const listTab = document.getElementById('sessionsListTab');
+  const agentTab = document.getElementById('sessionsAgentsTab');
+  if (!listPanel || !agentPanel || !listTab || !agentTab) return;
+  const showAgents = sessionsViewMode === 'agents';
+  listPanel.hidden = showAgents;
+  agentPanel.hidden = !showAgents;
+  listTab.classList.toggle('active', !showAgents);
+  agentTab.classList.toggle('active', showAgents);
+  listTab.setAttribute('aria-selected', showAgents ? 'false' : 'true');
+  agentTab.setAttribute('aria-selected', showAgents ? 'true' : 'false');
+  listTab.tabIndex = showAgents ? -1 : 0;
+  agentTab.tabIndex = showAgents ? 0 : -1;
+  if (showAgents && agentHierarchyLoadedForDays !== document.getElementById('days').value) {
+    loadAgentHierarchy();
+  }
+  if (updateUrl) {
+    const url = new URL(location.href);
+    if (showAgents) url.searchParams.set('sessions_mode', 'agents');
+    else url.searchParams.delete('sessions_mode');
+    history.replaceState({}, '', url);
+  }
+}
+function handleSessionsTabKey(event) {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  const ids = ['sessionsListTab', 'sessionsAgentsTab'];
+  const current = Math.max(0, ids.indexOf(event.currentTarget && event.currentTarget.id));
+  let next = current;
+  if (event.key === 'Home') next = 0;
+  else if (event.key === 'End') next = ids.length - 1;
+  else next = (current + (event.key === 'ArrowRight' ? 1 : -1) + ids.length) % ids.length;
+  const target = document.getElementById(ids[next]);
+  setSessionsView(next === 1 ? 'agents' : 'list');
+  target.focus();
+}
 function showView(view) {
   document.querySelectorAll('.view').forEach(node => {
     node.hidden = node.id !== `view-${view}`;
@@ -5552,7 +5605,7 @@ function showView(view) {
   });
   const days = document.getElementById('days').value;
   if (view === 'sessions' && sessionsLoadedForDays !== days) loadSessions();
-  if (view === 'sessions' && agentHierarchyLoadedForDays !== days) loadAgentHierarchy();
+  if (view === 'sessions') setSessionsView(sessionsViewMode, false);
   if (view === 'receipts' && reportLoadedForDays !== days) loadReport();
   if (view === 'receipts') markFreshStartReceiptsViewed();
 }
@@ -5573,7 +5626,7 @@ function changeWindow() {
   agentHierarchyLoadedForDays = null;
   reportLoadedForDays = null;
   const sessionsView = document.getElementById('view-sessions');
-  if (sessionsView && !sessionsView.hidden) {
+  if (sessionsView && !sessionsView.hidden && sessionsViewMode === 'agents') {
     agentHierarchyCache = { sessions: [] };
     agentHierarchyError = '';
     const body = document.getElementById('agentMapBody');
@@ -5942,11 +5995,11 @@ function renderSessionRows(rows, filtered) {
   const sharedNames = duplicateChatNames(rows);
   document.getElementById('sessionRows').innerHTML = rows.length
     ? ordered.map(s => `<tr class="clickable" onclick="selectSession('${esc(s.session_id)}')">
-        <td><span title="${esc(s.session_id)}">${esc(chatName(s))}</span>${sharedNames.has(chatName(s)) ? `<span class="match-note">${esc(chatDisambiguation(s))}</span>` : ''}<br>${sessionStatePill(s.state)} ${s.outcome ? outcomePill(s.outcome) : outcomeEvidencePill(s)}</td>
+        <td><span class="session-chat-name" title="${esc(chatName(s))}">${esc(chatName(s))}</span>${sharedNames.has(chatName(s)) ? `<span class="match-note">${esc(chatDisambiguation(s))}</span>` : ''}<br>${sessionStatePill(s.state)} ${s.outcome ? outcomePill(s.outcome) : outcomeEvidencePill(s)}</td>
         <td title="${esc(projectTitle(s))}">${esc(projectName(s))}<span class="match-note">${esc(s.tool)}</span>${s.match_field ? `<span class="match-note">matched on ${esc(s.match_field)}</span>` : ''}</td>
         <td>${esc(s.model)}</td>
         <td class="mono num">${esc(s.tokens_value === null || s.tokens_value === undefined ? s.tokens : tokens(s.tokens_value))}</td>
-        <td><button class="row-action">Review</button></td>
+        <td><button class="row-action" aria-label="Review ${esc(chatName(s))}">Review</button></td>
       </tr>`).join('')
     : `<tr><td colspan="5"><div class="empty">${filtered
         ? 'No sessions match those filters. Try clearing the search or choosing a different session state.'
@@ -6280,7 +6333,7 @@ function refreshTick() {
   // tries again. User-initiated loads are not gated by this.
   if (loadInFlight) { scheduleRefresh(REFRESH_CATCHUP_MS); return; }
   const sessionsView = document.getElementById('view-sessions');
-  if (sessionsView && !sessionsView.hidden) loadAgentHierarchy();
+  if (sessionsView && !sessionsView.hidden && sessionsViewMode === 'agents') loadAgentHierarchy();
   load(false, false);
 }
 
