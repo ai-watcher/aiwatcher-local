@@ -18,6 +18,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from .handoff import MAX_HANDOFF_WORDS, bound_handoff_words
+
 
 LOCAL_PROVIDER_PORTS = {
     "lmstudio": ("LM Studio", "127.0.0.1", 1234, "http://127.0.0.1:1234/v1"),
@@ -737,7 +739,15 @@ def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -
     next_steps = _clean_list(parsed.get("next_steps"), limit=6)
     uncertainties = _clean_list(parsed.get("uncertainties"), limit=5)
     acceptance = _clean_list(parsed.get("acceptance_check") or parsed.get("acceptance"), limit=5)
-    verification = _clean_list(parsed.get("verification_already_run") or parsed.get("verification"), limit=5)
+    packet_verification = _packet_list(evidence, "tests", limit=5)
+    completed_verification = any(
+        re.search(r"\b(?:passed|failed)\b", item.lower()) and "result unknown" not in item.lower()
+        for item in packet_verification
+    )
+    verification = [
+        *packet_verification,
+        *([] if completed_verification else ["No completed verification was observed; do not claim the prior work is verified."]),
+    ]
     objective_status = _clean_line(parsed.get("objective_status"), limit=180)
 
     source_lines = [
@@ -766,7 +776,10 @@ def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -
                 "the nearest observed base; remote push status is unknown"
             )
     if checkout:
-        checkout_lines.append(f"Working tree: {'has local changes' if checkout.get('dirty') else 'clean'}")
+        dirty = checkout.get("dirty")
+        checkout_lines.append(
+            f"Working tree: {'has local changes' if dirty is True else 'clean' if dirty is False else 'state unknown'}"
+        )
     for item in list(checkout.get("unpushed_commits") or [])[:6]:
         if isinstance(item, dict):
             label = "Unpushed commit" if checkout.get("upstream") else "Local commit ahead of observed base"
@@ -805,7 +818,7 @@ def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -
         "First action",
         f"- {next_ask or 'State what appears done, what remains uncertain, and the smallest safe checkpoint before editing.'}",
         *_section("Acceptance criteria", acceptance or _packet_list(packet, "acceptance_criteria", limit=5)),
-        *_section("Verification and test signals", verification or _packet_list(evidence, "tests", limit=5) or ["No completed verification was observed; do not claim the prior work is verified."]),
+        *_section("Verification and test signals", verification),
         *_section("Open questions and uncertainty", uncertainties),
         *_section("Evidence carried forward", evidence_lines or ["No commit, file, test, or decision evidence was available."]),
         "",
@@ -814,7 +827,7 @@ def _structured_handoff_text(parsed: dict[str, object], packet_text: str = "") -
         "- Do not expose secrets.",
         "- Stop before destructive changes, force pushes, broad refactors, production writes, or unrelated cleanup.",
     ]
-    return "\n".join(lines).strip()
+    return bound_handoff_words("\n".join(lines).strip(), max_words=MAX_HANDOFF_WORDS)
 
 
 def _fresh_start_response_is_useful(parsed: dict[str, object], packet_text: str) -> bool:

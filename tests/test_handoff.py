@@ -21,6 +21,25 @@ def run(command: list[str], cwd: str, env: dict[str, str] | None = None) -> None
 
 
 class HandoffTests(unittest.TestCase):
+    def test_unknown_test_artifact_does_not_suppress_unverified_warning(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init = ["git", "init"]
+            run(init, temp_dir)
+            artifact = Path(temp_dir, "junit-results.xml")
+            artifact.write_text("<testsuite failures='1'/>\n", encoding="utf-8")
+            os.utime(artifact, (now.timestamp(), now.timestamp()))
+            session = LocalSession(
+                session_id="artifact-only", tool="codex-cli", project_path=temp_dir,
+                started_at=now - timedelta(minutes=1), updated_at=now + timedelta(minutes=1),
+            )
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(temp_dir, "state.json")}):
+                capsule = build_handoff_capsule(session, [])
+
+        brief = capsule["next_brief"]
+        self.assertIn("junit-results.xml: result unknown", brief)
+        self.assertIn("No completed verification was observed", brief)
+
     def test_danny_style_worktree_handoff_is_concise_and_actionable(self) -> None:
         now = datetime.now(timezone.utc)
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -65,7 +84,36 @@ class HandoffTests(unittest.TestCase):
         self.assertIn("Finish review fixes for PR #150", brief)
         self.assertNotIn("10.2M", brief)
         self.assertNotIn("Usage pressure", brief)
-        self.assertLessEqual(len(brief.split()), 500)
+        self.assertLessEqual(len(brief.split()), 350, brief)
+
+    def test_dense_handoff_preserves_critical_state_within_word_budget(self) -> None:
+        now = datetime.now(timezone.utc)
+        dense = [f"item {index} " + ("detailed context " * 30) for index in range(8)]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run(["git", "init"], temp_dir)
+            run(["git", "config", "user.email", "test@example.com"], temp_dir)
+            run(["git", "config", "user.name", "AIWatcher Test"], temp_dir)
+            Path(temp_dir, "app.py").write_text("base\n", encoding="utf-8")
+            run(["git", "add", "app.py"], temp_dir)
+            run(["git", "commit", "-m", "base"], temp_dir)
+            expected_path = str(Path(temp_dir).resolve())
+            session = LocalSession(
+                session_id="dense", tool="codex-cli", project_path=temp_dir,
+                started_at=now, updated_at=now + timedelta(minutes=1),
+            )
+            capsule = build_handoff_capsule(
+                session, [], objective="Complete the verified continuation checkpoint.",
+                source_refs=dense, constraints=dense, acceptance_criteria=dense,
+                related_workspaces=[f"/repo/related-{index}" for index in range(8)],
+            )
+
+        brief = capsule["next_brief"]
+        self.assertLessEqual(len(brief.split()), 350, brief)
+        self.assertIn("Complete the verified continuation checkpoint", brief)
+        self.assertIn(expected_path, brief)
+        self.assertIn("Working tree: clean", brief)
+        self.assertIn("No completed verification was observed", brief)
+        self.assertIn("First action", brief)
 
     def test_handoff_capsule_prioritizes_fresh_session_guidance(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

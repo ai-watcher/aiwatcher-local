@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -10,6 +11,8 @@ from unittest.mock import patch
 
 from aiwatcher_cli import local_state
 from aiwatcher_cli.outcome_evidence import (
+    _checkout_state,
+    _working_tree_fingerprint,
     annotate_same_file_reprompt,
     build_outcome_evidence,
     check_commit_survival,
@@ -48,6 +51,96 @@ def commit_file(temp_dir: str, filename: str, content: str, message: str, *, whe
 
 
 class OutcomeEvidenceTests(unittest.TestCase):
+    def test_fingerprint_distinguishes_surrogateescaped_git_bytes(self) -> None:
+        def git_result(repo: str, args: list[str]):
+            return subprocess.CompletedProcess(["git"], 0, "", "")
+
+        with patch("aiwatcher_cli.outcome_evidence._run_git", side_effect=git_result):
+            first = _working_tree_fingerprint("/repo", "?? notes-\udcff.txt\n")
+            second = _working_tree_fingerprint("/repo", "?? notes-\udcfe.txt\n")
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(first, second)
+
+    def test_checkout_state_does_not_report_clean_when_git_status_fails(self) -> None:
+        failed = subprocess.CompletedProcess(["git"], 1, "", "status failed")
+
+        def run_git(repo: str, args: list[str]):
+            if args and args[0] == "status":
+                return failed
+            return subprocess.CompletedProcess(["git"], 0, "abc123\n", "")
+
+        with patch("aiwatcher_cli.outcome_evidence._run_git", side_effect=run_git):
+            state = _checkout_state("/repo")
+
+        self.assertIsNone(state["dirty"])
+        self.assertIsNone(state["dirty_fingerprint"])
+        self.assertFalse(state["state_observed"])
+
+    def test_dirty_fingerprint_changes_when_same_file_content_changes(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_repo(temp_dir)
+            commit_file(temp_dir, "app.py", "base\n", "base", when=now)
+            path = Path(temp_dir, "app.py")
+            path.write_text("first edit\n", encoding="utf-8")
+            first = _checkout_state(temp_dir)["dirty_fingerprint"]
+            path.write_text("different edit\n", encoding="utf-8")
+            second = _checkout_state(temp_dir)["dirty_fingerprint"]
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(first, second)
+
+    def test_dirty_fingerprint_changes_when_untracked_content_changes(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_repo(temp_dir)
+            commit_file(temp_dir, "app.py", "base\n", "base", when=now)
+            path = Path(temp_dir, "notes.txt")
+            path.write_text("first draft\n", encoding="utf-8")
+            first = _checkout_state(temp_dir)["dirty_fingerprint"]
+            path.write_text("different draft\n", encoding="utf-8")
+            second = _checkout_state(temp_dir)["dirty_fingerprint"]
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(first, second)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux permits undecodable byte filenames")
+    def test_dirty_fingerprint_handles_non_utf8_untracked_filename(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_repo(temp_dir)
+            commit_file(temp_dir, "app.py", "base\n", "base", when=now)
+            raw_path = os.fsencode(temp_dir) + b"/notes-\xff.txt"
+            descriptor = os.open(raw_path, os.O_WRONLY | os.O_CREAT, 0o600)
+            try:
+                os.write(descriptor, b"local notes\n")
+            finally:
+                os.close(descriptor)
+            fingerprint = _checkout_state(temp_dir)["dirty_fingerprint"]
+
+        self.assertIsNotNone(fingerprint)
+
+    def test_outcome_scan_skips_content_fingerprint_without_receipts(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_repo(temp_dir)
+            commit_file(temp_dir, "app.py", "base\n", "base", when=now)
+            session = LocalSession(
+                session_id="no-receipts", tool="codex-cli", project_path=temp_dir,
+                started_at=now, updated_at=now + timedelta(minutes=1),
+            )
+            with (
+                patch("aiwatcher_cli.outcome_evidence.recent_verification_receipts", return_value=[]),
+                patch("aiwatcher_cli.outcome_evidence._working_tree_fingerprint") as fingerprint,
+            ):
+                build_outcome_evidence(session)
+
+        fingerprint.assert_not_called()
+
     def test_test_artifact_does_not_claim_a_passed_verification(self) -> None:
         now = datetime.now(timezone.utc)
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -97,6 +190,40 @@ class OutcomeEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence.tests[0]["name"], "pytest")
         self.assertEqual(evidence.tests[0]["status"], "passed")
         self.assertTrue(evidence.tests[0]["current"])
+        self.assertTrue(evidence.tests[0]["authoritative"])
+
+    def test_newest_current_verification_failure_supersedes_older_pass(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = os.path.join(temp_dir, "repo")
+            os.mkdir(repo)
+            init_repo(repo)
+            head = commit_file(repo, "app.py", "base\n", "base", when=now)
+            repository_id = run_out(["git", "rev-list", "--max-parents=0", "HEAD"], repo)[:16]
+            fingerprint = _checkout_state(repo)["dirty_fingerprint"]
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                # Persist out of completion order: authority follows finished_at,
+                # not lock/insertion order.
+                for offset, exit_code in ((2, 1), (1, 0)):
+                    local_state.record_verification_receipt(
+                        runner="pytest", checkout_path=repo, repository_id=repository_id,
+                        head=head, dirty_fingerprint=fingerprint,
+                        started_at=(now + timedelta(minutes=offset)).isoformat(),
+                        finished_at=(now + timedelta(minutes=offset, seconds=30)).isoformat(),
+                        exit_code=exit_code,
+                    )
+                session = LocalSession(
+                    session_id="latest-failed", tool="codex-cli", project_path=repo,
+                    started_at=now, updated_at=now + timedelta(minutes=3),
+                )
+                evidence = build_outcome_evidence(session)
+
+        self.assertEqual(evidence.tests[0]["status"], "failed")
+        self.assertTrue(evidence.tests[0]["authoritative"])
+        self.assertNotIn("authoritative", evidence.tests[1])
+        self.assertEqual(evidence.confidence, "low")
+        self.assertFalse(any("passing verification" in reason for reason in evidence.reasons))
 
     def test_uses_observed_linked_worktree_and_reports_unpushed_state(self) -> None:
         now = datetime.now(timezone.utc)

@@ -19,6 +19,130 @@ from .scanner import LocalEvent, LocalSession, segment_session_by_prompt
 from .session_health import analyze_session_health
 
 
+MAX_HANDOFF_WORDS = 350
+
+_BRIEF_SECTION_PRIORITY = {
+    "Task context": 0,
+    "Most recent commit message": 2,
+    "Open questions and uncertainty": 1,
+    "Source of truth to load first": 1,
+    "Decisions and constraints": 1,
+    "Acceptance criteria and guardrails": 1,
+    "Evidence carried forward": 1,
+    "Source session identity": 2,
+    "Completed work and current state": 2,
+    "Completed work": 2,
+    "Current state": 2,
+    "Objective and context": 4,
+    "Objective": 4,
+    "Working checkout": 4,
+    "Verification and test signals": 4,
+    "First action": 4,
+}
+
+
+def bound_handoff_words(text: str, *, max_words: int = MAX_HANDOFF_WORDS) -> str:
+    """Fit a handoff to a word budget by dropping lower-value evidence first."""
+    lines = text.strip().splitlines()
+    if len(text.split()) <= max_words:
+        return text.strip()
+
+    section = ""
+    entries: list[dict[str, object]] = []
+    counts: dict[str, int] = {}
+    headings = set(_BRIEF_SECTION_PRIORITY)
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        heading = next((name for name in headings if stripped == name or stripped.startswith(name + " (")), None)
+        if heading:
+            section = heading
+            entries.append({"index": index, "section": section, "heading": True, "ordinal": -1})
+            continue
+        ordinal = counts.get(section, 0)
+        if stripped:
+            counts[section] = ordinal + 1
+        entries.append({"index": index, "section": section, "heading": False, "ordinal": ordinal})
+
+    def immutable(entry: dict[str, object]) -> bool:
+        return entry["section"] == "Verification and test signals" and entry["ordinal"] == 0
+
+    keep_limits = {0: 0, 1: 1, 2: 6, 4: 7}
+    removable: list[tuple[int, int, int]] = []
+    for entry in entries:
+        index = int(entry["index"])
+        if entry["heading"] or not lines[index].strip():
+            continue
+        if immutable(entry) or (
+            entry["section"] == "Most recent commit message" and lines[index].rstrip().endswith("...")
+        ):
+            continue
+        priority = _BRIEF_SECTION_PRIORITY.get(str(entry["section"]), 3)
+        if int(entry["ordinal"]) >= keep_limits.get(priority, 2):
+            removable.append((priority, -index, index))
+    removed: set[int] = set()
+    word_count = len(text.split())
+    for _, _, index in sorted(removable):
+        if word_count <= max_words:
+            break
+        removed.add(index)
+        word_count -= len(lines[index].split())
+
+    if word_count > max_words:
+        retained: list[tuple[int, int, int]] = []
+        for entry in entries:
+            index = int(entry["index"])
+            if index in removed or entry["heading"] or not lines[index].strip():
+                continue
+            if immutable(entry) or (
+                entry["section"] == "Most recent commit message" and lines[index].rstrip().endswith("...")
+            ):
+                continue
+            priority = _BRIEF_SECTION_PRIORITY.get(str(entry["section"]), 3)
+            retained.append((priority, -len(lines[index].split()), index))
+        for _, _, index in sorted(retained):
+            if word_count <= max_words:
+                break
+            words = lines[index].split()
+            reducible = max(0, len(words) - 8)
+            if not reducible:
+                continue
+            remove = min(reducible, word_count - max_words)
+            lines[index] = " ".join(words[:len(words) - remove]).rstrip(".,;:") + "..."
+            word_count -= remove
+
+    if word_count > max_words:
+        final_removable: list[tuple[int, int, int]] = []
+        for entry in entries:
+            index = int(entry["index"])
+            if index in removed or entry["heading"] or not lines[index].strip() or immutable(entry):
+                continue
+            priority = _BRIEF_SECTION_PRIORITY.get(str(entry["section"]), 3)
+            final_removable.append((priority, -index, index))
+        for _, _, index in sorted(final_removable):
+            if word_count <= max_words:
+                break
+            removed.add(index)
+            word_count -= len(lines[index].split())
+
+    if word_count > max_words:
+        for entry in entries:
+            if not immutable(entry):
+                continue
+            index = int(entry["index"])
+            words = lines[index].split()
+            if len(words) > 40:
+                remove = min(len(words) - 40, word_count - max_words)
+                lines[index] = " ".join(words[:len(words) - remove]).rstrip(".,;:") + "..."
+                word_count -= remove
+
+    result = "\n".join(line for index, line in enumerate(lines) if index not in removed).strip()
+    if len(result.split()) > max_words:
+        # This can only happen if the fixed headings plus one bounded
+        # verification line exceed the budget. Never return an oversized brief.
+        result = " ".join(result.split()[:max_words])
+    return result
+
+
 def _money(value: float) -> str:
     if value == 0:
         return "$0.00"
@@ -578,30 +702,16 @@ def build_handoff_capsule(
 
     warning_lines = [f"- {item}" for item in warnings[:5]]
     done_lines: list[str] = []
-    if evidence.commits:
-        latest_subject = str(evidence.commits[0].get("subject") or "").strip()
-        if latest_subject:
-            done_lines.append(f"- Recent commit evidence suggests work landed: {latest_subject}.")
-        else:
-            done_lines.append("- Recent commit evidence exists; inspect git log before continuing.")
     if evidence.changed_files:
         done_lines.append(
             f"- The workspace has {len(evidence.changed_files)} changed file(s) on disk; treat them as possible in-progress context, not proof from this source session."
         )
-    if evidence.unpushed_commits:
-        destination = evidence.upstream or "the nearest observed base branch"
-        done_lines.append(
-            f"- {len(evidence.unpushed_commits)} local commit(s) are ahead of {destination}."
-            + (" They have not been pushed to the configured upstream." if evidence.upstream else " No upstream is configured, so remote push status is unknown.")
-        )
     if decisions:
         done_lines.append("- Local decision notes exist; review them before changing direction.")
-    if not done_lines:
+    if not done_lines and not evidence.commits:
         done_lines.append("- No commit, changed-file, or test evidence was found; reconstruct the state carefully.")
 
-    uncertainty_lines = [
-        "- The previous chat is intentionally not available in this fresh session.",
-    ]
+    uncertainty_lines: list[str] = []
     if source_identity_label != "Exact active session":
         uncertainty_lines.append(
             "- AIWatcher has not verified the exact active chat. Confirm this source session matches the work the user intended before editing."
@@ -623,10 +733,11 @@ def build_handoff_capsule(
             "- AIWatcher could not confidently identify the project path.",
             "- Ask the user to confirm the repository/path before editing.",
         ])
-    if not include_prompt_excerpt:
-        uncertainty_lines.append("- Prompt text was not included; infer the task from repository state and local evidence.")
-    if not evidence.tests:
-        uncertainty_lines.append("- No nearby test artifact was detected; choose a narrow verification step after inspection.")
+    completed_verification = any(
+        item.get("source") == "AIWatcher verification receipt"
+        and item.get("status") in {"passed", "failed"}
+        for item in evidence.tests
+    )
 
     checkpoint_lines = [
         "- First verify that the source session identity above matches the work the user meant to continue.",
@@ -656,7 +767,7 @@ def build_handoff_capsule(
         same_project_session_count=same_project_session_count,
     )
 
-    next_brief = "\n".join([
+    next_brief = bound_handoff_words("\n".join([
         "AIWatcher Fresh Start brief",
         "",
         f"Start a fresh {profile['session_label']} from this handoff; the previous chat is unavailable.",
@@ -675,19 +786,22 @@ def build_handoff_capsule(
             [f"- Upstream: {evidence.upstream}; {evidence.ahead or 0} ahead, {evidence.behind or 0} behind."]
             if evidence.upstream else ["- Upstream: not configured or not observed."]
         ),
-        f"- Working tree: {'has local changes' if evidence.dirty else 'clean'}.",
+        f"- Working tree: {'has local changes' if evidence.dirty is True else 'clean' if evidence.dirty is False else 'state unknown'}.",
         *[
             f"- {'Unpushed' if evidence.upstream else 'Local commit ahead of observed base'}: "
             f"{item.get('sha')} {item.get('subject')}"
-            for item in evidence.unpushed_commits[:5]
+            for item in evidence.unpushed_commits[:1]
         ],
+        *(
+            [f"- ...and {len(evidence.unpushed_commits) - 1} more local commit(s) ahead; inspect `git log`."]
+            if len(evidence.unpushed_commits) > 1 else []
+        ),
         "",
         "Completed work and current state",
         *done_lines,
-        *memory_summary["current_state"][:3],
         *[f"- Commit: {item.get('sha')}: {item.get('subject')}" for item in evidence.commits[:4]],
-        *[f"- Changed file: {path}" for path in evidence.changed_files[:8]],
         *([f"- ...and {len(evidence.commits) - 4} more commit(s); inspect `git log`." ] if len(evidence.commits) > 4 else []),
+        *[f"- Changed file: {path}" for path in evidence.changed_files[:8]],
         *([f"- ...and {len(evidence.changed_files) - 8} more changed file(s); inspect `git status --short`." ] if len(evidence.changed_files) > 8 else []),
         *(
             ["- No nearby commit evidence was found; avoid overwriting local edits until their owner and intent are clear."]
@@ -703,8 +817,9 @@ def build_handoff_capsule(
                 f"{' (current for this Git state)' if item.get('current') is True else ' (stale; Git state changed)' if item.get('current') is False else ''}"
                 for item in evidence.tests[:6]
             ]
-            if evidence.tests else ["- No completed verification was observed; do not claim the prior work is verified."]
+            if evidence.tests else []
         ),
+        *([] if completed_verification else ["- No completed verification was observed; do not claim the prior work is verified."]),
         "",
         "Decisions and constraints",
         *(["- Decisions below are self-reported and not verified against what actually happened."] if decisions else []),
@@ -715,14 +830,13 @@ def build_handoff_capsule(
         *uncertainty_lines[:4],
         "",
         "First action",
-        *memory_summary["open"][:2],
-        *memory_summary["files"][:5],
+        *memory_summary["open"][1:2],
+        *(memory_summary["files"][:5] if evidence.changed_files else []),
         *([f"- Inspect `git show {evidence.commits[0].get('sha')} --stat` before changing landed work."] if evidence.commits else []),
-        "- Ask one focused outcome question if the objective remains unknown; do not use `git status` as the only next action.",
+        *(["- Ask one focused outcome question before editing because the objective remains unknown."] if not objective_text else []),
         "",
         "Source session identity",
         *source_identity_lines[:4],
-        f"- Source tool/model: {session.tool} / {session.model or 'unknown'}",
         f"- Target: {TARGET_LABELS[target]}",
         f"- Continuation type: {HANDOFF_TYPE_LABELS[handoff_type]}.",
         *([f"- Same-project sessions observed: {same_project_session_count}"] if same_project_session_count > 1 else []),
@@ -736,7 +850,7 @@ def build_handoff_capsule(
         "- Preserve unrelated changes and do not expose secrets.",
         "- Keep the exact checkout above active unless the user explicitly chooses another workspace.",
         "- Stop before destructive changes, force pushes, broad refactors, production writes, or unrelated cleanup.",
-    ])
+    ]))
 
     return {
         "session_id": session.session_id,

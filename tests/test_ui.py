@@ -5047,6 +5047,15 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertNotEqual(improve.call_args.kwargs["local_brief"], visible_brief)
         self.assertNotEqual(capsule.get("enrichment_status"), "client_handoff_brief")
 
+    def test_ai_handoff_packet_preserves_unknown_working_tree_state(self) -> None:
+        packet = json.loads(ui._fresh_start_ai_evidence_packet({
+            "session_id": "unknown-git",
+            "project": "/repo/app",
+            "evidence": {"dirty": None},
+        }))
+
+        self.assertIsNone(packet["checkout"]["dirty"])
+
     def test_handoff_detail_reuses_recent_authoritative_evidence(self) -> None:
         now = datetime.now(timezone.utc)
         row = LocalSession(

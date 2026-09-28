@@ -20,6 +20,8 @@ from .scanner import LocalSession
 
 
 GIT_TIMEOUT_SECONDS = 2
+MAX_FINGERPRINT_UNTRACKED_FILES = 200
+MAX_FINGERPRINT_UNTRACKED_BYTES = 64 * 1024 * 1024
 
 # Repo root for a given path does not change while the process lives, but the
 # companion re-derives it for every session on every scan tick -- which meant a
@@ -49,7 +51,7 @@ class OutcomeEvidence:
     upstream: str | None = None
     ahead: int | None = None
     behind: int | None = None
-    dirty: bool = False
+    dirty: bool | None = None
     unpushed_commits: list[dict[str, Any]] = field(default_factory=list)
     commit_receipts: list[dict[str, Any]] = field(default_factory=list)
     commits: list[dict[str, Any]] = field(default_factory=list)
@@ -96,6 +98,8 @@ def _run_git(repo: str, args: list[str]) -> subprocess.CompletedProcess[str] | N
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
             timeout=GIT_TIMEOUT_SECONDS,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
@@ -132,6 +136,63 @@ def _git_text(repo: str, args: list[str]) -> str | None:
     if not result or result.returncode != 0:
         return None
     return result.stdout.strip() or None
+
+
+def _working_tree_fingerprint(repo: str, status: str) -> str | None:
+    """Hash the current tracked diff and bounded untracked contents.
+
+    A porcelain status hash only identifies changed paths. Two different edits
+    to the same file therefore looked identical and could make an old test
+    receipt appear current. Raw content stays local; only this digest is stored.
+    If the tree cannot be read within conservative bounds, return unknown so a
+    verification receipt is never treated as current optimistically.
+    """
+    diff = _run_git(repo, ["diff", "--binary", "--no-ext-diff", "HEAD", "--"])
+    untracked = _run_git(repo, ["ls-files", "--others", "--exclude-standard", "-z"])
+    if not diff or diff.returncode != 0 or not untracked or untracked.returncode != 0:
+        return None
+
+    paths = [item for item in untracked.stdout.split("\0") if item]
+    if len(paths) > MAX_FINGERPRINT_UNTRACKED_FILES:
+        return None
+    if not status and not diff.stdout and not paths:
+        # Preserve the existing clean-tree fingerprint so receipts recorded by
+        # earlier versions remain comparable after this hardening change.
+        return hashlib.sha256(b"").hexdigest()[:24]
+
+    def frame(value: bytes) -> bytes:
+        return len(value).to_bytes(8, "big") + value
+
+    digest = hashlib.sha256()
+    digest.update(frame(status.encode("utf-8", errors="surrogateescape")))
+    digest.update(frame(diff.stdout.encode("utf-8", errors="surrogateescape")))
+    total_bytes = 0
+    root = Path(repo)
+    try:
+        for relative in paths:
+            path = root / relative
+            stat = path.lstat()
+            path_bytes = relative.encode("utf-8", errors="surrogateescape")
+            file_digest = hashlib.sha256()
+            if path.is_symlink():
+                kind = b"symlink"
+                file_digest.update(os.readlink(path).encode("utf-8", errors="surrogateescape"))
+            elif path.is_file():
+                kind = b"file"
+                total_bytes += stat.st_size
+                if total_bytes > MAX_FINGERPRINT_UNTRACKED_BYTES:
+                    return None
+                with path.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        file_digest.update(chunk)
+            else:
+                kind = f"mode:{stat.st_mode}".encode("ascii")
+            digest.update(frame(path_bytes))
+            digest.update(frame(kind))
+            digest.update(frame(file_digest.digest()))
+    except (OSError, ValueError):
+        return None
+    return digest.hexdigest()[:24]
 
 
 def _git_common_dir(repo: str | None) -> str | None:
@@ -179,11 +240,14 @@ def _count_revisions(repo: str, revision_range: str) -> int | None:
         return None
 
 
-def _checkout_state(repo: str) -> dict[str, Any]:
+def _checkout_state(repo: str, *, include_fingerprint: bool = True) -> dict[str, Any]:
     branch = _git_text(repo, ["branch", "--show-current"])
-    head = _git_text(repo, ["rev-parse", "--short=12", "HEAD"])
+    head_result = _run_git(repo, ["rev-parse", "--short=12", "HEAD"])
+    head = head_result.stdout.strip() if head_result and head_result.returncode == 0 else None
     upstream = _git_text(repo, ["rev-parse", "--abbrev-ref", "@{upstream}"])
-    status = _git_text(repo, ["status", "--porcelain"])
+    status_result = _run_git(repo, ["status", "--porcelain=v1", "--untracked-files=all"])
+    status = status_result.stdout if status_result and status_result.returncode == 0 else None
+    state_observed = head is not None and status is not None
     comparison_ref = upstream
     if not comparison_ref:
         remote_head = _git_text(repo, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
@@ -213,9 +277,28 @@ def _checkout_state(repo: str) -> dict[str, Any]:
         "comparison_ref": comparison_ref,
         "ahead": ahead,
         "behind": behind,
-        "dirty": bool(status),
-        "dirty_fingerprint": hashlib.sha256((status or "").encode("utf-8")).hexdigest()[:24],
+        "dirty": bool(status.strip()) if state_observed else None,
+        "dirty_fingerprint": (
+            _working_tree_fingerprint(repo, status)
+            if state_observed and include_fingerprint else None
+        ),
+        "state_observed": state_observed,
+        "_status": status,
         "unpushed_commits": unpushed,
+    }
+
+
+def verification_git_fingerprint(path: str) -> dict[str, str | None]:
+    """Return the checkout identity used when recording verification receipts."""
+    checkout = _repo_root(path)
+    if not checkout:
+        return {"checkout": None, "head": None, "dirty_fingerprint": None}
+    head = _git_text(checkout, ["rev-parse", "HEAD"])
+    state = _checkout_state(checkout)
+    return {
+        "checkout": checkout,
+        "head": head,
+        "dirty_fingerprint": state.get("dirty_fingerprint"),
     }
 
 
@@ -275,6 +358,8 @@ def _verification_receipts(
     lower = start - timedelta(hours=1)
     upper = (end or start) + timedelta(hours=COMMIT_LOOKAHEAD_HOURS)
     results: list[dict[str, Any]] = []
+    state_fingerprint = state.get("dirty_fingerprint")
+    fingerprint_checked = state_fingerprint is not None
     for receipt in recent_verification_receipts(repository_id=repository_id, limit=100):
         if not _same_checkout(receipt.get("checkout_path"), checkout_path):
             continue
@@ -288,10 +373,21 @@ def _verification_receipts(
             continue
         receipt_head = str(receipt.get("head") or "")
         state_head = str(state.get("head") or "")
+        receipt_fingerprint = receipt.get("dirty_fingerprint")
+        if not fingerprint_checked:
+            status = state.get("_status")
+            state_fingerprint = (
+                _working_tree_fingerprint(str(checkout_path), status)
+                if state.get("state_observed") is True and isinstance(status, str) and checkout_path
+                else None
+            )
+            state["dirty_fingerprint"] = state_fingerprint
+            fingerprint_checked = True
         current = (
             bool(receipt_head and state_head)
             and (receipt_head.startswith(state_head) or state_head.startswith(receipt_head))
-            and receipt.get("dirty_fingerprint") == state.get("dirty_fingerprint")
+            and bool(receipt_fingerprint and state_fingerprint)
+            and receipt_fingerprint == state_fingerprint
         )
         results.append({
             "name": receipt.get("runner"),
@@ -300,7 +396,15 @@ def _verification_receipts(
             "head": receipt.get("head"),
             "current": current,
             "source": "AIWatcher verification receipt",
+            "_finished_at_sort": stamp.timestamp(),
         })
+    results.sort(key=lambda item: float(item.get("_finished_at_sort") or 0), reverse=True)
+    for item in results:
+        if item.get("current") is True:
+            item["authoritative"] = True
+            break
+    for item in results:
+        item.pop("_finished_at_sort", None)
     return results[:10]
 
 
@@ -591,7 +695,7 @@ def build_outcome_evidence(session: LocalSession, *, survival: dict[str, str] | 
         evidence.reasons.append("No git repository was detected for this session.")
         return evidence
 
-    state = _checkout_state(repo)
+    state = _checkout_state(repo, include_fingerprint=False)
     evidence.checkout_path = repo
     evidence.repository_id = _repository_id(repo)
     evidence.branch = state["branch"]
@@ -622,7 +726,7 @@ def build_outcome_evidence(session: LocalSession, *, survival: dict[str, str] | 
     evidence.tests.extend(_detect_test_artifacts(repo, session))
 
     current_pass = any(
-        item.get("status") == "passed" and item.get("current") is True
+        item.get("status") == "passed" and item.get("authoritative") is True
         for item in evidence.tests
     )
     if evidence.commits and current_pass:

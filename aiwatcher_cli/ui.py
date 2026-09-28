@@ -1567,12 +1567,17 @@ def _fresh_start_ai_evidence_packet(capsule: dict[str, object]) -> str:
     tests = []
     for item in (raw_evidence.get("tests") or [])[:6]:
         if isinstance(item, dict):
-            label = " | ".join(str(item.get(key) or "").strip() for key in ("name", "status", "path", "artifact") if item.get(key))
+            parts = [str(item.get("status") or "observed").strip()]
             if item.get("current") is True:
-                label += " | current for this Git state"
+                parts.append("current for this Git state")
             elif item.get("current") is False:
-                label += " | stale after Git state changed"
-            tests.append(label)
+                parts.append("stale after Git state changed")
+            parts.extend(
+                str(item.get(key) or "").strip()
+                for key in ("name", "path", "artifact")
+                if item.get(key)
+            )
+            tests.append(" | ".join(parts))
         else:
             tests.append(str(item))
     logged_decisions = []
@@ -1624,7 +1629,7 @@ def _fresh_start_ai_evidence_packet(capsule: dict[str, object]) -> str:
             "upstream": raw_evidence.get("upstream"),
             "ahead": raw_evidence.get("ahead"),
             "behind": raw_evidence.get("behind"),
-            "dirty": bool(raw_evidence.get("dirty")),
+            "dirty": raw_evidence.get("dirty") if isinstance(raw_evidence.get("dirty"), bool) else None,
             "unpushed_commits": list(raw_evidence.get("unpushed_commits") or [])[:10],
         },
         "risks_and_uncertainties": continuation_items("risks_and_uncertainties", 8),

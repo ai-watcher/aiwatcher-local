@@ -8,7 +8,6 @@ standalone so it can later become the public `aiwatcher` package entrypoint.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import html
 import json
 import os
@@ -130,6 +129,7 @@ from .outcome_evidence import (
     check_commit_survival,
     evidence_for_sessions,
     repo_root_for_session,
+    verification_git_fingerprint,
 )
 from .pricing import is_subscription_model
 from .processes import (
@@ -7018,21 +7018,7 @@ def _verification_runner(command: list[str]) -> str | None:
 
 
 def _verification_git_fingerprint(cwd: str) -> dict[str, str | None]:
-    def git(*parts: str) -> str | None:
-        result = subprocess.run(
-            ["git", "-C", cwd, *parts], check=False, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        return result.stdout.strip() if result.returncode == 0 else None
-
-    checkout = git("rev-parse", "--show-toplevel")
-    head = git("rev-parse", "HEAD")
-    status = git("status", "--porcelain=v1")
-    return {
-        "checkout": checkout,
-        "head": head,
-        "dirty_fingerprint": hashlib.sha256((status or "").encode("utf-8")).hexdigest()[:24] if status is not None else None,
-    }
+    return verification_git_fingerprint(cwd)
 
 
 def command_run(args: argparse.Namespace) -> int:
