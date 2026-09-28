@@ -3317,8 +3317,8 @@ class SettingsDeepLinksNameTheirPanelTest(unittest.TestCase):
 class ConsistentUpdateBadgeTest(unittest.TestCase):
     """The badge reports update state consistently across install types.
 
-    Branch, checkout, package manager, and version remain available in the
-    hover and details panel without replacing the primary status.
+    The compact line names the workspace. Branch, checkout, package manager,
+    and version remain available in the hover and details panel.
     """
 
     def setUp(self):
@@ -3342,8 +3342,9 @@ class ConsistentUpdateBadgeTest(unittest.TestCase):
         self.assertNotIn("Feature branch", label)
 
     def test_the_header_shows_install_channel_and_keeps_details_in_the_hover(self):
-        self.assertIn("return 'Source checkout'", self.js)
+        self.assertIn("return workspace ? `${workspace} · source` : 'Source checkout'", self.js)
         self.assertIn("`${channel ? `${channel} · ` : ''}${manager}${data.version ? ` · v${data.version}` : ''}`", self.js)
+        self.assertIn("`${workspace} · ${channel ? `${channel}/` : ''}${manager}`", self.js)
         self.assertIn("GitHub branch: ${updateBranchLabel(data)}", self.js)
         self.assertIn("Update target: ${data.remote_ref}", self.js)
         self.assertIn("Installer: ${data.package_manager}", self.js)
@@ -3352,6 +3353,15 @@ class ConsistentUpdateBadgeTest(unittest.TestCase):
         self.assertIn("<b>GitHub branch</b>", self.js)
         self.assertIn("<b>Update target</b>", self.js)
         self.assertIn("max-width: min(360px, 30vw)", self.css)
+
+    def test_workspace_path_is_compact_in_the_pill_and_full_in_the_hover(self):
+        compact = js_function_source(self.js, "compactWorkspacePath")
+        location = js_function_source(self.js, "updateLocationLabel")
+        title = js_function_source(self.js, "updateBannerTitle")
+        self.assertIn("raw.replace(/\\\\/g, '/')", compact)
+        self.assertIn("`…/${name}`", compact)
+        self.assertIn("compactWorkspacePath(data.process_cwd)", location)
+        self.assertIn("Launched from: ${data.process_cwd}", title)
 
     def test_update_badge_starts_hidden_until_install_kind_is_known(self):
         from pathlib import Path
