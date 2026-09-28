@@ -323,6 +323,7 @@ class AiAssistTests(unittest.TestCase):
                 "model": "gpt-test",
                 "text": (
                     '{"goal":"Finish the smallest checkpoint.",'
+                    '"objective_status":"Confirmed from supplied objective",'
                     '"what_is_done":["Settings page exists"],'
                     '"current_state":["The UI change is not verified yet"],'
                     '"decisions":["Keep AI Assist optional"],'
@@ -333,6 +334,7 @@ class AiAssistTests(unittest.TestCase):
                     '"next_steps":["Inspect aiwatcher_cli/web/index.js"],'
                     '"next_ask":"Inspect settings files, then patch only the AI Assist config UX.",'
                     '"acceptance_check":["node --check passes"],'
+                    '"verification_already_run":["No verification observed yet"],'
                     '"uncertainties":["Confirm user-selected provider persists"]}'
                 ),
                 "usage": {"prompt_tokens": 200, "completion_tokens": 50},
@@ -398,6 +400,115 @@ class AiAssistTests(unittest.TestCase):
                     },
                     local_brief=evidence_packet,
                 )
+
+    def test_fresh_start_rejects_git_status_only_when_objective_is_unknown(self) -> None:
+        evidence_packet = json.dumps({
+            "contract": "fresh_start_continuation_v2",
+            "source": {"session_id": "session-1", "project": "/repo/ai"},
+            "objective": "",
+            "context_quality": {"objective_known": False},
+            "evidence": {"changed_files": ["aiwatcher_cli/ui.py"]},
+        })
+        parsed = {
+            "goal": "The objective is unknown; confirm the intended task.",
+            "objective_status": "Unknown",
+            "what_is_done": ["aiwatcher_cli/ui.py is changed"],
+            "current_state": ["Working tree contains one changed file"],
+            "risks_and_constraints": ["Do not overwrite unrelated changes"],
+            "inspect_first": ["aiwatcher_cli/ui.py"],
+            "next_steps": ["Inspect the change"],
+            "next_ask": "Run `git status --short`",
+            "acceptance_check": ["User confirms the task"],
+        }
+        self.assertFalse(ai_assist._fresh_start_response_is_useful(parsed, evidence_packet))
+
+    def test_fresh_start_accepts_unknown_objective_status_in_any_case(self) -> None:
+        # Models capitalise the status field ("Unknown"). Rejecting that threw
+        # away a paid, honest answer and fell back to the local brief.
+        evidence_packet = json.dumps({
+            "contract": "fresh_start_continuation_v2",
+            "source": {"session_id": "session-1", "project": "/repo/ai"},
+            "objective": "",
+            "context_quality": {"objective_known": False},
+            "evidence": {"changed_files": ["aiwatcher_cli/ui.py"]},
+        })
+        parsed = {
+            "goal": "Pick up work in /repo/ai from session session-1.",
+            "objective_status": "Unknown",
+            "what_is_done": ["aiwatcher_cli/ui.py is changed in /repo/ai"],
+            "current_state": ["Working tree contains one changed file"],
+            "risks_and_constraints": ["Do not overwrite unrelated changes"],
+            "inspect_first": ["aiwatcher_cli/ui.py"],
+            "next_steps": ["Inspect the change"],
+            "next_ask": "Inspect aiwatcher_cli/ui.py, then ask which outcome to pursue.",
+            "acceptance_check": ["User confirms the task"],
+        }
+        self.assertTrue(ai_assist._fresh_start_response_is_useful(parsed, evidence_packet))
+
+    def test_fresh_start_accepts_a_decision_title_without_the_whole_reasoning(self) -> None:
+        # A session whose only evidence is logged decisions used to require the
+        # answer to quote a ~300-character "title — reasoning" line verbatim.
+        evidence_packet = json.dumps({
+            "contract": "fresh_start_continuation_v2",
+            "source": {"session_id": "session-1", "project": "/repo/ai"},
+            "objective": "",
+            "context_quality": {"objective_known": False},
+            "evidence": {"commits": [], "changed_files": [], "tests": []},
+            "logged_decisions": [
+                "Split the site into Local and Enterprise pages — they have different value props, "
+                "not just different buyers, and one page cannot lead with both without burying one.",
+            ],
+        })
+        parsed = {
+            "goal": "Objective unknown; confirm the intended outcome.",
+            "objective_status": "Not captured",
+            "what_is_done": ["Decided: Split the site into Local and Enterprise pages"],
+            "current_state": ["No commits or changed files observed"],
+            "risks_and_constraints": ["Do not reopen settled decisions"],
+            "inspect_first": ["Site page sources"],
+            "next_steps": ["Ask which page to work on"],
+            "next_ask": "Ask the user which page to continue.",
+            "acceptance_check": ["User confirms the outcome"],
+        }
+        self.assertTrue(ai_assist._fresh_start_response_is_useful(parsed, evidence_packet))
+
+    def test_fresh_start_rejection_carries_the_billed_usage(self) -> None:
+        packet = json.dumps({
+            "contract": "fresh_start_continuation_v2",
+            "source": {"session_id": "session-1", "project": "/repo/ai"},
+            "objective": "",
+            "context_quality": {"objective_known": False},
+        })
+        with (
+            patch.object(ai_assist, "build_ai_assist_status", return_value={"ready": True, "mode": "cloud"}),
+            patch.object(ai_assist, "_call_configured_chat", return_value={
+                "mode": "cloud", "provider": "anthropic", "model": "claude-haiku-4-5",
+                "text": '{"goal":"Continue coding tasks","next_ask":"Run git status"}',
+                "usage": {"input_tokens": 900, "output_tokens": 120},
+            }),
+        ):
+            with self.assertRaises(ai_assist.AiAssistRejected) as caught:
+                ai_assist.improve_fresh_start_brief({"mode": "cloud"}, local_brief=packet)
+
+        self.assertEqual(caught.exception.model, "claude-haiku-4-5")
+        self.assertEqual(caught.exception.usage, {"input_tokens": 900, "output_tokens": 120})
+
+    def test_fresh_start_cut_off_answer_says_so_and_has_room_to_finish(self) -> None:
+        # Both live rejections on 2026-09-24 used exactly the 700-token cap:
+        # the JSON was truncated, unparseable, and reported as "generic".
+        self.assertGreaterEqual(ai_assist.MAX_FRESH_START_OUTPUT_TOKENS, 1400)
+        packet = json.dumps({"contract": "fresh_start_continuation_v2", "source": {"project": "/repo/ai"}})
+        with (
+            patch.object(ai_assist, "build_ai_assist_status", return_value={"ready": True, "mode": "cloud"}),
+            patch.object(ai_assist, "_call_configured_chat", return_value={
+                "mode": "cloud", "provider": "anthropic", "model": "claude-haiku-4-5",
+                "text": '{"goal":"Objective unknown","what_is_done":["Decided: split the si',
+                "usage": {"input_tokens": 1800, "output_tokens": 700},
+            }),
+        ):
+            with self.assertRaises(ai_assist.AiAssistRejected) as caught:
+                ai_assist.improve_fresh_start_brief({"mode": "cloud"}, local_brief=packet)
+        self.assertIn("cut off", str(caught.exception))
 
     def test_optimize_cleanup_prompt_composes_buckets_and_guardrails(self) -> None:
         with (

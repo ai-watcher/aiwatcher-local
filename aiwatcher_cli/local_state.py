@@ -102,6 +102,7 @@ def default_ai_assist_config() -> dict[str, Any]:
         "max_daily_usd": 0.25,
         "source_access": "metadata_only",
         "require_confirmation": True,
+        "auto_compose_fresh_start": False,
         "enabled_workflows": list(DEFAULT_AI_ASSIST_WORKFLOWS),
         "api_keys": {},
         "provider_checks": {},
@@ -170,6 +171,7 @@ def _normalize_ai_assist_config(value: Any) -> dict[str, Any]:
     config["max_daily_usd"] = _safe_float(value.get("max_daily_usd"), float(config["max_daily_usd"]))
     config["source_access"] = source_access if source_access in AI_ASSIST_SOURCE_ACCESS else "metadata_only"
     config["require_confirmation"] = bool(value.get("require_confirmation", True))
+    config["auto_compose_fresh_start"] = bool(value.get("auto_compose_fresh_start", False))
     workflows = value.get("enabled_workflows")
     if isinstance(workflows, list):
         normalized = [str(item).strip().lower() for item in workflows]
@@ -193,6 +195,7 @@ BRIEF_TOKEN_TTL_SECONDS = 900
 # Leading underscore is load-bearing: nothing outside this module (and
 # nothing else in this module) should reach for this lock on its own.
 _STATE_LOCK = threading.RLock()
+_AI_ASSIST_CLOUD_LOCK = threading.Lock()
 LOCK_TIMEOUT_SECONDS = 10
 LOCK_POLL_SECONDS = 0.05
 
@@ -224,6 +227,10 @@ class StateReadError(OSError):
 
 def _lock_path() -> Path:
     return state_path().parent / ".local-state.lock"
+
+
+def _ai_assist_cloud_lock_path() -> Path:
+    return state_path().parent / ".ai-assist-cloud-call.lock"
 
 
 def _acquire_file_lock(handle) -> None:
@@ -267,6 +274,51 @@ def _release_file_lock(handle) -> None:
             pass
     else:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def acquire_ai_assist_cloud_call_lock():
+    """Claim the one cloud-call slot shared by threads and UI processes.
+
+    Returns an opaque file handle when acquired and None when another call is
+    active. Lock-file existence alone is harmless; the OS releases the lock if
+    a process exits.
+    """
+    if not _AI_ASSIST_CLOUD_LOCK.acquire(blocking=False):
+        return None
+    handle = None
+    try:
+        lock_path = _ai_assist_cloud_lock_path()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(lock_path, "a+b")
+        if handle.seek(0, os.SEEK_END) == 0:
+            handle.write(b"\0")
+            handle.flush()
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            handle.close()
+            _AI_ASSIST_CLOUD_LOCK.release()
+            return None
+        return handle
+    except Exception:
+        if handle is not None:
+            handle.close()
+        _AI_ASSIST_CLOUD_LOCK.release()
+        raise
+
+
+def release_ai_assist_cloud_call_lock(handle) -> None:
+    if handle is None:
+        return
+    try:
+        _release_file_lock(handle)
+    finally:
+        handle.close()
+        _AI_ASSIST_CLOUD_LOCK.release()
 
 
 @contextlib.contextmanager
@@ -1712,8 +1764,13 @@ def record_ai_assist_cache(
     source_access: str | None = None,
     structured: dict[str, Any] | None = None,
     usage: dict[str, Any] | None = None,
+    rejected: bool = False,
 ) -> dict[str, Any]:
-    """Cache a bounded, local-only AI Assist output by deterministic evidence hash."""
+    """Cache a bounded, local-only AI Assist output by deterministic evidence hash.
+
+    `rejected` records that the answer for this evidence was discarded, so an
+    automatic rerun on unchanged evidence can skip instead of paying again.
+    """
     workflow_value = workflow.strip().lower()
     if workflow_value not in AI_ASSIST_WORKFLOWS:
         raise ValueError(f"workflow must be one of: {', '.join(sorted(AI_ASSIST_WORKFLOWS))}")
@@ -1737,6 +1794,7 @@ def record_ai_assist_cache(
         "source_access": source_access if source_access in AI_ASSIST_SOURCE_ACCESS else "metadata_only",
         "structured": structured if isinstance(structured, dict) else {},
         "usage": safe_usage,
+        "rejected": bool(rejected),
     }
     with _locked_state():
         data = _load()
@@ -1775,8 +1833,9 @@ def record_ai_assist_run(
     if workflow_value not in AI_ASSIST_WORKFLOWS:
         raise ValueError(f"workflow must be one of: {', '.join(sorted(AI_ASSIST_WORKFLOWS))}")
     status_value = status.strip().lower()
-    if status_value not in {"used", "skipped", "failed"}:
-        raise ValueError("status must be used, skipped, or failed")
+    # "rejected": the provider answered and billed, AIWatcher discarded the answer.
+    if status_value not in {"used", "skipped", "failed", "rejected"}:
+        raise ValueError("status must be used, skipped, failed, or rejected")
     safe_usage: dict[str, Any] = {}
     if isinstance(usage, dict):
         for key in ("prompt_tokens", "completion_tokens", "total_tokens", "input_tokens", "output_tokens"):
@@ -1786,7 +1845,7 @@ def record_ai_assist_run(
     cost_usd, priced = _ai_assist_run_cost(
         model,
         safe_usage,
-        billable=(status_value == "used" and not cache_hit and (mode or "").strip().lower() == "cloud"),
+        billable=(status_value in {"used", "rejected"} and not cache_hit and (mode or "").strip().lower() == "cloud"),
     )
     record = {
         "id": str(uuid.uuid4()),
@@ -1841,7 +1900,7 @@ def _ai_assist_run_cost(model: str | None, usage: dict[str, Any], *, billable: b
 def ai_assist_day_spend(now: datetime | None = None) -> dict[str, Any]:
     """Today's cloud AI Assist spend, UTC calendar day, from run receipts.
 
-    The daily cap in Settings is checked against this before every model
+    The daily spend threshold in Settings is checked against this before every model
     call. Runs whose model has no known price cannot be summed, so they are
     counted separately and the caller can say so.
     """
@@ -1860,7 +1919,7 @@ def ai_assist_day_spend(now: datetime | None = None) -> dict[str, Any]:
     for run in runs:
         if not isinstance(run, dict):
             continue
-        if run.get("status") != "used" or run.get("cache_hit") or run.get("mode") != "cloud":
+        if run.get("status") not in {"used", "rejected"} or run.get("cache_hit") or run.get("mode") != "cloud":
             continue
         try:
             ran_at = datetime.fromisoformat(str(run.get("created_at")))

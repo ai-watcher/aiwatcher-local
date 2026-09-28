@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import copy
 import json
 import os
 import re
@@ -23,6 +24,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from . import __version__
 from . import analyst, compaction, compaction_outcomes, improve, prompt_signals, statusline
 from .ai_assist import (
+    AiAssistRejected,
     AiAssistUnavailable,
     build_ai_assist_status,
     compose_ask_aiwatcher_answer,
@@ -59,6 +61,7 @@ from .local_state import (
     VALID_OUTCOMES,
     active_command_gate,
     active_prompt_gate,
+    acquire_ai_assist_cloud_call_lock,
     ai_assist_cache_get,
     ai_assist_config,
     ai_assist_day_spend,
@@ -99,10 +102,11 @@ from .local_state import (
     record_evidence_snapshot,
     record_outcome,
     record_ui_server,
+    release_ai_assist_cloud_call_lock,
     hash_prompt,
     state_path,
 )
-from .outcome_evidence import VALID_EVIDENCE_OUTCOMES, build_outcome_evidence, evidence_for_sessions
+from .outcome_evidence import VALID_EVIDENCE_OUTCOMES, build_outcome_evidence, evidence_for_sessions, repo_state_fingerprint
 from .local_state import dismiss_first_run, first_run_dismissed_at
 from .local_state import compact_nudge, record_compact_nudge, update_compact_nudge
 from .ledger import (
@@ -276,9 +280,14 @@ UNATTRIBUTED_PROJECT = "__unattributed__"
 UNATTRIBUTED_PROJECT_LABEL = "Unattributed sessions"
 
 _SUMMARY_CACHE: dict[int, tuple[float, dict[str, object]]] = {}
+_HANDOFF_DETAIL_CACHE: dict[tuple[object, ...], tuple[float, dict[str, object]]] = {}
+HANDOFF_DETAIL_CACHE_TTL_SECONDS = 60.0
 _SUMMARY_REFRESHING: set[int] = set()
 _SUMMARY_REFRESHED_AT: dict[int, float] = {}
 _SUMMARY_CACHE_LOCK = threading.RLock()
+_AI_ASSIST_INFLIGHT_LOCK = threading.Lock()
+_AI_ASSIST_INFLIGHT: dict[tuple[str, str], threading.Event] = {}
+AI_ASSIST_INFLIGHT_WAIT_SECONDS = 35.0
 _SESSION_INDEX: dict[str, LocalSession] = {}
 _EVENT_INDEX: dict[str, list[LocalEvent]] = {}
 _EVENT_INDEX_READY = False
@@ -1215,8 +1224,8 @@ def _record_ai_assist_provider_outcome(
 def _ai_assist_cap_error(config: dict[str, object]) -> str | None:
     """Why a cloud call may not spend right now, or None.
 
-    The cap in Settings is a daily budget: today's priced cloud runs are
-    summed from receipts and a call is refused once they reach it. Runs on a
+    The threshold in Settings stops new cloud calls once today's priced runs
+    reach it. Runs on a
     model the pricing table does not know cannot be summed; the reason says
     how many there were rather than counting them as free.
     """
@@ -1224,7 +1233,7 @@ def _ai_assist_cap_error(config: dict[str, object]) -> str | None:
         return None
     cap = float(config.get("max_daily_usd") or 0)
     if cap <= 0:
-        return "Cloud AI Assist daily cap is set to $0.00."
+        return "Cloud AI Assist daily spend threshold is set to $0.00."
     spend = ai_assist_day_spend()
     spent = float(spend.get("spent_usd") or 0.0)
     if spent < cap:
@@ -1235,8 +1244,8 @@ def _ai_assist_cap_error(config: dict[str, object]) -> str | None:
         if unpriced else ""
     )
     return (
-        f"Cloud AI Assist daily cap reached: ${spent:.2f} of ${cap:.2f} spent today (UTC).{note} "
-        "Raise the cap in Settings -> AI Assist or try again tomorrow."
+        f"Cloud AI Assist daily spend threshold reached: ${spent:.2f} of ${cap:.2f} spent today (UTC).{note} "
+        "Raise the threshold in Settings -> AI Assist or try again tomorrow."
     )
 
 
@@ -1251,8 +1260,12 @@ def _run_ai_assist_workflow(
     reason_used: str,
     reason_cached: str,
     finalize: Callable[[str, dict[str, object]], str] | None = None,
+    retry_rejected: bool = True,
 ) -> dict[str, object]:
     """Run one model-backed workflow: cap, cache, call, receipts, key status.
+
+    `retry_rejected=False` (automatic runs) skips evidence whose last answer
+    was rejected; a user's click still gets a fresh attempt.
 
     Returns {"text": composed text or None, "result": the ai_assist_result
     dict for the response}. Fresh Start and Optimize both go through here, so
@@ -1274,11 +1287,7 @@ def _run_ai_assist_workflow(
         )
         return {"text": None, "result": {"status": "skipped", "reason": reason, "receipt": record}}
 
-    if mode == "cloud" and float(config.get("max_daily_usd") or 0) <= 0:
-        return skipped("Cloud AI Assist daily cap is set to $0.00.")
-    cache_hash = _ai_assist_cache_hash(evidence_hash, config)
-    cached = ai_assist_cache_get(workflow, cache_hash)
-    if cached and cached.get("text"):
+    def cached_outcome(cached: dict[str, object]) -> dict[str, object]:
         text = str(cached.get("text") or "")
         usage = cached.get("usage") if isinstance(cached.get("usage"), dict) else {}
         record = record_ai_assist_run(
@@ -1309,73 +1318,173 @@ def _run_ai_assist_workflow(
             "receipt": record,
             "cache": {"evidence_hash": cache_hash},
         }}
-    # A cache hit is free, so the spend check comes after it.
-    cap_reason = _ai_assist_cap_error(config)
-    if cap_reason:
-        return skipped(cap_reason)
+
+    cache_hash = _ai_assist_cache_hash(evidence_hash, config)
+    cached = ai_assist_cache_get(workflow, cache_hash)
+    if cached and cached.get("text"):
+        return cached_outcome(cached)
+    if cached and cached.get("rejected") and not retry_rejected:
+        return skipped(
+            "AI Assist already rejected an answer for this unchanged evidence; showing the local brief. "
+            "Compose AI handoff tries again."
+        )
+    flight_key = (workflow, cache_hash)
+    with _AI_ASSIST_INFLIGHT_LOCK:
+        pending = _AI_ASSIST_INFLIGHT.get(flight_key)
+        if pending is None:
+            pending = threading.Event()
+            _AI_ASSIST_INFLIGHT[flight_key] = pending
+            owns_flight = True
+        else:
+            owns_flight = False
+    if not owns_flight:
+        if not pending.wait(AI_ASSIST_INFLIGHT_WAIT_SECONDS):
+            return skipped(
+                "An identical AI Assist request is still running. The local result remains available; retry shortly."
+            )
+        cached = ai_assist_cache_get(workflow, cache_hash)
+        if cached and cached.get("text"):
+            return cached_outcome(cached)
+        if cached and cached.get("rejected"):
+            return skipped(
+                "The identical AI Assist request finished but its answer was rejected; showing the local result. "
+                "Try again manually if needed."
+            )
+        return skipped(
+            "The identical AI Assist request finished without reusable output; showing the local result. "
+            "Try again if needed."
+        )
+
+    cloud_call_lock = None
     try:
-        result = compose()
-    except Exception as exc:  # noqa: BLE001 - the builder must always answer
-        failure = _ai_assist_failure(exc)
-        _record_ai_assist_provider_outcome(config, error=failure)
-        provider = str(getattr(failure, "provider", None) or config.get("provider") or "none")
+        # The first lookup and flight claim are intentionally separate. The
+        # previous owner may publish a result between them, so check once more
+        # before spending after this request becomes the owner.
+        cached = ai_assist_cache_get(workflow, cache_hash)
+        if cached and cached.get("text"):
+            return cached_outcome(cached)
+        if cached and cached.get("rejected") and not retry_rejected:
+            return skipped(
+                "AI Assist already rejected an answer for this unchanged evidence; showing the local brief. "
+                "Compose AI handoff tries again."
+            )
+        if mode == "cloud":
+            try:
+                cloud_call_lock = acquire_ai_assist_cloud_call_lock()
+            except OSError:
+                return skipped(
+                    "AIWatcher could not secure the cross-process cloud spend lock. "
+                    "The local result remains available; check local-state permissions and retry."
+                )
+            if cloud_call_lock is None:
+                return skipped(
+                    "Another cloud AI Assist call is already running. The local result remains available; retry shortly."
+                )
+        # A cache hit is free, so the spend check comes after it. Cloud calls
+        # are serialized until their receipt is saved, making the daily spend
+        # threshold atomic across different evidence as well as identical tabs.
+        cap_reason = _ai_assist_cap_error(config)
+        if cap_reason:
+            return skipped(cap_reason)
+        try:
+            result = compose()
+        except AiAssistRejected as rejection:
+            # The call completed and was billed; only the answer was discarded.
+            _record_ai_assist_provider_outcome(config, result={"provider": rejection.provider or ""})
+            record = record_ai_assist_run(
+                workflow=workflow,
+                status="rejected",
+                session_id=session_id,
+                mode=rejection.mode or mode,
+                provider=rejection.provider or str(config.get("provider") or "none"),
+                model=rejection.model or str(config.get("model") or "") or None,
+                input_chars=len(local_text),
+                source_access=source_access,
+                reason=str(rejection),
+                usage=rejection.usage,
+                evidence_hash=evidence_hash,
+                cache_hit=False,
+            )
+            record_ai_assist_cache(
+                workflow=workflow,
+                evidence_hash=cache_hash,
+                text="",
+                mode=rejection.mode,
+                provider=rejection.provider,
+                model=rejection.model,
+                source_access=source_access,
+                usage=rejection.usage,
+                rejected=True,
+            )
+            return {"text": None, "result": {"status": "failed", "reason": str(rejection), "receipt": record}}
+        except Exception as exc:  # noqa: BLE001 - the builder must always answer
+            failure = _ai_assist_failure(exc)
+            _record_ai_assist_provider_outcome(config, error=failure)
+            provider = str(getattr(failure, "provider", None) or config.get("provider") or "none")
+            record = record_ai_assist_run(
+                workflow=workflow,
+                status="failed",
+                session_id=session_id,
+                mode=mode,
+                provider=provider,
+                model=str(config.get("model") or "") or None,
+                source_access=source_access,
+                reason=str(failure),
+                evidence_hash=evidence_hash,
+            )
+            return {"text": None, "result": {"status": "failed", "reason": str(failure), "receipt": record}}
+        text = str(result.get("text") or "").strip()
+        if finalize is not None:
+            text = finalize(text, result)
+        _record_ai_assist_provider_outcome(config, result=result)
+        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        structured = result.get("structured") if isinstance(result.get("structured"), dict) else {}
         record = record_ai_assist_run(
             workflow=workflow,
-            status="failed",
+            status="used",
             session_id=session_id,
-            mode=mode,
-            provider=provider,
-            model=str(config.get("model") or "") or None,
-            source_access=source_access,
-            reason=str(failure),
+            mode=str(result.get("mode") or ""),
+            provider=str(result.get("provider") or ""),
+            model=str(result.get("model") or ""),
+            input_chars=int(result.get("input_chars") or 0),
+            output_chars=len(text),
+            source_access=str(result.get("source_access") or "metadata_only"),
+            reason=reason_used,
+            usage=usage,
             evidence_hash=evidence_hash,
+            cache_hit=False,
         )
-        return {"text": None, "result": {"status": "failed", "reason": str(failure), "receipt": record}}
-    text = str(result.get("text") or "").strip()
-    if finalize is not None:
-        text = finalize(text, result)
-    _record_ai_assist_provider_outcome(config, result=result)
-    usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
-    structured = result.get("structured") if isinstance(result.get("structured"), dict) else {}
-    record = record_ai_assist_run(
-        workflow=workflow,
-        status="used",
-        session_id=session_id,
-        mode=str(result.get("mode") or ""),
-        provider=str(result.get("provider") or ""),
-        model=str(result.get("model") or ""),
-        input_chars=int(result.get("input_chars") or 0),
-        output_chars=len(text),
-        source_access=str(result.get("source_access") or "metadata_only"),
-        reason=reason_used,
-        usage=usage,
-        evidence_hash=evidence_hash,
-        cache_hit=False,
-    )
-    cache_record = record_ai_assist_cache(
-        workflow=workflow,
-        evidence_hash=cache_hash,
-        text=text,
-        mode=str(result.get("mode") or ""),
-        provider=str(result.get("provider") or ""),
-        model=str(result.get("model") or ""),
-        source_access=str(result.get("source_access") or "metadata_only"),
-        structured=structured,
-        usage=usage,
-    )
-    return {"text": text, "result": {
-        "status": "used",
-        "provider": result.get("provider"),
-        "model": result.get("model"),
-        "mode": result.get("mode"),
-        "source_access": result.get("source_access"),
-        "input_chars": result.get("input_chars"),
-        "output_chars": len(text),
-        "usage": usage,
-        "structured": structured,
-        "receipt": record,
-        "cache": {"evidence_hash": cache_record.get("evidence_hash")},
-    }}
+        cache_record = record_ai_assist_cache(
+            workflow=workflow,
+            evidence_hash=cache_hash,
+            text=text,
+            mode=str(result.get("mode") or ""),
+            provider=str(result.get("provider") or ""),
+            model=str(result.get("model") or ""),
+            source_access=str(result.get("source_access") or "metadata_only"),
+            structured=structured,
+            usage=usage,
+        )
+        return {"text": text, "result": {
+            "status": "used",
+            "provider": result.get("provider"),
+            "model": result.get("model"),
+            "mode": result.get("mode"),
+            "source_access": result.get("source_access"),
+            "input_chars": result.get("input_chars"),
+            "output_chars": len(text),
+            "usage": usage,
+            "structured": structured,
+            "receipt": record,
+            "cache": {"evidence_hash": cache_record.get("evidence_hash")},
+        }}
+    finally:
+        if cloud_call_lock is not None:
+            release_ai_assist_cloud_call_lock(cloud_call_lock)
+        with _AI_ASSIST_INFLIGHT_LOCK:
+            if _AI_ASSIST_INFLIGHT.get(flight_key) is pending:
+                pending.set()
+                del _AI_ASSIST_INFLIGHT[flight_key]
 
 
 def _ai_assist_failure(exc: BaseException) -> AiAssistUnavailable:
@@ -1416,11 +1525,21 @@ def _fresh_start_evidence_hash(
         "warnings": capsule.get("warnings"),
         "runtime_attachment": capsule.get("runtime_attachment"),
         "same_project_session_count": capsule.get("same_project_session_count"),
+        "repo_state_id": capsule.get("repo_state_id"),
         "include_prompt_excerpt": capsule.get("include_prompt_excerpt"),
         "source_access": source_access,
         "next_brief": capsule.get("next_brief"),
     }
     return hash_prompt(json.dumps(evidence, sort_keys=True, default=str))
+
+
+def _attach_fresh_start_ai_identity(capsule: dict[str, object]) -> None:
+    config = ai_assist_config()
+    capsule["ai_assist"] = build_ai_assist_status(config)
+    capsule["fresh_start_evidence_id"] = _fresh_start_evidence_hash(
+        capsule,
+        source_access=str(config.get("source_access") or "metadata_only"),
+    )
 
 
 def _fresh_start_ai_evidence_packet(capsule: dict[str, object]) -> str:
@@ -1475,6 +1594,14 @@ def _fresh_start_ai_evidence_packet(capsule: dict[str, object]) -> str:
         },
         "continuation_type": capsule.get("handoff_type_label"),
         "objective": capsule.get("objective"),
+        "objective_evidence": {
+            "explicit_user_objective": capsule.get("objective"),
+            "prompt_excerpt_included": bool(capsule.get("include_prompt_excerpt")),
+            "rule": (
+                "Treat the objective as unknown unless explicit_user_objective or the included prompt excerpt states it. "
+                "Changed files and commits are workspace evidence, not proof of user intent."
+            ),
+        },
         "objective_and_context": continuation_items("objective_and_context", 5),
         "source_refs": list(capsule.get("source_refs") or [])[:8],
         "constraints": list(capsule.get("constraints") or [])[:8],
@@ -1502,7 +1629,35 @@ def _fresh_start_ai_evidence_packet(capsule: dict[str, object]) -> str:
             else None
         ),
     }
+    packet["context_quality"] = _fresh_start_context_quality(capsule)
     return json.dumps(packet, sort_keys=True, default=str)
+
+
+def _fresh_start_context_quality(capsule: dict[str, object]) -> dict[str, object]:
+    """The one answer to "does this handoff know what the user wanted?".
+
+    The drawer chip, the first-paint shell, and the packet sent to the model
+    all read it here so they cannot disagree.
+    """
+    explicit_objective = bool(str(capsule.get("objective") or "").strip())
+    prompt_included = bool(capsule.get("include_prompt_excerpt") and isinstance(capsule.get("costliest_prompt"), dict))
+    known = explicit_objective or prompt_included
+    if explicit_objective and prompt_included:
+        level, label = "strong", "Objective + prompt context"
+    elif known:
+        level, label = "partial", "Partial task context"
+    else:
+        level, label = "metadata_only", "Objective needs verification"
+    return {
+        "level": level,
+        "label": label,
+        "objective_known": known,
+        "note": (
+            "User intent is present in supplied objective or opted-in prompt evidence."
+            if known
+            else "User intent is not present; compose a verification-first handoff and do not infer it from files or commits."
+        ),
+    }
 
 
 def _optimize_checklist(candidates: list[dict[str, object]]) -> str:
@@ -2229,6 +2384,7 @@ def session_summary_json(row: LocalSession) -> dict[str, object]:
         "state": state,
         "runtime_attachment": attachment.to_json(),
         "actions": session_actions(row, outcome=outcome, attachment=attachment),
+        "fresh_start_completion": _fresh_start_completion(row.session_id),
         "summary_only": True,
         "detail_status": "loading",
     }
@@ -2239,6 +2395,36 @@ def build_session_summary(session_id: str, days: int = 30) -> dict[str, object]:
     if not row:
         return {"error": "session not found"}
     return session_summary_json(row)
+
+
+def _fresh_start_completion(session_id: str) -> dict[str, object] | None:
+    """Return the latest actionable Fresh Start receipt for a source session."""
+    try:
+        decisions = recent_handoff_decisions(limit=50)
+    except OSError:
+        return None
+    for decision in decisions:
+        if not isinstance(decision, dict):
+            continue
+        source_id = decision.get("source_session_id") or decision.get("session_id")
+        if source_id != session_id or decision.get("decision") not in {"new_chat", "copy_handoff"}:
+            continue
+        next_session_id = decision.get("next_session_id")
+        correlation = decision.get("next_session_correlation") if isinstance(decision.get("next_session_correlation"), dict) else {}
+        linked = bool(next_session_id) and str(correlation.get("status") or "linked") == "linked"
+        return {
+            "status": "completed" if linked else "proof_pending",
+            "label": "Fresh Start completed" if linked else "Fresh Start copied; proof pending",
+            "reason": str(
+                correlation.get("reason")
+                or ("A later same-project session was linked to this Fresh Start receipt." if linked else "Waiting to observe a later same-project session.")
+            ),
+            "receipt_id": decision.get("id"),
+            "created_at": decision.get("created_at"),
+            "next_session_id": next_session_id,
+            "confidence": correlation.get("confidence"),
+        }
+    return None
 
 
 def event_json(row: LocalEvent) -> dict[str, object]:
@@ -2620,6 +2806,7 @@ def build_session_detail(session_id: str, days: int = 30, *, allow_pending: bool
         pass
     return {
         **session_json(row),
+        "fresh_start_completion": _fresh_start_completion(row.session_id),
         "privacy": "Prompt text is shown only when you inspect this local session; it is not uploaded or persisted in summaries.",
         "verdict": _session_verdict_inputs(row, events),
         "insights": session_insights(row),
@@ -2884,6 +3071,7 @@ def build_basic_handoff_detail(
         "runtime_attachment": attachment.to_json(),
         "basic": True,
         "enrichment_status": "loading",
+        "context_quality": _fresh_start_context_quality({"objective": objective}),
     }
 
 
@@ -2901,6 +3089,29 @@ def build_handoff_detail(
     row = _find_session_row(session_id, days=days)
     if not row:
         return {"error": "session not found"}
+    repo_fingerprint = repo_state_fingerprint(row)
+    cache_key = (
+        session_id,
+        row.updated_at.isoformat() if row.updated_at else row.started_at.isoformat() if row.started_at else None,
+        days,
+        target,
+        include_prompt_excerpt,
+        handoff_type,
+        objective or "",
+        tuple(source_refs or []),
+        tuple(constraints or []),
+        tuple(acceptance_criteria or []),
+        # Commits and edits change the Git evidence without touching the
+        # session log, so the tree itself is part of what makes a hit valid.
+        repo_fingerprint,
+    )
+    now_monotonic = time.monotonic()
+    with _SUMMARY_CACHE_LOCK:
+        cached = _HANDOFF_DETAIL_CACHE.get(cache_key)
+        if cached and now_monotonic - cached[0] <= HANDOFF_DETAIL_CACHE_TTL_SECONDS:
+            capsule = copy.deepcopy(cached[1])
+            _attach_fresh_start_ai_identity(capsule)
+            return capsule
     events = sorted(
         [event for event in scan_all_events() if event.session_id == session_id],
         key=lambda event: event.timestamp or MIN_DT,
@@ -2925,7 +3136,14 @@ def build_handoff_detail(
         runtime_attachment=attachment.to_json(),
         same_project_session_count=_same_project_session_count(row),
     )
-    capsule["ai_assist"] = build_ai_assist_status(ai_assist_config())
+    capsule["repo_state_id"] = hash_prompt(repo_fingerprint) if repo_fingerprint else None
+    capsule["context_quality"] = _fresh_start_context_quality(capsule)
+    _attach_fresh_start_ai_identity(capsule)
+    with _SUMMARY_CACHE_LOCK:
+        _HANDOFF_DETAIL_CACHE[cache_key] = (now_monotonic, copy.deepcopy(capsule))
+        if len(_HANDOFF_DETAIL_CACHE) > 32:
+            oldest = min(_HANDOFF_DETAIL_CACHE, key=lambda key: _HANDOFF_DETAIL_CACHE[key][0])
+            _HANDOFF_DETAIL_CACHE.pop(oldest, None)
     return capsule
 
 
@@ -2940,8 +3158,13 @@ def build_ai_assisted_handoff_detail(
     constraints: list[str] | None = None,
     acceptance_criteria: list[str] | None = None,
     local_brief_override: str | None = None,
+    automatic: bool = False,
 ) -> dict[str, object]:
-    """Return a user-requested AI-composed Fresh Start brief with receipt."""
+    """Return an AI-composed Fresh Start brief with receipt.
+
+    `automatic` marks a run started by the user's auto-compose setting rather
+    than a click, so the receipt and ledger do not claim a confirmation.
+    """
     config = ai_assist_config(with_secrets=True)
     source_access = str(config.get("source_access") or "metadata_only")
     effective_prompt_excerpt = bool(include_prompt_excerpt and source_access in {"prompt_opt_in", "source_opt_in"})
@@ -2975,7 +3198,11 @@ def build_ai_assisted_handoff_detail(
             f"- Source access: {result.get('source_access') or 'metadata_only'}",
             "- Scope: Composed the paste-ready handoff from local AIWatcher evidence.",
             "- Evidence boundary: local session identity, token/cost totals, files, commits, outcomes, and proof claims remain authoritative.",
-            "- Cost boundary: one user-confirmed bounded model call; no saved-token claim is made by this AI step.",
+            (
+                "- Cost boundary: one bounded model call started by the auto-compose setting; no saved-token claim is made by this AI step."
+                if automatic
+                else "- Cost boundary: one user-confirmed bounded model call; no saved-token claim is made by this AI step."
+            ),
         ])
         return "\n\n".join([composed, receipt_text]).rstrip()
 
@@ -2986,9 +3213,18 @@ def build_ai_assisted_handoff_detail(
         local_text=evidence_packet,
         compose=lambda: improve_fresh_start_brief(config, local_brief=evidence_packet, timeout=20),
         session_id=session_id,
-        reason_used="User clicked Improve with AI Assist on a Fresh Start brief.",
-        reason_cached="User clicked Compose AI handoff on a Fresh Start brief; cached output reused.",
+        reason_used=(
+            "Auto-compose setting composed a Fresh Start brief."
+            if automatic
+            else "User clicked Improve with AI Assist on a Fresh Start brief."
+        ),
+        reason_cached=(
+            "Auto-compose setting reopened a Fresh Start brief; cached output reused."
+            if automatic
+            else "User clicked Compose AI handoff on a Fresh Start brief; cached output reused."
+        ),
         finalize=with_receipt,
+        retry_rejected=not automatic,
     )
     if outcome.get("text"):
         capsule["next_brief"] = outcome["text"]
@@ -3073,19 +3309,28 @@ def _payload_items(payload: dict[str, object], name: str) -> list[str]:
     return _query_items({name: values}, name)
 
 
-def _ai_assist_confirmation_error(payload: dict[str, object]) -> str | None:
+def _ai_assist_confirmation_error(
+    payload: dict[str, object], *, allow_automatic_fresh_start: bool = False,
+) -> str | None:
     """Return why a model call may not start, or None when it may.
 
     "Ask before every AI Assist run" used to be enforced only by a browser
     confirm() dialog, so any local client could spend the cloud budget with
     no prompt at all. The client now sends `confirmed: true` after the user
     agrees, and the server refuses without it while the setting is on.
+
+    An automatic Fresh Start run sends `automatic: true` instead of claiming a
+    confirmation nobody gave. The server accepts it only on the Fresh Start
+    route and only while the user's own auto-compose setting is on.
     """
     if not isinstance(payload, dict):
         return "AI Assist requests need a JSON object body"
-    if not ai_assist_config().get("require_confirmation", True):
+    config = ai_assist_config()
+    if not config.get("require_confirmation", True):
         return None
     if bool(payload.get("confirmed")):
+        return None
+    if allow_automatic_fresh_start and bool(payload.get("automatic")) and bool(config.get("auto_compose_fresh_start")):
         return None
     return (
         "AI Assist run needs explicit confirmation: send confirmed: true after the user agrees, "
@@ -9140,7 +9385,7 @@ class UIHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/handoff-basic":
                 response = build_basic_handoff_detail(session_id, days, target, **handoff_options)
             elif parsed.path == "/api/handoff-ai-assist":
-                confirmation_error = _ai_assist_confirmation_error(payload)
+                confirmation_error = _ai_assist_confirmation_error(payload, allow_automatic_fresh_start=True)
                 if confirmation_error:
                     self._send(400, json.dumps({"error": confirmation_error}), "application/json; charset=utf-8")
                     return
@@ -9151,6 +9396,7 @@ class UIHandler(BaseHTTPRequestHandler):
                     target,
                     include_prompt_excerpt,
                     local_brief_override=str(payload.get("local_brief") or ""),
+                    automatic=bool(payload.get("automatic")) and not bool(payload.get("confirmed")),
                     **handoff_options,
                 )
             else:

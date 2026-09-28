@@ -279,6 +279,11 @@ def _clean_user_items(items: Sequence[str] | None, *, limit: int = 8, item_limit
     return cleaned
 
 
+def _indefinite_article(label: str) -> str:
+    """"an AI coding session", not "a AI coding session"."""
+    return "an" if label[:1].lower() in "aeiou" else "a"
+
+
 def _brief_memory_summary(
     *,
     project_label: str,
@@ -304,7 +309,8 @@ def _brief_memory_summary(
         summary.append(f"- You were trying to: {objective_text}")
     else:
         summary.append(
-            f"- AIWatcher inferred this was a {session_label} in {project_part}; confirm the task from the workspace before editing."
+            f"- The exact user objective was not captured. This was {_indefinite_article(session_label)} {session_label} in {project_part}; "
+            "use the evidence below to reconstruct the state, then ask one focused question to confirm the intended next outcome before editing."
         )
     summary.append(
         f"- Source session match: {source_identity_label}; return capability: {exact_return_label}."
@@ -348,6 +354,11 @@ def _brief_memory_summary(
         "- First confirm the source session identity and project are the work the user meant to continue.",
         f"- Next checkpoint: {checkpoint_items[0] if checkpoint_items else 'inspect the listed evidence and choose one smallest safe step.'}",
     ]
+    if not objective_text:
+        open_items.append(
+            "- After inspecting the evidence, ask: `What outcome should I continue toward in this project?` "
+            "Include likely options supported by the evidence instead of asking the user to retell the whole session."
+        )
 
     files: list[str] = []
     for item in changed_files[:8]:
@@ -638,6 +649,7 @@ def build_handoff_capsule(
         "",
         "Objective and context",
         *memory_summary["summary"],
+        f"- Objective status: {'confirmed from user input' if objective_text else 'not captured; confirmation required before edits'}.",
         "",
         "Completed work",
         *done_lines,
@@ -708,6 +720,7 @@ def build_handoff_capsule(
         *[f"- {item}" for item in target_guidance],
         "- If the source session identity does not match the user's intended work, stop and ask before editing.",
         "- First reply with what appears done, what remains uncertain, and the smallest next checkpoint.",
+        "- If the objective is not captured, inspect the listed evidence first and then ask one focused outcome question before editing.",
         "- State which files or commands you will inspect before editing.",
         "- Implement only the smallest checkpoint after the plan is clear.",
         "- If continuing in Claude/Codex/Cursor, keep the same repository path active before editing.",

@@ -272,6 +272,7 @@ class DashboardServeTests(unittest.TestCase):
         self.assertEqual(args[:4], ("sess-1", 30, "codex", True))
         self.assertEqual(kwargs["handoff_type"], "coding")
         self.assertEqual(kwargs["objective"], "Continue the AI Assist handoff.")
+        self.assertFalse(kwargs["automatic"])
 
     def test_ai_assist_routes_refuse_a_model_call_without_confirmation(self) -> None:
         # "Ask before every AI Assist run" is on by default. A browser confirm()
@@ -289,6 +290,32 @@ class DashboardServeTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("confirmation", body["error"])
         optimize.assert_not_called()
+
+    def test_automatic_fresh_start_is_accepted_only_when_the_user_enabled_it(self) -> None:
+        # The auto path says it is automatic instead of claiming a confirmation
+        # nobody gave; the server honours that only from the user's own setting.
+        status, body, (handoff, _) = self._post_ai_assist(
+            "/api/handoff-ai-assist", {"session_id": "sess-1", "automatic": True},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("confirmation", body["error"])
+        handoff.assert_not_called()
+
+        enabled = {"require_confirmation": True, "auto_compose_fresh_start": True}
+        with patch.object(ui, "ai_assist_config", return_value=enabled):
+            status, _, (handoff, _) = self._post_ai_assist(
+                "/api/handoff-ai-assist", {"session_id": "sess-1", "automatic": True},
+            )
+            self.assertEqual(status, 200)
+            handoff.assert_called_once()
+            # The receipt must not claim the user confirmed an automatic run.
+            self.assertTrue(handoff.call_args.kwargs["automatic"])
+
+            status, body, (_, optimize) = self._post_ai_assist(
+                "/api/optimize-ai-assist", {"candidate_id": "sessions:/repo/app", "automatic": True},
+            )
+            self.assertEqual(status, 400)
+            optimize.assert_not_called()
 
     def test_ai_assist_routes_skip_confirmation_when_the_setting_is_off(self) -> None:
         with patch.object(ui, "ai_assist_config", return_value={"require_confirmation": False}):
@@ -2796,7 +2823,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(first["ai_assist_result"]["status"], "used")
         self.assertAlmostEqual(spend["spent_usd"], 0.15, places=4)
         self.assertEqual(second["ai_assist_result"]["status"], "skipped")
-        self.assertIn("daily cap reached: $0.15 of $0.10", second["ai_assist_result"]["reason"])
+        self.assertIn("daily spend threshold reached: $0.15 of $0.10", second["ai_assist_result"]["reason"])
         self.assertEqual(composer.call_count, 1)
         self.assertEqual(runs[0]["status"], "skipped")
         self.assertTrue(runs[1]["priced"])
@@ -2926,6 +2953,51 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(rows[0]["observed_followup"]["next_tokens_per_model_call_label"], "4.0k")
         self.assertEqual(rows[0]["observed_followup"]["direction"], "smaller")
         self.assertIn("not a final saved-token", rows[0]["observed_followup"]["basis"])
+
+    def test_source_session_summary_exposes_linked_fresh_start_completion(self) -> None:
+        source = LocalSession(
+            session_id="source",
+            tool="codex-cli",
+            project_path="/repo/app",
+            updated_at=datetime.now(timezone.utc),
+        )
+        receipt = {
+            "id": "receipt-1",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "source_session_id": "source",
+            "decision": "copy_handoff",
+            "next_session_id": "follow-up",
+            "next_session_correlation": {
+                "status": "linked",
+                "confidence": "high",
+                "reason": "Observed a later same-project session.",
+            },
+        }
+        with (
+            patch.object(ui, "recent_handoff_decisions", return_value=[receipt]),
+            patch.object(ui, "get_outcome", return_value=None),
+            patch.object(ui, "safe_runtime_processes", return_value=[]),
+        ):
+            summary = ui.session_summary_json(source)
+
+        completion = summary["fresh_start_completion"]
+        self.assertEqual(completion["status"], "completed")
+        self.assertEqual(completion["next_session_id"], "follow-up")
+        self.assertEqual(completion["confidence"], "high")
+
+    def test_source_session_summary_exposes_pending_fresh_start_receipt(self) -> None:
+        receipt = {
+            "id": "receipt-1",
+            "source_session_id": "source",
+            "decision": "copy_handoff",
+            "next_session_id": None,
+            "next_session_correlation": {"status": "waiting", "reason": "Waiting for a later session."},
+        }
+        with patch.object(ui, "recent_handoff_decisions", return_value=[receipt]):
+            completion = ui._fresh_start_completion("source")
+
+        self.assertEqual(completion["status"], "proof_pending")
+        self.assertIsNone(completion["next_session_id"])
 
     def test_optimize_inventory_detects_stale_session_cluster(self) -> None:
         now = datetime.now(timezone.utc)
@@ -3316,7 +3388,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(first["ai_assist_result"]["status"], "used")
         self.assertAlmostEqual(spend["spent_usd"], 0.15, places=4)  # 1M gpt-4o-mini input tokens
         self.assertEqual(second["ai_assist_result"]["status"], "skipped")
-        self.assertIn("daily cap reached: $0.15 of $0.10", second["ai_assist_result"]["reason"])
+        self.assertIn("daily spend threshold reached: $0.15 of $0.10", second["ai_assist_result"]["reason"])
         self.assertEqual(compose.call_count, 1)
         self.assertEqual(runs[0]["status"], "skipped")
         self.assertAlmostEqual(runs[1]["cost_usd"], 0.15, places=4)
@@ -4969,8 +5041,325 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertTrue(packet["current_state"])
         self.assertTrue(packet["next_steps"])
         self.assertTrue(packet["inspect_first"])
+        self.assertFalse(packet["objective_evidence"]["explicit_user_objective"])
+        self.assertFalse(packet["context_quality"]["objective_known"])
+        self.assertEqual(packet["context_quality"]["level"], "metadata_only")
         self.assertNotEqual(improve.call_args.kwargs["local_brief"], visible_brief)
         self.assertNotEqual(capsule.get("enrichment_status"), "client_handoff_brief")
+
+    def test_handoff_detail_reuses_recent_authoritative_evidence(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="cached-handoff",
+            tool="codex-cli",
+            project_path="/repo/cache",
+            started_at=now - timedelta(hours=2),
+            updated_at=now - timedelta(minutes=2),
+        )
+        with ui._SUMMARY_CACHE_LOCK:
+            ui._SESSION_INDEX.clear()
+            ui._HANDOFF_DETAIL_CACHE.clear()
+        ui._index_sessions([row])
+        with (
+            patch.object(ui, "scan_all_events", return_value=[]) as scan,
+            patch.object(ui, "safe_runtime_processes", return_value=[]),
+            patch.object(ui, "ai_assist_config", return_value={"mode": "off"}),
+        ):
+            first = ui.build_handoff_detail("cached-handoff", days=7)
+            second = ui.build_handoff_detail("cached-handoff", days=7)
+
+        self.assertFalse(first.get("error"))
+        self.assertEqual(first["next_brief"], second["next_brief"])
+        self.assertEqual(scan.call_count, 1)
+
+    def test_rejected_answer_is_billed_and_not_retried_automatically(self) -> None:
+        config = {"mode": "cloud", "max_daily_usd": 5, "provider": "anthropic", "model": "claude-haiku-4-5"}
+        rejection = ui.AiAssistRejected(
+            "AI Assist returned a generic handoff",
+            provider="anthropic", mode="cloud", model="claude-haiku-4-5",
+            usage={"input_tokens": 1_000_000, "output_tokens": 0},
+        )
+        compose = Mock(side_effect=rejection)
+
+        def run(retry_rejected: bool) -> dict[str, object]:
+            return ui._run_ai_assist_workflow(
+                workflow="fresh_start", config=config, evidence_hash="same-evidence",
+                local_text="packet", compose=compose, session_id="s1",
+                reason_used="used", reason_cached="cached", retry_rejected=retry_rejected,
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                first = run(retry_rejected=False)
+                automatic_again = run(retry_rejected=False)
+                clicked = run(retry_rejected=True)
+
+        self.assertEqual(first["result"]["receipt"]["status"], "rejected")
+        self.assertEqual(first["result"]["receipt"]["cost_usd"], 1.0)
+        self.assertEqual(automatic_again["result"]["status"], "skipped")
+        self.assertEqual(clicked["result"]["receipt"]["status"], "rejected")
+        self.assertEqual(compose.call_count, 2)
+
+    def test_identical_concurrent_ai_assist_requests_share_one_model_call(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        compose = Mock()
+
+        def compose_once() -> dict[str, object]:
+            entered.set()
+            self.assertTrue(release.wait(2), "test did not release the model call")
+            return {
+                "text": "AI-assisted handoff",
+                "mode": "local",
+                "provider": "ollama",
+                "model": "test-model",
+                "input_chars": 6,
+                "source_access": "metadata_only",
+                "usage": {},
+            }
+
+        compose.side_effect = compose_once
+        results: list[dict[str, object]] = []
+        errors: list[BaseException] = []
+        follower_checked_cache = threading.Event()
+        cache_get = ui.ai_assist_cache_get
+
+        def observed_cache_get(workflow: str, evidence_hash: str) -> dict[str, object] | None:
+            cached = cache_get(workflow, evidence_hash)
+            if threading.current_thread().name == "ai-assist-follower":
+                if cached is None:
+                    follower_checked_cache.set()
+            return cached
+
+        def run() -> None:
+            try:
+                results.append(ui._run_ai_assist_workflow(
+                    workflow="fresh_start",
+                    config={"mode": "local", "provider": "ollama", "model": "test-model"},
+                    evidence_hash="same-concurrent-evidence",
+                    local_text="packet",
+                    compose=compose,
+                    session_id="s1",
+                    reason_used="used",
+                    reason_cached="cached",
+                ))
+            except BaseException as exc:  # pragma: no cover - surfaced below
+                errors.append(exc)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                with patch.object(ui, "ai_assist_cache_get", side_effect=observed_cache_get):
+                    with ui._AI_ASSIST_INFLIGHT_LOCK:
+                        ui._AI_ASSIST_INFLIGHT.clear()
+                    first = threading.Thread(target=run, name="ai-assist-owner")
+                    second = threading.Thread(target=run, name="ai-assist-follower")
+                    first.start()
+                    self.assertTrue(entered.wait(2), "first request never reached the model call")
+                    second.start()
+                    self.assertTrue(follower_checked_cache.wait(2), "follower never checked the cache")
+                    release.set()
+                    first.join(3)
+                    second.join(3)
+                    self.assertFalse(first.is_alive())
+                    self.assertFalse(second.is_alive())
+
+        self.assertEqual(errors, [])
+        self.assertEqual(compose.call_count, 1)
+        self.assertEqual(sorted(item["result"]["status"] for item in results), ["cached", "used"])
+        with ui._AI_ASSIST_INFLIGHT_LOCK:
+            self.assertEqual(ui._AI_ASSIST_INFLIGHT, {})
+
+    def test_zero_cloud_cap_still_allows_a_free_cache_hit(self) -> None:
+        config = {"mode": "cloud", "provider": "openai", "model": "gpt-4o-mini", "max_daily_usd": 1}
+        compose = Mock(return_value={
+            "text": "Cached AI handoff",
+            "mode": "cloud",
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+            "input_chars": 6,
+            "source_access": "metadata_only",
+            "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+        })
+
+        def run(current_config: dict[str, object]) -> dict[str, object]:
+            return ui._run_ai_assist_workflow(
+                workflow="fresh_start",
+                config=current_config,
+                evidence_hash="cached-at-zero-cap",
+                local_text="packet",
+                compose=compose,
+                session_id="s1",
+                reason_used="used",
+                reason_cached="cached",
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                first = run(config)
+                cached = run({**config, "max_daily_usd": 0})
+
+        self.assertEqual(first["result"]["status"], "used")
+        self.assertEqual(cached["result"]["status"], "cached")
+        self.assertEqual(compose.call_count, 1)
+
+    def test_identical_waiter_recovers_when_the_owner_fails(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        follower_missed_cache = threading.Event()
+        results: list[dict[str, object]] = []
+        cache_get = ui.ai_assist_cache_get
+
+        def compose_failure() -> dict[str, object]:
+            entered.set()
+            self.assertTrue(release.wait(2), "test did not release the failed call")
+            raise RuntimeError("provider offline")
+
+        compose = Mock(side_effect=compose_failure)
+
+        def observed_cache_get(workflow: str, evidence_hash: str) -> dict[str, object] | None:
+            cached = cache_get(workflow, evidence_hash)
+            if threading.current_thread().name == "failed-owner-waiter" and cached is None:
+                follower_missed_cache.set()
+            return cached
+
+        def run() -> None:
+            results.append(ui._run_ai_assist_workflow(
+                workflow="fresh_start",
+                config={"mode": "local", "provider": "ollama", "model": "test-model"},
+                evidence_hash="failed-owner-evidence",
+                local_text="packet",
+                compose=compose,
+                session_id="s1",
+                reason_used="used",
+                reason_cached="cached",
+            ))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(ui, "ai_assist_cache_get", side_effect=observed_cache_get),
+            ):
+                owner = threading.Thread(target=run, name="failed-owner")
+                waiter = threading.Thread(target=run, name="failed-owner-waiter")
+                owner.start()
+                self.assertTrue(entered.wait(2), "owner never reached the model call")
+                waiter.start()
+                self.assertTrue(follower_missed_cache.wait(2), "waiter never observed the cache miss")
+                release.set()
+                owner.join(3)
+                waiter.join(3)
+
+        self.assertFalse(owner.is_alive())
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(compose.call_count, 1)
+        self.assertEqual(sorted(item["result"]["status"] for item in results), ["failed", "skipped"])
+        with ui._AI_ASSIST_INFLIGHT_LOCK:
+            self.assertEqual(ui._AI_ASSIST_INFLIGHT, {})
+
+    def test_different_cloud_requests_cannot_race_the_spend_threshold(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        errors: list[BaseException] = []
+        owner_result: list[dict[str, object]] = []
+        config = {"mode": "cloud", "provider": "openai", "model": "gpt-4o-mini", "max_daily_usd": 0.10}
+
+        def compose_once() -> dict[str, object]:
+            entered.set()
+            self.assertTrue(release.wait(2), "test did not release the cloud call")
+            return {
+                "text": "Cloud answer",
+                "mode": "cloud",
+                "provider": "openai",
+                "model": "gpt-4o-mini",
+                "input_chars": 6,
+                "source_access": "metadata_only",
+                "usage": {"prompt_tokens": 1_000_000, "completion_tokens": 0},
+            }
+
+        compose = Mock(side_effect=compose_once)
+
+        def run_owner() -> None:
+            try:
+                owner_result.append(ui._run_ai_assist_workflow(
+                    workflow="fresh_start", config=config, evidence_hash="owner-evidence",
+                    local_text="packet", compose=compose, session_id="owner",
+                    reason_used="used", reason_cached="cached",
+                ))
+            except BaseException as exc:  # pragma: no cover - surfaced below
+                errors.append(exc)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                owner = threading.Thread(target=run_owner)
+                owner.start()
+                self.assertTrue(entered.wait(2), "owner never reached the cloud call")
+                competing = ui._run_ai_assist_workflow(
+                    workflow="fresh_start", config=config, evidence_hash="different-evidence",
+                    local_text="packet", compose=compose, session_id="competitor",
+                    reason_used="used", reason_cached="cached",
+                )
+                release.set()
+                owner.join(3)
+                runs = recent_ai_assist_runs(limit=5)
+
+        self.assertEqual(errors, [])
+        self.assertFalse(owner.is_alive())
+        self.assertEqual(owner_result[0]["result"]["status"], "used")
+        self.assertEqual(competing["result"]["status"], "skipped")
+        self.assertIn("already running", competing["result"]["reason"])
+        self.assertEqual(compose.call_count, 1)
+        self.assertEqual(sum(1 for item in runs if item["status"] == "used" and not item["cache_hit"]), 1)
+
+    def test_handoff_detail_cache_misses_after_a_commit_or_edit(self) -> None:
+        # A commit changes the Git evidence without touching the session log;
+        # reusing the cached capsule would hand the model pre-commit evidence.
+        now = datetime.now(timezone.utc)
+        row = LocalSession(
+            session_id="cached-handoff-git",
+            tool="codex-cli",
+            project_path="/repo/cache",
+            started_at=now - timedelta(hours=2),
+            updated_at=now - timedelta(minutes=2),
+        )
+        with ui._SUMMARY_CACHE_LOCK:
+            ui._SESSION_INDEX.clear()
+            ui._HANDOFF_DETAIL_CACHE.clear()
+        ui._index_sessions([row])
+        with (
+            patch.object(ui, "scan_all_events", return_value=[]) as scan,
+            patch.object(ui, "safe_runtime_processes", return_value=[]),
+            patch.object(ui, "ai_assist_config", return_value={"mode": "off"}),
+            patch.object(ui, "repo_state_fingerprint", side_effect=["head-a", "head-a", "head-b"]),
+        ):
+            first = ui.build_handoff_detail("cached-handoff-git", days=7)
+            second = ui.build_handoff_detail("cached-handoff-git", days=7)
+            changed = ui.build_handoff_detail("cached-handoff-git", days=7)
+
+        self.assertEqual(scan.call_count, 2)
+        self.assertEqual(first["fresh_start_evidence_id"], second["fresh_start_evidence_id"])
+        self.assertNotEqual(first["fresh_start_evidence_id"], changed["fresh_start_evidence_id"])
+
+    def test_fresh_start_context_quality_has_one_definition(self) -> None:
+        # The drawer chip, the first-paint shell, and the model packet must agree.
+        prompt = {"prompt": "Fix the gate"}
+        cases = [
+            ({}, "metadata_only", False),
+            ({"objective": "  "}, "metadata_only", False),
+            ({"include_prompt_excerpt": True, "costliest_prompt": None}, "metadata_only", False),
+            ({"objective": "Ship it"}, "partial", True),
+            ({"include_prompt_excerpt": True, "costliest_prompt": prompt}, "partial", True),
+            ({"objective": "Ship it", "include_prompt_excerpt": True, "costliest_prompt": prompt}, "strong", True),
+        ]
+        for capsule, level, known in cases:
+            with self.subTest(capsule=capsule):
+                quality = ui._fresh_start_context_quality(capsule)
+                self.assertEqual(quality["level"], level)
+                self.assertEqual(quality["objective_known"], known)
 
     def test_ai_assisted_handoff_composes_paste_ready_brief_and_receipt(self) -> None:
         now = datetime.now(timezone.utc)
