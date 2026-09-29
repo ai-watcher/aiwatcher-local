@@ -231,6 +231,15 @@ aiwatcher-local` so the recorded Git commit actually advances. A plain `pipx
 upgrade` may clone the latest commit and still keep the existing files when
 both builds declare the same version.
 
+A GitHub package continues tracking the revision it was installed from. An
+install ending in `@main` follows `main`; an install ending in a feature-branch
+name follows that branch. The workspace where `aiwatcher` is started does not
+change this update target. To move a feature-branch install back to `main`, run:
+
+```console
+pipx install --force git+https://github.com/ai-watcher/aiwatcher-local.git@main
+```
+
 ### Restart after an update
 
 Updating files does not replace AIWatcher processes that are already running.

@@ -62,7 +62,7 @@ def package_upgrade_guidance(direct: dict[str, Any] | None = None) -> list[dict[
     direct = direct if direct is not None else _direct_url_metadata()
     spec = _package_spec(direct)
     git_backed = _direct_url_commit(direct) is not None
-    return [
+    guidance = [
         {
             "label": "pipx",
             "command": f"pipx {'reinstall' if git_backed else 'upgrade'} {PACKAGE_NAME}",
@@ -84,6 +84,14 @@ def package_upgrade_guidance(direct: dict[str, Any] | None = None) -> list[dict[
             "command": f"python -m pip install --upgrade git+https://github.com/{GITHUB_REPO}.git",
         },
     ]
+    if git_backed and _direct_url_revision(direct) != GITHUB_BRANCH:
+        guidance.append({
+            "label": "Switch to main",
+            "command": (
+                f"pipx install --force git+https://github.com/{GITHUB_REPO}.git@{GITHUB_BRANCH}"
+            ),
+        })
+    return guidance
 
 
 def git_capture(repo: Path, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
@@ -210,6 +218,7 @@ def _package_update_status(*, fetch: bool, branch: str) -> dict[str, object]:
     manager = package_manager()
     command = _package_update_command(manager, direct)
     installed_commit = _direct_url_commit(direct)
+    tracked_revision = _direct_url_revision(direct) if installed_commit else branch
     payload: dict[str, object] = {
         "ok": True,
         "install_kind": "package",
@@ -218,8 +227,8 @@ def _package_update_status(*, fetch: bool, branch: str) -> dict[str, object]:
         "version": __version__,
         "repo": None,
         "remote": "github",
-        "branch": branch,
-        "remote_ref": f"github/{branch}",
+        "branch": tracked_revision,
+        "remote_ref": f"github/{tracked_revision}",
         "update_channel": "github" if installed_commit else "pypi",
         "install_revision": installed_commit or __version__,
         "update_available": False,
@@ -230,14 +239,17 @@ def _package_update_status(*, fetch: bool, branch: str) -> dict[str, object]:
 
     if not fetch:
         payload["message"] = (
-            f"AIWatcher {__version__} is installed as a package. "
+            f"AIWatcher {__version__} is installed from GitHub revision `{tracked_revision}`. "
+            "Check for updates to compare it with that revision."
+            if installed_commit
+            else f"AIWatcher {__version__} is installed as a package. "
             "Check for updates to compare it with the latest release."
         )
         return payload
 
     commit = installed_commit
     if commit:
-        compare = urllib.parse.quote(f"{commit}...{branch}", safe=".")
+        compare = urllib.parse.quote(f"{commit}...{tracked_revision}", safe=".")
         try:
             data = _fetch_json(f"{GITHUB_API_BASE}/compare/{compare}")
         except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
