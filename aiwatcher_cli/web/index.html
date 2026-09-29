@@ -362,7 +362,7 @@
        placeholder pretending to be finished. -->
   <section id="view-control" class="view" hidden>
     <!-- What you can act on, read across. Three facts that each end in a verb:
-         how much context a Fresh Start would save, whether anything is being
+         how much replayed context a Fresh Start is reviewing, whether anything is being
          reviewed before it runs, and how many decisions this window produced.
          The placeholder that stood here said the actions were still elsewhere,
          which was true and is not a surface. -->
@@ -454,11 +454,11 @@
          card it describes. Both ids are kept: load() writes to them. -->
     <div class="card" style="margin-bottom:14px">
       <div class="section-title">
-        <div><h2>Fresh Start receipts</h2><p><strong id="preflightDecisions">-</strong> preflight decisions &middot; <span id="windowLabel">-</span>. When AIWatcher suggested a fresh session, what you chose, and whether a follow-up session was observed. Proof stays pending until a later session in the same project is observed.</p></div>
+        <div><h2>Fresh Start receipts</h2><p><strong id="preflightDecisions">-</strong> preflight decisions &middot; <span id="windowLabel">-</span>. When AIWatcher suggested a fresh session, what you chose, and whether a follow-up was explicitly linked. Same-project timing is shown only as a possible match.</p></div>
         <div class="actions"><button class="btn-quiet" aria-pressed="false" onclick="quietFreshStartReminders()">Quiet reminders</button><span class="note-chip local">Private</span></div>
       </div>
       <div class="table-wrap"><table>
-        <thead><tr><th>Time</th><th>Decision</th><th>Expected context at risk</th><th>Proof</th><th>Sessions</th><th></th></tr></thead>
+        <thead><tr><th>Time</th><th>Decision</th><th>Source context</th><th>Proof</th><th>Sessions</th><th></th></tr></thead>
         <tbody id="handoffDecisionRows"></tbody>
       </table></div>
     </div>

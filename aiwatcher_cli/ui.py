@@ -72,6 +72,7 @@ from .local_state import (
     companion_preferences,
     companion_skip_active,
     evidence_snapshots_for_sessions,
+    fresh_start_followup_evidence,
     get_outcome,
     get_watcher_status,
     outcome_counts,
@@ -197,7 +198,8 @@ SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
 #    its own number rather than inheriting a 9 that means two different things.
 # 10: both of the above.
 # 11: Codex chat labels use the concise name field and reject prompt-mirroring caches.
-SUMMARY_CACHE_SCHEMA_VERSION = 11
+# 12: evidence-accurate activity, Fresh Start, and historical-token semantics.
+SUMMARY_CACHE_SCHEMA_VERSION = 12
 
 
 def restart_command(
@@ -844,17 +846,17 @@ def _project_health(items: list[LocalSession]) -> dict[str, object]:
         }
     if tool_calls >= 1_000 or calls >= 1_000 or tokens >= 50_000_000:
         return {
-            "status": "critical",
-            "label": "Critical",
-            "tone": "critical",
-            "reason": "Heavy context or tool-call pressure. Review before continuing broad work.",
+            "status": "review",
+            "label": "High activity",
+            "tone": "warning",
+            "reason": "High observed usage in this reporting window. Review outcomes before deciding whether action is needed.",
             "action_label": "Review",
         }
     if api_value >= 10 or tool_calls >= 250 or calls >= 250 or tokens >= 1_000_000:
         return {
             "status": "review",
-            # The column holds states: Critical, Healthy, Limited data. "Review"
-            # was an instruction sitting among them.
+            # The column holds states such as High activity, Healthy, and
+            # Limited data. "Review" alone is an instruction, not a state.
             "label": "Needs review",
             "tone": "warning",
             "reason": "High usage for this window. Check whether the latest sessions produced useful outcomes.",
@@ -870,9 +872,9 @@ def _project_health(items: list[LocalSession]) -> dict[str, object]:
         }
     return {
         "status": "healthy",
-        "label": "Healthy",
+        "label": "Typical activity",
         "tone": "healthy",
-        "reason": "No unusual local cost or context pressure in this window.",
+        "reason": "Observed activity is below the review thresholds for this window.",
         "action_label": "Review",
     }
 
@@ -1114,7 +1116,7 @@ def _optimize_candidate_prompt(item: dict[str, object]) -> str:
         f"- Last activity: {last_activity}",
         f"- Session count: {session_count}",
         f"- Tool: {tool}",
-        f"- Impact signal: {impact}",
+        f"- Observed scale: {impact}",
         f"- Evidence label: {evidence_label}",
         f"- Evidence: {evidence}",
         f"- Why surfaced: {reason}",
@@ -1722,7 +1724,7 @@ def _optimize_checklist(candidates: list[dict[str, object]]) -> str:
             f"   Signal: {item.get('activity_summary') or item.get('summary')}",
             f"   Why: {item.get('why_inactive') or item.get('summary')}",
             f"   Evidence: {item.get('evidence_label')} - {item.get('evidence')}",
-            f"   Impact: {item.get('impact_label')}",
+            f"   Observed scale: {item.get('impact_label')}",
         ])
         lines.append("   Action: copy the project-specific cleanup prompt in AIWatcher before doing anything.")
     lines.extend([
@@ -1752,9 +1754,10 @@ def _group_pending_fresh_starts(candidates: list[dict[str, object]]) -> list[dic
             out.append(candidate)
             continue
         first["session_count"] = int(first.get("session_count") or 1) + 1
-        tokens = int(first.get("tokens_at_risk") or 0) + int(candidate.get("tokens_at_risk") or 0)
-        first["tokens_at_risk"] = tokens
-        first["impact_label"] = f"~{compact_int(tokens)} context at risk" if tokens else None
+        tokens = int(first.get("token_volume") or 0) + int(candidate.get("token_volume") or 0)
+        first["token_volume"] = tokens
+        first["source_session_tokens"] = tokens
+        first["impact_label"] = f"~{compact_int(tokens)} source-session tokens recorded" if tokens else None
         count = first["session_count"]
         first["title"] = f"Finish Fresh Start cleanup ({count} decisions)"
         first["summary"] = (
@@ -1813,12 +1816,12 @@ def build_optimize_inventory(
         tools = sorted({row.tool for row in inactive if row.tool})
         latest_label = _elapsed_label(latest, now=now)
         tool_label = ", ".join(tools[:3]) if tools else "local AI tools"
-        activity_summary = f"{len(inactive)} sessions · last {latest_label} · {tool_label} · ~{compact_int(tokens)} context"
+        activity_summary = f"{len(inactive)} sessions · last {latest_label} · {tool_label} · ~{compact_int(tokens)} historical tokens"
         if completed:
             activity_summary += f" · {completed} useful outcome{'s' if completed != 1 else ''}"
         why_inactive = (
             f"Last local activity was {latest_label}; {len(inactive)} same-project sessions "
-            f"from {tool_label} are still carrying context."
+            f"from {tool_label} account for recorded historical activity."
         )
         if completed:
             why_inactive += f" {completed} already have useful outcomes, so archive review is lower risk."
@@ -1828,13 +1831,14 @@ def build_optimize_inventory(
             "title": "Archive completed or stale chats",
             "project": project_label(project),
             "project_full": project,
-            "summary": f"{len(inactive)} inactive same-project sessions are carrying ~{compact_int(tokens)} context. Archive or mark done once the work is no longer active.",
+            "summary": f"{len(inactive)} inactive same-project sessions recorded ~{compact_int(tokens)} historical tokens. Archive or mark done only for organization after confirming the work is no longer active.",
             "activity_summary": activity_summary,
             "why_inactive": why_inactive,
             "evidence_label": "Observed",
-            "evidence": "Observed from local session timestamps, project path, token pressure, and outcome metadata. Archive action must happen in the AI app.",
-            "impact_label": f"~{compact_int(tokens)} context at risk",
-            "tokens_at_risk": tokens,
+            "evidence": "Observed from local session timestamps, project path, historical token totals, and outcome metadata. Archive action must happen in the AI app.",
+            "impact_label": f"~{compact_int(tokens)} historical session tokens",
+            "token_volume": tokens,
+            "historical_tokens_observed": tokens,
             "session_count": len(inactive),
             "completed_count": completed,
             "tool": ", ".join(tools[:3]) if tools else "local AI tools",
@@ -1849,7 +1853,8 @@ def build_optimize_inventory(
             continue
         if str(decision.get("decision") or "") not in {"new_chat", "copy_handoff"}:
             continue
-        if decision.get("next_session_id"):
+        followup = fresh_start_followup_evidence(decision)
+        if followup["state"] == "confirmed":
             continue
         created_at = _parse_iso_datetime(decision.get("created_at"))
         if created_at is not None and now - created_at < timedelta(hours=2):
@@ -1865,13 +1870,14 @@ def build_optimize_inventory(
             "title": "Finish Fresh Start cleanup",
             "project": project_label(project),
             "project_full": project if is_reliable_project_path(project) else "",
-            "summary": "A Fresh Start brief was copied, but no follow-up proof is linked yet. Mark the old chat done or paste the brief into the new chat.",
+            "summary": "A Fresh Start brief was copied, but no explicit follow-up proof is linked yet. Review any possible match, or paste the brief into the intended new chat.",
             "activity_summary": f"Fresh Start receipt · copied {_elapsed_label(created_at, now=now)} · follow-up proof pending",
-            "why_inactive": "AIWatcher saw a Fresh Start decision but has not linked a later same-project session yet.",
+            "why_inactive": "AIWatcher saw a Fresh Start decision but has not observed an explicit receipt linking the intended follow-up.",
             "evidence_label": "Observed",
             "evidence": "Observed from AIWatcher Fresh Start receipt metadata.",
-            "impact_label": f"~{compact_int(tokens)} context at risk" if tokens else None,
-            "tokens_at_risk": tokens,
+            "impact_label": f"~{compact_int(tokens)} source-session tokens recorded" if tokens else None,
+            "token_volume": tokens,
+            "source_session_tokens": tokens,
             "session_count": 1,
             "tool": "AIWatcher Fresh Start receipt",
             "last_activity": created_at.isoformat() if created_at else None,
@@ -1924,7 +1930,7 @@ def build_optimize_inventory(
             "evidence_label": "Inferred",
             "evidence": evidence,
             "impact_label": "disk cleanup possible",
-            "tokens_at_risk": 0,
+            "token_volume": 0,
             "session_count": len(related_sessions),
             "updated_label": _elapsed_label(latest, now=now) if latest else _elapsed_label(mtime, now=now) if isinstance(mtime, datetime) else "no recent session",
             "tool": "git worktree" if source == "git_worktree" else "local scratch workspace",
@@ -1959,7 +1965,7 @@ def build_optimize_inventory(
             "impact_label": rss_impact,
             "reward_label": reward_label,
             "cost_note": "Cost savings are unknown from RSS alone; attach provider billing or session-token evidence before claiming dollars.",
-            "tokens_at_risk": 0,
+            "token_volume": 0,
             "rss_kb": rss_kb,
             "session_count": len(stale_processes),
             "tool": "local process inventory",
@@ -1980,14 +1986,14 @@ def build_optimize_inventory(
         })
 
     candidates = _group_pending_fresh_starts(candidates)
-    candidates.sort(key=lambda item: (int(item.get("tokens_at_risk") or 0), int(item.get("session_count") or 0)), reverse=True)
+    candidates.sort(key=lambda item: (int(item.get("token_volume") or 0), int(item.get("session_count") or 0)), reverse=True)
     for item in candidates:
         item["cleanup_prompt"] = _optimize_candidate_prompt(item)
         item["evidence_hash"] = _optimize_candidate_evidence_hash(item)
-    total_tokens = sum(int(item.get("tokens_at_risk") or 0) for item in candidates)
+    total_tokens = sum(int(item.get("token_volume") or 0) for item in candidates)
     total_rss_kb = sum(int(item.get("rss_kb") or 0) for item in candidates)
     if total_tokens:
-        impact_label = f"~{compact_int(total_tokens)} context at risk"
+        impact_label = f"~{compact_int(total_tokens)} session tokens represented"
     elif total_rss_kb:
         impact_label = f"{bytes_label(int(total_rss_kb * 1024))} local RSS to review"
     else:
@@ -2453,20 +2459,23 @@ def _fresh_start_completion(session_id: str) -> dict[str, object] | None:
         source_id = decision.get("source_session_id") or decision.get("session_id")
         if source_id != session_id or decision.get("decision") not in {"new_chat", "copy_handoff"}:
             continue
-        next_session_id = decision.get("next_session_id")
-        correlation = decision.get("next_session_correlation") if isinstance(decision.get("next_session_correlation"), dict) else {}
-        linked = bool(next_session_id) and str(correlation.get("status") or "linked") == "linked"
+        followup = fresh_start_followup_evidence(decision)
+        confirmed = followup["state"] == "confirmed"
+        possible = followup["state"] == "possible"
+        status = "completed" if confirmed else ("possible_followup" if possible else "proof_pending")
+        label = "Fresh Start completed" if confirmed else ("Possible follow-up found" if possible else "Fresh Start copied; proof pending")
         return {
-            "status": "completed" if linked else "proof_pending",
-            "label": "Fresh Start completed" if linked else "Fresh Start copied; proof pending",
+            "status": status,
+            "label": label,
             "reason": str(
-                correlation.get("reason")
-                or ("A later same-project session was linked to this Fresh Start receipt." if linked else "Waiting to observe a later same-project session.")
+                followup.get("reason")
+                or ("The follow-up explicitly linked this Fresh Start receipt." if confirmed else "Waiting for explicit follow-up evidence.")
             ),
             "receipt_id": decision.get("id"),
             "created_at": decision.get("created_at"),
-            "next_session_id": next_session_id,
-            "confidence": correlation.get("confidence"),
+            "next_session_id": followup.get("next_session_id"),
+            "candidate_session_id": followup.get("candidate_session_id"),
+            "confidence": followup.get("confidence"),
         }
     return None
 
@@ -3980,7 +3989,8 @@ def _handoff_bubble(context_health: list[dict[str, object]]) -> dict[str, object
 
     The full health list remains available below; this bubble is the
     developer-facing intervention: one timely choice, like "start fresh" or
-    "continue here", with an honest estimate of context pressure avoided.
+    "continue here", with the observed replay pressure kept distinct from any
+    unmeasured savings claim.
     """
     candidate = next(
         (
@@ -4028,6 +4038,7 @@ def _handoff_bubble(context_health: list[dict[str, object]]) -> dict[str, object
         "primary_label": primary_label,
         "continue_label": "Continue 15 min",
         "saved_context_label": saved_label,
+        "replayed_context_label": saved_label,
         "expected_saved_context_tokens": candidate.get("estimated_replayed_context_tokens"),
         "runtime_attachment": candidate.get("runtime_attachment"),
         "tags": [
@@ -5088,19 +5099,24 @@ def _handoff_decision_rows(
         decision = str(row.get("decision") or "")
         source_session_id = str(row.get("source_session_id") or row.get("session_id") or "")
         source_session = session_by_id.get(source_session_id)
-        next_session_id = row.get("next_session_id") if isinstance(row.get("next_session_id"), str) else None
+        followup = fresh_start_followup_evidence(row)
+        next_session_id = followup.get("next_session_id") if isinstance(followup.get("next_session_id"), str) else None
+        candidate_session_id = followup.get("candidate_session_id") if isinstance(followup.get("candidate_session_id"), str) else None
         next_session = session_by_id.get(next_session_id or "")
         correlation = row.get("next_session_correlation") if isinstance(row.get("next_session_correlation"), dict) else {}
         proof_status = "No fresh start claimed"
         proof_reason = "This decision did not claim a fresh follow-up session."
         if decision in {"new_chat", "copy_handoff"}:
             status = str(correlation.get("status") or "waiting")
-            if next_session:
+            if next_session and followup["state"] == "confirmed":
                 proof_status = "Follow-up observed"
                 proof_reason = str(
                     correlation.get("reason")
                     or "Observed a later local session in the same project after the Fresh Start action."
                 )
+            elif followup["state"] == "possible":
+                proof_status = "Possible follow-up"
+                proof_reason = str(followup.get("reason") or "A later same-project session is a possible match, not proof that the handoff was used.")
             elif status == "ambiguous":
                 proof_status = "Multiple possible next sessions"
                 proof_reason = str(correlation.get("reason") or "AIWatcher found more than one possible follow-up.")
@@ -5179,6 +5195,7 @@ def _handoff_decision_rows(
             "session_id": row.get("session_id"),
             "source_session_id": source_session_id,
             "next_session_id": next_session_id,
+            "candidate_session_id": candidate_session_id,
             "decision": decision,
             "receipt_kind": row.get("receipt_kind"),
             "receipt_viewed_at": row.get("receipt_viewed_at"),
@@ -6761,13 +6778,13 @@ def answer_local_question(question: str, days: int = 7) -> dict[str, object]:
         top = optimize.get("top") if isinstance(optimize.get("top"), dict) else (candidates[0] if candidates and isinstance(candidates[0], dict) else {})
         if top:
             project = str(top.get("project_full") or top.get("project") or "this workspace")
-            impact = str(top.get("impact_label") or top.get("context_at_risk_label") or "context at risk")
+            impact = str(top.get("impact_label") or top.get("context_at_risk_label") or "historical activity to review")
             evidence = str(top.get("evidence") or top.get("summary") or "local session history shows inactive same-project work")
             count = top.get("session_count") or top.get("items") or top.get("count")
             bullets = [
                 f"Top candidate: {project}",
                 f"Why it surfaced: {evidence}",
-                f"Potential impact: {impact}",
+                f"Observed scale: {impact}",
                 "AIWatcher cannot archive inside the AI app yet. Confirm the chat is finished before archiving it.",
             ]
             if count:
@@ -6807,7 +6824,7 @@ def answer_local_question(question: str, days: int = 7) -> dict[str, object]:
                 bullets=[
                     f"Latest turn: {latest} tokens",
                     f"Recommendation: {recommendation}",
-                    "AIWatcher should not claim saved tokens until a follow-up session is observed.",
+                    "AIWatcher should not claim saved tokens until an explicitly linked follow-up can be compared.",
                 ],
                 actions=actions,
             )

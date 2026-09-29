@@ -2920,7 +2920,7 @@ class DashboardWindowTests(unittest.TestCase):
         link_handoff_decision_next_session(
             record["id"],
             next_session_id="next",
-            correlation={"status": "linked", "confidence": "high", "reason": "same project after action"},
+            correlation={"status": "confirmed", "method": "explicit_receipt", "confidence": "high", "reason": "receipt matched"},
         )
         record_outcome("next", "useful")
         record_evidence_snapshot(
@@ -2968,9 +2968,10 @@ class DashboardWindowTests(unittest.TestCase):
             "decision": "copy_handoff",
             "next_session_id": "follow-up",
             "next_session_correlation": {
-                "status": "linked",
+                "status": "confirmed",
+                "method": "explicit_receipt",
                 "confidence": "high",
-                "reason": "Observed a later same-project session.",
+                "reason": "The follow-up included the receipt identifier.",
             },
         }
         with (
@@ -2998,6 +2999,75 @@ class DashboardWindowTests(unittest.TestCase):
 
         self.assertEqual(completion["status"], "proof_pending")
         self.assertIsNone(completion["next_session_id"])
+
+    def test_inferred_fresh_start_match_is_not_rendered_as_completed(self) -> None:
+        receipt = {
+            "id": "receipt-1",
+            "source_session_id": "source",
+            "decision": "copy_handoff",
+            "next_session_id": "legacy-auto-match",
+            "next_session_correlation": {
+                "status": "linked",
+                "method": "first_following_local_session",
+                "confidence": "high",
+                "reason": "Observed a later same-project session.",
+            },
+        }
+        with patch.object(ui, "recent_handoff_decisions", return_value=[receipt]):
+            completion = ui._fresh_start_completion("source")
+
+        self.assertEqual(completion["status"], "possible_followup")
+        self.assertEqual(completion["label"], "Possible follow-up found")
+        self.assertIsNone(completion["next_session_id"])
+        self.assertEqual(completion["candidate_session_id"], "legacy-auto-match")
+
+    def test_inferred_fresh_start_match_stays_in_cleanup_queue(self) -> None:
+        decision = {
+            "id": "legacy-receipt",
+            "created_at": (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(),
+            "source_session_id": "source",
+            "source_project_path": "/repo/app",
+            "decision": "copy_handoff",
+            "expected_saved_context_tokens": 120_000,
+            "next_session_id": "legacy-auto-match",
+            "next_session_correlation": {
+                "status": "linked",
+                "method": "first_following_local_session",
+                "confidence": "high",
+            },
+        }
+        with (
+            patch.object(ui, "safe_runtime_processes", return_value=[]),
+            patch.object(ui, "_agent_workspace_rows", return_value=[]),
+            patch.object(ui, "recent_optimize_decisions", return_value=[]),
+        ):
+            inventory = ui.build_optimize_inventory([], outcomes={}, handoff_decisions=[decision])
+
+        self.assertEqual(inventory["top"]["kind"], "fresh_start_pending")
+        self.assertIn("explicit follow-up proof", inventory["top"]["summary"])
+        self.assertEqual(inventory["top"]["impact_label"], "~120.0k source-session tokens recorded")
+
+    def test_handoff_receipt_labels_inferred_match_as_possible(self) -> None:
+        source = LocalSession(session_id="source", tool="codex-cli", project_path="/repo/app")
+        candidate = LocalSession(session_id="candidate", tool="codex-cli", project_path="/repo/app")
+        decision = {
+            "id": "legacy-receipt",
+            "source_session_id": "source",
+            "decision": "copy_handoff",
+            "next_session_id": "candidate",
+            "next_session_correlation": {
+                "status": "linked",
+                "method": "first_following_local_session",
+                "confidence": "high",
+            },
+        }
+        with patch.object(ui, "recent_handoff_decisions", return_value=[decision]):
+            rows = ui._handoff_decision_rows(limit=5, sessions=[source, candidate])
+
+        self.assertEqual(rows[0]["proof_status"], "Possible follow-up")
+        self.assertIsNone(rows[0]["next_session_id"])
+        self.assertEqual(rows[0]["candidate_session_id"], "candidate")
+        self.assertIsNone(rows[0]["observed_followup"])
 
     def test_optimize_inventory_detects_stale_session_cluster(self) -> None:
         now = datetime.now(timezone.utc)
@@ -3027,10 +3097,15 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(inventory["status"], "needs_action")
         self.assertEqual(inventory["top"]["kind"], "session_cluster")
         self.assertEqual(inventory["top"]["project_full"], "/repo/app")
-        self.assertEqual(inventory["top"]["tokens_at_risk"], 780_000)
+        self.assertEqual(inventory["top"]["historical_tokens_observed"], 780_000)
+        self.assertEqual(inventory["top"]["token_volume"], 780_000)
+        self.assertNotIn("tokens_at_risk", inventory["top"])
         self.assertIn("3 sessions", inventory["top"]["activity_summary"])
         self.assertIn("codex-cli", inventory["top"]["activity_summary"])
-        self.assertIn("~780.0k context", inventory["top"]["activity_summary"])
+        self.assertIn("~780.0k historical tokens", inventory["top"]["activity_summary"])
+        self.assertEqual(inventory["top"]["impact_label"], "~780.0k historical session tokens")
+        self.assertNotIn("context at risk", json.dumps(inventory))
+        self.assertIn("organization", inventory["top"]["summary"])
         self.assertIn("why_inactive", inventory["top"])
         self.assertEqual(inventory["top"]["action_label"], "Copy cleanup prompt")
         prompt = inventory["top"]["cleanup_prompt"]
@@ -4511,6 +4586,43 @@ class DashboardWindowTests(unittest.TestCase):
 
         self.assertEqual(projects[0]["health"]["status"], "review")
         self.assertEqual(projects[0]["health"]["action_label"], "Review")
+
+    def test_project_health_calls_extreme_aggregate_volume_high_activity(self) -> None:
+        now = datetime.now(timezone.utc)
+        rows = [LocalSession(
+            session_id="aggregate-heavy",
+            tool="codex-cli",
+            project_path="/repo/heavy",
+            started_at=now - timedelta(days=2),
+            updated_at=now - timedelta(days=1),
+            tokens_in=50_000_000,
+            agent_calls=1_000,
+            tool_calls=1_000,
+        )]
+
+        health = ui.group_projects(rows)[0]["health"]
+
+        self.assertEqual(health["status"], "review")
+        self.assertEqual(health["label"], "High activity")
+        self.assertEqual(health["tone"], "warning")
+        self.assertNotIn("critical", json.dumps(health).lower())
+
+    def test_project_health_calls_below_threshold_volume_typical_activity(self) -> None:
+        row = LocalSession(
+            session_id="ordinary",
+            tool="codex-cli",
+            project_path="/repo/ordinary",
+            tokens_in=20_000,
+            tokens_out=2_000,
+            agent_calls=8,
+            tool_calls=12,
+        )
+
+        health = ui.group_projects([row])[0]["health"]
+
+        self.assertEqual(health["status"], "healthy")
+        self.assertEqual(health["label"], "Typical activity")
+        self.assertIn("below the review thresholds", health["reason"])
 
     def test_root_project_is_labeled_unattributed_and_sorted_after_real_projects(self) -> None:
         now = datetime.now(timezone.utc)

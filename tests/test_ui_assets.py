@@ -681,6 +681,8 @@ class SessionDrawerTest(unittest.TestCase):
     def test_linked_fresh_start_replaces_the_repeated_session_action(self):
         completion = js_function_source(self.js, "renderFreshStartCompletion")
         self.assertIn("Fresh Start completed", completion)
+        self.assertIn("possible_followup", completion)
+        self.assertIn("Needs confirmation", completion)
         self.assertIn("Open follow-up", completion)
         self.assertIn("View receipt", completion)
         self.assertIn("historical evidence", completion)
@@ -688,6 +690,11 @@ class SessionDrawerTest(unittest.TestCase):
         self.assertIn("renderFreshStartCompletion(s)", summary)
         select = js_function_source(self.js, "selectSession")
         self.assertIn("renderFreshStartCompletion(s) || renderSessionActions(s)", select)
+
+    def test_receipts_keep_possible_followup_distinct_from_confirmed_next_session(self):
+        receipts = js_function_source(self.js, "renderHandoffDecisionRows")
+        self.assertIn("candidate_session_id", receipts)
+        self.assertIn("Inspect ${decision.next_session_id ? 'next' : 'candidate'}", receipts)
 
     def test_the_verdict_is_three_separate_judgements(self):
         """One verdict answered three questions at once with a single token
@@ -1501,6 +1508,14 @@ class PlanControlTest(unittest.TestCase):
         server = inspect.getsource(ui.build_optimize_inventory)
         self.assertNotIn('else "context at risk"', server)
         self.assertNotIn("item.impact_label || 'review'", self.js)
+
+    def test_historical_tokens_are_not_presented_as_live_context_savings(self):
+        server = inspect.getsource(ui.build_optimize_inventory)
+        control = js_function_source(self.js, "renderControlStrip")
+        self.assertNotIn("tokens_at_risk", server)
+        self.assertNotIn("context at risk", server)
+        self.assertNotIn("context saved if you start fresh", control)
+        self.assertIn("actual reduction unmeasured", control)
 
     def test_stale_processes_get_a_runtime_review_card(self):
         self.assertIn("function renderRuntimeOptimizeCard", self.js)
@@ -2496,6 +2511,16 @@ class CopyAndAffordanceTest(unittest.TestCase):
     def test_the_status_column_holds_states_not_instructions(self):
         source = inspect.getsource(ui._project_health) if hasattr(ui, "_project_health") else inspect.getsource(ui)
         self.assertIn('"label": "Needs review"', source)
+        self.assertIn('"label": "High activity"', source)
+        self.assertIn('"label": "Typical activity"', source)
+        self.assertNotIn('"label": "Critical"', source)
+
+    def test_fresh_start_copy_distinguishes_candidate_from_proof(self):
+        self.assertNotIn("same project is observed", self.html)
+        self.assertIn("possible match", self.html)
+        preview = js_function_source(self.js, "renderFreshStartPreview")
+        self.assertNotIn("same-project session as proof", preview)
+        self.assertNotIn("same-project session as proof", self.js)
 
     def test_nav_uses_one_case_convention(self):
         self.assertNotIn("Plan / Control", self.html)
@@ -2706,8 +2731,8 @@ class PathsAndChartsTest(unittest.TestCase):
         # generic pending one -- that is the whole fix, so assert the guard
         # rather than the absence of the field.
         self.assertIn("decision.proof_status !== 'Proof pending'", rows)
-        # And the sentence it replaced is stated once, on the card.
-        self.assertIn("Proof stays pending until", self.html)
+        # And the candidate-versus-proof boundary is stated once, on the card.
+        self.assertIn("Same-project timing is shown only as a possible match", self.html)
 
     def test_an_empty_table_says_so_where_the_rows_would_be(self):
         self.assertIn("td .empty", self.css)

@@ -477,7 +477,7 @@ class LocalStateTests(unittest.TestCase):
                 linked = local_state.link_handoff_decision_next_session(
                     record["id"],
                     next_session_id="next-session",
-                    correlation={"status": "linked", "confidence": "high", "reason": "same project"},
+                    correlation={"status": "confirmed", "method": "explicit_receipt", "confidence": "high", "reason": "receipt matched"},
                 )
                 recent = local_state.recent_handoff_decisions()
 
@@ -485,7 +485,59 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(recent[0]["session_id"], "source-session")
         self.assertEqual(recent[0]["source_session_id"], "source-session")
         self.assertEqual(recent[0]["next_session_id"], "next-session")
-        self.assertEqual(recent[0]["next_session_correlation"]["status"], "linked")
+        self.assertEqual(recent[0]["next_session_correlation"]["status"], "confirmed")
+
+    def test_inferred_fresh_start_link_is_possible_not_confirmed(self) -> None:
+        evidence = local_state.fresh_start_followup_evidence({
+            "next_session_id": "legacy-auto-match",
+            "next_session_correlation": {
+                "status": "linked",
+                "method": "first_following_local_session",
+                "confidence": "high",
+            },
+        })
+
+        self.assertEqual(evidence["state"], "possible")
+        self.assertIsNone(evidence["next_session_id"])
+        self.assertEqual(evidence["candidate_session_id"], "legacy-auto-match")
+
+    def test_explicit_fresh_start_link_is_confirmed(self) -> None:
+        evidence = local_state.fresh_start_followup_evidence({
+            "next_session_id": "explicit-followup",
+            "next_session_correlation": {
+                "status": "confirmed",
+                "method": "explicit_receipt",
+                "confidence": "high",
+            },
+        })
+
+        self.assertEqual(evidence["state"], "confirmed")
+        self.assertEqual(evidence["next_session_id"], "explicit-followup")
+        self.assertIsNone(evidence["candidate_session_id"])
+
+    def test_unknown_link_method_is_not_treated_as_explicit_proof(self) -> None:
+        evidence = local_state.fresh_start_followup_evidence({
+            "next_session_id": "heuristic-match",
+            "next_session_correlation": {
+                "status": "linked",
+                "method": "future_heuristic",
+                "confidence": "high",
+            },
+        })
+
+        self.assertEqual(evidence["state"], "possible")
+        self.assertIsNone(evidence["next_session_id"])
+        self.assertEqual(evidence["candidate_session_id"], "heuristic-match")
+
+    def test_missing_link_method_is_not_treated_as_explicit_proof(self) -> None:
+        evidence = local_state.fresh_start_followup_evidence({
+            "next_session_id": "unknown-provenance",
+            "next_session_correlation": {"status": "linked", "confidence": "high"},
+        })
+
+        self.assertEqual(evidence["state"], "possible")
+        self.assertIsNone(evidence["next_session_id"])
+        self.assertEqual(evidence["candidate_session_id"], "unknown-provenance")
 
     def test_mark_recent_handoff_receipts_viewed_acknowledges_fresh_start_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
