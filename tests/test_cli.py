@@ -33,6 +33,17 @@ from unittest.mock import Mock, patch
 from aiwatcher_cli import cli, local_state, ui, updater
 from aiwatcher_cli.local_state import recent_decisions
 from aiwatcher_cli.outcome_evidence import OutcomeEvidence
+
+
+class VerificationRunnerTests(unittest.TestCase):
+    def test_allowlists_common_verification_commands(self) -> None:
+        self.assertEqual(cli._verification_runner(["python3", "-m", "pytest", "tests"]), "python -m pytest")
+        self.assertEqual(cli._verification_runner(["npm", "run", "check"]), "npm run check")
+        self.assertEqual(cli._verification_runner(["cargo", "test"]), "cargo test")
+
+    def test_does_not_store_arbitrary_shell_commands_as_verification(self) -> None:
+        self.assertIsNone(cli._verification_runner(["bash", "-lc", "cat .env && pytest"]))
+        self.assertIsNone(cli._verification_runner(["git", "status"]))
 from aiwatcher_cli.processes import RuntimeProcess
 from aiwatcher_cli.scanner import LocalEvent, LocalSession, SurfaceCoverage
 
@@ -2199,8 +2210,9 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertIn("generating a Fresh Start brief now", rendered)
         self.assertIn("AIWatcher Fresh Start capsule", rendered)
         self.assertIn("AIWatcher Fresh Start brief", rendered)
-        self.assertIn("Do not assume access to the previous chat", rendered)
-        self.assertIn("First reply with what appears done", rendered)
+        self.assertIn("the previous chat is unavailable", rendered)
+        self.assertIn("First action", rendered)
+        self.assertIn("ask one focused question", rendered)
 
     def test_watch_critical_context_copies_to_clipboard_and_dedupes_across_polls(self) -> None:
         row = session(1, project="/repo/orcha")

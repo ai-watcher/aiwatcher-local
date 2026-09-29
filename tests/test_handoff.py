@@ -21,6 +21,100 @@ def run(command: list[str], cwd: str, env: dict[str, str] | None = None) -> None
 
 
 class HandoffTests(unittest.TestCase):
+    def test_unknown_test_artifact_does_not_suppress_unverified_warning(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init = ["git", "init"]
+            run(init, temp_dir)
+            artifact = Path(temp_dir, "junit-results.xml")
+            artifact.write_text("<testsuite failures='1'/>\n", encoding="utf-8")
+            os.utime(artifact, (now.timestamp(), now.timestamp()))
+            session = LocalSession(
+                session_id="artifact-only", tool="codex-cli", project_path=temp_dir,
+                started_at=now - timedelta(minutes=1), updated_at=now + timedelta(minutes=1),
+            )
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": os.path.join(temp_dir, "state.json")}):
+                capsule = build_handoff_capsule(session, [])
+
+        brief = capsule["next_brief"]
+        self.assertIn("junit-results.xml: result unknown", brief)
+        self.assertIn("No completed verification was observed", brief)
+
+    def test_danny_style_worktree_handoff_is_concise_and_actionable(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            main = Path(temp_dir, "main")
+            review = Path(temp_dir, "aiw-pr150")
+            main.mkdir()
+            run(["git", "init"], str(main))
+            run(["git", "config", "user.email", "test@example.com"], str(main))
+            run(["git", "config", "user.name", "AIWatcher Test"], str(main))
+            (main / "base.txt").write_text("base\n", encoding="utf-8")
+            run(["git", "add", "base.txt"], str(main))
+            run(["git", "commit", "-m", "base"], str(main))
+            run(["git", "worktree", "add", "-b", "review-pr150", str(review)], str(main))
+            run(["git", "branch", "--set-upstream-to", "master", "review-pr150"], str(review))
+            for index in range(4):
+                (review / f"fix{index}.py").write_text(f"fix {index}\n", encoding="utf-8")
+                run(["git", "add", f"fix{index}.py"], str(review))
+                run(["git", "commit", "-m", f"fix PR 150 issue {index + 1}"], str(review))
+
+            session = LocalSession(
+                session_id="danny-review",
+                tool="claude-code",
+                project_path=str(main),
+                raw_cwd=str(review),
+                started_at=now - timedelta(hours=1),
+                updated_at=now,
+                tokens_in=10_200_000,
+            )
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                capsule = build_handoff_capsule(
+                    session,
+                    [],
+                    objective="Finish review fixes for PR #150 and decide whether to push after retesting.",
+                )
+
+        brief = capsule["next_brief"]
+        self.assertIn(str(review.resolve()).replace("\\", "/"), brief)
+        self.assertIn("review-pr150", brief)
+        self.assertIn("4 ahead", brief)
+        self.assertIn("Unpushed:", brief)
+        self.assertIn("Finish review fixes for PR #150", brief)
+        self.assertNotIn("10.2M", brief)
+        self.assertNotIn("Usage pressure", brief)
+        self.assertLessEqual(len(brief.split()), 350, brief)
+
+    def test_dense_handoff_preserves_critical_state_within_word_budget(self) -> None:
+        now = datetime.now(timezone.utc)
+        dense = [f"item {index} " + ("detailed context " * 30) for index in range(8)]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run(["git", "init"], temp_dir)
+            run(["git", "config", "user.email", "test@example.com"], temp_dir)
+            run(["git", "config", "user.name", "AIWatcher Test"], temp_dir)
+            Path(temp_dir, "app.py").write_text("base\n", encoding="utf-8")
+            run(["git", "add", "app.py"], temp_dir)
+            run(["git", "commit", "-m", "base"], temp_dir)
+            expected_path = str(Path(temp_dir).resolve())
+            session = LocalSession(
+                session_id="dense", tool="codex-cli", project_path=temp_dir,
+                started_at=now, updated_at=now + timedelta(minutes=1),
+            )
+            capsule = build_handoff_capsule(
+                session, [], objective="Complete the verified continuation checkpoint.",
+                source_refs=dense, constraints=dense, acceptance_criteria=dense,
+                related_workspaces=[f"/repo/related-{index}" for index in range(8)],
+            )
+
+        brief = capsule["next_brief"]
+        self.assertLessEqual(len(brief.split()), 350, brief)
+        self.assertIn("Complete the verified continuation checkpoint", brief)
+        self.assertIn(expected_path, brief)
+        self.assertIn("Working tree: clean", brief)
+        self.assertIn("No completed verification was observed", brief)
+        self.assertIn("First action", brief)
+
     def test_handoff_capsule_prioritizes_fresh_session_guidance(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")
@@ -45,26 +139,22 @@ class HandoffTests(unittest.TestCase):
         self.assertIn("continue with a smaller checkpoint", "\n".join(capsule["warnings"]))
         self.assertIn("fresh Claude/Codex/Cursor session", rendered)
         self.assertIn("fresh AI coding session", capsule["next_brief"])
-        self.assertIn("Do not assume access to the previous chat", capsule["next_brief"])
+        self.assertIn("the previous chat is unavailable", capsule["next_brief"])
         self.assertIn("Objective and context", capsule["next_brief"])
         self.assertIn("Objective status: not captured; confirmation required before edits", capsule["next_brief"])
-        self.assertIn("What outcome should I continue toward in this project?", capsule["next_brief"])
+        self.assertIn("ask one focused question to confirm the intended next outcome", capsule["next_brief"])
         self.assertIn("This was an AI", capsule["next_brief"])
         self.assertNotIn("This was a a", capsule["next_brief"])
         self.assertIn("Completed work", capsule["next_brief"])
         self.assertIn("Decisions and constraints", capsule["next_brief"])
-        self.assertIn("Current state", capsule["next_brief"])
-        self.assertIn("Next steps", capsule["next_brief"])
-        self.assertIn("Inspect first", capsule["next_brief"])
+        self.assertIn("Completed work and current state", capsule["next_brief"])
+        self.assertIn("First action", capsule["next_brief"])
         self.assertIn("Acceptance criteria", capsule["next_brief"])
         self.assertLess(capsule["next_brief"].index("Objective and context"), capsule["next_brief"].index("Source session identity"))
         self.assertIn("git status --short", capsule["next_brief"])
-        self.assertIn("smallest next checkpoint", capsule["next_brief"])
-        self.assertIn("Risks and uncertainties", capsule["next_brief"])
-        self.assertIn("How to continue", capsule["next_brief"])
-        self.assertIn("If this is a forked chat", capsule["next_brief"])
-        self.assertIn("If this is a subagent task", capsule["next_brief"])
-        self.assertIn("Usage pressure", capsule["next_brief"])
+        self.assertIn("Next checkpoint", capsule["next_brief"])
+        self.assertIn("Open questions and uncertainty", capsule["next_brief"])
+        self.assertNotIn("Usage pressure", capsule["next_brief"])
         self.assertTrue(capsule["continuation_context"]["objective_and_context"])
         self.assertTrue(capsule["continuation_context"]["current_state"])
         self.assertTrue(capsule["continuation_context"]["next_steps"])
@@ -113,9 +203,7 @@ class HandoffTests(unittest.TestCase):
         self.assertIn("01a00644-0f16-7291-b259-144420adaed1", brief)
         self.assertIn("Same-project sessions observed: 4", brief)
         self.assertIn("AIWatcher has not verified the exact active chat", brief)
-        self.assertIn("Workspace evidence to inspect (not guaranteed source-session evidence)", brief)
         self.assertIn("Changed file: api/index.js", brief)
-        self.assertIn("Changed files are workspace evidence, not proof that the source AI session created those edits.", brief)
         self.assertIn("not proof from this source session", brief)
         self.assertNotIn("treat them as in-progress work.", brief)
 
@@ -139,7 +227,7 @@ class HandoffTests(unittest.TestCase):
         self.assertIn("- Project: unknown project", capsule["next_brief"])
         self.assertIn("- Project confidence: unconfirmed", capsule["next_brief"])
         self.assertIn("Ask the user to confirm the repository/path before editing.", capsule["next_brief"])
-        self.assertIn("Project path was not reliable", capsule["next_brief"])
+        self.assertIn("AIWatcher could not confidently identify the project path", capsule["next_brief"])
 
     def test_handoff_capsule_formats_for_target_tool(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -159,7 +247,7 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(capsule["target"], "codex")
         self.assertEqual(capsule["target_label"], "Codex")
         self.assertIn("fresh Codex session", rendered)
-        self.assertIn("Treat this as a fresh Codex session with no prior chat context", capsule["next_brief"])
+        self.assertIn("- Target: Codex", capsule["next_brief"])
         self.assertNotIn("Paste this as the first prompt", capsule["next_brief"])
 
     def test_product_handoff_carries_objective_sources_constraints_and_acceptance(self) -> None:
@@ -200,13 +288,13 @@ class HandoffTests(unittest.TestCase):
         )
         self.assertIn("fresh product/strategy session", brief)
         self.assertIn("Continuation type: Product/strategy continuation.", brief)
-        self.assertIn("User objective: Align the product plan", brief)
+        self.assertIn("You were trying to: Align the product plan", brief)
         self.assertIn("Objective status: confirmed from user input", brief)
         self.assertIn("Source of truth to load first", brief)
         self.assertIn("- strategy.md", brief)
         self.assertIn("Decisions and constraints", brief)
         self.assertIn("- Do not build a generic dashboard.", brief)
-        self.assertIn("Acceptance criteria", brief)
+        self.assertIn("Acceptance criteria and guardrails", brief)
         self.assertIn("Read the source-of-truth files first", brief)
 
     def test_next_brief_includes_commit_sha_and_changed_files(self) -> None:
@@ -243,7 +331,7 @@ class HandoffTests(unittest.TestCase):
         self.assertIn("Changed file: app.py", capsule["next_brief"])
         self.assertIn(f"Most recent commit message ({commit_sha})", capsule["next_brief"])
         self.assertIn("Session tokens were not being refreshed.", capsule["next_brief"])
-        self.assertIn("git diff --stat", capsule["next_brief"])
+        self.assertIn("git status --short", capsule["next_brief"])
 
     def test_body_less_commit_omits_commit_message_section(self) -> None:
         now = datetime.now(timezone.utc)
@@ -299,7 +387,7 @@ class HandoffTests(unittest.TestCase):
 
         brief = capsule["next_brief"]
         self.assertNotIn(long_body, brief)
-        section = brief.split("Most recent commit message")[1].split("\n\nFresh-session instructions")[0]
+        section = brief.split("Most recent commit message")[1].split("\n\nVerification and test signals")[0]
         header_line, _, body_text = section.partition("\n")
         self.assertTrue(body_text.rstrip().endswith("..."))
         kept_text = body_text.rstrip()[:-3].rstrip()
@@ -346,8 +434,7 @@ class HandoffTests(unittest.TestCase):
         brief = capsule["next_brief"]
         self.assertEqual(len(capsule["evidence"]["commits"]), 5)
         self.assertEqual(len(capsule["evidence"]["changed_files"]), 6)
-        self.assertIn("...and 2 more commit(s) (see git log)", brief)
-        self.assertIn("...and 1 more changed file(s) (see git status)", brief)
+        self.assertIn("...and 1 more commit(s); inspect `git log`", brief)
 
     def test_changed_files_without_commits_warns_not_to_overwrite_work(self) -> None:
         now = datetime.now(timezone.utc)
@@ -424,7 +511,7 @@ class HandoffTests(unittest.TestCase):
                 capsule = build_handoff_capsule(session, [], outcome="useful")
 
         brief = capsule["next_brief"]
-        self.assertIn("Decisions logged this session (self-reported, not verified against what actually happened)", brief)
+        self.assertIn("Decisions below are self-reported and not verified against what actually happened", brief)
         self.assertIn("- Considered a token-based tiebreaker", brief)
         self.assertIn("Why: Still picks turn #1 for unrelated reasons.", brief)
         self.assertIn("Rejected: token-based tiebreaker, git diff --stat only", brief)
@@ -474,8 +561,7 @@ class HandoffTests(unittest.TestCase):
         self.assertIn("- Related active workspace: /repo/docs", brief)
         self.assertIn("- Related active workspace: /repo/enterprise", brief)
         self.assertIn("confirm which repo owns the next checkpoint", brief)
-        self.assertIn("Continue in the same workspace/repository unless the user explicitly asks", brief)
-        self.assertIn("keep the same repository path active before editing", brief)
+        self.assertIn("Keep the exact checkout above active unless the user explicitly chooses another workspace", brief)
         self.assertNotIn("clone the repository", brief.lower())
 
 

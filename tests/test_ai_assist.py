@@ -361,6 +361,52 @@ class AiAssistTests(unittest.TestCase):
         self.assertEqual(result["structured"]["goal"], "Finish the smallest checkpoint.")
         self.assertNotIn("sk-secret", payload)
         self.assertLess(len(payload), 10_000)
+        self.assertLessEqual(len(result["text"].split()), ai_assist.MAX_HANDOFF_WORDS)
+
+    def test_fresh_start_uses_packet_verification_not_model_claim(self) -> None:
+        packet = json.dumps({
+            "source": {"session_id": "session-1", "project": "/repo/ai"},
+            "checkout": {"path": "/repo/ai", "dirty": None},
+            "evidence": {"tests": ["junit-results.xml | result unknown"]},
+        })
+        text = ai_assist._structured_handoff_text({
+            "goal": "Continue carefully.",
+            "verification_already_run": ["Full suite passed."],
+            "next_ask": "Inspect the evidence.",
+        }, packet)
+
+        self.assertIn("Working tree: state unknown", text)
+        self.assertIn("junit-results.xml | result unknown", text)
+        self.assertIn("No completed verification was observed", text)
+        self.assertNotIn("Full suite passed", text)
+
+    def test_fresh_start_word_cap_resists_model_ellipsis_prefixes(self) -> None:
+        long_item = "...and " + ("discretionary model prose " * 120)
+        packet = json.dumps({
+            "source": {"session_id": "session-1", "project": "/repo/ai"},
+            "checkout": {"path": "/repo/ai", "branch": "feature", "head": "abc123", "dirty": False},
+            "objective": "Finish the continuation checkpoint.",
+            "evidence": {"tests": ["failed | current for this Git state | pytest"]},
+        })
+        parsed = {
+            "goal": "Finish the continuation checkpoint.",
+            "what_is_done": [long_item] * 7,
+            "current_state": [long_item] * 7,
+            "decisions": [long_item] * 6,
+            "context_to_preserve": [long_item] * 7,
+            "risks_and_constraints": [long_item] * 6,
+            "inspect_first": [long_item] * 7,
+            "do_not_redo": [long_item] * 5,
+            "next_steps": [long_item] * 6,
+            "next_ask": long_item,
+            "acceptance_check": [long_item] * 5,
+            "uncertainties": [long_item] * 5,
+        }
+
+        text = ai_assist._structured_handoff_text(parsed, packet)
+
+        self.assertLessEqual(len(text.split()), ai_assist.MAX_HANDOFF_WORDS, text)
+        self.assertIn("failed | current for this Git state | pytest", text)
 
     def test_fresh_start_rejects_generic_model_output(self) -> None:
         evidence_packet = json.dumps({
