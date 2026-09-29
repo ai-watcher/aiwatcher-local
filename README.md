@@ -19,14 +19,11 @@ unless you explicitly configure optional AI Assist.
 - [What You Get](#what-you-get)
 - [First Look](#first-look)
 - [Why Developers Use It](#why-developers-use-it)
-- [Quick Start](#quick-start)
-- [Choose an Install Method](#choose-an-install-method)
-- [Install pipx](#install-pipx)
-- [Upgrade or Reinstall](#upgrade-or-reinstall)
+- [Install and Start](#install-and-start)
+- [Already Installed](#already-installed)
+- [Connect Your AI Tools](#connect-your-ai-tools)
+- [Other Install Methods](#other-install-methods)
 - [Troubleshooting](#troubleshooting)
-- [First Useful Checks](#first-useful-checks)
-- [Optional Hooks](#optional-hooks)
-- [Clone The Codebase](#clone-the-codebase)
 - [What It Reads](#what-it-reads)
 - [Common Commands](#common-commands)
 - [Project Status](#project-status)
@@ -69,22 +66,22 @@ context:
 - **Keep trust visible:** label what is automatic, what is inferred, and what
   the current tool surface cannot prove.
 
-## Quick Start
+## Install and Start
 
 For most users, the best path is [`pipx`](https://pipx.pypa.io/latest/).
 It installs AIWatcher from
 [PyPI](https://pypi.org/project/aiwatcher-local/) in an isolated environment
 and makes the `aiwatcher` command available everywhere.
 
-You need Python 3.10 or newer for current versions of `pipx`. If `pipx` is
-already installed:
+You need Python 3.10 or newer for current versions of `pipx`. Install AIWatcher
+and add pipx's command directory to your `PATH`:
 
 ```console
 pipx install aiwatcher-local
 pipx ensurepath
 ```
 
-Open a new terminal after `ensurepath`, then start AIWatcher:
+Open a new terminal after `ensurepath`, then run:
 
 ```console
 aiwatcher setup
@@ -92,50 +89,129 @@ aiwatcher doctor
 aiwatcher start --open-ui
 ```
 
-That is the complete normal installation. `setup` detects supported local AI
-tools and prints relevant next steps; it is not an interactive menu.
-`start --open-ui` starts the private local Console and Companion, then opens the
-Console in your browser.
+`setup` detects supported local AI tools and prints relevant next steps.
+`start --open-ui` starts the private local Console and Companion and opens the
+Console in your browser. Your normal command after the first setup is simply:
 
-If `pipx install` says `aiwatcher-local` is already installed, that is expected.
-Do not use `--force` for a routine update. Run:
+```console
+aiwatcher start --open-ui
+```
+
+If `pipx` is not installed yet, expand [Other Install Methods](#other-install-methods)
+for short platform-specific instructions. Do not clone the repository just to
+use AIWatcher.
+
+## Already Installed
+
+If `pipx install` says AIWatcher is already installed, that is expected. Update
+the existing installation instead:
 
 ```console
 pipx upgrade aiwatcher-local
+aiwatcher companion stop
+aiwatcher ui --restart --open
 ```
 
-## Choose an Install Method
+The restart matters because a running Console or Companion keeps using the code
+that was loaded when its process started.
 
-Use the first method that fits your situation:
+Use the update command that matches how AIWatcher was installed:
 
-| Preference | Method | Best for |
-| --- | --- | --- |
-| **1. Recommended** | `pipx install aiwatcher-local` | Almost everyone; isolated, available from any terminal, and easy to upgrade |
-| **2. Existing Python environment** | `python -m pip install aiwatcher-local` | Users who deliberately manage and activate their own virtual environment |
-| **3. Source clone** | `git clone ...` and editable install | Contributors and users who need unreleased `main` changes |
+| Installation | Update command |
+| --- | --- |
+| `pipx` from PyPI | `pipx upgrade aiwatcher-local` |
+| Windows using `py -m pipx` | `py -m pipx upgrade aiwatcher-local` |
+| `pip` virtual environment | Activate it, then run `python -m pip install --upgrade aiwatcher-local` |
+| `uv tool` | `uv tool upgrade aiwatcher-local` |
+| `pipx` directly from GitHub | `pipx reinstall aiwatcher-local` |
+| Source clone on clean `main` | `aiwatcher update --apply` |
 
-Do not clone the repository just to use AIWatcher. Do not install it into the
-macOS, Homebrew, or Linux system Python, and do not use
-`--break-system-packages`.
+After any update, restart both local processes:
 
-## Install pipx
+```console
+aiwatcher companion stop
+aiwatcher ui --restart --open
+```
 
-Skip this section if `pipx --version` already works. These commands follow the
-official [pipx installation guide](https://pipx.pypa.io/latest/how-to/install-pipx.html).
+Merging code into GitHub `main` does not update PyPI installations. PyPI users
+receive the change only after a maintainer publishes a newer package version.
+GitHub installs and source clones can receive unreleased commits without a PyPI
+release.
 
-### macOS
+A pipx installation is shared across your laptop; it does not belong to the
+directory where you ran `pipx install`. The Console reports the running
+workspace separately from the package location and update channel.
+
+To repair a broken pipx environment, use `pipx reinstall aiwatcher-local`. To
+remove it, use `pipx uninstall aiwatcher-local`.
+
+## Connect Your AI Tools
+
+AIWatcher is useful immediately through the Console, Companion, and manual
+`preflight`. Hooks add review before supported AI tools spend context. Install
+only the integrations you use:
+
+```console
+aiwatcher install-claude-hook --write --scope user --gate
+aiwatcher install-codex-hook --write --scope user --gate
+aiwatcher install-cursor-hook --write --scope user --gate
+```
+
+`--write` applies the configuration; without it the installer only previews the
+change. User scope is the simplest choice for most people. For one repository,
+replace `--scope user` with `--scope project --project-dir /path/to/repo`.
+
+After installing or changing a hook, reload the tool and send a small test
+prompt:
+
+| Tool surface | What to do after installation |
+| --- | --- |
+| Claude Code CLI | End the active session, start Claude Code again, and send a test prompt |
+| Claude Desktop Code tab | Quit Claude Desktop completely, reopen it, and test in the Code tab |
+| Codex CLI/TUI | Start a new session, run `/hooks` to review and trust the hook, then test |
+| Codex Desktop | Quit and reopen the app, then test; hook invocation depends on the current app build |
+| Cursor | Reload the Cursor window, then send a test prompt |
+
+Verify what actually ran:
+
+```console
+aiwatcher hook-status
+```
+
+Claude Desktop general chat and other surfaces without a verified prompt hook
+are not silently protected. Use the Console or Companion **Plan** flow, or run:
+
+```console
+aiwatcher preflight "Refactor the checkout flow" --tool codex --cwd "$(pwd)"
+```
+
+Claude Code can also gate risky shell commands:
+
+```console
+aiwatcher install-claude-command-gate --write --scope user
+```
+
+Normal package upgrades do not require reinstalling unchanged hook files. Do
+restart the Console and Companion after an upgrade, and reload the AI client if
+hook configuration changed or `hook-status` does not show the test invocation.
+
+## Other Install Methods
+
+The choices below are ordered from general use to contributor setup.
+
+<details>
+<summary>Install pipx on macOS, Linux, or Windows</summary>
+
+Skip this if `pipx --version` already works.
+
+**macOS**
 
 ```console
 brew install pipx
 pipx ensurepath
 ```
 
-If `brew` is unavailable, install it from [brew.sh](https://brew.sh/) or use the
-virtual-environment method below.
-
-### Ubuntu or Debian
-
-Ubuntu 23.04+, Debian 12+, and newer releases:
+**Ubuntu 23.04+, Debian 12+, or newer**
 
 ```console
 sudo apt update
@@ -143,215 +219,92 @@ sudo apt install pipx
 pipx ensurepath
 ```
 
-Older distributions may not package `pipx`. Follow the official pipx guide for
-your distribution instead of modifying an externally managed system Python.
-
-### Fedora
+**Fedora**
 
 ```console
 sudo dnf install pipx
 pipx ensurepath
 ```
 
-### Windows PowerShell
-
-With Python from python.org:
+**Windows PowerShell**
 
 ```powershell
 py -m pip install --user pipx
 py -m pipx ensurepath
 ```
 
-Open a new PowerShell window, then use `pipx install aiwatcher-local`. If the
-`pipx` command is still unavailable, use `py -m pipx` in its place:
+Open a new terminal after `ensurepath`. On Windows, `py -m pipx` can replace
+`pipx` if the standalone command is not yet available. WSL users should follow
+the Linux instructions inside WSL and avoid mixing Windows and WSL Python
+installations.
 
-```powershell
-py -m pipx install aiwatcher-local
-py -m pipx upgrade aiwatcher-local
-```
+For older operating systems, use the official
+[pipx installation guide](https://pipx.pypa.io/latest/how-to/install-pipx.html).
 
-Windows Subsystem for Linux users should follow the Linux instructions inside
-their WSL distribution, not mix Windows and WSL Python installations.
+</details>
 
-### Install with pip in a virtual environment
+<details>
+<summary>Install with pip in a virtual environment</summary>
 
-AIWatcher itself supports Python 3.9+, although Python 3.10+ is recommended.
-Use this path when you intentionally prefer `pip` or cannot install `pipx`.
+Use this when you intentionally manage your own Python environment. AIWatcher
+supports Python 3.9+, although Python 3.10+ is recommended.
 
-macOS or Linux:
+**macOS or Linux**
 
 ```console
 python3 -m venv ~/.venvs/aiwatcher-local
 source ~/.venvs/aiwatcher-local/bin/activate
 python -m pip install --upgrade aiwatcher-local
 aiwatcher setup
-aiwatcher doctor
 aiwatcher start --open-ui
 ```
 
-Windows PowerShell:
+**Windows PowerShell**
 
 ```powershell
 py -m venv "$HOME\.venvs\aiwatcher-local"
 & "$HOME\.venvs\aiwatcher-local\Scripts\Activate.ps1"
 python -m pip install --upgrade aiwatcher-local
 aiwatcher setup
-aiwatcher doctor
 aiwatcher start --open-ui
 ```
 
-Activate this environment again before running `aiwatcher` in a new terminal.
-This activation requirement is why `pipx` is the default recommendation.
+Activate the environment again before running `aiwatcher` in a new terminal.
+Do not install into the macOS, Homebrew, or Linux system Python, and do not use
+`--break-system-packages`.
 
-## Upgrade or Reinstall
+</details>
 
-Use the update command belonging to the method that installed AIWatcher:
+<details>
+<summary>Install unreleased GitHub main with pipx</summary>
 
-| Installation | Normal update |
-| --- | --- |
-| `pipx` from PyPI | `pipx upgrade aiwatcher-local` |
-| Windows using `py -m pipx` | `py -m pipx upgrade aiwatcher-local` |
-| `pip` virtual environment | Activate the environment, then run `python -m pip install --upgrade aiwatcher-local` |
-| `uv tool` | `uv tool upgrade aiwatcher-local` |
-| Source clone on `main` | `aiwatcher update --apply`, then `aiwatcher start --open-ui` |
+Use this for staging changes that are merged to GitHub but not yet published to
+PyPI:
 
-The Console update indicator uses the same distinction. PyPI installs compare
-their installed version with the latest PyPI release. Source clones compare
-their checkout with `origin/main`. Clicking the indicator reviews the update;
-applying and restarting is a separate explicit action.
-
-Merging a change into GitHub `main` does **not** update PyPI installations. A
-maintainer must publish a newer version first. If PyPI still has the same
-version, `pipx upgrade` correctly reports that nothing changed.
-
-An installation made directly from GitHub is different: commits can change
-while the package still declares the same version. For that install type,
-`aiwatcher update --apply` and the Console use `pipx reinstall
-aiwatcher-local` so the recorded Git commit actually advances. A plain `pipx
-upgrade` may clone the latest commit and still keep the existing files when
-both builds declare the same version.
-
-A GitHub package continues tracking the revision it was installed from. An
-install ending in `@main` follows `main`; an install ending in a feature-branch
-name follows that branch. The workspace where `aiwatcher` is started does not
-change this update target. To move a feature-branch install back to `main`, run:
+A GitHub installation keeps tracking the branch or revision in its install
+spec. The workspace where `aiwatcher` starts does not change that update target.
+The command below installs or moves an existing feature-branch installation to
+`main`:
 
 ```console
-pipx install --force git+https://github.com/ai-watcher/aiwatcher-local.git@main
-```
-
-### Restart after an update
-
-Updating files does not replace AIWatcher processes that are already running.
-Restart the dashboard and Companion so both use the newly installed code:
-
-```console
+pipx install --force 'git+https://github.com/ai-watcher/aiwatcher-local.git@main'
 aiwatcher companion stop
 aiwatcher ui --restart --open
 ```
 
-The second command starts a fresh dashboard and Companion. If the floating
-Companion says `UI offline`, use the same sequence, then verify:
+Later, use `pipx reinstall aiwatcher-local` to fetch the current commit from the
+same GitHub source, even when the package version has not changed.
+
+</details>
+
+<details>
+<summary>Clone the source code for development</summary>
+
+Clone only to contribute, inspect the code, or keep an editable checkout.
+
+**macOS or Linux**
 
 ```console
-aiwatcher companion status
-aiwatcher doctor
-aiwatcher update
-```
-
-A pipx installation is shared across the laptop; it does not belong to the
-workspace where the install or update command happened. The Console reports
-the directory the running process was started from separately from the package
-location and update channel.
-
-Use a reinstall only when the environment is broken or you need to change its
-Python interpreter:
-
-```console
-pipx reinstall aiwatcher-local
-```
-
-To remove AIWatcher completely:
-
-```console
-pipx uninstall aiwatcher-local
-```
-
-Users of the original `aiwatcher-cli` 0.1.0 package should migrate once:
-
-```console
-pipx uninstall aiwatcher-cli
-pipx install aiwatcher-local
-```
-
-## Troubleshooting
-
-Start with the first command that fails, then use the matching row.
-
-| Error or symptom | Fix |
-| --- | --- |
-| `pipx: command not found` | Install `pipx` using the platform section above, run `pipx ensurepath`, and open a new terminal. On Windows, try `py -m pipx`. |
-| `aiwatcher: command not found` | Run `pipx ensurepath`, open a new terminal, and confirm `pipx list` includes `aiwatcher-local`. |
-| `aiwatcher-local ... already seems to be installed` | This is normal. Use `pipx upgrade aiwatcher-local`; use `pipx reinstall` only to repair the environment. |
-| `No matching distribution found for aiwatcher-local` | Check spelling, internet/index configuration, and `python --version`. AIWatcher requires Python 3.9+; current `pipx` requires Python 3.10+. |
-| `externally-managed-environment` | Stop using system `pip`. Install with `pipx` or create the virtual environment shown above. Do not add `--break-system-packages`. |
-| `No module named pipx` | Install `pipx` first. On Linux with PEP 668, use `apt`, `dnf`, or the official pipx guide rather than system `pip`. |
-| `No module named pip3` | Use `python3 -m pip`, not `python3 -m pip3`; the module name is `pip`. |
-| `python3` or `py` is missing | Install Python 3.10+ from your platform package manager or [python.org](https://www.python.org/downloads/), then open a new terminal. |
-| Dashboard opens an older checkout | Stop the old process and run `aiwatcher start --open-ui` from the intended installation. `aiwatcher doctor` reports integration and install details. |
-| Upgrade reports no change | Check the installed and available versions with `pipx list` and the [PyPI release page](https://pypi.org/project/aiwatcher-local/). GitHub `main` may be newer than the latest published package. |
-
-## First Useful Checks
-
-```sh
-aiwatcher doctor
-aiwatcher hook-status
-aiwatcher preflight "Refactor the checkout flow and delete old auth secrets" --tool codex --cwd "$(pwd)"
-```
-
-- `doctor` shows which local tools AIWatcher can read.
-- `hook-status` proves whether a tool actually invoked AIWatcher.
-- `preflight` gives value immediately, even before hooks are installed.
-
-## Optional Hooks
-
-Hooks let AIWatcher act before the AI tool spends context. Install only the
-ones you use:
-
-```sh
-aiwatcher install-claude-hook --write --scope user --gate
-aiwatcher install-codex-hook --write --scope user --gate
-aiwatcher install-cursor-hook --write --scope user --gate
-```
-
-For Claude Code CLI, AIWatcher can also review risky shell commands before
-they run:
-
-```sh
-aiwatcher install-claude-command-gate --write --scope user
-```
-
-Then send a small test prompt in your AI tool and verify:
-
-```sh
-aiwatcher hook-status
-```
-
-If a surface does not invoke hooks, use the Console or Companion **Plan** flow
-to preflight prompts manually. AIWatcher does not claim silent protection on
-tool surfaces that do not expose a verified lifecycle hook.
-
-## Clone The Codebase
-
-Clone only if you want to contribute, inspect code locally, or use the
-dashboard's source-update flow. Most users should use the `pipx` path above.
-
-The source clone path creates a project-local virtual environment, so it does
-not modify your Homebrew, system, or Windows Python packages.
-
-macOS or Linux:
-
-```sh
 git clone https://github.com/ai-watcher/aiwatcher-local.git
 cd aiwatcher-local
 python3 -m venv .venv
@@ -361,7 +314,7 @@ python -m aiwatcher_cli setup
 python -m aiwatcher_cli start --open-ui
 ```
 
-Windows PowerShell:
+**Windows PowerShell**
 
 ```powershell
 git clone https://github.com/ai-watcher/aiwatcher-local.git
@@ -373,12 +326,51 @@ python -m aiwatcher_cli setup
 python -m aiwatcher_cli start --open-ui
 ```
 
-The key detail is `python -m pip` inside the virtual environment. Do not use
-`python -m pip3`.
-
 On a clean `main` checkout, `aiwatcher update --apply` fetches and fast-forwards
-the clone. On a feature branch or a checkout with local changes, use your normal
-Git workflow; AIWatcher refuses to overwrite or move that work automatically.
+the clone. On a feature branch or checkout with local changes, use normal Git
+commands; AIWatcher refuses to overwrite or move that work automatically.
+
+</details>
+
+Users of the original `aiwatcher-cli` 0.1.0 package should migrate once:
+
+```console
+pipx uninstall aiwatcher-cli
+pipx install aiwatcher-local
+```
+
+## Troubleshooting
+
+<details>
+<summary>Installation, PATH, updates, and stale processes</summary>
+
+Start with the first command that fails, then use the matching row.
+
+| Error or symptom | Fix |
+| --- | --- |
+| `pipx: command not found` | Install pipx using the platform section above, run `pipx ensurepath`, and open a new terminal. On Windows, try `py -m pipx`. |
+| `aiwatcher: command not found` | Run `pipx ensurepath`, open a new terminal, and confirm `pipx list` includes `aiwatcher-local`. |
+| `aiwatcher-local ... already seems to be installed` | This is normal. Use `pipx upgrade aiwatcher-local`; use `pipx reinstall` only for GitHub installs or to repair the environment. |
+| `No matching distribution found for aiwatcher-local` | Check spelling, internet/index configuration, and `python --version`. AIWatcher requires Python 3.9+; current pipx requires Python 3.10+. |
+| `externally-managed-environment` | Stop using system pip. Install with pipx or create the virtual environment above. Do not add `--break-system-packages`. |
+| `No module named pipx` | Install pipx first. On Linux with PEP 668, use `apt`, `dnf`, or the official pipx guide rather than system pip. |
+| `No module named pip3` | Use `python3 -m pip`, not `python3 -m pip3`; the module name is `pip`. |
+| `python3` or `py` is missing | Install Python 3.10+ from your package manager or [python.org](https://www.python.org/downloads/), then open a new terminal. |
+| Companion says `UI offline` | Run `aiwatcher companion stop`, then `aiwatcher ui --restart --open`. |
+| Dashboard opens an older checkout | Stop the old process, change to the intended workspace if using a source clone, and restart. Run `aiwatcher doctor` for install details. |
+| Upgrade reports no change | Compare `pipx list` with the [PyPI release page](https://pypi.org/project/aiwatcher-local/). GitHub `main` can be newer than PyPI. |
+| Hook does not appear to run | Restart or reload the AI tool, send a test prompt, then run `aiwatcher hook-status`. Use manual `preflight` when the surface does not expose the hook. |
+
+Useful diagnostics:
+
+```console
+aiwatcher companion status
+aiwatcher doctor
+aiwatcher hook-status
+aiwatcher update
+```
+
+</details>
 
 ## What It Reads
 
