@@ -690,6 +690,47 @@ class UpdateCommandCliTests(unittest.TestCase):
         self.assertIn("/compare/abc1234567890...main", fetch_json.call_args.args[0])
         git_capture.assert_not_called()
 
+    def test_github_package_install_tracks_its_recorded_feature_branch(self) -> None:
+        direct_url = {
+            "url": "https://github.com/ai-watcher/aiwatcher-local.git",
+            "vcs_info": {
+                "vcs": "git",
+                "requested_revision": "feature/integration",
+                "commit_id": "abc1234567890",
+            },
+        }
+        with (
+            patch.object(updater, "install_kind", return_value="package"),
+            patch.object(updater, "_direct_url_metadata", return_value=direct_url),
+            patch.object(updater, "package_manager", return_value="pipx"),
+            patch.object(updater.shutil, "which", return_value="/usr/local/bin/pipx"),
+            patch.object(
+                updater,
+                "_fetch_json",
+                return_value={"ahead_by": 0, "commits": []},
+            ) as fetch_json,
+        ):
+            result = updater.check_for_updates()
+
+        self.assertFalse(result["update_available"])
+        self.assertEqual(result["branch"], "feature/integration")
+        self.assertEqual(result["remote_ref"], "github/feature/integration")
+        self.assertIn(
+            "/compare/abc1234567890...feature%2Fintegration",
+            fetch_json.call_args.args[0],
+        )
+        self.assertEqual(result["command"], ["pipx", "reinstall", "aiwatcher-local"])
+        self.assertEqual(
+            result["guidance"][-1],
+            {
+                "label": "Switch to main",
+                "command": (
+                    "pipx install --force "
+                    "git+https://github.com/ai-watcher/aiwatcher-local.git@main"
+                ),
+            },
+        )
+
     def test_pypi_package_install_compares_versions(self) -> None:
         with (
             patch.object(updater, "install_kind", return_value="package"),
