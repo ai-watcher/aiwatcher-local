@@ -564,6 +564,12 @@ class ConsentAndCapTest(unittest.TestCase):
         self.local_state = local_state
         self.project = str(Path(self._tmp.name) / "proj")
         Path(self.project).mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "-C", self.project, "init", "-q"], check=True)
+        subprocess.run(["git", "-C", self.project, "config", "user.name", "Test"], check=True)
+        subprocess.run(["git", "-C", self.project, "config", "user.email", "test@example.com"], check=True)
+        Path(self.project, "README.md").write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "-C", self.project, "add", "README.md"], check=True)
+        subprocess.run(["git", "-C", self.project, "commit", "-q", "-m", "root"], check=True)
 
     def tearDown(self):
         if self._prev is None:
@@ -579,6 +585,13 @@ class ConsentAndCapTest(unittest.TestCase):
         self.local_state.record_analyst_consent(self.project, allowed=True)
         self.assertTrue(self.local_state.analyst_consent(self.project)["allowed"])
         other = self.project + "-other"
+        Path(other).mkdir()
+        subprocess.run(["git", "-C", other, "init", "-q"], check=True)
+        subprocess.run(["git", "-C", other, "config", "user.name", "Test"], check=True)
+        subprocess.run(["git", "-C", other, "config", "user.email", "test@example.com"], check=True)
+        Path(other, "README.md").write_text("y\n", encoding="utf-8")
+        subprocess.run(["git", "-C", other, "add", "README.md"], check=True)
+        subprocess.run(["git", "-C", other, "commit", "-q", "-m", "root"], check=True)
         self.assertIsNone(self.local_state.analyst_consent(other),
                           "consent for one repository must not authorise another")
 
@@ -586,6 +599,18 @@ class ConsentAndCapTest(unittest.TestCase):
         # Otherwise "no" means "ask me again on the next prompt".
         self.local_state.record_analyst_consent(self.project, allowed=False)
         self.assertFalse(self.local_state.analyst_consent(self.project)["allowed"])
+
+    def test_replacement_repository_does_not_inherit_paid_consent(self):
+        self.local_state.record_analyst_consent(self.project, allowed=True)
+        os.rename(Path(self.project) / ".git", Path(self.project) / ".git-retired")
+        subprocess.run(["git", "-C", self.project, "init", "-q"], check=True)
+        subprocess.run(["git", "-C", self.project, "config", "user.name", "Test"], check=True)
+        subprocess.run(["git", "-C", self.project, "config", "user.email", "test@example.com"], check=True)
+        Path(self.project, "README.md").write_text("replacement\n", encoding="utf-8")
+        subprocess.run(["git", "-C", self.project, "add", "README.md"], check=True)
+        subprocess.run(["git", "-C", self.project, "commit", "-q", "-m", "replacement"], check=True)
+
+        self.assertIsNone(self.local_state.analyst_consent(self.project))
 
     def test_the_cap_counts_this_month_only(self):
         import datetime as dt
@@ -730,13 +755,42 @@ class FileContentsOptInTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory(prefix="aiw-contents-state-")
         os.environ["AIWATCHER_STATE_FILE"] = str(Path(tmp.name) / "state.json")
         try:
-            self.assertFalse(local_state.analyst_contents_allowed("/repo"))
-            local_state.record_analyst_contents("/repo", allowed=True)
-            self.assertTrue(local_state.analyst_contents_allowed("/repo"))
+            repo = str(Path(tmp.name) / "repo")
+            other = str(Path(tmp.name) / "other")
+            for path in (repo, other):
+                Path(path).mkdir()
+                subprocess.run(["git", "-C", path, "init", "-q"], check=True)
+                subprocess.run(["git", "-C", path, "config", "user.name", "Test"], check=True)
+                subprocess.run(["git", "-C", path, "config", "user.email", "test@example.com"], check=True)
+                Path(path, "README.md").write_text("x\n", encoding="utf-8")
+                subprocess.run(["git", "-C", path, "add", "README.md"], check=True)
+                subprocess.run(["git", "-C", path, "commit", "-q", "-m", "root"], check=True)
+            self.assertFalse(local_state.analyst_contents_allowed(repo))
+            local_state.record_analyst_contents(repo, allowed=True)
+            self.assertTrue(local_state.analyst_contents_allowed(repo))
             # Per project: one repository's answer is not another's.
-            self.assertFalse(local_state.analyst_contents_allowed("/other"))
+            self.assertFalse(local_state.analyst_contents_allowed(other))
             # And paying for a second opinion is not agreeing to be read.
-            self.assertIsNone(local_state.analyst_consent("/repo"))
+            self.assertIsNone(local_state.analyst_consent(repo))
+
+            # Replacing the repository at the same path does not inherit the
+            # previous repository's file-content authorization.
+            os.rename(Path(repo) / ".git", Path(repo) / ".git-retired")
+            subprocess.run(["git", "-C", repo, "init", "-q"], check=True)
+            subprocess.run(["git", "-C", repo, "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", repo, "config", "user.email", "test@example.com"], check=True)
+            Path(repo, "README.md").write_text("replacement\n", encoding="utf-8")
+            subprocess.run(["git", "-C", repo, "add", "README.md"], check=True)
+            subprocess.run(["git", "-C", repo, "commit", "-q", "-m", "replacement"], check=True)
+            self.assertFalse(local_state.analyst_contents_allowed(repo))
+
+            # A v2 path grant is deliberately not authorization for whatever
+            # repository happens to occupy that path after upgrade.
+            state_path = Path(os.environ["AIWATCHER_STATE_FILE"])
+            stored = json.loads(state_path.read_text(encoding="utf-8"))
+            stored["analyst_contents"] = {repo: {"allowed": True}}
+            state_path.write_text(json.dumps(stored), encoding="utf-8")
+            self.assertFalse(local_state.analyst_contents_allowed(repo))
         finally:
             if prev is None:
                 os.environ.pop("AIWATCHER_STATE_FILE", None)

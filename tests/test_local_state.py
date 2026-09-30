@@ -8,6 +8,7 @@ import tempfile
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 from aiwatcher_cli import local_state
@@ -49,6 +50,8 @@ class LocalStateTests(unittest.TestCase):
                     "sha": "abc123",
                     "subject": "first title",
                     "repository_id": "repo-1",
+                    "repository_lineage_id": "lineage-1",
+                    "checkout_id": "checkout-1",
                     "checkout_path": "/repo/worktree",
                     "branch": "review",
                     "cost_usd": 0.12,
@@ -58,7 +61,9 @@ class LocalStateTests(unittest.TestCase):
                     "sha": "abc123",
                     "subject": "updated title",
                     "repository_id": "repo-1",
-                    "checkout_path": "/repo/worktree",
+                    "repository_lineage_id": "lineage-1",
+                    "checkout_id": "checkout-1",
+                    "checkout_path": "/repo/moved-worktree",
                     "branch": "review",
                     "cost_usd": 0.12,
                     "files_changed": 2,
@@ -67,7 +72,9 @@ class LocalStateTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["subject"], "updated title")
-        self.assertEqual(rows[0]["checkout_path"], "/repo/worktree")
+        self.assertEqual(rows[0]["checkout_path"], "/repo/moved-worktree")
+        self.assertEqual(rows[0]["checkout_id"], "checkout-1")
+        self.assertEqual(rows[0]["repository_lineage_id"], "lineage-1")
 
     def test_verification_receipt_stores_result_without_command_output(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -77,6 +84,8 @@ class LocalStateTests(unittest.TestCase):
                     runner="pytest",
                     checkout_path="/repo/review",
                     repository_id="repo-1",
+                    repository_lineage_id="lineage-1",
+                    checkout_id="checkout-1",
                     head="abc123",
                     dirty_fingerprint="clean",
                     started_at="2026-09-27T01:00:00+00:00",
@@ -87,8 +96,61 @@ class LocalStateTests(unittest.TestCase):
 
         self.assertEqual(rows[0]["status"], "passed")
         self.assertEqual(rows[0]["runner"], "pytest")
+        self.assertEqual(rows[0]["checkout_id"], "checkout-1")
+        self.assertEqual(rows[0]["repository_lineage_id"], "lineage-1")
         self.assertNotIn("output", rows[0])
         self.assertNotIn("command", rows[0])
+
+    def test_receipt_filters_apply_before_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_commit_receipt({
+                    "sha": "target",
+                    "checkout_id": "wanted",
+                    "checkout_path": "/repo/wanted",
+                })
+                for index in range(110):
+                    local_state.record_commit_receipt({
+                        "sha": f"other-{index}",
+                        "checkout_id": f"other-{index}",
+                        "checkout_path": f"/repo/other-{index}",
+                    })
+                rows = local_state.recent_commit_receipts(
+                    checkout_id="wanted",
+                    checkout_path="/repo/wanted",
+                    include_legacy=True,
+                    limit=1,
+                )
+
+        self.assertEqual([row["sha"] for row in rows], ["target"])
+
+    def test_identity_secret_is_private_stable_and_upgrades_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                first = local_state.get_or_create_identity_secret()
+                second = local_state.get_or_create_identity_secret()
+                stored = json.loads(Path(state_file).read_text(encoding="utf-8"))
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), 32)
+        self.assertEqual(stored["version"], 3)
+        self.assertEqual(len(stored["identity_secret"]), 64)
+
+    def test_malformed_identity_secret_is_replaced(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir, "state.json")
+            state_file.write_text(
+                json.dumps({"version": 3, "identity_secret": "z" * 64}),
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": str(state_file)}):
+                secret = local_state.get_or_create_identity_secret()
+                stored = json.loads(state_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(len(secret), 32)
+        self.assertNotEqual(stored["identity_secret"], "z" * 64)
 
     def test_state_lock_is_only_ever_used_inside_locked_state(self) -> None:
         # _STATE_LOCK guards only in-process threads; a bare `with _STATE_LOCK:`

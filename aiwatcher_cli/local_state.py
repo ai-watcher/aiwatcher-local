@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import secrets
 import json
 import os
 import re
@@ -23,7 +24,7 @@ else:
     import fcntl
 
 
-STATE_VERSION = 2
+STATE_VERSION = 3
 VALID_OUTCOMES = {"useful", "rework", "abandoned"}
 
 AI_ASSIST_MODES = {"off", "local", "cloud"}
@@ -362,6 +363,9 @@ def state_path() -> Path:
 def _empty_state() -> dict[str, Any]:
     return {
         "version": STATE_VERSION,
+        # Installation-local key for opaque repository/worktree identifiers.
+        # It never leaves this private 0600 state file.
+        "identity_secret": None,
         "interventions": [],
         "outcomes": [],
         "hook_events": [],
@@ -462,6 +466,7 @@ def _load() -> dict[str, Any]:
         return _empty_state()
 
     data.setdefault("version", STATE_VERSION)
+    data.setdefault("identity_secret", None)
     data.setdefault("interventions", [])
     data.setdefault("outcomes", [])
     data.setdefault("hook_events", [])
@@ -527,6 +532,24 @@ def _save(data: dict[str, Any]) -> None:
                 pass
 
 
+def get_or_create_identity_secret() -> bytes:
+    """Return the installation-local key used to obscure filesystem identity."""
+    with _locked_state():
+        data = _load()
+        value = data.get("identity_secret")
+        try:
+            secret = bytes.fromhex(value) if isinstance(value, str) else b""
+        except ValueError:
+            secret = b""
+        if len(secret) != 32:
+            value = secrets.token_hex(32)
+            secret = bytes.fromhex(value)
+            data["identity_secret"] = value
+            data["version"] = STATE_VERSION
+            _save(data)
+    return secret
+
+
 def hash_prompt(prompt: str) -> str:
     return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
@@ -577,6 +600,9 @@ def record_intervention(
     selected_score: int | None = None,
     session_id: str | None = None,
 ) -> str:
+    from .git_identity import resolve_git_identity
+
+    identity = resolve_git_identity(cwd)
     with _locked_state():
         data = _load()
         intervention_id = str(uuid.uuid4())
@@ -587,6 +613,9 @@ def record_intervention(
             "intervention_type": "prompt_preflight",
             "tool": tool,
             "cwd": cwd,
+            "repository_id": identity.repository_id if identity else None,
+            "checkout_id": identity.checkout_id if identity else None,
+            "identity_source": identity.identity_source if identity else None,
             "risk": risk,
             "score": score,
             "selected_risk": selected_risk,
@@ -1438,6 +1467,7 @@ def record_handoff_decision(
     expected_saved_context_tokens: int | None = None,
     action_channel: str | None = None,
     source_project_path: str | None = None,
+    source_raw_cwd: str | None = None,
 ) -> dict[str, Any]:
     """Record a local, privacy-safe Fresh Start companion decision.
 
@@ -1449,6 +1479,12 @@ def record_handoff_decision(
         raise ValueError(f"decision must be one of: {', '.join(sorted(VALID_HANDOFF_DECISIONS))}")
     if not session_id.strip():
         raise ValueError("session_id is required")
+    from .git_identity import identity_for_session
+
+    source_identity = identity_for_session(source_project_path, source_raw_cwd)
+    source_conflict = bool(
+        source_identity is not None and source_identity.identity_source == "identity_conflict"
+    )
     with _locked_state():
         data = _load()
         actionable_fresh_start = decision in {"new_chat", "copy_handoff"}
@@ -1464,6 +1500,13 @@ def record_handoff_decision(
             "reason": reason.strip()[:500],
             "action_channel": (action_channel or "dashboard").strip()[:80],
             "source_project_path": source_project_path.strip()[:1000] if isinstance(source_project_path, str) else None,
+            "source_repository_id": (
+                source_identity.repository_id if source_identity and not source_conflict else None
+            ),
+            "source_checkout_id": (
+                source_identity.checkout_id if source_identity and not source_conflict else None
+            ),
+            "source_identity_source": source_identity.identity_source if source_identity else None,
             "expected_saved_context_tokens": (
                 int(expected_saved_context_tokens)
                 if isinstance(expected_saved_context_tokens, int) and expected_saved_context_tokens > 0
@@ -2494,6 +2537,8 @@ def record_commit_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
         "subject": str(receipt.get("subject") or "").strip()[:500],
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "repository_id": str(receipt.get("repository_id") or "").strip()[:160] or None,
+        "repository_lineage_id": str(receipt.get("repository_lineage_id") or "").strip()[:160] or None,
+        "checkout_id": str(receipt.get("checkout_id") or "").strip()[:160] or None,
         "checkout_path": checkout,
         "branch": str(receipt.get("branch") or "").strip()[:300] or None,
         "upstream": str(receipt.get("upstream") or "").strip()[:300] or None,
@@ -2502,9 +2547,17 @@ def record_commit_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
     }
     with _locked_state():
         data = _load()
+        checkout_id = record["checkout_id"]
         data["commit_receipts"] = [
             row for row in data["commit_receipts"]
-            if not (isinstance(row, dict) and row.get("sha") == sha and row.get("checkout_path") == checkout)
+            if not (
+                isinstance(row, dict)
+                and row.get("sha") == sha
+                and (
+                    (checkout_id and row.get("checkout_id") == checkout_id)
+                    or row.get("checkout_path") == checkout
+                )
+            )
         ]
         data["commit_receipts"].append(record)
         data["commit_receipts"] = data["commit_receipts"][-MAX_COMMIT_RECEIPTS_STORED:]
@@ -2512,7 +2565,37 @@ def record_commit_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
-def recent_commit_receipts(*, repository_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+def _receipt_matches_checkout(
+    row: dict[str, Any],
+    *,
+    repository_id: str | None,
+    checkout_id: str | None,
+    checkout_path: str | None,
+    include_legacy: bool,
+) -> bool:
+    if checkout_id:
+        row_checkout_id = row.get("checkout_id")
+        if isinstance(row_checkout_id, str) and row_checkout_id:
+            return row_checkout_id == checkout_id
+        if not include_legacy or not checkout_path:
+            return False
+        try:
+            return os.path.normcase(os.path.realpath(str(row.get("checkout_path") or ""))) == (
+                os.path.normcase(os.path.realpath(checkout_path))
+            )
+        except (OSError, ValueError):
+            return False
+    return not repository_id or row.get("repository_id") == repository_id
+
+
+def recent_commit_receipts(
+    *,
+    repository_id: str | None = None,
+    checkout_id: str | None = None,
+    checkout_path: str | None = None,
+    include_legacy: bool = False,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
     try:
         with _locked_state():
             rows = list(_load().get("commit_receipts", []))
@@ -2520,7 +2603,13 @@ def recent_commit_receipts(*, repository_id: str | None = None, limit: int = 50)
         return []
     filtered = [
         dict(row) for row in rows if isinstance(row, dict)
-        and (not repository_id or row.get("repository_id") == repository_id)
+        and _receipt_matches_checkout(
+            row,
+            repository_id=repository_id,
+            checkout_id=checkout_id,
+            checkout_path=checkout_path,
+            include_legacy=include_legacy,
+        )
     ]
     return list(reversed(filtered[-max(0, limit):]))
 
@@ -2536,6 +2625,8 @@ def record_verification_receipt(
     started_at: str,
     finished_at: str,
     repository_id: str | None = None,
+    repository_lineage_id: str | None = None,
+    checkout_id: str | None = None,
     head: str | None = None,
     dirty_fingerprint: str | None = None,
 ) -> dict[str, Any]:
@@ -2545,6 +2636,8 @@ def record_verification_receipt(
         "runner": runner.strip()[:160],
         "checkout_path": checkout_path.strip()[:1000],
         "repository_id": repository_id.strip()[:160] if repository_id else None,
+        "repository_lineage_id": repository_lineage_id.strip()[:160] if repository_lineage_id else None,
+        "checkout_id": checkout_id.strip()[:160] if checkout_id else None,
         "head": head.strip()[:40] if head else None,
         "dirty_fingerprint": dirty_fingerprint.strip()[:80] if dirty_fingerprint else None,
         "started_at": started_at,
@@ -2562,7 +2655,14 @@ def record_verification_receipt(
     return record
 
 
-def recent_verification_receipts(*, repository_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+def recent_verification_receipts(
+    *,
+    repository_id: str | None = None,
+    checkout_id: str | None = None,
+    checkout_path: str | None = None,
+    include_legacy: bool = False,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
     try:
         with _locked_state():
             rows = list(_load().get("verification_receipts", []))
@@ -2570,7 +2670,13 @@ def recent_verification_receipts(*, repository_id: str | None = None, limit: int
         return []
     filtered = [
         dict(row) for row in rows if isinstance(row, dict)
-        and (not repository_id or row.get("repository_id") == repository_id)
+        and _receipt_matches_checkout(
+            row,
+            repository_id=repository_id,
+            checkout_id=checkout_id,
+            checkout_path=checkout_path,
+            include_legacy=include_legacy,
+        )
     ]
     return list(reversed(filtered[-max(0, limit):]))
 
@@ -2645,7 +2751,9 @@ def analyst_consent(project_path: str) -> dict[str, Any] | None:
     consent nobody reads, and this is a decision about one repository's budget
     rather than about the machine.
     """
-    key = (project_path or "").strip()
+    from .git_identity import repository_identity
+
+    key = repository_identity(project_path)
     if not key:
         return None
     try:
@@ -2658,12 +2766,15 @@ def analyst_consent(project_path: str) -> dict[str, Any] | None:
 
 
 def record_analyst_consent(project_path: str, *, allowed: bool) -> dict[str, Any]:
-    key = (project_path or "").strip()
+    from .git_identity import repository_identity
+
+    key = repository_identity(project_path)
     if not key:
-        raise ValueError("project_path is required")
+        raise ValueError("a Git repository identity is required")
     record = {
         "allowed": bool(allowed),
         "decided_at": datetime.now(timezone.utc).isoformat(),
+        "repository_id": key,
     }
     with _locked_state():
         data = _load()
@@ -2685,7 +2796,9 @@ def analyst_contents_allowed(project_path: str) -> bool:
     that -- "It sees your prompt and your file paths. Never file contents,
     unless you turn that on."
     """
-    key = (project_path or "").strip()
+    from .git_identity import repository_identity
+
+    key = repository_identity(project_path)
     if not key:
         return False
     try:
@@ -2698,10 +2811,16 @@ def analyst_contents_allowed(project_path: str) -> bool:
 
 
 def record_analyst_contents(project_path: str, *, allowed: bool) -> dict[str, Any]:
-    key = (project_path or "").strip()
+    from .git_identity import repository_identity
+
+    key = repository_identity(project_path)
     if not key:
-        raise ValueError("project_path is required")
-    record = {"allowed": bool(allowed), "decided_at": datetime.now(timezone.utc).isoformat()}
+        raise ValueError("a Git repository identity is required")
+    record = {
+        "allowed": bool(allowed),
+        "decided_at": datetime.now(timezone.utc).isoformat(),
+        "repository_id": key,
+    }
     with _locked_state():
         data = _load()
         contents = data.get("analyst_contents")
@@ -2721,8 +2840,10 @@ def record_analyst_run(*, project_path: str, cost_usd: float,
     estimated before it, so the counter the user is shown is the money that
     actually moved.
     """
+    from .git_identity import repository_identity
+
     record = {
-        "project_path": (project_path or "").strip()[:1000],
+        "repository_id": repository_identity(project_path),
         "session_id": (session_id or "").strip()[:200] or None,
         "cost_usd": round(max(0.0, float(cost_usd or 0.0)), 6),
         "ran_at": datetime.now(timezone.utc).isoformat(),

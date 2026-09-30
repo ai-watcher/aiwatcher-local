@@ -96,7 +96,7 @@ class HandoffTests(unittest.TestCase):
             Path(temp_dir, "app.py").write_text("base\n", encoding="utf-8")
             run(["git", "add", "app.py"], temp_dir)
             run(["git", "commit", "-m", "base"], temp_dir)
-            expected_path = str(Path(temp_dir).resolve())
+            expected_path = str(Path(temp_dir).resolve()).replace("\\", "/")
             session = LocalSession(
                 session_id="dense", tool="codex-cli", project_path=temp_dir,
                 started_at=now, updated_at=now + timedelta(minutes=1),

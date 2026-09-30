@@ -508,6 +508,7 @@ class ProjectPathTests(unittest.TestCase):
         self.assertEqual(sessions[0].project_path, str(right_repo.resolve()))
         self.assertTrue(events)
         self.assertTrue(all(event.project_path == str(right_repo.resolve()) for event in events))
+        self.assertTrue(all(event.raw_cwd == str(Path.home()) for event in events))
 
     def test_claude_incidental_path_mention_does_not_move_session_off_real_cwd(self) -> None:
         """Mentioning an unrelated path in passing must not re-attribute the session."""
@@ -553,6 +554,7 @@ class ProjectPathTests(unittest.TestCase):
         self.assertEqual(sessions[0].project_path, str(target_repo.resolve()))
         self.assertTrue(events)
         self.assertTrue(all(event.project_path == str(target_repo.resolve()) for event in events))
+        self.assertTrue(all(event.raw_cwd == str(stale_repo) for event in events))
 
     def _run_codex_rollout(self, temp_dir: str, cwd: str, prompt: str):
         root = Path(temp_dir) / "sessions"
@@ -609,6 +611,7 @@ class ProjectPathTests(unittest.TestCase):
         self.assertEqual(sessions[0].project_path, str(right_repo.resolve()))
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].project_path, str(right_repo.resolve()))
+        self.assertEqual(events[0].raw_cwd, str(Path.home()))
 
     def test_codex_incidental_path_mention_does_not_move_session_off_real_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -642,6 +645,7 @@ class ProjectPathTests(unittest.TestCase):
 
         self.assertEqual(sessions[0].project_path, str(target_repo.resolve()))
         self.assertEqual(events[0].project_path, str(target_repo.resolve()))
+        self.assertEqual(events[0].raw_cwd, str(stale_repo))
 
 
 class PromptCacheAccountingTests(unittest.TestCase):

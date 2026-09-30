@@ -10,7 +10,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from aiwatcher_cli import local_state
+from aiwatcher_cli.git_identity import resolve_git_identity
 from aiwatcher_cli.outcome_evidence import (
+    OutcomeEvidence,
     _checkout_state,
     _working_tree_fingerprint,
     annotate_same_file_reprompt,
@@ -51,6 +53,31 @@ def commit_file(temp_dir: str, filename: str, content: str, message: str, *, whe
 
 
 class OutcomeEvidenceTests(unittest.TestCase):
+    def test_legacy_receipt_does_not_cross_replacement_repository(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = os.path.join(temp_dir, "repo")
+            os.mkdir(repo)
+            init_repo(repo)
+            old_sha = commit_file(repo, "old.py", "old\n", "old repository", when=now)
+            replacement = os.path.join(temp_dir, "replacement")
+            run(["git", "clone", "-q", repo, replacement], temp_dir)
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_commit_receipt({
+                    "sha": old_sha,
+                    "checkout_path": repo,
+                    "repository_id": old_sha[:16],
+                })
+                os.rename(repo, os.path.join(temp_dir, "retired"))
+                os.rename(replacement, repo)
+                evidence = build_outcome_evidence(LocalSession(
+                    session_id="replacement", tool="codex-cli", project_path=repo,
+                    started_at=now, updated_at=now + timedelta(minutes=2),
+                ))
+
+        self.assertEqual(evidence.commit_receipts, [])
+
     def test_fingerprint_distinguishes_surrogateescaped_git_bytes(self) -> None:
         def git_result(repo: str, args: list[str]):
             return subprocess.CompletedProcess(["git"], 0, "", "")
@@ -168,13 +195,16 @@ class OutcomeEvidenceTests(unittest.TestCase):
             os.mkdir(repo)
             init_repo(repo)
             head = commit_file(repo, "app.py", "base\n", "base", when=now)
-            repository_id = run_out(["git", "rev-list", "--max-parents=0", "HEAD"], repo)[:16]
             state_file = os.path.join(temp_dir, "state.json")
             with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                identity = resolve_git_identity(repo)
+                assert identity is not None
                 local_state.record_verification_receipt(
                     runner="pytest",
                     checkout_path=repo,
-                    repository_id=repository_id,
+                    repository_id=identity.repository_id,
+                    repository_lineage_id=identity.repository_lineage_id,
+                    checkout_id=identity.checkout_id,
                     head=head,
                     dirty_fingerprint="e3b0c44298fc1c149afbf4c8",
                     started_at=now.isoformat(),
@@ -199,15 +229,19 @@ class OutcomeEvidenceTests(unittest.TestCase):
             os.mkdir(repo)
             init_repo(repo)
             head = commit_file(repo, "app.py", "base\n", "base", when=now)
-            repository_id = run_out(["git", "rev-list", "--max-parents=0", "HEAD"], repo)[:16]
             fingerprint = _checkout_state(repo)["dirty_fingerprint"]
             state_file = os.path.join(temp_dir, "state.json")
             with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                identity = resolve_git_identity(repo)
+                assert identity is not None
                 # Persist out of completion order: authority follows finished_at,
                 # not lock/insertion order.
                 for offset, exit_code in ((2, 1), (1, 0)):
                     local_state.record_verification_receipt(
-                        runner="pytest", checkout_path=repo, repository_id=repository_id,
+                        runner="pytest", checkout_path=repo,
+                        repository_id=identity.repository_id,
+                        repository_lineage_id=identity.repository_lineage_id,
+                        checkout_id=identity.checkout_id,
                         head=head, dirty_fingerprint=fingerprint,
                         started_at=(now + timedelta(minutes=offset)).isoformat(),
                         finished_at=(now + timedelta(minutes=offset, seconds=30)).isoformat(),
@@ -286,11 +320,15 @@ class OutcomeEvidenceTests(unittest.TestCase):
             init_repo(str(main))
             head = commit_file(str(main), "app.py", "base\n", "base", when=now - timedelta(minutes=2))
             run(["git", "worktree", "add", "-b", "review-pr", str(worktree)], str(main))
-            repository_id = run_out(["git", "rev-list", "--max-parents=0", "HEAD"], str(main))[:16]
             state_file = os.path.join(temp_dir, "state.json")
             with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                main_identity = resolve_git_identity(str(main))
+                assert main_identity is not None
                 local_state.record_verification_receipt(
-                    runner="pytest", checkout_path=str(main), repository_id=repository_id, head=head,
+                    runner="pytest", checkout_path=str(main),
+                    repository_id=main_identity.repository_id,
+                    repository_lineage_id=main_identity.repository_lineage_id,
+                    checkout_id=main_identity.checkout_id, head=head,
                     dirty_fingerprint="e3b0c44298fc1c149afbf4c8", started_at=now.isoformat(),
                     finished_at=(now + timedelta(seconds=5)).isoformat(), exit_code=0,
                 )
@@ -528,6 +566,32 @@ class ChurnDowngradesInferredOutcomeTests(unittest.TestCase):
 
 
 class SameFileRepromptTests(unittest.TestCase):
+    def test_linked_worktree_paths_compare_by_repository_identity(self) -> None:
+        now = datetime.now(timezone.utc)
+        first = LocalSession(
+            session_id="first", tool="codex-cli", project_path="/repo/main",
+            repository_id="repository-1", started_at=now, updated_at=now,
+        )
+        second = LocalSession(
+            session_id="second", tool="codex-cli", project_path="/repo/review",
+            repository_id="repository-1",
+            started_at=now + timedelta(hours=1), updated_at=now + timedelta(hours=1),
+        )
+        first_evidence = OutcomeEvidence(
+            session_id="first", project_path=first.project_path,
+            repository_id="repository-1", files_touched=["auth.py"],
+        )
+        second_evidence = OutcomeEvidence(
+            session_id="second", project_path=second.project_path,
+            repository_id="repository-1", files_touched=["auth.py"],
+        )
+
+        annotate_same_file_reprompt([
+            (first, first_evidence),
+            (second, second_evidence),
+        ])
+
+        self.assertTrue(first_evidence.same_file_reprompt)
     def test_flags_when_a_later_session_touches_the_same_file_soon_after(self) -> None:
         now = datetime.now(timezone.utc)
         with tempfile.TemporaryDirectory() as temp_dir:

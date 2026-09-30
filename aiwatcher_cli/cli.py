@@ -104,6 +104,7 @@ from .local_state import (
     upsert_ambient_intervention,
 )
 from .handoff import HANDOFF_TYPE_LABELS, TARGET_LABELS, build_handoff_capsule, render_handoff_capsule
+from .git_identity import resolve_git_identity
 from .ledger import Ledger, build_ledger, cost_per_surviving_line, repo_identity, repos_matching, unbanked_summary
 from .statusline import statusline_from_stdin, statusline_settings_snippet
 from .receipt import (
@@ -4552,10 +4553,13 @@ def command_commit_receipt(args: argparse.Namespace) -> int:
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         try:
+            identity = resolve_git_identity(repo)
             record_commit_receipt({
                 **receipt,
-                "repository_id": repo_identity(repo),
-                "checkout_path": os.path.realpath(repo),
+                "repository_id": identity.repository_id if identity else None,
+                "repository_lineage_id": identity.repository_lineage_id if identity else repo_identity(repo),
+                "checkout_id": identity.checkout_id if identity else None,
+                "checkout_path": identity.checkout_path if identity else os.path.realpath(repo),
                 "branch": branch_result.stdout.strip() if branch_result.returncode == 0 else None,
                 "upstream": upstream_result.stdout.strip() if upstream_result.returncode == 0 else None,
             })
@@ -7117,7 +7121,9 @@ def command_run(args: argparse.Namespace) -> int:
             record_verification_receipt(
                 runner=verification_runner,
                 checkout_path=checkout,
-                repository_id=repo_identity(checkout),
+                repository_id=verification_after.get("repository_id"),
+                repository_lineage_id=verification_after.get("repository_lineage_id"),
+                checkout_id=verification_after.get("checkout_id"),
                 head=verification_after.get("head"),
                 dirty_fingerprint=verification_after.get("dirty_fingerprint"),
                 started_at=run_started.astimezone(timezone.utc).isoformat(),
