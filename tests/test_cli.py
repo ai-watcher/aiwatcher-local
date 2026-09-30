@@ -2297,6 +2297,26 @@ class PromptPreflightTests(unittest.TestCase):
             self.assertIn("Fresh Start brief already generated", second_output.getvalue())
             self.assertIn(f"--target {args.target}", second_output.getvalue())
 
+    def test_watch_event_scan_is_bounded_to_requested_window(self) -> None:
+        row = session(1)
+        event = LocalEvent(
+            event_id="evt-1",
+            session_id=row.session_id,
+            tool=row.tool,
+            event_type="assistant",
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        with patch.object(cli, "scan_all_events", return_value=[event]) as scan:
+            grouped = cli.events_by_session([row], days=1)
+
+        self.assertEqual(grouped[row.session_id], [event])
+        scan.assert_called_once()
+        since = scan.call_args.kwargs.get("since")
+        self.assertIsNotNone(since)
+        self.assertLess(timedelta(hours=23, minutes=59), datetime.now(timezone.utc) - since)
+        self.assertLess(datetime.now(timezone.utc) - since, timedelta(days=1, seconds=2))
+
     def test_watch_notify_sends_one_local_notification_per_session_state(self) -> None:
         row = session(1, project="/repo/orcha")
         row.agent_calls = 300

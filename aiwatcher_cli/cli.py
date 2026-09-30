@@ -3500,14 +3500,14 @@ def events_by_session(sessions: Sequence[LocalSession], *, days: int) -> dict[st
     """Batched version of events_for_session for many sessions at once.
 
     watch polls this for every session in its window each cycle -- calling
-    events_for_session() per session would rescan scan_all_events() (the
-    full local event history) once per session, per poll. This scans it
-    exactly once per poll instead.
+    events_for_session() per session would rescan the local event window once
+    per session, per poll. This scans it exactly once per poll, and passes the
+    cutoff through so old transcript files are never opened for a live watch.
     """
     since = datetime.now().astimezone() - timedelta(days=max(days, 1))
     session_ids = {row.session_id for row in sessions}
     grouped: dict[str, list[LocalEvent]] = defaultdict(list)
-    for event in scan_all_events():
+    for event in scan_all_events(since=since):
         if event.session_id in session_ids and event.timestamp and event.timestamp.astimezone() >= since:
             grouped[event.session_id].append(event)
     for session_events in grouped.values():
