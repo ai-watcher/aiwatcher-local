@@ -405,6 +405,22 @@ class StartCommandCliTests(unittest.TestCase):
         self.assertIn("AIWatcher companion is already running (PID 999).", stdout.getvalue())
         self.assertIn("AIWatcher companion presence started", stdout.getvalue())
 
+    def test_companion_heartbeat_does_not_scan_transcripts(self) -> None:
+        with (
+            patch.object(cli, "record_watcher_heartbeat") as heartbeat,
+            patch.object(cli, "clear_watcher_heartbeat") as clear,
+            patch.object(cli, "scan_all", side_effect=AssertionError("companion heartbeat must not scan")),
+            patch.object(cli, "scan_all_events", side_effect=AssertionError("companion heartbeat must not scan")),
+            patch.object(cli.time_module, "sleep", side_effect=KeyboardInterrupt),
+        ):
+            result = cli._run_companion_heartbeat(30)
+
+        self.assertEqual(result, 0)
+        heartbeat.assert_called_once_with(
+            pid=os.getpid(), mode="companion", interval_seconds=30, notify=False, overlay=True,
+        )
+        clear.assert_called_once_with(pid=os.getpid())
+
     def test_pid_probe_treats_permission_error_as_running(self) -> None:
         with (
             patch.object(cli.sys, "platform", "linux"),

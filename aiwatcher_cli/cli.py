@@ -788,9 +788,9 @@ def budget_check_text(
     now = datetime.now().astimezone()
     today_start = local_midnight(now.date())
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    rows = scan_all()
+    rows = scan_all(since=month_start)
     try:
-        events = scan_all_events()
+        events = scan_all_events(since=month_start)
     except OSError:
         events = []
     today_rows = clip_sessions_to_window(rows, events, today_start)
@@ -3489,7 +3489,7 @@ def events_for_session(session_id: str, *, days: int = 30) -> list[LocalEvent]:
     since = datetime.now().astimezone() - timedelta(days=days)
     return sorted(
         [
-            event for event in scan_all_events()
+            event for event in scan_all_events(since=since)
             if event.session_id == session_id and event.timestamp and event.timestamp.astimezone() >= since
         ],
         key=event_sort_key,
@@ -3516,8 +3516,9 @@ def events_by_session(sessions: Sequence[LocalSession], *, days: int) -> dict[st
 
 
 def render_session_timeline(session_id: str, *, days: int = 30, limit: int = 30) -> str:
+    since = datetime.now().astimezone() - timedelta(days=days)
     events = events_for_session(session_id, days=days)
-    session = next((row for row in scan_all() if row.session_id == session_id), None)
+    session = next((row for row in scan_all(since=since) if row.session_id == session_id), None)
     if not events and not session:
         return f"No local timeline found for session {session_id!r} in the last {days} days."
     if not events:
@@ -4104,6 +4105,30 @@ def command_status(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_companion_heartbeat(interval_seconds: int) -> int:
+    """Keep lifecycle state alive while the local action server owns scans.
+
+    The Companion used to run command_watch() beside the server, so the same
+    process scanned transcripts once for the overlay cache and again for a
+    log-only watch card. The overlay and dashboard consume the server cache;
+    the second scan had no user-visible purpose and doubled background work.
+    """
+    interval = max(15, int(interval_seconds))
+    try:
+        while True:
+            record_watcher_heartbeat(
+                pid=os.getpid(),
+                mode="companion",
+                interval_seconds=interval,
+                notify=False,
+                overlay=True,
+            )
+            time_module.sleep(interval)
+    except KeyboardInterrupt:
+        clear_watcher_heartbeat(pid=os.getpid())
+        return 0
+
+
 def command_companion(args: argparse.Namespace) -> int:
     action = str(args.companion_action)
     presence_requested = not bool(getattr(args, "no_presence", False))
@@ -4215,19 +4240,7 @@ def command_companion(args: argparse.Namespace) -> int:
                 print(f"AIWatcher companion presence started ({detail}).")
             else:
                 print(f"AIWatcher companion presence not started ({detail}).", file=sys.stderr)
-        watch_args = argparse.Namespace(
-            days=1,
-            interval=max(15, int(args.interval)),
-            once=False,
-            cost_threshold=5.0,
-            calls_threshold=250,
-            tokens_threshold=500_000,
-            target="generic",
-            notify=False,
-            overlay=True,
-            companion=True,
-        )
-        return command_watch(watch_args)
+        return _run_companion_heartbeat(getattr(args, "interval", 30))
     if action == "start":
         result = start_companion(
             interval_seconds=args.interval,
@@ -9520,16 +9533,16 @@ def command_export(args: argparse.Namespace) -> int:
     if args.level == "events":
         rows = [
             row.to_json()
-            for row in scan_all_events()
+            for row in scan_all_events(since=since)
             if row.timestamp and row.timestamp.astimezone() >= since
         ]
         print(json.dumps({"schema": "aiwatcher.local_events.v0", "events": rows}, indent=2))
     else:
         try:
-            export_events = scan_all_events()
+            export_events = scan_all_events(since=since)
         except OSError:
             export_events = []
-        rows = [row.to_json() for row in clip_sessions_to_window(scan_all(), export_events, since)]
+        rows = [row.to_json() for row in clip_sessions_to_window(scan_all(since=since), export_events, since)]
         print(json.dumps({"schema": "aiwatcher.local_sessions.v0", "sessions": rows}, indent=2))
     print("Tip: Cloud can schedule exports and evidence packs for teams.", file=sys.stderr)
     return 0

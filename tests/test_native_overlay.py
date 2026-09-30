@@ -520,10 +520,9 @@ class NativeOverlayConfigTests(unittest.TestCase):
         self.assertIn("orbitLayer", mac)
         self.assertIn('CABasicAnimation(keyPath: "transform.rotation.z")', mac)
         self.assertIn("accessibilityDisplayShouldReduceMotion", mac)
-        self.assertIn(
-            "orbitLayer.isHidden = !collapsed || workingCount <= 0 || needsAttention || reduceMotion",
-            mac,
-        )
+        self.assertIn("let shouldOrbit = collapsed && workingCount > 0 && !needsAttention && !reduceMotion", mac)
+        self.assertIn('orbitLayer.removeAnimation(forKey: "orbit")', mac)
+        self.assertIn("self.schedulePulse(after: animate ? 0.8 : 10.0)", mac)
 
         tk_source = inspect.getsource(native_overlay.run_native_presence)
         self.assertIn("orbit_angle_var", tk_source)

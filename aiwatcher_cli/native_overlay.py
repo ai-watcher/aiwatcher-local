@@ -992,12 +992,6 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         orbitLayer.lineCap = .round
         orbitLayer.strokeEnd = 0.33
         orbitLayer.isHidden = true
-        let spin = CABasicAnimation(keyPath: "transform.rotation.z")
-        spin.fromValue = 0
-        spin.toValue = -2 * Double.pi
-        spin.duration = 2.8
-        spin.repeatCount = .infinity
-        orbitLayer.add(spin, forKey: "orbit")
         rootView.layer?.addSublayer(orbitLayer)
 
         // The attention rim: a full orange ring on the bubble's edge while
@@ -1882,7 +1876,18 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         collapsedBlueRing.borderColor = ringColor.cgColor
         brandBlueRing.borderColor = ringColor.cgColor
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        orbitLayer.isHidden = !collapsed || workingCount <= 0 || needsAttention || reduceMotion
+        let shouldOrbit = collapsed && workingCount > 0 && !needsAttention && !reduceMotion
+        orbitLayer.isHidden = !shouldOrbit
+        if shouldOrbit && orbitLayer.animation(forKey: "orbit") == nil {
+            let spin = CABasicAnimation(keyPath: "transform.rotation.z")
+            spin.fromValue = 0
+            spin.toValue = -2 * Double.pi
+            spin.duration = 2.8
+            spin.repeatCount = .infinity
+            orbitLayer.add(spin, forKey: "orbit")
+        } else if !shouldOrbit {
+            orbitLayer.removeAnimation(forKey: "orbit")
+        }
         // The rim outranks the orbit arc the way attention outranks running.
         // A hard gate pulses it between full and faint on the same tick as
         // the button; with Reduce Motion on it holds at full, still orange,
@@ -1906,11 +1911,17 @@ final class PresenceDelegate: NSObject, NSApplicationDelegate {
         applyWindowVisibility()
     }
 
-    func schedulePulse() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-            self.pulseOn.toggle()
-            self.updateAppearance()
-            self.schedulePulse()
+    func schedulePulse(after delay: Double = 0.8) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            let animate = self.isHardGate() && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            if animate {
+                self.pulseOn.toggle()
+                self.updateAppearance()
+            } else if self.pulseOn {
+                self.pulseOn = false
+                self.updateAppearance()
+            }
+            self.schedulePulse(after: animate ? 0.8 : 10.0)
         }
     }
 
