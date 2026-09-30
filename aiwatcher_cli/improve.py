@@ -183,10 +183,13 @@ def recent_results(state=None):
     for record in (state["handoffs"] if state is not None else local_state.recent_handoff_decisions(limit=20)):
         if record.get("decision") not in {"new_chat", "copy_handoff"}:
             continue
-        linked = record.get("next_session_id")
-        results.append({"title": "Fresh Start follow-up" if linked else "Fresh Start prepared",
-                        "body": ("A later session was linked. This is correlation, not proof of improvement."
-                                 if linked else "No later session linked yet. Copying a brief does not prove it was used."),
+        followup = local_state.fresh_start_followup_evidence(record)
+        confirmed = followup["state"] == "confirmed"
+        possible = followup["state"] == "possible"
+        results.append({"title": "Fresh Start follow-up" if confirmed else ("Possible Fresh Start follow-up" if possible else "Fresh Start prepared"),
+                        "body": ("The follow-up was explicitly linked. This is still not proof of improvement."
+                                 if confirmed else ("A later same-project session may be the follow-up; explicit linkage is still missing."
+                                 if possible else "No later session linked yet. Copying a brief does not prove it was used.")),
                         "session_id": record.get("source_session_id") or record.get("session_id"),
                         "at": record.get("created_at", "")})
     if state is not None:

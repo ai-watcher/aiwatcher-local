@@ -89,7 +89,10 @@ function handoffDecisionLabel(value) {
 }
 function renderHandoffDecisionRows(decisions) {
   if (!decisions.length) return '<tr><td colspan="6"><div class="empty">No Fresh Start receipts recorded yet.</div></td></tr>';
-  return decisions.map(decision => `<tr>
+  return decisions.map(decision => {
+    const relatedId = decision.next_session_id || decision.candidate_session_id || '';
+    const relatedLabel = decision.next_session_id ? 'next' : (decision.candidate_session_id ? 'candidate' : 'next');
+    return `<tr>
     <td>${esc(dateLabel(decision.created_at))}</td>
     <td>${esc(handoffDecisionLabel(decision.decision))}</td>
     <td>${esc(decision.expected_saved_context_label ? `~${decision.expected_saved_context_label}` : '—')}</td>
@@ -103,9 +106,10 @@ function renderHandoffDecisionRows(decisions) {
             : decision.outcome || decision.inferred_outcome);
       return specific ? `<br><span class="sub">${esc(specific)}</span>` : '';
     })()}${decision.proof_evidence ? `<br><span class="sub">${esc(decision.proof_evidence.label)} · ${esc(decision.proof_evidence.commits)} commits · ${esc(decision.proof_evidence.tests)} tests</span>` : ''}</td>
-    <td><span class="sub">source</span> ${esc(decision.source_session_id || decision.session_id || 'unknown')}<br><span class="sub">next</span> ${esc(decision.next_session_id || 'waiting')}</td>
-    <td>${decision.next_session_id ? `<button class="row-action" onclick="selectSession('${esc(decision.next_session_id)}')">Inspect next</button>` : decision.source_session_id ? `<button class="row-action" onclick="selectSession('${esc(decision.source_session_id)}')">Inspect source</button>` : ''}</td>
-  </tr>`).join('');
+    <td><span class="sub">source</span> ${esc(decision.source_session_id || decision.session_id || 'unknown')}<br><span class="sub">${esc(relatedLabel)}</span> ${esc(relatedId || 'waiting')}</td>
+    <td>${relatedId ? `<button class="row-action" onclick="selectSession('${esc(relatedId)}')">Inspect ${decision.next_session_id ? 'next' : 'candidate'}</button>` : decision.source_session_id ? `<button class="row-action" onclick="selectSession('${esc(decision.source_session_id)}')">Inspect source</button>` : ''}</td>
+  </tr>`;
+  }).join('');
 }
 function openReceipt(receiptId) {
   const receipt = receiptCache.find(item => item.id === receiptId);
@@ -284,7 +288,7 @@ function renderOptimizeCleanupPrompt(result) {
         <div class="fresh-preview-row"><strong>Full path</strong><p>${esc(candidate.project_full || 'Local machine')}</p></div>
         <div class="fresh-preview-row"><strong>Last activity</strong><p>${esc(candidate.last_activity || candidate.updated_label || 'unknown')}</p></div>
         <div class="fresh-preview-row"><strong>Tool</strong><p>${esc(candidate.tool || (Array.isArray(candidate.tools) ? candidate.tools.join(', ') : 'local AI metadata'))}</p></div>
-        <div class="fresh-preview-row"><strong>Impact</strong><p>${esc(candidate.impact_label || 'No savings claim')}</p></div>
+        <div class="fresh-preview-row"><strong>Observed scale</strong><p>${esc(candidate.impact_label || 'No measured resource impact')}</p></div>
       </div>
     </div>
     <div class="brief-focus">
@@ -1871,9 +1875,9 @@ function freshStartReceiptWidget({ reason = '', expected = '', copy = '', contro
     <div class="receipt-steps">
       <div class="receipt-step"><span>1</span><div><strong>Copied brief</strong><p>${esc(reason || 'Fresh Start brief copied from local session evidence.')}</p></div></div>
       <div class="receipt-step"><span>2</span><div><strong>Next user action</strong><p>${esc(copy || 'Open a fresh AI chat in the same workspace and paste the copied brief.')}</p></div></div>
-      <div class="receipt-step"><span>3</span><div><strong>Proof pending</strong><p>AIWatcher will not claim saved tokens until it observes a later same-project session.</p></div></div>
+      <div class="receipt-step"><span>3</span><div><strong>Proof pending</strong><p>AIWatcher may identify a possible same-project follow-up, but completion requires explicit linkage.</p></div></div>
     </div>
-    <div class="pill-row"><span class="pill">${esc(expected || 'context at risk')}</span><span class="pill">No saved-token claim yet</span><span class="pill">Fresh Start receipt saved</span></div>
+    <div class="pill-row"><span class="pill">${esc(expected || 'source context recorded')}</span><span class="pill">No saved-token claim yet</span><span class="pill">Fresh Start receipt saved</span></div>
     ${controls ? `<div class="actions" style="margin-top:14px">${controls}</div>` : ''}
   </div>`;
 }
@@ -1969,7 +1973,7 @@ function renderHandoff(capsule) {
     ${renderIdentityStrip(capsule, runtime, capsule.source_path)}
     <div id="handoffStatus" class="verdict-card useful" style="margin-top:14px">
       <h3>${aiReady ? 'Best next action: compose AI handoff' : assisted ? 'Best next action: copy AI handoff' : 'Best next action: start fresh in the same workspace'}</h3>
-      <p>${esc(actionHelp)} AIWatcher will watch for a later same-project session as proof.</p>
+      <p>${esc(actionHelp)} AIWatcher may surface a later same-project session as a candidate, but will keep proof pending until linkage is explicit.</p>
       <div class="copy-row" style="margin-top:12px">
         ${primaryAction}
         ${secondaryCopy}
@@ -2356,11 +2360,11 @@ function renderOptimizeWorkspace(optimize) {
   if (!candidates.length) {
     return `<div class="empty">${esc(optimize.summary || 'No stale chats, worktrees, or runtime cleanup opportunities stood out.')}</div>`;
   }
-  const topImpact = optimize.impact_label || 'No savings claim';
+  const topImpact = optimize.impact_label || 'No measured resource impact';
   return `<div id="optimizeReward" class="verdict-card" hidden></div>
     <div class="mini-grid" style="margin-bottom:12px">
       <div class="mini"><span class="label">Status</span><strong>${esc(optimize.title || 'Optimize')}</strong></div>
-      <div class="mini"><span class="label">Impact signal</span><strong>${esc(topImpact)}</strong></div>
+      <div class="mini"><span class="label">Review scope</span><strong>${esc(topImpact)}</strong></div>
       <div class="mini"><span class="label">Evidence</span><strong>${esc(optimize.evidence_label || 'Observed')}</strong></div>
       <div class="mini"><span class="label">Items</span><strong>${esc(candidates.length)}</strong></div>
     </div>
@@ -2374,7 +2378,7 @@ function renderOptimizeWorkspace(optimize) {
       const fullPath = item.project_full || item.project || '';
       const pathLine = fullPath ? `<div class="optimize-full-path"><span class="label">Full path</span><code>${esc(fullPath)}</code></div>` : '';
       const activityLine = item.activity_summary ? `<p class="optimize-activity-line">${esc(item.activity_summary)}</p>` : '';
-      return `<div class="action-row optimize-card ${item.tokens_at_risk ? 'medium' : 'low'}">
+      return `<div class="action-row optimize-card low">
       <div class="optimize-card-copy">
         <div class="action-title">${esc(item.title)} <span class="pill">${esc(item.evidence_label || 'Observed')}</span></div>
         <p>${esc(item.why_inactive || item.summary || '')}</p>
@@ -4107,12 +4111,13 @@ function renderFreshStartCompletion(s) {
   const completion = s.fresh_start_completion || null;
   if (!completion) return '';
   const completed = completion.status === 'completed';
+  const possible = completion.status === 'possible_followup';
   const nextButton = completed && completion.next_session_id
     ? `<button class="btn-primary" onclick="selectSession('${esc(completion.next_session_id)}')">Open follow-up</button>`
     : '';
   return `<section class="detail-section recommended-action action-composer settled fresh-start-completion">
     <div class="action-composer-head">
-      <h3>${completed ? 'Completed' : 'In progress'}</h3>
+      <h3>${completed ? 'Completed' : (possible ? 'Needs confirmation' : 'In progress')}</h3>
       <strong>${esc(completion.label || (completed ? 'Fresh Start completed' : 'Fresh Start proof pending'))}</strong>
       <p>${esc(completion.reason || '')}</p>
     </div>
@@ -4121,7 +4126,7 @@ function renderFreshStartCompletion(s) {
       ${completion.confidence ? `<span class="pill">${esc(completion.confidence)} confidence</span>` : ''}
     </div>
     <div class="action-buttons">${nextButton}<button class="btn-quiet" onclick="showView('receipts'); closeDrawer()">View receipt</button></div>
-    <p class="tool-link-note">The context chart remains as historical evidence; this recommendation is no longer outstanding.</p>
+    <p class="tool-link-note">${completed ? 'The context chart remains as historical evidence; this recommendation is no longer outstanding.' : 'The receipt remains open until an explicit follow-up link is available.'}</p>
   </section>`;
 }
 function renderSessionActions(s) {
@@ -4727,7 +4732,7 @@ async function dismissFirstRun(goHome) {
 /* Control's strip: three facts that each end in something you can do.
  *
  * Every value here is already in the payload -- the handoff bubble knows what a
- * Fresh Start would save, coverage knows whether anything is gated, totals
+ * Fresh Start is reviewing, coverage knows whether anything is gated, totals
  * knows how many decisions this window produced. What was missing was a place
  * to read them together, which is what the stage is for.
  */
@@ -4735,13 +4740,14 @@ function renderControlStrip(data) {
   const bubble = data.handoff_bubble || null;
   const fresh = document.getElementById('freshStartTile');
   if (fresh) {
-    if (bubble && bubble.saved_context_label) {
+    const replayedContext = bubble && (bubble.replayed_context_label || bubble.saved_context_label);
+    if (bubble && replayedContext) {
       fresh.className = 'card metric-card '
         + (bubble.severity === 'critical' ? 'metric-red' : 'metric-amber');
       fresh.hidden = false;
-      fresh.innerHTML = `<div class="label">Fresh Start ready</div>
-        <div class="value">${esc(bubble.saved_context_label)}</div>
-        <div class="sub">context saved if you start fresh &middot;
+      fresh.innerHTML = `<div class="label">Fresh Start review</div>
+        <div class="value">${esc(replayedContext)}</div>
+        <div class="sub">replayed context observed; actual reduction unmeasured &middot;
           <button class="link-inline" onclick="startFreshFromBubble('${esc(bubble.session_id)}')">review brief</button></div>`;
     } else { fresh.hidden = true; }
   }
@@ -4840,7 +4846,7 @@ function renderWasteTile(optimize) {
   if (!host) return;
   const items = ((optimize && optimize.candidates) || []).length;
   if (!optimize || !items) { host.hidden = true; return; }
-  const impact = optimize.impact_label ? esc(optimize.impact_label) : 'no measured impact';
+  const impact = optimize.impact_label ? esc(optimize.impact_label) : 'no measured resource impact';
   host.className = 'card metric-card '
     + (optimize.status === 'needs_action' ? 'metric-amber' : 'metric-neutral');
   host.hidden = false;

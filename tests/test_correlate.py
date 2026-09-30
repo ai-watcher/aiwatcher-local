@@ -129,7 +129,7 @@ class CorrelateTests(unittest.TestCase):
 
         self.assertEqual(linked, 0)
 
-    def test_links_fresh_start_receipt_to_first_later_same_project_session(self) -> None:
+    def test_records_first_later_same_project_session_as_possible_followup(self) -> None:
         now = datetime.now(timezone.utc)
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")
@@ -149,9 +149,10 @@ class CorrelateTests(unittest.TestCase):
         self.assertEqual(linked, 1)
         record = next(row for row in rows if row["id"] == decision["id"])
         self.assertEqual(record["session_id"], "source")
-        self.assertEqual(record["next_session_id"], "later")
-        self.assertEqual(record["next_session_correlation"]["status"], "linked")
-        self.assertEqual(record["next_session_correlation"]["confidence"], "high")
+        self.assertIsNone(record["next_session_id"])
+        self.assertEqual(record["next_session_correlation"]["status"], "candidate")
+        self.assertEqual(record["next_session_correlation"]["candidate_session_id"], "later")
+        self.assertEqual(record["next_session_correlation"]["confidence"], "medium")
 
     def test_fresh_start_receipt_does_not_link_continue_here_or_wrong_project(self) -> None:
         now = datetime.now(timezone.utc)
@@ -242,8 +243,9 @@ class CorrelateTests(unittest.TestCase):
 
         self.assertEqual(linked, 1)
         record = next(row for row in rows if row["id"] == decision["id"])
-        self.assertEqual(record["next_session_id"], "candidate")
-        self.assertEqual(record["next_session_correlation"]["status"], "linked")
+        self.assertIsNone(record["next_session_id"])
+        self.assertEqual(record["next_session_correlation"]["candidate_session_id"], "candidate")
+        self.assertEqual(record["next_session_correlation"]["status"], "candidate")
 
 
 if __name__ == "__main__":

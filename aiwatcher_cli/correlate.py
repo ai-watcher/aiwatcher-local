@@ -109,16 +109,16 @@ def link_recent_fresh_start_receipts_to_sessions(
     days: int = 7,
     max_delay_hours: int = 24,
 ) -> int:
-    """Link Fresh Start receipts to the first later same-project local session.
+    """Record the first later same-project session as a possible follow-up.
 
-    This is deliberately narrower than preflight correlation: it should prove a
-    fresh follow-up session happened, not mistake continued activity in the
-    original chat for a successful restart.
+    Project and timing are discovery signals, not proof that the copied handoff
+    was used. Explicit receipt linkage may set ``next_session_id`` elsewhere;
+    this correlator only records a candidate.
     """
     rows = list(sessions)
     decisions = recent_handoff_decisions(limit=500)
     cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, days))
-    linked = 0
+    correlated = 0
     used_sessions: set[str] = set()
     for decision in sorted(decisions, key=lambda row: str(row.get("created_at") or "")):
         if decision.get("decision") not in {"new_chat", "copy_handoff"}:
@@ -162,7 +162,7 @@ def link_recent_fresh_start_receipts_to_sessions(
                 continue
             if not _same_project(source_project, session.project_path):
                 continue
-            confidence = "high" if started and started > created_at else "medium"
+            confidence = "medium" if started and started > created_at else "low"
             candidates.append((stamp, confidence, session))
         if not candidates:
             link_handoff_decision_next_session(
@@ -194,15 +194,15 @@ def link_recent_fresh_start_receipts_to_sessions(
         _, confidence, match = candidates[0]
         if link_handoff_decision_next_session(
             decision_id,
-            next_session_id=match.session_id,
             correlation={
-                "status": "linked",
+                "status": "candidate",
                 "method": "first_following_local_session",
                 "window_hours": max_delay_hours,
                 "confidence": confidence,
-                "reason": "Observed a later local session in the same project after the Fresh Start action.",
+                "candidate_session_id": match.session_id,
+                "reason": "A later same-project session may be the follow-up, but no explicit handoff linkage was observed.",
             },
         ):
             used_sessions.add(match.session_id)
-            linked += 1
-    return linked
+            correlated += 1
+    return correlated

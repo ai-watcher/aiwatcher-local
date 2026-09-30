@@ -2008,6 +2008,46 @@ def link_handoff_decision_next_session(
     return False
 
 
+EXPLICIT_FRESH_START_LINK_METHODS = frozenset({"explicit_receipt", "manual_link", "user_confirmed"})
+
+
+def fresh_start_followup_evidence(record: dict[str, Any]) -> dict[str, Any]:
+    """Classify a Fresh Start follow-up without promoting proximity to proof.
+
+    Older AIWatcher versions stored the first later same-project session in
+    ``next_session_id``.  That is useful discovery evidence, but project and
+    timing alone cannot prove that the handoff was pasted or used.
+    """
+    correlation = (
+        record.get("next_session_correlation")
+        if isinstance(record.get("next_session_correlation"), dict)
+        else {}
+    )
+    method = str(correlation.get("method") or "")
+    status = str(correlation.get("status") or "")
+    next_session_id = record.get("next_session_id")
+    candidate_session_id = correlation.get("candidate_session_id")
+
+    explicit_link = method in EXPLICIT_FRESH_START_LINK_METHODS
+    confirmed = bool(next_session_id) and status in {"", "linked", "confirmed"} and explicit_link
+    if confirmed:
+        state = "confirmed"
+    elif candidate_session_id or next_session_id:
+        state = "possible"
+        candidate_session_id = candidate_session_id or next_session_id
+    else:
+        state = "pending"
+
+    return {
+        "state": state,
+        "next_session_id": next_session_id if confirmed else None,
+        "candidate_session_id": candidate_session_id if state == "possible" else None,
+        "confidence": correlation.get("confidence"),
+        "reason": correlation.get("reason"),
+        "method": method or None,
+    }
+
+
 VALID_AMBIENT_INTERVENTION_STATES = {
     "detected",
     "delivered",

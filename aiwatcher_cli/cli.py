@@ -1045,17 +1045,40 @@ def _long_prompt_topics(text: str) -> list[str]:
 
 
 def _plan_only_requested(lower: str) -> bool:
-    patterns = [
-        r"\bdo\s+not\s+(?:edit|fix|implement|change|modify|write|patch)\b",
-        r"\bdon'?t\s+(?:edit|fix|implement|change|modify|write|patch|jump on fixing|work on (?:any )?code changes)\b",
-        r"\bno\s+(?:code\s+)?changes\b",
-        r"\bwithout\s+(?:editing|changing|modifying|fixing|implementing)\b",
+    explicit_patterns = [
         r"\bplan\s+only\b",
         r"\breview\s+only\b",
         r"\baudit\s+only\b",
         r"\bjust\s+(?:tell|explain|review|analy[sz]e|plan)\b",
     ]
-    return any(re.search(pattern, lower) for pattern in patterns)
+    if any(re.search(pattern, lower) for pattern in explicit_patterns):
+        return True
+
+    negative_edit_patterns = [
+        r"\bdo\s+not\s+(?:edit|fix|implement|change|modify|write|patch)\b",
+        r"\bdon'?t\s+(?:edit|fix|implement|change|modify|write|patch|jump on fixing|work on (?:any )?code changes)\b",
+        r"\bno\s+(?:code\s+)?changes\b",
+        r"\bwithout\s+(?:editing|changing|modifying|fixing|implementing)\b",
+    ]
+    if re.search(
+        r"\b(?:do\s+not|don'?t)\s+(?:make\s+)?(?:any\s+)?(?:code\s+)?changes?\b"
+        r".{0,80}\b(?:explain|describe|review|analy[sz]e)\b",
+        lower,
+    ):
+        return True
+    if not any(re.search(pattern, lower) for pattern in negative_edit_patterns):
+        return False
+
+    edit_terms = ("change", "modify", "edit", "write", "implement", "refactor", "delete", "migrate", "rename", "add", "update", "fix", "patch")
+    for term in edit_terms:
+        for match in re.finditer(rf"\b{re.escape(term)}\b", lower):
+            prefix = lower[max(0, match.start() - 80):match.start()]
+            if re.search(r"(?:\bdo\s+not|\bdon'?t|\bwithout)\s+(?:\w+\s+){0,2}$", prefix):
+                continue
+            if re.search(r"\b(?:explain|describe|show|tell)\b.{0,55}\bhow\s+to\s+$", prefix):
+                continue
+            return False
+    return True
 
 
 def _brief_task_sections(prompt: str, *, cwd: str | None) -> list[str]:
@@ -2127,7 +2150,11 @@ def analyze_prompt(
 
     edit_terms = ["change", "modify", "edit", "write", "implement", "refactor", "delete", "migrate", "rename", "add", "update"]
     plan_terms = ["plan first", "do not edit", "inspect first", "propose", "before editing", "ask before"]
-    needs_checkpoint = any(re.search(rf"\b{re.escape(term)}\b", lower) for term in edit_terms) and not any(term in lower for term in plan_terms)
+    needs_checkpoint = (
+        not plan_only
+        and any(re.search(rf"\b{re.escape(term)}\b", lower) for term in edit_terms)
+        and not any(term in lower for term in plan_terms)
+    )
     if needs_checkpoint:
         score += 2
         findings.append("Prompt asks for changes without an explicit plan/checkpoint.")
@@ -2135,7 +2162,7 @@ def analyze_prompt(
         guardrails.append({"icon": "\U0001F4CB", "label": "Plan-first checkpoint"})
 
     risky_terms = [
-        "production", "prod database", "customer data", "pii", "secret", "api key",
+        "customer data", "pii", "secret", "api key",
         "access token", "auth token", "bearer token", "refresh token", "session token",
         ".env", "credential", "drop table", "rm -rf", "payment", "stripe",
     ]
@@ -2187,8 +2214,34 @@ def analyze_prompt(
         or re.search(rf"\b(?:{high_impact_targets})\b.{{0,35}}?\b(?:{destructive_verbs})\b", lower)
         or re.search(r"\b(?:rm\s+-rf|git\s+reset\s+--hard|git\s+push\s+--force|drop\s+table|truncate\s+table)\b", lower)
     )
+    production_actions = (
+        r"deploy|release|roll\s*out|restart|stop|start|change|modify|update|delete|"
+        r"remove|drop|rotate|write|migrate|apply|run|connect|access|configure|"
+        r"reconfigure|provision"
+    )
+    production_operation = False
+    for match in re.finditer(rf"\b(?:{production_actions})\b", lower):
+        prefix = lower[max(0, match.start() - 35):match.start()]
+        if re.search(r"(?:\bdo\s+not|\bdon'?t|\bmust\s+not|\bshould\s+not|\bnever|\bwithout)\s+(?:\w+\s+){0,2}$", prefix):
+            continue
+        action = match.group(0)
+        suffix = lower[match.end():match.end() + 80]
+        nearby = lower[max(0, match.start() - 70):match.end() + 80]
+        if not re.search(r"\bprod(?:uction)?\b", nearby):
+            continue
+        # Editing explanatory artifacts about production is ordinary developer
+        # work. Running tests *against* production remains an operation, so the
+        # exception is deliberately limited to edit-like verbs.
+        if action in {"change", "modify", "update", "write"} and re.match(
+            r"\s+(?:the\s+|an?\s+)?(?:unit\s+|integration\s+)?(?:tests?|documentation|docs?|readme)\b",
+            suffix,
+        ):
+            continue
+        production_operation = True
+        break
     sensitive_or_destructive = (
         any(term in lower for term in risky_terms)
+        or production_operation
         or security_weakening
         or high_impact_destructive
     )
@@ -2238,7 +2291,7 @@ def analyze_prompt(
         suggestions.append("Split this into one task per prompt and checkpoint between them.")
         guardrails.append({"icon": "✂️", "label": "Split into smaller tasks"})
 
-    if plan_only and score > 0:
+    if plan_only:
         findings.append("Prompt asks for review/planning only, so the execution brief should prevent code edits.")
         suggestions.append("Keep this as an audit: return findings, proposed fix/tests, and wait before changing files.")
         guardrails.append({"icon": "\U0001F6A7", "label": "Review only"})
@@ -9238,7 +9291,7 @@ def command_hook_status(_args: argparse.Namespace) -> int:
         print("\nRecent Fresh Start decisions")
         for row in handoff_decisions:
             expected = row.get("expected_saved_context_tokens")
-            saved = f" | ~{compact_int(expected)} expected context at risk" if isinstance(expected, int) and expected > 0 else ""
+            saved = f" | ~{compact_int(expected)} source-session tokens recorded" if isinstance(expected, int) and expected > 0 else ""
             line = (
                 f"- {row.get('created_at', 'unknown')} | "
                 f"{row.get('decision', 'unknown')}{saved}"

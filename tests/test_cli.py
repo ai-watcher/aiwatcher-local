@@ -4057,6 +4057,86 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         self.assertNotIn("Run the narrowest relevant verification after implementation", brief)
         self.assertNotIn("Summarize what changed", brief)
 
+    def test_scoped_production_behavior_constraint_does_not_reverse_edit_intent(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            results = [
+                cli.analyze_prompt(prompt, tool="codex", cwd="/repo")
+                for prompt in (
+                    "Add a unit test; do not change production behavior.",
+                    "Add a unit test without changing production behavior.",
+                    "Fix the failing test, but do not edit documentation.",
+                    "Do not change production behavior and add a unit test.",
+                )
+            ]
+
+        for result in results:
+            labels = [item["label"] for item in result["guardrails"]]
+            self.assertEqual(result["risk"], "low")
+            self.assertNotIn("Review only", labels)
+            self.assertNotIn("Confirm before destructive changes", labels)
+            self.assertFalse(any("sensitive" in finding.lower() for finding in result["findings"]))
+            self.assertIn("Run the narrowest relevant verification after implementation", result["suggested_prompt"])
+
+    def test_production_configuration_remains_sensitive(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            result = cli.analyze_prompt(
+                "Change production configuration.",
+                tool="codex",
+                cwd="/repo",
+            )
+
+        self.assertIn(result["risk"], {"medium", "high"})
+        self.assertIn("Confirm before destructive changes", [item["label"] for item in result["guardrails"]])
+
+    def test_explanation_with_no_edit_constraint_remains_review_only(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            results = [
+                cli.analyze_prompt(prompt, tool="codex", cwd="/repo")
+                for prompt in (
+                    "Explain how to fix the parser, but don't edit code.",
+                    "Do not make any code changes; explain the fix.",
+                )
+            ]
+
+        for result in results:
+            self.assertIn("Review only", [item["label"] for item in result["guardrails"]])
+            self.assertIn("Review and reason only; do not edit files", result["suggested_prompt"])
+            self.assertFalse(any("asks for changes" in finding.lower() for finding in result["findings"]))
+
+    def test_live_production_operations_remain_sensitive(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            results = [
+                cli.analyze_prompt(prompt, tool="codex", cwd="/repo")
+                for prompt in (
+                    "Deploy the release to production.",
+                    "Restart the production service.",
+                    "Change production configuration.",
+                    "In production, restart the service.",
+                    "Apply the migration in production.",
+                    "Run the migration against production.",
+                )
+            ]
+
+        for result in results:
+            self.assertIn(result["risk"], {"medium", "high"})
+            self.assertIn("Confirm before destructive changes", [item["label"] for item in result["guardrails"]])
+
+    def test_benign_production_references_do_not_trigger_sensitive_guardrail(self) -> None:
+        with patch.object(cli, "sessions_since", return_value=[]):
+            results = [
+                cli.analyze_prompt(prompt, tool="codex", cwd="/repo")
+                for prompt in (
+                    "Document the production database setup.",
+                    "Add a unit test for production configuration parsing.",
+                    "Update the unit test for production configuration parsing.",
+                    "Change the documentation for production deployment.",
+                )
+            ]
+
+        for result in results:
+            self.assertEqual(result["risk"], "low")
+            self.assertNotIn("Confirm before destructive changes", [item["label"] for item in result["guardrails"]])
+
     def test_guardrail_chips_match_triggered_findings(self) -> None:
         with patch.object(cli, "sessions_since", return_value=[]):
             result = cli.analyze_prompt(
@@ -6644,7 +6724,7 @@ class IntegrationConfigTests(unittest.TestCase):
         output = stdout.getvalue()
         self.assertIn("Recent Fresh Start decisions", output)
         self.assertIn("copy_handoff", output)
-        self.assertIn("~240.0k expected context at risk", output)
+        self.assertIn("~240.0k source-session tokens recorded", output)
         self.assertIn("session sess-heavy", output)
 
 
