@@ -837,11 +837,10 @@ _ABSOLUTE_PATH_RE = re.compile(
 )
 _JSON_TIMESTAMP_PREFIX_RE = re.compile(r'"timestamp"\s*:\s*"([^"]+)"')
 CODEX_TAIL_INITIAL_BYTES = 8 * 1024 * 1024
-# A single active rollout can exceed 500 MB. Windowed dashboard scans are
-# intentionally best-effort, and loading more history than this per file made
-# cold starts monopolize a core and retain hundreds of megabytes. Incremental
-# scans pick up appended rows after the first pass.
-CODEX_TAIL_MAX_BYTES = 32 * 1024 * 1024
+# Keep the existing coverage ceiling while streaming it line-by-line below.
+# Lowering this limit reduces cold-start work, but can silently omit events that
+# are still inside the requested time window on a very active rollout.
+CODEX_TAIL_MAX_BYTES = 128 * 1024 * 1024
 CODEX_TAIL_MIN_FILE_BYTES = 16 * 1024 * 1024
 CODEX_MAX_WINDOW_JSON_LINE_BYTES = 2 * 1024 * 1024
 CODEX_TAIL_PROBE_BYTES = 256 * 1024
