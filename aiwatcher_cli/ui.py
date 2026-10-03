@@ -46,6 +46,7 @@ from .cli import (
 )
 from .correlate import link_recent_fresh_start_receipts_to_sessions, link_recent_interventions_to_sessions
 from .evidence_capture import record_missing_evidence_snapshots_from_evidence
+from .git_identity import identity_for_session, repository_identity
 from .handoff import HANDOFF_TYPE_LABELS, TARGET_LABELS, build_handoff_capsule
 from .metrics import (
     model_cost_comparison,
@@ -199,7 +200,8 @@ SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
 # 10: both of the above.
 # 11: Codex chat labels use the concise name field and reject prompt-mirroring caches.
 # 12: evidence-accurate activity, Fresh Start, and historical-token semantics.
-SUMMARY_CACHE_SCHEMA_VERSION = 12
+# 13: session payloads carry separate repository and checkout identities.
+SUMMARY_CACHE_SCHEMA_VERSION = 13
 
 
 def restart_command(
@@ -271,7 +273,8 @@ _POST_WITHOUT_BODY = frozenset({
 })
 # 2: sessions carry their chat title; a version-1 index would restore every chat nameless.
 # 3: Codex titles are concise names; version 2 may contain full first-user-message payloads.
-SESSION_SNAPSHOT_SCHEMA_VERSION = 3
+# 4: sessions carry raw CWD and stable repository/checkout identity.
+SESSION_SNAPSHOT_SCHEMA_VERSION = 4
 SUMMARY_BACKGROUND_COOLDOWN_SECONDS = 60
 SUMMARY_WINDOWS = (1, 7, 30)
 # One definition of "live", shared with session_presence, which subdivides
@@ -416,11 +419,38 @@ def project_key(path: str | None) -> str:
     return path if is_reliable_project_path(path) else UNATTRIBUTED_PROJECT
 
 
+def _project_path_group_key(path: str | None) -> str:
+    repository_id = repository_identity(path)
+    return f"repository:{repository_id}" if repository_id else f"path:{project_key(path)}"
+
+
+def _session_project_group_key(row: LocalSession) -> str:
+    if row.identity_source == "identity_conflict":
+        return f"conflict:{row.tool}:{row.session_id}"
+    identity = identity_for_session(row.project_path, row.raw_cwd)
+    if identity is not None and identity.identity_source == "identity_conflict":
+        return f"conflict:{row.tool}:{row.session_id}"
+    repository_id = row.repository_id or (identity.repository_id if identity else None)
+    return f"repository:{repository_id}" if repository_id else f"path:{project_key(row.project_path)}"
+
+
 def fresh_start_project_skip_key(project_path: str | None) -> str | None:
     """Stable project-level quiet key for Fresh Start nudges."""
     if not is_reliable_project_path(project_path):
         return None
-    return f"control_recommended_project:{project_key(project_path)}"
+    identity = repository_identity(project_path)
+    return f"control_recommended_project:{identity or project_key(project_path)}"
+
+
+def _fresh_start_session_skip_key(
+    row: LocalSession | None,
+    fallback_path: str | None = None,
+) -> str | None:
+    if row is not None:
+        if _session_project_group_key(row).startswith("conflict:"):
+            return None
+        return fresh_start_project_skip_key(row.project_path)
+    return fresh_start_project_skip_key(fallback_path)
 
 
 def _fresh_start_project_quiet(project_path: str | None) -> bool:
@@ -471,7 +501,7 @@ def _fresh_start_context_candidates(summary: dict[str, object]) -> list[dict[str
         project = str(row.get("project_full") or "")
         if _fresh_start_project_quiet(project):
             continue
-        project_key_value = project_key(project)
+        project_key_value = str(row.get("project_group") or _project_path_group_key(project))
         if project_key_value in seen_projects:
             continue
         seen_projects.add(project_key_value)
@@ -603,6 +633,12 @@ def _session_from_json(raw: object) -> LocalSession | None:
         session_id=session_id,
         tool=tool,
         project_path=raw.get("project_path") if isinstance(raw.get("project_path"), str) else None,
+        raw_cwd=raw.get("raw_cwd") if isinstance(raw.get("raw_cwd"), str) else None,
+        repository_id=raw.get("repository_id") if isinstance(raw.get("repository_id"), str) else None,
+        repository_lineage_id=raw.get("repository_lineage_id") if isinstance(raw.get("repository_lineage_id"), str) else None,
+        checkout_id=raw.get("checkout_id") if isinstance(raw.get("checkout_id"), str) else None,
+        checkout_path=raw.get("checkout_path") if isinstance(raw.get("checkout_path"), str) else None,
+        identity_source=raw.get("identity_source") if isinstance(raw.get("identity_source"), str) else None,
         started_at=_parse_dt(raw.get("started_at")),
         updated_at=_parse_dt(raw.get("updated_at")),
         model=raw.get("model") if isinstance(raw.get("model"), str) else None,
@@ -882,15 +918,22 @@ def _project_health(items: list[LocalSession]) -> dict[str, object]:
 def group_projects(rows: list[LocalSession]) -> list[dict[str, object]]:
     grouped: dict[str, list[LocalSession]] = defaultdict(list)
     for row in rows:
-        grouped[project_key(row.project_path)].append(row)
+        grouped[_session_project_group_key(row)].append(row)
     result = []
-    for key, items in grouped.items():
+    for group_id, items in grouped.items():
+        key = next(
+            (project_key(item.project_path) for item in items if is_reliable_project_path(item.project_path)),
+            UNATTRIBUTED_PROJECT,
+        )
         stats = summarize(items)
         attributed = key != UNATTRIBUTED_PROJECT
         name = key if attributed else UNATTRIBUTED_PROJECT_LABEL
         result.append({
             "name": name,
-            "id": key,
+            # Keep ordinary path IDs backward compatible. Conflict groups need
+            # their internal key so two rows cannot open the same safe group.
+            "id": group_id if group_id.startswith("conflict:") else key,
+            "project_path": key,
             "short_name": project_label(key),
             "attributed": attributed,
             "sessions": stats["sessions"],
@@ -2503,13 +2546,29 @@ def _safe_window_outcomes(session_ids: set[str]) -> tuple[dict[str, dict[str, ob
 
 
 def build_project_detail(project: str, days: int = 7) -> dict[str, object]:
-    rows = [row for row in rows_for_window(days, prefer_cache=True) if project_key(row.project_path) == project]
+    selected_group = (
+        project
+        if project.startswith(("repository:", "conflict:", "path:"))
+        else _project_path_group_key(project)
+    )
+    rows = [
+        row for row in rows_for_window(days, prefer_cache=True)
+        if _session_project_group_key(row) == selected_group
+    ]
+    display_project = next(
+        (project_key(row.project_path) for row in rows if is_reliable_project_path(row.project_path)),
+        project,
+    )
     stats = summarize(rows)
     sessions = sorted(rows, key=lambda row: row.updated_at or row.started_at or MIN_DT, reverse=True)
     return {
-        "project": project,
-        "project_short": UNATTRIBUTED_PROJECT_LABEL if project == UNATTRIBUTED_PROJECT else short_path(project, 72),
-        "attributed": project != UNATTRIBUTED_PROJECT,
+        "project": display_project,
+        "project_short": (
+            UNATTRIBUTED_PROJECT_LABEL
+            if display_project == UNATTRIBUTED_PROJECT
+            else short_path(display_project, 72)
+        ),
+        "attributed": display_project != UNATTRIBUTED_PROJECT,
         "health": _project_health(rows),
         "totals": {
             "sessions": stats["sessions"],
@@ -2925,7 +2984,7 @@ def build_session_resume(session_id: str, days: int = 30, *, launch: bool = Fals
 
 def _related_active_workspaces(row: LocalSession, *, limit: int = 3) -> list[str]:
     now = datetime.now(timezone.utc)
-    current = project_key(row.project_path)
+    current = _session_project_group_key(row)
     with _SUMMARY_CACHE_LOCK:
         candidates = list(_SESSION_INDEX.values())
     workspaces: list[str] = []
@@ -2934,26 +2993,27 @@ def _related_active_workspaces(row: LocalSession, *, limit: int = 3) -> list[str
         state = session_state(candidate, now=now)
         if state.get("status") not in {"active", "recent"}:
             continue
-        key = project_key(candidate.project_path)
-        if key == UNATTRIBUTED_PROJECT or key == current or key in seen:
+        key = _session_project_group_key(candidate)
+        display_path = project_key(candidate.project_path)
+        if display_path == UNATTRIBUTED_PROJECT or key == current or key in seen:
             continue
         seen.add(key)
-        workspaces.append(key)
+        workspaces.append(display_path)
         if len(workspaces) >= limit:
             break
     return workspaces
 
 
 def _same_project_session_count(row: LocalSession) -> int:
-    current = project_key(row.project_path)
-    if current == UNATTRIBUTED_PROJECT:
+    current = _session_project_group_key(row)
+    if current == f"path:{UNATTRIBUTED_PROJECT}" or current.startswith("conflict:"):
         return 1
     with _SUMMARY_CACHE_LOCK:
         candidates = list(_SESSION_INDEX.values())
     session_ids = {
         candidate.session_id
         for candidate in candidates
-        if candidate.session_id and project_key(candidate.project_path) == current
+        if candidate.session_id and _session_project_group_key(candidate) == current
     }
     session_ids.add(row.session_id)
     return max(1, len(session_ids))
@@ -3790,6 +3850,11 @@ def _context_health_card(
         "tool": health.tool,
         "project": project_label(health.project_path),
         "project_full": health.project_path,
+        "project_group": (
+            _session_project_group_key(session)
+            if session is not None
+            else f"path:{project_key(health.project_path)}"
+        ),
         "severity": health.severity,
         "session_count": len(group),
         "critical_sessions": critical_count,
@@ -3918,7 +3983,9 @@ def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) ->
             turns_by_session[event.session_id].append(event.tokens_in)
     grouped: dict[str, list[ContextHealth]] = defaultdict(list)
     for health in analyze_all_sessions(rows, events):
-        grouped[project_key(health.project_path)].append(health)
+        session = sessions_by_id.get(health.session_id)
+        key = _session_project_group_key(session) if session else f"path:{project_key(health.project_path)}"
+        grouped[key].append(health)
     severity_order = {"critical": 0, "warning": 1, "healthy": 2}
     cards: list[dict[str, object]] = []
     def _still_reachable(item: ContextHealth) -> bool:
@@ -9344,7 +9411,11 @@ class UIHandler(BaseHTTPRequestHandler):
                 self._send(400, json.dumps({"error": "project_path is required"}),
                            "application/json; charset=utf-8")
                 return
-            record_analyst_consent(project, allowed=allowed)
+            try:
+                record_analyst_consent(project, allowed=allowed)
+            except ValueError as exc:
+                self._send(400, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")
+                return
             self._send(200, json.dumps({"allowed": allowed, "project_path": project}),
                        "application/json; charset=utf-8")
             return
@@ -9355,7 +9426,11 @@ class UIHandler(BaseHTTPRequestHandler):
                 self._send(400, json.dumps({"error": "project_path is required"}),
                            "application/json; charset=utf-8")
                 return
-            record_analyst_contents(project, allowed=allowed)
+            try:
+                record_analyst_contents(project, allowed=allowed)
+            except ValueError as exc:
+                self._send(400, json.dumps({"error": str(exc)}), "application/json; charset=utf-8")
+                return
             self._send(200, json.dumps({"allowed": allowed, "project_path": project}),
                        "application/json; charset=utf-8")
             return
@@ -9607,6 +9682,7 @@ class UIHandler(BaseHTTPRequestHandler):
                     expected_saved_context_tokens=expected if isinstance(expected, int) else None,
                     action_channel=action_channel,
                     source_project_path=source_row.project_path if source_row else source_project_path or None,
+                    source_raw_cwd=source_row.raw_cwd if source_row else None,
                 )
                 if decision in {"continue_here", "dismissed"}:
                     record_companion_skip(
@@ -9614,7 +9690,7 @@ class UIHandler(BaseHTTPRequestHandler):
                         reason=f"User chose {decision} for Fresh Start.",
                         minutes=FRESH_START_PROJECT_COOLDOWN_MINUTES,
                     )
-                    project_key_for_skip = fresh_start_project_skip_key(source_row.project_path if source_row else source_project_path)
+                    project_key_for_skip = _fresh_start_session_skip_key(source_row, source_project_path)
                     if project_key_for_skip:
                         record_companion_skip(
                             key=project_key_for_skip,
@@ -9757,13 +9833,14 @@ class UIHandler(BaseHTTPRequestHandler):
                         reason="User skipped the Fresh Start Companion nudge.",
                         action_channel="companion_skip",
                         source_project_path=source_row.project_path if source_row else None,
+                        source_raw_cwd=source_row.raw_cwd if source_row else None,
                     )
                     record_companion_skip(
                         key=f"control_recommended:{session_id}",
                         reason="User skipped the Fresh Start Companion nudge.",
                         minutes=FRESH_START_PROJECT_COOLDOWN_MINUTES,
                     )
-                    project_key_for_skip = fresh_start_project_skip_key(project)
+                    project_key_for_skip = _fresh_start_session_skip_key(source_row, project)
                     if project_key_for_skip:
                         record_companion_skip(
                             key=project_key_for_skip,

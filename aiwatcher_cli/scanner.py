@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from .git_identity import identity_for_session
 from .local_state import recent_hook_events
 from .pricing import (
     CACHE_READ_MULTIPLIER,
@@ -227,6 +228,13 @@ class LocalSession:
     # which would leave AIWatcher unable to tell its own analyst runs from
     # the user's work and quietly inflate every number it reports.
     raw_cwd: str | None = None
+    # Stable Git identities are separate from display/grouping paths. A single
+    # repository can have several simultaneous linked worktrees.
+    repository_id: str | None = None
+    repository_lineage_id: str | None = None
+    checkout_id: str | None = None
+    checkout_path: str | None = None
+    identity_source: str | None = None
     notes: list[str] = field(default_factory=list)
     # "cli" | "desktop" | None (host did not report which surface was used).
     surface: str | None = None
@@ -257,11 +265,30 @@ class LocalSession:
         return max(0, int((self.updated_at - self.started_at).total_seconds()))
 
     def to_json(self) -> dict[str, Any]:
+        if not self.checkout_id:
+            identity = identity_for_session(self.project_path, self.raw_cwd)
+            if identity is not None:
+                self.identity_source = identity.identity_source
+                if identity.identity_source == "identity_conflict":
+                    self.repository_id = None
+                    self.repository_lineage_id = None
+                    self.checkout_id = None
+                    self.checkout_path = None
+                else:
+                    self.repository_id = identity.repository_id
+                    self.repository_lineage_id = identity.repository_lineage_id
+                    self.checkout_id = identity.checkout_id
+                    self.checkout_path = identity.checkout_path
         return {
             "session_id": self.session_id,
             "tool": self.tool,
             "project_path": self.project_path,
             "raw_cwd": self.raw_cwd,
+            "repository_id": self.repository_id,
+            "repository_lineage_id": self.repository_lineage_id,
+            "checkout_id": self.checkout_id,
+            "checkout_path": self.checkout_path,
+            "identity_source": self.identity_source,
             "analyst_run": self.analyst_run,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
@@ -289,6 +316,14 @@ class LocalEvent:
     event_type: str
     timestamp: datetime | None = None
     project_path: str | None = None
+    # Exact working directory observed for this event. project_path may be a
+    # prompt-derived display/grouping hint and is not checkout identity.
+    raw_cwd: str | None = None
+    repository_id: str | None = None
+    repository_lineage_id: str | None = None
+    checkout_id: str | None = None
+    checkout_path: str | None = None
+    identity_source: str | None = None
     model: str | None = None
     # Same convention as LocalSession: tokens_in is all billed input, and the
     # two cache counters are a subset of it.
@@ -303,6 +338,16 @@ class LocalEvent:
     turn: int = 0
 
     def to_json(self) -> dict[str, Any]:
+        if not self.checkout_id:
+            identity = identity_for_session(None, self.raw_cwd)
+            if identity is None:
+                identity = identity_for_session(self.project_path, None)
+            if identity is not None:
+                self.repository_id = identity.repository_id
+                self.repository_lineage_id = identity.repository_lineage_id
+                self.checkout_id = identity.checkout_id
+                self.checkout_path = identity.checkout_path
+                self.identity_source = identity.identity_source
         return {
             "event_id": self.event_id,
             "session_id": self.session_id,
@@ -310,6 +355,12 @@ class LocalEvent:
             "event_type": self.event_type,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
             "project_path": self.project_path,
+            "raw_cwd": self.raw_cwd,
+            "repository_id": self.repository_id,
+            "repository_lineage_id": self.repository_lineage_id,
+            "checkout_id": self.checkout_id,
+            "checkout_path": self.checkout_path,
+            "identity_source": self.identity_source,
             "model": self.model,
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
@@ -1963,6 +2014,7 @@ def scan_claude_code_events(since: datetime | None = None) -> list[LocalEvent]:
                                 event_type=event_type,
                                 timestamp=ts,
                                 project_path=project_path,
+                                raw_cwd=cwd if isinstance(cwd, str) else None,
                                 model=model,
                                 tokens_in=input_tokens,
                                 tokens_out=output_tokens,
@@ -3001,6 +3053,7 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
                         event_type="model_usage",
                         timestamp=timestamp,
                         project_path=project_path,
+                        raw_cwd=recorded_cwd,
                         model=model or "codex",
                         tokens_in=event_input,
                         tokens_out=event_output,

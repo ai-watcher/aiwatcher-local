@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 
+from .git_identity import repository_lineage_identity, resolve_git_identity
 from .outcome_evidence import _repo_root
 from .scanner import LocalEvent
 from .survival import MIN_AGE_DAYS, measure_change_survival
@@ -294,12 +295,10 @@ def commits_since(repo: str, since: datetime) -> list[Change] | None:
     return changes
 
 
-# A repo's root commit cannot change, so this is cached for the life of the
-# process. The global git identity is cached too -- it is one value shared by
+# The global git identity is cached -- it is one value shared by
 # every repo, and looking it up once per path was most of the added git calls.
 # Per-repo `user.email` is deliberately NOT cached: it is the value most likely
 # to be edited while a dashboard is running.
-_IDENTITY_CACHE: dict[str, str] = {}
 _GLOBAL_EMAIL: list[str | None] = [None]
 
 
@@ -312,23 +311,12 @@ def repo_identity(repo: str) -> str:
     them showing "no spend observed" because the first copy had already
     claimed the money.
 
-    The root commit's sha is the identity: it is stable across clones, remotes
-    and renames, and needs no network. A repo with several roots (history
-    grafted from another project) sorts them so the key stays deterministic.
-    Falls back to the path when git cannot answer, which keeps the old
-    behaviour rather than merging two repos that might be unrelated.
+    A credential-free hosted origin identifies normal clones. Repositories
+    without one fall back to their sorted root commits. The value is opaque and
+    installation-local. Git failures fall back to the path rather than merging
+    repositories that might be unrelated.
     """
-    if repo in _IDENTITY_CACHE:
-        return _IDENTITY_CACHE[repo]
-    result = _git(repo, ["rev-list", "--max-parents=0", "HEAD"])
-    if not result or result.returncode != 0:
-        # Not cached: an unreadable repo may just be an unmounted drive, and
-        # pinning it to its path for the process lifetime would outlive that.
-        return repo
-    roots = sorted(line.strip() for line in result.stdout.split() if line.strip())
-    identity = roots[0][:16] if roots else repo
-    _IDENTITY_CACHE[repo] = identity
-    return identity
+    return repository_lineage_identity(repo) or repo
 
 
 def local_author_emails(repo: str) -> set[str]:
@@ -358,16 +346,20 @@ def local_author_emails(repo: str) -> set[str]:
     return emails
 
 
-def _event_repo(event: LocalEvent, cache: dict[str, str | None]) -> str | None:
-    path = event.project_path
+def _event_repo(
+    event: LocalEvent,
+    cache: dict[tuple[str, str], str | None],
+) -> str | None:
+    path = event.raw_cwd or event.checkout_path or event.project_path
     if not path:
         return None
-    if path not in cache:
-        try:
-            cache[path] = _repo_root(path)
-        except OSError:
-            cache[path] = None
-    return cache[path]
+    key = (path, event.project_path or "")
+    if key not in cache:
+        identity = resolve_git_identity(path)
+        if identity is None and event.raw_cwd and event.project_path:
+            identity = resolve_git_identity(event.project_path)
+        cache[key] = identity.checkout_path if identity else None
+    return cache[key]
 
 
 def repos_matching(events: Sequence[LocalEvent], needle: str) -> list[str]:
@@ -387,7 +379,7 @@ def repos_matching(events: Sequence[LocalEvent], needle: str) -> list[str]:
     scope to either way.
     """
     wanted = needle.lower()
-    cache: dict[str, str | None] = {}
+    cache: dict[tuple[str, str], str | None] = {}
     by_identity: dict[str, str] = {}
     for event in events:
         if event.cost_usd <= 0:
@@ -434,7 +426,7 @@ def build_ledger(
     since = now - timedelta(days=days)
     cutoff = timedelta(hours=max_lookback_hours)
 
-    repo_cache: dict[str, str | None] = {}
+    repo_cache: dict[tuple[str, str], str | None] = {}
     by_repo: dict[str, list[LocalEvent]] = defaultdict(list)
     unbanked_usd = 0.0
     unbanked_events = 0
@@ -848,7 +840,7 @@ def checkpoint_distance(
     # _event_repo, not the event's raw path: it resolves to the repo root and
     # caches, which is what makes a clone of the same repository count as the
     # same repository here and in build_ledger.
-    cache: dict[str, str | None] = {}
+    cache: dict[tuple[str, str], str | None] = {}
     since = []
     for event in events:
         if event.cost_usd <= 0 or not event.timestamp:

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from . import statusline
+from .git_identity import identity_for_session, resolve_git_identity
 from .pricing import cache_read_cost, is_subscription_model, lookup
 from .scanner import LocalSession, _codex_user_prompt_text, _parse_ts
 from .session_health import CONTEXT_RESET_DROP_RATIO
@@ -357,7 +358,17 @@ def assess(session: LocalSession) -> Assessment | None:
     """
     if not session.source_path or not session.project_path:
         return None
-    boundary = head_commit(session.project_path)
+    repo = None
+    if session.identity_source != "identity_conflict" and session.checkout_path and session.checkout_id:
+        cached = resolve_git_identity(session.checkout_path)
+        if cached is not None and cached.checkout_id == session.checkout_id:
+            repo = cached.checkout_path
+    if repo is None:
+        identity = identity_for_session(session.project_path, session.raw_cwd)
+        if identity is not None and identity.identity_source == "identity_conflict":
+            return None
+        repo = identity.checkout_path if identity is not None else session.project_path
+    boundary = head_commit(repo)
     if boundary is None:
         return None
     if "codex" in session.tool.lower():
@@ -372,7 +383,7 @@ def assess(session: LocalSession) -> Assessment | None:
     turns_since = int(stats.get("turns_since") or 0)
     prompts_since = int(stats.get("prompts_since") or 0)
     min_since = int(stats.get("min_context_since") or 0)
-    files = [_relative(p, session.project_path) for p in stats.get("files_since") or []]
+    files = [_relative(p, repo) for p in stats.get("files_since") or []]
 
     dead = max(0, at_commit - first)
     since = max(0, latest - at_commit) if at_commit else 0

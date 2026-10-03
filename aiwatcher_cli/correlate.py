@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
+from .git_identity import identity_for_session
 from .local_state import (
     link_handoff_decision_next_session,
     link_intervention_session,
@@ -48,16 +49,38 @@ def _same_tool(intervention_tool: object, session_tool: str) -> bool:
     return observed in TOOL_ALIASES.get(tool, {tool})
 
 
-def _same_project(intervention_cwd: object, session_project: str | None) -> bool:
+def _same_project(
+    intervention_cwd: object,
+    session_project: str | None,
+    *,
+    intervention_raw_cwd: str | None = None,
+    session_raw_cwd: str | None = None,
+    intervention_repository_id: str | None = None,
+    session_repository_id: str | None = None,
+    intervention_identity_source: str | None = None,
+    session_identity_source: str | None = None,
+) -> bool:
     cwd = str(intervention_cwd or "").strip()
     project = str(session_project or "").strip()
     if not cwd or not project:
-        return True
+        return False
+    if "identity_conflict" in {intervention_identity_source, session_identity_source}:
+        return False
+    left = identity_for_session(cwd, intervention_raw_cwd or cwd)
+    right = identity_for_session(project, session_raw_cwd or project)
+    if any(identity is not None and identity.identity_source == "identity_conflict" for identity in (left, right)):
+        return False
+    left_id = intervention_repository_id or (left.repository_id if left else None)
+    right_id = session_repository_id or (right.repository_id if right else None)
+    if left_id or right_id:
+        return bool(left_id and right_id and left_id == right_id)
     try:
         cwd_path = Path(cwd).expanduser().resolve(strict=False)
         project_path = Path(project).expanduser().resolve(strict=False)
     except (OSError, RuntimeError):
-        return cwd == project
+        return False
+    if not cwd_path.exists() or not project_path.exists():
+        return False
     return cwd_path == project_path or cwd_path in project_path.parents or project_path in cwd_path.parents
 
 
@@ -91,7 +114,15 @@ def link_recent_interventions_to_sessions(
                 continue
             if not _same_tool(intervention.get("tool"), session.tool):
                 continue
-            if not _same_project(intervention.get("cwd"), session.project_path):
+            if not _same_project(
+                intervention.get("cwd"),
+                session.project_path,
+                intervention_repository_id=intervention.get("repository_id"),
+                session_repository_id=session.repository_id,
+                intervention_identity_source=intervention.get("identity_source"),
+                session_identity_source=session.identity_source,
+                session_raw_cwd=session.raw_cwd,
+            ):
                 continue
             candidates.append((stamp, session))
         if not candidates:
@@ -160,7 +191,24 @@ def link_recent_fresh_start_receipts_to_sessions(
             stamp = started or updated
             if not stamp or stamp <= created_at or stamp > upper:
                 continue
-            if not _same_project(source_project, session.project_path):
+            if not _same_project(
+                source_project,
+                session.project_path,
+                intervention_raw_cwd=source_session.raw_cwd if source_session else None,
+                session_raw_cwd=session.raw_cwd,
+                intervention_repository_id=(
+                    source_session.repository_id
+                    if source_session
+                    else decision.get("source_repository_id")
+                ),
+                session_repository_id=session.repository_id,
+                intervention_identity_source=(
+                    source_session.identity_source
+                    if source_session
+                    else decision.get("source_identity_source")
+                ),
+                session_identity_source=session.identity_source,
+            ):
                 continue
             confidence = "medium" if started and started > created_at else "low"
             candidates.append((stamp, confidence, session))

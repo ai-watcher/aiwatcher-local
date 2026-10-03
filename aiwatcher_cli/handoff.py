@@ -205,7 +205,11 @@ def _safe_project_path(path: str | None) -> tuple[str, bool]:
         resolved = Path(path).expanduser()
     if resolved.parent == resolved:
         return "unknown project", False
-    return str(resolved), True
+    return str(resolved).replace("\\", "/"), True
+
+
+def _display_path(path: str | None, fallback: str) -> str:
+    return str(path or fallback).replace("\\", "/")
 
 
 def _short_session_id(session_id: str | None) -> str:
@@ -615,7 +619,7 @@ def build_handoff_capsule(
     ]
 
     evidence_lines = [
-        f"- Active checkout: {evidence.checkout_path or project_label}",
+        f"- Active checkout: {_display_path(evidence.checkout_path, project_label)}",
         f"- Branch/HEAD: {evidence.branch or 'unknown'} / {evidence.head or 'unknown'}",
         f"- Nearby commits: {len(evidence.commits)}",
         f"- Changed files: {len(evidence.changed_files)}",
@@ -780,7 +784,7 @@ def build_handoff_capsule(
         "Working checkout",
         f"- Project: {project_label}",
         f"- Project confidence: {'reliable' if project_reliable else 'unconfirmed'}",
-        f"- Path: {evidence.checkout_path or project_label}",
+        f"- Path: {_display_path(evidence.checkout_path, project_label)}",
         f"- Branch/HEAD: {evidence.branch or 'unknown'} / {evidence.head or 'unknown'}",
         *(
             [f"- Upstream: {evidence.upstream}; {evidence.ahead or 0} ahead, {evidence.behind or 0} behind."]
