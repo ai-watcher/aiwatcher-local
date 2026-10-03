@@ -279,7 +279,7 @@ Do not install into the macOS, Homebrew, or Linux system Python, and do not use
 <summary>Install unreleased GitHub main with pipx</summary>
 
 Use this for staging changes that are merged to GitHub but not yet published to
-PyPI:
+PyPI.
 
 A GitHub installation keeps tracking the branch or revision in its install
 spec. The workspace where `aiwatcher` starts does not change that update target.
