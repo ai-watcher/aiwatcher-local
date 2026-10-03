@@ -445,7 +445,7 @@ What to check:
 - The Home dashboard should show a Fresh Start companion for warning/critical context
   health with Fresh Start and continue-here choices, then save only local
   decision metadata.
-- Copying a Fresh Start brief from the Home companion should replace the recommendation
+- Copying a Fresh Start brief from the Home companion is an explicit user action and should replace the recommendation
   with a clear "paste into a fresh chat" confirmation and receipt link.
 - `companion start` should watch without the dashboard, confirm a signal on two
   scans, wait for a pause, and show only the highest-value eligible session.
