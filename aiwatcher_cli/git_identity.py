@@ -155,6 +155,7 @@ def _persistent_generation_marker(path: str) -> str | None:
         return None
     except OSError:
         return None
+    write_succeeded = False
     try:
         payload = value.encode("ascii")
         written = 0
@@ -164,17 +165,22 @@ def _persistent_generation_marker(path: str) -> str | None:
                 raise OSError("generation marker write made no progress")
             written += count
         os.fsync(descriptor)
+        write_succeeded = True
     except OSError:
-        try:
-            os.unlink(marker_path)
-        except OSError:
-            pass
-        return None
+        pass
     finally:
         try:
             os.close(descriptor)
         except OSError:
             pass
+    if not write_succeeded:
+        # Windows cannot unlink an open file, so cleanup must happen after the
+        # descriptor is closed. Leaving a partial marker would prevent retry.
+        try:
+            os.unlink(marker_path)
+        except OSError:
+            pass
+        return None
     return value
 
 
