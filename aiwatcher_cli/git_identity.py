@@ -118,10 +118,10 @@ def _filesystem_identity(path: str) -> str:
             birth = _filesystem_birth_marker(path, stat)
             if birth:
                 return f"inode:{stat.st_dev}:{stat.st_ino}:born:{birth}"
-            # Some filesystems do not expose birth time. ctime is less stable,
-            # but failing closed after metadata changes is safer than letting a
-            # replacement repository inherit authorization.
-            return f"inode:{stat.st_dev}:{stat.st_ino}:ctime:{stat.st_ctime_ns}"
+            # ctime changes during ordinary Git metadata updates on some
+            # filesystems. Device + inode is the stable local fallback; a
+            # replacement repository normally receives a different inode.
+            return f"inode:{stat.st_dev}:{stat.st_ino}"
     except OSError:
         pass
     return f"path:{os.path.realpath(path)}"

@@ -41,6 +41,20 @@ def init_repo(path: str) -> None:
 
 
 class GitIdentityTests(unittest.TestCase):
+    def test_identity_without_birth_time_survives_ctime_changes(self) -> None:
+        before = SimpleNamespace(st_dev=7, st_ino=11, st_ctime_ns=13)
+        after = SimpleNamespace(st_dev=7, st_ino=11, st_ctime_ns=99)
+
+        with (
+            patch("aiwatcher_cli.git_identity._filesystem_birth_marker", return_value=None),
+            patch("aiwatcher_cli.git_identity.os.stat", side_effect=[before, after]),
+        ):
+            first = _filesystem_identity("/repo/.git")
+            second = _filesystem_identity("/repo/.git")
+
+        self.assertEqual(first, "inode:7:11")
+        self.assertEqual(second, first)
+
     def test_linux_identity_includes_birth_time_when_inode_can_be_reused(self) -> None:
         stat = SimpleNamespace(st_dev=7, st_ino=11, st_ctime_ns=13)
         completed = subprocess.CompletedProcess(
