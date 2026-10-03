@@ -112,6 +112,30 @@ class GitIdentityTests(unittest.TestCase):
             self.assertFalse(marker.exists())
             self.assertIsNotNone(_persistent_generation_marker(temp_dir))
 
+    def test_failed_marker_write_closes_descriptor_before_cleanup(self) -> None:
+        events: list[str] = []
+        real_close = os.close
+        real_unlink = os.unlink
+
+        def close(descriptor: int) -> None:
+            events.append("close")
+            real_close(descriptor)
+
+        def unlink(path: str) -> None:
+            events.append("unlink")
+            real_unlink(path)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch("aiwatcher_cli.git_identity.os.write", side_effect=OSError("disk full")),
+                patch("aiwatcher_cli.git_identity.os.close", side_effect=close),
+                patch("aiwatcher_cli.git_identity.os.unlink", side_effect=unlink),
+            ):
+                value = _persistent_generation_marker(temp_dir)
+
+        self.assertIsNone(value)
+        self.assertEqual(events, ["close", "unlink"])
+
     def test_concurrent_marker_creation_waits_for_the_winner(self) -> None:
         value = "a" * 32
         with (
