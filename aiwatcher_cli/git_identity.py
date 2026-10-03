@@ -10,8 +10,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import secrets
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -20,6 +22,7 @@ from .local_state import get_or_create_identity_secret
 
 
 GIT_TIMEOUT_SECONDS = 2
+GENERATION_MARKER_NAME = "aiwatcher-generation-v1"
 
 
 @dataclass(frozen=True)
@@ -110,20 +113,99 @@ def _filesystem_birth_marker(path: str, stat: os.stat_result) -> str | None:
     return marker
 
 
+def _read_generation_marker(path: str) -> str | None:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        value = os.read(descriptor, 64).decode("ascii").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    if len(value) != 32 or any(character not in "0123456789abcdef" for character in value):
+        return None
+    return value
+
+
+def _persistent_generation_marker(path: str) -> str | None:
+    """Return a generation-safe marker kept inside a Git admin directory."""
+    marker_path = os.path.join(path, GENERATION_MARKER_NAME)
+    existing = _read_generation_marker(marker_path)
+    if existing:
+        return existing
+
+    value = secrets.token_hex(16)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(marker_path, flags, 0o600)
+    except FileExistsError:
+        # Another AIWatcher process may be between creating and writing the
+        # marker. A few bounded reads avoid inventing a second identity.
+        for _attempt in range(5):
+            existing = _read_generation_marker(marker_path)
+            if existing:
+                return existing
+            time.sleep(0.02)
+        return None
+    except OSError:
+        return None
+    write_succeeded = False
+    try:
+        payload = value.encode("ascii")
+        written = 0
+        while written < len(payload):
+            count = os.write(descriptor, payload[written:])
+            if count <= 0:
+                raise OSError("generation marker write made no progress")
+            written += count
+        os.fsync(descriptor)
+        write_succeeded = True
+    except OSError:
+        pass
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    if not write_succeeded:
+        # Windows cannot unlink an open file, so cleanup must happen after the
+        # descriptor is closed. Leaving a partial marker would prevent retry.
+        try:
+            os.unlink(marker_path)
+        except OSError:
+            pass
+        return None
+    return value
+
+
 def _filesystem_identity(path: str) -> str:
     """Identify a live filesystem object without exposing its path."""
     try:
         stat = os.stat(path)
-        if stat.st_ino:
-            birth = _filesystem_birth_marker(path, stat)
-            if birth:
-                return f"inode:{stat.st_dev}:{stat.st_ino}:born:{birth}"
-            # ctime changes during ordinary Git metadata updates on some
-            # filesystems. Device + inode is the stable local fallback; a
-            # replacement repository normally receives a different inode.
-            return f"inode:{stat.st_dev}:{stat.st_ino}"
     except OSError:
-        pass
+        return f"path:{os.path.realpath(path)}"
+    if stat.st_ino:
+        try:
+            birth = _filesystem_birth_marker(path, stat)
+        except OSError:
+            birth = None
+        if birth:
+            return f"inode:{stat.st_dev}:{stat.st_ino}:born:{birth}"
+        try:
+            generation = _persistent_generation_marker(path)
+        except OSError:
+            generation = None
+        if generation:
+            return f"inode:{stat.st_dev}:{stat.st_ino}:generation:{generation}"
+        # If the directory is read-only or marker I/O fails, preserve the
+        # trust boundary even though ctime may make identity conservative.
+        return f"inode:{stat.st_dev}:{stat.st_ino}:ctime:{stat.st_ctime_ns}"
     return f"path:{os.path.realpath(path)}"
 
 
