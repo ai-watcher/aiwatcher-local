@@ -405,6 +405,22 @@ class StartCommandCliTests(unittest.TestCase):
         self.assertIn("AIWatcher companion is already running (PID 999).", stdout.getvalue())
         self.assertIn("AIWatcher companion presence started", stdout.getvalue())
 
+    def test_companion_heartbeat_does_not_scan_transcripts(self) -> None:
+        with (
+            patch.object(cli, "record_watcher_heartbeat") as heartbeat,
+            patch.object(cli, "clear_watcher_heartbeat") as clear,
+            patch.object(cli, "scan_all", side_effect=AssertionError("companion heartbeat must not scan")),
+            patch.object(cli, "scan_all_events", side_effect=AssertionError("companion heartbeat must not scan")),
+            patch.object(cli.time_module, "sleep", side_effect=KeyboardInterrupt),
+        ):
+            result = cli._run_companion_heartbeat(30)
+
+        self.assertEqual(result, 0)
+        heartbeat.assert_called_once_with(
+            pid=os.getpid(), mode="companion", interval_seconds=30, notify=False, overlay=True,
+        )
+        clear.assert_called_once_with(pid=os.getpid())
+
     def test_pid_probe_treats_permission_error_as_running(self) -> None:
         with (
             patch.object(cli.sys, "platform", "linux"),
@@ -2296,6 +2312,26 @@ class PromptPreflightTests(unittest.TestCase):
             copy_mock.assert_called_once()  # still just the one call from the first poll
             self.assertIn("Fresh Start brief already generated", second_output.getvalue())
             self.assertIn(f"--target {args.target}", second_output.getvalue())
+
+    def test_watch_event_scan_is_bounded_to_requested_window(self) -> None:
+        row = session(1)
+        event = LocalEvent(
+            event_id="evt-1",
+            session_id=row.session_id,
+            tool=row.tool,
+            event_type="assistant",
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        with patch.object(cli, "scan_all_events", return_value=[event]) as scan:
+            grouped = cli.events_by_session([row], days=1)
+
+        self.assertEqual(grouped[row.session_id], [event])
+        scan.assert_called_once()
+        since = scan.call_args.kwargs.get("since")
+        self.assertIsNotNone(since)
+        self.assertLess(timedelta(hours=23, minutes=59), datetime.now(timezone.utc) - since)
+        self.assertLess(datetime.now(timezone.utc) - since, timedelta(days=1, seconds=2))
 
     def test_watch_notify_sends_one_local_notification_per_session_state(self) -> None:
         row = session(1, project="/repo/orcha")

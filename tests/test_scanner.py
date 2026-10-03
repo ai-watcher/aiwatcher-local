@@ -18,6 +18,88 @@ from aiwatcher_cli.pricing import (
 
 
 class ProjectPathTests(unittest.TestCase):
+    def test_codex_cache_reparses_when_requested_window_widens(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "sessions"
+            root.mkdir()
+            rollout = root / "rollout-one.jsonl"
+            rows = [
+                {"timestamp": "2026-07-01T10:00:00Z", "type": "session_meta",
+                 "payload": {"id": "session-1", "cwd": temp_dir}},
+                {"timestamp": "2026-07-01T10:00:01Z", "type": "turn_context",
+                 "payload": {"model": "gpt-5.5", "cwd": temp_dir}},
+                {"timestamp": "2026-07-01T10:00:02Z", "type": "event_msg", "payload": {
+                    "type": "token_count", "info": {
+                        "total_token_usage": {"input_tokens": 80, "output_tokens": 20, "total_tokens": 100},
+                        "last_token_usage": {"input_tokens": 80, "output_tokens": 20},
+                    }}},
+                {"timestamp": "2026-07-08T10:00:02Z", "type": "event_msg", "payload": {
+                    "type": "token_count", "info": {
+                        "total_token_usage": {"input_tokens": 160, "output_tokens": 40, "total_tokens": 200},
+                        "last_token_usage": {"input_tokens": 80, "output_tokens": 20},
+                    }}},
+            ]
+            rollout.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+            with patch.object(scanner, "CODEX_SESSIONS_DIRS", [root]):
+                scanner.CODEX_ROLLOUT_CACHE = None
+                scanner.CODEX_ROLLOUT_CACHE_SINCE = None
+                _sessions, narrow_events = scanner.scan_codex_rollouts(
+                    since=datetime(2026, 7, 7, tzinfo=timezone.utc)
+                )
+                with patch.object(scanner, "_codex_rollout_lines", wraps=scanner._codex_rollout_lines) as read_lines:
+                    _sessions, wide_events = scanner.scan_codex_rollouts(
+                        since=datetime(2026, 6, 30, tzinfo=timezone.utc)
+                    )
+                scanner.CODEX_ROLLOUT_CACHE = None
+                scanner.CODEX_ROLLOUT_CACHE_SINCE = None
+
+        self.assertEqual(len(narrow_events), 1)
+        self.assertEqual(len(wide_events), 2)
+        read_lines.assert_called_once()
+
+    def test_codex_scan_reuses_unchanged_rollout_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "sessions"
+            root.mkdir()
+            paths = [root / "rollout-one.jsonl", root / "rollout-two.jsonl"]
+            for index, path in enumerate(paths, 1):
+                rows = [
+                    {"timestamp": f"2026-07-01T10:00:0{index}Z", "type": "session_meta",
+                     "payload": {"id": f"session-{index}", "cwd": temp_dir}},
+                    {"timestamp": f"2026-07-01T10:00:1{index}Z", "type": "turn_context",
+                     "payload": {"model": "gpt-5.5", "cwd": temp_dir}},
+                    {"timestamp": f"2026-07-01T10:00:2{index}Z", "type": "event_msg", "payload": {
+                        "type": "token_count", "info": {
+                            "total_token_usage": {"input_tokens": 80, "output_tokens": 20, "total_tokens": 100},
+                            "last_token_usage": {"input_tokens": 80, "output_tokens": 20},
+                        }}},
+                ]
+                path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+            with patch.object(scanner, "CODEX_SESSIONS_DIRS", [root]):
+                scanner.CODEX_ROLLOUT_CACHE = None
+                scanner.scan_codex_rollouts()
+                appended = {
+                    "timestamp": "2026-07-01T10:01:00Z", "type": "event_msg", "payload": {
+                        "type": "token_count", "info": {
+                            "total_token_usage": {"input_tokens": 160, "output_tokens": 40, "total_tokens": 200},
+                            "last_token_usage": {"input_tokens": 80, "output_tokens": 20},
+                        }}
+                }
+                with paths[1].open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(appended) + "\n")
+                with patch.object(scanner, "_codex_appended_lines", wraps=scanner._codex_appended_lines) as read_lines:
+                    sessions, events = scanner.scan_codex_rollouts()
+                scanner.CODEX_ROLLOUT_CACHE = None
+
+        self.assertEqual({row.session_id for row in sessions}, {"session-1", "session-2"})
+        self.assertEqual({row.session_id for row in events}, {"session-1", "session-2"})
+        updated = next(row for row in sessions if row.session_id == "session-2")
+        self.assertEqual((updated.tokens_in, updated.tokens_out, updated.agent_calls), (160, 40, 2))
+        read_lines.assert_called_once()
+        self.assertEqual(read_lines.call_args.args[0], paths[1])
+
     def test_surface_coverage_marks_detected_unsupported_tools_honestly(self) -> None:
         with patch.object(
             scanner,

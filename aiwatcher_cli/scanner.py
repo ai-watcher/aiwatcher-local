@@ -140,6 +140,7 @@ CODEX_ROLLOUT_CACHE: tuple[
     list["LocalSession"],
     list["LocalEvent"],
 ] | None = None
+CODEX_ROLLOUT_CACHE_SINCE: datetime | None = None
 
 
 def _first_existing(paths: list[Path]) -> Path | None:
@@ -836,9 +837,13 @@ _ABSOLUTE_PATH_RE = re.compile(
 )
 _JSON_TIMESTAMP_PREFIX_RE = re.compile(r'"timestamp"\s*:\s*"([^"]+)"')
 CODEX_TAIL_INITIAL_BYTES = 8 * 1024 * 1024
+# Keep the existing coverage ceiling while streaming it line-by-line below.
+# Lowering this limit reduces cold-start work, but can silently omit events that
+# are still inside the requested time window on a very active rollout.
 CODEX_TAIL_MAX_BYTES = 128 * 1024 * 1024
 CODEX_TAIL_MIN_FILE_BYTES = 16 * 1024 * 1024
 CODEX_MAX_WINDOW_JSON_LINE_BYTES = 2 * 1024 * 1024
+CODEX_TAIL_PROBE_BYTES = 256 * 1024
 
 
 def _normalize_project_hint(path: str | None) -> str | None:
@@ -938,6 +943,38 @@ def _line_timestamp_from_prefix(line: str) -> datetime | None:
     return _parse_ts(stamp_match.group(1))
 
 
+def _seek_after_partial_line(handle: Any, start: int, limit: int | None = None) -> bool:
+    """Seek past a partial JSONL row without allocating the entire row."""
+    handle.seek(start)
+    remaining = limit
+    while remaining is None or remaining > 0:
+        read_size = 64 * 1024 if remaining is None else min(64 * 1024, remaining)
+        chunk = handle.read(read_size)
+        if not chunk:
+            return False
+        newline = chunk.find(b"\n")
+        if newline >= 0:
+            handle.seek(handle.tell() - len(chunk) + newline + 1)
+            return True
+        if remaining is not None:
+            remaining -= len(chunk)
+    return False
+
+
+def _codex_first_timestamp_from(path: Path, start: int) -> datetime | None:
+    """Probe a bounded slice for the first complete timestamped JSONL row."""
+    with path.open("rb") as handle:
+        handle.seek(start)
+        if start > 0 and not _seek_after_partial_line(handle, start, CODEX_TAIL_PROBE_BYTES):
+            return None
+        probe = handle.read(CODEX_TAIL_PROBE_BYTES)
+    for raw in probe.splitlines():
+        timestamp = _line_timestamp_from_prefix(raw[:512].decode("utf-8", errors="replace"))
+        if timestamp is not None:
+            return timestamp
+    return None
+
+
 def _codex_rollout_lines(path: Path, since: datetime | None) -> Iterable[tuple[int, str]]:
     """Yield rollout lines, reading only the recent tail for windowed scans.
 
@@ -965,29 +1002,32 @@ def _codex_rollout_lines(path: Path, since: datetime | None) -> Iterable[tuple[i
     threshold = since.astimezone(timezone.utc) - MTIME_SAFETY_MARGIN
     window = min(CODEX_TAIL_INITIAL_BYTES, size)
     selected_start = 0
-    selected_lines: list[str] = []
     while True:
         start = max(0, size - window)
-        with path.open("rb") as handle:
-            handle.seek(start)
-            if start > 0:
-                handle.readline()
-            chunk = handle.read()
-        lines = [line.decode("utf-8", errors="replace") for line in chunk.splitlines(keepends=True)]
         selected_start = start
-        selected_lines = lines
-        first_timestamp = next(
-            (stamp for line in lines for stamp in [_line_timestamp_from_prefix(line)] if stamp is not None),
-            None,
-        )
+        first_timestamp = _codex_first_timestamp_from(path, start)
         if start == 0 or (first_timestamp and first_timestamp.astimezone(timezone.utc) <= threshold):
             break
         if window >= min(CODEX_TAIL_MAX_BYTES, size):
             break
         window = min(window * 2, CODEX_TAIL_MAX_BYTES, size)
-    approx_index = max(0, selected_start)
-    for offset, line in enumerate(selected_lines):
-        yield approx_index + offset, line
+    with path.open("rb") as handle:
+        handle.seek(selected_start)
+        if selected_start > 0 and not _seek_after_partial_line(handle, selected_start):
+            return
+        for offset, raw in enumerate(handle):
+            yield selected_start + offset, raw.decode("utf-8", errors="replace")
+
+
+def _codex_appended_lines(path: Path, offset: int) -> Iterable[tuple[int, str]]:
+    """Read only bytes appended after a cached, complete rollout snapshot."""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(max(0, offset))
+            for index, raw in enumerate(handle):
+                yield offset + index, raw.decode("utf-8", errors="replace")
+    except OSError:
+        return
 
 
 def _codex_window_line_is_essential(line: str) -> bool:
@@ -1626,7 +1666,7 @@ def surface_coverage(sessions: Iterable[LocalSession] | None = None) -> list[Sur
     ]
 
 
-def scan_claude_code() -> list[LocalSession]:
+def scan_claude_code(since: datetime | None = None) -> list[LocalSession]:
     sessions: list[LocalSession] = []
     projects_dirs = [path for path in CLAUDE_PROJECTS_DIRS if path.exists()]
     if not projects_dirs:
@@ -1639,6 +1679,8 @@ def scan_claude_code() -> list[LocalSession]:
             fallback_project_path = _decode_claude_project_path(project_dir.name)
             for fpath_raw in glob.glob(str(project_dir / "*.jsonl")):
                 fpath = Path(fpath_raw)
+                if _too_old_to_matter(fpath, since):
+                    continue
                 session_id = fpath.stem
                 # One usage block per API request, however many transcript
                 # lines that request produced. See _usage_receipt_key.
@@ -2761,7 +2803,7 @@ def _iso_or_none(value: datetime | None) -> str | None:
 
 
 def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSession], list[LocalEvent]]:
-    global CODEX_ROLLOUT_CACHE
+    global CODEX_ROLLOUT_CACHE, CODEX_ROLLOUT_CACHE_SINCE
     sessions: list[LocalSession] = []
     events: list[LocalEvent] = []
     paths: list[Path] = []
@@ -2780,34 +2822,80 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
             continue
         signature_rows.append((str(path), stat.st_mtime_ns, stat.st_size))
     signature = tuple(sorted(signature_rows))
-    if CODEX_ROLLOUT_CACHE and CODEX_ROLLOUT_CACHE[0] == signature:
+    cache_covers_window = (
+        CODEX_ROLLOUT_CACHE_SINCE is None
+        or (since is not None and since >= CODEX_ROLLOUT_CACHE_SINCE)
+    )
+    if CODEX_ROLLOUT_CACHE and CODEX_ROLLOUT_CACHE[0] == signature and cache_covers_window:
         return list(CODEX_ROLLOUT_CACHE[1]), list(CODEX_ROLLOUT_CACHE[2])
 
-    for path in paths:
-        session_id = path.stem
-        project_path: str | None = None
+    # Rollout files are append-only. A live session changes one file while
+    # hundreds of historical files remain byte-for-byte identical; reparsing
+    # every unchanged file made each dashboard refresh proportional to the
+    # user's lifetime history. Reuse rows from the previous scan whenever the
+    # path, mtime, and size still match, and parse only new or changed files.
+    paths_to_scan = paths
+    resume_sessions: dict[str, tuple[LocalSession, int]] = {}
+    resume_events: dict[str, list[LocalEvent]] = {}
+    if CODEX_ROLLOUT_CACHE and cache_covers_window:
+        previous_signature, previous_sessions, previous_events = CODEX_ROLLOUT_CACHE
+        previous = {path: (mtime_ns, size) for path, mtime_ns, size in previous_signature}
+        current = {path: (mtime_ns, size) for path, mtime_ns, size in signature}
+        unchanged = {path for path, stat in current.items() if previous.get(path) == stat}
+        if unchanged:
+            sessions.extend(row for row in previous_sessions if str(row.source_path or "") in unchanged)
+            events.extend(row for row in previous_events if str(row.source_path or "") in unchanged)
+            paths_to_scan = [path for path in paths if str(path) not in unchanged]
+        previous_session_by_path = {
+            str(row.source_path or ""): row for row in previous_sessions if row.source_path
+        }
+        for path in paths_to_scan:
+            key = str(path)
+            old_stat = previous.get(key)
+            new_stat = current.get(key)
+            prior = previous_session_by_path.get(key)
+            if old_stat and new_stat and prior and new_stat[1] > old_stat[1]:
+                resume_sessions[key] = (prior, old_stat[1])
+                resume_events[key] = [
+                    row for row in previous_events if str(row.source_path or "") == key
+                ]
+
+    for path in paths_to_scan:
+        prior_entry = resume_sessions.get(str(path))
+        prior = prior_entry[0] if prior_entry else None
+        session_id = prior.session_id if prior else path.stem
+        project_path: str | None = prior.project_path if prior else None
         # The cwd exactly as Codex wrote it. project_path below is the same
         # value already folded to a git root, which erases the one thing that
         # tells a Second Opinion analyst run apart from the user's own work.
-        recorded_cwd: str | None = None
-        model: str | None = None
-        surface: str | None = None
-        started_at: datetime | None = None
-        updated_at: datetime | None = None
-        final_input = 0
+        recorded_cwd: str | None = prior.raw_cwd if prior else None
+        model: str | None = prior.model if prior else None
+        surface: str | None = prior.surface if prior else None
+        started_at: datetime | None = prior.started_at if prior else None
+        updated_at: datetime | None = prior.updated_at if prior else None
+        final_input = prior.tokens_in if prior else 0
         final_cached = 0
-        final_output = 0
-        agent_calls = 0
-        tool_calls = 0
-        previous_total = -1
+        final_output = prior.tokens_out if prior else 0
+        agent_calls = prior.agent_calls if prior else 0
+        tool_calls = prior.tool_calls if prior else 0
+        previous_total = final_input + final_output if prior else -1
+        saw_token_count = False
         hint_counts: dict[str, int] = defaultdict(int)
         hint_costs: dict[str, float] = defaultdict(float)
         intentional_hint_counts: dict[str, int] = defaultdict(int)
         model_totals: dict[str, dict[str, float]] = defaultdict(
             lambda: {"tokens_in": 0.0, "tokens_out": 0.0, "cost_usd": 0.0, "agent_calls": 0.0, "tool_calls": 0.0}
         )
+        if prior:
+            for key, value in prior.model_breakdown.items():
+                model_totals[key] = dict(value)
+            events.extend(resume_events.get(str(path), []))
         try:
-            for index, line in _codex_rollout_lines(path, since):
+            line_rows = (
+                _codex_appended_lines(path, prior_entry[1])
+                if prior_entry else _codex_rollout_lines(path, since)
+            )
+            for index, line in line_rows:
                     if not line or line == "\n":
                         continue
                     if since is not None:
@@ -2849,6 +2937,11 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
                         if model:
                             model_totals[model]["tool_calls"] += 1
                     prompt_text = _codex_user_prompt_text(row_type, payload)
+                    # Prompts can include pasted logs or documents measured in
+                    # megabytes. Project hints live near the instruction text;
+                    # regex-scanning the entire payload dominated CPU samples.
+                    if prompt_text and len(prompt_text) > 16_384:
+                        prompt_text = prompt_text[:8_192] + prompt_text[-8_192:]
                     for hint in _project_hints_from_text(prompt_text):
                         hint_counts[hint] += 1
                         hint_costs[hint] += estimate_cost(model, 0, 0)
@@ -2877,6 +2970,7 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
                     if not total_tokens or total_tokens == previous_total:
                         continue
                     previous_total = total_tokens
+                    saw_token_count = True
                     final_input = int(total.get("input_tokens") or 0)
                     final_cached = min(final_input, int(total.get("cached_input_tokens") or 0))
                     final_output = int(total.get("output_tokens") or 0)
@@ -2941,8 +3035,11 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
             # Session-level total, so it is dated by the session's last turn:
             # a rollup has no single moment, and the newest turn is the closest
             # honest answer for which rate card applied.
-            cost_usd=estimate_cost(
-                model, final_input - final_cached, final_output, cache_read=final_cached, when=updated_at,
+            cost_usd=(
+                estimate_cost(
+                    model, final_input - final_cached, final_output, cache_read=final_cached, when=updated_at,
+                )
+                if saw_token_count or prior is None else prior.cost_usd
             ),
             agent_calls=agent_calls,
             tool_calls=tool_calls,
@@ -2955,6 +3052,7 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
             ],
         ))
     CODEX_ROLLOUT_CACHE = (signature, list(sessions), list(events))
+    CODEX_ROLLOUT_CACHE_SINCE = since
     return sessions, events
 
 
@@ -3047,7 +3145,7 @@ def model_usage_totals(sessions: Iterable[LocalSession]) -> dict[str, dict[str, 
 
 
 def scan_all(since: datetime | None = None) -> list[LocalSession]:
-    return [*scan_claude_code(), *scan_codex_cli(since=since), *scan_cursor_limited()]
+    return [*scan_claude_code(since=since), *scan_codex_cli(since=since), *scan_cursor_limited()]
 
 
 # How far before a caller's `since` a transcript file may have been last

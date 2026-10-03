@@ -4499,7 +4499,7 @@ class DashboardWindowTests(unittest.TestCase):
         self.assertEqual(marked["update_source_root"], str(Path("/site-packages/aiwatcher")))
         self.assertEqual(marked["update_install_revision"], "commit-new")
 
-    def test_shared_refresh_scans_once_and_materializes_all_windows(self) -> None:
+    def test_refresh_scans_and_materializes_only_requested_window(self) -> None:
         now = datetime.now(timezone.utc)
         rows = [LocalSession(
             session_id="shared-refresh",
@@ -4529,8 +4529,8 @@ class DashboardWindowTests(unittest.TestCase):
 
         scan_sessions.assert_called_once()
         scan_events.assert_called_once()
-        self.assertEqual([call.args[0] for call in build.call_args_list], [7, 1, 30])
-        self.assertTrue(all(window in ui._SUMMARY_CACHE for window in (1, 7, 30)))
+        self.assertEqual([call.args[0] for call in build.call_args_list], [7])
+        self.assertEqual(set(ui._SUMMARY_CACHE), {7})
 
     def test_http_session_detail_returns_fast_pending_card_before_event_index(self) -> None:
         now = datetime.now(timezone.utc)

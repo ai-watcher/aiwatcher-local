@@ -188,7 +188,7 @@ REPLAY_CHART_MAX_TURNS = 1_200
 # A turn writes the conversation to cache, rather than just topping it up, at
 # roughly this size. Below it every ordinary turn would read as a cache write.
 CACHE_WRITE_TURN_TOKENS = 10_000
-SUMMARY_MEMORY_TTL_SECONDS = 45
+SUMMARY_MEMORY_TTL_SECONDS = 120
 SUMMARY_DISK_TTL_SECONDS = 6 * 60 * 60
 # Bump whenever build_summary's payload shape changes, so a cache written by an
 # older build is discarded instead of rendering blank sections in a newer UI.
@@ -272,7 +272,7 @@ _POST_WITHOUT_BODY = frozenset({
 # 2: sessions carry their chat title; a version-1 index would restore every chat nameless.
 # 3: Codex titles are concise names; version 2 may contain full first-user-message payloads.
 SESSION_SNAPSHOT_SCHEMA_VERSION = 3
-SUMMARY_BACKGROUND_COOLDOWN_SECONDS = 8
+SUMMARY_BACKGROUND_COOLDOWN_SECONDS = 60
 SUMMARY_WINDOWS = (1, 7, 30)
 # One definition of "live", shared with session_presence, which subdivides
 # this window into working/quiet. Aliased rather than duplicated so the two
@@ -6632,7 +6632,11 @@ def _build_summary_shell(
 
 
 def _summary_refresh_windows(requested_days: int) -> list[int]:
-    return [requested_days, *[days for days in SUMMARY_WINDOWS if days != requested_days]]
+    # Refresh only what the user is viewing. Materializing 1/7/30-day windows
+    # together made the default seven-day dashboard scan 32 days of history on
+    # every refresh. Other windows keep their disk cache and refresh when the
+    # user selects them.
+    return [requested_days]
 
 
 def _run_shared_summary_refresh(requested_days: int) -> None:
@@ -6640,7 +6644,7 @@ def _run_shared_summary_refresh(requested_days: int) -> None:
     global _SUMMARY_REFRESH_ERROR
     try:
         now = datetime.now().astimezone()
-        scan_days = max(32, requested_days + 2)
+        scan_days = requested_days + 2
         all_rows = scan_all(since=now - timedelta(days=scan_days))
         # Publish session identity as soon as the comparatively slow transcript
         # scan finishes. Filters and detail headers do not need to wait for git,
