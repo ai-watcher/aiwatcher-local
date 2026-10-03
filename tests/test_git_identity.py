@@ -13,6 +13,7 @@ from unittest.mock import patch
 from aiwatcher_cli.git_identity import (
     _BIRTH_CACHE,
     _filesystem_identity,
+    _persistent_generation_marker,
     identity_for_session,
     resolve_git_identity,
 )
@@ -47,13 +48,125 @@ class GitIdentityTests(unittest.TestCase):
 
         with (
             patch("aiwatcher_cli.git_identity._filesystem_birth_marker", return_value=None),
+            patch(
+                "aiwatcher_cli.git_identity._persistent_generation_marker",
+                return_value="a" * 32,
+            ),
             patch("aiwatcher_cli.git_identity.os.stat", side_effect=[before, after]),
         ):
             first = _filesystem_identity("/repo/.git")
             second = _filesystem_identity("/repo/.git")
 
-        self.assertEqual(first, "inode:7:11")
+        self.assertEqual(first, f"inode:7:11:generation:{'a' * 32}")
         self.assertEqual(second, first)
+
+    def test_generation_marker_prevents_inode_reuse_from_inheriting_identity(self) -> None:
+        stat = SimpleNamespace(st_dev=7, st_ino=11, st_ctime_ns=13)
+        with (
+            patch("aiwatcher_cli.git_identity._filesystem_birth_marker", return_value=None),
+            patch("aiwatcher_cli.git_identity.os.stat", return_value=stat),
+            patch(
+                "aiwatcher_cli.git_identity._persistent_generation_marker",
+                side_effect=["a" * 32, "b" * 32],
+            ),
+        ):
+            original = _filesystem_identity("/repo/.git")
+            replacement = _filesystem_identity("/repo/.git")
+
+        self.assertNotEqual(original, replacement)
+
+    def test_read_only_fallback_fails_closed_when_ctime_changes(self) -> None:
+        before = SimpleNamespace(st_dev=7, st_ino=11, st_ctime_ns=13)
+        after = SimpleNamespace(st_dev=7, st_ino=11, st_ctime_ns=99)
+        with (
+            patch("aiwatcher_cli.git_identity._filesystem_birth_marker", return_value=None),
+            patch("aiwatcher_cli.git_identity._persistent_generation_marker", return_value=None),
+            patch("aiwatcher_cli.git_identity.os.stat", side_effect=[before, after]),
+        ):
+            first = _filesystem_identity("/repo/.git")
+            second = _filesystem_identity("/repo/.git")
+
+        self.assertNotEqual(first, second)
+
+    def test_marker_error_uses_generation_safe_ctime_not_path(self) -> None:
+        stat = SimpleNamespace(st_dev=7, st_ino=11, st_ctime_ns=13)
+        with (
+            patch("aiwatcher_cli.git_identity._filesystem_birth_marker", return_value=None),
+            patch(
+                "aiwatcher_cli.git_identity._persistent_generation_marker",
+                side_effect=OSError("marker unavailable"),
+            ),
+            patch("aiwatcher_cli.git_identity.os.stat", return_value=stat),
+        ):
+            marker = _filesystem_identity("/repo/.git")
+
+        self.assertEqual(marker, "inode:7:11:ctime:13")
+
+    def test_failed_marker_write_is_removed_for_a_later_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            marker = Path(temp_dir, "aiwatcher-generation-v1")
+            with patch("aiwatcher_cli.git_identity.os.write", side_effect=OSError("disk full")):
+                value = _persistent_generation_marker(temp_dir)
+
+            self.assertIsNone(value)
+            self.assertFalse(marker.exists())
+            self.assertIsNotNone(_persistent_generation_marker(temp_dir))
+
+    def test_concurrent_marker_creation_waits_for_the_winner(self) -> None:
+        value = "a" * 32
+        with (
+            patch(
+                "aiwatcher_cli.git_identity._read_generation_marker",
+                side_effect=[None, None, None, value],
+            ),
+            patch("aiwatcher_cli.git_identity.os.open", side_effect=FileExistsError),
+            patch("aiwatcher_cli.git_identity.time.sleep"),
+        ):
+            observed = _persistent_generation_marker("/repo/.git")
+
+        self.assertEqual(observed, value)
+
+    def test_generation_marker_is_stable_and_private_to_git_admin_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            first = _persistent_generation_marker(temp_dir)
+            second = _persistent_generation_marker(temp_dir)
+            marker = Path(temp_dir, "aiwatcher-generation-v1")
+            mode = marker.stat().st_mode & 0o777
+
+        self.assertIsNotNone(first)
+        self.assertEqual(second, first)
+        self.assertEqual(len(str(first)), 32)
+        if os.name != "nt":
+            self.assertEqual(mode, 0o600)
+
+    def test_generation_fallback_does_not_transfer_repository_authorization(self) -> None:
+        from aiwatcher_cli import local_state
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = str(Path(temp_dir, "state.json"))
+            repo = str(Path(temp_dir, "repo"))
+            retired = str(Path(temp_dir, "retired-git"))
+            Path(repo).mkdir()
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state}),
+                patch("aiwatcher_cli.git_identity._filesystem_birth_marker", return_value=None),
+            ):
+                init_repo(repo)
+                original = resolve_git_identity(repo)
+                local_state.record_analyst_consent(repo, allowed=True)
+                local_state.record_analyst_contents(repo, allowed=True)
+
+                os.rename(Path(repo, ".git"), retired)
+                init_repo(repo)
+                replacement = resolve_git_identity(repo)
+                inherited_consent = local_state.analyst_consent(repo)
+                inherited_contents = local_state.analyst_contents_allowed(repo)
+
+        assert original is not None and replacement is not None
+        self.assertNotEqual(original.repository_id, replacement.repository_id)
+        self.assertNotEqual(original.checkout_id, replacement.checkout_id)
+        self.assertIsNone(inherited_consent)
+        self.assertFalse(inherited_contents)
 
     def test_linux_identity_includes_birth_time_when_inode_can_be_reused(self) -> None:
         stat = SimpleNamespace(st_dev=7, st_ino=11, st_ctime_ns=13)
