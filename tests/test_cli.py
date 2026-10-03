@@ -2232,7 +2232,7 @@ class PromptPreflightTests(unittest.TestCase):
             cli.command_watch(args)
         self.assertIn("not a live hook into a running agent", output.getvalue())
         self.assertIn("local logs only", output.getvalue())
-        self.assertIn("may copy a local Fresh Start brief", output.getvalue())
+        self.assertIn("prepares a local Fresh Start brief without changing your clipboard", output.getvalue())
 
     def test_watch_critical_context_prints_handoff_capsule_inline(self) -> None:
         row = session(1, project="/repo/orcha")
@@ -2264,14 +2264,15 @@ class PromptPreflightTests(unittest.TestCase):
         rendered = output.getvalue()
         self.assertIn("Context    : critical", rendered)
         self.assertIn("Recommended: prepare Fresh Start brief now", rendered)
-        self.assertIn("generating a Fresh Start brief now", rendered)
+        self.assertIn("preparing a Fresh Start brief now", rendered)
         self.assertIn("AIWatcher Fresh Start capsule", rendered)
         self.assertIn("AIWatcher Fresh Start brief", rendered)
         self.assertIn("the previous chat is unavailable", rendered)
         self.assertIn("First action", rendered)
         self.assertIn("ask one focused question", rendered)
+        self.assertIn("Your clipboard was not changed", rendered)
 
-    def test_watch_critical_context_copies_to_clipboard_and_dedupes_across_polls(self) -> None:
+    def test_watch_critical_context_prepares_without_copying_and_dedupes_across_polls(self) -> None:
         row = session(1, project="/repo/orcha")
         # Critical means at the model's own window: 200K fills Haiku's.
         row.model = "claude-haiku-4-5"
@@ -2301,16 +2302,18 @@ class PromptPreflightTests(unittest.TestCase):
             all_events = cli.events_by_session([row], days=1)
             with patch("sys.stdout", output):
                 cli._print_watch_status_card(row, [row], args, all_events.get(row.session_id, []), critical_capsule_seen)
-            copy_mock.assert_called_once()
-            self.assertIn("Copied", output.getvalue())
+            copy_mock.assert_not_called()
+            self.assertIn("Fresh Start brief prepared", output.getvalue())
+            self.assertIn("Your clipboard was not changed", output.getvalue())
+            self.assertIn("--copy", output.getvalue())
             self.assertIn(row.session_id, critical_capsule_seen)
 
-            # Second poll for the same (unchanged) session should not regenerate/recopy.
+            # Second poll for the same (unchanged) session should not regenerate.
             second_output = io.StringIO()
             with patch("sys.stdout", second_output):
                 cli._print_watch_status_card(row, [row], args, all_events.get(row.session_id, []), critical_capsule_seen)
-            copy_mock.assert_called_once()  # still just the one call from the first poll
-            self.assertIn("Fresh Start brief already generated", second_output.getvalue())
+            copy_mock.assert_not_called()
+            self.assertIn("Fresh Start brief already prepared", second_output.getvalue())
             self.assertIn(f"--target {args.target}", second_output.getvalue())
 
     def test_watch_event_scan_is_bounded_to_requested_window(self) -> None:

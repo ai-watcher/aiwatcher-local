@@ -6581,7 +6581,7 @@ def _print_watch_status_card(
         # (in-memory, not persisted), so restarting watch will regenerate it once more.
         if critical_capsule_seen.get(session.session_id) == stamp:
             print(
-                f"\n  Fresh Start brief already generated this session. Run "
+                f"\n  Fresh Start brief already prepared for this session. Run "
                 f"`aiwatcher resume --session-id {session.session_id} --target {args.target} --copy` to get it again."
             )
         else:
@@ -6601,14 +6601,14 @@ def _print_watch_status_card(
                 extra_warnings=extra_warnings or None,
             )
             rendered = render_handoff_capsule(capsule)
-            print("\n  Stopping here is recommended -- generating a Fresh Start brief now:\n")
+            print("\n  Stopping here is recommended -- preparing a Fresh Start brief now:\n")
             for line in rendered.splitlines():
                 print(f"  {line}" if line else "")
-            ok, detail = _copy_to_clipboard(str(capsule.get("next_brief") or rendered))
-            if ok:
-                print(f"\n  Copied {capsule.get('target_label') or 'Fresh Start'} brief to clipboard.")
-            else:
-                print(f"\n  Could not copy to clipboard ({detail}).")
+            print(
+                "\n  Fresh Start brief prepared. Your clipboard was not changed. "
+                "Use Copy in the companion, or run "
+                f"`aiwatcher resume --session-id {session.session_id} --target {args.target} --copy`."
+            )
     print()
 
 
@@ -6913,7 +6913,8 @@ def command_watch(args: argparse.Namespace) -> int:
     print("AIWatcher Local watch")
     print(
         "Read-only local scan. No data leaves this machine. "
-        "On critical context, AIWatcher may copy a local Fresh Start brief. Press Ctrl+C to stop."
+        "On critical context, AIWatcher prepares a local Fresh Start brief without changing your clipboard. "
+        "Press Ctrl+C to stop."
     )
     print("This re-scans local session logs on a timer -- it is not a live hook into a running agent.\n")
 
