@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from aiwatcher_cli.handoff import build_handoff_capsule, render_handoff_capsule
 from aiwatcher_cli.local_state import record_decision
+from aiwatcher_cli.outcome_evidence import OutcomeEvidence
 from aiwatcher_cli.scanner import LocalSession
 
 
@@ -21,6 +22,42 @@ def run(command: list[str], cwd: str, env: dict[str, str] | None = None) -> None
 
 
 class HandoffTests(unittest.TestCase):
+    def test_session_bound_terminal_receipt_counts_as_completed_verification(self) -> None:
+        session = LocalSession(
+            session_id="verified", tool="codex-cli", project_path="/repo",
+            updated_at=datetime.now(timezone.utc),
+        )
+        evidence = OutcomeEvidence(
+            session_id="verified", project_path="/repo", repo_root="/repo",
+            checkout_path="/repo", tests=[{
+                "name": "pytest", "status": "passed", "completion_state": "completed",
+                "attribution": "session_bound", "source": "Session-bound terminal receipt",
+            }],
+        )
+        with patch("aiwatcher_cli.handoff.build_outcome_evidence", return_value=evidence):
+            brief = build_handoff_capsule(session, [])["next_brief"]
+
+        self.assertIn("pytest: passed", brief)
+        self.assertNotIn("No session-bound completed verification was observed", brief)
+
+    def test_time_window_verification_is_labeled_and_not_treated_as_session_bound(self) -> None:
+        session = LocalSession(
+            session_id="candidate", tool="codex-cli", project_path="/repo",
+            updated_at=datetime.now(timezone.utc),
+        )
+        evidence = OutcomeEvidence(
+            session_id="candidate", project_path="/repo", repo_root="/repo",
+            checkout_path="/repo", tests=[{
+                "name": "pytest", "status": "passed", "completion_state": "completed",
+                "attribution": "inferred_time_window", "current": True,
+            }],
+        )
+        with patch("aiwatcher_cli.handoff.build_outcome_evidence", return_value=evidence):
+            brief = build_handoff_capsule(session, [])["next_brief"]
+
+        self.assertIn("time-window candidate; may belong to another session", brief)
+        self.assertIn("No session-bound completed verification was observed", brief)
+
     def test_unknown_test_artifact_does_not_suppress_unverified_warning(self) -> None:
         now = datetime.now(timezone.utc)
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -38,7 +75,7 @@ class HandoffTests(unittest.TestCase):
 
         brief = capsule["next_brief"]
         self.assertIn("junit-results.xml: result unknown", brief)
-        self.assertIn("No completed verification was observed", brief)
+        self.assertIn("No session-bound completed verification was observed", brief)
 
     def test_danny_style_worktree_handoff_is_concise_and_actionable(self) -> None:
         now = datetime.now(timezone.utc)
@@ -112,7 +149,7 @@ class HandoffTests(unittest.TestCase):
         self.assertIn("Complete the verified continuation checkpoint", brief)
         self.assertIn(expected_path, brief)
         self.assertIn("Working tree: clean", brief)
-        self.assertIn("No completed verification was observed", brief)
+        self.assertIn("No session-bound completed verification was observed", brief)
         self.assertIn("First action", brief)
 
     def test_handoff_capsule_prioritizes_fresh_session_guidance(self) -> None:

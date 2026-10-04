@@ -404,6 +404,23 @@ project paths, event types, and content hashes. They do not include prompt text
 or source code. `--since` accepts ISO dates or datetimes and returns a
 user-facing error when the date is invalid.
 
+Session evidence keeps attribution and code-state authority separate:
+
+- Post-commit hooks persist SHA, commit time, branch, HEAD, and stable checkout
+  identity even when no cost receipt can be calculated. A receipt is bound to
+  a session only when an explicit session ID is available.
+- Structured Claude Bash and legacy structured Codex shell records can show
+  that an allowlisted test/check ran in a session. AIWatcher stores only the
+  fixed runner label, result state, timestamps, and checkout identity, never
+  command arguments or terminal output.
+- Transcript-derived passes are historical evidence, not proof that the current
+  HEAD and dirty working tree still pass. `aiwatcher run -- <command>` remains
+  the path that captures a Git-state-bound verification receipt.
+- Current Codex code-mode `custom_tool_call: exec` records are opaque wrappers,
+  so AIWatcher discloses that coverage gap, including in mixed structured and
+  opaque sessions, instead of parsing JavaScript or claiming it observed nested
+  terminal commands.
+
 ## How To Validate Locally
 
 Use this as the first test script:

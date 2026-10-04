@@ -2532,9 +2532,9 @@ def record_commit_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
     checkout = str(receipt.get("checkout_path") or receipt.get("repo") or "").strip()[:1000]
     if not sha or not checkout:
         raise ValueError("sha and checkout_path are required")
-    record = {
+    incoming = {
         "sha": sha,
-        "subject": str(receipt.get("subject") or "").strip()[:500],
+        "subject": str(receipt.get("subject") or "").strip()[:500] if "subject" in receipt else None,
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "repository_id": str(receipt.get("repository_id") or "").strip()[:160] or None,
         "repository_lineage_id": str(receipt.get("repository_lineage_id") or "").strip()[:160] or None,
@@ -2542,12 +2542,35 @@ def record_commit_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
         "checkout_path": checkout,
         "branch": str(receipt.get("branch") or "").strip()[:300] or None,
         "upstream": str(receipt.get("upstream") or "").strip()[:300] or None,
-        "cost_usd": _safe_float(receipt.get("cost_usd"), 0.0),
-        "files_changed": max(0, int(receipt.get("files_changed") or 0)),
+        "head": str(receipt.get("head") or "").strip()[:40] or None,
+        "committed_at": str(receipt.get("committed_at") or "").strip()[:80] or None,
+        "session_id": str(receipt.get("session_id") or "").strip()[:120] or None,
+        "session_source": str(receipt.get("session_source") or "").strip()[:80] or None,
+        "source_id": str(receipt.get("source_id") or "").strip()[:160] or None,
+        "receipt_available": bool(receipt.get("available")) if "available" in receipt else None,
+        "cost_usd": _safe_float(receipt.get("cost_usd"), 0.0) if "cost_usd" in receipt else None,
+        "files_changed": max(0, int(receipt.get("files_changed") or 0)) if "files_changed" in receipt else None,
     }
     with _locked_state():
         data = _load()
-        checkout_id = record["checkout_id"]
+        checkout_id = incoming["checkout_id"]
+        existing = next((
+            row for row in reversed(data["commit_receipts"])
+            if isinstance(row, dict)
+            and row.get("sha") == sha
+            and (
+                (checkout_id and row.get("checkout_id") == checkout_id)
+                or row.get("checkout_path") == checkout
+            )
+        ), None)
+        record = dict(existing or {})
+        for key, value in incoming.items():
+            if key in {"session_id", "session_source", "source_id"} and existing and existing.get(key):
+                continue
+            if value is not None:
+                record[key] = value
+        if existing and existing.get("recorded_at"):
+            record["recorded_at"] = existing["recorded_at"]
         data["commit_receipts"] = [
             row for row in data["commit_receipts"]
             if not (
@@ -2594,6 +2617,8 @@ def recent_commit_receipts(
     checkout_id: str | None = None,
     checkout_path: str | None = None,
     include_legacy: bool = False,
+    session_id: str | None = None,
+    include_unbound: bool = True,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
     try:
@@ -2610,6 +2635,11 @@ def recent_commit_receipts(
             checkout_path=checkout_path,
             include_legacy=include_legacy,
         )
+        and (
+            session_id is None
+            or row.get("session_id") == session_id
+            or (include_unbound and not row.get("session_id"))
+        )
     ]
     return list(reversed(filtered[-max(0, limit):]))
 
@@ -2621,7 +2651,7 @@ def record_verification_receipt(
     *,
     runner: str,
     checkout_path: str,
-    exit_code: int,
+    exit_code: int | None,
     started_at: str,
     finished_at: str,
     repository_id: str | None = None,
@@ -2629,8 +2659,22 @@ def record_verification_receipt(
     checkout_id: str | None = None,
     head: str | None = None,
     dirty_fingerprint: str | None = None,
+    session_id: str | None = None,
+    session_source: str | None = None,
+    source_id: str | None = None,
+    completion_state: str = "completed",
+    state_binding: str = "git_state",
+    truncated: bool = False,
 ) -> dict[str, Any]:
     """Store a bounded test/check result without command output or arguments."""
+    numeric_exit = int(exit_code) if isinstance(exit_code, int) else None
+    status = (
+        "incomplete" if completion_state in {"pending", "background", "interrupted", "denied"}
+        else "result unknown" if completion_state != "completed"
+        else "passed" if numeric_exit == 0
+        else "failed" if numeric_exit is not None
+        else "result unknown"
+    )
     record = {
         "id": str(uuid.uuid4()),
         "runner": runner.strip()[:160],
@@ -2642,13 +2686,24 @@ def record_verification_receipt(
         "dirty_fingerprint": dirty_fingerprint.strip()[:80] if dirty_fingerprint else None,
         "started_at": started_at,
         "finished_at": finished_at,
-        "exit_code": int(exit_code),
-        "status": "passed" if int(exit_code) == 0 else "failed",
+        "exit_code": numeric_exit,
+        "status": status,
+        "session_id": session_id.strip()[:120] if isinstance(session_id, str) and session_id.strip() else None,
+        "session_source": session_source.strip()[:80] if isinstance(session_source, str) and session_source.strip() else None,
+        "source_id": source_id.strip()[:160] if isinstance(source_id, str) and source_id.strip() else None,
+        "completion_state": completion_state.strip()[:40],
+        "state_binding": state_binding if state_binding in {"git_state", "historical"} else "historical",
+        "truncated": bool(truncated),
     }
     if not record["runner"] or not record["checkout_path"]:
         raise ValueError("runner and checkout_path are required")
     with _locked_state():
         data = _load()
+        if record["source_id"]:
+            data["verification_receipts"] = [
+                row for row in data["verification_receipts"]
+                if not (isinstance(row, dict) and row.get("source_id") == record["source_id"])
+            ]
         data["verification_receipts"].append(record)
         data["verification_receipts"] = data["verification_receipts"][-MAX_VERIFICATION_RECEIPTS_STORED:]
         _save(data)
@@ -2661,6 +2716,8 @@ def recent_verification_receipts(
     checkout_id: str | None = None,
     checkout_path: str | None = None,
     include_legacy: bool = False,
+    session_id: str | None = None,
+    include_unbound: bool = True,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
     try:
@@ -2676,6 +2733,11 @@ def recent_verification_receipts(
             checkout_id=checkout_id,
             checkout_path=checkout_path,
             include_legacy=include_legacy,
+        )
+        and (
+            session_id is None
+            or row.get("session_id") == session_id
+            or (include_unbound and not row.get("session_id"))
         )
     ]
     return list(reversed(filtered[-max(0, limit):]))

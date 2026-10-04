@@ -9,9 +9,12 @@ import os
 import subprocess
 import tempfile
 import unittest
+from argparse import Namespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
+from aiwatcher_cli import cli, local_state
 from aiwatcher_cli.receipt import (
     MIN_LINES_FOR_RATE,
     build_commit_receipt,
@@ -136,6 +139,35 @@ class CommitReceiptTests(unittest.TestCase):
         self.assertIsNone(receipt["usd_per_line"])
         self.assertIsNone(receipt["rate_ratio"])
         self.assertIn("no AI spend observed", format_receipt(receipt))
+
+    def test_command_persists_commit_facts_when_cost_receipt_is_unavailable(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = os.path.join(temp_dir, "repo")
+            os.mkdir(repo)
+            init_repo(repo)
+            sha = commit(repo, "a.py", "one\n", "observed commit", when=now)
+            state_file = os.path.join(temp_dir, "state.json")
+            args = Namespace(
+                repo=repo, sha=sha, quiet_if_empty=True, json=False,
+                session_id="session-exact",
+            )
+            with (
+                patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}),
+                patch.object(cli, "scan_all_events", return_value=[]),
+                patch.object(cli, "build_commit_receipt", return_value={
+                    "available": False, "reason": "no ledger evidence", "sha": sha[:12],
+                }),
+            ):
+                result = cli.command_commit_receipt(args)
+                rows = local_state.recent_commit_receipts(session_id="session-exact", include_unbound=False)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["sha"], sha)
+        self.assertEqual(rows[0]["head"], sha)
+        self.assertEqual(rows[0]["subject"], "observed commit")
+        self.assertEqual(rows[0]["session_source"], "explicit_cli")
 
 
 class OutputEncodingTests(unittest.TestCase):

@@ -47,6 +47,7 @@ from .companion import (
     tray_status,
     uninstall_login_autostart,
 )
+from .command_evidence import environment_session_identity, verification_runner as _verification_runner
 from .evidence_capture import record_missing_evidence_snapshots
 from . import compaction, compaction_outcomes, prompt_signals
 from .local_state import (
@@ -4505,6 +4506,31 @@ def command_compactions(args: argparse.Namespace) -> int:
     return 0
 
 
+def _commit_facts(repo: str, sha: str) -> dict[str, str | None] | None:
+    result = subprocess.run(
+        ["git", "-C", repo, "show", "-s", "--format=%H%x1f%cI%x1f%s", sha],
+        check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if result.returncode != 0:
+        return None
+    full_sha, separator, remainder = result.stdout.strip().partition("\x1f")
+    committed_at, second_separator, subject = remainder.partition("\x1f")
+    if not full_sha or not separator or not second_separator:
+        return None
+    head_result = subprocess.run(
+        ["git", "-C", repo, "rev-parse", "HEAD"],
+        check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    return {
+        "sha": full_sha,
+        "head": head_result.stdout.strip() if head_result.returncode == 0 else None,
+        "committed_at": committed_at or None,
+        "subject": subject.strip(),
+    }
+
+
 def command_commit_receipt(args: argparse.Namespace) -> int:
     """Print the receipt for one commit. Safe to run from a git hook.
 
@@ -4530,6 +4556,42 @@ def command_commit_receipt(args: argparse.Namespace) -> int:
                 return 0
             sha = result.stdout.strip()
 
+        facts = _commit_facts(repo, sha)
+        if facts is None:
+            if not args.quiet_if_empty:
+                print(f"Commit {sha[:12]} was not found in this checkout.")
+            return 0
+        branch_result = subprocess.run(
+            ["git", "-C", repo, "branch", "--show-current"],
+            check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        upstream_result = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "--abbrev-ref", "@{upstream}"],
+            check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        identity = resolve_git_identity(repo)
+        session_id, session_source = environment_session_identity(getattr(args, "session_id", None))
+        commit_record = {
+            **facts,
+            "repository_id": identity.repository_id if identity else None,
+            "repository_lineage_id": identity.repository_lineage_id if identity else repo_identity(repo),
+            "checkout_id": identity.checkout_id if identity else None,
+            "checkout_path": identity.checkout_path if identity else os.path.realpath(repo),
+            "branch": branch_result.stdout.strip() if branch_result.returncode == 0 else None,
+            "upstream": upstream_result.stdout.strip() if upstream_result.returncode == 0 else None,
+            "session_id": session_id,
+            "session_source": session_source,
+        }
+
+        # Persist observed Git facts before optional cost enrichment. A ledger
+        # miss must not erase the commit itself from later handoffs.
+        try:
+            record_commit_receipt(commit_record)
+        except (OSError, ValueError):
+            pass
+
         # Only the window the commit's own cost needs. The month-long baseline
         # is read from cache; recomputing it here would put a second of ledger
         # history into every commit, which is how a hook gets uninstalled.
@@ -4542,26 +4604,10 @@ def command_commit_receipt(args: argparse.Namespace) -> int:
             if not args.quiet_if_empty:
                 print(receipt.get("reason") or "No receipt available for this commit.")
             return 0
-        branch_result = subprocess.run(
-            ["git", "-C", repo, "branch", "--show-current"],
-            check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        upstream_result = subprocess.run(
-            ["git", "-C", repo, "rev-parse", "--abbrev-ref", "@{upstream}"],
-            check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
         try:
-            identity = resolve_git_identity(repo)
             record_commit_receipt({
+                **commit_record,
                 **receipt,
-                "repository_id": identity.repository_id if identity else None,
-                "repository_lineage_id": identity.repository_lineage_id if identity else repo_identity(repo),
-                "checkout_id": identity.checkout_id if identity else None,
-                "checkout_path": identity.checkout_path if identity else os.path.realpath(repo),
-                "branch": branch_result.stdout.strip() if branch_result.returncode == 0 else None,
-                "upstream": upstream_result.stdout.strip() if upstream_result.returncode == 0 else None,
             })
         except (OSError, ValueError):
             # Persistence enriches later handoffs; it must never suppress the
@@ -7064,30 +7110,6 @@ def command_watch(args: argparse.Namespace) -> int:
         return 0
 
 
-def _verification_runner(command: list[str]) -> str | None:
-    """Return a safe label for an allowlisted verification command."""
-    if not command:
-        return None
-    names = [Path(part).name.lower() for part in command[:4]]
-    first = names[0]
-    if first in {"pytest", "py.test"}:
-        return "pytest"
-    if first in {"python", "python3", "py"} and len(command) >= 3 and command[1] == "-m":
-        module = str(command[2]).lower()
-        if module in {"pytest", "unittest"}:
-            return f"python -m {module}"
-    if first in {"npm", "pnpm", "yarn", "bun"}:
-        action = str(command[1]).lower() if len(command) > 1 else ""
-        script = str(command[2]).lower() if action == "run" and len(command) > 2 else action
-        if script in {"test", "check", "lint", "build", "typecheck", "smoke"}:
-            return f"{first} {('run ' if action == 'run' else '')}{script}"
-    if first in {"cargo", "go", "dotnet", "mvn", "mvnw", "gradle", "gradlew"}:
-        action = str(command[1]).lower() if len(command) > 1 else ""
-        if action in {"test", "check", "verify", "build"}:
-            return f"{first} {action}"
-    return None
-
-
 def _verification_git_fingerprint(cwd: str) -> dict[str, str | None]:
     return verification_git_fingerprint(cwd)
 
@@ -7119,6 +7141,7 @@ def command_run(args: argparse.Namespace) -> int:
         verification_after = _verification_git_fingerprint(checkout)
         finished_at = datetime.now(timezone.utc).isoformat()
         try:
+            session_id, session_source = environment_session_identity()
             record_verification_receipt(
                 runner=verification_runner,
                 checkout_path=checkout,
@@ -7130,6 +7153,10 @@ def command_run(args: argparse.Namespace) -> int:
                 started_at=run_started.astimezone(timezone.utc).isoformat(),
                 finished_at=finished_at,
                 exit_code=int(completed.returncode),
+                session_id=session_id,
+                session_source=session_source,
+                completion_state="completed",
+                state_binding="git_state",
             )
         except (OSError, ValueError):
             # The wrapped command's real exit code always wins over optional
@@ -9851,6 +9878,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--quiet-if-empty", action="store_true",
         help="Print nothing when there is no receipt to show; used by the git hook",
     )
+    receipt.add_argument("--session-id", help="Bind the commit receipt to an explicitly known AI session")
     receipt.set_defaults(func=command_commit_receipt)
 
     compactions = sub.add_parser(
@@ -9862,7 +9890,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     install_receipt = sub.add_parser(
         "install-commit-hook",
-        help="Install a post-commit git hook that prints a receipt after each commit",
+        help="Install a post-commit hook for ordinary commits; Git rewrite operations are skipped",
     )
     install_receipt.add_argument("--repo", help="Repository to install into; defaults to the working directory")
     install_receipt.add_argument("--command", help="Command the hook should invoke")

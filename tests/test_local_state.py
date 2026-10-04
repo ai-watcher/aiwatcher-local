@@ -125,6 +125,99 @@ class LocalStateTests(unittest.TestCase):
 
         self.assertEqual([row["sha"] for row in rows], ["target"])
 
+    def test_receipt_session_filter_does_not_cross_overlapping_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                for session_id, sha in (("session-a", "aaa111"), ("session-b", "bbb222"), (None, "legacy")):
+                    local_state.record_commit_receipt({
+                        "sha": sha,
+                        "checkout_id": "checkout-1",
+                        "checkout_path": "/repo/review",
+                        "session_id": session_id,
+                    })
+                rows = local_state.recent_commit_receipts(
+                    checkout_id="checkout-1",
+                    session_id="session-a",
+                    include_unbound=False,
+                )
+
+        self.assertEqual([row["sha"] for row in rows], ["aaa111"])
+
+    def test_commit_cost_enrichment_preserves_existing_git_facts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_commit_receipt({
+                    "sha": "abc123", "checkout_path": "/repo/review",
+                    "subject": "Keep this subject", "files_changed": 4,
+                })
+                local_state.record_commit_receipt({
+                    "sha": "abc123", "checkout_path": "/repo/review", "cost_usd": 1.25,
+                })
+                rows = local_state.recent_commit_receipts(checkout_path="/repo/review")
+
+        self.assertEqual(rows[0]["subject"], "Keep this subject")
+        self.assertEqual(rows[0]["files_changed"], 4)
+        self.assertEqual(rows[0]["cost_usd"], 1.25)
+
+    def test_commit_receipt_preserves_first_exact_session_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                for session_id in ("session-a", "session-b"):
+                    local_state.record_commit_receipt({
+                        "sha": "abc123", "checkout_path": "/repo/review",
+                        "session_id": session_id,
+                        "session_source": "transcript_tool_result",
+                        "source_id": f"source-{session_id}",
+                    })
+                rows = local_state.recent_commit_receipts(checkout_path="/repo/review")
+
+        self.assertEqual(rows[0]["session_id"], "session-a")
+        self.assertEqual(rows[0]["source_id"], "source-session-a")
+
+    def test_verification_source_id_replaces_pending_with_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                common = {
+                    "runner": "pytest", "checkout_path": "/repo/review",
+                    "checkout_id": "checkout-1", "started_at": "2026-10-03T12:00:00+00:00",
+                    "finished_at": "2026-10-03T12:01:00+00:00", "session_id": "session-a",
+                    "source_id": "tool-call-1", "state_binding": "historical",
+                }
+                local_state.record_verification_receipt(
+                    **common, exit_code=None, completion_state="pending",
+                )
+                local_state.record_verification_receipt(
+                    **common, exit_code=0, completion_state="completed",
+                )
+                rows = local_state.recent_verification_receipts(
+                    checkout_id="checkout-1", session_id="session-a", include_unbound=False,
+                )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "passed")
+        self.assertEqual(rows[0]["state_binding"], "historical")
+
+    def test_verification_receipt_never_persists_command_or_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                local_state.record_verification_receipt(
+                    runner="pytest", checkout_path="/repo/review", exit_code=0,
+                    started_at="2026-10-03T12:00:00+00:00",
+                    finished_at="2026-10-03T12:01:00+00:00",
+                    session_id="session-a", source_id="tool-call-1",
+                    state_binding="historical", truncated=True,
+                )
+                saved = json.loads(Path(state_file).read_text(encoding="utf-8"))
+
+        serialized = json.dumps(saved["verification_receipts"][0], sort_keys=True)
+        for forbidden in ("command", "stdout", "stderr", "output", "persistedOutputPath"):
+            self.assertNotIn(forbidden, serialized)
+
     def test_identity_secret_is_private_stable_and_upgrades_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_file = os.path.join(temp_dir, "state.json")
