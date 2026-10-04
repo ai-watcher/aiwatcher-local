@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from aiwatcher_cli import local_state
 from aiwatcher_cli.git_identity import resolve_git_identity
 from aiwatcher_cli.outcome_evidence import (
     OutcomeEvidence,
+    _checkout_root,
     _checkout_state,
     _working_tree_fingerprint,
     annotate_same_file_reprompt,
@@ -53,6 +55,44 @@ def commit_file(temp_dir: str, filename: str, content: str, message: str, *, whe
 
 
 class OutcomeEvidenceTests(unittest.TestCase):
+    def test_command_checkout_selection_is_conservative_when_worktrees_conflict(self) -> None:
+        from aiwatcher_cli.command_evidence import CommandEvidence
+
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            main = Path(temp_dir, "main")
+            first = Path(temp_dir, "first")
+            second = Path(temp_dir, "second")
+            main.mkdir()
+            init_repo(str(main))
+            sha = commit_file(str(main), "app.py", "base\n", "base", when=now)
+            run(["git", "worktree", "add", "-b", "first-branch", str(first)], str(main))
+            run(["git", "worktree", "add", "-b", "second-branch", str(second)], str(main))
+            session = LocalSession(
+                session_id="session-a", tool="codex-cli", project_path=str(main), raw_cwd=str(main),
+            )
+            common = {
+                "session_id": "session-a", "tool": "codex-cli", "runner": "pytest",
+                "command_kind": "verification", "started_at": now.isoformat(),
+                "finished_at": now.isoformat(), "completion_state": "completed", "exit_code": 0,
+            }
+            observed = [
+                CommandEvidence(source_id="one", cwd=str(first), **common),
+                CommandEvidence(source_id="two", cwd=str(second), **common),
+            ]
+
+            ambiguous = _checkout_root(session, observed)
+            observed[0] = CommandEvidence(
+                source_id="commit", session_id="session-a", tool="codex-cli", cwd=str(first),
+                runner=None, command_kind="git_commit", started_at=now.isoformat(),
+                finished_at=now.isoformat(), completion_state="completed", exit_code=0,
+                commit_sha=sha,
+            )
+            commit_selected = _checkout_root(session, observed)
+
+        self.assertEqual(Path(ambiguous or "").resolve(), main.resolve())
+        self.assertEqual(Path(commit_selected or "").resolve(), first.resolve())
+
     def test_legacy_receipt_does_not_cross_replacement_repository(self) -> None:
         now = datetime.now(timezone.utc)
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -77,6 +117,124 @@ class OutcomeEvidenceTests(unittest.TestCase):
                 ))
 
         self.assertEqual(evidence.commit_receipts, [])
+
+    def test_exact_commit_receipts_do_not_cross_overlapping_sessions(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_repo(temp_dir)
+            first = commit_file(temp_dir, "first.py", "first\n", "first session", when=now)
+            second = commit_file(temp_dir, "second.py", "second\n", "second session", when=now + timedelta(minutes=1))
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                identity = resolve_git_identity(temp_dir)
+                assert identity is not None
+                for session_id, sha in (("session-a", first), ("session-b", second)):
+                    local_state.record_commit_receipt({
+                        "sha": sha, "subject": session_id,
+                        "repository_id": identity.repository_id,
+                        "repository_lineage_id": identity.repository_lineage_id,
+                        "checkout_id": identity.checkout_id,
+                        "checkout_path": identity.checkout_path,
+                        "session_id": session_id,
+                    })
+                evidence = build_outcome_evidence(LocalSession(
+                    session_id="session-a", tool="claude-code", project_path=temp_dir,
+                    started_at=now - timedelta(minutes=1), updated_at=now + timedelta(minutes=2),
+                ))
+
+        self.assertEqual([row["sha"] for row in evidence.commit_receipts], [first])
+        self.assertEqual([row["subject"] for row in evidence.commits], ["first session"])
+        self.assertEqual(evidence.commit_attribution, "session_bound")
+
+    def test_transcript_test_pass_is_session_bound_but_not_current(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            init_repo(temp_dir)
+            commit_file(temp_dir, "app.py", "base\n", "base", when=now - timedelta(minutes=1))
+            source = Path(temp_dir, "session.jsonl")
+            rows = [
+                {
+                    "uuid": "call", "type": "assistant", "sessionId": "session-a",
+                    "cwd": temp_dir, "timestamp": now.isoformat(),
+                    "message": {"content": [{
+                        "type": "tool_use", "id": "tool-1", "name": "Bash",
+                        "input": {"command": "python3 -m unittest tests.test_app"},
+                    }]},
+                },
+                {
+                    "uuid": "result", "type": "user", "sessionId": "session-a",
+                    "cwd": temp_dir, "timestamp": (now + timedelta(seconds=10)).isoformat(),
+                    "message": {"content": [{
+                        "type": "tool_result", "tool_use_id": "tool-1",
+                        "is_error": False, "content": "private output",
+                    }]},
+                    "toolUseResult": {"stdout": "private output", "stderr": "", "interrupted": False},
+                },
+            ]
+            source.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                evidence = build_outcome_evidence(LocalSession(
+                    session_id="session-a", tool="claude-code", project_path=temp_dir,
+                    raw_cwd=temp_dir, source_path=str(source),
+                    started_at=now, updated_at=now + timedelta(minutes=1),
+                ))
+
+        receipt = next(row for row in evidence.tests if row.get("name") == "python -m unittest")
+        self.assertEqual(receipt["status"], "passed")
+        self.assertEqual(receipt["attribution"], "session_bound")
+        self.assertFalse(receipt["current"])
+        self.assertNotIn("authoritative", receipt)
+
+    def test_command_workdir_moves_evidence_to_linked_worktree(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            main = Path(temp_dir, "main")
+            worktree = Path(temp_dir, "review")
+            main.mkdir()
+            init_repo(str(main))
+            commit_file(str(main), "app.py", "base\n", "base", when=now - timedelta(hours=1))
+            run(["git", "worktree", "add", "-b", "review-pr", str(worktree)], str(main))
+            sha = commit_file(
+                str(worktree), "fix.py", "fixed\n", "fix in worktree",
+                when=now + timedelta(minutes=1),
+            )
+            source = Path(temp_dir, "session.jsonl")
+            rows = [
+                {
+                    "timestamp": now.isoformat(), "type": "session_meta",
+                    "payload": {"id": "session-a", "cwd": str(main)},
+                },
+                {
+                    "timestamp": (now + timedelta(minutes=1)).isoformat(),
+                    "type": "response_item", "payload": {
+                        "type": "function_call", "name": "exec_command", "call_id": "commit-1",
+                        "arguments": json.dumps({
+                            "cmd": "git commit -m 'fix in worktree'", "workdir": str(worktree),
+                        }),
+                    },
+                },
+                {
+                    "timestamp": (now + timedelta(minutes=1, seconds=5)).isoformat(),
+                    "type": "response_item", "payload": {
+                        "type": "function_call_output", "call_id": "commit-1",
+                        "output": f"Process exited with code 0\nFinal output:\n[review-pr {sha[:7]}] fix in worktree",
+                    },
+                },
+            ]
+            source.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                evidence = build_outcome_evidence(LocalSession(
+                    session_id="session-a", tool="codex-cli", project_path=str(main),
+                    raw_cwd=str(main), source_path=str(source),
+                    started_at=now, updated_at=now + timedelta(minutes=2),
+                ))
+
+        self.assertEqual(Path(evidence.checkout_path or "").resolve(), worktree.resolve())
+        self.assertEqual(evidence.commit_attribution, "session_bound")
+        self.assertEqual([row["sha"] for row in evidence.commit_receipts], [sha])
+        self.assertEqual([row["subject"] for row in evidence.commits], ["fix in worktree"])
 
     def test_fingerprint_distinguishes_surrogateescaped_git_bytes(self) -> None:
         def git_result(repo: str, args: list[str]):
@@ -210,6 +368,7 @@ class OutcomeEvidenceTests(unittest.TestCase):
                     started_at=now.isoformat(),
                     finished_at=(now + timedelta(minutes=1)).isoformat(),
                     exit_code=0,
+                    session_id="verified",
                 )
                 session = LocalSession(
                     session_id="verified", tool="codex-cli", project_path=repo,
@@ -221,6 +380,36 @@ class OutcomeEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence.tests[0]["status"], "passed")
         self.assertTrue(evidence.tests[0]["current"])
         self.assertTrue(evidence.tests[0]["authoritative"])
+
+    def test_unbound_verification_is_never_authoritative_for_a_session(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = os.path.join(temp_dir, "repo")
+            os.mkdir(repo)
+            init_repo(repo)
+            head = commit_file(repo, "app.py", "base\n", "base", when=now)
+            fingerprint = _checkout_state(repo)["dirty_fingerprint"]
+            state_file = os.path.join(temp_dir, "state.json")
+            with patch.dict(os.environ, {"AIWATCHER_STATE_FILE": state_file}):
+                identity = resolve_git_identity(repo)
+                assert identity is not None
+                local_state.record_verification_receipt(
+                    runner="pytest", checkout_path=repo,
+                    repository_id=identity.repository_id,
+                    repository_lineage_id=identity.repository_lineage_id,
+                    checkout_id=identity.checkout_id,
+                    head=head, dirty_fingerprint=fingerprint,
+                    started_at=now.isoformat(), finished_at=(now + timedelta(seconds=30)).isoformat(),
+                    exit_code=0,
+                )
+                evidence = build_outcome_evidence(LocalSession(
+                    session_id="different-session", tool="codex-cli", project_path=repo,
+                    started_at=now, updated_at=now + timedelta(minutes=1),
+                ))
+
+        self.assertTrue(evidence.tests[0]["current"])
+        self.assertEqual(evidence.tests[0]["attribution"], "inferred_time_window")
+        self.assertNotIn("authoritative", evidence.tests[0])
 
     def test_newest_current_verification_failure_supersedes_older_pass(self) -> None:
         now = datetime.now(timezone.utc)
@@ -246,6 +435,7 @@ class OutcomeEvidenceTests(unittest.TestCase):
                         started_at=(now + timedelta(minutes=offset)).isoformat(),
                         finished_at=(now + timedelta(minutes=offset, seconds=30)).isoformat(),
                         exit_code=exit_code,
+                        session_id="latest-failed",
                     )
                 session = LocalSession(
                     session_id="latest-failed", tool="codex-cli", project_path=repo,

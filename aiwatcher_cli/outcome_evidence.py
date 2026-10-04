@@ -15,8 +15,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from .command_evidence import CommandEvidence, command_evidence_coverage, command_evidence_for_session
 from .git_identity import identity_for_session, repository_identity, resolve_git_identity
-from .local_state import recent_commit_receipts, recent_verification_receipts
+from .local_state import (
+    recent_commit_receipts,
+    recent_verification_receipts,
+    record_commit_receipt,
+    record_verification_receipt,
+)
 from .scanner import LocalSession
 
 
@@ -58,6 +64,8 @@ class OutcomeEvidence:
     unpushed_commits: list[dict[str, Any]] = field(default_factory=list)
     commit_receipts: list[dict[str, Any]] = field(default_factory=list)
     commits: list[dict[str, Any]] = field(default_factory=list)
+    commit_attribution: str = "none"
+    command_evidence_coverage: str = "unavailable"
     changed_files: list[str] = field(default_factory=list)
     files_touched: list[str] = field(default_factory=list)  # files touched by this session's own commits
     tests: list[dict[str, Any]] = field(default_factory=list)
@@ -85,6 +93,8 @@ class OutcomeEvidence:
             "unpushed_commits": self.unpushed_commits,
             "commit_receipts": self.commit_receipts,
             "commits": self.commits,
+            "commit_attribution": self.commit_attribution,
+            "command_evidence_coverage": self.command_evidence_coverage,
             "changed_files": self.changed_files,
             "files_touched": self.files_touched,
             "tests": self.tests,
@@ -194,7 +204,10 @@ def _git_common_dir(repo: str | None) -> str | None:
     return identity.common_dir if identity else None
 
 
-def _checkout_root(session: LocalSession) -> str | None:
+def _checkout_root(
+    session: LocalSession,
+    observed_commands: list[CommandEvidence] | None = None,
+) -> str | None:
     """Return the exact checkout observed by the tool when it is trustworthy.
 
     ``project_path`` intentionally groups linked worktrees under one project in
@@ -203,14 +216,45 @@ def _checkout_root(session: LocalSession) -> str | None:
     ``raw_cwd`` preserves that observation. Only prefer it when Git confirms it
     belongs to the same repository as the grouped project path.
     """
+    base_identity = None
     if session.identity_source != "identity_conflict" and session.checkout_path and session.checkout_id:
         cached = resolve_git_identity(session.checkout_path)
         if cached is not None and cached.checkout_id == session.checkout_id:
-            return cached.checkout_path
-    identity = identity_for_session(session.project_path, session.raw_cwd)
-    if identity is not None and identity.identity_source == "identity_conflict":
+            base_identity = cached
+    if base_identity is None:
+        base_identity = identity_for_session(session.project_path, session.raw_cwd)
+    if base_identity is not None and base_identity.identity_source == "identity_conflict":
         return None
-    return identity.checkout_path if identity else None
+
+    grouped_identity = resolve_git_identity(session.project_path)
+    expected_common_dir = (
+        grouped_identity.common_dir if grouped_identity is not None
+        else base_identity.common_dir if base_identity is not None
+        else None
+    )
+    command_identities: dict[str, Any] = {}
+    commit_identities: dict[str, Any] = {}
+    for observed in observed_commands or []:
+        if (
+            observed.session_id != session.session_id
+            or observed.completion_state != "completed"
+            or not observed.cwd
+            or not os.path.isabs(observed.cwd)
+        ):
+            continue
+        candidate = resolve_git_identity(observed.cwd)
+        if candidate is None:
+            continue
+        if expected_common_dir is not None and candidate.common_dir != expected_common_dir:
+            continue
+        command_identities[candidate.checkout_id] = candidate
+        if observed.command_kind == "git_commit" and observed.exit_code == 0 and observed.commit_sha:
+            commit_identities[candidate.checkout_id] = candidate
+    if len(commit_identities) == 1:
+        return next(iter(commit_identities.values())).checkout_path
+    if not commit_identities and len(command_identities) == 1:
+        return next(iter(command_identities.values())).checkout_path
+    return base_identity.checkout_path if base_identity else None
 
 
 def _count_revisions(repo: str, revision_range: str) -> int | None:
@@ -315,6 +359,96 @@ def _commit_exists(repo: str, value: object) -> bool:
     return bool(result and result.returncode == 0)
 
 
+def _commit_details(repo: str, value: object) -> dict[str, Any] | None:
+    sha = str(value or "").strip()
+    if not sha:
+        return None
+    result = _run_git(
+        repo,
+        ["show", "-s", "--date=iso-strict", "--format=%H%x1f%cI%x1f%s%x1f%b", f"{sha}^{{commit}}"],
+    )
+    if not result or result.returncode != 0:
+        return None
+    parts = result.stdout.rstrip("\r\n").split("\x1f", 3)
+    if len(parts) != 4:
+        return None
+    full_sha, committed_at, subject, body = parts
+    return {
+        "sha": full_sha[:12],
+        "subject": subject.strip(),
+        "body": body.strip(),
+        "committed_at": committed_at,
+        "receipt_observed": True,
+        "attribution": "session_bound",
+    }
+
+
+def _ingest_session_command_evidence(
+    observed_commands: list[CommandEvidence],
+    checkout_id: str | None,
+) -> None:
+    """Persist bounded facts from structured tool-call/result pairs."""
+    for observed in observed_commands:
+        cwd = observed.cwd
+        if not cwd or not os.path.isabs(cwd):
+            continue
+        identity = resolve_git_identity(cwd)
+        if identity is None or (checkout_id and identity.checkout_id != checkout_id):
+            continue
+        if observed.command_kind == "verification":
+            if not observed.runner:
+                continue
+            started = observed.started_at or observed.finished_at
+            finished = observed.finished_at or observed.started_at
+            if not started or not finished:
+                continue
+            try:
+                record_verification_receipt(
+                    runner=observed.runner,
+                    checkout_path=identity.checkout_path,
+                    repository_id=identity.repository_id,
+                    repository_lineage_id=identity.repository_lineage_id,
+                    checkout_id=identity.checkout_id,
+                    head=None,
+                    dirty_fingerprint=None,
+                    started_at=started,
+                    finished_at=finished,
+                    exit_code=observed.exit_code,
+                    session_id=observed.session_id,
+                    session_source="transcript_tool_result",
+                    source_id=observed.source_id,
+                    completion_state=observed.completion_state,
+                    state_binding="historical",
+                    truncated=observed.truncated,
+                )
+            except (OSError, ValueError):
+                continue
+        elif (
+            observed.command_kind == "git_commit"
+            and observed.completion_state == "completed"
+            and observed.exit_code == 0
+            and observed.commit_sha
+        ):
+            details = _commit_details(identity.checkout_path, observed.commit_sha)
+            if details is None:
+                continue
+            try:
+                record_commit_receipt({
+                    **details,
+                    "sha": _git_text(identity.checkout_path, ["rev-parse", f"{observed.commit_sha}^{{commit}}"]),
+                    "repository_id": identity.repository_id,
+                    "repository_lineage_id": identity.repository_lineage_id,
+                    "checkout_id": identity.checkout_id,
+                    "checkout_path": identity.checkout_path,
+                    "head": _git_text(identity.checkout_path, ["rev-parse", f"{observed.commit_sha}^{{commit}}"]),
+                    "session_id": observed.session_id,
+                    "session_source": "transcript_tool_result",
+                    "source_id": observed.source_id,
+                })
+            except (OSError, ValueError):
+                continue
+
+
 def _session_commit_receipts(
     session: LocalSession,
     repository_id: str | None,
@@ -323,19 +457,14 @@ def _session_commit_receipts(
 ) -> list[dict[str, Any]]:
     if not checkout_id and not checkout_path:
         return []
-    start, end = _session_window(session)
-    if not start:
-        return []
-    lower = start - timedelta(hours=1)
-    upper = (end or start) + timedelta(hours=COMMIT_LOOKAHEAD_HOURS)
     matched: list[dict[str, Any]] = []
-    # Read legacy path-only receipts too. New rows match by checkout_id first;
-    # old rows fall back to the normalized path below.
     for receipt in recent_commit_receipts(
         repository_id=repository_id,
         checkout_id=checkout_id,
         checkout_path=checkout_path,
-        include_legacy=not bool(checkout_id),
+        include_legacy=False,
+        session_id=session.session_id,
+        include_unbound=False,
         limit=100,
     ):
         receipt_checkout_id = receipt.get("checkout_id")
@@ -344,16 +473,11 @@ def _session_commit_receipts(
                 continue
         elif not _same_checkout(receipt.get("checkout_path"), checkout_path):
             continue
-        if not receipt_checkout_id and checkout_path and not _commit_exists(checkout_path, receipt.get("sha")):
+        if receipt.get("session_id") != session.session_id:
             continue
-        try:
-            stamp = datetime.fromisoformat(str(receipt.get("recorded_at") or "").replace("Z", "+00:00"))
-        except ValueError:
+        if checkout_path and not _commit_exists(checkout_path, receipt.get("sha")):
             continue
-        if stamp.tzinfo is None:
-            stamp = stamp.replace(tzinfo=timezone.utc)
-        if lower <= stamp <= upper:
-            matched.append(receipt)
+        matched.append(receipt)
     return matched[:20]
 
 
@@ -379,6 +503,8 @@ def _verification_receipts(
         checkout_id=checkout_id,
         checkout_path=checkout_path,
         include_legacy=not bool(checkout_id),
+        session_id=session.session_id,
+        include_unbound=True,
         limit=100,
     ):
         receipt_checkout_id = receipt.get("checkout_id")
@@ -389,13 +515,14 @@ def _verification_receipts(
             continue
         if not receipt_checkout_id and checkout_path and not _commit_exists(checkout_path, receipt.get("head")):
             continue
+        exact_session = receipt.get("session_id") == session.session_id
         try:
             stamp = datetime.fromisoformat(str(receipt.get("finished_at") or "").replace("Z", "+00:00"))
         except ValueError:
             continue
         if stamp.tzinfo is None:
             stamp = stamp.replace(tzinfo=timezone.utc)
-        if not lower <= stamp <= upper:
+        if not exact_session and not lower <= stamp <= upper:
             continue
         receipt_head = str(receipt.get("head") or "")
         state_head = str(state.get("head") or "")
@@ -410,6 +537,8 @@ def _verification_receipts(
             state["dirty_fingerprint"] = state_fingerprint
             fingerprint_checked = True
         current = (
+            receipt.get("state_binding") != "historical"
+            and
             bool(receipt_head and state_head)
             and (receipt_head.startswith(state_head) or state_head.startswith(receipt_head))
             and bool(receipt_fingerprint and state_fingerprint)
@@ -421,12 +550,18 @@ def _verification_receipts(
             "finished_at": receipt.get("finished_at"),
             "head": receipt.get("head"),
             "current": current,
-            "source": "AIWatcher verification receipt",
+            "source": (
+                "Session-bound terminal receipt"
+                if exact_session else "AIWatcher verification receipt (time-window match)"
+            ),
+            "attribution": "session_bound" if exact_session else "inferred_time_window",
+            "completion_state": receipt.get("completion_state") or "completed",
+            "truncated": bool(receipt.get("truncated")),
             "_finished_at_sort": stamp.timestamp(),
         })
     results.sort(key=lambda item: float(item.get("_finished_at_sort") or 0), reverse=True)
     for item in results:
-        if item.get("current") is True:
+        if item.get("current") is True and item.get("attribution") == "session_bound":
             item["authoritative"] = True
             break
     for item in results:
@@ -626,7 +761,8 @@ def check_commit_undone(repo: str, sha: str, *, tracked_paths: set[str] | None =
 def repo_state_fingerprint(session: LocalSession) -> str | None:
     """Return HEAD plus the changed-path list, so callers caching handoff
     evidence can tell a commit or new edit apart from an unchanged tree."""
-    repo = _checkout_root(session)
+    observed_commands = command_evidence_for_session(session)
+    repo = _checkout_root(session, observed_commands)
     if not repo:
         return None
     result = _run_git(repo, ["status", "--porcelain=v2", "--branch", "--untracked-files=no"])
@@ -715,7 +851,8 @@ def build_outcome_evidence(session: LocalSession, *, survival: dict[str, str] | 
     not to have stuck around, without this function needing to know how or
     where that history is stored.
     """
-    repo = _checkout_root(session)
+    observed_commands = command_evidence_for_session(session)
+    repo = _checkout_root(session, observed_commands)
     evidence = OutcomeEvidence(session_id=session.session_id, project_path=session.project_path, repo_root=repo, survival=survival)
     if not repo:
         evidence.reasons.append("No git repository was detected for this session.")
@@ -734,23 +871,23 @@ def build_outcome_evidence(session: LocalSession, *, survival: dict[str, str] | 
     evidence.behind = state["behind"]
     evidence.dirty = state["dirty"]
     evidence.unpushed_commits = state["unpushed_commits"]
+    evidence.command_evidence_coverage = command_evidence_coverage(session)
+    _ingest_session_command_evidence(observed_commands, evidence.checkout_id)
     evidence.commit_receipts = _session_commit_receipts(
         session, evidence.repository_id, repo, evidence.checkout_id,
     )
-
-    evidence.commits = _recent_commits(repo, session)
-    known_shas = {str(item.get("sha") or "") for item in evidence.commits}
-    for receipt in evidence.commit_receipts:
-        sha = str(receipt.get("sha") or "")
-        if sha and not any(sha.startswith(known) or known.startswith(sha) for known in known_shas if known):
-            evidence.commits.append({
-                "sha": sha[:12],
-                "subject": str(receipt.get("subject") or ""),
-                "body": "",
-                "committed_at": receipt.get("recorded_at"),
-                "receipt_observed": True,
-            })
-            known_shas.add(sha)
+    if evidence.commit_receipts:
+        evidence.commits = [
+            detail
+            for receipt in evidence.commit_receipts
+            if (detail := _commit_details(repo, receipt.get("sha"))) is not None
+        ]
+        evidence.commit_attribution = "session_bound"
+    else:
+        evidence.commits = _recent_commits(repo, session)
+        for commit in evidence.commits:
+            commit["attribution"] = "nearby_time_window"
+        evidence.commit_attribution = "nearby_time_window" if evidence.commits else "none"
     evidence.changed_files = _changed_files(repo)
     evidence.files_touched = _files_touched(repo, evidence.commits)
     evidence.tests = _verification_receipts(
