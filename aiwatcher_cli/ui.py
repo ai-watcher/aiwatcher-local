@@ -4035,10 +4035,10 @@ def _context_health_cards(rows: list[LocalSession], events: list[LocalEvent]) ->
             charted_because_live=_still_reachable(representative),
             compact_payload=_group_compact_payload(group, sessions_by_id, _still_reachable),
         )
-        quiet = (
-            representative.severity in {"critical", "warning"}
-            and _fresh_start_project_quiet(representative.project_path)
-        )
+        # Snooze is project-scoped, not severity-scoped. A project may improve
+        # from warning to healthy between the click and the refresh, but the
+        # user's 48-hour quiet request must still be visible and honored.
+        quiet = _fresh_start_project_quiet(representative.project_path)
         card["fresh_start_quiet"] = quiet
         card["actionable"] = not quiet
         cards.append(card)
