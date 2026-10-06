@@ -232,7 +232,7 @@ Print what the latest commit cost in AI spend
 
 ```sh
 aiwatcher commit-receipt [--sha SHA] [--repo REPO] [--json]
-                         [--quiet-if-empty]
+                         [--quiet-if-empty] [--session-id SESSION_ID]
 ```
 
 Examples:
@@ -248,6 +248,7 @@ aiwatcher commit-receipt --repo ../my-service --json
 | `--repo` | text |  | Repository to report on; defaults to the working directory |
 | `--json` | flag |  | Emit the receipt as JSON |
 | `--quiet-if-empty` | flag |  | Print nothing when there is no receipt to show; used by the git hook |
+| `--session-id` | text |  | Bind the commit receipt to an explicitly known AI session |
 
 ### `aiwatcher outcome`
 
@@ -1089,7 +1090,7 @@ aiwatcher uninstall-codex-wrapper --shell-rc ~/.bashrc
 
 ### `aiwatcher install-commit-hook`
 
-Install a post-commit git hook that prints a receipt after each commit
+Install a post-commit hook for ordinary commits; Git rewrite operations are skipped
 
 ```sh
 aiwatcher install-commit-hook [--repo REPO] [--command COMMAND]

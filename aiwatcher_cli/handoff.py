@@ -465,15 +465,24 @@ def _brief_memory_summary(
     if commits:
         latest = commits[0]
         subject = str(latest.get("subject") or "").strip()
+        commit_label = (
+            "Latest session-bound commit"
+            if getattr(evidence, "commit_attribution", "none") == "session_bound"
+            else "Latest nearby commit candidate"
+        )
         current_state.append(
-            f"- Latest nearby commit: {latest.get('sha')}{(': ' + subject) if subject else ''}."
+            f"- {commit_label}: {latest.get('sha')}{(': ' + subject) if subject else ''}."
         )
     if changed_files:
         shown = ", ".join(str(item) for item in changed_files[:4])
         extra = f" and {len(changed_files) - 4} more" if len(changed_files) > 4 else ""
         current_state.append(f"- Working tree has {len(changed_files)} changed file(s): {shown}{extra}.")
     if tests:
-        current_state.append(f"- {len(tests)} nearby test artifact(s) were detected; inspect before claiming done.")
+        exact_tests = sum(1 for item in tests if item.get("attribution") == "session_bound")
+        current_state.append(
+            f"- {len(tests)} verification signal(s) were found"
+            f" ({exact_tests} session-bound); inspect Git-state binding before claiming done."
+        )
     if not current_state:
         current_state.append("- No nearby commits, changed files, or test artifacts were found; reconstruct from the repository state first.")
 
@@ -566,6 +575,14 @@ def build_handoff_capsule(
             }
 
     warnings: list[str] = list(extra_warnings or [])
+    if evidence.commit_attribution == "nearby_time_window":
+        warnings.append(
+            "Commit attribution is inferred from checkout timing, not an exact session receipt; confirm authorship before relying on it."
+        )
+    if evidence.command_evidence_coverage in {"opaque_codex_exec", "partial_opaque_codex_exec"}:
+        warnings.append(
+            "This Codex transcript has shell calls whose nested results are not structurally visible, so terminal verification may be incomplete."
+        )
     if health:
         if health.severity != "healthy":
             detail = (
@@ -618,10 +635,15 @@ def build_handoff_capsule(
         if item not in {project_label, session.project_path}
     ]
 
+    commit_count_label = (
+        "Session-bound commits"
+        if evidence.commit_attribution == "session_bound"
+        else "Nearby commits (time-window candidates)"
+    )
     evidence_lines = [
         f"- Active checkout: {_display_path(evidence.checkout_path, project_label)}",
         f"- Branch/HEAD: {evidence.branch or 'unknown'} / {evidence.head or 'unknown'}",
-        f"- Nearby commits: {len(evidence.commits)}",
+        f"- {commit_count_label}: {len(evidence.commits)}",
         f"- Changed files: {len(evidence.changed_files)}",
         f"- Test artifacts: {len(evidence.tests)}",
     ]
@@ -738,7 +760,8 @@ def build_handoff_capsule(
             "- Ask the user to confirm the repository/path before editing.",
         ])
     completed_verification = any(
-        item.get("source") == "AIWatcher verification receipt"
+        item.get("attribution") == "session_bound"
+        and item.get("completion_state") == "completed"
         and item.get("status") in {"passed", "failed"}
         for item in evidence.tests
     )
@@ -819,11 +842,12 @@ def build_handoff_capsule(
                 f"- {item.get('artifact') or item.get('name')}: "
                 f"{item.get('status') or item.get('updated_at') or 'observed'}"
                 f"{' (current for this Git state)' if item.get('current') is True else ' (stale; Git state changed)' if item.get('current') is False else ''}"
+                f"{' [session-bound]' if item.get('attribution') == 'session_bound' else ' [time-window candidate; may belong to another session]' if item.get('attribution') == 'inferred_time_window' else ''}"
                 for item in evidence.tests[:6]
             ]
             if evidence.tests else []
         ),
-        *([] if completed_verification else ["- No completed verification was observed; do not claim the prior work is verified."]),
+        *([] if completed_verification else ["- No session-bound completed verification was observed; do not claim the prior work is verified."]),
         "",
         "Decisions and constraints",
         *(["- Decisions below are self-reported and not verified against what actually happened."] if decisions else []),
