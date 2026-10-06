@@ -1558,6 +1558,18 @@ class PlanControlTest(unittest.TestCase):
         self.assertIn("[project]", body)
         self.assertIn("Context review quieted for this project for 48h.", body)
 
+    def test_context_health_snooze_all_uses_every_rendered_fresh_start_project(self):
+        render = self.js[self.js.index("function renderContextHealth"):]
+        render = render[:render.index(chr(10) + "}")]
+        self.assertIn("row.can_handoff && row.actionable !== false", render)
+        self.assertNotIn("row.severity === 'critical' || row.severity === 'warning'", render)
+        self.assertIn('data-projects="${esc(JSON.stringify(snoozableProjects))}"', render)
+
+        selection = self.js[self.js.index("function visibleFreshStartProjects"):]
+        selection = selection[:selection.index(chr(10) + "}")]
+        self.assertIn("button.dataset.projects", selection)
+        self.assertNotIn("document.querySelectorAll", selection)
+
     def test_context_health_defers_quieted_projects_to_server_truth(self):
         self.assertNotIn("const quietedFreshStartProjects = new Set()", self.js)
         self.assertNotIn("clean.forEach(project => quietedFreshStartProjects.add(project))", self.js)

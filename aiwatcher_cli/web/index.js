@@ -3559,9 +3559,13 @@ function renderContextHealth(rows, statusArg, presence) {
     const ar = healthRank(a, keys), br = healthRank(b, keys);
     return br[0] - ar[0] || br[1] - ar[1] || br[2] - ar[2];
   });
-  const snoozable = ranked.filter(row => row.can_handoff && row.actionable !== false && !row.fresh_start_quiet && (row.severity === 'critical' || row.severity === 'warning'));
-  const batch = snoozable.length > 1
-    ? `<div class="health-batch"><button class="btn-quiet" onclick="snoozeVisibleFreshStartProjects(this)">Snooze all 48h</button></div>`
+  // Every row offering Fresh Start belongs to "all". Restricting this to
+  // warning/critical rows made the button quiet two projects while five rows
+  // still offered the action.
+  const snoozable = ranked.filter(row => row.can_handoff && row.actionable !== false && !row.fresh_start_quiet && row.project_full);
+  const snoozableProjects = [...new Set(snoozable.map(row => String(row.project_full || '')).filter(Boolean))];
+  const batch = snoozableProjects.length > 1
+    ? `<div class="health-batch"><button class="btn-quiet" data-projects="${esc(JSON.stringify(snoozableProjects))}" onclick="snoozeVisibleFreshStartProjects(this)">Snooze all 48h</button></div>`
     : '';
   // healthFacts carried these per project, under a card that no longer exists.
   // The severity counts are the part that was not already on Home's facts row,
@@ -5424,7 +5428,7 @@ async function quietFreshStartReminders() {
   }
 }
 async function snoozeFreshStartProjects(projects, message) {
-  const clean = (projects || []).filter(Boolean);
+  const clean = [...new Set((projects || []).filter(Boolean))];
   if (!clean.length) {
     showToast('No reliable project path found to snooze.', 'error');
     return false;
@@ -5436,7 +5440,9 @@ async function snoozeFreshStartProjects(projects, message) {
       body: JSON.stringify({ state: 'control_recommended_group', projects: clean }),
     });
     if (!response.ok) throw new Error('snooze failed');
-    showToast(message || `Fresh Start snoozed for ${clean.length} project${clean.length === 1 ? '' : 's'} for 48h.`);
+    const result = await response.json();
+    const affected = Number(result.projects) || clean.length;
+    showToast(message || `Fresh Start snoozed for ${affected} project${affected === 1 ? '' : 's'} for 48h.`);
     await load(true, true);
     return true;
   } catch (error) {
@@ -5514,16 +5520,19 @@ async function deferCompact(sessionId, sha) {
     showToast('Could not save Later yet.', 'error');
   }
 }
-function visibleFreshStartProjects() {
-  // Any element carrying a project, not only .health-card. This screen shows
-  // one lead card and the rest as compact rows, so matching on the card class
-  // would have snoozed a single project while the button said it snoozed all.
-  const cards = Array.from(document.querySelectorAll('#sessionContextHealth [data-project-full][data-fresh-start-actionable="true"]'));
-  return [...new Set(cards.map(card => card.dataset.projectFull || '').filter(Boolean))];
+function visibleFreshStartProjects(button) {
+  // Use the same list that made the batch button visible. Re-querying the DOM
+  // after rendering let eligibility and identity drift between label and click.
+  try {
+    const projects = JSON.parse((button && button.dataset.projects) || '[]');
+    return [...new Set((Array.isArray(projects) ? projects : []).filter(Boolean))];
+  } catch (error) {
+    return [];
+  }
 }
 async function snoozeVisibleFreshStartProjects(button) {
-  const projects = visibleFreshStartProjects();
-  const ok = await snoozeFreshStartProjects(projects, `Fresh Start snoozed for ${projects.length} project${projects.length === 1 ? '' : 's'} for 48h.`);
+  const projects = visibleFreshStartProjects(button);
+  const ok = await snoozeFreshStartProjects(projects);
   if (ok && button) button.disabled = true;
 }
 async function continueFreshStartProject(sessionId, project) {

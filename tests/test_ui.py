@@ -5735,7 +5735,7 @@ class DashboardWindowTests(unittest.TestCase):
             LocalSession(session_id="ready", tool="codex-cli", project_path="/repo/ready", updated_at=now),
         ]
 
-        def _health(session_id: str, project_path: str) -> ui.ContextHealth:
+        def _health(session_id: str, project_path: str, severity: str = "critical") -> ui.ContextHealth:
             return ui.ContextHealth(
                 session_id=session_id,
                 tool="codex-cli",
@@ -5762,13 +5762,13 @@ class DashboardWindowTests(unittest.TestCase):
                 is_context_critical=False,
                 is_high_bloat=True,
                 is_extreme_bloat=True,
-                severity="critical",
+                severity=severity,
                 recommendations=["Start a fresh session before continuing."],
             )
 
         with (
             patch.object(ui, "analyze_all_sessions", return_value=[
-                _health("quiet", "/repo/quiet"),
+                _health("quiet", "/repo/quiet", "healthy"),
                 _health("ready", "/repo/ready"),
             ]),
             patch.object(
