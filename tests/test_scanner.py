@@ -4,7 +4,7 @@ import os
 import tempfile
 import unittest
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,6 +15,128 @@ from aiwatcher_cli.pricing import (
     CACHE_WRITE_5M_MULTIPLIER,
     lookup,
 )
+
+
+class WindowActivityProbeTests(unittest.TestCase):
+    def test_recent_mtime_does_not_admit_stale_transcript_content(self) -> None:
+        since = datetime(2026, 10, 1, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcript = Path(temp_dir, "stale.jsonl")
+            transcript.write_text(
+                json.dumps({"timestamp": "2026-08-01T12:00:00Z", "type": "event"}) + "\n",
+                encoding="utf-8",
+            )
+            os.utime(transcript, None)
+
+            self.assertFalse(scanner._jsonl_has_window_activity(transcript, since))
+
+    def test_old_session_with_recent_appended_event_is_kept(self) -> None:
+        since = datetime(2026, 10, 1, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcript = Path(temp_dir, "continued.jsonl")
+            transcript.write_text(
+                "\n".join([
+                    json.dumps({"timestamp": "2026-08-01T12:00:00Z", "type": "event"}),
+                    json.dumps({"timestamp": "2026-10-04T12:00:00Z", "type": "event"}),
+                ]) + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertTrue(scanner._jsonl_has_window_activity(transcript, since))
+
+    def test_unparseable_tail_fails_open(self) -> None:
+        since = datetime.now(timezone.utc) - timedelta(days=7)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcript = Path(temp_dir, "unknown.jsonl")
+            transcript.write_text("not-json\n", encoding="utf-8")
+
+            self.assertTrue(scanner._jsonl_has_window_activity(transcript, since))
+
+    def test_codex_scan_skips_stale_content_with_fresh_mtime(self) -> None:
+        since = datetime(2026, 10, 1, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir, "sessions")
+            root.mkdir()
+            transcript = root / "rollout-stale.jsonl"
+            transcript.write_text(
+                json.dumps({
+                    "timestamp": "2026-08-01T12:00:00Z",
+                    "type": "session_meta",
+                    "payload": {"id": "stale", "cwd": temp_dir},
+                }) + "\n",
+                encoding="utf-8",
+            )
+            os.utime(transcript, None)
+            with (
+                patch.object(scanner, "CODEX_SESSIONS_DIRS", [root]),
+                patch.object(scanner, "_codex_rollout_lines", wraps=scanner._codex_rollout_lines) as read_lines,
+            ):
+                scanner.CODEX_ROLLOUT_CACHE = None
+                scanner.CODEX_ROLLOUT_CACHE_SINCE = None
+                sessions, events = scanner.scan_codex_rollouts(since=since)
+
+        self.assertEqual(sessions, [])
+        self.assertEqual(events, [])
+        read_lines.assert_not_called()
+
+    def test_codex_window_budget_keeps_essential_usage_records(self) -> None:
+        since = datetime(2026, 10, 1, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir, "sessions")
+            root.mkdir()
+            transcript = root / "rollout-recent.jsonl"
+            rows = [
+                {
+                    "timestamp": "2026-10-04T12:00:00Z",
+                    "type": "session_meta",
+                    "payload": {"id": "recent", "cwd": temp_dir},
+                },
+                {
+                    "timestamp": "2026-10-04T12:00:01Z",
+                    "type": "response_item",
+                    "payload": {"type": "message", "role": "user", "content": "x" * 1000},
+                },
+                {
+                    "timestamp": "2026-10-04T12:00:02Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {
+                                "total_tokens": 100,
+                                "input_tokens": 80,
+                                "output_tokens": 20,
+                            },
+                            "last_token_usage": {"input_tokens": 80, "output_tokens": 20},
+                        },
+                    },
+                },
+            ]
+            transcript.write_text(
+                "\n".join(json.dumps(row) for row in rows) + "\n",
+                encoding="utf-8",
+            )
+            with (
+                patch.object(scanner, "CODEX_SESSIONS_DIRS", [root]),
+                patch.object(scanner, "CODEX_ROLLOUT_REQUEST_MAX_BYTES", 1),
+            ):
+                scanner.CODEX_ROLLOUT_CACHE = None
+                scanner.CODEX_ROLLOUT_CACHE_SINCE = None
+                sessions, events = scanner.scan_codex_rollouts(since=since)
+
+        self.assertEqual([row.session_id for row in sessions], ["recent"])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].tokens_in, 80)
+
+    def test_bounded_reader_drains_oversized_jsonl_row(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcript = Path(temp_dir, "rollout.jsonl")
+            transcript.write_bytes(b'first\n' + (b'x' * 40) + b'\nlast')
+
+            with transcript.open("rb") as handle:
+                rows = list(scanner._bounded_binary_lines(handle, 8))
+
+        self.assertEqual(rows, [(0, b'first\n'), (2, b'last')])
 
 
 class ProjectPathTests(unittest.TestCase):

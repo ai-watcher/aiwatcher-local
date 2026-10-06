@@ -92,6 +92,7 @@ CODEX_ROLLOUT_SCAN_MAX_RECORDS = 10_000
 CODEX_ROLLOUT_REQUEST_MAX_BYTES = 64 * 1024 * 1024
 CODEX_ROLLOUT_REQUEST_MAX_FILES = 2048
 CODEX_ROLLOUT_REQUEST_MAX_RECORDS = 100_000
+CODEX_ROLLOUT_ESSENTIAL_MAX_LINE_BYTES = 4 * 1024 * 1024
 CODEX_LIFECYCLE_CACHE_MAX_ENTRIES = 4096
 _CODEX_LIFECYCLE_CACHE: dict[str, tuple[int, int, dict[str, Any] | None]] = {}
 
@@ -895,6 +896,8 @@ CODEX_TAIL_MAX_BYTES = 128 * 1024 * 1024
 CODEX_TAIL_MIN_FILE_BYTES = 16 * 1024 * 1024
 CODEX_MAX_WINDOW_JSON_LINE_BYTES = 2 * 1024 * 1024
 CODEX_TAIL_PROBE_BYTES = 256 * 1024
+WINDOW_ACTIVITY_PROBE_BYTES = 2 * 1024 * 1024
+WINDOW_ACTIVITY_PROBE_RECORDS = 64
 
 
 def _normalize_project_hint(path: str | None) -> str | None:
@@ -1026,6 +1029,29 @@ def _codex_first_timestamp_from(path: Path, start: int) -> datetime | None:
     return None
 
 
+def _bounded_binary_lines(handle: Any, max_line_bytes: int) -> Iterable[tuple[int, bytes]]:
+    """Yield complete lines without ever materializing an oversized row.
+
+    ``for raw in handle`` and an unbounded ``readline()`` allocate the entire
+    physical line before callers can inspect its length. Rollouts can contain
+    enormous pasted payloads on one JSONL row, so enforce the cap while reading
+    and drain oversized rows in bounded chunks.
+    """
+    index = 0
+    read_size = max_line_bytes + 1
+    while True:
+        raw = handle.readline(read_size)
+        if not raw:
+            return
+        if len(raw) > max_line_bytes:
+            while raw and not raw.endswith(b"\n"):
+                raw = handle.readline(read_size)
+            index += 1
+            continue
+        yield index, raw
+        index += 1
+
+
 def _codex_rollout_lines(path: Path, since: datetime | None) -> Iterable[tuple[int, str]]:
     """Yield rollout lines, reading only the recent tail for windowed scans.
 
@@ -1036,18 +1062,18 @@ def _codex_rollout_lines(path: Path, since: datetime | None) -> Iterable[tuple[i
     window. Full scans still read the whole file.
     """
     if since is None:
-        with path.open(errors="replace") as handle:
-            for index, line in enumerate(handle):
-                yield index, line
+        with path.open("rb") as handle:
+            for index, raw in _bounded_binary_lines(handle, CODEX_ROLLOUT_ESSENTIAL_MAX_LINE_BYTES):
+                yield index, raw.decode("utf-8", errors="replace")
         return
     try:
         size = path.stat().st_size
     except OSError:
         return
     if size < CODEX_TAIL_MIN_FILE_BYTES:
-        with path.open(errors="replace") as handle:
-            for index, line in enumerate(handle):
-                yield index, line
+        with path.open("rb") as handle:
+            for index, raw in _bounded_binary_lines(handle, CODEX_ROLLOUT_ESSENTIAL_MAX_LINE_BYTES):
+                yield index, raw.decode("utf-8", errors="replace")
         return
 
     threshold = since.astimezone(timezone.utc) - MTIME_SAFETY_MARGIN
@@ -1066,7 +1092,7 @@ def _codex_rollout_lines(path: Path, since: datetime | None) -> Iterable[tuple[i
         handle.seek(selected_start)
         if selected_start > 0 and not _seek_after_partial_line(handle, selected_start):
             return
-        for offset, raw in enumerate(handle):
+        for offset, raw in _bounded_binary_lines(handle, CODEX_ROLLOUT_ESSENTIAL_MAX_LINE_BYTES):
             yield selected_start + offset, raw.decode("utf-8", errors="replace")
 
 
@@ -1075,7 +1101,7 @@ def _codex_appended_lines(path: Path, offset: int) -> Iterable[tuple[int, str]]:
     try:
         with path.open("rb") as handle:
             handle.seek(max(0, offset))
-            for index, raw in enumerate(handle):
+            for index, raw in _bounded_binary_lines(handle, CODEX_ROLLOUT_ESSENTIAL_MAX_LINE_BYTES):
                 yield offset + index, raw.decode("utf-8", errors="replace")
     except OSError:
         return
@@ -1732,6 +1758,8 @@ def scan_claude_code(since: datetime | None = None) -> list[LocalSession]:
                 fpath = Path(fpath_raw)
                 if _too_old_to_matter(fpath, since):
                     continue
+                if since is not None and not _jsonl_has_window_activity(fpath, since):
+                    continue
                 session_id = fpath.stem
                 # One usage block per API request, however many transcript
                 # lines that request produced. See _usage_receipt_key.
@@ -1915,6 +1943,8 @@ def scan_claude_code_events(since: datetime | None = None) -> list[LocalEvent]:
             for fpath_raw in glob.glob(str(project_dir / "*.jsonl")):
                 fpath = Path(fpath_raw)
                 if _too_old_to_matter(fpath, since):
+                    continue
+                if since is not None and not _jsonl_has_window_activity(fpath, since):
                     continue
                 session_id = fpath.stem
                 turn = 0
@@ -2733,6 +2763,37 @@ def _reverse_file_lines(
             yield remainder
 
 
+def _jsonl_has_window_activity(path: Path, since: datetime) -> bool:
+    """Confirm a fresh mtime represents recent transcript activity.
+
+    Restores, migrations, and host tools can touch old JSONL files without
+    appending a new event. Reading those files from byte zero made a short
+    dashboard window scan proportional to lifetime history. Inspect a bounded
+    tail and fail open when the probe cannot establish an event timestamp.
+    """
+    threshold = since.astimezone(timezone.utc) - MTIME_SAFETY_MARGIN
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            start = max(0, size - WINDOW_ACTIVITY_PROBE_BYTES)
+            handle.seek(start)
+            raw = handle.read(WINDOW_ACTIVITY_PROBE_BYTES)
+    except OSError:
+        return True
+    if start > 0:
+        newline = raw.find(b"\n")
+        if newline < 0:
+            return True
+        raw = raw[newline + 1:]
+    timestamps: list[datetime] = []
+    for line in reversed(raw.splitlines()[-WINDOW_ACTIVITY_PROBE_RECORDS:]):
+        timestamp = _line_timestamp_from_prefix(line[:512].decode("utf-8", errors="replace"))
+        if timestamp is not None:
+            timestamps.append(timestamp.astimezone(timezone.utc))
+    return max(timestamps) >= threshold if timestamps else True
+
+
 def _resolve_codex_agent_state(
     thread: dict[str, Any],
     *,
@@ -2865,6 +2926,7 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
         paths.extend(
             path for path in root.rglob("*.jsonl")
             if not _too_old_to_matter(path, since)
+            and (since is None or _jsonl_has_window_activity(path, since))
         )
     signature_rows: list[tuple[str, int, int]] = []
     for path in paths:
@@ -2912,7 +2974,10 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
                     row for row in previous_events if str(row.source_path or "") == key
                 ]
 
+    request_budget = _CodexRolloutScanBudget() if since is not None else None
     for path in paths_to_scan:
+        if request_budget is not None and not request_budget.begin_file():
+            break
         prior_entry = resume_sessions.get(str(path))
         prior = prior_entry[0] if prior_entry else None
         session_id = prior.session_id if prior else path.stem
@@ -2954,11 +3019,19 @@ def scan_codex_rollouts(since: datetime | None = None) -> tuple[list[LocalSessio
                         line_timestamp = _line_timestamp_from_prefix(line)
                         if line_timestamp and line_timestamp < since - MTIME_SAFETY_MARGIN:
                             continue
-                        if (
-                            len(line) > CODEX_MAX_WINDOW_JSON_LINE_BYTES
-                            and not _codex_window_line_is_essential(line)
+                        essential = _codex_window_line_is_essential(line)
+                        if len(line) > (
+                            CODEX_ROLLOUT_ESSENTIAL_MAX_LINE_BYTES
+                            if essential else CODEX_MAX_WINDOW_JSON_LINE_BYTES
                         ):
                             continue
+                        if request_budget is not None and not essential:
+                            requested = len(line)
+                            if request_budget.take_bytes(requested) < requested:
+                                continue
+                            if request_budget.records_remaining <= 0:
+                                continue
+                            request_budget.records_remaining -= 1
                     try:
                         row = json.loads(line)
                     except json.JSONDecodeError:
