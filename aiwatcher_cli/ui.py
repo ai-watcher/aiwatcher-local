@@ -145,6 +145,7 @@ from .session_health import (
     gate_health_warning,
 )
 from .scanner import (
+    CURRENT_PROMPT_TAIL_BYTES,
     clip_sessions_to_window,
     LocalEvent,
     LocalSession,
@@ -7953,7 +7954,10 @@ def _current_prompt_cached(path: str, *, read_title: bool = True) -> tuple[dict[
     cached = _PROMPT_STATUS_CACHE.get(path)
     if cached is not None and cached[0] == info.st_size and cached[1] == info.st_mtime:
         return cached[2], cached[3]
-    segment = current_prompt_segment(segment_session_by_prompt(path))
+    segment = current_prompt_segment(segment_session_by_prompt(
+        path,
+        tail_bytes=CURRENT_PROMPT_TAIL_BYTES,
+    ))
     # Titles come from Claude Code's transcript rows; a Codex rollout has none.
     title = statusline.read_transcript(path).get("title") if segment is not None and read_title else None
     if len(_PROMPT_STATUS_CACHE) > 32:

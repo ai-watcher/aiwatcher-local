@@ -138,6 +138,58 @@ class WindowActivityProbeTests(unittest.TestCase):
 
         self.assertEqual(rows, [(0, b'first\n'), (2, b'last')])
 
+    def test_codex_prompt_segmentation_can_read_only_recent_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcript = Path(temp_dir, "rollout.jsonl")
+            rows = [
+                {
+                    "timestamp": "2026-10-01T10:00:00Z",
+                    "type": "session_meta",
+                    "payload": {"id": "one", "cwd": temp_dir},
+                },
+                {
+                    "timestamp": "2026-10-01T10:00:01Z",
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "old prompt"},
+                },
+                *(
+                    {
+                        "timestamp": "2026-10-01T10:00:02Z",
+                        "type": "response_item",
+                        "payload": {"type": "message", "role": "assistant", "content": "padding"},
+                    }
+                    for _ in range(20)
+                ),
+                {
+                    "timestamp": "2026-10-07T10:00:00Z",
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "recent prompt"},
+                },
+                {
+                    "timestamp": "2026-10-07T10:00:01Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {"total_tokens": 120},
+                            "last_token_usage": {"input_tokens": 100, "output_tokens": 20},
+                        },
+                    },
+                },
+            ]
+            transcript.write_text(
+                "\n".join(json.dumps(row) for row in rows) + "\n",
+                encoding="utf-8",
+            )
+
+            segments = scanner.segment_session_by_prompt(
+                str(transcript),
+                tail_bytes=700,
+            )
+
+        self.assertEqual([row["prompt"] for row in segments], ["recent prompt"])
+        self.assertEqual(segments[0]["requests"], 1)
+
 
 class ProjectPathTests(unittest.TestCase):
     def test_codex_cache_reparses_when_requested_window_widens(self) -> None:
