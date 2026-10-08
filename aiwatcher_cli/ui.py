@@ -7,6 +7,7 @@ import copy
 import json
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -19,6 +20,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePath
 from types import SimpleNamespace
 from typing import Any, Callable, Sequence
+from urllib import error as urlerror
+from urllib import request as urlrequest
 from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
@@ -76,6 +79,7 @@ from .local_state import (
     evidence_snapshots_for_sessions,
     fresh_start_followup_evidence,
     get_outcome,
+    get_ui_server,
     get_watcher_status,
     outcome_counts,
     outcomes_for_sessions,
@@ -2251,6 +2255,7 @@ def _session_row_json(
 ) -> dict[str, object]:
     state = session_state(row)
     attachment = runtime_attachment_for_session(row, state=state, processes=[])
+    cumulative_tokens = has_cumulative_totals(row)
     return {
         "tool": row.tool,
         "session_id": row.session_id,
@@ -2262,6 +2267,8 @@ def _session_row_json(
         "model": display_model_name(row.model),
         "tokens": compact_int(row.tokens_in + row.tokens_out),
         "tokens_value": row.tokens_in + row.tokens_out,
+        "tokens_scope": "cumulative_thread" if cumulative_tokens else "session",
+        "tokens_scope_label": "Cumulative thread total" if cumulative_tokens else "Session total",
         "api_value": money(row.cost_usd),
         "api_value_usd": round(row.cost_usd, 6),
         "outcome": (window_outcomes.get(row.session_id) or {}).get("outcome"),
@@ -2414,6 +2421,7 @@ def session_json(row: LocalSession) -> dict[str, object]:
     evidence = build_outcome_evidence(row, survival=_survival_for_session(row.session_id))
     state = session_state(row)
     attachment = runtime_attachment_for_session(row, state=state, processes=safe_runtime_processes())
+    cumulative_tokens = has_cumulative_totals(row)
     return {
         "session_id": row.session_id,
         "tool": row.tool,
@@ -2423,6 +2431,8 @@ def session_json(row: LocalSession) -> dict[str, object]:
         "model": display_model_name(row.model),
         "tokens": row.tokens_in + row.tokens_out,
         "tokens_label": compact_int(row.tokens_in + row.tokens_out),
+        "tokens_scope": "cumulative_thread" if cumulative_tokens else "session",
+        "tokens_scope_label": "Cumulative thread total" if cumulative_tokens else "Session total",
         "tokens_in_label": compact_int(row.tokens_in),
         "tokens_out_label": compact_int(row.tokens_out),
         "api_value_usd": round(row.cost_usd, 6),
@@ -2451,6 +2461,7 @@ def recent_session_json(
     evidence_by_session = evidence_by_session or {}
     state = session_state(row)
     attachment = runtime_attachment_for_session(row, state=state, processes=[])
+    cumulative_tokens = has_cumulative_totals(row)
     return {
         "tool": row.tool,
         "session_id": row.session_id,
@@ -2463,6 +2474,8 @@ def recent_session_json(
         "tokens": compact_int(row.tokens_in + row.tokens_out),
         "tokens_label": compact_int(row.tokens_in + row.tokens_out),
         "tokens_value": row.tokens_in + row.tokens_out,
+        "tokens_scope": "cumulative_thread" if cumulative_tokens else "session",
+        "tokens_scope_label": "Cumulative thread total" if cumulative_tokens else "Session total",
         "api_value": money(row.cost_usd),
         "api_value_usd": round(row.cost_usd, 6),
         "calls": row.agent_calls,
@@ -4092,19 +4105,16 @@ def build_prompt_preflight(prompt: str, *, tool: str = "agent", cwd: str | None 
         summary = {}
     handoff_bubble = summary.get("handoff_bubble") if isinstance(summary, dict) else None
     impact = result.get("estimated_impact") if isinstance(result.get("estimated_impact"), dict) else {}
-    impact_label = "AIWatcher needs local history before it can estimate savings."
+    impact_label = "AIWatcher needs local history before it can model a scenario comparison."
     if impact:
         if impact.get("available"):
             savings = impact.get("savings", {}) if isinstance(impact.get("savings"), dict) else {}
             api_value = savings.get("api_value_usd", []) if isinstance(savings, dict) else []
             tokens = savings.get("tokens", []) if isinstance(savings, dict) else []
             if len(api_value) == 2 and len(tokens) == 2:
-                impact_label = (
-                    f"Possible avoidable pressure: {compact_int(int(tokens[0]))}-{compact_int(int(tokens[1]))} tokens "
-                    f"and {money(float(api_value[0]))}-{money(float(api_value[1]))} API-equivalent."
-                )
+                impact_label = "Heuristic scenario: the scoped prompt is modeled to use less execution pressure; magnitude is not measured."
             else:
-                impact_label = "Comparable local sessions found, but savings could not be summarized."
+                impact_label = "Comparable local sessions found, but the modeled difference could not be summarized."
         else:
             impact_label = str(impact.get("direction") or impact.get("basis") or impact_label)
     return {
@@ -9927,65 +9937,66 @@ def find_available_port(host: str, preferred_port: int, attempts: int = 20) -> i
     raise OSError(f"No available port found from {preferred_port} to {preferred_port + max(1, attempts) - 1}.")
 
 
-def _pids_for_port(port: int) -> list[str]:
-    if os.name == "nt":
-        try:
+def _verified_recorded_ui_server(timeout: float = 0.6) -> dict[str, object] | None:
+    """Return the recorded dashboard only when its health endpoint proves identity."""
+    server = get_ui_server()
+    if not server:
+        return None
+    host = str(server.get("host") or "127.0.0.1")
+    if host in ("0.0.0.0", "::", ""):
+        host = "127.0.0.1"
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        return None
+    try:
+        port = int(server.get("port") or 0)
+        recorded_pid = int(server.get("pid") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not (0 < port <= 65535 and recorded_pid > 0):
+        return None
+    try:
+        url_host = f"[{host}]" if ":" in host else host
+        with urlrequest.urlopen(f"http://{url_host}:{port}/api/health", timeout=timeout) as response:
+            health = json.loads(response.read().decode("utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError, urlerror.URLError):
+        return None
+    if not isinstance(health, dict) or health.get("service") != "aiwatcher-local":
+        return None
+    try:
+        health_pid = int(health.get("pid") or 0)
+    except (TypeError, ValueError):
+        return None
+    if health_pid != recorded_pid:
+        return None
+    return {**server, "host": host, "port": port, "pid": recorded_pid}
+
+
+def restart_local_server(_requested_port: int) -> int | None:
+    """Stop only the dashboard identified by its recorded PID and health data."""
+    server = _verified_recorded_ui_server()
+    if not server:
+        return None
+    pid = int(server["pid"])
+    port = int(server["port"])
+    try:
+        if os.name == "nt":
             result = subprocess.run(
-                ["netstat", "-ano", "-p", "tcp"],
+                ["taskkill", "/PID", str(pid), "/F"],
                 check=False,
                 capture_output=True,
                 text=True,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-        except OSError:
-            return []
-
-        pids: set[str] = set()
-        suffix = f":{port}"
-        for line in result.stdout.splitlines():
-            parts = line.split()
-            if len(parts) < 5:
-                continue
-            local_address, state, pid = parts[1], parts[3], parts[-1]
-            if local_address.endswith(suffix) and state.upper() == "LISTENING" and pid.isdigit():
-                pids.add(pid)
-        return sorted(pids)
-
-    try:
-        result = subprocess.run(
-            ["lsof", "-ti", f"tcp:{port}"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except OSError:
-        return []
-
-    return [pid.strip() for pid in result.stdout.splitlines() if pid.strip()]
-
-
-def restart_local_server(port: int) -> bool:
-    pids = _pids_for_port(port)
-    if not pids:
-        return False
-
-    stopped = False
-    for pid in pids:
-        try:
-            if os.name == "nt":
-                subprocess.run(
-                    ["taskkill", "/PID", pid, "/F"],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
-            else:
-                subprocess.run(["kill", pid], check=False, capture_output=True, text=True)
-            stopped = True
-        except OSError:
-            continue
-    return stopped
+            if result.returncode != 0:
+                return None
+        else:
+            os.kill(pid, signal.SIGTERM)
+    except (OSError, OverflowError, ValueError):
+        return None
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and not is_port_available(str(server["host"]), port):
+        time.sleep(0.05)
+    return port
 
 
 def serve(
@@ -9998,9 +10009,10 @@ def serve(
     on_started: Callable[[str, int], Any] | None = None,
 ) -> None:
     if restart:
-        stopped = restart_local_server(port)
-        if stopped:
-            print(f"Stopped existing process on port {port}.")
+        stopped_port = restart_local_server(port)
+        if stopped_port is not None:
+            port = stopped_port
+            print(f"Stopped verified AIWatcher dashboard on port {port}.")
 
     selected_port = port
     if auto_port:

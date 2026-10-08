@@ -1783,8 +1783,8 @@ class PromptPreflightTests(unittest.TestCase):
         impact = result["estimated_impact"]
         self.assertFalse(impact["available"])
         rendered = cli.render_preflight(result)
-        self.assertIn("Quantified savings unavailable", rendered)
-        self.assertNotIn("Estimated savings:", rendered)
+        self.assertIn("Scenario comparison unavailable", rendered)
+        self.assertNotIn("Modeled difference:", rendered)
 
     def test_quantified_ranges_require_enough_history_over_time(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]
@@ -1800,7 +1800,9 @@ class PromptPreflightTests(unittest.TestCase):
         self.assertTrue(impact["available"])
         self.assertGreaterEqual(impact["sample_count"], cli.MIN_SAVINGS_SESSIONS)
         self.assertGreaterEqual(impact["history_span_days"], cli.MIN_SAVINGS_HISTORY_DAYS)
-        self.assertIn("planning ranges", cli.render_preflight(result).lower())
+        rendered = cli.render_preflight(result)
+        self.assertIn("fixed risk and scope multipliers", rendered.lower())
+        self.assertIn("not measured savings", rendered.lower())
 
     def test_codex_cumulative_totals_are_not_used_for_savings(self) -> None:
         rows = [
@@ -4543,15 +4545,14 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
             result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
         self.assertIsNone(cli._hero_savings_label(result))
 
-    def test_hero_savings_label_shows_compact_dollar_range_when_available(self) -> None:
+    def test_hero_savings_label_uses_directional_heuristic_when_available(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]
         baselines = _baselines_from_sessions(rows)
         with patch.object(cli, "get_baselines", return_value=baselines):
             result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
         label = cli._hero_savings_label(result)
         self.assertIsNotNone(label)
-        self.assertIn("avoidable", label)
-        self.assertTrue(label.startswith("~$"))
+        self.assertEqual(label, "Heuristic only")
 
     def test_gate_html_shows_guardrail_chips_and_savings_badge_above_the_fold(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]
@@ -4565,7 +4566,7 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         page = cli._prompt_gate_html(tool="claude", cwd="/repo", prompt="original prompt text", result=result)
 
         self.assertIn('class="pill savings"', page)
-        self.assertIn("avoidable", page)
+        self.assertIn("Heuristic only", page)
         self.assertIn('class="guardrails"', page)
         self.assertIn("Scope narrowed", page)
         self.assertIn("Confirm before destructive changes", page)
@@ -4579,15 +4580,14 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
             result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
         self.assertIsNone(cli._hero_pressure_label(result))
 
-    def test_hero_pressure_label_shows_tokens_and_tool_calls_when_available(self) -> None:
+    def test_hero_pressure_label_avoids_false_precision_when_available(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]
         baselines = _baselines_from_sessions(rows)
         with patch.object(cli, "get_baselines", return_value=baselines):
             result = cli.analyze_prompt("Refactor the entire codebase", tool="claude", cwd="/repo")
         label = cli._hero_pressure_label(result)
         self.assertIsNotNone(label)
-        self.assertIn("tokens", label)
-        self.assertIn("tool calls avoided", label)
+        self.assertEqual(label, "Lower pressure in scoped scenario")
 
     def test_gate_html_shows_pressure_caption_next_to_savings_badge(self) -> None:
         rows = [session(index, age_days=index * 2) for index in range(10)]
@@ -4601,13 +4601,13 @@ class WatchLoopAndVelocityIntegrationTests(unittest.TestCase):
         page = cli._prompt_gate_html(tool="claude", cwd="/repo", prompt="original prompt text", result=result)
 
         self.assertIn('class="pressure-caption"', page)
-        self.assertIn("tool calls avoided", page)
+        self.assertIn("Lower pressure in scoped scenario", page)
         # The compact caption must sit right after the savings badge (both in
         # the header), not down in the "What AIWatcher noticed" detail card --
         # that's still where the full sentence (_impact_summary) lives.
         self.assertLess(page.index('class="pressure-caption"'), page.index("What AIWatcher noticed"))
         self.assertGreater(page.index('class="pressure-caption"'), page.index('class="pill savings"'))
-        self.assertIn("Estimated avoidable pressure:", page)
+        self.assertIn("Modeled scenario direction:", page)
 
     def test_gate_html_shows_recommended_route_before_details(self) -> None:
         with patch.object(cli, "sessions_since", return_value=[]):

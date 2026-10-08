@@ -41,6 +41,45 @@ class WebAssetsTest(unittest.TestCase):
     the package, and an include that never got substituted -- both of which serve
     a page that looks fine in the diff and is broken in the browser."""
 
+    def test_preflight_receipts_label_heuristic_scenarios_not_predicted_savings(self):
+        source = (pathlib.Path(__file__).parents[1] / "aiwatcher_cli" / "web" / "index.js").read_text(encoding="utf-8")
+        stats = js_function_source(source, "predictedStats")
+        self.assertIn("Directional heuristic only", stats)
+        self.assertIn("Magnitude is not shown", stats)
+        self.assertIn("Not measured savings or a billing forecast", stats)
+        self.assertNotIn("Predicted token savings", stats)
+        self.assertNotIn("API-equivalent savings", stats)
+        self.assertNotIn("p.tokens_label", stats)
+        self.assertNotIn("p.api_value_label", stats)
+
+    def test_view_navigation_persists_and_honors_browser_history(self):
+        source = (pathlib.Path(__file__).parents[1] / "aiwatcher_cli" / "web" / "index.js").read_text(encoding="utf-8")
+        show_view = js_function_source(source, "showView")
+        self.assertIn("history.pushState", show_view)
+        self.assertIn("view === 'today' ? 'home' : view", show_view)
+        self.assertIn("url.searchParams.set('view', viewParam)", show_view)
+        self.assertIn("url.hash = ''", show_view)
+        self.assertIn("window.addEventListener('popstate'", source)
+        self.assertIn("requestedParam === 'home' ? 'today'", source)
+        self.assertIn("ownerView !== requestedView", source)
+        self.assertIn("showView(requested, false)", source)
+
+    def test_mobile_sessions_keep_actions_visible_and_long_identity_wraps(self):
+        css = (pathlib.Path(__file__).parents[1] / "aiwatcher_cli" / "web" / "index.css").read_text(encoding="utf-8")
+        html = (pathlib.Path(__file__).parents[1] / "aiwatcher_cli" / "web" / "index.html").read_text(encoding="utf-8")
+        self.assertIn('class="sessions-table"', html)
+        self.assertIn(".sessions-table .row-action { width: 100%; }", css)
+        self.assertIn(".session-id-chip { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }", css)
+        self.assertIn(".freshness { white-space: normal; overflow-wrap: anywhere; }", css)
+        self.assertIn(".session-hero .session-meta { margin-bottom: 12px; max-width: 100%; overflow-wrap: anywhere; }", css)
+
+    def test_session_surfaces_render_token_scope_labels(self):
+        source = (pathlib.Path(__file__).parents[1] / "aiwatcher_cli" / "web" / "index.js").read_text(encoding="utf-8")
+        hero = js_function_source(source, "renderSessionHero")
+        project = js_function_source(source, "renderProjectSessionRow")
+        self.assertIn("s.tokens_scope_label", hero)
+        self.assertIn("s.tokens_scope_label", project)
+
     def test_overlay_keeps_no_second_copy_of_the_nudge_titles(self):
         """overlay.js used to carry its own title table keyed on action. It
         drifted: no entry for a waiting session, so the strongest signal in the
@@ -446,10 +485,9 @@ class NavigationTest(unittest.TestCase):
         gives up before showView reveals the target. Every target has to be
         resolved after the view is shown -- generically, because the one
         hand-written branch that did this was the only anchor that worked."""
-        source = self.js[self.js.index("location.hash ?"):]
-        source = source[:source.index("\n  }") + 4]
+        source = js_function_source(self.js, "applyHashTarget")
         self.assertIn("closest('.view')", source)
-        self.assertIn("scrollIntoView", source)
+        self.assertIn("scrollIntoView", self.js)
         # A per-target branch is the thing this replaced.
         self.assertNotIn("location.hash === '#", self.js)
 
@@ -663,7 +701,7 @@ class SessionDrawerTest(unittest.TestCase):
         # every real session. Context pressure means tokens per turn elsewhere in
         # the product, and the session payload has no per-turn figure.
         hero = js_function_source(self.js, "renderSessionHero")
-        self.assertIn("<span>Tokens</span>", hero)
+        self.assertIn("s.tokens_scope_label", hero)
         self.assertNotIn("Context pressure", hero)
         self.assertNotIn("session-meter", hero)
         self.assertNotIn("function contextPressure(", self.js)
