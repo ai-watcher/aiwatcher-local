@@ -305,7 +305,7 @@ def start_companion(
     presence_position: str = "bottom-right",
     presence_visibility: str = "always",
 ) -> dict[str, Any]:
-    current = get_watcher_status(max_age_seconds=max(45, interval_seconds * 2))
+    current = get_watcher_status()
     if current.get("running"):
         if current.get("mode") == "companion":
             return {"ok": True, "already_running": True, **current}
@@ -337,7 +337,7 @@ def start_companion(
 
     for _ in range(20):
         time.sleep(0.1)
-        status = get_watcher_status(max_age_seconds=max(45, interval_seconds * 2))
+        status = get_watcher_status()
         if status.get("running") and status.get("pid") == process.pid:
             return {"ok": True, "already_running": False, **status, "log_path": str(log_path)}
         if process.poll() is not None:

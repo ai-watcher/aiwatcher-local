@@ -6490,6 +6490,9 @@ def _mark_summary_cache(summary: dict[str, object], *, status: str, source: str,
     copy["update_source_root"] = str(installed_source_root())
     copy["update_install_revision"] = package_install_revision()
     copy["companion_preferences"] = settings["companion_preferences"]
+    # Watcher lifecycle is live process state, not historical summary data.
+    # Rehydrate it on every poll regardless of memory or disk cache source.
+    copy["watcher"] = get_watcher_status()
     generated_at = copy.get("generated_at") if isinstance(copy.get("generated_at"), str) else None
     copy["cache_schema_version"] = SUMMARY_CACHE_SCHEMA_VERSION
     copy["cache"] = {

@@ -15,6 +15,50 @@ from datetime import datetime, timezone
 
 
 DEFAULT_STALE_MINUTES = 120
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_SYNCHRONIZE = 0x00100000
+_WAIT_TIMEOUT = 0x00000102
+_ERROR_ACCESS_DENIED = 5
+
+
+def _windows_pid_is_running(pid: int) -> bool:
+    if pid <= 0 or pid > 0xFFFFFFFF:
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    handle = kernel32.OpenProcess(
+        _PROCESS_QUERY_LIMITED_INFORMATION | _SYNCHRONIZE, False, pid
+    )
+    if not handle:
+        return ctypes.get_last_error() == _ERROR_ACCESS_DENIED
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == _WAIT_TIMEOUT
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def pid_is_running(pid: int) -> bool:
+    if pid <= 0 or pid > (0xFFFFFFFF if sys.platform == "win32" else 0x7FFFFFFF):
+        return False
+    if sys.platform == "win32":
+        try:
+            return _windows_pid_is_running(pid)
+        except (OSError, AttributeError, OverflowError, ValueError):
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except (OSError, OverflowError, ProcessLookupError):
+        return False
 
 
 @dataclass

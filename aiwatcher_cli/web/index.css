@@ -986,6 +986,7 @@
     /* The command is shown, not just copyable: a user should be able to read
        what they are about to paste into a terminal without clicking first. */
     .watcher-start { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
+    .watcher-start[hidden] { display: none; }
     .watcher-start-hint { font-size: var(--fs-2); color: var(--muted); }
     .watcher-start code {
       font-size: var(--fs-2); padding: 3px 8px; border-radius: var(--r-1);
